@@ -25,7 +25,10 @@ use crate::{
         QueryConversationState, QueryExecutionDetail, QueryTurnKind, QueryVerificationState,
         QueryVerificationWarning, resolve_top_k,
     },
-    domains::query_ir::literal_text_is_identifier_shaped,
+    domains::query_ir::{
+        ClarificationReason, LiteralKind, QueryIR, SourceSliceDirection, SourceSliceFilter,
+        literal_text_is_identifier_shaped,
+    },
     domains::{
         agent_runtime::{
             RuntimeDecisionKind, RuntimeExecutionOwner, RuntimeStageKind, RuntimeStageState,
@@ -67,12 +70,15 @@ use crate::{
             },
             assistant_grounding::AssistantGroundingEvidence,
             execution::{
-                CanonicalAnswerEvidence, RuntimeAnswerQueryResult, RuntimeAnswerVerification,
-                generate_answer_query, literal_revision_targets, persist_query_verification,
-                prepare_answer_query, verify_answer_against_canonical_evidence,
+                CanonicalAnswerEvidence, QueryCompileUsage, RuntimeAnswerQueryResult,
+                RuntimeAnswerVerification, compile_query_ir, generate_answer_query,
+                literal_revision_targets, persist_query_verification, prepare_answer_query,
+                verify_answer_against_canonical_evidence,
             },
+            latest_versions::{latest_version_scope_terms, query_requests_latest_versions},
             planner::QueryIntentProfile,
             result_cache,
+            text_match::normalized_alnum_token_sequence,
         },
     },
 };
@@ -114,16 +120,137 @@ struct QueryResultCacheContext {
     binding_fingerprint: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum UiAgentHistoryScope {
+    Preserve,
+    CurrentQuestionOnly,
+}
+
+async fn resolve_ui_agent_history_scope(
+    state: &AppState,
+    library_id: Uuid,
+    question: &str,
+    contextual_follow_up: bool,
+) -> (UiAgentHistoryScope, Option<QueryCompileUsage>) {
+    if !contextual_follow_up {
+        return (UiAgentHistoryScope::Preserve, None);
+    }
+    let (query_ir, usage) = match compile_query_ir(state, library_id, question, None).await {
+        Ok(result) => result,
+        Err(error) => {
+            warn!(
+                error = %error,
+                library_id = %library_id,
+                "failed to preflight UI agent history scope; preserving conversation history"
+            );
+            return (UiAgentHistoryScope::Preserve, None);
+        }
+    };
+    let scope = if query_ir_selects_current_question_only_agent_history(question, &query_ir) {
+        tracing::info!(
+            library_id = %library_id,
+            query_ir_act = ?query_ir.act,
+            query_ir_source_slice = ?query_ir.source_slice,
+            "current-question typed IR disables UI agent history replay"
+        );
+        UiAgentHistoryScope::CurrentQuestionOnly
+    } else {
+        UiAgentHistoryScope::Preserve
+    };
+    (scope, usage)
+}
+
+fn query_ir_selects_current_question_only_agent_history(question: &str, ir: &QueryIR) -> bool {
+    if query_ir_has_unresolved_history_dependency(ir) {
+        return false;
+    }
+    if ir.source_slice.is_some() && !query_ir_source_slice_has_current_anchor(ir) {
+        return false;
+    }
+    if current_question_is_short_disambiguator(question, ir) {
+        return false;
+    }
+
+    query_ir_has_current_question_anchor(ir)
+}
+
+fn query_ir_has_unresolved_history_dependency(ir: &QueryIR) -> bool {
+    !ir.conversation_refs.is_empty()
+        || ir.needs_clarification.as_ref().is_some_and(|clarification| {
+            matches!(clarification.reason, ClarificationReason::AnaphoraUnresolved)
+        })
+}
+
+fn query_ir_source_slice_has_current_anchor(ir: &QueryIR) -> bool {
+    let Some(source_slice) = &ir.source_slice else {
+        return false;
+    };
+    source_slice.count.is_some()
+        || ir
+            .literal_constraints
+            .iter()
+            .any(|literal| matches!(literal.kind, LiteralKind::NumericCode))
+        || !ir.target_entities.is_empty()
+        || ir.document_focus.is_some()
+        || (query_requests_latest_versions(ir)
+            && matches!(source_slice.direction, SourceSliceDirection::Tail)
+            && matches!(source_slice.filter, SourceSliceFilter::ReleaseMarker)
+            && !latest_version_scope_terms(ir).is_empty())
+}
+
+fn query_ir_has_current_question_anchor(ir: &QueryIR) -> bool {
+    !ir.target_types.is_empty()
+        || !ir.target_entities.is_empty()
+        || !ir.literal_constraints.is_empty()
+        || ir.document_focus.is_some()
+        || ir.comparison.is_some()
+        || query_ir_source_slice_has_current_anchor(ir)
+}
+
+fn current_question_is_short_disambiguator(question: &str, ir: &QueryIR) -> bool {
+    if ir.comparison.is_some() || ir.document_focus.is_some() || ir.source_slice.is_some() {
+        return false;
+    }
+    if !ir.literal_constraints.is_empty() || !ir.temporal_constraints.is_empty() {
+        return false;
+    }
+    normalized_alnum_token_sequence(question, 2).len() <= 3
+}
+
 impl QueryService {
     pub async fn execute_grounded_answer_turn(
         &self,
         state: &AppState,
         command: ExecuteConversationTurnCommand,
     ) -> Result<QueryTurnExecutionResult, ApiError> {
-        self.execute_grounded_answer_pipeline(state, command).await
+        // Mark this scope as the latency-sensitive query lane so its provider
+        // calls draw on the query-reserved budget and never starve behind an
+        // ingest burst.
+        crate::integrations::provider_budget::with_lane(
+            crate::integrations::provider_budget::ProviderLane::Query,
+            self.execute_grounded_answer_pipeline(state, command),
+        )
+        .await
     }
 
     pub async fn execute_assistant_agent_turn(
+        &self,
+        state: &AppState,
+        auth: &AuthContext,
+        command: ExecuteConversationTurnCommand,
+        activity_tx: Option<Sender<AgentLoopActivityEvent>>,
+    ) -> Result<QueryTurnExecutionResult, ApiError> {
+        // Mark this scope as the latency-sensitive query lane so every provider
+        // call in the agent loop draws on the query-reserved budget and never
+        // starves behind an ingest burst.
+        crate::integrations::provider_budget::with_lane(
+            crate::integrations::provider_budget::ProviderLane::Query,
+            self.execute_assistant_agent_turn_inner(state, auth, command, activity_tx),
+        )
+        .await
+    }
+
+    async fn execute_assistant_agent_turn_inner(
         &self,
         state: &AppState,
         auth: &AuthContext,
@@ -299,6 +426,36 @@ impl QueryService {
             )
             .await?;
 
+        let (agent_history_scope, agent_query_compile_usage) = resolve_ui_agent_history_scope(
+            state,
+            library.id,
+            &content_text,
+            conversation_context.contextual_follow_up,
+        )
+        .await;
+        let current_question_only_agent =
+            matches!(agent_history_scope, UiAgentHistoryScope::CurrentQuestionOnly);
+        let empty_agent_conversation_history = Vec::new();
+        let empty_follow_up_context_messages = Vec::new();
+        let empty_grounded_answer_tool_history = Vec::new();
+        let agent_contextual_follow_up =
+            conversation_context.contextual_follow_up && !current_question_only_agent;
+        let agent_conversation_history = if current_question_only_agent {
+            empty_agent_conversation_history.as_slice()
+        } else {
+            agent_conversation_history.as_slice()
+        };
+        let agent_follow_up_context_messages = if current_question_only_agent {
+            empty_follow_up_context_messages.as_slice()
+        } else {
+            prior_grounded_answer_context_messages.as_slice()
+        };
+        let agent_grounded_answer_tool_history = if current_question_only_agent {
+            empty_grounded_answer_tool_history.as_slice()
+        } else {
+            conversation_context.grounded_answer_tool_history.as_slice()
+        };
+
         let outcome: RuntimeTerminalOutcome<QueryAnswerTaskSuccess, QueryAnswerTaskFailure> =
             if let Err(failure) = begin_query_runtime_stage(
                 state.agent_runtime.executor(),
@@ -325,11 +482,10 @@ impl QueryService {
                     library_id: library.id,
                     library_ref: &library_ref,
                     user_question: &content_text,
-                    contextual_follow_up: conversation_context.contextual_follow_up,
-                    conversation_history: &agent_conversation_history,
-                    follow_up_context_messages: &prior_grounded_answer_context_messages,
-                    grounded_answer_tool_history: &conversation_context
-                        .grounded_answer_tool_history,
+                    contextual_follow_up: agent_contextual_follow_up,
+                    conversation_history: agent_conversation_history,
+                    follow_up_context_messages: agent_follow_up_context_messages,
+                    grounded_answer_tool_history: agent_grounded_answer_tool_history,
                     request_id: &agent_request_id,
                     grounded_answer_top_k: top_k,
                     iteration_cap: ui_agent_iteration_cap(),
@@ -496,7 +652,7 @@ impl QueryService {
                                                     state,
                                                     library.id,
                                                     &content_text,
-                                                    &conversation_context.prompt_history_messages,
+                                                    agent_conversation_history,
                                                     &agent_result.answer,
                                                     &revision_targets,
                                                     &prompt_context,
@@ -508,8 +664,7 @@ impl QueryService {
                                                             literal_revision_history_literal_coverage(
                                                                 &agent_result.answer,
                                                                 &revision.answer,
-                                                                &conversation_context
-                                                                    .grounded_answer_tool_history,
+                                                                agent_grounded_answer_tool_history,
                                                             )
                                                             .filter(|(before, after, _)| {
                                                                 after < before
@@ -589,7 +744,7 @@ impl QueryService {
                                         let coverage_targets =
                                             literal_inventory_coverage_revision_targets(
                                                 &agent_result.answer,
-                                                &conversation_context.grounded_answer_tool_history,
+                                                agent_grounded_answer_tool_history,
                                                 &agent_result.assistant_grounding,
                                             );
                                         if !coverage_targets.is_empty() {
@@ -604,7 +759,7 @@ impl QueryService {
                                                     state,
                                                     library.id,
                                                     &content_text,
-                                                    &conversation_context.prompt_history_messages,
+                                                    agent_conversation_history,
                                                     &agent_result.answer,
                                                     &coverage_targets,
                                                     &revision_context,
@@ -936,6 +1091,14 @@ impl QueryService {
                 {
                     warn!(error = %error, execution_id = %terminal_execution.id, "UI agent query billing capture failed");
                 }
+                capture_query_compile_usage_if_any(
+                    state,
+                    &conversation,
+                    &terminal_execution,
+                    &runtime_result.execution,
+                    agent_query_compile_usage.as_ref(),
+                )
+                .await;
             }
             RuntimeTerminalOutcome::Failed { summary, .. }
             | RuntimeTerminalOutcome::Canceled { summary, .. } => {
@@ -1001,6 +1164,10 @@ impl QueryService {
             graph_edge_references: detail.graph_edge_references,
             verification_state: detail.verification_state,
             verification_warnings: detail.verification_warnings,
+            // Top-level agent turn carries no clarification of its own; any
+            // clarification surfaces inside the child `grounded_answer` tool
+            // call results the agent loop relays.
+            clarification: crate::services::query::execution::RuntimeClarification::default(),
         })
     }
 
@@ -1151,6 +1318,20 @@ impl QueryService {
                         }
                     }
                     Err(error) => {
+                        if result_cache::fill_lock_error_fails_open(&error) {
+                            // Redis is down/unreachable: degrade to cache-miss
+                            // latency. The answer pipeline does not need Redis to
+                            // compute, and the replay/winner-store paths already
+                            // fail open, so proceed without the fill lock rather
+                            // than 5xx the whole turn for the outage. One WARN per
+                            // affected turn (we break immediately, no retry spam).
+                            warn!(
+                                error = %error,
+                                cache_key = %cache_context_ref.cache_key,
+                                "query result cache fill lock unavailable; proceeding without cache coordination"
+                            );
+                            break;
+                        }
                         warn!(
                             error = %error,
                             cache_key = %cache_context_ref.cache_key,
@@ -1246,6 +1427,15 @@ impl QueryService {
         // `billing_provider_call` at the end of the turn attribute
         // each LLM call to the right `call_kind`.
         let mut query_compile_usage = None;
+        // Turn-scoped clarification metadata. The answer pipeline computes it
+        // inside the answer stage below (release-clarify / disposition-router
+        // branches); `get_execution` re-reads the persisted execution detail
+        // from Postgres and cannot reconstruct this in-memory structure, so we
+        // carry it directly to the `QueryTurnExecutionResult` construction at
+        // the end of the turn. Default (`required: false`, no candidates) for
+        // ordinary answers.
+        let mut turn_clarification =
+            crate::services::query::execution::RuntimeClarification::default();
         let outcome: RuntimeTerminalOutcome<QueryAnswerTaskSuccess, QueryAnswerTaskFailure> = {
             if let Err(failure) = begin_query_runtime_stage(
                 state.agent_runtime.executor(),
@@ -1505,7 +1695,9 @@ impl QueryService {
                                             answer,
                                             provider,
                                             usage_json,
+                                            clarification,
                                         } = result;
+                                        turn_clarification = clarification;
                                         record_query_runtime_stage(
                                             state.agent_runtime.executor(),
                                             &mut runtime_session,
@@ -1947,6 +2139,7 @@ impl QueryService {
             graph_edge_references: detail.graph_edge_references,
             verification_state: detail.verification_state,
             verification_warnings: detail.verification_warnings,
+            clarification: turn_clarification,
         })
     }
 
@@ -2140,6 +2333,9 @@ impl QueryService {
             graph_edge_references: detail.graph_edge_references,
             verification_state: detail.verification_state,
             verification_warnings: detail.verification_warnings,
+            // Result-cache replay reconstructs from the persisted execution
+            // detail, which carries no clarification metadata.
+            clarification: crate::services::query::execution::RuntimeClarification::default(),
         }))
     }
 
@@ -2912,8 +3108,11 @@ fn latest_dense_history_identifier_literals(history: &[ExternalConversationTurn]
 }
 
 fn dense_history_literals(text: &str) -> Vec<String> {
-    let literal_line =
-        text.lines().map(str::trim).find(|line| line.starts_with("literals:")).unwrap_or("");
+    let literal_line = text
+        .lines()
+        .map(str::trim)
+        .find(|line| line.starts_with("ir.memory.literals.v1:"))
+        .unwrap_or("");
     extract_backtick_literals(literal_line)
 }
 
@@ -3601,6 +3800,11 @@ mod tests {
     use uuid::Uuid;
 
     use crate::domains::query::QueryTurnKind;
+    use crate::domains::query_ir::{
+        ClarificationReason, ClarificationSpec, ConversationRefKind, EntityMention, EntityRole,
+        LiteralKind, LiteralSpan, QueryAct, QueryIR, QueryLanguage, QueryScope,
+        SourceSliceDirection, SourceSliceFilter, SourceSliceSpec, UnresolvedRef,
+    };
     use crate::services::query::assistant_grounding::AssistantGroundingEvidence;
     use crate::services::query::service::ExternalConversationTurn;
 
@@ -3611,9 +3815,38 @@ mod tests {
         agent_has_verifiable_tool_evidence, is_query_vector_source_mismatch,
         latest_dense_history_identifier_literals, literal_inventory_coverage_revision_targets,
         literal_revision_covers_required_literals, literal_revision_history_literal_coverage,
-        no_agent_tool_evidence_warnings, should_backfill_graph_entity_references,
-        text_contains_literal, ui_agent_iteration_cap,
+        no_agent_tool_evidence_warnings, query_ir_selects_current_question_only_agent_history,
+        should_backfill_graph_entity_references, text_contains_literal, ui_agent_iteration_cap,
     };
+
+    fn release_inventory_query_ir() -> QueryIR {
+        QueryIR {
+            act: QueryAct::Enumerate,
+            scope: QueryScope::SingleDocument,
+            language: QueryLanguage::Auto,
+            target_types: vec!["release".to_string()],
+            target_entities: vec![EntityMention {
+                label: "Alpha Suite".to_string(),
+                role: EntityRole::Subject,
+            }],
+            literal_constraints: vec![LiteralSpan {
+                text: "5".to_string(),
+                kind: LiteralKind::NumericCode,
+            }],
+            temporal_constraints: Vec::new(),
+            comparison: None,
+            document_focus: None,
+            conversation_refs: Vec::new(),
+            needs_clarification: None,
+            source_slice: Some(SourceSliceSpec {
+                direction: SourceSliceDirection::Tail,
+                count: Some(5),
+                filter: SourceSliceFilter::ReleaseMarker,
+            }),
+            retrieval_query: Some("latest 5 Alpha Suite releases".to_string()),
+            confidence: 0.96,
+        }
+    }
 
     #[test]
     fn classifies_runtime_vector_source_mismatch() {
@@ -3627,6 +3860,65 @@ mod tests {
         assert!(!is_query_vector_source_mismatch(
             "query retrieval provider is healthy and ready for embeddings"
         ));
+    }
+
+    #[test]
+    fn ui_agent_history_scope_uses_current_question_for_explicit_release_inventory() {
+        let query_ir = release_inventory_query_ir();
+
+        assert!(query_ir_selects_current_question_only_agent_history(
+            "show the latest 5 Alpha Suite releases",
+            &query_ir
+        ));
+    }
+
+    #[test]
+    fn ui_agent_history_scope_preserves_history_for_unresolved_anaphora() {
+        let mut query_ir = release_inventory_query_ir();
+        query_ir.conversation_refs =
+            vec![UnresolvedRef { surface: "that".to_string(), kind: ConversationRefKind::Pronoun }];
+        query_ir.needs_clarification = Some(ClarificationSpec {
+            reason: ClarificationReason::AnaphoraUnresolved,
+            suggestion: String::new(),
+        });
+
+        assert!(!query_ir_selects_current_question_only_agent_history(
+            "show the latest 5 Alpha Suite releases",
+            &query_ir
+        ));
+    }
+
+    #[test]
+    fn ui_agent_history_scope_preserves_history_for_bare_source_slice() {
+        let mut query_ir = release_inventory_query_ir();
+        query_ir.target_entities.clear();
+        query_ir.literal_constraints.clear();
+        query_ir.source_slice.as_mut().expect("slice").count = None;
+
+        assert!(!query_ir_selects_current_question_only_agent_history("latest entries", &query_ir));
+    }
+
+    #[test]
+    fn ui_agent_history_scope_uses_current_question_for_self_contained_query() {
+        let mut query_ir = release_inventory_query_ir();
+        query_ir.source_slice = None;
+        query_ir.literal_constraints.clear();
+        query_ir.target_types = vec!["attribute".to_string()];
+
+        assert!(query_ir_selects_current_question_only_agent_history(
+            "Which attributes does Alpha Suite expose for message delivery?",
+            &query_ir
+        ));
+    }
+
+    #[test]
+    fn ui_agent_history_scope_preserves_history_for_short_disambiguator() {
+        let mut query_ir = release_inventory_query_ir();
+        query_ir.source_slice = None;
+        query_ir.literal_constraints.clear();
+        query_ir.target_types = vec!["attribute".to_string()];
+
+        assert!(!query_ir_selects_current_question_only_agent_history("Beta", &query_ir));
     }
 
     #[test]
@@ -3680,7 +3972,7 @@ mod tests {
     fn literal_inventory_coverage_targets_missing_identifier_literals() {
         let history = vec![ExternalConversationTurn {
             turn_kind: QueryTurnKind::Assistant,
-            content_text: "literals: `alphaPackage`, `endpointUrl`, `partnerId`, `secretKey`, `retryTimeout`, `sendDetails`\nProvider Alpha setup.".to_string(),
+            content_text: "ir.memory.literals.v1: `alphaPackage`, `endpointUrl`, `partnerId`, `secretKey`, `retryTimeout`, `sendDetails`\nSample Subject setup.".to_string(),
         }];
         let grounding = AssistantGroundingEvidence {
             verification_corpus: vec![
@@ -3699,7 +3991,7 @@ mod tests {
     fn literal_inventory_coverage_waits_until_answer_enumerates_inventory() {
         let history = vec![ExternalConversationTurn {
             turn_kind: QueryTurnKind::Assistant,
-            content_text: "literals: `alphaPackage`, `endpointUrl`, `partnerId`, `secretKey`, `retryTimeout`, `sendDetails`".to_string(),
+            content_text: "ir.memory.literals.v1: `alphaPackage`, `endpointUrl`, `partnerId`, `secretKey`, `retryTimeout`, `sendDetails`".to_string(),
         }];
         let grounding = AssistantGroundingEvidence {
             verification_corpus: vec![
@@ -3723,7 +4015,7 @@ mod tests {
         let history = vec![ExternalConversationTurn {
             turn_kind: QueryTurnKind::Assistant,
             content_text:
-                "literals: `alphaPackage`, `endpointUrl`, `secretKey`, `/opt/alpha.conf`, `retryTimeout`"
+                "ir.memory.literals.v1: `alphaPackage`, `endpointUrl`, `secretKey`, `/opt/alpha.conf`, `retryTimeout`"
                     .to_string(),
         }];
         let grounding = AssistantGroundingEvidence {
@@ -3745,7 +4037,7 @@ mod tests {
         let history = vec![ExternalConversationTurn {
             turn_kind: QueryTurnKind::Assistant,
             content_text:
-                "literals: `alphaPackage`, `/opt/alpha.ini`, `[Main]`, `retryTimeout`, `visible`, `false`"
+                "ir.memory.literals.v1: `alphaPackage`, `/opt/alpha.ini`, `[Main]`, `retryTimeout`, `visible`, `false`"
                     .to_string(),
         }];
         let draft =
@@ -3762,7 +4054,8 @@ mod tests {
     fn literal_fidelity_revision_ignores_plain_boolean_memory_values() {
         let history = vec![ExternalConversationTurn {
             turn_kind: QueryTurnKind::Assistant,
-            content_text: "literals: `true`, `false`, `enabled`, `disabled`".to_string(),
+            content_text: "ir.memory.literals.v1: `true`, `false`, `enabled`, `disabled`"
+                .to_string(),
         }];
 
         assert_eq!(
@@ -3798,8 +4091,9 @@ mod tests {
     fn literal_inventory_dedup_preserves_case_sensitive_literals() {
         let history = vec![ExternalConversationTurn {
             turn_kind: QueryTurnKind::Assistant,
-            content_text: "literals: `retryTimeout`, `RetryTimeout`, `endpointUrl`, `secretKey`"
-                .to_string(),
+            content_text:
+                "ir.memory.literals.v1: `retryTimeout`, `RetryTimeout`, `endpointUrl`, `secretKey`"
+                    .to_string(),
         }];
 
         assert_eq!(

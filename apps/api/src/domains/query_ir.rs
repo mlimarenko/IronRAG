@@ -113,8 +113,8 @@ impl QueryScope {
 pub enum QueryLanguage {
     En,
     Ru,
-    /// Other / mixed / indeterminate. Answer language falls back to the
-    /// library's configured default (or first-detected script).
+    /// Other / mixed / indeterminate. Deterministic answer labels fall back to
+    /// the best matching supported label resource, then to the product default.
     Auto,
 }
 
@@ -1351,7 +1351,7 @@ mod tests {
 /// Canonical QueryIR cache discriminator. When compiler semantics change,
 /// obsolete cache rows are discarded instead of read through compatibility
 /// aliases or parallel cache generations.
-pub const QUERY_IR_SCHEMA_VERSION: u16 = 10;
+pub const QUERY_IR_SCHEMA_VERSION: u16 = 11;
 
 /// Maximum age of a Postgres-tier `query_ir_cache` row before it is
 /// treated as a miss. Redis already holds its own 24h hot tier; the

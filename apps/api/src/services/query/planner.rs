@@ -2,13 +2,19 @@ use std::collections::BTreeSet;
 
 use serde::{Deserialize, Serialize};
 
-use crate::domains::query::{DEFAULT_TOP_K, MAX_TOP_K, QueryPlanningMetadata, RuntimeQueryMode};
-use crate::domains::query_ir::literal_text_is_identifier_shaped;
+use crate::domains::query::{
+    DEFAULT_TOP_K, IntentKeywords, MAX_TOP_K, QueryPlanningMetadata, RuntimeQueryMode,
+};
+use crate::domains::query_ir::{
+    EntityRole, QueryIR, SourceSliceDirection, SourceSliceFilter,
+    literal_kind_has_exact_technical_shape, literal_text_is_identifier_shaped,
+};
 const DEFAULT_CONTEXT_BUDGET_CHARS: usize = 22_000;
 /// Minimum token length after stripping punctuation. Tokens shorter than
 /// this mostly carry no retrieval signal; a length cutoff avoids a
 /// language-specific lexicon.
 const TOKEN_MIN_LEN: usize = 3;
+pub const QUERY_IR_LEXICAL_LANE_MIN_CONFIDENCE: f32 = 0.6;
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
@@ -155,7 +161,7 @@ pub fn build_query_plan(
     let requested_mode = explicit.unwrap_or_else(|| choose_mode(None, question));
     let planned_mode = choose_mode(explicit, question);
     let keywords = extract_keywords(question);
-    let (high_level_keywords, low_level_keywords) = split_keywords(&keywords);
+    let lane_keywords = derive_lexical_lane_keywords(&keywords, None);
     let case_preserving = extract_keywords_preserving_case(question);
     let (entity_keywords, concept_keywords) = classify_keyword_levels(&case_preserving);
 
@@ -168,8 +174,8 @@ pub fn build_query_plan(
         planned_mode,
         intent_profile,
         keywords,
-        high_level_keywords,
-        low_level_keywords,
+        high_level_keywords: lane_keywords.high_level,
+        low_level_keywords: lane_keywords.low_level,
         entity_keywords,
         concept_keywords,
         top_k: planned_top_k(question, top_k),
@@ -272,6 +278,143 @@ pub fn classify_keyword_levels(keywords: &[String]) -> (Vec<String>, Vec<String>
     (entity_keywords, concept_keywords)
 }
 
+#[must_use]
+pub fn derive_lexical_lane_keywords(
+    keywords: &[String],
+    query_ir: Option<&QueryIR>,
+) -> IntentKeywords {
+    let fallback = full_keyword_lanes(keywords);
+    let Some(query_ir) = query_ir else {
+        return fallback;
+    };
+    if query_ir.confidence < QUERY_IR_LEXICAL_LANE_MIN_CONFIDENCE {
+        return fallback;
+    }
+
+    let seeds = collect_query_ir_lexical_lane_seeds(query_ir);
+    if seeds.high.is_empty() && seeds.low.is_empty() {
+        return fallback;
+    }
+
+    let high_level = keywords_matching_seeds(keywords, &seeds.high);
+    let low_level = keywords_matching_seeds(keywords, &seeds.low);
+    if high_level.is_empty() && low_level.is_empty() {
+        return fallback;
+    }
+
+    IntentKeywords {
+        high_level: if high_level.is_empty() { keywords.to_vec() } else { high_level },
+        low_level: if low_level.is_empty() { keywords.to_vec() } else { low_level },
+    }
+}
+
+fn full_keyword_lanes(keywords: &[String]) -> IntentKeywords {
+    IntentKeywords { high_level: keywords.to_vec(), low_level: keywords.to_vec() }
+}
+
+#[derive(Default)]
+struct LexicalLaneSeeds {
+    high: Vec<String>,
+    low: Vec<String>,
+}
+
+fn collect_query_ir_lexical_lane_seeds(query_ir: &QueryIR) -> LexicalLaneSeeds {
+    let mut seeds = LexicalLaneSeeds::default();
+    for entity in &query_ir.target_entities {
+        match entity.role {
+            EntityRole::Subject | EntityRole::Object => push_seed(&mut seeds.high, &entity.label),
+            EntityRole::Modifier => push_seed(&mut seeds.low, &entity.label),
+        }
+    }
+    for target_type in &query_ir.target_types {
+        push_seed(&mut seeds.high, target_type);
+    }
+    if let Some(document_focus) = &query_ir.document_focus {
+        push_seed(&mut seeds.high, &document_focus.hint);
+    }
+    if let Some(comparison) = &query_ir.comparison {
+        if let Some(left) = &comparison.a {
+            push_seed(&mut seeds.high, left);
+        }
+        if let Some(right) = &comparison.b {
+            push_seed(&mut seeds.high, right);
+        }
+        push_seed(&mut seeds.low, &comparison.dimension);
+    }
+    for literal in &query_ir.literal_constraints {
+        if literal_kind_has_exact_technical_shape(literal.kind, &literal.text) {
+            push_seed(&mut seeds.high, &literal.text);
+        } else {
+            push_seed(&mut seeds.low, &literal.text);
+        }
+    }
+    for temporal in &query_ir.temporal_constraints {
+        push_seed(&mut seeds.low, &temporal.surface);
+    }
+    if let Some(source_slice) = &query_ir.source_slice {
+        push_seed(&mut seeds.low, source_slice_direction_seed(source_slice.direction));
+        if let Some(filter_seed) = source_slice_filter_seed(source_slice.filter) {
+            push_seed(&mut seeds.low, filter_seed);
+        }
+    }
+    seeds
+}
+
+const fn source_slice_direction_seed(direction: SourceSliceDirection) -> &'static str {
+    match direction {
+        SourceSliceDirection::Head => "head",
+        SourceSliceDirection::Tail => "tail",
+        SourceSliceDirection::All => "all",
+    }
+}
+
+const fn source_slice_filter_seed(filter: SourceSliceFilter) -> Option<&'static str> {
+    match filter {
+        SourceSliceFilter::None => None,
+        SourceSliceFilter::ReleaseMarker => Some("release_marker"),
+    }
+}
+
+fn push_seed(seeds: &mut Vec<String>, value: &str) {
+    let normalized = normalize_lane_text(value);
+    if normalized.is_empty() || seeds.iter().any(|seed| seed == &normalized) {
+        return;
+    }
+    seeds.push(normalized);
+}
+
+fn keywords_matching_seeds(keywords: &[String], seeds: &[String]) -> Vec<String> {
+    let mut selected = Vec::new();
+    for keyword in keywords {
+        if seeds.iter().any(|seed| keyword_matches_seed(keyword, seed))
+            && !selected.contains(keyword)
+        {
+            selected.push(keyword.clone());
+        }
+    }
+    selected
+}
+
+fn keyword_matches_seed(keyword: &str, seed: &str) -> bool {
+    let keyword = normalize_lane_text(keyword);
+    if keyword.is_empty() || seed.is_empty() {
+        return false;
+    }
+    keyword == seed || seed.split_whitespace().any(|seed_token| seed_token == keyword)
+}
+
+fn normalize_lane_text(value: &str) -> String {
+    let mut normalized = String::new();
+    for ch in value.chars().flat_map(char::to_lowercase) {
+        if ch.is_alphanumeric() {
+            normalized.push(ch);
+        } else {
+            normalized.push(' ');
+        }
+    }
+    normalized.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
 fn is_entity_keyword(keyword: &str) -> bool {
     // Entity keywords: proper nouns, technical names, specific identifiers
     // 1. Contains uppercase (likely proper noun): "PostgreSQL", "FastAPI", "OAuth"
@@ -293,15 +436,32 @@ fn is_entity_keyword(keyword: &str) -> bool {
     has_upper || has_technical_chars || has_digits || is_path || is_acronym || is_camel
 }
 
-fn split_keywords(keywords: &[String]) -> (Vec<String>, Vec<String>) {
-    let high_level_keywords = keywords.iter().take(3).cloned().collect::<Vec<_>>();
-    let low_level_keywords = keywords.iter().skip(3).cloned().collect::<Vec<_>>();
-    (high_level_keywords, low_level_keywords)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domains::query_ir::{EntityMention, QueryAct, QueryLanguage, QueryScope};
+
+    fn query_ir_with_subject(label: &str, confidence: f32) -> QueryIR {
+        QueryIR {
+            act: QueryAct::Describe,
+            scope: QueryScope::SingleDocument,
+            language: QueryLanguage::Auto,
+            target_types: Vec::new(),
+            target_entities: vec![EntityMention {
+                label: label.to_string(),
+                role: EntityRole::Subject,
+            }],
+            literal_constraints: Vec::new(),
+            temporal_constraints: Vec::new(),
+            comparison: None,
+            document_focus: None,
+            conversation_refs: Vec::new(),
+            needs_clarification: None,
+            source_slice: None,
+            retrieval_query: None,
+            confidence,
+        }
+    }
 
     #[test]
     fn extract_keywords_deduplicates_and_filters_short_tokens() {
@@ -457,6 +617,43 @@ mod tests {
             ]
         );
         assert!(!plan.intent_profile.multi_document_technical);
+    }
+
+    #[test]
+    fn lexical_lanes_follow_query_ir_instead_of_keyword_position() {
+        let keywords = vec![
+            "common".to_string(),
+            "prefix".to_string(),
+            "shared".to_string(),
+            "alpha".to_string(),
+            "gamma".to_string(),
+        ];
+
+        let alpha = derive_lexical_lane_keywords(
+            &keywords,
+            Some(&query_ir_with_subject("Alpha Node", 0.9)),
+        );
+        let gamma = derive_lexical_lane_keywords(
+            &keywords,
+            Some(&query_ir_with_subject("Gamma Node", 0.9)),
+        );
+
+        assert_eq!(alpha.high_level, vec!["alpha".to_string()]);
+        assert_eq!(gamma.high_level, vec!["gamma".to_string()]);
+        assert_eq!(alpha.low_level, keywords);
+        assert_eq!(gamma.low_level, keywords);
+    }
+
+    #[test]
+    fn lexical_lanes_fallback_to_full_keywords_for_low_confidence_ir() {
+        let keywords = vec!["common".to_string(), "prefix".to_string(), "gamma".to_string()];
+        let lanes = derive_lexical_lane_keywords(
+            &keywords,
+            Some(&query_ir_with_subject("Gamma Node", 0.59)),
+        );
+
+        assert_eq!(lanes.high_level, keywords);
+        assert_eq!(lanes.low_level, keywords);
     }
 
     #[test]

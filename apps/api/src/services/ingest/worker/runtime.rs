@@ -5,7 +5,10 @@ use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 use uuid::Uuid;
 
-use crate::{app::state::AppState, infra::repositories::ingest_repository};
+use crate::{
+    app::state::AppState,
+    infra::{persistence, repositories::ingest_repository},
+};
 
 use super::{
     CANONICAL_LEASE_RECOVERY_INTERVAL, CANONICAL_STALE_LEASE_SECONDS,
@@ -13,16 +16,24 @@ use super::{
     fail_canonical_ingest_job,
 };
 
+const PROCESS_CLAIM_MEMORY_RESERVED_MIB: u64 = 256;
+const PROCESS_CLAIM_MEMORY_PER_JOB_MIB: u64 = 512;
+
 pub(super) async fn run_ingestion_worker_pool(
     state: Arc<AppState>,
     mut shutdown: broadcast::Receiver<()>,
 ) {
     let global_limit = state.settings.ingestion_max_parallel_jobs_global.max(1);
+    let process_db_limit = persistence::worker_process_db_job_limit(&state.settings);
     let workspace_limit = state.settings.ingestion_max_parallel_jobs_per_workspace.max(1);
     let library_limit = state.settings.ingestion_max_parallel_jobs_per_library.max(1);
     let memory_soft_limit_mib = crate::shared::telemetry::resolve_memory_soft_limit_mib(
         state.settings.ingestion_memory_soft_limit_mib,
     );
+    let configured_process_claim_limit = global_limit.min(process_db_limit).max(1);
+    let memory_bound_process_claim_limit = memory_bound_process_claim_limit(memory_soft_limit_mib);
+    let process_claim_limit =
+        configured_process_claim_limit.min(memory_bound_process_claim_limit).max(1);
     let memory_soft_limit_source = if state.settings.ingestion_memory_soft_limit_mib > 0 {
         "config"
     } else if memory_soft_limit_mib > 0 {
@@ -37,6 +48,10 @@ pub(super) async fn run_ingestion_worker_pool(
     state.worker_runtime.mark_idle().await;
     info!(
         global_limit,
+        process_claim_limit,
+        configured_process_claim_limit,
+        memory_bound_process_claim_limit,
+        process_db_limit,
         workspace_limit,
         library_limit,
         memory_soft_limit_mib,
@@ -81,6 +96,7 @@ pub(super) async fn run_ingestion_worker_pool(
             state.clone(),
             &mut active_jobs,
             &mut next_worker_index,
+            process_claim_limit,
             global_limit,
             workspace_limit,
             library_limit,
@@ -141,17 +157,32 @@ fn canonical_worker_id(service_name: &str, worker_index: usize) -> String {
     format!("{service_name}:canonical:{worker_index}:{}", Uuid::now_v7())
 }
 
+fn memory_bound_process_claim_limit(memory_soft_limit_mib: u64) -> usize {
+    if memory_soft_limit_mib == 0 {
+        return usize::MAX;
+    }
+    let job_slots = memory_soft_limit_mib
+        .saturating_sub(PROCESS_CLAIM_MEMORY_RESERVED_MIB)
+        .checked_div(PROCESS_CLAIM_MEMORY_PER_JOB_MIB)
+        .unwrap_or(0);
+    usize::try_from(job_slots.max(1)).unwrap_or(usize::MAX)
+}
+
 async fn fill_available_job_slots(
     state: Arc<AppState>,
     active_jobs: &mut JoinSet<CanonicalJobOutcome>,
     next_worker_index: &mut usize,
+    process_claim_limit: usize,
     global_limit: usize,
     workspace_limit: usize,
     library_limit: usize,
     memory_soft_limit_mib: u64,
     shutdown_cancellation_token: &CancellationToken,
 ) {
-    while active_jobs.len() < global_limit {
+    // The SQL query still enforces the deployment-wide global cap. This loop
+    // adds the per-process cap derived from the worker's DB pools so one
+    // replica cannot lease more jobs than its heartbeat/main pools can serve.
+    while active_jobs.len() < process_claim_limit {
         // Memory-aware backpressure. The static parallelism limits above are
         // the *ceiling* — actual concurrency also drops automatically when
         // the worker process RSS approaches the soft limit, so a burst of
@@ -200,11 +231,19 @@ async fn fill_available_job_slots(
                     let worker_id = worker_id.clone();
                     let job_cancellation_token = shutdown_cancellation_token.child_token();
                     async move {
-                        let result = execute_canonical_ingest_job(
-                            state,
-                            &worker_id,
-                            job,
-                            job_cancellation_token,
+                        // Each ingest job runs in its own spawned task, so the
+                        // provider-budget lane must be established here: the
+                        // task-local lane does not cross the `spawn` boundary.
+                        // Marking ingest keeps its fan-out off the
+                        // query-reserved budget.
+                        let result = crate::integrations::provider_budget::with_lane(
+                            crate::integrations::provider_budget::ProviderLane::Ingest,
+                            execute_canonical_ingest_job(
+                                state,
+                                &worker_id,
+                                job,
+                                job_cancellation_token,
+                            ),
                         )
                         .await;
                         CanonicalJobOutcome {
@@ -538,5 +577,25 @@ fn spawn_external_stale_lease_reaper(heartbeat_pool: sqlx::PgPool) {
             %error,
             "failed to spawn external stale-lease reaper thread; canonical lease recovery will still run on the tokio side, but the dedicated OS-thread safety net is disabled until the worker restarts"
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::memory_bound_process_claim_limit;
+
+    #[test]
+    fn memory_bound_process_claim_limit_serializes_tiny_workers() {
+        assert_eq!(memory_bound_process_claim_limit(691), 1);
+    }
+
+    #[test]
+    fn memory_bound_process_claim_limit_scales_with_soft_limit() {
+        assert_eq!(memory_bound_process_claim_limit(2304), 4);
+    }
+
+    #[test]
+    fn memory_bound_process_claim_limit_is_disabled_without_soft_limit() {
+        assert_eq!(memory_bound_process_claim_limit(0), usize::MAX);
     }
 }

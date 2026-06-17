@@ -7,7 +7,7 @@
     clippy::too_many_lines
 )]
 
-use std::sync::Arc;
+use std::{collections::BTreeMap, sync::Arc};
 
 use anyhow::{Context, anyhow};
 use chrono::{DateTime, Utc};
@@ -116,6 +116,12 @@ pub struct KnowledgeEntityVectorRow {
     pub vector: Vec<f32>,
     pub freshness_generation: i64,
     pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ChunkVectorDimensionCount {
+    dim: i64,
+    row_count: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
@@ -804,6 +810,63 @@ impl ArangoSearchStore {
                 .context("chunk vector count summed across shards overflowed i64")?;
         }
         usize::try_from(total).context("chunk vector count overflowed usize")
+    }
+
+    pub async fn list_chunk_vector_dimensions(
+        &self,
+        library_id: Uuid,
+        embedding_model_key: &str,
+        vector_kind: &str,
+    ) -> anyhow::Result<Vec<u64>> {
+        let mut targets = vec![KNOWLEDGE_CHUNK_VECTOR_COLLECTION.to_string()];
+        targets.extend(self.client.list_per_dim_chunk_vector_collections().await?);
+        targets.extend(self.client.list_per_library_chunk_vector_collections().await?);
+        targets.sort();
+        targets.dedup();
+
+        let mut counts_by_dim: BTreeMap<u64, u64> = BTreeMap::new();
+        for collection in targets {
+            let cursor = self
+                .client
+                .query_json(
+                    "FOR vector IN @@collection
+                     FILTER vector.library_id == @library_id
+                       AND vector.embedding_model_key == @embedding_model_key
+                       AND vector.vector_kind == @vector_kind
+                       AND vector.dimensions != null
+                       AND vector.dimensions > 0
+                     COLLECT dim = vector.dimensions WITH COUNT INTO row_count
+                     RETURN { dim, row_count }",
+                    serde_json::json!({
+                        "@collection": collection,
+                        "library_id": library_id,
+                        "embedding_model_key": embedding_model_key,
+                        "vector_kind": vector_kind,
+                    }),
+                )
+                .await
+                .with_context(|| {
+                    format!("failed to list chunk vector dimensions from {collection}")
+                })?;
+            for row in decode_many_results::<ChunkVectorDimensionCount>(cursor)? {
+                anyhow::ensure!(row.dim > 0, "chunk vector dimension must be positive");
+                anyhow::ensure!(row.row_count > 0, "chunk vector dimension count must be positive");
+                let dim =
+                    u64::try_from(row.dim).context("chunk vector dimension overflowed u64")?;
+                let row_count = u64::try_from(row.row_count)
+                    .context("chunk vector dimension row count overflowed u64")?;
+                counts_by_dim
+                    .entry(dim)
+                    .and_modify(|total| *total = total.saturating_add(row_count))
+                    .or_insert(row_count);
+            }
+        }
+
+        let mut dimensions: Vec<(u64, u64)> = counts_by_dim.into_iter().collect();
+        dimensions.sort_by(|(left_dim, left_count), (right_dim, right_count)| {
+            right_count.cmp(left_count).then_with(|| right_dim.cmp(left_dim))
+        });
+        Ok(dimensions.into_iter().map(|(dim, _)| dim).collect())
     }
 
     pub async fn upsert_entity_vector(
@@ -2081,6 +2144,14 @@ impl crate::infra::knowledge_plane::SearchStore for ArangoSearchStore {
             freshness_generation,
         )
         .await
+    }
+    async fn list_chunk_vector_dimensions(
+        &self,
+        library_id: Uuid,
+        embedding_model_key: &str,
+        vector_kind: &str,
+    ) -> anyhow::Result<Vec<u64>> {
+        self.list_chunk_vector_dimensions(library_id, embedding_model_key, vector_kind).await
     }
     async fn upsert_entity_vector(
         &self,

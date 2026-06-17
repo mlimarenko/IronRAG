@@ -368,6 +368,17 @@ impl CanonicalExtractContentError {
             message: message.to_string(),
         }
     }
+
+    pub(super) fn extraction_failed_terminal(
+        failure_code: &str,
+        message: impl std::fmt::Display,
+    ) -> Self {
+        Self {
+            failure_code: failure_code.to_string(),
+            retryable: false,
+            message: message.to_string(),
+        }
+    }
 }
 
 impl std::fmt::Display for CanonicalExtractContentError {
@@ -830,7 +841,7 @@ async fn execute_canonical_ingest_job(
             }
             let message = format!("{error:#}");
             let extract_error = error.downcast_ref::<CanonicalExtractContentError>();
-            if let Err(e) = state
+            match state
                 .canonical_services
                 .ingest
                 .finalize_attempt(
@@ -866,9 +877,35 @@ async fn execute_canonical_ingest_job(
                 )
                 .await
             {
-                tracing::warn!(%attempt_id, ?e, "failed to finalize attempt as failed");
+                Ok(finalized) if finalized.retryable => {
+                    // `finalize_attempt` already requeued the job (queue_state ->
+                    // queued, available_at -> now + backoff) because the failure
+                    // was retryable and the attempt budget still has room. Return
+                    // Ok so the dispatcher's `handle_job_outcome` does NOT route
+                    // this through `fail_canonical_ingest_job`, which would clobber
+                    // the freshly requeued state back to terminal `failed` and kill
+                    // the retry. The next dispatcher tick re-leases the job once the
+                    // backoff window elapses.
+                    info!(
+                        %worker_id,
+                        %job_id,
+                        %attempt_id,
+                        attempt_number = finalized.attempt_number,
+                        "canonical ingest job failed retryably; requeued for another attempt",
+                    );
+                    Ok(())
+                }
+                Ok(_) => {
+                    // Terminal failure (non-retryable, or retry budget exhausted).
+                    // Propagate the error so the dispatcher reconciles the mutation
+                    // and marks the job permanently failed.
+                    Err(error).context(message)
+                }
+                Err(e) => {
+                    tracing::warn!(%attempt_id, ?e, "failed to finalize attempt as failed");
+                    Err(error).context(message)
+                }
             }
-            Err(error).context(message)
         }
     }
 }
@@ -1477,6 +1514,10 @@ async fn run_canonical_ingest_pipeline(
         .await;
     let embed_chunk_elapsed_ms = Some(embed_chunk_start.elapsed().as_millis() as i64);
     let mut embed_chunk_failure: Option<String> = None;
+    // Whether the vectors already persisted for this revision must survive the
+    // failure so the requeued attempt can resume from them (transient provider /
+    // store blip) instead of re-embedding everything from scratch.
+    let mut embed_chunk_preserve_vectors = false;
     let embed_chunk_success = match &embed_chunk_outcome {
         Ok(outcome) => {
             if let (Some(provider), Some(model), Some(usage_json)) = (
@@ -1545,6 +1586,7 @@ async fn run_canonical_ingest_pipeline(
                     lease_lost_requested,
                 ));
             }
+            embed_chunk_preserve_vectors = error.preserves_partial_vectors();
             embed_chunk_failure = Some(format!("chunk embedding failed: {error:#}"));
             warn!(
                 %worker_id,
@@ -1584,7 +1626,13 @@ async fn run_canonical_ingest_pipeline(
     };
     drop(embed_chunk_outcome);
     if let Some(reason) = embed_chunk_failure {
-        fail_revision_vector_graph_readiness(state, revision_id, &reason).await?;
+        fail_revision_vector_graph_readiness(
+            state,
+            revision_id,
+            &reason,
+            !embed_chunk_preserve_vectors,
+        )
+        .await?;
         return Err(anyhow::anyhow!(reason));
     }
 
@@ -1852,7 +1900,11 @@ async fn run_canonical_ingest_pipeline(
             );
             true
         } else {
-            fail_revision_vector_graph_readiness(state, revision_id, &reason).await?;
+            // Reached only when chunk embedding did not succeed for this
+            // revision (the embed-failure path above returns earlier when it
+            // does fail), so there is no trustworthy partial vector state to
+            // keep — wipe it.
+            fail_revision_vector_graph_readiness(state, revision_id, &reason, true).await?;
             return Err(anyhow::anyhow!(reason));
         }
     } else {

@@ -3,8 +3,8 @@ use std::collections::HashMap;
 use uuid::Uuid;
 
 use crate::domains::query_ir::{
-    QueryAct, QueryIR, QueryLanguage, QueryScope, SourceSliceDirection, SourceSliceFilter,
-    SourceSliceSpec,
+    EntityMention, EntityRole, QueryAct, QueryIR, QueryLanguage, QueryScope, SourceSliceDirection,
+    SourceSliceFilter, SourceSliceSpec,
 };
 use crate::infra::arangodb::document_store::KnowledgeDocumentRow;
 use crate::services::query::effective_query::{
@@ -18,7 +18,8 @@ use crate::shared::extraction::table_summary::{
 use super::super::{
     build_missing_explicit_document_answer, build_table_row_grounded_answer,
     build_table_summary_grounded_answer, concise_document_subject_label,
-    document_focus_marker_hits, focused_answer_document_id, render_table_summary_chunk_section,
+    document_focus_marker_hits, focused_answer_document_id, parse_table_row_chunk,
+    question_asks_table_aggregation, render_table_summary_chunk_section,
 };
 
 fn effective_query_text(scope: &str, question: &str) -> String {
@@ -80,6 +81,35 @@ fn table_frequency_ir() -> QueryIR {
     }
 }
 
+fn table_column_inventory_ir(label: &str) -> QueryIR {
+    QueryIR {
+        act: QueryAct::Describe,
+        target_types: vec!["table_row".to_string(), "table_summary".to_string()],
+        target_entities: vec![EntityMention {
+            label: label.to_string(),
+            role: EntityRole::Subject,
+        }],
+        ..describe_query_ir()
+    }
+}
+
+fn retrieve_table_column_inventory_ir(label: &str) -> QueryIR {
+    QueryIR { act: QueryAct::RetrieveValue, ..table_column_inventory_ir(label) }
+}
+
+#[test]
+fn table_summary_with_table_row_target_is_not_aggregation_lookup() {
+    let row_lookup_ir = retrieve_table_column_inventory_ir("accounts table");
+    let summary_ir = QueryIR {
+        act: QueryAct::RetrieveValue,
+        target_types: vec!["table_summary".to_string()],
+        ..describe_query_ir()
+    };
+
+    assert!(!question_asks_table_aggregation("", Some(&row_lookup_ir)));
+    assert!(question_asks_table_aggregation("", Some(&summary_ir)));
+}
+
 #[test]
 fn concise_document_subject_label_strips_spreadsheet_extensions() {
     assert_eq!(
@@ -116,11 +146,11 @@ fn focused_answer_document_id_prefers_explicit_extension_match() {
             chunk_index: 0,
             chunk_kind: None,
             document_id: csv_id,
-            document_label: "people-100.csv".to_string(),
+            document_label: "records-a.csv".to_string(),
             excerpt: String::new(),
             score_kind: crate::services::query::execution::RuntimeChunkScoreKind::Relevance,
             score: Some(1.0),
-            source_text: "Sheet: people-100 | Row 1 | Email: elijah57@example.net".to_string(),
+            source_text: "Sheet: records-a | Row 1 | Email: record-a@example.invalid".to_string(),
         },
         RuntimeMatchedChunk {
             chunk_id: Uuid::now_v7(),
@@ -128,17 +158,17 @@ fn focused_answer_document_id_prefers_explicit_extension_match() {
             chunk_index: 0,
             chunk_kind: None,
             document_id: xlsx_id,
-            document_label: "people-100.xlsx".to_string(),
+            document_label: "records-a.xlsx".to_string(),
             excerpt: String::new(),
             score_kind: crate::services::query::execution::RuntimeChunkScoreKind::Relevance,
             score: Some(10.0),
-            source_text: "Sheet: people-100 | Row 1 | Email: elijah57@example.net".to_string(),
+            source_text: "Sheet: records-a | Row 1 | Email: record-a@example.invalid".to_string(),
         },
     ];
 
     assert_eq!(
         focused_answer_document_id(
-            "In people-100.csv what is Shelby Terrell's job title (email elijah57@example.net)?",
+            "In records-a.csv what is sample record's job title (email record-a@example.invalid)?",
             &chunks,
         ),
         Some(csv_id)
@@ -156,7 +186,7 @@ fn focused_answer_document_id_prefers_current_question_segment() {
             chunk_index: 0,
             chunk_kind: None,
             document_id: stale_id,
-            document_label: "Provider Alpha Admin Guide".to_string(),
+            document_label: "Sample Unit Admin Guide".to_string(),
             excerpt: String::new(),
             score_kind: crate::services::query::execution::RuntimeChunkScoreKind::Relevance,
             score: Some(10.0),
@@ -168,7 +198,7 @@ fn focused_answer_document_id_prefers_current_question_segment() {
             chunk_index: 1,
             chunk_kind: None,
             document_id: focused_id,
-            document_label: "Provider Alpha".to_string(),
+            document_label: "Sample Unit".to_string(),
             excerpt: String::new(),
             score_kind: crate::services::query::execution::RuntimeChunkScoreKind::Relevance,
             score: Some(1.0),
@@ -179,8 +209,8 @@ fn focused_answer_document_id_prefers_current_question_segment() {
     assert_eq!(
         focused_answer_document_id(
             &effective_query_text(
-                "Prior assistant listed Provider Alpha Admin Guide.",
-                "Provider Alpha setup",
+                "Prior assistant listed Sample Unit Admin Guide.",
+                "Sample Unit setup",
             ),
             &chunks,
         ),
@@ -241,7 +271,122 @@ fn build_table_row_grounded_answer_matches_requested_headers() {
             None,
             &chunks,
         ),
-        Some("Country: `Papua New Guinea`; Industry: `Plastics`".to_string())
+        Some("Name: `Ferrell LLC`; Country: `Papua New Guinea`; Industry: `Plastics`".to_string())
+    );
+}
+
+#[test]
+fn build_table_row_grounded_answer_matches_camel_case_requested_headers() {
+    let document_id = Uuid::now_v7();
+    let chunks = vec![RuntimeMatchedChunk {
+        chunk_id: Uuid::now_v7(),
+        revision_id: Uuid::now_v7(),
+        chunk_index: 0,
+        chunk_kind: Some("table_row".to_string()),
+        document_id,
+        document_label: "sales.xlsx".to_string(),
+        excerpt: String::new(),
+        score_kind: crate::services::query::execution::RuntimeChunkScoreKind::Relevance,
+        score: Some(10.0),
+        source_text:
+            "Sheet: Revenue | Table: RevenueTable | Row 3 | Quarter: Q3 | RevenueUSD: 143500 | Region: Central | RiskFlag: high | OwnerTeam: Gamma Team"
+                .to_string(),
+    }];
+
+    assert_eq!(
+        build_table_row_grounded_answer(
+            "In the revenue workbook, which region has Q3 revenue of 143500 USD, and what risk flag is listed?",
+            None,
+            &chunks,
+        ),
+        Some("RevenueUSD: `143500`; Region: `Central`; RiskFlag: `high`".to_string())
+    );
+}
+
+#[test]
+fn build_table_row_grounded_answer_matches_partial_compound_header_and_row_identifier() {
+    let document_id = Uuid::now_v7();
+    let chunks = vec![RuntimeMatchedChunk {
+        chunk_id: Uuid::now_v7(),
+        revision_id: Uuid::now_v7(),
+        chunk_index: 0,
+        chunk_kind: Some("table_row".to_string()),
+        document_id,
+        document_label: "matrix.xlsx".to_string(),
+        excerpt: String::new(),
+        score_kind: crate::services::query::execution::RuntimeChunkScoreKind::Relevance,
+        score: Some(10.0),
+        source_text:
+            "Sheet: Matrix | Row 4 | GroupName: Group Delta | WindowValue: 45 units | RatePercent: 12 | RequiredReviewer: Team Q"
+                .to_string(),
+    }];
+
+    assert_eq!(
+        build_table_row_grounded_answer(
+            "What rate percent and reviewer are listed for Group Delta records?",
+            None,
+            &chunks,
+        ),
+        Some("GroupName: `Group Delta`; RatePercent: `12`; RequiredReviewer: `Team Q`".to_string())
+    );
+}
+
+#[test]
+fn build_table_row_grounded_answer_preserves_raw_pipe_row_identifier() {
+    let document_id = Uuid::now_v7();
+    let chunks = vec![RuntimeMatchedChunk {
+        chunk_id: Uuid::now_v7(),
+        revision_id: Uuid::now_v7(),
+        chunk_index: 0,
+        chunk_kind: Some("table_row".to_string()),
+        document_id,
+        document_label: "matrix.xlsx".to_string(),
+        excerpt: String::new(),
+        score_kind: crate::services::query::execution::RuntimeChunkScoreKind::Relevance,
+        score: Some(10.0),
+        source_text: "| Group Delta | 30 units | 7 | Reviewer Q |".to_string(),
+    }];
+
+    assert_eq!(
+        build_table_row_grounded_answer(
+            "What number and reviewer are listed for Group Delta in the workbook?",
+            None,
+            &chunks,
+        ),
+        Some("`Group Delta`; `30 units`; `7`; `Reviewer Q`".to_string())
+    );
+}
+
+#[test]
+fn build_table_row_grounded_answer_handles_focused_row_lookup_without_inventory_intent() {
+    let document_id = Uuid::now_v7();
+    let chunks = vec![RuntimeMatchedChunk {
+        chunk_id: Uuid::now_v7(),
+        revision_id: Uuid::now_v7(),
+        chunk_index: 0,
+        chunk_kind: Some("table_row".to_string()),
+        document_id,
+        document_label: "operations.xlsx".to_string(),
+        excerpt: String::new(),
+        score_kind: crate::services::query::execution::RuntimeChunkScoreKind::Relevance,
+        score: Some(10.0),
+        source_text:
+            "Sheet: Operations | Table: StatusTable | Row 2 | StatusCode: amber | Region: North | OwnerTeam: Delta"
+                .to_string(),
+    }];
+    let ir = QueryIR {
+        act: QueryAct::RetrieveValue,
+        target_types: vec!["table_row".to_string()],
+        ..describe_query_ir()
+    };
+
+    assert_eq!(
+        build_table_row_grounded_answer(
+            "For the amber status row, what region and owner team are listed?",
+            Some(&ir),
+            &chunks,
+        ),
+        Some("StatusCode: `amber`; Region: `North`; OwnerTeam: `Delta`".to_string())
     );
 }
 
@@ -336,6 +481,350 @@ fn build_table_row_grounded_answer_lists_values_for_table_row_enumeration_ir() {
 }
 
 #[test]
+fn parse_table_row_chunk_keeps_post_row_table_and_row_fields_as_data() {
+    let chunk = RuntimeMatchedChunk {
+        chunk_id: Uuid::now_v7(),
+        revision_id: Uuid::now_v7(),
+        chunk_index: 0,
+        chunk_kind: None,
+        document_id: Uuid::now_v7(),
+        document_label: "schema.pdf".to_string(),
+        excerpt: String::new(),
+        score_kind: crate::services::query::execution::RuntimeChunkScoreKind::Relevance,
+        score: Some(10.0),
+        source_text:
+            "Sheet: Schema | Table: Key Indexes | Row 1 | Table: accounts | Column: LOWER(email) | Row Label: email index"
+                .to_string(),
+    };
+
+    let parsed = parse_table_row_chunk(&chunk).expect("table row should parse");
+
+    assert_eq!(parsed.sheet_name, "Schema");
+    assert_eq!(parsed.table_name.as_deref(), Some("Key Indexes"));
+    assert_eq!(parsed.row_number, 1);
+    assert!(parsed.fields.iter().any(|(header, value)| header == "Table" && value == "accounts"));
+    assert!(
+        parsed.fields.iter().any(|(header, value)| header == "Column" && value == "LOWER(email)")
+    );
+    assert!(
+        parsed.fields.iter().any(|(header, value)| header == "Row Label" && value == "email index")
+    );
+}
+
+#[test]
+fn build_table_row_grounded_answer_lists_schema_columns_for_target_table() {
+    let document_id = Uuid::now_v7();
+    let chunks = vec![
+        RuntimeMatchedChunk {
+            chunk_id: Uuid::now_v7(),
+            revision_id: Uuid::now_v7(),
+            chunk_index: 0,
+            chunk_kind: None,
+            document_id,
+            document_label: "schema.pdf".to_string(),
+            excerpt: String::new(),
+            score_kind: crate::services::query::execution::RuntimeChunkScoreKind::Relevance,
+            score: Some(10.0),
+            source_text:
+                "Sheet: Store Schema | Table: 1. Table: accounts | Row 1 | Column: account_id | Type: UUID | Constraints: PRIMARY KEY | Description: Unique account identifier"
+                    .to_string(),
+        },
+        RuntimeMatchedChunk {
+            chunk_id: Uuid::now_v7(),
+            revision_id: Uuid::now_v7(),
+            chunk_index: 1,
+            chunk_kind: None,
+            document_id,
+            document_label: "schema.pdf".to_string(),
+            excerpt: String::new(),
+            score_kind: crate::services::query::execution::RuntimeChunkScoreKind::Relevance,
+            score: Some(9.0),
+            source_text:
+                "Sheet: Store Schema | Table: 1. Table: accounts | Row 2 | Column: email | Type: VARCHAR(255) | Constraints: UNIQUE, NOT NULL | Description: Login email"
+                    .to_string(),
+        },
+        RuntimeMatchedChunk {
+            chunk_id: Uuid::now_v7(),
+            revision_id: Uuid::now_v7(),
+            chunk_index: 2,
+            chunk_kind: None,
+            document_id,
+            document_label: "schema.pdf".to_string(),
+            excerpt: String::new(),
+            score_kind: crate::services::query::execution::RuntimeChunkScoreKind::Relevance,
+            score: Some(8.0),
+            source_text:
+                "Sheet: Store Schema | Table: 1. Table: accounts | Row 3 | Column: status | Type: VARCHAR(20) | Constraints: NOT NULL | Description: Account state"
+                    .to_string(),
+        },
+        RuntimeMatchedChunk {
+            chunk_id: Uuid::now_v7(),
+            revision_id: Uuid::now_v7(),
+            chunk_index: 3,
+            chunk_kind: None,
+            document_id,
+            document_label: "schema.pdf".to_string(),
+            excerpt: String::new(),
+            score_kind: crate::services::query::execution::RuntimeChunkScoreKind::Relevance,
+            score: Some(99.0),
+            source_text:
+                "Sheet: Store Schema | Table: 6. Key Indexes | Row 1 | Index Name: idx_accounts_email_lower | Table: accounts | Column: LOWER(email) | Type: UNIQUE, btree"
+                    .to_string(),
+        },
+    ];
+    let ir = table_column_inventory_ir("accounts table");
+
+    let answer = build_table_row_grounded_answer(
+        "What columns does the accounts table have?",
+        Some(&ir),
+        &chunks,
+    )
+    .expect("schema column inventory answer");
+
+    assert!(answer.contains("`account_id`"));
+    assert!(answer.contains("`email`"));
+    assert!(answer.contains("`status`"));
+    assert!(answer.contains("`UUID`"));
+    assert!(!answer.contains("LOWER(email)"));
+}
+
+#[test]
+fn build_table_row_grounded_answer_does_not_list_schema_columns_without_table_ir_targets() {
+    let document_id = Uuid::now_v7();
+    let revision_id = Uuid::now_v7();
+    let chunks = vec![
+        RuntimeMatchedChunk {
+            chunk_id: Uuid::now_v7(),
+            revision_id,
+            chunk_index: 0,
+            chunk_kind: None,
+            document_id,
+            document_label: "schema.pdf".to_string(),
+            excerpt: String::new(),
+            score_kind: crate::services::query::execution::RuntimeChunkScoreKind::Relevance,
+            score: Some(10.0),
+            source_text:
+                "Sheet: Store Schema | Table: 1. Table: accounts | Row 1 | Column: account_id | Type: UUID | Constraints: PRIMARY KEY | Description: Unique account identifier"
+                    .to_string(),
+        },
+        RuntimeMatchedChunk {
+            chunk_id: Uuid::now_v7(),
+            revision_id,
+            chunk_index: 1,
+            chunk_kind: None,
+            document_id,
+            document_label: "schema.pdf".to_string(),
+            excerpt: String::new(),
+            score_kind: crate::services::query::execution::RuntimeChunkScoreKind::Relevance,
+            score: Some(9.0),
+            source_text:
+                "Sheet: Store Schema | Table: 1. Table: accounts | Row 2 | Column: email | Type: VARCHAR(255) | Constraints: UNIQUE, NOT NULL | Description: Login email"
+                    .to_string(),
+        },
+        RuntimeMatchedChunk {
+            chunk_id: Uuid::now_v7(),
+            revision_id,
+            chunk_index: 2,
+            chunk_kind: None,
+            document_id,
+            document_label: "schema.pdf".to_string(),
+            excerpt: String::new(),
+            score_kind: crate::services::query::execution::RuntimeChunkScoreKind::Relevance,
+            score: Some(99.0),
+            source_text:
+                "Sheet: Store Schema | Table: 6. Key Indexes | Row 1 | Index Name: idx_accounts_email_lower | Table: accounts | Column: LOWER(email) | Type: UNIQUE, btree"
+                    .to_string(),
+        },
+    ];
+    let ir = describe_query_ir();
+
+    let answer = build_table_row_grounded_answer(
+        "What columns does the accounts table have?",
+        Some(&ir),
+        &chunks,
+    );
+
+    if let Some(answer) = answer.as_deref() {
+        assert!(!answer.contains("`account_id`"), "{answer}");
+        assert!(!answer.contains("`UUID`"), "{answer}");
+    }
+}
+
+#[test]
+fn build_table_row_grounded_answer_lists_schema_columns_for_retrieve_value_ir() {
+    let document_id = Uuid::now_v7();
+    let revision_id = Uuid::now_v7();
+    let chunks = vec![
+        RuntimeMatchedChunk {
+            chunk_id: Uuid::now_v7(),
+            revision_id,
+            chunk_index: 0,
+            chunk_kind: None,
+            document_id,
+            document_label: "schema.pdf".to_string(),
+            excerpt: String::new(),
+            score_kind: crate::services::query::execution::RuntimeChunkScoreKind::Relevance,
+            score: Some(10.0),
+            source_text:
+                "Sheet: Store Schema | Table: 1. Table: accounts | Row 1 | Column: account_id | Type: UUID | Constraints: PRIMARY KEY | Description: Unique account identifier"
+                    .to_string(),
+        },
+        RuntimeMatchedChunk {
+            chunk_id: Uuid::now_v7(),
+            revision_id,
+            chunk_index: 1,
+            chunk_kind: None,
+            document_id,
+            document_label: "schema.pdf".to_string(),
+            excerpt: String::new(),
+            score_kind: crate::services::query::execution::RuntimeChunkScoreKind::Relevance,
+            score: Some(9.0),
+            source_text:
+                "Sheet: Store Schema | Table: 1. Table: accounts | Row 2 | Column: email | Type: VARCHAR(255) | Constraints: UNIQUE, NOT NULL | Description: Login email"
+                    .to_string(),
+        },
+        RuntimeMatchedChunk {
+            chunk_id: Uuid::now_v7(),
+            revision_id,
+            chunk_index: 2,
+            chunk_kind: None,
+            document_id,
+            document_label: "schema.pdf".to_string(),
+            excerpt: String::new(),
+            score_kind: crate::services::query::execution::RuntimeChunkScoreKind::Relevance,
+            score: Some(99.0),
+            source_text:
+                "Sheet: Store Schema | Table: 6. Key Indexes | Row 1 | Index Name: idx_accounts_email_lower | Table: accounts | Column: LOWER(email) | Type: UNIQUE, btree"
+                    .to_string(),
+        },
+    ];
+    let ir = retrieve_table_column_inventory_ir("accounts table");
+
+    let answer = build_table_row_grounded_answer(
+        "Which columns are in the accounts table?",
+        Some(&ir),
+        &chunks,
+    )
+    .expect("schema column inventory answer");
+
+    assert!(answer.contains("`account_id`"));
+    assert!(answer.contains("`email`"));
+    assert!(answer.contains("`UUID`"));
+    assert!(!answer.contains("LOWER(email)"));
+}
+
+#[test]
+fn build_table_row_grounded_answer_lists_raw_pipe_columns_from_heading_section() {
+    let document_id = Uuid::now_v7();
+    let revision_id = Uuid::now_v7();
+    let chunks = vec![
+        RuntimeMatchedChunk {
+            chunk_id: Uuid::now_v7(),
+            revision_id,
+            chunk_index: 0,
+            chunk_kind: Some("heading".to_string()),
+            document_id,
+            document_label: "schema.pdf".to_string(),
+            excerpt: String::new(),
+            score_kind: crate::services::query::execution::RuntimeChunkScoreKind::Relevance,
+            score: Some(10.0),
+            source_text: "## 1. Table: accounts".to_string(),
+        },
+        RuntimeMatchedChunk {
+            chunk_id: Uuid::now_v7(),
+            revision_id,
+            chunk_index: 1,
+            chunk_kind: Some("table_row".to_string()),
+            document_id,
+            document_label: "schema.pdf".to_string(),
+            excerpt: String::new(),
+            score_kind: crate::services::query::execution::RuntimeChunkScoreKind::Relevance,
+            score: Some(9.0),
+            source_text: "| account_id | UUID | PRIMARY KEY | Unique account identifier |"
+                .to_string(),
+        },
+        RuntimeMatchedChunk {
+            chunk_id: Uuid::now_v7(),
+            revision_id,
+            chunk_index: 2,
+            chunk_kind: Some("table_row".to_string()),
+            document_id,
+            document_label: "schema.pdf".to_string(),
+            excerpt: String::new(),
+            score_kind: crate::services::query::execution::RuntimeChunkScoreKind::Relevance,
+            score: Some(8.0),
+            source_text: "| email | VARCHAR(255) | UNIQUE, NOT NULL | Login email |".to_string(),
+        },
+        RuntimeMatchedChunk {
+            chunk_id: Uuid::now_v7(),
+            revision_id,
+            chunk_index: 3,
+            chunk_kind: Some("heading".to_string()),
+            document_id,
+            document_label: "schema.pdf".to_string(),
+            excerpt: String::new(),
+            score_kind: crate::services::query::execution::RuntimeChunkScoreKind::Relevance,
+            score: Some(20.0),
+            source_text: "## 2. Table: orders".to_string(),
+        },
+        RuntimeMatchedChunk {
+            chunk_id: Uuid::now_v7(),
+            revision_id,
+            chunk_index: 4,
+            chunk_kind: Some("table_row".to_string()),
+            document_id,
+            document_label: "schema.pdf".to_string(),
+            excerpt: String::new(),
+            score_kind: crate::services::query::execution::RuntimeChunkScoreKind::Relevance,
+            score: Some(20.0),
+            source_text: "| order_id | UUID | PRIMARY KEY | Unique order identifier |".to_string(),
+        },
+    ];
+    let ir = retrieve_table_column_inventory_ir("accounts table");
+
+    let answer = build_table_row_grounded_answer(
+        "Which columns are in the accounts table?",
+        Some(&ir),
+        &chunks,
+    )
+    .expect("raw pipe column inventory answer");
+
+    assert!(answer.contains("`account_id`"));
+    assert!(answer.contains("`email`"));
+    assert!(answer.contains("`UUID`"));
+    assert!(!answer.contains("order_id"));
+}
+
+#[test]
+fn build_table_row_grounded_answer_rejects_unmatched_column_inventory_rows() {
+    let document_id = Uuid::now_v7();
+    let chunks = vec![RuntimeMatchedChunk {
+        chunk_id: Uuid::now_v7(),
+        revision_id: Uuid::now_v7(),
+        chunk_index: 0,
+        chunk_kind: None,
+        document_id,
+        document_label: "implementation-notes.md".to_string(),
+        excerpt: String::new(),
+        score_kind: crate::services::query::execution::RuntimeChunkScoreKind::Relevance,
+        score: Some(99.0),
+        source_text:
+            "Sheet: Notes | Table: Route Notes | Row 1 | Column: Application route handlers | Detail: Handler list"
+                .to_string(),
+    }];
+    let ir = QueryIR { act: QueryAct::Enumerate, ..table_column_inventory_ir("accounts table") };
+
+    assert_eq!(
+        build_table_row_grounded_answer(
+            "Which columns are in the accounts table?",
+            Some(&ir),
+            &chunks,
+        ),
+        None
+    );
+}
+
+#[test]
 fn build_table_summary_grounded_answer_reports_most_frequent_values() {
     let document_id = Uuid::now_v7();
     let summaries = build_table_column_summaries(
@@ -382,7 +871,7 @@ fn build_table_summary_grounded_answer_reports_most_frequent_values() {
 fn build_table_summary_grounded_answer_reports_no_single_most_frequent_value() {
     let document_id = Uuid::now_v7();
     let summaries = build_table_column_summaries(
-        Some("customers-100"),
+        Some("records-b"),
         None,
         &["City".to_string()],
         &[vec!["Moscow".to_string()], vec!["London".to_string()], vec!["Berlin".to_string()]],
@@ -395,7 +884,7 @@ fn build_table_summary_grounded_answer_reports_no_single_most_frequent_value() {
             chunk_index: 0,
             chunk_kind: None,
             document_id,
-            document_label: "customers-100.csv".to_string(),
+            document_label: "records-b.csv".to_string(),
             excerpt: String::new(),
             score_kind: crate::services::query::execution::RuntimeChunkScoreKind::Relevance,
             score: Some(10.0),
@@ -405,7 +894,7 @@ fn build_table_summary_grounded_answer_reports_no_single_most_frequent_value() {
 
     assert_eq!(
         build_table_summary_grounded_answer(
-            "What is the most frequent City in customers-100.csv?",
+            "What is the most frequent City in records-b.csv?",
             Some(&table_frequency_ir()),
             &chunks,
         ),
@@ -580,9 +1069,9 @@ fn build_missing_explicit_document_answer_reports_absent_file_reference() {
 
     assert_eq!(
         build_missing_explicit_document_answer(
-            "What is Shelby Terrell's job title in people-100.csv?",
+            "What is sample record's job title in records-a.csv?",
             &index,
         ),
-        Some("Document `people-100.csv` is not present in the active library.".to_string())
+        Some("Document `records-a.csv` is not present in the active library.".to_string())
     );
 }

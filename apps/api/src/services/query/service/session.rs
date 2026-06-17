@@ -40,14 +40,20 @@ const DENSE_HISTORY_LITERAL_MIN_COUNT: usize = 8;
 const MAX_HISTORY_LITERAL_ITEMS: usize = 64;
 const MAX_HISTORY_LITERAL_CHARS: usize = 160;
 const DENSE_HISTORY_LITERAL_RAW_PROSE_CHARS: usize = 640;
-const DENSE_HISTORY_LITERAL_PREFIX: &str = "literals:";
-const HISTORY_LITERAL_ANCHOR_PREFIX: &str = "literal anchors:";
+const DENSE_HISTORY_LITERAL_PREFIX: &str = "ir.memory.literals.v1:";
+const HISTORY_LITERAL_ANCHOR_PREFIX: &str = "ir.memory.anchors.v1:";
+const HISTORY_COMPACT_LITERAL_MEMORY_CONTEXT_PREFIX: &str = "ir.context.compact-literal-memory.v1:";
+const HISTORY_PINNED_LITERAL_ANCHORS_CONTEXT_PREFIX: &str = "ir.context.pinned-literal-anchors.v1:";
+const HISTORY_SYSTEM_TURN_PREFIX: &str = "ir.history.system.v1:";
+const HISTORY_TOOL_TURN_PREFIX: &str = "ir.history.tool.v1:";
 const MAX_HISTORY_LITERAL_ANCHOR_ITEMS: usize = 64;
 const MAX_HISTORY_LITERAL_ANCHOR_CHARS: usize = 1_800;
 const HISTORY_OVERLAP_FOLLOW_UP_MAX_TOKENS: usize = 8;
 const DENSE_LITERAL_HISTORY_FOLLOW_UP_MAX_TOKENS: usize = 24;
 const CONTEXT_DEPENDENT_FOLLOW_UP_MAX_TOKENS: usize = 6;
 const HISTORY_OVERLAP_FOLLOW_UP_MIN_MATCHES: usize = 2;
+const HISTORY_OVERLAP_FOLLOW_UP_MIN_COVERAGE_NUMERATOR: usize = 3;
+const HISTORY_OVERLAP_FOLLOW_UP_MIN_COVERAGE_DENOMINATOR: usize = 5;
 const HISTORY_OVERLAP_FOLLOW_UP_LOOKBACK_TURNS: usize = 6;
 const HISTORY_SUBJECT_TOKEN_CAP: usize = 16;
 const HISTORY_SUBJECT_LOOKBACK_TURNS: usize = 8;
@@ -520,12 +526,17 @@ fn build_conversation_runtime_context_from_views(
         &previous_turns,
         MAX_PROMPT_HISTORY_TURNS,
         MAX_PROMPT_HISTORY_TURN_CHARS,
+        should_scope_with_history,
     );
-    let query_planning_history_text = render_user_turn_history(
-        &previous_turns,
-        MAX_PROMPT_HISTORY_TURNS,
-        MAX_PROMPT_HISTORY_TURN_CHARS,
-    );
+    let query_planning_history_text = should_scope_with_history
+        .then(|| {
+            render_user_turn_history(
+                &previous_turns,
+                MAX_PROMPT_HISTORY_TURNS,
+                MAX_PROMPT_HISTORY_TURN_CHARS,
+            )
+        })
+        .flatten();
     let pinned_literal_anchor_scope = pinned_previous_assistant_literal_anchor_scope(
         &previous_turns,
         &current_text,
@@ -535,6 +546,7 @@ fn build_conversation_runtime_context_from_views(
         &previous_turns,
         MAX_PROMPT_HISTORY_TURNS,
         MAX_PROMPT_HISTORY_TURN_CHARS,
+        should_scope_with_history,
     );
     if let Some(anchor_scope) = &pinned_literal_anchor_scope {
         prompt_history_messages.insert(0, pinned_literal_anchor_message(anchor_scope.clone()));
@@ -543,6 +555,7 @@ fn build_conversation_runtime_context_from_views(
         &previous_turns,
         MAX_GROUNDED_ANSWER_TOOL_HISTORY_TURNS,
         MAX_GROUNDED_ANSWER_TOOL_HISTORY_CHARS,
+        should_scope_with_history,
     );
     if let Some(anchor_scope) = &pinned_literal_anchor_scope {
         grounded_answer_tool_history.insert(
@@ -874,11 +887,18 @@ fn render_turn_history(
     turns: &[&RuntimeContextTurn<'_>],
     limit: usize,
     max_chars_per_turn: usize,
+    include_compact_literal_memory: bool,
 ) -> Option<String> {
     let selected = turns
         .iter()
         .rev()
         .filter_map(|turn| {
+            if !include_compact_literal_memory
+                && matches!(turn.turn_kind, QueryTurnKind::Assistant)
+                && is_compact_literal_memory(turn.content_text)
+            {
+                return None;
+            }
             let text =
                 compact_history_turn_text(&turn.turn_kind, &turn.content_text, max_chars_per_turn);
             (!text.is_empty())
@@ -922,11 +942,18 @@ fn render_prompt_history_messages(
     previous_turns: &[&RuntimeContextTurn<'_>],
     limit: usize,
     max_chars_per_turn: usize,
+    include_compact_literal_memory: bool,
 ) -> Vec<ChatMessage> {
     let mut selected = previous_turns
         .iter()
         .rev()
         .filter_map(|turn| {
+            if !include_compact_literal_memory
+                && matches!(turn.turn_kind, QueryTurnKind::Assistant)
+                && is_compact_literal_memory(turn.content_text)
+            {
+                return None;
+            }
             let text =
                 compact_history_turn_text(&turn.turn_kind, &turn.content_text, max_chars_per_turn);
             (!text.is_empty()).then(|| (*turn, text))
@@ -939,8 +966,12 @@ fn render_prompt_history_messages(
         .map(|(turn, text)| match &turn.turn_kind {
             QueryTurnKind::User => ChatMessage::user(text),
             QueryTurnKind::Assistant => assistant_history_message(text),
-            QueryTurnKind::System => ChatMessage::assistant_text(format!("System note: {text}")),
-            QueryTurnKind::Tool => ChatMessage::assistant_text(format!("Tool observation: {text}")),
+            QueryTurnKind::System => {
+                ChatMessage::assistant_text(format!("{HISTORY_SYSTEM_TURN_PREFIX}\n{text}"))
+            }
+            QueryTurnKind::Tool => {
+                ChatMessage::assistant_text(format!("{HISTORY_TOOL_TURN_PREFIX}\n{text}"))
+            }
         })
         .collect()
 }
@@ -948,16 +979,14 @@ fn render_prompt_history_messages(
 fn assistant_history_message(text: String) -> ChatMessage {
     if is_compact_literal_memory(&text) {
         return ChatMessage::system(format!(
-            "Prior assistant compact literal memory. Use it only to preserve exact anchors; never copy it as a user-facing answer.\n{text}"
+            "{HISTORY_COMPACT_LITERAL_MEMORY_CONTEXT_PREFIX}\n{text}"
         ));
     }
     ChatMessage::assistant_text(text)
 }
 
 fn pinned_literal_anchor_message(anchor_scope: String) -> ChatMessage {
-    ChatMessage::system(format!(
-        "Prior assistant pinned literal anchors. Use them only to resolve follow-up scope and preserve exact anchors; call tools again for factual support.\n{anchor_scope}"
-    ))
+    ChatMessage::system(format!("{HISTORY_PINNED_LITERAL_ANCHORS_CONTEXT_PREFIX}\n{anchor_scope}"))
 }
 
 fn is_compact_literal_memory(text: &str) -> bool {
@@ -971,12 +1000,19 @@ fn render_grounded_answer_tool_history(
     previous_turns: &[&RuntimeContextTurn<'_>],
     limit: usize,
     max_chars_per_turn: usize,
+    include_compact_literal_memory: bool,
 ) -> Vec<ExternalConversationTurn> {
     let mut selected = previous_turns
         .iter()
         .rev()
         .filter_map(|turn| match &turn.turn_kind {
             QueryTurnKind::User | QueryTurnKind::Assistant => {
+                if !include_compact_literal_memory
+                    && matches!(turn.turn_kind, QueryTurnKind::Assistant)
+                    && is_compact_literal_memory(turn.content_text)
+                {
+                    return None;
+                }
                 let text = compact_history_turn_text(
                     &turn.turn_kind,
                     &turn.content_text,
@@ -1292,15 +1328,23 @@ fn is_history_overlapping_follow_up(
         return dense_literal_history_overlapping_follow_up(previous_turns, focus_tokens);
     }
 
+    let min_overlap = history_overlap_follow_up_min_matches(focus_tokens.len());
     previous_turns
         .iter()
         .rev()
         .take(HISTORY_OVERLAP_FOLLOW_UP_LOOKBACK_TURNS)
         .filter(|turn| matches!(turn.turn_kind, QueryTurnKind::User | QueryTurnKind::Assistant))
         .any(|turn| {
-            history_focus_overlap_count(turn.content_text, focus_tokens)
-                >= HISTORY_OVERLAP_FOLLOW_UP_MIN_MATCHES
+            history_focus_overlap_count_at_least(turn.content_text, focus_tokens, min_overlap)
+                >= min_overlap
         })
+}
+
+fn history_overlap_follow_up_min_matches(focus_token_count: usize) -> usize {
+    focus_token_count
+        .saturating_mul(HISTORY_OVERLAP_FOLLOW_UP_MIN_COVERAGE_NUMERATOR)
+        .div_ceil(HISTORY_OVERLAP_FOLLOW_UP_MIN_COVERAGE_DENOMINATOR)
+        .max(HISTORY_OVERLAP_FOLLOW_UP_MIN_MATCHES)
 }
 
 fn dense_literal_history_overlapping_follow_up(
@@ -1310,6 +1354,11 @@ fn dense_literal_history_overlapping_follow_up(
     if focus_tokens.len() > DENSE_LITERAL_HISTORY_FOLLOW_UP_MAX_TOKENS {
         return false;
     }
+    let min_overlap = focus_tokens
+        .len()
+        .div_ceil(2)
+        .min(DENSE_HISTORY_LITERAL_MIN_COUNT / 2)
+        .max(HISTORY_OVERLAP_FOLLOW_UP_MIN_MATCHES);
     previous_turns
         .iter()
         .rev()
@@ -1318,17 +1367,28 @@ fn dense_literal_history_overlapping_follow_up(
         .any(|turn| {
             extract_retrieval_anchor_literals_from_text(turn.content_text).len()
                 >= DENSE_HISTORY_LITERAL_MIN_COUNT
-                && history_focus_overlap_count(turn.content_text, focus_tokens)
-                    >= HISTORY_OVERLAP_FOLLOW_UP_MIN_MATCHES
+                && history_focus_overlap_count_at_least(
+                    turn.content_text,
+                    focus_tokens,
+                    min_overlap,
+                ) >= min_overlap
         })
 }
 
 fn history_focus_overlap_count(value: &str, focus_tokens: &[String]) -> usize {
+    history_focus_overlap_count_at_least(value, focus_tokens, HISTORY_OVERLAP_FOLLOW_UP_MIN_MATCHES)
+}
+
+fn history_focus_overlap_count_at_least(
+    value: &str,
+    focus_tokens: &[String],
+    min_matches: usize,
+) -> usize {
     let history_tokens = normalized_alnum_tokens(value, 4);
     focus_tokens
         .iter()
         .filter(|focus| history_tokens.iter().any(|candidate| near_token_match(focus, candidate)))
-        .take(HISTORY_OVERLAP_FOLLOW_UP_MIN_MATCHES)
+        .take(min_matches)
         .count()
 }
 
@@ -1368,7 +1428,7 @@ mod tests {
             turn(
                 QueryTurnKind::Assistant,
                 concat!(
-                    "literals: `alpha-pkg`, `/opt/alpha/alpha.conf`, `[Main]`, ",
+                    "ir.memory.literals.v1: `alpha-pkg`, `/opt/alpha/alpha.conf`, `[Main]`, ",
                     "`alphaUrl`, `alphaTimeout`, `alphaSecret`, `alphaCurrency`, ",
                     "`alphaPayload`, `alphaVisible`\n",
                     "Configuration fragments and example values are available."
@@ -1393,7 +1453,7 @@ mod tests {
             turn(
                 QueryTurnKind::Assistant,
                 concat!(
-                    "literals: `alpha-pkg`, `/opt/alpha/alpha.conf`, `[Main]`, ",
+                    "ir.memory.literals.v1: `alpha-pkg`, `/opt/alpha/alpha.conf`, `[Main]`, ",
                     "`alphaUrl`, `alphaTimeout`, `alphaSecret`, `alphaCurrency`, ",
                     "`alphaPayload`, `alphaVisible`"
                 ),
@@ -1410,13 +1470,45 @@ mod tests {
     }
 
     #[test]
+    fn dense_literal_history_does_not_scope_self_contained_related_question() {
+        let previous = [
+            turn(QueryTurnKind::User, "Alpha service setup inventory"),
+            turn(
+                QueryTurnKind::Assistant,
+                concat!(
+                    "ir.memory.literals.v1: `alpha-service`, `alpha-worker`, `alpha-cache`, ",
+                    "`alpha-db`, `alpha-api`, `alpha-ui`, `alpha-auth`, `alpha-bus`\n",
+                    "Alpha service ports and local runtime settings are listed."
+                ),
+            ),
+            turn(
+                QueryTurnKind::User,
+                "Which Alpha service workers connect to the message bus and what URL format is used?",
+            ),
+        ];
+
+        let context = build_conversation_runtime_context_from_views(&previous, false);
+
+        assert!(!context.contextual_follow_up);
+        assert_eq!(
+            context.effective_query_text,
+            "Which Alpha service workers connect to the message bus and what URL format is used?"
+        );
+        assert_eq!(context.query_planning_history_text, None);
+        assert!(
+            !should_replay_prior_grounded_answer_context(&context),
+            "self-contained related questions should retrieve fresh evidence instead of replaying prior chunks"
+        );
+    }
+
+    #[test]
     fn dense_literal_history_does_not_override_current_literal_scope() {
         let previous = [
             turn(QueryTurnKind::User, "Alpha Connector setup inventory"),
             turn(
                 QueryTurnKind::Assistant,
                 concat!(
-                    "literals: `alpha-pkg`, `/opt/alpha/alpha.conf`, `[Main]`, ",
+                    "ir.memory.literals.v1: `alpha-pkg`, `/opt/alpha/alpha.conf`, `[Main]`, ",
                     "`alphaUrl`, `alphaTimeout`, `alphaSecret`, `alphaCurrency`, ",
                     "`alphaPayload`, `alphaVisible`\n",
                     "Configuration fragments and example values are available."

@@ -1,8 +1,8 @@
 use std::collections::HashMap;
-use std::hash::{Hash, Hasher};
 use std::sync::Mutex;
 
 use anyhow::Context;
+use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::{
@@ -19,20 +19,47 @@ use crate::{
 
 const EMBEDDING_CACHE_MAX_ENTRIES: usize = 1000;
 
-static EMBEDDING_CACHE: std::sync::LazyLock<Mutex<HashMap<u64, Vec<f32>>>> =
+/// Full-width content identity for an in-process question-embedding cache
+/// entry. A 32-byte SHA-256 of the canonical identity tuple (trimmed question
+/// text + every embedding-scoping binding dimension) keyed with full-width
+/// `Eq`, so two distinct questions / bindings can never alias.
+///
+/// The previous design keyed by a `u64` from `DefaultHasher` and silently
+/// returned on collision — a 64-bit collision would hand back the *wrong*
+/// embedding for a different question (silent wrong retrieval), and
+/// `DefaultHasher` is not stable across releases. SHA-256 width plus equality
+/// on the full digest removes the collision risk; storage is keyed by the
+/// digest itself, never a truncated hash.
+type EmbeddingCacheKey = [u8; 32];
+
+static EMBEDDING_CACHE: std::sync::LazyLock<Mutex<HashMap<EmbeddingCacheKey, Vec<f32>>>> =
     std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
 
-pub(super) fn embedding_cache_key(question: &str, binding: &ResolvedRuntimeBinding) -> u64 {
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    question.hash(&mut hasher);
-    binding.provider_catalog_id.hash(&mut hasher);
-    binding.provider_kind.hash(&mut hasher);
-    binding.provider_base_url.hash(&mut hasher);
-    binding.credential_id.hash(&mut hasher);
-    binding.model_catalog_id.hash(&mut hasher);
-    binding.model_name.hash(&mut hasher);
-    binding.extra_parameters_json.hash(&mut hasher);
-    hasher.finish()
+fn update_framed(hasher: &mut Sha256, bytes: &[u8]) {
+    // Length-prefix every field so concatenation is unambiguous: adjacent
+    // fields cannot be re-partitioned into a colliding identity tuple.
+    hasher.update((bytes.len() as u64).to_le_bytes());
+    hasher.update(bytes);
+}
+
+pub(super) fn embedding_cache_key(
+    question: &str,
+    binding: &ResolvedRuntimeBinding,
+) -> EmbeddingCacheKey {
+    let mut hasher = Sha256::new();
+    update_framed(&mut hasher, question.as_bytes());
+    update_framed(&mut hasher, binding.provider_catalog_id.as_bytes());
+    update_framed(&mut hasher, binding.provider_kind.as_bytes());
+    update_framed(&mut hasher, binding.provider_base_url.as_deref().unwrap_or("").as_bytes());
+    update_framed(&mut hasher, binding.credential_id.as_bytes());
+    update_framed(&mut hasher, binding.model_catalog_id.as_bytes());
+    update_framed(&mut hasher, binding.model_name.as_bytes());
+    // `serde_json::Value` has no stable `Hash`; serialize to its canonical
+    // string form (BTreeMap-ordered object keys) for a deterministic identity.
+    let extra_parameters = serde_json::to_string(&binding.extra_parameters_json)
+        .unwrap_or_else(|_| binding.extra_parameters_json.to_string());
+    update_framed(&mut hasher, extra_parameters.as_bytes());
+    hasher.finalize().into()
 }
 
 /// Result of embedding a query question, including billing-relevant usage data.
@@ -187,5 +214,59 @@ mod tests {
         let mut changed_parameters = base;
         changed_parameters.extra_parameters_json = json!({"dimensions": 512});
         assert_ne!(base_key, embedding_cache_key("query text", &changed_parameters));
+    }
+
+    #[test]
+    fn query_embedding_cache_key_is_full_width_sha256() {
+        // The key is a 32-byte digest, equality on the full width — not a 64-bit
+        // hash that could silently alias two distinct questions.
+        let key = embedding_cache_key("query text", &binding());
+        assert_eq!(key.len(), 32);
+    }
+
+    #[test]
+    fn query_embedding_cache_key_distinguishes_distinct_questions() {
+        let base = binding();
+        let key_a = embedding_cache_key("how do I configure the gateway", &base);
+        let key_b = embedding_cache_key("how do I configure the database", &base);
+        assert_ne!(key_a, key_b);
+    }
+
+    #[test]
+    fn query_embedding_cache_distinguishes_distinct_questions_in_storage() {
+        // Engineer the old collision scenario: two distinct questions must map to
+        // distinct cache entries so a `.get()` can never return another
+        // question's embedding.
+        let base = binding();
+        let mut cache: std::collections::HashMap<EmbeddingCacheKey, Vec<f32>> =
+            std::collections::HashMap::new();
+        let key_a = embedding_cache_key("question alpha", &base);
+        let key_b = embedding_cache_key("question beta", &base);
+        cache.insert(key_a, vec![1.0, 0.0]);
+        cache.insert(key_b, vec![0.0, 1.0]);
+        assert_eq!(cache.get(&key_a), Some(&vec![1.0, 0.0]));
+        assert_eq!(cache.get(&key_b), Some(&vec![0.0, 1.0]));
+        assert_eq!(cache.len(), 2);
+    }
+
+    #[test]
+    fn query_embedding_cache_field_boundaries_are_unambiguous() {
+        // Length-prefix framing means moving a character across a field boundary
+        // changes the key: the question "ab" + provider_kind "c" must not collide
+        // with question "a" + provider_kind "bc".
+        let mut left = binding();
+        left.provider_kind = "c".to_string();
+        let mut right = binding();
+        right.provider_kind = "bc".to_string();
+        assert_ne!(embedding_cache_key("ab", &left), embedding_cache_key("a", &right),);
+    }
+
+    #[test]
+    fn query_embedding_cache_hit_for_identical_identity_tuple() {
+        let base = binding();
+        assert_eq!(
+            embedding_cache_key("identical question", &base),
+            embedding_cache_key("identical question", &base),
+        );
     }
 }

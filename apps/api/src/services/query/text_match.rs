@@ -1,5 +1,7 @@
 use std::collections::{BTreeSet, HashMap};
 
+use unicode_normalization::UnicodeNormalization;
+
 pub(crate) use crate::shared::text_tokens::{
     normalized_alnum_token_sequence, normalized_alnum_tokens,
 };
@@ -105,6 +107,123 @@ pub(crate) fn near_token_overlap_count(left: &BTreeSet<String>, right: &BTreeSet
             right.iter().any(|right_token| near_token_match(left_token, right_token))
         })
         .count()
+}
+
+pub(crate) fn label_acronym_terms(label: &str) -> BTreeSet<String> {
+    let tokens = label_term_sequence(label, 2);
+    acronym_terms_from_tokens(&tokens)
+}
+
+pub(crate) fn add_label_terms_with_acronyms(
+    terms: &mut BTreeSet<String>,
+    acronym_terms: &mut BTreeSet<String>,
+    label: &str,
+    min_token_chars: usize,
+) {
+    terms.extend(label_terms(label, min_token_chars));
+    acronym_terms.extend(label_acronym_terms(label));
+}
+
+pub(crate) fn label_terms(label: &str, min_token_chars: usize) -> BTreeSet<String> {
+    label_term_sequence(label, min_token_chars).into_iter().collect()
+}
+
+pub(crate) fn label_term_sequence(label: &str, min_token_chars: usize) -> Vec<String> {
+    let mut seen = BTreeSet::new();
+    let mut tokens = Vec::new();
+    for token in normalized_alnum_token_sequence(label, min_token_chars)
+        .into_iter()
+        .chain(compact_identifier_split_terms(label, min_token_chars))
+    {
+        if seen.insert(token.clone()) {
+            tokens.push(token);
+        }
+    }
+    tokens
+}
+
+fn compact_identifier_split_terms(label: &str, min_token_chars: usize) -> Vec<String> {
+    let mut terms = Vec::new();
+    for segment in raw_alnum_segments(label) {
+        for part in split_compact_identifier_segment(&segment) {
+            let normalized = part.nfkc().flat_map(char::to_lowercase).collect::<String>();
+            if normalized.chars().count() >= min_token_chars {
+                terms.push(normalized);
+            }
+        }
+    }
+    terms
+}
+
+fn raw_alnum_segments(value: &str) -> Vec<String> {
+    let mut segments = Vec::new();
+    let mut current = String::new();
+    for ch in value.nfkc() {
+        if ch.is_alphanumeric() {
+            current.push(ch);
+        } else if !current.is_empty() {
+            segments.push(std::mem::take(&mut current));
+        }
+    }
+    if !current.is_empty() {
+        segments.push(current);
+    }
+    segments
+}
+
+fn split_compact_identifier_segment(segment: &str) -> Vec<String> {
+    let chars = segment.chars().collect::<Vec<_>>();
+    if chars.len() <= 1 {
+        return vec![segment.to_string()];
+    }
+    let mut parts = Vec::<String>::new();
+    let mut start = 0usize;
+    for index in 1..chars.len() {
+        let prev = chars[index - 1];
+        let current = chars[index];
+        let next = chars.get(index + 1).copied();
+        let boundary = (prev.is_lowercase() && current.is_uppercase())
+            || (prev.is_alphabetic() && current.is_numeric())
+            || (prev.is_numeric() && current.is_alphabetic())
+            || (prev.is_uppercase()
+                && current.is_uppercase()
+                && next.is_some_and(|next| next.is_lowercase())
+                && index > start);
+        if boundary {
+            parts.push(chars[start..index].iter().collect());
+            start = index;
+        }
+    }
+    parts.push(chars[start..].iter().collect());
+    parts
+}
+
+fn acronym_terms_from_tokens(tokens: &[String]) -> BTreeSet<String> {
+    let mut acronyms = BTreeSet::new();
+    for window_len in 2..=tokens.len().min(4) {
+        for window in tokens.windows(window_len) {
+            if let Some(acronym) = acronym_from_token_window(window) {
+                acronyms.insert(acronym);
+            }
+        }
+    }
+    acronyms
+}
+
+fn acronym_from_token_window(window: &[String]) -> Option<String> {
+    if !(2..=4).contains(&window.len()) {
+        return None;
+    }
+    let mut acronym = String::new();
+    for token in window {
+        if token.chars().count() < 2 || !token.chars().all(char::is_alphabetic) {
+            return None;
+        }
+        let first = token.chars().next()?;
+        acronym.extend(first.to_lowercase());
+    }
+    let acronym_len = acronym.chars().count();
+    ((2..=6).contains(&acronym_len)).then_some(acronym)
 }
 
 pub(crate) fn common_prefix_char_count(left: &str, right: &str) -> usize {
@@ -295,13 +414,13 @@ mod tests {
     #[test]
     fn near_token_match_accepts_single_edit_for_long_tokens() {
         assert!(near_token_match("targetnme", "targetname"));
-        assert!(near_token_match("paymant", "payment"));
+        assert!(near_token_match("workflaw", "workflow"));
     }
 
     #[test]
     fn near_token_match_rejects_short_or_distant_tokens() {
         assert!(!near_token_match("api", "app"));
-        assert!(!near_token_match("target", "payment"));
+        assert!(!near_token_match("target", "workflow"));
     }
 
     #[test]
@@ -329,6 +448,25 @@ mod tests {
             normalized_alnum_token_sequence("ＣＡＦÉ ΔELTA alpha-beta", 3),
             vec!["café".to_string(), "δelta".to_string(), "alpha".to_string(), "beta".to_string()]
         );
+    }
+
+    #[test]
+    fn label_acronym_terms_keep_short_script_agnostic_acronyms() {
+        assert!(label_acronym_terms("Alpha Service").contains("as"));
+        assert!(label_acronym_terms("Blue Module").contains("bm"));
+        assert!(label_acronym_terms("Alpha 22 Service").is_empty());
+    }
+
+    #[test]
+    fn label_terms_split_compact_identifier_segments() {
+        let terms = label_terms("Alpha:ControlCenter SubjectServer2", 1);
+        assert!(terms.contains("alpha"));
+        assert!(terms.contains("control"));
+        assert!(terms.contains("center"));
+        assert!(terms.contains("subject"));
+        assert!(terms.contains("server"));
+        assert!(terms.contains("2"));
+        assert!(label_acronym_terms("AlphaControlCenter").contains("acc"));
     }
 
     #[test]

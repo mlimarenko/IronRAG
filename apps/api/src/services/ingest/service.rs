@@ -34,6 +34,57 @@ pub const INGEST_STAGE_WEB_DISCOVERY: &str = "web_discovery";
 pub const INGEST_STAGE_WEB_MATERIALIZE_PAGE: &str = "web_materialize_page";
 pub const INGEST_STAGE_WEBHOOK_DELIVERY: &str = "webhook_delivery";
 
+/// Maximum number of `ingest_attempt` rows a single job may accumulate before a
+/// retryable stage failure is escalated to a terminal `failed`. A transient
+/// provider blip (429 / timeout / connection reset) must not permanently kill a
+/// document, but an unbounded requeue loop would pin a poisoned job in the queue
+/// forever. Five attempts gives exponential backoff (see
+/// [`retry_backoff_after_attempt`]) room to ride out a multi-minute provider
+/// outage while still surfacing a genuinely broken document within a bounded
+/// number of tries. The budget is derived purely from the existing
+/// `ingest_attempt.attempt_number` counter — no schema change.
+const MAX_INGEST_ATTEMPTS: i32 = 5;
+
+/// Base backoff applied to the first retry; doubled per subsequent attempt.
+const INGEST_RETRY_BACKOFF_BASE_SECONDS: i64 = 15;
+
+/// Upper bound on the computed backoff so a late attempt cannot push a job
+/// arbitrarily far into the future.
+const INGEST_RETRY_BACKOFF_MAX_SECONDS: i64 = 600;
+
+/// Exponential backoff for the next retry of a job whose current attempt
+/// (`attempt_number`, 1-based) just failed retryably. Attempt 1 → base, attempt
+/// 2 → 2×base, … capped at [`INGEST_RETRY_BACKOFF_MAX_SECONDS`]. Delivered via
+/// the existing `ingest_job.available_at` mechanism so the dispatcher simply
+/// skips the job until the delay elapses.
+fn retry_backoff_after_attempt(attempt_number: i32) -> chrono::Duration {
+    let exponent = attempt_number.saturating_sub(1).clamp(0, 16) as u32;
+    let scaled = INGEST_RETRY_BACKOFF_BASE_SECONDS
+        .saturating_mul(1_i64.checked_shl(exponent).unwrap_or(i64::MAX));
+    chrono::Duration::seconds(scaled.min(INGEST_RETRY_BACKOFF_MAX_SECONDS))
+}
+
+/// Whether a retryable failure has run out of its attempt budget and must be
+/// escalated to a terminal `failed`. Only `failed` attempts the worker marked
+/// retryable are subject to the budget; succeeded / canceled / abandoned states
+/// pass through unchanged.
+fn is_retry_budget_exhausted(attempt_state: &str, retryable: bool, attempt_number: i32) -> bool {
+    attempt_state == "failed" && retryable && attempt_number >= MAX_INGEST_ATTEMPTS
+}
+
+/// The job `queue_state` a finalized attempt transitions the job into. A
+/// retryable `failed` attempt that still has budget goes back to `queued` (so
+/// the dispatcher re-leases it after the backoff window); everything else is
+/// terminal or pass-through.
+fn next_job_queue_state_after_finalize(attempt_state: &str, effective_retryable: bool) -> &str {
+    match attempt_state {
+        "succeeded" => "completed",
+        "failed" if effective_retryable => "queued",
+        "failed" | "abandoned" | "canceled" => "failed",
+        other => other,
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CanonicalIngestProgressProfile {
     Balanced,
@@ -703,6 +754,34 @@ impl IngestService {
             )));
         }
 
+        // Attempt-budget gate. A stage failure the worker flagged as retryable is
+        // only actually requeued while the job still has retries left in its
+        // budget (counted via the monotonic `attempt_number`). Once the budget is
+        // exhausted the failure is escalated to a terminal `failed` so a poisoned
+        // document cannot loop in the queue forever, and the attempts count is
+        // surfaced in the persisted failure message for the operator.
+        let budget_exhausted = is_retry_budget_exhausted(
+            &command.attempt_state,
+            command.retryable,
+            attempt.attempt_number,
+        );
+        let effective_retryable = command.retryable && !budget_exhausted;
+        let failure_message = if command.attempt_state == "succeeded" {
+            None
+        } else if budget_exhausted {
+            Some(format!(
+                "{} (exhausted retry budget after {} attempts)",
+                command
+                    .failure_message
+                    .clone()
+                    .or(attempt.failure_message.clone())
+                    .unwrap_or_else(|| "ingest attempt failed".to_string()),
+                attempt.attempt_number,
+            ))
+        } else {
+            command.failure_message.clone().or(attempt.failure_message.clone())
+        };
+
         let row = ingest_repository::finalize_leased_ingest_attempt(
             &state.persistence.postgres,
             command.attempt_id,
@@ -718,17 +797,13 @@ impl IngestService {
                 finished_at: Some(Utc::now()),
                 failure_class: command.failure_class,
                 failure_code: failure_code.clone(),
-                failure_message: if command.attempt_state == "succeeded" {
-                    None
-                } else {
-                    command.failure_message.clone().or(attempt.failure_message)
-                },
+                failure_message,
                 progress_percent: if command.attempt_state == "succeeded" {
                     100
                 } else {
                     attempt.progress_percent
                 },
-                retryable: command.retryable,
+                retryable: effective_retryable,
             },
         )
         .await
@@ -739,12 +814,8 @@ impl IngestService {
                 command.attempt_id
             ))
         })?;
-        let next_queue_state = match command.attempt_state.as_str() {
-            "succeeded" => "completed",
-            "failed" if command.retryable => "queued",
-            "failed" | "abandoned" | "canceled" => "failed",
-            other => other,
-        };
+        let next_queue_state =
+            next_job_queue_state_after_finalize(&command.attempt_state, effective_retryable);
         let completed_at = if next_queue_state == "completed" || next_queue_state == "failed" {
             Some(Utc::now())
         } else {
@@ -763,7 +834,11 @@ impl IngestService {
                 queue_state: next_queue_state.to_string(),
                 priority: job.priority,
                 dedupe_key: job.dedupe_key,
-                available_at: if command.retryable { Utc::now() } else { job.available_at },
+                available_at: if effective_retryable {
+                    Utc::now() + retry_backoff_after_attempt(attempt.attempt_number)
+                } else {
+                    job.available_at
+                },
                 completed_at,
             },
         )
@@ -1252,11 +1327,12 @@ mod tests {
         INGEST_STAGE_EXTRACT_CONTENT, INGEST_STAGE_EXTRACT_GRAPH,
         INGEST_STAGE_EXTRACT_TECHNICAL_FACTS, INGEST_STAGE_FINALIZING,
         INGEST_STAGE_PREPARE_STRUCTURE, INGEST_STAGE_WEB_DISCOVERY,
-        INGEST_STAGE_WEB_MATERIALIZE_PAGE, canonical_ingest_attempt_stage_unit_progress_percent,
-        canonical_ingest_progress_profile, canonical_ingest_stage_metadata,
-        canonical_ingest_stage_progress_percent_for_profile,
-        canonical_ingest_stage_unit_progress_percent_for_profile, normalize_stage_name,
-        progress_profile_from_stage_details,
+        INGEST_STAGE_WEB_MATERIALIZE_PAGE, MAX_INGEST_ATTEMPTS,
+        canonical_ingest_attempt_stage_unit_progress_percent, canonical_ingest_progress_profile,
+        canonical_ingest_stage_metadata, canonical_ingest_stage_progress_percent_for_profile,
+        canonical_ingest_stage_unit_progress_percent_for_profile, is_retry_budget_exhausted,
+        next_job_queue_state_after_finalize, normalize_stage_name,
+        progress_profile_from_stage_details, retry_backoff_after_attempt,
     };
     use crate::infra::repositories::ingest_repository::IngestStageEventRow;
     use chrono::Utc;
@@ -1489,5 +1565,62 @@ mod tests {
             ),
             None
         );
+    }
+
+    // BUG A (a): a transient/retryable stage failure that still has attempt
+    // budget left is requeued, NOT terminally failed.
+    #[test]
+    fn retryable_failure_under_budget_requeues_instead_of_failing() {
+        // First attempt fails retryably -> budget is not exhausted -> requeue.
+        assert!(!is_retry_budget_exhausted("failed", true, 1));
+        let effective_retryable = !is_retry_budget_exhausted("failed", true, 1);
+        assert!(effective_retryable);
+        assert_eq!(
+            next_job_queue_state_after_finalize("failed", effective_retryable),
+            "queued",
+            "a retryable failure with budget left must go back to the queue"
+        );
+        // A non-retryable failure is terminal regardless of budget.
+        assert!(!is_retry_budget_exhausted("failed", false, 1));
+        assert_eq!(next_job_queue_state_after_finalize("failed", false), "failed");
+        // A success is never subject to the retry budget.
+        assert!(!is_retry_budget_exhausted("succeeded", true, 99));
+        assert_eq!(next_job_queue_state_after_finalize("succeeded", true), "completed");
+    }
+
+    // BUG A (b): once the attempt budget is exhausted, a retryable failure is
+    // escalated to a terminal `failed`.
+    #[test]
+    fn retryable_failure_at_budget_limit_becomes_terminal() {
+        // Below the limit -> still retryable.
+        assert!(!is_retry_budget_exhausted("failed", true, MAX_INGEST_ATTEMPTS - 1));
+        // At and beyond the limit -> exhausted.
+        assert!(is_retry_budget_exhausted("failed", true, MAX_INGEST_ATTEMPTS));
+        assert!(is_retry_budget_exhausted("failed", true, MAX_INGEST_ATTEMPTS + 1));
+        let effective_retryable = !is_retry_budget_exhausted("failed", true, MAX_INGEST_ATTEMPTS);
+        assert!(!effective_retryable);
+        assert_eq!(
+            next_job_queue_state_after_finalize("failed", effective_retryable),
+            "failed",
+            "an exhausted retry budget must finalize the job terminally"
+        );
+    }
+
+    // Backoff grows exponentially with the attempt number and is bounded, so the
+    // requeue delay rides out a multi-minute provider outage without pushing a
+    // job arbitrarily far into the future.
+    #[test]
+    fn retry_backoff_is_exponential_and_bounded() {
+        let first = retry_backoff_after_attempt(1);
+        let second = retry_backoff_after_attempt(2);
+        let third = retry_backoff_after_attempt(3);
+        assert!(first.num_seconds() > 0);
+        assert_eq!(second.num_seconds(), first.num_seconds() * 2);
+        assert_eq!(third.num_seconds(), first.num_seconds() * 4);
+        // A very large attempt number saturates at the cap rather than
+        // overflowing or producing an unbounded delay.
+        let capped = retry_backoff_after_attempt(1000);
+        assert!(capped.num_seconds() >= third.num_seconds());
+        assert!(capped.num_seconds() <= 600);
     }
 }

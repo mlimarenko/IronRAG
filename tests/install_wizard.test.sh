@@ -208,6 +208,128 @@ else
   echo "  SKIP: util-linux 'script' not available — interactive path not exercised"
 fi
 
+# ── require_resolved: the non-interactive fail-fast contract (sourced). ──────
+echo "── require_resolved: non-interactive contract ──"
+# Synthetic inputs only — the "required" field lives in the test, not the
+# installer's real variable table, so we exercise the mechanism without
+# inventing a production required value.
+(
+  INTERACTIVE=0
+  err_out="$(require_resolved "demo" "" 0 "--demo or IRONRAG_DEMO" 2>&1)"
+  rc=$?
+  check "missing + no default exits 3" "$rc" "3"
+  case "$err_out" in
+    *"required value 'demo' has no safe default"*) pass ;;
+    *) fail "fail-fast message missing exact field name; got [$err_out]" ;;
+  esac
+  case "$err_out" in
+    *"--demo or IRONRAG_DEMO"*) pass ;;
+    *) fail "fail-fast message must list how to set it; got [$err_out]" ;;
+  esac
+  require_resolved "demo" "" 1 "x" 2>/dev/null; check "missing + safe default OK" "$?" "0"
+  require_resolved "demo" "val" 0 "x" 2>/dev/null; check "present value OK" "$?" "0"
+  INTERACTIVE=1
+  require_resolved "demo" "" 0 "x" 2>/dev/null; check "interactive never fails (would prompt)" "$?" "0"
+)
+
+# ── resolve_value precedence: flag > env > prompt-default (sourced). ─────────
+echo "── resolve_value: flag > env > default ──"
+# INTERACTIVE is read by the sourced resolve_value/ask helpers (dynamic scope),
+# so shellcheck cannot see the use from here.
+# shellcheck disable=SC2034
+INTERACTIVE=0
+resolve_value RV "flagval" "envval" "p" "defval"; check "flag wins"     "$RV" "flagval"
+resolve_value RV ""        "envval" "p" "defval"; check "env when no flag" "$RV" "envval"
+resolve_value RV ""        ""       "p" "defval"; check "default when none" "$RV" "defval"
+# Secret path has no flag tier: env wins, else default (no prompt with no TTY).
+resolve_secret RS "envsec" "p" "defsec"; check "secret env wins" "$RS" "envsec"
+resolve_secret RS ""       "p" "defsec"; check "secret default"  "$RS" "defsec"
+
+# ── --help exits 0 and documents every flag + env var. ──────────────────────
+echo "── --help: exits 0 and lists every option ──"
+HELP_OUT="$(bash "$INSTALL_SH" --help 2>&1)"; check "--help exit 0" "$?" "0"
+for tok in \
+  "--non-interactive" "--interactive" "--port" "--profile" "--admin-login" \
+  "--plan-only" "--recompute-resources" "--reset-volumes" "--help" \
+  "IRONRAG_PORT" "IRONRAG_PROFILE" "IRONRAG_ADMIN_LOGIN" "IRONRAG_ADMIN_PASSWORD" \
+  "IRONRAG_OPENAI_API_KEY" "IRONRAG_DEEPSEEK_API_KEY" "IRONRAG_QWEN_API_KEY" \
+  "IRONRAG_GPTUNNEL_API_KEY" "IRONRAG_OPENROUTER_API_KEY" "IRONRAG_ROUTERAI_API_KEY" \
+  "precedence"
+do
+  case "$HELP_OUT" in
+    *"$tok"*) pass ;;
+    *) fail "--help omits ${tok}" ;;
+  esac
+done
+
+# ── A value-taking flag with no operand must error (exit 2), not eat the next flag. ──
+echo "── flag-needs-value guard ──"
+bash "$INSTALL_SH" --port </dev/null >/dev/null 2>&1; check "--port without value -> 2" "$?" "2"
+bash "$INSTALL_SH" --port --yes </dev/null >/dev/null 2>&1; check "--port then flag -> 2" "$?" "2"
+
+# ── Non-interactive, env-var-driven full flow completes and writes answers. ──
+echo "── integration: non-interactive env-var answers complete the flow ──"
+WORK="$(mktemp -d)"
+cp "${ROOT_DIR}/docker-compose.yml" "${WORK}/docker-compose.yml"
+cp "${ROOT_DIR}/.env.example"      "${WORK}/.env.example"
+# Fresh .env; every answer supplied via env (no flags), no TTY. The two secret
+# values live on their own lines so each carries the detect-secrets pragma; the
+# special chars exercise the verbatim atomic .env write.
+ENV_ADMIN_PW='pw&with|specials'         # pragma: allowlist secret  (synthetic)
+ENV_OPENAI_KEY='sk-env-driven-0001'     # pragma: allowlist secret  (synthetic)
+IRONRAG_NONINTERACTIVE=1 \
+IRONRAG_INSTALL_SKIP_DOWNLOAD=1 \
+IRONRAG_INSTALL_SKIP_DEPLOY=1 \
+IRONRAG_PORT=18123 \
+IRONRAG_PROFILE=small \
+IRONRAG_ADMIN_LOGIN=root \
+IRONRAG_ADMIN_PASSWORD="$ENV_ADMIN_PW" \
+IRONRAG_OPENAI_API_KEY="$ENV_OPENAI_KEY" \
+  bash "$INSTALL_SH" local "$WORK" </dev/null >/dev/null 2>&1
+check "env-driven run exit 0" "$?" "0"
+check "env port written"      "$(env_get IRONRAG_PORT "${WORK}/.env")" "18123"
+# small profile -> db mem 2048M (compute_plan calibration above).
+check "env profile applied"   "$(env_get IRONRAG_DB_MEMORY_LIMIT "${WORK}/.env")" "2048M"
+check "env admin login"       "$(env_get IRONRAG_UI_BOOTSTRAP_ADMIN_LOGIN "${WORK}/.env")" "root"
+check "env admin password"    "$(env_get IRONRAG_UI_BOOTSTRAP_ADMIN_PASSWORD "${WORK}/.env")" "$ENV_ADMIN_PW"
+check "env openai key"        "$(env_get IRONRAG_OPENAI_API_KEY "${WORK}/.env")" "$ENV_OPENAI_KEY"
+check "frontend origin synced to port" \
+  "$(env_get IRONRAG_FRONTEND_ORIGIN "${WORK}/.env")" \
+  "http://127.0.0.1:18123,http://localhost:18123"
+rm -rf "$WORK"
+
+# ── Flag tier beats env tier for non-secret values. ─────────────────────────
+echo "── integration: flag > env for --port / --profile ──"
+WORK="$(mktemp -d)"
+cp "${ROOT_DIR}/docker-compose.yml" "${WORK}/docker-compose.yml"
+cp "${ROOT_DIR}/.env.example"      "${WORK}/.env.example"
+IRONRAG_NONINTERACTIVE=1 \
+IRONRAG_INSTALL_SKIP_DOWNLOAD=1 \
+IRONRAG_INSTALL_SKIP_DEPLOY=1 \
+IRONRAG_PORT=18123 IRONRAG_PROFILE=micro \
+  bash "$INSTALL_SH" --port 18999 --profile=large local "$WORK" </dev/null >/dev/null 2>&1
+check "flag port beats env"    "$(env_get IRONRAG_PORT "${WORK}/.env")" "18999"
+# large profile -> db mem 8192M, beating env's micro (1024M).
+check "flag profile beats env" "$(env_get IRONRAG_DB_MEMORY_LIMIT "${WORK}/.env")" "8192M"
+rm -rf "$WORK"
+
+# ── No TTY on stdin auto-selects non-interactive (no flag, no env override). ──
+echo "── integration: non-TTY stdin auto non-interactive ──"
+WORK="$(mktemp -d)"
+cp "${ROOT_DIR}/docker-compose.yml" "${WORK}/docker-compose.yml"
+cp "${ROOT_DIR}/.env.example"      "${WORK}/.env.example"
+# Deliberately do NOT pass --non-interactive / IRONRAG_NONINTERACTIVE: stdin is
+# /dev/null (no TTY), so open_tty fails and the script must not hang on a prompt.
+IRONRAG_INSTALL_SKIP_DOWNLOAD=1 IRONRAG_INSTALL_SKIP_DEPLOY=1 \
+  bash "$INSTALL_SH" local "$WORK" </dev/null >"${WORK}/out.log" 2>&1
+check "non-TTY run exit 0" "$?" "0"
+case "$(cat "${WORK}/out.log")" in
+  *"Non-interactive mode"*) pass ;;
+  *) fail "non-TTY run did not announce non-interactive mode" ;;
+esac
+check "non-TTY wrote default port" "$(env_get IRONRAG_PORT "${WORK}/.env")" "19000"
+rm -rf "$WORK"
+
 # ── Report ──
 echo ""
 echo "──────────────────────────────────────────"

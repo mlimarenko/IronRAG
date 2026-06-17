@@ -20,6 +20,10 @@ import requests
 DEFAULT_POLL_INTERVAL_SECONDS = 5.0
 DEFAULT_WAIT_TIMEOUT_SECONDS = 900.0
 DEFAULT_QUERY_TOP_K = 8
+RANK_METRIC_CUTOFFS = (1, 3, 5, 10)
+RANK_METRIC_SEARCH_LIMIT = max(RANK_METRIC_CUTOFFS)
+RANK_RELEVANCE_FILE_NAME = "rank_relevance.json"
+RANK_TREND_FILE_NAME = "rank_metrics_trend.jsonl"
 DEFAULT_SUITE_MATRIX = [
     "api_baseline_suite.json",
     "workflow_strict_suite.json",
@@ -195,6 +199,8 @@ class BenchmarkCase:
     expected_entity_reference_labels_contains: list[str]
     expected_relation_reference_text_contains: list[str]
     allowed_verification_states: list[str]
+    relevant_documents: list[str]
+    relevant_chunks: list[str]
 
 
 class BenchmarkClient:
@@ -250,8 +256,35 @@ class BenchmarkClient:
         return response.json()
 
 
+def load_rank_relevance(path: Path) -> dict[str, Any]:
+    relevance_path = path.parent / RANK_RELEVANCE_FILE_NAME
+    if not relevance_path.exists():
+        return {}
+    payload = json.loads(relevance_path.read_text(encoding="utf-8"))
+    return payload.get("suites", {})
+
+
+def suite_case_rank_relevance(
+    rank_relevance: dict[str, Any],
+    suite_id: str | None,
+    case_id: str,
+) -> dict[str, Any]:
+    if not suite_id:
+        return {}
+    suite_relevance = rank_relevance.get(suite_id, {})
+    if not isinstance(suite_relevance, dict):
+        return {}
+    cases = suite_relevance.get("cases", {})
+    if not isinstance(cases, dict):
+        return {}
+    value = cases.get(case_id, {})
+    return value if isinstance(value, dict) else {}
+
+
 def load_suite(path: Path) -> tuple[list[Path], list[BenchmarkCase], dict[str, Any]]:
     payload = json.loads(path.read_text(encoding="utf-8"))
+    suite_id = payload.get("suiteId")
+    rank_relevance = load_rank_relevance(path)
     documents = []
     for item in payload["documents"]:
         candidate = Path(item)
@@ -259,34 +292,47 @@ def load_suite(path: Path) -> tuple[list[Path], list[BenchmarkCase], dict[str, A
             candidate = (path.parent / candidate).resolve()
         documents.append(candidate)
 
-    cases = [
-        BenchmarkCase(
-            case_id=item["id"],
-            question=item["question"],
-            search_query=item.get("searchQuery", item["question"]),
-            expected_documents_contains=item.get("expectedDocumentsContains", []),
-            search_required_all=item.get("searchRequiredAll", []),
-            answer_required_all=item.get("answerRequiredAll", []),
-            answer_required_any=item.get("answerRequiredAny", []),
-            answer_opening_required_any=item.get("answerOpeningRequiredAny", []),
-            answer_forbidden_any=item.get("answerForbiddenAny", []),
-            min_chunk_reference_count=item.get("minChunkReferenceCount", 0),
-            min_prepared_segment_reference_count=item.get(
-                "minPreparedSegmentReferenceCount", 0
-            ),
-            min_technical_fact_reference_count=item.get("minTechnicalFactReferenceCount", 0),
-            min_entity_reference_count=item.get("minEntityReferenceCount", 0),
-            min_relation_reference_count=item.get("minRelationReferenceCount", 0),
-            expected_entity_reference_labels_contains=item.get(
-                "expectedEntityReferenceLabelsContains", []
-            ),
-            expected_relation_reference_text_contains=item.get(
-                "expectedRelationReferenceTextContains", []
-            ),
-            allowed_verification_states=item.get("allowedVerificationStates", ["verified"]),
+    cases = []
+    for item in payload["cases"]:
+        relevance = suite_case_rank_relevance(rank_relevance, suite_id, item["id"])
+        cases.append(
+            BenchmarkCase(
+                case_id=item["id"],
+                question=item["question"],
+                search_query=item.get("searchQuery", item["question"]),
+                expected_documents_contains=item.get("expectedDocumentsContains", []),
+                search_required_all=item.get("searchRequiredAll", []),
+                answer_required_all=item.get("answerRequiredAll", []),
+                answer_required_any=item.get("answerRequiredAny", []),
+                answer_opening_required_any=item.get("answerOpeningRequiredAny", []),
+                answer_forbidden_any=item.get("answerForbiddenAny", []),
+                min_chunk_reference_count=item.get("minChunkReferenceCount", 0),
+                min_prepared_segment_reference_count=item.get(
+                    "minPreparedSegmentReferenceCount", 0
+                ),
+                min_technical_fact_reference_count=item.get("minTechnicalFactReferenceCount", 0),
+                min_entity_reference_count=item.get("minEntityReferenceCount", 0),
+                min_relation_reference_count=item.get("minRelationReferenceCount", 0),
+                expected_entity_reference_labels_contains=item.get(
+                    "expectedEntityReferenceLabelsContains", []
+                ),
+                expected_relation_reference_text_contains=item.get(
+                    "expectedRelationReferenceTextContains", []
+                ),
+                allowed_verification_states=item.get("allowedVerificationStates", ["verified"]),
+                relevant_documents=item.get(
+                    "relevantDocuments",
+                    relevance.get(
+                        "relevantDocuments",
+                        item.get("expectedDocumentsContains", []),
+                    ),
+                ),
+                relevant_chunks=item.get(
+                    "relevantChunks",
+                    relevance.get("relevantChunks", []),
+                ),
+            )
         )
-        for item in payload["cases"]
-    ]
     return documents, cases, payload
 
 
@@ -418,12 +464,111 @@ def create_query_session(client: BenchmarkClient, workspace_id: str, library_id:
     )
 
 
-def summarize_search_hits(search_payload: dict[str, Any]) -> tuple[list[dict[str, Any]], str]:
+def stable_key(value: str | None) -> str:
+    return canonical_match_text(Path(value).stem if value else "")
+
+
+def document_stable_keys(document: dict[str, Any]) -> list[str]:
+    candidates = [
+        document.get("file_name"),
+        document.get("fileName"),
+        document.get("title"),
+        document.get("external_key"),
+        document.get("externalKey"),
+    ]
+    keys: list[str] = []
+    for value in candidates:
+        if not value:
+            continue
+        text = str(value)
+        for candidate in (text, Path(text).name, Path(text).stem):
+            key = stable_key(candidate)
+            if key and key not in keys:
+                keys.append(key)
+    return keys
+
+
+def primary_document_stable_key(document: dict[str, Any]) -> str | None:
+    keys = document_stable_keys(document)
+    return keys[0] if keys else None
+
+
+def normalize_relevant_keys(values: list[str]) -> set[str]:
+    keys = set()
+    for value in values:
+        key = stable_key(value)
+        if key:
+            keys.add(key)
+    return keys
+
+
+def compute_rank_metrics(
+    ranked_ids: list[str],
+    relevant_ids: set[str],
+    cutoffs: tuple[int, ...] = RANK_METRIC_CUTOFFS,
+) -> dict[str, Any] | None:
+    relevant = {item for item in relevant_ids if item}
+    if not relevant:
+        return None
+    ranked = [item for item in ranked_ids if item]
+    first_rank = next(
+        (index + 1 for index, item in enumerate(ranked) if item in relevant),
+        None,
+    )
+    metrics: dict[str, Any] = {
+        "rankedCount": len(ranked),
+        "relevantCount": len(relevant),
+        "firstRelevantRank": first_rank,
+        "mrr": round(1.0 / first_rank, 6) if first_rank else 0.0,
+    }
+    for cutoff in cutoffs:
+        metrics[f"hit@{cutoff}"] = any(item in relevant for item in ranked[:cutoff])
+    return metrics
+
+
+def compute_marker_rank_metrics(
+    ranked_texts: list[str],
+    relevant_markers: list[str],
+    cutoffs: tuple[int, ...] = RANK_METRIC_CUTOFFS,
+) -> dict[str, Any] | None:
+    markers = [canonical_match_text(marker) for marker in relevant_markers if marker.strip()]
+    if not markers:
+        return None
+    first_rank = None
+    normalized_ranked = [canonical_match_text(item) for item in ranked_texts]
+    for index, text in enumerate(normalized_ranked):
+        if any(marker in text for marker in markers):
+            first_rank = index + 1
+            break
+    metrics: dict[str, Any] = {
+        "rankedCount": len(normalized_ranked),
+        "relevantCount": len(markers),
+        "firstRelevantRank": first_rank,
+        "mrr": round(1.0 / first_rank, 6) if first_rank else 0.0,
+    }
+    for cutoff in cutoffs:
+        metrics[f"hit@{cutoff}"] = any(
+            any(marker in text for marker in markers) for text in normalized_ranked[:cutoff]
+        )
+    return metrics
+
+
+def summarize_search_hits(
+    search_payload: dict[str, Any],
+) -> tuple[list[dict[str, Any]], str, list[str], list[str]]:
     summaries: list[dict[str, Any]] = []
     chunk_texts: list[str] = []
+    ranked_document_keys: list[str] = []
+    ranked_chunk_texts: list[str] = []
 
     for hit in search_payload.get("documentHits", []):
         document = hit.get("document", {})
+        document_id = document.get("document_id") or document.get("documentId")
+        file_name = document.get("file_name") or document.get("fileName")
+        title = document.get("title") or file_name
+        document_key = primary_document_stable_key(document)
+        if document_key:
+            ranked_document_keys.append(document_key)
         chunk_summaries = []
         for chunk in hit.get("chunkHits", []):
             content = (
@@ -434,22 +579,37 @@ def summarize_search_hits(search_payload: dict[str, Any]) -> tuple[list[dict[str
                 or ""
             )
             chunk_texts.append(content)
+            ranked_chunk_texts.append(content)
             chunk_summaries.append(
                 {
                     "chunkId": chunk.get("chunk_id") or chunk.get("chunkId"),
+                    "documentId": document_id,
                     "score": chunk.get("score") or chunk.get("lexicalScore"),
                     "contentPreview": content[:600],
                 }
             )
+        vector_chunk_summaries = []
+        for chunk in hit.get("vectorChunkHits", []):
+            vector_chunk_summaries.append(
+                {
+                    "chunkId": chunk.get("chunk_id") or chunk.get("chunkId"),
+                    "documentId": document_id,
+                    "score": chunk.get("score"),
+                }
+            )
         summaries.append(
             {
-                "title": document.get("title") or document.get("fileName"),
+                "documentId": document_id,
+                "fileName": file_name,
+                "title": title,
+                "stableKey": document_key,
                 "score": hit.get("score"),
                 "chunkHits": chunk_summaries,
+                "vectorChunkHits": vector_chunk_summaries,
             }
         )
 
-    return summaries, "\n".join(chunk_texts)
+    return summaries, "\n".join(chunk_texts), ranked_document_keys, ranked_chunk_texts
 
 
 def run_case(
@@ -463,12 +623,14 @@ def run_case(
         f"/knowledge/libraries/{library_id}/search/documents",
         params={
             "query": case.search_query,
-            "limit": 3,
-            "chunkHitLimitPerDocument": 3,
+            "limit": max(RANK_METRIC_SEARCH_LIMIT, query_top_k),
+            "chunkHitLimitPerDocument": RANK_METRIC_SEARCH_LIMIT,
             "evidenceSampleLimit": 0,
         },
     )
-    search_summaries, aggregated_chunk_text = summarize_search_hits(search_payload)
+    search_summaries, aggregated_chunk_text, ranked_document_keys, ranked_chunk_texts = (
+        summarize_search_hits(search_payload)
+    )
     top_document_title = search_summaries[0]["title"] if search_summaries else None
     top_document_ok = (
         True
@@ -479,6 +641,19 @@ def run_case(
         )
     )
     retrieval_contains_required = contains_all(aggregated_chunk_text, case.search_required_all)
+    document_rank_metrics = compute_rank_metrics(
+        ranked_document_keys,
+        normalize_relevant_keys(case.relevant_documents),
+    )
+    chunk_rank_metrics = compute_marker_rank_metrics(ranked_chunk_texts, case.relevant_chunks)
+    rank_metrics = {
+        key: value
+        for key, value in {
+            "documents": document_rank_metrics,
+            "chunks": chunk_rank_metrics,
+        }.items()
+        if value is not None
+    }
 
     answer_started = time.monotonic()
     turn_payload = client.post_json(
@@ -609,6 +784,9 @@ def run_case(
         "failedChecks": failed_checks,
         "searchResultCount": len(search_summaries),
         "searchResults": search_summaries,
+        "rankMetrics": rank_metrics,
+        "relevantDocuments": case.relevant_documents,
+        "relevantChunks": case.relevant_chunks,
         "answerLatencyMs": answer_latency_ms,
         "answer": answer_text,
         "executionId": execution_id,
@@ -648,6 +826,7 @@ def build_summary(case_results: list[dict[str, Any]]) -> dict[str, Any]:
     for item in case_results:
         for failure_code in item.get("failedChecks", []):
             failure_reason_counts[failure_code] = failure_reason_counts.get(failure_code, 0) + 1
+    rank_metrics = build_rank_metric_summary(case_results)
     return {
         "totalCases": total,
         "topDocumentPassCount": top_doc_pass,
@@ -671,7 +850,34 @@ def build_summary(case_results: list[dict[str, Any]]) -> dict[str, Any]:
         "forbiddenAnswerFailures": forbidden_failures,
         "verificationFailures": verification_failures,
         "failureReasonCounts": failure_reason_counts,
+        "rankMetrics": rank_metrics,
     }
+
+
+def average(values: list[float]) -> float:
+    return round(sum(values) / len(values), 6) if values else 0.0
+
+
+def build_rank_metric_summary(case_results: list[dict[str, Any]]) -> dict[str, Any]:
+    summary: dict[str, Any] = {}
+    for family in ("documents", "chunks"):
+        cases = [
+            item.get("rankMetrics", {}).get(family)
+            for item in case_results
+            if item.get("rankMetrics", {}).get(family)
+        ]
+        family_metrics = [item for item in cases if isinstance(item, dict)]
+        metric_summary: dict[str, Any] = {
+            "caseCount": len(family_metrics),
+            "mrr": average([float(item.get("mrr", 0.0)) for item in family_metrics]),
+        }
+        for cutoff in RANK_METRIC_CUTOFFS:
+            key = f"hit@{cutoff}"
+            metric_summary[key] = average(
+                [1.0 if item.get(key) else 0.0 for item in family_metrics]
+            )
+        summary[family] = metric_summary
+    return summary
 
 
 def build_matrix_summary(suite_results: list[dict[str, Any]]) -> dict[str, Any]:
@@ -691,6 +897,7 @@ def build_matrix_summary(suite_results: list[dict[str, Any]]) -> dict[str, Any]:
         if suite["strictBlocking"]
         and suite["summary"]["strictCasePassCount"] != suite["summary"]["totalCases"]
     ]
+    rank_metrics = build_matrix_rank_metric_summary(suite_results)
     return {
         "totalSuites": total_suites,
         "strictBlockingSuites": strict_blocking_suites,
@@ -701,12 +908,39 @@ def build_matrix_summary(suite_results: list[dict[str, Any]]) -> dict[str, Any]:
         if total_cases
         else 0.0,
         "failingSuites": failing_suites,
+        "rankMetrics": rank_metrics,
     }
+
+
+def build_matrix_rank_metric_summary(suite_results: list[dict[str, Any]]) -> dict[str, Any]:
+    synthetic_cases: list[dict[str, Any]] = []
+    for suite in suite_results:
+        synthetic_cases.extend(suite.get("cases", []))
+    return build_rank_metric_summary(synthetic_cases)
 
 
 def write_json(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+
+def append_rank_trend(output_dir: Path, matrix_result: dict[str, Any]) -> None:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    record = {
+        "generatedAt": matrix_result.get("generatedAt"),
+        "suiteMatrix": matrix_result.get("suiteMatrix", []),
+        "libraryId": (matrix_result.get("library") or {}).get("id"),
+        "summary": matrix_result.get("summary", {}),
+        "suites": [
+            {
+                "suiteId": suite.get("suite", {}).get("suiteId"),
+                "rankMetrics": suite.get("summary", {}).get("rankMetrics", {}),
+            }
+            for suite in matrix_result.get("suites", [])
+        ],
+    }
+    with (output_dir / RANK_TREND_FILE_NAME).open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
 
 
 def main() -> int:
@@ -870,6 +1104,7 @@ def main() -> int:
         for suite_result in suite_results:
             suite_path = Path(suite_result["suite"]["path"])
             write_json(output_dir / f"{suite_path.stem}.result.json", suite_result)
+        append_rank_trend(output_dir, matrix_result)
 
     print(json.dumps(matrix_result, ensure_ascii=False, indent=2))
 

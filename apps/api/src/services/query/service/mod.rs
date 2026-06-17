@@ -132,6 +132,11 @@ pub struct QueryTurnExecutionResult {
     pub graph_edge_references: Vec<QueryGraphEdgeReference>,
     pub verification_state: QueryVerificationState,
     pub verification_warnings: Vec<crate::domains::query::QueryVerificationWarning>,
+    /// Typed clarification metadata for this turn. Carried in-memory from the
+    /// answer pipeline (the persisted execution detail re-read by
+    /// `get_execution` cannot reconstruct it); default for ordinary answers
+    /// and for paths that do not run the single-shot grounded answer pipeline.
+    pub clarification: crate::services::query::execution::RuntimeClarification,
 }
 
 #[derive(Clone, Default)]

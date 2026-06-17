@@ -47,6 +47,19 @@ pub(super) async fn fail_canonical_ingest_job(
         return;
     }
 
+    if existing.queue_state == "queued" {
+        // The job has already been requeued for a retry (queued, possibly with a
+        // backoff `available_at`). A retryable stage failure finalizes the
+        // attempt and requeues the job itself; demoting it to terminal `failed`
+        // here would clobber that retry. The normal retryable path already
+        // returns Ok so this handler is not reached for it — this guard is a
+        // defensive safety net against a stale terminal handler racing a
+        // requeue. `leased` is deliberately NOT guarded here: a finalize that
+        // failed mid-flight can leave the job `leased`, and this fallback must
+        // still be able to mark it `failed`.
+        return;
+    }
+
     if existing.queue_state != "failed" {
         let update_result = ingest_repository::update_ingest_job(
             &state.persistence.postgres,

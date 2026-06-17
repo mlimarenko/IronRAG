@@ -47,8 +47,24 @@ const DEFAULT_EVIDENCE_SAMPLE_LIMIT: usize = 5;
 const SEARCH_LEXICAL_QUERY_PARALLELISM: usize = 4;
 const SEARCH_CHUNK_EVIDENCE_PARALLELISM: usize = 4;
 const SEARCH_DOCUMENT_ENRICHMENT_PARALLELISM: usize = 4;
+const SEARCH_DOCUMENT_BACKFILL_MAX_CANDIDATES: usize = 32;
 const DOCUMENT_KEYWORD_COVERAGE_BONUS_WEIGHT: f64 = 0.8;
 const DOCUMENT_KEYWORD_AGGREGATE_COVERAGE_BONUS_WEIGHT: f64 = 0.25;
+const DOCUMENT_IDENTITY_TOKEN_BONUS_WEIGHT: f64 = 0.25;
+const DOCUMENT_IDENTITY_PHRASE_BONUS_WEIGHT: f64 = 0.75;
+const DOCUMENT_IDENTITY_EXACT_SOURCE_PHRASE_BONUS_WEIGHT: f64 = 18.0;
+const DOCUMENT_ANCHOR_TOKEN_BONUS_WEIGHT: f64 = 1.8;
+const DOCUMENT_ANCHOR_SURFACE_STRONG_BONUS_WEIGHT: f64 = 48.0;
+const DOCUMENT_ANCHOR_SURFACE_WEAK_BONUS_WEIGHT: f64 = 0.75;
+const DOCUMENT_ANCHOR_MATCH_BONUS_MAX: f64 = 48.0;
+const DOCUMENT_ANCHOR_MULTI_SURFACE_EXPONENT: i32 = 6;
+const DOCUMENT_VECTOR_RAW_SCORE_WEIGHT: f64 = 0.75;
+const DOCUMENT_BEST_CHUNK_KEYWORD_COVERAGE_WEIGHT: f64 = 1.25;
+const DOCUMENT_BEST_CHUNK_ANCHOR_COVERAGE_WEIGHT: f64 = 0.75;
+const DOCUMENT_SOFT_TITLE_SCORE_MIN: f64 = 45.0;
+const DOCUMENT_SOFT_TITLE_SCORE_MAX: f64 = 50.5;
+const DOCUMENT_SOFT_TITLE_LOW_EVIDENCE_MIN_SCALE: f64 = 0.25;
+const DOCUMENT_SOFT_TITLE_IDENTITY_PRESERVE_THRESHOLD: f64 = 1.0;
 
 #[derive(Debug, Deserialize, utoipa::ToSchema, utoipa::IntoParams)]
 #[serde(rename_all = "camelCase")]
@@ -208,6 +224,226 @@ fn document_keyword_coverage_bonus(
     let aggregate_signal = (aggregate_coverage / denominator).min(1.0);
     (best_signal * DOCUMENT_KEYWORD_COVERAGE_BONUS_WEIGHT)
         + (aggregate_signal * DOCUMENT_KEYWORD_AGGREGATE_COVERAGE_BONUS_WEIGHT)
+}
+
+fn document_anchor_match_bonus(chunk_hits: &[KnowledgeChunkSearchRow], query_text: &str) -> f64 {
+    if chunk_hits.is_empty() {
+        return 0.0;
+    }
+    let token_anchors = document_search_anchor_tokens(query_text);
+    let surface_anchors = document_search_exact_anchor_surfaces(query_text);
+    if token_anchors.is_empty() && surface_anchors.is_empty() {
+        return 0.0;
+    }
+    let haystack = chunk_hits
+        .iter()
+        .map(|hit| format!("{}\n{}", hit.content_text, hit.normalized_text))
+        .collect::<Vec<_>>()
+        .join("\n")
+        .to_lowercase();
+
+    let token_bonus = if token_anchors.is_empty() {
+        0.0
+    } else {
+        let matches =
+            token_anchors.iter().filter(|anchor| haystack.contains(anchor.as_str())).count() as f64;
+        (matches / token_anchors.len() as f64).min(1.0) * DOCUMENT_ANCHOR_TOKEN_BONUS_WEIGHT
+    };
+    let surface_bonus = document_anchor_surface_coverage_bonus(&surface_anchors, &haystack);
+    (token_bonus + surface_bonus).min(DOCUMENT_ANCHOR_MATCH_BONUS_MAX)
+}
+
+fn document_anchor_surface_coverage_bonus(surface_anchors: &[String], haystack: &str) -> f64 {
+    if surface_anchors.is_empty() {
+        return 0.0;
+    }
+    let total_weight = surface_anchors
+        .iter()
+        .map(|anchor| document_anchor_surface_bonus_weight(anchor))
+        .sum::<f64>();
+    if total_weight <= 0.0 {
+        return 0.0;
+    }
+    let matched_weight = surface_anchors
+        .iter()
+        .filter(|anchor| haystack.contains(anchor.as_str()))
+        .map(|anchor| document_anchor_surface_bonus_weight(anchor))
+        .sum::<f64>();
+    if total_weight > DOCUMENT_ANCHOR_SURFACE_STRONG_BONUS_WEIGHT {
+        let coverage = (matched_weight / total_weight).min(1.0);
+        coverage.powi(DOCUMENT_ANCHOR_MULTI_SURFACE_EXPONENT)
+            * DOCUMENT_ANCHOR_SURFACE_STRONG_BONUS_WEIGHT
+    } else {
+        matched_weight.min(DOCUMENT_ANCHOR_SURFACE_STRONG_BONUS_WEIGHT)
+    }
+}
+
+fn document_anchor_surface_bonus_weight(anchor: &str) -> f64 {
+    if anchor.chars().any(|ch| matches!(ch, '_' | '-' | '.' | '/' | ':' | '@')) {
+        DOCUMENT_ANCHOR_SURFACE_STRONG_BONUS_WEIGHT
+    } else {
+        DOCUMENT_ANCHOR_SURFACE_WEAK_BONUS_WEIGHT
+    }
+}
+
+fn document_identity_bonus(document: &KnowledgeDocumentRow, query_text: &str) -> f64 {
+    let query_tokens =
+        document_search_anchor_tokens(query_text).into_iter().collect::<HashSet<_>>();
+    if query_tokens.is_empty() {
+        return 0.0;
+    }
+    let query_phrases =
+        document_search_anchor_phrases(query_text).into_iter().collect::<HashSet<_>>();
+    document_identity_values(document)
+        .into_iter()
+        .map(|value| {
+            let normalized_value = value.to_ascii_lowercase();
+            let normalized_source_phrase = normalized_alnum_token_sequence_by(
+                &value,
+                |token| token.chars().count() >= 2 || token.chars().any(|ch| ch.is_ascii_digit()),
+                Some(64),
+            )
+            .join(" ");
+            let identity_tokens = normalized_alnum_token_sequence_by(
+                &value,
+                |token| token.chars().count() >= 4 || token.chars().any(|ch| ch.is_ascii_digit()),
+                Some(32),
+            )
+            .into_iter()
+            .collect::<HashSet<_>>();
+            let token_overlap = identity_tokens.intersection(&query_tokens).count() as f64;
+            let phrase_overlap = query_phrases
+                .iter()
+                .filter(|phrase| {
+                    normalized_value.contains(phrase.as_str())
+                        || normalized_source_phrase.contains(phrase.as_str())
+                })
+                .count() as f64;
+            let exact_source_phrase_overlap = query_phrases
+                .iter()
+                .filter(|phrase| {
+                    phrase.split_whitespace().count() >= 3
+                        && normalized_source_phrase.contains(phrase.as_str())
+                })
+                .count() as f64;
+            token_overlap * DOCUMENT_IDENTITY_TOKEN_BONUS_WEIGHT
+                + phrase_overlap * DOCUMENT_IDENTITY_PHRASE_BONUS_WEIGHT
+                + exact_source_phrase_overlap * DOCUMENT_IDENTITY_EXACT_SOURCE_PHRASE_BONUS_WEIGHT
+        })
+        .fold(0.0, f64::max)
+}
+
+fn document_best_chunk_focus_bonus(
+    chunk_hits: &[KnowledgeChunkSearchRow],
+    keywords: &[String],
+    query_text: &str,
+) -> f64 {
+    let signals = document_best_chunk_focus_signals(chunk_hits, keywords, query_text);
+    signals.keyword * DOCUMENT_BEST_CHUNK_KEYWORD_COVERAGE_WEIGHT
+        + signals.anchor * DOCUMENT_BEST_CHUNK_ANCHOR_COVERAGE_WEIGHT
+}
+
+fn document_best_chunk_evidence_coverage(
+    chunk_hits: &[KnowledgeChunkSearchRow],
+    keywords: &[String],
+    query_text: &str,
+) -> f64 {
+    let signals = document_best_chunk_focus_signals(chunk_hits, keywords, query_text);
+    signals.keyword.max(signals.anchor).clamp(0.0, 1.0)
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct DocumentChunkFocusSignals {
+    keyword: f64,
+    anchor: f64,
+}
+
+fn document_best_chunk_focus_signals(
+    chunk_hits: &[KnowledgeChunkSearchRow],
+    keywords: &[String],
+    query_text: &str,
+) -> DocumentChunkFocusSignals {
+    if chunk_hits.is_empty() {
+        return DocumentChunkFocusSignals::default();
+    }
+    let anchor_tokens = document_search_anchor_tokens(query_text);
+    let anchor_phrases = document_search_anchor_phrases(query_text);
+    let surface_anchors = document_search_exact_anchor_surfaces(query_text);
+    chunk_hits
+        .iter()
+        .map(|hit| {
+            let haystack = format!("{}\n{}", hit.content_text, hit.normalized_text).to_lowercase();
+            let keyword_signal = if keywords.is_empty() {
+                0.0
+            } else {
+                let matches =
+                    keywords.iter().filter(|keyword| haystack.contains(keyword.as_str())).count();
+                (matches as f64 / keywords.len() as f64).min(1.0)
+            };
+            let anchor_denominator =
+                anchor_tokens.len() + anchor_phrases.len() + surface_anchors.len();
+            let anchor_signal = if anchor_denominator == 0 {
+                0.0
+            } else {
+                let token_matches =
+                    anchor_tokens.iter().filter(|token| haystack.contains(token.as_str())).count();
+                let phrase_matches = anchor_phrases
+                    .iter()
+                    .filter(|phrase| haystack.contains(phrase.as_str()))
+                    .count();
+                let surface_matches = surface_anchors
+                    .iter()
+                    .filter(|surface| haystack.contains(surface.as_str()))
+                    .count();
+                ((token_matches + phrase_matches + surface_matches) as f64
+                    / anchor_denominator as f64)
+                    .min(1.0)
+            };
+            DocumentChunkFocusSignals { keyword: keyword_signal, anchor: anchor_signal }
+        })
+        .fold(DocumentChunkFocusSignals::default(), |best, next| {
+            if (next.keyword + next.anchor) > (best.keyword + best.anchor) { next } else { best }
+        })
+}
+
+fn document_vector_raw_score_bonus(vector_score: Option<f64>) -> f64 {
+    vector_score.unwrap_or_default().clamp(0.0, 1.0) * DOCUMENT_VECTOR_RAW_SCORE_WEIGHT
+}
+
+fn document_lexical_signal(
+    lexical_score: Option<f64>,
+    identity_bonus: f64,
+    best_chunk_evidence_coverage: f64,
+) -> f64 {
+    let Some(lexical_score) = lexical_score else {
+        return 0.0;
+    };
+    let base = lexical_score.ln_1p();
+    if (DOCUMENT_SOFT_TITLE_SCORE_MIN..=DOCUMENT_SOFT_TITLE_SCORE_MAX).contains(&lexical_score)
+        && identity_bonus < DOCUMENT_SOFT_TITLE_IDENTITY_PRESERVE_THRESHOLD
+    {
+        let evidence_coverage = best_chunk_evidence_coverage.clamp(0.0, 1.0);
+        let scale = DOCUMENT_SOFT_TITLE_LOW_EVIDENCE_MIN_SCALE
+            + ((1.0 - DOCUMENT_SOFT_TITLE_LOW_EVIDENCE_MIN_SCALE)
+                * evidence_coverage
+                * evidence_coverage);
+        return base * scale;
+    }
+    base
+}
+
+fn document_identity_values(document: &KnowledgeDocumentRow) -> Vec<&str> {
+    [
+        document.title.as_deref(),
+        document.file_name.as_deref(),
+        Some(document.external_key.as_str()),
+        document.source_uri.as_deref(),
+        document.document_hint.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    .filter(|value| !value.trim().is_empty())
+    .collect()
 }
 
 fn resolved_evidence_sample_limit(value: Option<usize>) -> usize {
@@ -567,64 +803,45 @@ async fn search_documents_impl(
         .collect();
 
     for accumulator in &mut document_hits {
-        accumulator.chunk_hits.truncate(chunk_hit_limit_per_document);
-        accumulator.vector_chunk_hits.truncate(chunk_hit_limit_per_document);
-        let mut seen_evidence_chunks = HashSet::new();
-        let candidate_chunk_ids: Vec<Uuid> = accumulator
-            .chunk_hits
-            .iter()
-            .map(|hit| hit.chunk_id)
-            .chain(accumulator.vector_chunk_hits.iter().map(|hit| hit.chunk_id))
-            .collect();
-        let mut deduped_chunk_ids = Vec::<Uuid>::new();
-        for chunk_id in candidate_chunk_ids {
-            if !seen_evidence_chunks.insert(chunk_id) {
-                continue;
-            }
-            deduped_chunk_ids.push(chunk_id);
-        }
-
-        if evidence_sample_limit > 0 {
-            let evidence_by_chunk = load_evidence_samples_by_chunk_ids(
-                &state,
-                accumulator.document.document_id,
-                &deduped_chunk_ids,
-            )
-            .await?;
-            for chunk_id in deduped_chunk_ids {
-                let Some(evidence_rows) = evidence_by_chunk.get(&chunk_id) else {
-                    continue;
-                };
-                for evidence in evidence_rows {
-                    if accumulator.evidence_ids.insert(evidence.evidence_id) {
-                        accumulator.evidence_samples.push(evidence.clone());
-                    }
-                    if accumulator.evidence_samples.len() >= evidence_sample_limit {
-                        break;
-                    }
-                }
-                if accumulator.evidence_samples.len() >= evidence_sample_limit {
-                    break;
-                }
-            }
-        }
-
-        let lexical_rank = accumulator.lexical_rank.unwrap_or(usize::MAX / 2);
-        let vector_rank = accumulator.vector_rank.unwrap_or(usize::MAX / 2);
-        let lexical_signal = accumulator.lexical_score.map(f64::ln_1p).unwrap_or_default();
-        let vector_signal = accumulator.vector_score.map(f64::ln_1p).unwrap_or_default();
-        let provenance_bonus = (accumulator.evidence_samples.len() as f64) / 1000.0;
-        let keyword_coverage_bonus =
-            document_keyword_coverage_bonus(&accumulator.chunk_hits, &query_keywords);
-        accumulator.score = lexical_signal
-            + vector_signal
-            + (1.0 / (60.0 + lexical_rank as f64))
-            + (1.0 / (60.0 + vector_rank as f64))
-            + provenance_bonus
-            + keyword_coverage_bonus;
+        accumulator.score = score_document_accumulator(accumulator, &query_keywords, &query_text);
     }
+    document_hits.sort_by(|left, right| {
+        right
+            .score
+            .partial_cmp(&left.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| left.document.document_id.cmp(&right.document.document_id))
+    });
 
-    let mut document_hits = document_hits;
+    let backfill_candidate_limit = limit
+        .max(limit.saturating_mul(4).min(SEARCH_DOCUMENT_BACKFILL_MAX_CANDIDATES))
+        .min(document_hits.len());
+    document_hits.truncate(backfill_candidate_limit);
+    let backfill_parallelism =
+        SEARCH_DOCUMENT_ENRICHMENT_PARALLELISM.min(document_hits.len()).max(1);
+    let prepared_results = stream::iter(document_hits.into_iter().map(|accumulator| {
+        let state = state.clone();
+        let query_text = query_text.clone();
+        let query_keywords = query_keywords.clone();
+        async move {
+            prepare_document_search_candidate(
+                state,
+                query_text,
+                query_keywords,
+                chunk_hit_limit_per_document,
+                evidence_sample_limit,
+                accumulator,
+            )
+            .await
+        }
+    }))
+    .buffer_unordered(backfill_parallelism)
+    .collect::<Vec<_>>()
+    .await;
+    let mut document_hits = Vec::with_capacity(prepared_results.len());
+    for result in prepared_results {
+        document_hits.push(result?);
+    }
     document_hits.sort_by(|left, right| {
         right
             .score
@@ -639,16 +856,7 @@ async fn search_documents_impl(
         stream::iter(document_hits.into_iter().enumerate().map(|(index, accumulator)| {
             let state = state.clone();
             let query_text = query_text.clone();
-            async move {
-                enrich_document_search_hit(
-                    state,
-                    query_text,
-                    chunk_hit_limit_per_document,
-                    index,
-                    accumulator,
-                )
-                .await
-            }
+            async move { enrich_document_search_hit(state, query_text, index, accumulator).await }
         }))
         .buffer_unordered(enrichment_parallelism)
         .collect::<Vec<_>>()
@@ -778,17 +986,10 @@ async fn load_evidence_samples_by_chunk_ids(
 async fn enrich_document_search_hit(
     state: AppState,
     query_text: String,
-    chunk_hit_limit_per_document: usize,
     index: usize,
     mut accumulator: KnowledgeDocumentAccumulator,
 ) -> Result<(usize, KnowledgeSearchDocumentHit), ApiError> {
-    backfill_document_chunk_hits(
-        &state,
-        &query_text,
-        chunk_hit_limit_per_document,
-        &mut accumulator,
-    )
-    .await?;
+    focus_document_chunk_hits_for_query(&query_text, &mut accumulator.chunk_hits);
     let technical_fact_samples = state
         .canonical_services
         .knowledge
@@ -819,6 +1020,106 @@ async fn enrich_document_search_hit(
     ))
 }
 
+fn focus_document_chunk_hits_for_query(
+    query_text: &str,
+    chunk_hits: &mut [KnowledgeChunkSearchRow],
+) {
+    let focus_terms = document_search_focus_terms(query_text);
+    if focus_terms.is_empty() {
+        return;
+    }
+    for hit in chunk_hits {
+        let haystack = format!("{}\n{}", hit.content_text, hit.normalized_text).to_lowercase();
+        if !focus_terms.iter().any(|term| haystack.contains(term)) {
+            continue;
+        }
+        let focused_content = focused_search_hit_text(&hit.content_text, &focus_terms, 1_600);
+        if !focused_content.trim().is_empty() {
+            hit.content_text = focused_content;
+        }
+        let focused_normalized = focused_search_hit_text(&hit.normalized_text, &focus_terms, 1_600);
+        if !focused_normalized.trim().is_empty() {
+            hit.normalized_text = focused_normalized;
+        }
+    }
+}
+
+fn document_search_focus_terms(query_text: &str) -> Vec<String> {
+    let mut seen = HashSet::new();
+    document_search_exact_anchor_surfaces(query_text)
+        .into_iter()
+        .chain(document_search_anchor_tokens(query_text))
+        .chain(document_search_anchor_phrases(query_text))
+        .chain(document_search_keywords(query_text))
+        .map(|term| term.trim().to_lowercase())
+        .filter(|term| term.chars().count() >= 2)
+        .filter(|term| seen.insert(term.clone()))
+        .collect()
+}
+
+fn focused_search_hit_text(text: &str, focus_terms: &[String], max_chars: usize) -> String {
+    let trimmed = text.trim();
+    if trimmed.is_empty() || max_chars == 0 {
+        return String::new();
+    }
+    if trimmed.chars().count() <= max_chars {
+        return trimmed.to_string();
+    }
+    let lowered = trimmed.to_lowercase();
+    let best_match = focus_terms
+        .iter()
+        .filter_map(|term| {
+            let term = term.trim().to_lowercase();
+            if term.chars().count() < 2 {
+                return None;
+            }
+            lowered
+                .find(term.as_str())
+                .map(|byte_index| (document_search_focus_term_score(&term), byte_index))
+        })
+        .max_by(|left, right| left.0.cmp(&right.0).then_with(|| right.1.cmp(&left.1)));
+
+    let Some((_, match_byte_index)) = best_match else {
+        return crate::services::query::execution::focused_excerpt_for(
+            trimmed,
+            focus_terms,
+            max_chars,
+        );
+    };
+    centered_char_window(trimmed, match_byte_index, max_chars)
+}
+
+fn document_search_focus_term_score(term: &str) -> usize {
+    let has_structural_separator =
+        term.chars().any(|ch| matches!(ch, '_' | '-' | '.' | '/' | ':' | '@'));
+    let has_digit = term.chars().any(|ch| ch.is_ascii_digit());
+    let has_uppercase_shape = term.chars().any(|ch| ch.is_ascii_uppercase());
+    let token_count = term.split_whitespace().count();
+    usize::from(has_structural_separator) * 1_000
+        + usize::from(has_digit) * 700
+        + usize::from(has_uppercase_shape) * 500
+        + token_count.saturating_sub(1) * 100
+        + term.chars().count().min(80)
+}
+
+fn centered_char_window(text: &str, center_byte_index: usize, max_chars: usize) -> String {
+    let char_positions = text.char_indices().map(|(index, _)| index).collect::<Vec<_>>();
+    if char_positions.len() <= max_chars {
+        return text.to_string();
+    }
+    let center_char_index = char_positions
+        .binary_search(&center_byte_index)
+        .unwrap_or_else(|index| index.saturating_sub(1));
+    let half_window = max_chars / 2;
+    let start_char = center_char_index.saturating_sub(half_window);
+    let end_char = (start_char + max_chars).min(char_positions.len());
+    let start_byte = char_positions[start_char];
+    let end_byte = char_positions.get(end_char).copied().unwrap_or(text.len());
+    let prefix = if start_char > 0 { "... " } else { "" };
+    let suffix = if end_char < char_positions.len() { " ..." } else { "" };
+    format!("{prefix}{}{suffix}", text[start_byte..end_byte].trim())
+}
+
 fn resolved_chunk_hit(
     chunk_id: &Uuid,
     chunk_map: &HashMap<Uuid, KnowledgeChunkRow>,
@@ -846,6 +1147,103 @@ fn map_search_revision_summary(revision: KnowledgeRevisionRow) -> KnowledgeSearc
         graph_state: revision.graph_state,
         created_at: revision.created_at,
     }
+}
+
+async fn prepare_document_search_candidate(
+    state: AppState,
+    query_text: String,
+    query_keywords: Vec<String>,
+    chunk_hit_limit_per_document: usize,
+    evidence_sample_limit: usize,
+    mut accumulator: KnowledgeDocumentAccumulator,
+) -> Result<KnowledgeDocumentAccumulator, ApiError> {
+    backfill_document_chunk_hits(
+        &state,
+        &query_text,
+        chunk_hit_limit_per_document,
+        &mut accumulator,
+    )
+    .await?;
+
+    accumulator.chunk_hits.truncate(chunk_hit_limit_per_document);
+    accumulator.vector_chunk_hits.truncate(chunk_hit_limit_per_document);
+    let mut seen_evidence_chunks = HashSet::new();
+    let candidate_chunk_ids: Vec<Uuid> = accumulator
+        .chunk_hits
+        .iter()
+        .map(|hit| hit.chunk_id)
+        .chain(accumulator.vector_chunk_hits.iter().map(|hit| hit.chunk_id))
+        .collect();
+    let mut deduped_chunk_ids = Vec::<Uuid>::new();
+    for chunk_id in candidate_chunk_ids {
+        if !seen_evidence_chunks.insert(chunk_id) {
+            continue;
+        }
+        deduped_chunk_ids.push(chunk_id);
+    }
+
+    if evidence_sample_limit > 0 {
+        let evidence_by_chunk = load_evidence_samples_by_chunk_ids(
+            &state,
+            accumulator.document.document_id,
+            &deduped_chunk_ids,
+        )
+        .await?;
+        for chunk_id in deduped_chunk_ids {
+            let Some(evidence_rows) = evidence_by_chunk.get(&chunk_id) else {
+                continue;
+            };
+            for evidence in evidence_rows {
+                if accumulator.evidence_ids.insert(evidence.evidence_id) {
+                    accumulator.evidence_samples.push(evidence.clone());
+                }
+                if accumulator.evidence_samples.len() >= evidence_sample_limit {
+                    break;
+                }
+            }
+            if accumulator.evidence_samples.len() >= evidence_sample_limit {
+                break;
+            }
+        }
+    }
+
+    accumulator.score = score_document_accumulator(&accumulator, &query_keywords, &query_text);
+    Ok(accumulator)
+}
+
+fn score_document_accumulator(
+    accumulator: &KnowledgeDocumentAccumulator,
+    query_keywords: &[String],
+    query_text: &str,
+) -> f64 {
+    let lexical_rank = accumulator.lexical_rank.unwrap_or(usize::MAX / 2);
+    let vector_rank = accumulator.vector_rank.unwrap_or(usize::MAX / 2);
+    let vector_signal = accumulator.vector_score.map(f64::ln_1p).unwrap_or_default();
+    let provenance_bonus = (accumulator.evidence_samples.len() as f64) / 1000.0;
+    let keyword_coverage_bonus =
+        document_keyword_coverage_bonus(&accumulator.chunk_hits, query_keywords);
+    let anchor_match_bonus = document_anchor_match_bonus(&accumulator.chunk_hits, query_text);
+    let best_chunk_focus_bonus =
+        document_best_chunk_focus_bonus(&accumulator.chunk_hits, query_keywords, query_text);
+    let vector_raw_score_bonus = document_vector_raw_score_bonus(accumulator.vector_score);
+    let identity_bonus = document_identity_bonus(&accumulator.document, query_text);
+    let best_chunk_evidence_coverage =
+        document_best_chunk_evidence_coverage(&accumulator.chunk_hits, query_keywords, query_text);
+    let lexical_signal = document_lexical_signal(
+        accumulator.lexical_score,
+        identity_bonus,
+        best_chunk_evidence_coverage,
+    );
+    lexical_signal
+        + vector_signal
+        + (1.0 / (60.0 + lexical_rank as f64))
+        + (1.0 / (60.0 + vector_rank as f64))
+        + provenance_bonus
+        + keyword_coverage_bonus
+        + anchor_match_bonus
+        + best_chunk_focus_bonus
+        + vector_raw_score_bonus
+        + identity_bonus
 }
 
 async fn backfill_document_chunk_hits(
@@ -956,6 +1354,38 @@ fn document_search_anchor_phrases(query_text: &str) -> Vec<String> {
         }
     }
     phrases
+}
+
+fn document_search_exact_anchor_surfaces(query_text: &str) -> Vec<String> {
+    let mut anchors = Vec::<String>::new();
+    let mut seen = HashSet::<String>::new();
+    for raw in query_text.split_whitespace() {
+        let candidate = raw
+            .trim_matches(|ch: char| {
+                !(ch.is_alphanumeric() || matches!(ch, '_' | '-' | '.' | '/' | ':' | '@'))
+            })
+            .trim();
+        if candidate.is_empty() {
+            continue;
+        }
+        let alnum_count = candidate.chars().filter(|ch| ch.is_alphanumeric()).count();
+        if alnum_count < 3 {
+            continue;
+        }
+        let has_structural_separator =
+            candidate.chars().any(|ch| matches!(ch, '_' | '-' | '.' | '/' | ':' | '@'));
+        let has_digit = candidate.chars().any(|ch| ch.is_ascii_digit());
+        let has_upper_after_first = candidate.chars().skip(1).any(|ch| ch.is_ascii_uppercase());
+        let has_lower = candidate.chars().any(|ch| ch.is_ascii_lowercase());
+        if !(has_structural_separator || has_digit || (has_upper_after_first && has_lower)) {
+            continue;
+        }
+        let normalized = candidate.to_lowercase();
+        if seen.insert(normalized.clone()) {
+            anchors.push(normalized);
+        }
+    }
+    anchors
 }
 
 async fn resolve_hybrid_search_context(
@@ -1084,17 +1514,213 @@ mod tests {
 
     #[test]
     fn document_keyword_coverage_bonus_rewards_concentrated_evidence() {
-        let keywords =
-            document_search_keywords("Alpha Gateway auth billing payment service ports queue");
-        let weak = chunk_hit("Alpha Gateway API mentions payment once.");
-        let strong = chunk_hit(
-            "Alpha Gateway auth service, billing service, payment service, ports, and queue.",
-        );
+        let keywords = document_search_keywords("Alpha matrix beta gamma delta epsilon zeta");
+        let weak = chunk_hit("Alpha matrix mentions beta once.");
+        let strong = chunk_hit("Alpha matrix beta, gamma, delta, epsilon, and zeta.");
 
         let weak_bonus = document_keyword_coverage_bonus(&[weak], &keywords);
         let strong_bonus = document_keyword_coverage_bonus(&[strong], &keywords);
 
         assert!(strong_bonus > weak_bonus + 0.2);
+    }
+
+    #[test]
+    fn document_identity_bonus_rewards_specific_title_tokens() {
+        let specific = document_row("alpha_matrix_delta_index.yaml");
+        let generic = document_row("alpha_matrix.yaml");
+
+        let query = "Alpha Matrix delta index";
+        assert!(
+            document_identity_bonus(&specific, query) > document_identity_bonus(&generic, query)
+        );
+    }
+
+    #[test]
+    fn document_identity_bonus_rewards_structured_identity_match() {
+        let exact = document_row("segment-alpha-control-plane.md");
+        let generic = document_row("segment-alpha-overview.md");
+
+        let query = "segment alpha control plane calibration";
+
+        assert!(document_identity_bonus(&exact, query) > document_identity_bonus(&generic, query));
+    }
+
+    #[test]
+    fn document_identity_bonus_rewards_multi_token_source_phrase() {
+        let source = document_row("north-region-review-cycle.txt");
+        let generic = document_row("north-region-review-notes.txt");
+
+        let query = "north region review cycle threshold";
+
+        assert!(document_identity_bonus(&source, query) > document_identity_bonus(&generic, query));
+    }
+
+    #[test]
+    fn document_identity_bonus_rewards_source_phrase_with_separators() {
+        let source = document_row("alpha_data_sequence.md");
+        let generic = document_row("alpha_reference_notes.md");
+
+        let query = "alpha data sequence retry policy exponential backoff max attempts delay";
+
+        assert!(document_identity_bonus(&source, query) > document_identity_bonus(&generic, query));
+    }
+
+    #[test]
+    fn document_best_chunk_focus_bonus_rewards_concentrated_evidence() {
+        let keywords = document_search_keywords("alpha beta gamma delta epsilon");
+        let diffuse = vec![
+            chunk_hit("alpha beta notes"),
+            chunk_hit("gamma delta notes"),
+            chunk_hit("epsilon notes"),
+        ];
+        let focused = vec![chunk_hit("alpha beta gamma delta epsilon")];
+
+        let query = "alpha beta gamma delta epsilon";
+
+        assert!(
+            document_best_chunk_focus_bonus(&focused, &keywords, query)
+                > document_best_chunk_focus_bonus(&diffuse, &keywords, query)
+        );
+    }
+
+    #[test]
+    fn document_best_chunk_evidence_coverage_rewards_single_focused_chunk() {
+        let keywords = document_search_keywords("alpha beta gamma delta epsilon");
+        let diffuse = vec![
+            chunk_hit("alpha beta notes"),
+            chunk_hit("gamma delta notes"),
+            chunk_hit("epsilon notes"),
+        ];
+        let focused = vec![chunk_hit("alpha beta gamma delta epsilon")];
+        let query = "alpha beta gamma delta epsilon";
+
+        assert!(
+            document_best_chunk_evidence_coverage(&focused, &keywords, query)
+                > document_best_chunk_evidence_coverage(&diffuse, &keywords, query) + 0.3
+        );
+    }
+
+    #[test]
+    fn document_lexical_signal_dampens_soft_title_without_evidence_coverage() {
+        let weak = document_lexical_signal(Some(50.0), 0.0, 0.2);
+        let strong = document_lexical_signal(Some(50.0), 0.0, 0.9);
+        let identity = document_lexical_signal(Some(50.0), 1.25, 0.2);
+        let exact_identity = document_lexical_signal(Some(1_000_000.0), 0.0, 0.0);
+
+        assert!(strong > weak + 2.0);
+        assert_eq!(identity, 50.0_f64.ln_1p());
+        assert_eq!(exact_identity, 1_000_000.0_f64.ln_1p());
+    }
+
+    #[test]
+    fn document_vector_raw_score_bonus_preserves_similarity_margin() {
+        assert!(
+            document_vector_raw_score_bonus(Some(0.91))
+                > document_vector_raw_score_bonus(Some(0.73))
+        );
+        assert_eq!(document_vector_raw_score_bonus(Some(-0.5)), 0.0);
+        assert_eq!(document_vector_raw_score_bonus(Some(2.0)), DOCUMENT_VECTOR_RAW_SCORE_WEIGHT);
+    }
+
+    #[test]
+    fn document_anchor_match_bonus_rewards_exact_config_keys() {
+        let generic = chunk_hit(
+            "Configuration values include OTHER_PORT, OTHER_DATABASE_URL, and OTHER_SECRET.",
+        );
+        let exact =
+            chunk_hit("Configuration values include APP_PORT, APP_DATABASE_URL, and APP_SECRET.");
+
+        let query = "Which settings configure APP_PORT APP_DATABASE_URL APP_SECRET?";
+
+        assert!(
+            document_anchor_match_bonus(&[exact], query)
+                > document_anchor_match_bonus(&[generic], query) + 1.0
+        );
+    }
+
+    #[test]
+    fn document_anchor_match_bonus_treats_structural_literals_as_strong_anchors() {
+        let generic = chunk_hit("Trace limit window controls the request budget.");
+        let exact = chunk_hit("TRACE_LIMIT_WINDOW controls the request budget.");
+
+        let query = "trace limit TRACE_LIMIT_WINDOW";
+
+        assert!(
+            document_anchor_match_bonus(&[exact], query)
+                > document_anchor_match_bonus(&[generic], query) + 20.0
+        );
+    }
+
+    #[test]
+    fn document_anchor_match_bonus_rewards_camel_case_identifiers() {
+        let generic = chunk_hit("The preprocessor lowercases text and normalizes addresses.");
+        let exact = chunk_hit("TextPreprocessor.lowercase, TextPreprocessor.normalize_address");
+
+        let query = "What steps does TextPreprocessor apply?";
+
+        assert!(
+            document_anchor_match_bonus(&[exact], query)
+                > document_anchor_match_bonus(&[generic], query)
+        );
+    }
+
+    #[test]
+    fn document_anchor_match_bonus_keeps_plain_camelcase_weaker_than_structural_literals() {
+        assert!(
+            document_anchor_surface_bonus_weight("retry_limit")
+                > document_anchor_surface_bonus_weight("configmaps")
+        );
+        assert_eq!(
+            document_anchor_surface_bonus_weight("base64"),
+            document_anchor_surface_bonus_weight("configmaps")
+        );
+        let proper_name = chunk_hit("ConfigMaps are mentioned as a related object.");
+        let substantive =
+            chunk_hit("Sensitive data should use encryption and base64 encoding where required.");
+
+        let query = "ConfigMaps sensitive data base64 encryption";
+
+        assert!(
+            document_anchor_match_bonus(&[substantive], query)
+                > document_anchor_match_bonus(&[proper_name], query),
+        );
+    }
+
+    #[test]
+    fn document_anchor_match_bonus_scales_partial_multi_surface_matches() {
+        let partial = chunk_hit("The RETRY_LIMIT_REQUESTS setting is available.");
+        let complete = chunk_hit(
+            "The RETRY_LIMIT_REQUESTS and RETRY_LIMIT_WINDOW_SECONDS settings are available.",
+        );
+
+        let query = "RETRY_LIMIT_REQUESTS RETRY_LIMIT_WINDOW_SECONDS";
+
+        assert!(
+            document_anchor_match_bonus(&[complete], query)
+                > document_anchor_match_bonus(&[partial], query) + 10.0
+        );
+    }
+
+    #[test]
+    fn document_anchor_match_bonus_requires_multi_surface_coverage() {
+        let partial = chunk_hit("The ALPHA_LIMIT setting is available.");
+        let complete = chunk_hit("The ALPHA_LIMIT and BETA_TIMEOUT settings are available.");
+        let query = "ALPHA_LIMIT BETA_TIMEOUT";
+
+        assert!(document_anchor_match_bonus(&[partial], query) < 5.0);
+        assert!(document_anchor_match_bonus(&[complete], query) > 40.0);
+    }
+
+    #[test]
+    fn exact_anchor_surfaces_ignore_ordinary_title_case_words() {
+        let anchors =
+            document_search_exact_anchor_surfaces("Alpha Beta TextParser RETRY_LIMIT key-v2");
+
+        assert!(!anchors.contains(&"alpha".to_string()));
+        assert!(!anchors.contains(&"beta".to_string()));
+        assert!(anchors.contains(&"textparser".to_string()));
+        assert!(anchors.contains(&"retry_limit".to_string()));
+        assert!(anchors.contains(&"key-v2".to_string()));
     }
 
     #[test]
@@ -1112,10 +1738,53 @@ mod tests {
 
     #[test]
     fn anchor_phrases_are_generated_from_structure_without_topic_aliases() {
-        let queries = expand_document_search_queries("Alpha Gateway auth service ports");
+        let queries = expand_document_search_queries("Alpha Matrix delta channel");
 
-        assert_eq!(queries[0], "Alpha Gateway auth service ports");
-        assert!(queries.iter().any(|query| query == "alpha gateway"));
-        assert!(queries.iter().any(|query| query == "gateway auth"));
+        assert_eq!(queries[0], "Alpha Matrix delta channel");
+        assert!(queries.iter().any(|query| query == "alpha matrix"));
+        assert!(queries.iter().any(|query| query == "matrix delta"));
+    }
+
+    #[test]
+    fn focused_search_hit_text_centers_late_structural_anchor() {
+        let text = format!(
+            "alpha matrix summary {}; blocks.alpha.entry.reason_code enum beta gamma delta epsilon zeta status",
+            (0..220).map(|index| format!("early_{index}=value")).collect::<Vec<_>>().join("; ")
+        );
+        let focus_terms = document_search_focus_terms(
+            "alpha matrix reason_code beta gamma delta epsilon zeta status",
+        );
+
+        let excerpt = focused_search_hit_text(&text, &focus_terms, 220);
+
+        assert!(excerpt.contains("reason_code"), "{excerpt}");
+        assert!(excerpt.contains("beta"), "{excerpt}");
+        assert!(!excerpt.contains("early_0=value"), "{excerpt}");
+    }
+
+    fn document_row(file_name: &str) -> KnowledgeDocumentRow {
+        let document_id = Uuid::now_v7();
+        KnowledgeDocumentRow {
+            key: document_id.to_string(),
+            arango_id: None,
+            arango_rev: None,
+            document_id,
+            workspace_id: Uuid::now_v7(),
+            library_id: Uuid::now_v7(),
+            external_key: file_name.to_string(),
+            file_name: Some(file_name.to_string()),
+            title: Some(file_name.to_string()),
+            source_uri: None,
+            document_hint: None,
+            document_state: "active".to_string(),
+            active_revision_id: Some(Uuid::now_v7()),
+            readable_revision_id: Some(Uuid::now_v7()),
+            latest_revision_no: Some(1),
+            parent_document_id: None,
+            document_role: crate::domains::content::DOCUMENT_ROLE_PRIMARY.to_string(),
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+            deleted_at: None,
+        }
     }
 }

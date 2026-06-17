@@ -369,6 +369,72 @@ fn build_canonical_answer_context_does_not_filter_on_weak_document_focus() {
 }
 
 #[test]
+fn build_canonical_answer_context_keeps_value_queries_broad_without_explicit_document() {
+    let dominant_document_id = Uuid::now_v7();
+    let value_document_id = Uuid::now_v7();
+    let query_ir = query_ir_with_act_scope_and_target_types(
+        QueryAct::RetrieveValue,
+        QueryScope::SingleDocument,
+        ["table_row", "table_summary"],
+    );
+
+    let context = build_canonical_answer_context(
+        "Which value is reported for the target row?",
+        &query_ir,
+        None,
+        &CanonicalAnswerEvidence {
+            bundle: None,
+            chunk_rows: Vec::new(),
+            structured_blocks: Vec::new(),
+            technical_facts: Vec::new(),
+        },
+        &[
+            RuntimeMatchedChunk {
+                chunk_id: Uuid::now_v7(),
+                revision_id: Uuid::now_v7(),
+                chunk_index: 0,
+                chunk_kind: Some("table_row".to_string()),
+                document_id: dominant_document_id,
+                document_label: "dominant-table.csv".to_string(),
+                excerpt: "Sheet: Main | Row 1 | Name: Alpha | Value: 10".to_string(),
+                score_kind: crate::services::query::execution::RuntimeChunkScoreKind::Relevance,
+                score: Some(10.0),
+                source_text: "Sheet: Main | Row 1 | Name: Alpha | Value: 10".to_string(),
+            },
+            RuntimeMatchedChunk {
+                chunk_id: Uuid::now_v7(),
+                revision_id: Uuid::now_v7(),
+                chunk_index: 1,
+                chunk_kind: Some("table_row".to_string()),
+                document_id: dominant_document_id,
+                document_label: "dominant-table.csv".to_string(),
+                excerpt: "Sheet: Main | Row 2 | Name: Beta | Value: 20".to_string(),
+                score_kind: crate::services::query::execution::RuntimeChunkScoreKind::Relevance,
+                score: Some(9.0),
+                source_text: "Sheet: Main | Row 2 | Name: Beta | Value: 20".to_string(),
+            },
+            RuntimeMatchedChunk {
+                chunk_id: Uuid::now_v7(),
+                revision_id: Uuid::now_v7(),
+                chunk_index: 0,
+                chunk_kind: Some("table_row".to_string()),
+                document_id: value_document_id,
+                document_label: "value-table.csv".to_string(),
+                excerpt: "Sheet: Detail | Row 1 | Name: Target | Value: 42".to_string(),
+                score_kind: crate::services::query::execution::RuntimeChunkScoreKind::Relevance,
+                score: Some(1.0),
+                source_text: "Sheet: Detail | Row 1 | Name: Target | Value: 42".to_string(),
+            },
+        ],
+        &[],
+    );
+
+    assert!(!context.contains("Focused grounded document"));
+    assert!(context.contains("Name: Alpha"));
+    assert!(context.contains("Name: Target"));
+}
+
+#[test]
 fn build_canonical_answer_context_filters_only_explicit_document_reference() {
     let focused_document_id = Uuid::now_v7();
     let other_document_id = Uuid::now_v7();

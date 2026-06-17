@@ -57,6 +57,21 @@ impl QueryServiceError {
         }
     }
 
+    /// Whether a failure of the chunk-embedding stage should KEEP the chunk
+    /// vectors already persisted for this revision instead of wiping them.
+    ///
+    /// Transient/retryable failures (provider 429/timeout, vector-store write
+    /// blip) leave the successfully persisted batches valid: the next attempt's
+    /// resume path (`load_current_revision_chunk_vector_ids`) re-uses them and
+    /// only embeds the missing remainder, so a blip at 95% of a large document
+    /// no longer throws away every paid-for vector. Terminal/correctness
+    /// failures (cancellation, dimension/coverage violations) must still wipe
+    /// the partial state because reusing it on a later run could be wrong.
+    #[must_use]
+    pub const fn preserves_partial_vectors(&self) -> bool {
+        matches!(self, Self::ProviderUnavailable { .. })
+    }
+
     #[must_use]
     pub fn from_message(message: impl Into<String>) -> Self {
         let message = message.into();
@@ -148,5 +163,46 @@ impl From<ApiError> for QueryServiceError {
             }
             other => Self::from_message(other.to_string()),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::QueryServiceError;
+    use uuid::Uuid;
+
+    // BUG B: only transient/retryable provider failures preserve the partial
+    // vectors already persisted for a revision; terminal/correctness failures
+    // must still wipe them so stale partial state is never reused.
+    #[test]
+    fn only_provider_unavailable_preserves_partial_vectors() {
+        assert!(
+            QueryServiceError::ProviderUnavailable { message: "embedding 429".to_string() }
+                .preserves_partial_vectors()
+        );
+        assert!(!QueryServiceError::Cancelled.preserves_partial_vectors());
+        assert!(
+            !QueryServiceError::StateConflict { message: "coverage mismatch".to_string() }
+                .preserves_partial_vectors()
+        );
+        assert!(
+            !QueryServiceError::Internal(anyhow::anyhow!("dimension mismatch"))
+                .preserves_partial_vectors()
+        );
+        assert!(
+            !QueryServiceError::LibraryNotFound { library_id: Uuid::now_v7() }
+                .preserves_partial_vectors()
+        );
+    }
+
+    // A transient embedding-provider error message classifies as
+    // ProviderUnavailable, so the embed failure path preserves partial vectors.
+    #[test]
+    fn transient_embedding_error_classifies_as_provider_unavailable() {
+        let error = QueryServiceError::from_message(
+            "failed to embed chunk batch for revision: upstream timeout",
+        );
+        assert!(matches!(error, QueryServiceError::ProviderUnavailable { .. }));
+        assert!(error.preserves_partial_vectors());
     }
 }

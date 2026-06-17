@@ -2,15 +2,6 @@ use std::{collections::HashSet, sync::LazyLock};
 
 use super::technical_literals::trim_literal_token;
 
-static PACKAGE_COMMAND_REGEX: LazyLock<regex::Regex> = LazyLock::new(|| {
-    #[allow(clippy::expect_used)]
-    regex::RegexBuilder::new(
-        r"(?im)(?:^|[\s:;])(?:aptitude\s+install|apt(?:-get)?\s+install|dpkg-reconfigure)\s+([A-Za-z0-9][A-Za-z0-9_.+-]{1,160})(?:$|[\s.,;:)])",
-    )
-    .build()
-    .expect("package command regex must compile")
-});
-
 static CONFIG_ASSIGNMENT_LITERAL_REGEX: LazyLock<regex::Regex> = LazyLock::new(|| {
     #[allow(clippy::expect_used)]
     regex::RegexBuilder::new(
@@ -103,18 +94,191 @@ pub(super) fn extract_explicit_path_literals(text: &str, limit: usize) -> Vec<St
 }
 
 pub(super) fn extract_package_command_literals(text: &str, limit: usize) -> Vec<String> {
-    let mut packages = Vec::new();
+    let mut command_objects = Vec::new();
     let mut seen = HashSet::new();
-    for capture in PACKAGE_COMMAND_REGEX.captures_iter(text) {
-        let Some(package) = capture
-            .get(1)
-            .map(|value| value.as_str().trim().trim_end_matches(['.', ',', ';', ':', ')']))
-        else {
+    let mut matches = Vec::<(usize, String)>::new();
+    let mut offset = 0usize;
+    for line in text.lines() {
+        let tokens = command_literal_tokens(line, offset);
+        for index in 0..tokens.len() {
+            if let Some((position, value)) = command_object_literal_from_tokens(&tokens, index) {
+                matches.push((position, value));
+            }
+        }
+        offset = offset.saturating_add(line.len()).saturating_add(1);
+    }
+    matches.sort_by_key(|(position, _)| *position);
+    for (_, value) in matches {
+        push_unique_limited(&mut command_objects, &mut seen, value, limit);
+    }
+    command_objects
+}
+
+fn command_literal_tokens(line: &str, line_offset: usize) -> Vec<(usize, String)> {
+    let mut tokens = Vec::new();
+    let mut search_from = 0usize;
+    for raw in line.split_whitespace() {
+        let Some(relative) = line[search_from..].find(raw) else {
             continue;
         };
-        push_unique_limited(&mut packages, &mut seen, package.to_string(), limit);
+        let start = search_from.saturating_add(relative);
+        search_from = start.saturating_add(raw.len());
+        let cleaned = trim_command_object_boundary(raw);
+        if !cleaned.is_empty() {
+            tokens.push((line_offset.saturating_add(start), cleaned.to_string()));
+        }
     }
-    packages
+    tokens
+}
+
+fn command_object_literal_from_tokens(
+    tokens: &[(usize, String)],
+    index: usize,
+) -> Option<(usize, String)> {
+    let head = tokens.get(index)?.1.as_str();
+    if !command_literal_head_is_candidate(head) {
+        return None;
+    }
+    let tail = &tokens[index.saturating_add(1)..];
+    let boundary = tail
+        .iter()
+        .position(|(_, token)| command_literal_token_is_sentence_function_word(token))
+        .unwrap_or(tail.len());
+    let args = &tail[..boundary];
+    if !command_literal_window_has_command_shape(head, args) {
+        return None;
+    }
+    args.iter().take(8).find_map(|(position, token)| {
+        command_object_literal_candidate(token).map(|value| (*position, value))
+    })
+}
+
+fn command_literal_window_has_command_shape(head: &str, args: &[(usize, String)]) -> bool {
+    if args.is_empty() {
+        return false;
+    }
+    let head_has_executable_shape = command_literal_token_has_executable_shape(head);
+    let has_structural_argument =
+        args.iter().take(8).any(|(_, token)| command_literal_token_is_structural_argument(token));
+    if head_has_executable_shape && has_structural_argument {
+        return true;
+    }
+    if command_literal_token_is_plain_word(head)
+        && let Some((_, subcommand)) = args.first()
+        && command_literal_token_is_plain_word(subcommand)
+    {
+        return args.iter().skip(1).take(6).any(|(_, token)| {
+            command_object_literal_candidate(token).is_some()
+                || command_literal_token_is_structural_argument(token)
+        });
+    }
+    false
+}
+
+fn command_literal_head_is_candidate(token: &str) -> bool {
+    !token.is_empty()
+        && !token.starts_with('-')
+        && !token.contains("://")
+        && !token.contains('=')
+        && token.chars().any(|ch| ch.is_ascii_alphabetic())
+        && token.chars().all(|ch| {
+            ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-' | '+' | '/' | '\\')
+        })
+        && !command_literal_token_is_sentence_function_word(token)
+}
+
+fn command_object_literal_candidate(token: &str) -> Option<String> {
+    let token = trim_command_object_boundary(token);
+    if token.len() < 3
+        || token.len() > 160
+        || token.starts_with('-')
+        || token.starts_with('+')
+        || token.starts_with("./")
+        || token.starts_with("../")
+        || token.starts_with('/')
+        || token.contains("://")
+        || token.contains('=')
+        || !token.chars().any(|ch| ch.is_ascii_alphabetic())
+        || !token.chars().all(|ch| {
+            ch.is_ascii_alphanumeric() || matches!(ch, '@' | '_' | '-' | '.' | '+' | '/' | ':')
+        })
+    {
+        return None;
+    }
+    let has_identity_shape = token.starts_with('@')
+        || token.contains('-')
+        || token.contains('_')
+        || token.contains('.')
+        || token.contains('/')
+        || token.chars().any(|ch| ch.is_ascii_digit());
+    has_identity_shape.then(|| token.to_string())
+}
+
+fn command_literal_token_is_structural_argument(token: &str) -> bool {
+    token.starts_with('-')
+        || token.starts_with('+')
+        || token.contains('=')
+        || token.contains("://")
+        || command_literal_token_is_path_like(token)
+        || command_object_literal_candidate(token).is_some()
+}
+
+fn command_literal_token_has_executable_shape(token: &str) -> bool {
+    command_literal_token_is_path_like(token)
+        || token.contains('-')
+        || token.contains('_')
+        || token.contains('.')
+        || token.chars().any(|ch| ch.is_ascii_digit())
+}
+
+fn command_literal_token_is_path_like(token: &str) -> bool {
+    (token.starts_with("./")
+        || token.starts_with("../")
+        || token.starts_with('/')
+        || token.contains('/'))
+        && !token.contains("://")
+        && token.chars().any(|ch| ch.is_ascii_alphanumeric())
+}
+
+fn command_literal_token_is_plain_word(token: &str) -> bool {
+    let len = token.chars().count();
+    (2..=32).contains(&len)
+        && token.chars().all(|ch| ch.is_ascii_alphabetic())
+        && !command_literal_token_is_sentence_function_word(token)
+}
+
+fn command_literal_token_is_sentence_function_word(token: &str) -> bool {
+    matches!(
+        token.to_ascii_lowercase().as_str(),
+        "a" | "an"
+            | "and"
+            | "as"
+            | "before"
+            | "by"
+            | "for"
+            | "from"
+            | "if"
+            | "in"
+            | "of"
+            | "on"
+            | "or"
+            | "the"
+            | "then"
+            | "to"
+            | "with"
+            | "without"
+    )
+}
+
+fn trim_command_object_boundary(token: &str) -> &str {
+    token
+        .trim_matches(|ch: char| {
+            matches!(
+                ch,
+                '`' | '\'' | '"' | '(' | ')' | '[' | ']' | '{' | '}' | '<' | '>' | ';' | ',' | ':'
+            )
+        })
+        .trim_end_matches(|ch: char| matches!(ch, '.' | ',' | ';' | ':' | ')'))
 }
 
 pub(super) fn extract_prefix_literals(text: &str, limit: usize) -> Vec<String> {

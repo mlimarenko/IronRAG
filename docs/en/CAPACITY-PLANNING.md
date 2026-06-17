@@ -17,6 +17,19 @@ IRONRAG_DB_MEMORY_LIMIT=6144M \
   docker compose up -d
 ```
 
+## Container DNS
+
+The Compose stack gives application containers explicit recursive DNS defaults
+so outbound provider endpoints resolve consistently even when the host's Docker
+daemon inherited a local resolver that containers cannot reach. Override them
+when your environment requires a private resolver:
+
+```bash
+IRONRAG_DOCKER_DNS_PRIMARY=192.0.2.53 \
+  IRONRAG_DOCKER_DNS_SECONDARY=192.0.2.54 \
+  docker compose up -d
+```
+
 ## Host profiles
 
 | Profile | Host | Corpus shape | Notes |
@@ -24,6 +37,23 @@ IRONRAG_DB_MEMORY_LIMIT=6144M \
 | Evaluation | 4 vCPU, 8–12 GiB RAM, 50+ GB disk | Largest library up to ~25k chunks | Good for trials and demos. Avoid large high-dimensional vector rebuilds on this tier. |
 | Standard | 4–8 vCPU, 16 GiB RAM, 100–150 GB disk | Largest library up to ~250k chunks; total corpus may be larger across many libraries | Matches the default Compose memory budget. Suitable for normal self-hosted use when rebuilds are occasional. |
 | Large | 8–16 vCPU, 24–32 GiB RAM, 250+ GB disk | Largest library ~250k–1M chunks, high ingest concurrency, or full vector rebuilds | Raise the `IRONRAG_*_MEMORY_LIMIT` caps (see above) or equivalent Helm resource overrides. |
+
+## Runtime graph prewarm
+
+Runtime graph projection prewarm is disabled by default:
+
+```text
+IRONRAG_RUNTIME_GRAPH_PROJECTION_PREWARM_ENABLED=false
+IRONRAG_RUNTIME_GRAPH_PROJECTION_PREWARM_MAX_LIBRARIES=0
+```
+
+Leave it disabled on constrained or multi-library hosts. Lazy per-library graph
+loading keeps steady query service available without allocating every active
+library graph at API startup. Enable prewarm only when the host has enough free
+RAM for the largest active graph projections and first-turn graph latency is a
+known operational bottleneck. When enabling it, use
+`IRONRAG_RUNTIME_GRAPH_PROJECTION_PREWARM_MAX_LIBRARIES` to cap startup memory
+exposure before raising API memory limits.
 
 ## Disk planning
 
@@ -62,24 +92,57 @@ a maintenance window and raise the memory caps for million-row shards.
 
 Ingest — extraction, chunking, embedding, and graph build — runs in a separate
 **worker** service. The default stack runs **one** worker, which keeps the
-baseline light enough for small corpora and weak hosts. To ingest faster (large
-back-catalog imports, many libraries loading at once), run more workers from a
-single variable:
+baseline light enough for small corpora and weak hosts. To spread ingest work
+more independently (large back-catalog imports, many libraries loading at once),
+run more workers from a single variable:
 
 ```bash
 IRONRAG_WORKER_REPLICAS=4 docker compose up -d
 ```
 
 On Kubernetes set `worker.replicaCount` in
-[`charts/ironrag/values.yaml`](../../charts/ironrag/values.yaml).
+[`charts/ironrag/values.yaml`](../../charts/ironrag/values.yaml). The Helm chart
+also reserves one API rollout surge slot in the DB budget so API rolling updates
+can stay available without opening surprise Postgres backends.
+
+If you scale API replicas outside Helm, set `IRONRAG_API_REPLICAS` to the number
+of API processes that can be alive at once. For rolling updates, include the
+surge process in that count. Compose defaults to one API and one worker; Helm
+derives the API count from `api.replicaCount + 1` and the worker count from
+`worker.replicaCount`.
 
 Scale-out is safe at any time: workers claim queued jobs with
 `SELECT … FOR UPDATE SKIP LOCKED` under per-library, per-workspace and global
 concurrency caps, so two workers never pick up the same job and no library is
-over-subscribed. Each worker keeps its own `IRONRAG_WORKER_MEMORY_LIMIT` budget,
-so size the host for `replicas × worker memory` on top of the database and
-backend. Adding workers speeds up ingest only; query serving scales with the
-backend, not the worker count.
+over-subscribed. The default caps are deliberately conservative:
+
+```text
+IRONRAG_INGESTION_MAX_PARALLEL_JOBS_GLOBAL=4
+IRONRAG_INGESTION_MAX_PARALLEL_JOBS_PER_WORKSPACE=2
+IRONRAG_INGESTION_MAX_PARALLEL_JOBS_PER_LIBRARY=1
+```
+
+Each worker also applies a memory-derived local claim cap from its cgroup soft
+limit before it asks Postgres for more canonical ingest jobs. This keeps
+memory-heavy extraction or graph-merge jobs from stacking in one process on a
+swapless host. Raising `IRONRAG_WORKER_REPLICAS` or the ingest caps is useful
+only when the host, worker memory limit, database connection budget, and
+provider concurrency budget are raised together.
+
+Each worker keeps its own `IRONRAG_WORKER_MEMORY_LIMIT` budget, so size the
+host for `replicas × worker memory` on top of the database and backend.
+Docling-backed PDF, office, and OCR extraction also requires enough hard cgroup
+headroom for one local extractor process. If the worker cap is too small,
+ingestion fails the affected document with `docling_insufficient_memory` before
+spawning the extractor; raise `IRONRAG_WORKER_MEMORY_LIMIT` for extractor-heavy
+imports rather than relying on retries.
+`IRONRAG_DATABASE_MAX_CONNECTIONS` is a deployment-wide app connection budget;
+the runtime divides it across the expected API and worker processes and caps
+each worker's local claim loop to the DB slots it can service. Adding workers
+only increases DB-backed ingest parallelism when that deployment-wide DB budget
+has enough headroom for the larger process count. With the default budget, extra
+workers mostly spread work and memory isolation across processes; query serving
+scales with the backend, not the worker count.
 
 See also: [AI bindings](./AI-BINDINGS.md) (embedding dimension changes),
 [Helm chart](../../charts/ironrag/values.yaml) (resource presets),

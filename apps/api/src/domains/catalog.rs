@@ -4,6 +4,7 @@ use uuid::Uuid;
 
 use crate::domains::ai::AiBindingPurpose;
 use crate::domains::recognition::LibraryRecognitionPolicy;
+use crate::domains::retrieval::RetrievalConfig;
 use crate::shared::web::ingest::WebIngestPolicy;
 
 /// Chunking strategy applied when segmenting document content into chunks.
@@ -96,6 +97,7 @@ pub struct CatalogLibrary {
     pub extraction_prompt: Option<String>,
     pub web_ingest_policy: WebIngestPolicy,
     pub recognition_policy: LibraryRecognitionPolicy,
+    pub retrieval_config: RetrievalConfig,
     pub lifecycle_state: CatalogLifecycleState,
     pub include_document_hint_in_mcp_answers: bool,
     pub chunking_template: ChunkingTemplate,

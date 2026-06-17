@@ -6,7 +6,9 @@ fn sample_settings() -> Settings {
         bind_addr: "0.0.0.0:8080".into(),
         service_role: "api".into(),
         database_url: "postgres://postgres:postgres@127.0.0.1:5432/ironrag".into(),
-        database_max_connections: 64,
+        database_max_connections: 20,
+        api_replicas: 1,
+        worker_replicas: 1,
         knowledge_plane_backend: "arango".into(),
         redis_url: "redis://127.0.0.1:6379".into(),
         arangodb_url: "http://127.0.0.1:8529".into(),
@@ -111,6 +113,8 @@ fn sample_settings() -> Settings {
         runtime_graph_filter_empty_relations: true,
         runtime_graph_filter_degenerate_self_loops: true,
         runtime_graph_convergence_warning_backlog_threshold: 1,
+        runtime_graph_projection_prewarm_enabled: false,
+        runtime_graph_projection_prewarm_max_libraries: 0,
         mcp_memory_default_read_window_chars: 48_000,
         mcp_memory_max_read_window_chars: 192_000,
         mcp_memory_default_search_limit: 10,
@@ -119,6 +123,8 @@ fn sample_settings() -> Settings {
         mcp_memory_audit_enabled: true,
         chunking_max_chars: 2800,
         chunking_overlap_chars: 280,
+        provider_concurrency_max_outbound: 0,
+        provider_concurrency_query_reserved: 0,
     }
 }
 
@@ -142,6 +148,7 @@ fn settings_from_env_entries(entries: &[(&str, &str)]) -> Settings {
     settings.knowledge_plane_backend = settings.knowledge_plane_backend.trim().to_ascii_lowercase();
     validate_service_role(&settings).expect("role should validate");
     validate_knowledge_plane_backend(&settings).expect("knowledge backend should validate");
+    validate_database_settings(&settings).expect("database settings should validate");
     validate_service_name(&settings).expect("service name should validate");
     validate_arangodb_settings(&settings).expect("arangodb settings should validate");
     validate_ingestion_settings(&settings).expect("ingestion settings should validate");
@@ -161,7 +168,9 @@ fn from_env_has_sane_local_defaults() {
     assert_eq!(settings.service_role, "api");
     assert_eq!(settings.service_name, "ironrag-backend");
     assert_eq!(settings.environment, "local");
-    assert_eq!(settings.database_max_connections, 64);
+    assert_eq!(settings.database_max_connections, 20);
+    assert_eq!(settings.api_replicas, 1);
+    assert_eq!(settings.worker_replicas, 1);
     assert_eq!(settings.knowledge_plane_backend, "arango");
     assert_eq!(settings.ingestion_graph_extract_parallelism_per_doc, 16);
     assert_eq!(settings.redis_url, "redis://127.0.0.1:6379");
@@ -200,6 +209,8 @@ fn from_env_has_sane_local_defaults() {
     assert!(settings.runtime_graph_filter_empty_relations);
     assert!(settings.runtime_graph_filter_degenerate_self_loops);
     assert_eq!(settings.runtime_graph_convergence_warning_backlog_threshold, 1);
+    assert!(!settings.runtime_graph_projection_prewarm_enabled);
+    assert_eq!(settings.runtime_graph_projection_prewarm_max_libraries, 0);
     assert_eq!(settings.mcp_memory_default_read_window_chars, 48_000);
     assert_eq!(settings.mcp_memory_max_read_window_chars, 192_000);
     assert_eq!(settings.mcp_memory_default_search_limit, 10);
@@ -251,6 +262,31 @@ fn canonical_prefixed_flat_variables_override_defaults() {
 }
 
 #[test]
+fn database_connection_budget_must_cover_runtime_replicas() {
+    let mut settings = sample_settings();
+    settings.database_max_connections = 7;
+
+    assert_eq!(
+        validate_database_settings(&settings),
+        Err("database_max_connections must be at least 8 for api_replicas=1 and worker_replicas=1"
+            .into()),
+    );
+}
+
+#[test]
+fn database_replica_counts_override_defaults() {
+    let settings = settings_from_env_entries(&[
+        ("IRONRAG_API_REPLICAS", "2"),
+        ("IRONRAG_WORKER_REPLICAS", "3"),
+        ("IRONRAG_DATABASE_MAX_CONNECTIONS", "20"),
+    ]);
+
+    assert_eq!(settings.api_replicas, 2);
+    assert_eq!(settings.worker_replicas, 3);
+    assert_eq!(settings.database_max_connections, 20);
+}
+
+#[test]
 fn knowledge_plane_backend_env_overrides_default() {
     let settings = settings_from_env_entries(&[("IRONRAG_KNOWLEDGE_PLANE_BACKEND", " POSTGRES ")]);
 
@@ -284,6 +320,17 @@ fn canonical_graph_gc_interval_variable_overrides_default() {
     let settings = settings_from_env_entries(&[("IRONRAG_GRAPH_GC_HOURS", "6")]);
 
     assert_eq!(settings.graph_gc_hours, 6);
+}
+
+#[test]
+fn runtime_graph_projection_prewarm_variables_override_defaults() {
+    let settings = settings_from_env_entries(&[
+        ("IRONRAG_RUNTIME_GRAPH_PROJECTION_PREWARM_ENABLED", "true"),
+        ("IRONRAG_RUNTIME_GRAPH_PROJECTION_PREWARM_MAX_LIBRARIES", "2"),
+    ]);
+
+    assert!(settings.runtime_graph_projection_prewarm_enabled);
+    assert_eq!(settings.runtime_graph_projection_prewarm_max_libraries, 2);
 }
 
 #[test]

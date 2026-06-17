@@ -241,10 +241,13 @@ async fn resolve_resumable_pdf_extract_content(
     )
     .await
     .map_err(|error| {
-        CanonicalExtractContentError::extraction_failed(
-            "pdf_page_count_failed",
-            format!("failed to read pdf page count for revision {}: {error}", revision.revision_id),
-        )
+        let message =
+            format!("failed to read pdf page count for revision {}: {error}", revision.revision_id);
+        if let Some(failure_code) = error.memory_failure_code() {
+            CanonicalExtractContentError::extraction_failed_terminal(failure_code, message)
+        } else {
+            CanonicalExtractContentError::extraction_failed("pdf_page_count_failed", message)
+        }
     })?
     .filter(|value| *value > 0)
     .ok_or_else(|| {
@@ -515,13 +518,18 @@ async fn extract_pdf_run_streamed(
     )
     .await
     .map_err(|error| {
-        CanonicalExtractContentError::extraction_failed(
-            "pdf_page_range_extract_failed",
-            format!(
-                "failed to extract pdf pages {}-{} for revision {}: {error}",
-                run.start_page, run.end_page, revision_id
-            ),
-        )
+        let message = format!(
+            "failed to extract pdf pages {}-{} for revision {}: {error}",
+            run.start_page, run.end_page, revision_id
+        );
+        if let Some(failure_code) = error.memory_failure_code() {
+            CanonicalExtractContentError::extraction_failed_terminal(failure_code, message)
+        } else {
+            CanonicalExtractContentError::extraction_failed(
+                "pdf_page_range_extract_failed",
+                message,
+            )
+        }
     })
 }
 

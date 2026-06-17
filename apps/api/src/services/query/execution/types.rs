@@ -239,11 +239,47 @@ pub(crate) struct QueryChunkReferenceSnapshot {
     pub(crate) score: f64,
 }
 
+/// Structured provenance for a runtime answer candidate. Mirrors
+/// `AssistantAnswerCandidateProvenance` in the contracts crate; every id is
+/// optional because the clarify branches derive candidates from different
+/// evidence shapes (graph entity probe, document variant, label-only).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RuntimeAnswerCandidateProvenance {
+    pub entity_id: Option<Uuid>,
+    pub document_id: Option<Uuid>,
+    pub chunk_id: Option<Uuid>,
+}
+
+/// One typed disambiguation choice the clarify path surfaced. `kind` reuses
+/// the existing typed vocabulary (graph `node_type`, or `"document"`). This
+/// is a serialization of structures the clarify branch already computed — no
+/// new retrieval.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RuntimeAnswerCandidate {
+    pub label: String,
+    pub kind: String,
+    pub confidence: Option<f64>,
+    pub provenance: RuntimeAnswerCandidateProvenance,
+}
+
+/// Typed clarification metadata for a grounded-answer turn. `required` is
+/// `true` only when the turn returned a clarifying answer; ordinary answers
+/// carry the default (`required: false`, empty candidates).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct RuntimeClarification {
+    pub required: bool,
+    pub question: Option<String>,
+    pub answer_candidates: Vec<RuntimeAnswerCandidate>,
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct RuntimeAnswerQueryResult {
     pub(crate) answer: String,
     pub(crate) provider: ProviderModelSelection,
     pub(crate) usage_json: serde_json::Value,
+    /// Typed clarification metadata for this turn. Default (not a clarify
+    /// turn) for ordinary answers; populated at the clarify branches.
+    pub(crate) clarification: RuntimeClarification,
 }
 
 #[derive(Debug, Clone)]

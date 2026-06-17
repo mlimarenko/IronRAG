@@ -130,7 +130,7 @@ def load_api_key(provider: str) -> str | None:
     val = os.environ.get(env_name)
     if val:
         return val
-    p = Path("/home/leader/sources/IronRAG/ironrag/.env")
+    p = Path("/home/leader/sources/gitlab.piping.space/general/tools/ironrag/.env")
     if p.exists():
         for line in p.read_text().splitlines():
             if line.startswith(f"{env_name}="):

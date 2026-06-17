@@ -93,6 +93,12 @@ pub enum AgentStopReason {
     FinalAnswer,
     IterationCap,
     Deadline,
+    /// The loop forced a final answer because several consecutive iterations
+    /// produced no successful *new* tool result (every call errored, was
+    /// suppressed as a duplicate, or replayed an earlier result) and no final
+    /// answer was emitted. Distinct from `Deadline`/`IterationCap` so the
+    /// no-progress early-stop is observable in the turn debug payload.
+    NoProgress,
     ToolError,
     ProviderError,
 }

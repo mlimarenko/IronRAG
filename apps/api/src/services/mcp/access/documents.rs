@@ -32,6 +32,7 @@ use crate::{
 
 use super::{
     catalog::{describe_libraries, load_library_by_catalog_ref, load_visible_library_contexts},
+    fusion::SearchLane,
     types::{
         ArangoChunkMentionReferenceRow, ArangoRelationSupportReferenceRow, McpDocumentAccumulator,
         McpRevisionGroundingReferences, McpSearchEmbeddingContext, ResolvedDocumentState,
@@ -153,11 +154,11 @@ pub async fn search_documents(
         let mut document_accumulators =
             std::collections::HashMap::<Uuid, McpDocumentAccumulator>::new();
 
-        for metadata_hit in &metadata_hits {
+        for (index, metadata_hit) in metadata_hits.iter().enumerate() {
             let accumulator = document_accumulators
                 .entry(metadata_hit.document_id)
                 .or_insert_with(|| McpDocumentAccumulator::from_metadata(metadata_hit));
-            accumulator.bump_score(metadata_hit.metadata_score);
+            accumulator.observe_lane(SearchLane::Metadata, saturating_rank(index));
             accumulator.populate_excerpt_from_text(&metadata_hit.matched_text, query);
         }
 
@@ -176,8 +177,8 @@ pub async fn search_documents(
             };
             let accumulator = document_accumulators
                 .entry(document.document_id)
-                .or_insert_with(|| McpDocumentAccumulator::from_knowledge(document, revision, hit));
-            accumulator.bump_score(hit.score);
+                .or_insert_with(|| McpDocumentAccumulator::from_knowledge(document, revision));
+            accumulator.observe_lane(SearchLane::LexicalChunk, saturating_rank(index));
             accumulator.merge_chunk_span_anchor(
                 chunk.span_start,
                 hit.score,
@@ -205,26 +206,10 @@ pub async fn search_documents(
             let Some(revision) = revision_map.get(&chunk.revision_id) else {
                 continue;
             };
-            let accumulator =
-                document_accumulators.entry(document.document_id).or_insert_with(|| {
-                    McpDocumentAccumulator::from_knowledge(
-                        document,
-                        revision,
-                        &crate::infra::arangodb::search_store::KnowledgeChunkSearchRow {
-                            chunk_id: chunk.chunk_id,
-                            workspace_id: chunk.workspace_id,
-                            library_id: chunk.library_id,
-                            revision_id: chunk.revision_id,
-                            content_text: chunk.content_text.clone(),
-                            normalized_text: chunk.normalized_text.clone(),
-                            section_path: chunk.section_path.clone(),
-                            heading_trail: chunk.heading_trail.clone(),
-                            score: hit.score,
-                            quality_score: chunk.quality_score,
-                        },
-                    )
-                });
-            accumulator.bump_score(hit.score);
+            let accumulator = document_accumulators
+                .entry(document.document_id)
+                .or_insert_with(|| McpDocumentAccumulator::from_knowledge(document, revision));
+            accumulator.observe_lane(SearchLane::VectorChunk, saturating_rank(index));
             accumulator.merge_chunk_span_anchor(
                 chunk.span_start,
                 hit.score,
@@ -241,6 +226,7 @@ pub async fn search_documents(
 
         let mut library_hits = Vec::new();
         for accumulator in document_accumulators.into_values() {
+            let fused_score = accumulator.fused_score();
             let chunk_references = accumulator.clone().into_chunk_references();
             let content_summary = state
                 .canonical_services
@@ -266,7 +252,7 @@ pub async fn search_documents(
                 workspace_id: accumulator.workspace_id,
                 document_title: accumulator.document_title,
                 latest_revision_id: Some(accumulator.readable_revision_id),
-                score: accumulator.score,
+                score: fused_score,
                 excerpt: accumulator.excerpt,
                 excerpt_start_offset: accumulator.excerpt_start_offset,
                 excerpt_end_offset: accumulator.excerpt_end_offset,

@@ -10,6 +10,7 @@ use sqlx::{FromRow, PgPool};
 use uuid::Uuid;
 
 use crate::domains::query_ir::literal_text_is_identifier_shaped;
+use crate::domains::retrieval::DEFAULT_TEXT_SEARCH_CONFIG;
 use crate::infra::{
     arangodb::search_store::{
         KNOWLEDGE_CHUNK_VECTOR_KIND, KNOWLEDGE_ENTITY_VECTOR_KIND, KnowledgeChunkSearchRow,
@@ -209,16 +210,21 @@ const CHUNK_LEXICAL_SQL_TEMPLATE: &str = "with title_identity_docs as (
              limit $10";
 
 /// Pass A (precise): exact AND `websearch_to_tsquery`. Byte-for-byte the
-/// original chunk query — the executed SQL is unchanged.
-static CHUNK_LEXICAL_SQL_EXACT: LazyLock<String> = LazyLock::new(|| {
-    CHUNK_LEXICAL_SQL_TEMPLATE
-        .replace("{FTS}", "websearch_to_tsquery('simple', ironrag_unaccent($2))")
-});
+/// original chunk query — the executed SQL is unchanged. Rendered with the
+/// historical default text-search config so the default path stays identical.
+static CHUNK_LEXICAL_SQL_EXACT: LazyLock<String> =
+    LazyLock::new(|| chunk_lexical_sql(DEFAULT_TEXT_SEARCH_CONFIG).0);
 
 /// Relaxed passes (B/C): `to_tsquery`, fed a prefix tsquery string via `$2`.
-static CHUNK_LEXICAL_SQL_PREFIX: LazyLock<String> = LazyLock::new(|| {
-    CHUNK_LEXICAL_SQL_TEMPLATE.replace("{FTS}", "to_tsquery('simple', ironrag_unaccent($2))")
-});
+static CHUNK_LEXICAL_SQL_PREFIX: LazyLock<String> =
+    LazyLock::new(|| chunk_lexical_sql(DEFAULT_TEXT_SEARCH_CONFIG).1);
+
+/// Renders the chunk lexical-lane `(exact_sql, prefix_sql)` pair for a given
+/// Postgres text-search config name. `text_search_config == "simple"` reproduces
+/// the historical hardcoded SQL byte-for-byte.
+fn chunk_lexical_sql(text_search_config: &str) -> (String, String) {
+    lexical_lane_sql_for_config(CHUNK_LEXICAL_SQL_TEMPLATE, text_search_config)
+}
 
 #[derive(Clone)]
 pub struct PgSearchStore {
@@ -1041,6 +1047,37 @@ impl SearchStore for PgSearchStore {
         usize::try_from(total).context("chunk vector count overflowed usize")
     }
 
+    async fn list_chunk_vector_dimensions(
+        &self,
+        library_id: Uuid,
+        embedding_model_key: &str,
+        vector_kind: &str,
+    ) -> anyhow::Result<Vec<u64>> {
+        let rows = sqlx::query_scalar::<_, i32>(
+            "select dim
+             from knowledge_vector_relation_manifest
+             where library_id = $1
+               and embedding_model_key = $2
+               and vector_kind = $3
+               and row_count > 0
+             group by dim
+             order by sum(row_count) desc, dim desc",
+        )
+        .bind(library_id)
+        .bind(embedding_model_key)
+        .bind(vector_kind)
+        .fetch_all(&self.pool)
+        .await
+        .context("failed to list chunk vector dimensions from manifest")?;
+
+        rows.into_iter()
+            .map(|dim| {
+                anyhow::ensure!(dim > 0, "chunk vector manifest dimension must be positive");
+                u64::try_from(dim).context("chunk vector manifest dimension overflowed u64")
+            })
+            .collect()
+    }
+
     async fn upsert_entity_vector(
         &self,
         row: &KnowledgeEntityVectorRow,
@@ -1192,6 +1229,50 @@ impl SearchStore for PgSearchStore {
             query,
             CHUNK_LEXICAL_SQL_EXACT.as_str(),
             CHUNK_LEXICAL_SQL_PREFIX.as_str(),
+            |row: &KnowledgeChunkSearchRow| row.chunk_id,
+            |sql, fts_input| async move {
+                self.run_chunk_lexical_pass(
+                    &sql,
+                    library_id,
+                    &fts_input,
+                    limit,
+                    temporal_start,
+                    temporal_end,
+                    query_terms,
+                    title_identity_terms,
+                    title_ngram_terms,
+                    title_soft_raw_enabled,
+                )
+                .await
+            },
+        )
+        .await
+    }
+
+    async fn search_chunks_with_config(
+        &self,
+        library_id: Uuid,
+        query: &str,
+        limit: usize,
+        temporal_start: Option<DateTime<Utc>>,
+        temporal_end: Option<DateTime<Utc>>,
+        text_search_config: &str,
+    ) -> anyhow::Result<Vec<KnowledgeChunkSearchRow>> {
+        if query.trim().is_empty() {
+            return Ok(Vec::new());
+        }
+        let (sql_exact, sql_prefix) = chunk_lexical_sql(text_search_config);
+        let query_terms = lexical_query_terms(query);
+        let title_ngram_terms = title_ngram_terms(&query_terms);
+        let title_identity_terms = title_identity_terms(query, &query_terms);
+        let title_soft_raw_enabled = title_soft_raw_enabled(&query_terms);
+        let query_terms = query_terms.as_slice();
+        let title_ngram_terms = title_ngram_terms.as_slice();
+        let title_identity_terms = title_identity_terms.as_slice();
+        run_lexical_ladder(
+            query,
+            &sql_exact,
+            &sql_prefix,
             |row: &KnowledgeChunkSearchRow| row.chunk_id,
             |sql, fts_input| async move {
                 self.run_chunk_lexical_pass(
@@ -2119,12 +2200,41 @@ where
 
 /// Substitutes the `{FTS}` placeholder in a lexical-lane SQL template with the
 /// precise (`websearch_to_tsquery`) and relaxed (`to_tsquery`) constructors,
-/// returning `(exact_sql, prefix_sql)`. Both bind the FTS input via `$2`.
+/// returning `(exact_sql, prefix_sql)`. Both bind the FTS input via `$2`. Uses the
+/// historical default text-search config, so output is byte-identical to the
+/// original hardcoded SQL.
 fn lexical_lane_sql(template: &str) -> (String, String) {
+    lexical_lane_sql_for_config(template, DEFAULT_TEXT_SEARCH_CONFIG)
+}
+
+/// Like [`lexical_lane_sql`] but renders the lexical lane against an explicit
+/// Postgres text-search config name (sourced from a library's retrieval config).
+///
+/// The config name is sanitized to a conservative identifier shape before it is
+/// embedded in the SQL string literal — Postgres `regconfig` names are unquoted
+/// identifiers, so they cannot be bound as a `$n` parameter and must be rendered
+/// inline. The API boundary additionally rejects names absent from `pg_ts_config`;
+/// an unexpected value here falls back to the historical default rather than
+/// emitting unsafe SQL.
+fn lexical_lane_sql_for_config(template: &str, text_search_config: &str) -> (String, String) {
+    let config = sanitize_text_search_config(text_search_config);
     (
-        template.replace("{FTS}", "websearch_to_tsquery('simple', ironrag_unaccent($2))"),
-        template.replace("{FTS}", "to_tsquery('simple', ironrag_unaccent($2))"),
+        template
+            .replace("{FTS}", &format!("websearch_to_tsquery('{config}', ironrag_unaccent($2))")),
+        template.replace("{FTS}", &format!("to_tsquery('{config}', ironrag_unaccent($2))")),
     )
+}
+
+/// Returns the text-search config name when it is a safe Postgres identifier
+/// (ASCII letters, digits, and underscores, not starting with a digit), otherwise
+/// the historical default. This is defence-in-depth: write-time validation already
+/// rejects names missing from `pg_ts_config`, but the name is rendered into a SQL
+/// string literal so it must never carry quote or statement-terminator characters.
+fn sanitize_text_search_config(text_search_config: &str) -> &str {
+    let is_safe = !text_search_config.is_empty()
+        && !text_search_config.starts_with(|ch: char| ch.is_ascii_digit())
+        && text_search_config.chars().all(|ch| ch.is_ascii_alphanumeric() || ch == '_');
+    if is_safe { text_search_config } else { DEFAULT_TEXT_SEARCH_CONFIG }
 }
 
 #[cfg(test)]
@@ -2172,6 +2282,31 @@ mod tests {
         );
         assert!(!CHUNK_LEXICAL_SQL_PREFIX.contains("websearch_to_tsquery"));
         assert!(!CHUNK_LEXICAL_SQL_PREFIX.contains("{FTS}"));
+    }
+
+    #[test]
+    fn chunk_lexical_sql_non_default_config_substitutes_config_name() {
+        // Prove that a non-default text_search_config name flows through into
+        // the rendered FTS constructors so the lexical lane actually uses the
+        // library's declared config rather than the hardcoded 'simple' default.
+        let (exact, prefix) = chunk_lexical_sql("custom_lang");
+        assert!(
+            exact.contains("websearch_to_tsquery('custom_lang', ironrag_unaccent($2))"),
+            "exact template must contain websearch_to_tsquery with custom_lang config"
+        );
+        assert!(
+            prefix.contains("to_tsquery('custom_lang', ironrag_unaccent($2))"),
+            "prefix template must contain to_tsquery with custom_lang config"
+        );
+        // Sanity: neither template should fall back to 'simple'.
+        assert!(
+            !exact.contains("'simple'"),
+            "exact template must not contain 'simple' when config is custom_lang"
+        );
+        assert!(
+            !prefix.contains("'simple'"),
+            "prefix template must not contain 'simple' when config is custom_lang"
+        );
     }
 
     // (a) A multi-token query produces the exact prefix-AND query.

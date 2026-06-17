@@ -17,7 +17,7 @@ this directory is the entry point for deeper technical material.
 | [CAPACITY-PLANNING.md](./CAPACITY-PLANNING.md) | Host profiles, disk and vector sizing, large-host memory caps. |
 | [WEBHOOK.md](./WEBHOOK.md) | Outbound webhook subsystem: events, payload contract, signing, retry policy. |
 | [AI-BINDINGS.md](./AI-BINDINGS.md) | AI binding model: 8 purposes, scope ladder, wire-level prompt layout, model-choice tradeoffs, prompt-cache pitfalls. |
-| [BENCHMARKS.md](./BENCHMARKS.md) | Performance baselines for retrieval, ingest, graph render, MCP-UI parity. |
+| [BENCHMARKS.md](./BENCHMARKS.md) | Grounded-query benchmark suites, retrieval rank metrics, ingest smoke checks, and comparison workflow. |
 | [Upgrade from 0.4.x](../../README.md#upgrading-from-04x) | Short 0.4.x to 0.5.0 upgrade path; the full procedure is in the changelog. |
 
 ## Pipeline at a glance
@@ -115,6 +115,11 @@ vector rebuild utility from a source library using that binding. PostgreSQL
 stores vector material in per-`(library, dim)` pgvector relations tracked by a
 manifest, so the rebuild recalculates the affected vector material before the
 new retrieval lane is used.
+
+Lexical retrieval is also structured by the compiled `QueryIR`: high/low lane
+seeds come from typed subjects, target types, document focus, literals, and
+refinements. If the IR is not trustworthy for a turn, lexical retrieval falls
+back to the full extracted keyword set.
 
 ## Storage map
 

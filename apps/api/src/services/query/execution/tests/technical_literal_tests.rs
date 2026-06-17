@@ -871,17 +871,17 @@ fn technical_literal_focus_keywords_with_ir_literal_prioritizes_literal_tokens()
     // Compiler literals are emitted first, but surrounding request tokens
     // still participate so nearby config blocks can be disambiguated without
     // relying on a language-specific stop list.
-    let ir = query_ir_with_literals_and_target_types(["Acme Control Center"], ["port"]);
+    let ir = query_ir_with_literals_and_target_types(["Acme Runtime Console"], ["port"]);
     let keywords = technical_literal_focus_keywords(
-        "What port does the Acme Control Center use in production?",
+        "What port does the Acme Runtime Console use in production?",
         Some(&ir),
     );
 
-    assert!(keywords.iter().any(|keyword| keyword == "control"));
-    assert!(keywords.iter().any(|keyword| keyword == "center"));
+    assert!(keywords.iter().any(|keyword| keyword == "runtime"));
+    assert!(keywords.iter().any(|keyword| keyword == "console"));
     assert!(keywords.iter().any(|keyword| keyword == "production"));
     assert!(
-        keywords.iter().position(|keyword| keyword == "control").unwrap()
+        keywords.iter().position(|keyword| keyword == "runtime").unwrap()
             < keywords.iter().position(|keyword| keyword == "production").unwrap()
     );
 }
@@ -960,9 +960,24 @@ fn literal_extractors_normalize_markdown_wrapped_tokens() {
 
 #[test]
 fn package_literal_extractor_reads_inline_install_commands() {
-    let text = "Install the connector with aptitude install alpha-connector before running dpkg-reconfigure alpha-connector.";
+    let text = "Install the connector with sample-install alpha-connector before running sample-configure alpha-connector.";
 
     assert_eq!(extract_package_command_literals(text, 4), vec!["alpha-connector".to_string()]);
+}
+
+#[test]
+fn package_literal_extractor_reads_common_install_command_shapes() {
+    let text = "sample-install beta-agent\nsample-add gamma-agent\nsample-install @scope/delta\nsample-add epsilon-ui";
+
+    assert_eq!(
+        extract_package_command_literals(text, 8),
+        vec![
+            "beta-agent".to_string(),
+            "gamma-agent".to_string(),
+            "@scope/delta".to_string(),
+            "epsilon-ui".to_string()
+        ]
+    );
 }
 
 #[test]

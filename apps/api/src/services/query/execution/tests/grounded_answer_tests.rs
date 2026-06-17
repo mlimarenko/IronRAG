@@ -6,8 +6,8 @@ fn build_port_answer_skips_override_when_focused_document_has_no_grounded_port()
     let telegram_document_id = Uuid::now_v7();
 
     let answer = build_port_answer(
-        "What port does the Acme Control Center use?",
-        &query_ir_with_literals_and_target_types(["Acme Control Center"], ["port"]),
+        "What port does the Acme Sample Console use?",
+        &query_ir_with_literals_and_target_types(["Acme Sample Console"], ["port"]),
         &[
             RuntimeMatchedChunk {
                 chunk_id: Uuid::now_v7(),
@@ -15,14 +15,14 @@ fn build_port_answer_skips_override_when_focused_document_has_no_grounded_port()
                 chunk_index: 0,
                 chunk_kind: None,
                 document_id: control_document_id,
-                document_label: "Acme Control Center - Example".to_string(),
+                document_label: "Acme Sample Console - Example".to_string(),
                 excerpt:
-                    "Acme Control Center is configuration management software for managed objects."
+                    "Acme Sample Console is configuration management software for managed objects."
                         .to_string(),
                 score_kind: crate::services::query::execution::RuntimeChunkScoreKind::Relevance,
                 score: Some(0.95),
                 source_text: repair_technical_layout_noise(
-                    "Acme Control Center\nDescription\nAcme Control Center is configuration management software for managed objects.",
+                    "Acme Sample Console\nDescription\nAcme Sample Console is configuration management software for managed objects.",
                 ),
             },
             RuntimeMatchedChunk {
@@ -48,7 +48,7 @@ fn build_port_answer_skips_override_when_focused_document_has_no_grounded_port()
 #[test]
 fn build_port_answer_skips_port_plus_protocol_questions() {
     let rewards_document_id = Uuid::now_v7();
-    let loyalty_document_id = Uuid::now_v7();
+    let profile_document_id = Uuid::now_v7();
 
     let answer = build_port_answer(
         "What is the default port for the Rewards Accounts REST API, and which protocol does the Customer Profile API use?",
@@ -76,7 +76,7 @@ fn build_port_answer_skips_port_plus_protocol_questions() {
                 revision_id: Uuid::now_v7(),
                 chunk_index: 0,
                 chunk_kind: None,
-                document_id: loyalty_document_id,
+                document_id: profile_document_id,
                 document_label: "customer_profile_soap_reference.md".to_string(),
                 excerpt: "Protocol: SOAP over HTTP".to_string(),
                 score_kind: crate::services::query::execution::RuntimeChunkScoreKind::Relevance,
@@ -94,7 +94,7 @@ fn build_port_answer_skips_port_plus_protocol_questions() {
 #[test]
 fn build_port_and_protocol_answer_handles_english_multi_document_question() {
     let rewards_document_id = Uuid::now_v7();
-    let loyalty_document_id = Uuid::now_v7();
+    let profile_document_id = Uuid::now_v7();
 
     let answer = build_port_and_protocol_answer(
             "What is the default port for the Rewards Accounts REST API, and which protocol does the Customer Profile API use?",
@@ -123,7 +123,7 @@ fn build_port_and_protocol_answer_handles_english_multi_document_question() {
                     revision_id: Uuid::now_v7(),
                     chunk_index: 0,
                     chunk_kind: None,
-                    document_id: loyalty_document_id,
+                    document_id: profile_document_id,
                     document_label: "customer_profile_soap_reference.md".to_string(),
                     excerpt: "Protocol: SOAP over HTTP".to_string(),
                     score_kind: crate::services::query::execution::RuntimeChunkScoreKind::Relevance,
@@ -964,9 +964,9 @@ fn build_deterministic_grounded_answer_uses_port_fact_without_chunk_parsing() {
 #[test]
 fn build_deterministic_grounded_answer_uses_port_and_protocol_facts() {
     let rewards_document_id = Uuid::now_v7();
-    let loyalty_document_id = Uuid::now_v7();
+    let profile_document_id = Uuid::now_v7();
     let rewards_revision_id = Uuid::now_v7();
-    let loyalty_revision_id = Uuid::now_v7();
+    let profile_revision_id = Uuid::now_v7();
 
     let answer = build_deterministic_grounded_answer(
         "What is the default port for the Rewards Accounts REST API, and which protocol does the Customer Profile API use?",
@@ -1000,8 +1000,8 @@ fn build_deterministic_grounded_answer_uses_port_and_protocol_facts() {
                     display_value: "http".to_string(),
                     ..sample_technical_fact_row(
                         Uuid::now_v7(),
-                        loyalty_document_id,
-                        loyalty_revision_id,
+                        profile_document_id,
+                        profile_revision_id,
                     )
                 },
                 KnowledgeTechnicalFactRow {
@@ -1012,8 +1012,8 @@ fn build_deterministic_grounded_answer_uses_port_and_protocol_facts() {
                     display_value: "soap".to_string(),
                     ..sample_technical_fact_row(
                         Uuid::now_v7(),
-                        loyalty_document_id,
-                        loyalty_revision_id,
+                        profile_document_id,
+                        profile_revision_id,
                     )
                 },
             ],
@@ -1036,7 +1036,7 @@ fn build_deterministic_grounded_answer_uses_port_and_protocol_facts() {
                 revision_id: Uuid::now_v7(),
                 chunk_index: 0,
                 chunk_kind: None,
-                document_id: loyalty_document_id,
+                document_id: profile_document_id,
                 document_label: "customer_profile_soap_reference.md".to_string(),
                 excerpt: "Customer Profile SOAP API Reference".to_string(),
                 score_kind: crate::services::query::execution::RuntimeChunkScoreKind::Relevance,
@@ -1057,8 +1057,8 @@ fn build_deterministic_grounded_answer_skips_port_override_without_fact() {
     let telegram_document_id = Uuid::now_v7();
 
     let answer = build_deterministic_grounded_answer(
-        "What port does the Acme Control Center use?",
-        &query_ir_with_literals_and_target_types(["Acme Control Center"], ["port"]),
+        "What port does the Acme Sample Console use?",
+        &query_ir_with_literals_and_target_types(["Acme Sample Console"], ["port"]),
         &CanonicalAnswerEvidence {
             bundle: None,
             chunk_rows: Vec::new(),
@@ -1072,14 +1072,14 @@ fn build_deterministic_grounded_answer_skips_port_override_without_fact() {
                 chunk_index: 0,
                 chunk_kind: None,
                 document_id: control_document_id,
-                document_label: "Acme Control Center - Example".to_string(),
+                document_label: "Acme Sample Console - Example".to_string(),
                 excerpt:
-                    "Acme Control Center is configuration management software for managed objects."
+                    "Acme Sample Console is configuration management software for managed objects."
                         .to_string(),
                 score_kind: crate::services::query::execution::RuntimeChunkScoreKind::Relevance,
                 score: Some(0.95),
                 source_text: repair_technical_layout_noise(
-                    "Acme Control Center\nDescription\nAcme Control Center is configuration management software for managed objects.",
+                    "Acme Sample Console\nDescription\nAcme Sample Console is configuration management software for managed objects.",
                 ),
             },
             RuntimeMatchedChunk {
@@ -1224,7 +1224,7 @@ fn build_deterministic_grounded_answer_preserves_setup_config_sections() {
     let document_id = Uuid::now_v7();
     let revision_id = Uuid::now_v7();
     let answer = build_deterministic_grounded_answer(
-        "How do I configure Provider Alpha: package, primary file, and parameters?",
+        "How do I configure Subject Alpha: package, primary file, and parameters?",
         &query_ir_with_act_scope_and_target_types(
             QueryAct::ConfigureHow,
             QueryScope::SingleDocument,
@@ -1235,10 +1235,10 @@ fn build_deterministic_grounded_answer_preserves_setup_config_sections() {
             chunk_rows: Vec::new(),
             structured_blocks: vec![KnowledgeStructuredBlockRow {
                 normalized_text:
-                    "[CFG]\nRow 1 | Name: endpointUrl | Type: string | Default: http://demo.local\nRow 2 | Name: partnerId | Type: string | Default: empty\nRow 3 | Name: fillDetails | Type: boolean | Values: true false | Default: true\nRow 4 | Name: printSlip | Type: boolean | Values: true false | Default: false\n| captureSlip | boolean | true false | false |"
+                    "[CFG]\nRow 1 | Name: endpointUrl | Type: string | Default: http://example.invalid\nRow 2 | Name: accountId | Type: string | Default: empty\nRow 3 | Name: includeDetails | Type: boolean | Values: true false | Default: true\nRow 4 | Name: printSummary | Type: boolean | Values: true false | Default: false\n| captureSummary | boolean | true false | false |"
                         .to_string(),
                 text:
-                    "[CFG]\nRow 1 | Name: endpointUrl | Type: string | Default: http://demo.local\nRow 2 | Name: partnerId | Type: string | Default: empty\nRow 3 | Name: fillDetails | Type: boolean | Values: true false | Default: true\nRow 4 | Name: printSlip | Type: boolean | Values: true false | Default: false\n| captureSlip | boolean | true false | false |"
+                    "[CFG]\nRow 1 | Name: endpointUrl | Type: string | Default: http://example.invalid\nRow 2 | Name: accountId | Type: string | Default: empty\nRow 3 | Name: includeDetails | Type: boolean | Values: true false | Default: true\nRow 4 | Name: printSummary | Type: boolean | Values: true false | Default: false\n| captureSummary | boolean | true false | false |"
                         .to_string(),
                 ..sample_structured_block_row(Uuid::now_v7(), document_id, revision_id)
             }],
@@ -1250,25 +1250,25 @@ fn build_deterministic_grounded_answer_preserves_setup_config_sections() {
             chunk_index: 0,
             chunk_kind: None,
             document_id,
-            document_label: "Provider Alpha setup".to_string(),
-            excerpt: "Install alpha provider module and configure CFG.".to_string(),
+            document_label: "Subject Alpha setup".to_string(),
+            excerpt: "Install module-alpha and configure CFG.".to_string(),
             score_kind: crate::services::query::execution::RuntimeChunkScoreKind::Relevance,
             score: Some(0.96),
             source_text: repair_technical_layout_noise(
-                "apt install alpha-provider-module\nPrimary file: /opt/provider-alpha/alpha.conf\n[CFG]\nRow 1 | Name: endpointUrl | Type: string | Default: http://demo.local\nRow 2 | Name: partnerId | Type: string | Default: empty\nRow 3 | Name: fillDetails | Type: boolean | Values: true false | Default: true\nRow 4 | Name: printSlip | Type: boolean | Values: true false | Default: false\n| captureSlip | boolean | true false | false |\n[UI.ScanPanel.qrCode]\nvisible = true",
+                "sample-install module-alpha\nPrimary file: /opt/subject-alpha/alpha.conf\n[CFG]\nRow 1 | Name: endpointUrl | Type: string | Default: http://example.invalid\nRow 2 | Name: accountId | Type: string | Default: empty\nRow 3 | Name: includeDetails | Type: boolean | Values: true false | Default: true\nRow 4 | Name: printSummary | Type: boolean | Values: true false | Default: false\n| captureSummary | boolean | true false | false |\n[UI.ScanPanel.qrCode]\nvisible = true",
             ),
         }],
     )
     .unwrap_or_default();
 
-    assert!(answer.contains("`alpha-provider-module`"), "{answer}");
-    assert!(answer.contains("`/opt/provider-alpha/alpha.conf`"), "{answer}");
+    assert!(answer.contains("`module-alpha`"), "{answer}");
+    assert!(answer.contains("`/opt/subject-alpha/alpha.conf`"), "{answer}");
     assert!(answer.contains("`[CFG]`"), "{answer}");
     assert!(answer.contains("`endpointUrl`"), "{answer}");
-    assert!(answer.contains("`partnerId`"), "{answer}");
-    assert!(answer.contains("`fillDetails = true`"), "{answer}");
-    assert!(answer.contains("`printSlip = false`"), "{answer}");
-    assert!(answer.contains("`captureSlip = false`"), "{answer}");
+    assert!(answer.contains("`accountId`"), "{answer}");
+    assert!(answer.contains("`includeDetails = true`"), "{answer}");
+    assert!(answer.contains("`printSummary = false`"), "{answer}");
+    assert!(answer.contains("`captureSummary = false`"), "{answer}");
     assert!(answer.contains("`[UI.ScanPanel.qrCode]`"), "{answer}");
     assert!(answer.contains("`visible = true`"), "{answer}");
 }
@@ -1439,12 +1439,12 @@ fn build_deterministic_grounded_answer_finds_parameter_with_question_mark_despit
                 chunk_index: 0,
                 chunk_kind: None,
                 document_id: foreign_document_id,
-                document_label: "inventory_soap_api_contract.md".to_string(),
-                excerpt: "Inventory SOAP uses WSDL.".to_string(),
+                document_label: "foreign_transport_contract.md".to_string(),
+                excerpt: "Foreign transport uses WSDL.".to_string(),
                 score_kind: crate::services::query::execution::RuntimeChunkScoreKind::Relevance,
                 score: Some(0.99),
                 source_text: repair_technical_layout_noise(
-                    "Inventory SOAP API Contract\nWSDL URL: http://demo.local:8080/inventory-api/ws/inventory.wsdl",
+                    "Foreign Transport Contract\nWSDL URL: http://example.invalid:8080/foreign-api/ws/service.wsdl",
                 ),
             },
             RuntimeMatchedChunk {
@@ -1453,8 +1453,8 @@ fn build_deterministic_grounded_answer_finds_parameter_with_question_mark_despit
                 chunk_index: 0,
                 chunk_kind: None,
                 document_id,
-                document_label: "rewards_accounts_api_contract.md".to_string(),
-                excerpt: "withCards includes linked card records.".to_string(),
+                document_label: "subject_records_api_contract.md".to_string(),
+                excerpt: "withCards includes linked records.".to_string(),
                 score_kind: crate::services::query::execution::RuntimeChunkScoreKind::Relevance,
                 score: Some(0.71),
                 source_text: repair_technical_layout_noise(

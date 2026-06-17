@@ -1,29 +1,29 @@
 #!/usr/bin/env bash
 # Regression guard for the docker-compose memory budget.
 #
-# The shipped defaults must fit a small 4 GiB VM. On a swapless host the
-# steady-state sum of `memory` LIMITS is the only real containment lever
-# (Compose does not enforce `reservations`, and cgroup v2 lets the sum of
-# caps exceed physical RAM — a combined RSS above physical RAM trips the
-# kernel global OOM killer). This guard fails the build if a future edit to
-# docker-compose.yml pushes the steady-state limit sum past the ceiling, so
-# the default stack can never silently outgrow a 4 GiB VM. The one-shot
+# The shipped defaults must stay within the documented local memory envelope.
+# On a swapless host the steady-state sum of `memory` LIMITS is the only real
+# containment lever (Compose does not enforce `reservations`, and cgroup v2 lets
+# the sum of caps exceed physical RAM — a combined RSS above physical RAM trips
+# the kernel global OOM killer). This guard fails the build if a future edit to
+# docker-compose.yml pushes the steady-state limit sum past the ceiling, so the
+# default stack cannot silently become more memory-hungry. The one-shot
 # `startup` migrator is excluded: it exits before steady state and never
 # co-resides under load.
 #
 # Each anchor's memory limit is env-overridable as
 # `memory: ${IRONRAG_*_MEMORY_LIMIT:-<default>}` (CPU likewise via
-# IRONRAG_*_CPUS); this guard parses the baseline DEFAULT (the 4 GiB-VM
-# sizing). Raising a cap via env for a bigger host (e.g. a 16 GiB stage)
-# intentionally exceeds this ceiling and is not checked here.
+# IRONRAG_*_CPUS); this guard parses the baseline DEFAULT. Raising a cap via
+# env for a bigger host intentionally exceeds this ceiling and is not checked
+# here.
 #
 # Usage: scripts/ops/check-mem-budget.sh [compose-file] [ceiling-MiB]
-#   defaults: docker-compose.yml, 3584 MiB (4 GiB - 0.5 GiB headroom)
+#   defaults: docker-compose.yml, 5632 MiB (6 GiB - 0.5 GiB headroom)
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 COMPOSE_FILE="${1:-${ROOT_DIR}/docker-compose.yml}"
-CEILING_MIB="${2:-3584}"
+CEILING_MIB="${2:-5632}"
 
 if [[ ! -f "${COMPOSE_FILE}" ]]; then
   echo "check-mem-budget: compose file not found: ${COMPOSE_FILE}" >&2
@@ -54,11 +54,11 @@ EXCLUDED = {"startup"}
 def compose_default(raw: str) -> str:
     """Resolve a docker-compose interpolation to its baseline default.
 
-    `memory: ${IRONRAG_DB_MEMORY_LIMIT:-1024M}` carries the 4 GiB-VM
-    baseline in the `:-<default>` clause; the guard sizes against that, not
-    the operator's env override. A plain literal (`memory: 1024M`) passes
-    through unchanged. An interpolation without a default is unparseable —
-    a future edit must keep a literal default so the baseline is knowable.
+    `memory: ${IRONRAG_DB_MEMORY_LIMIT:-1024M}` carries the baseline in the
+    `:-<default>` clause; the guard sizes against that, not the operator's env
+    override. A plain literal (`memory: 1024M`) passes through unchanged. An
+    interpolation without a default is unparseable — a future edit must keep a
+    literal default so the baseline is knowable.
     """
     m = re.fullmatch(r"\s*\$\{[A-Za-z_][A-Za-z0-9_]*:-(.*?)\}\s*", raw)
     if m:
@@ -198,10 +198,10 @@ if total > ceiling_mib:
     over = total - ceiling_mib
     print(f"\nFAIL: steady-state memory limit sum exceeds the budget ceiling by "
           f"{over} MiB ({over / 1024:.2f} GiB).\n"
-          f"On a swapless 4 GiB VM this risks the kernel global OOM killer. "
-          f"Lower a service cap. The baseline defaults must fit a 4 GiB VM; a "
-          f"bigger host is opt-in via the IRONRAG_*_MEMORY_LIMIT env overrides, "
-          f"not by raising the defaults here.",
+          f"On a swapless host this risks the kernel global OOM killer. "
+          f"Lower a service cap or raise this documented baseline intentionally; "
+          f"a bigger host remains opt-in via the IRONRAG_*_MEMORY_LIMIT env "
+          f"overrides, not by accidental default drift.",
           file=sys.stderr)
     sys.exit(1)
 

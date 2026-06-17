@@ -13,6 +13,11 @@ expression: shapes
       "technicalFactReferences": 1,
       "total": 4
     },
+    "clarificationShape": {
+      "candidateCount": 0,
+      "questionPresent": false,
+      "required": false
+    },
     "contentShape": {
       "blocks": [
         {
@@ -28,6 +33,7 @@ expression: shapes
     },
     "executionDetailKeys": [
       "chunkReferences",
+      "clarification",
       "contextBundleId",
       "entityReferences",
       "execution",
@@ -97,6 +103,8 @@ expression: shapes
     },
     "structuredContentKeys": [
       "answerBody",
+      "answerCandidates",
+      "clarification",
       "conversationId",
       "executionDetail",
       "executionId",
@@ -152,6 +160,11 @@ expression: shapes
       "technicalFactReferences": 2,
       "total": 5
     },
+    "clarificationShape": {
+      "candidateCount": 0,
+      "questionPresent": false,
+      "required": false
+    },
     "contentShape": {
       "blocks": [
         {
@@ -167,6 +180,7 @@ expression: shapes
     },
     "executionDetailKeys": [
       "chunkReferences",
+      "clarification",
       "contextBundleId",
       "entityReferences",
       "execution",
@@ -254,6 +268,8 @@ expression: shapes
     },
     "structuredContentKeys": [
       "answerBody",
+      "answerCandidates",
+      "clarification",
       "conversationId",
       "executionDetail",
       "executionId",
@@ -309,6 +325,11 @@ expression: shapes
       "technicalFactReferences": 0,
       "total": 0
     },
+    "clarificationShape": {
+      "candidateCount": 0,
+      "questionPresent": false,
+      "required": false
+    },
     "contentShape": {
       "blocks": [
         {
@@ -324,6 +345,7 @@ expression: shapes
     },
     "executionDetailKeys": [
       "chunkReferences",
+      "clarification",
       "contextBundleId",
       "entityReferences",
       "execution",
@@ -360,6 +382,8 @@ expression: shapes
     },
     "structuredContentKeys": [
       "answerBody",
+      "answerCandidates",
+      "clarification",
       "conversationId",
       "executionDetail",
       "executionId",
@@ -428,6 +452,11 @@ expression: shapes
       "technicalFactReferences": 0,
       "total": 4
     },
+    "clarificationShape": {
+      "candidateCount": 0,
+      "questionPresent": false,
+      "required": false
+    },
     "contentShape": {
       "blocks": [
         {
@@ -443,6 +472,7 @@ expression: shapes
     },
     "executionDetailKeys": [
       "chunkReferences",
+      "clarification",
       "contextBundleId",
       "entityReferences",
       "execution",
@@ -520,6 +550,8 @@ expression: shapes
     },
     "structuredContentKeys": [
       "answerBody",
+      "answerCandidates",
+      "clarification",
       "conversationId",
       "executionDetail",
       "executionId",
@@ -588,6 +620,11 @@ expression: shapes
       "technicalFactReferences": 0,
       "total": 5
     },
+    "clarificationShape": {
+      "candidateCount": 0,
+      "questionPresent": false,
+      "required": false
+    },
     "contentShape": {
       "blocks": [
         {
@@ -603,6 +640,7 @@ expression: shapes
     },
     "executionDetailKeys": [
       "chunkReferences",
+      "clarification",
       "contextBundleId",
       "entityReferences",
       "execution",
@@ -672,6 +710,8 @@ expression: shapes
     },
     "structuredContentKeys": [
       "answerBody",
+      "answerCandidates",
+      "clarification",
       "conversationId",
       "executionDetail",
       "executionId",
@@ -727,6 +767,11 @@ expression: shapes
       "technicalFactReferences": 1,
       "total": 4
     },
+    "clarificationShape": {
+      "candidateCount": 0,
+      "questionPresent": false,
+      "required": false
+    },
     "contentShape": {
       "blocks": [
         {
@@ -742,6 +787,7 @@ expression: shapes
     },
     "executionDetailKeys": [
       "chunkReferences",
+      "clarification",
       "contextBundleId",
       "entityReferences",
       "execution",
@@ -819,6 +865,8 @@ expression: shapes
     },
     "structuredContentKeys": [
       "answerBody",
+      "answerCandidates",
+      "clarification",
       "conversationId",
       "executionDetail",
       "executionId",

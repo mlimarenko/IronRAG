@@ -163,7 +163,7 @@ fn reorder_chunks(
         let Some(rank) = order_index.get(&chunk.chunk_id.to_string()).copied() else {
             continue;
         };
-        chunk.score = Some(ordered_len.saturating_sub(rank) as f32);
+        chunk.score = Some(rerank_preserved_chunk_score(chunk, ordered_len, rank));
     }
     indexed.sort_by(|(left_index, left), (right_index, right)| {
         let left_order = order_index.get(&left.chunk_id.to_string()).copied().unwrap_or(usize::MAX);
@@ -172,6 +172,18 @@ fn reorder_chunks(
         left_order.cmp(&right_order).then_with(|| left_index.cmp(right_index))
     });
     indexed.into_iter().map(|(_, item)| item).collect()
+}
+
+fn rerank_preserved_chunk_score(
+    chunk: &RuntimeMatchedChunk,
+    ordered_len: usize,
+    rank: usize,
+) -> f32 {
+    let rerank_score = ordered_len.saturating_sub(rank) as f32;
+    if chunk.score_kind == RuntimeChunkScoreKind::Relevance {
+        return rerank_score;
+    }
+    chunk.score.unwrap_or(0.0).max(rerank_score)
 }
 
 fn reorder_by_ids<T>(
@@ -233,5 +245,39 @@ mod tests {
 
         assert!(candidate.text.contains("Short neighboring heading."));
         assert!(!candidate.text.contains("AlphaSwitch escalates through mailbox Z-19"));
+    }
+
+    #[test]
+    fn rerank_does_not_lower_absolute_evidence_lane_score() {
+        let mut protected = chunk_with_runtime_text(RuntimeChunkScoreKind::FocusedDocument);
+        protected.score = Some(5_000.0);
+        let protected_id = protected.chunk_id.to_string();
+        let mut ordinary = chunk_with_runtime_text(RuntimeChunkScoreKind::Relevance);
+        ordinary.score = Some(0.1);
+        let ordinary_id = ordinary.chunk_id.to_string();
+        let outcome = RerankOutcome {
+            entities: Vec::new(),
+            relationships: Vec::new(),
+            chunks: vec![ordinary_id, protected_id],
+            metadata: crate::domains::query::RerankMetadata {
+                status: crate::domains::query::RerankStatus::Applied,
+                candidate_count: 2,
+                reordered_count: Some(2),
+            },
+        };
+        let mut bundle = RetrievalBundle {
+            entities: Vec::new(),
+            relationships: Vec::new(),
+            chunks: vec![protected, ordinary],
+        };
+
+        apply_rerank_outcome(&mut bundle, &outcome);
+
+        let retained = bundle
+            .chunks
+            .iter()
+            .find(|chunk| chunk.chunk_id.to_string() == outcome.chunks[1])
+            .expect("protected chunk must remain present");
+        assert_eq!(retained.score, Some(5_000.0));
     }
 }

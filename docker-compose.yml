@@ -6,7 +6,8 @@
 # variants are opt-in:
 #
 #   default (no profile)   filesystem content storage, prebuilt Hub images,
-#                          16 GiB-host memory caps. Just `docker compose up -d`.
+#                          Docling-capable local memory caps. Just
+#                          `docker compose up -d`.
 #
 #   s4 profile             bundled s4core (S3-compatible) object storage.
 #     COMPOSE_PROFILES=s4 \
@@ -55,7 +56,11 @@ x-ironrag-runtime-env: &ironrag-runtime-env
   # several stacks deliberately share one database.
   IRONRAG_DEPLOYMENT_ID: ${IRONRAG_DEPLOYMENT_ID:-}
   IRONRAG_DATABASE_URL: postgres://${IRONRAG_POSTGRES_USER:-postgres}:${IRONRAG_POSTGRES_PASSWORD:-postgres}@${IRONRAG_POSTGRES_HOST:-postgres}:5432/${IRONRAG_POSTGRES_DB:-ironrag}
+  # Deployment-wide app connection budget. The backend divides it across the
+  # expected API + worker replicas before opening per-process SQLx pools.
   IRONRAG_DATABASE_MAX_CONNECTIONS: ${IRONRAG_DATABASE_MAX_CONNECTIONS:-20}
+  IRONRAG_API_REPLICAS: ${IRONRAG_API_REPLICAS:-1}
+  IRONRAG_WORKER_REPLICAS: ${IRONRAG_WORKER_REPLICAS:-1}
   IRONRAG_KNOWLEDGE_PLANE_BACKEND: postgres
   IRONRAG_REDIS_URL: ${IRONRAG_REDIS_URL:-redis://redis:6379}
   IRONRAG_LOG_FILTER: ${IRONRAG_LOG_FILTER:-info}
@@ -100,6 +105,17 @@ x-ironrag-runtime-env: &ironrag-runtime-env
   IRONRAG_CONTENT_STORAGE_S3_SECRET_ACCESS_KEY: ${IRONRAG_CONTENT_STORAGE_S3_SECRET_ACCESS_KEY:-ironrag-dev-secret}
   IRONRAG_CONTENT_STORAGE_S3_SESSION_TOKEN: ${IRONRAG_CONTENT_STORAGE_S3_SESSION_TOKEN:-}
   IRONRAG_CONTENT_STORAGE_S3_FORCE_PATH_STYLE: ${IRONRAG_CONTENT_STORAGE_S3_FORCE_PATH_STYLE:-true}
+  # Keep the local baseline memory-safe: the worker runtime also applies a
+  # cgroup-derived per-process claim cap, while these defaults prevent several
+  # replicas from stacking graph-merge jobs on the same host. Larger deployments
+  # can raise the values together with worker memory.
+  IRONRAG_INGESTION_MAX_PARALLEL_JOBS_GLOBAL: ${IRONRAG_INGESTION_MAX_PARALLEL_JOBS_GLOBAL:-4}
+  IRONRAG_INGESTION_MAX_PARALLEL_JOBS_PER_WORKSPACE: ${IRONRAG_INGESTION_MAX_PARALLEL_JOBS_PER_WORKSPACE:-2}
+  IRONRAG_INGESTION_MAX_PARALLEL_JOBS_PER_LIBRARY: ${IRONRAG_INGESTION_MAX_PARALLEL_JOBS_PER_LIBRARY:-1}
+  # Graph projection prewarm is opt-in. Large libraries can allocate enough
+  # memory to OOM the API role if every active graph is loaded at startup.
+  IRONRAG_RUNTIME_GRAPH_PROJECTION_PREWARM_ENABLED: ${IRONRAG_RUNTIME_GRAPH_PROJECTION_PREWARM_ENABLED:-false}
+  IRONRAG_RUNTIME_GRAPH_PROJECTION_PREWARM_MAX_LIBRARIES: ${IRONRAG_RUNTIME_GRAPH_PROJECTION_PREWARM_MAX_LIBRARIES:-0}
   IRONRAG_OTEL_ENABLED: ${IRONRAG_OTEL_ENABLED:-true}
   OTEL_RESOURCE_ATTRIBUTES: ${OTEL_RESOURCE_ATTRIBUTES:-service.namespace=ironrag}
   # Logs are the only content-bearing signal (they carry query text and document
@@ -112,30 +128,35 @@ x-ironrag-runtime-env: &ironrag-runtime-env
   OTEL_EXPORTER_OTLP_PROTOCOL: ${OTEL_EXPORTER_OTLP_PROTOCOL:-}
   OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
 
-# ─── Memory containment (4 GiB VM baseline, swap = 0) ────────────────────────
+x-ironrag-dns: &ironrag-dns
+  - ${IRONRAG_DOCKER_DNS_PRIMARY:-1.1.1.1}
+  - ${IRONRAG_DOCKER_DNS_SECONDARY:-8.8.8.8}
+
+# ─── Memory containment (Docling-capable local baseline, swap = 0) ────────────
 # The steady-state sum of `memory` LIMITS is the real lever here: Compose does
 # NOT enforce `reservations` (only Swarm / k8s does), and cgroup v2 lets the
 # sum of caps exceed physical RAM. On a swapless host a combined resident set
 # above physical RAM trips the kernel's GLOBAL OOM killer, which then SIGKILLs
 # the largest-RSS bystander instead of the rebuildable worker. The defaults
-# below are small so the stack fits a 4 GiB VM out of the box.
+# below are sized so the local stack can run one bounded embedded Docling
+# extractor and still fail fast before pressure turns into SIGKILL loops.
 #
 #   anchor    default  services            counts toward steady Σ?
 #   frontend   192M    frontend            yes
 #   cache      192M    redis               yes
 #   db        1024M    postgres, startup   postgres: yes / startup: one-shot
-#   worker     768M    worker              yes
+#   worker    3072M    worker              yes
 #   backend   1024M    backend             yes
 #
 # Steady Σ (repo services, one-shot startup excluded):
-#   1024 + 1024 + 768 + 192 + 192 = 3200 MiB ≈ 3.1 GiB, fits a 4 GiB VM.
+#   1024 + 1024 + 3072 + 192 + 192 = 5504 MiB ≈ 5.4 GiB.
 # `scripts/ops/check-mem-budget.sh` (wired into `make check`) parses the
 # defaults below and fails the build if this baseline sum is exceeded, so a
-# future edit cannot silently push the stack past a 4 GiB VM. Both the CPU and
-# memory limit of every role scale UP via the IRONRAG_*_CPUS /
-# IRONRAG_*_MEMORY_LIMIT env overrides for a bigger host (e.g. a 16 GiB stage),
-# without editing this file. These caps plus the per-service `oom_score_adj`
-# below keep the small default correct by default.
+# future edit cannot silently make the default stack more memory-hungry. Both
+# the CPU and memory limit of every role scale via the IRONRAG_*_CPUS /
+# IRONRAG_*_MEMORY_LIMIT env overrides without editing this file. Text/native
+# only local stacks may lower the worker cap, but PDF / office / OCR ingest
+# needs the one-process Docling headroom or it will be rejected by the worker.
 x-ironrag-resources-frontend: &ironrag-resources-frontend
   limits:
     cpus: ${IRONRAG_FRONTEND_CPUS:-0.50}
@@ -163,26 +184,23 @@ x-ironrag-resources-db: &ironrag-resources-db
     cpus: "0.25"
     memory: 256M
 
-# Ingest worker. The small 768M default is docling memory containment:
-# `auto_docling_max_concurrency_for_limits` (apps/api/src/integrations/docling/
-# mod.rs) derives the concurrency cap from (mem_mib*0.9 - 2048) / 2560, which
-# clamps to docling concurrency = 1 at this cap. A runaway docling/python
-# extraction then cgroup-OOMs the worker — whose job simply requeues — instead
-# of tripping a host global OOM. `oom_score_adj: 800` (below) makes the worker
-# the kernel's first sacrifice. Raise IRONRAG_WORKER_MEMORY_LIMIT on a bigger
-# host to lift the docling concurrency cap.
+# Ingest worker. The default is sized for one bounded embedded Docling
+# extractor process plus Rust worker headroom; application-side concurrency and
+# cgroup headroom gates still prevent parallel extractor fanout and SIGKILL
+# retry loops under pressure. For text/native-only local stacks this can be
+# lowered, but PDF / office / OCR ingest should keep at least one-process
+# Docling headroom.
 x-ironrag-resources-worker: &ironrag-resources-worker
   limits:
     cpus: ${IRONRAG_WORKER_CPUS:-2.00}
-    memory: ${IRONRAG_WORKER_MEMORY_LIMIT:-768M}
+    memory: ${IRONRAG_WORKER_MEMORY_LIMIT:-3072M}
   reservations:
     cpus: "0.50"
     memory: 256M
 
-# API backend. Answer path only — no docling spawned here. The 1024M default
-# fits a 4 GiB VM for light concurrency; heavy concurrent grounded-answer turns
-# can peak higher (observed 1.7-3.1 GiB on a large corpus), so raise
-# IRONRAG_BACKEND_MEMORY_LIMIT on a bigger host.
+# API backend. Answer path only — no docling spawned here. The 1024M default is
+# enough for light concurrency; heavy concurrent grounded-answer turns can peak
+# higher, so raise IRONRAG_BACKEND_MEMORY_LIMIT on a bigger host.
 x-ironrag-resources-backend: &ironrag-resources-backend
   limits:
     cpus: ${IRONRAG_BACKEND_CPUS:-2.00}
@@ -192,7 +210,7 @@ x-ironrag-resources-backend: &ironrag-resources-backend
     memory: 256M
 
 # Bundled s4core object store (only under the `s4` profile, so NOT part of the
-# 4 GiB-VM baseline budget — check-mem-budget.sh skips profiled services). A
+# default memory budget — check-mem-budget.sh skips profiled services). A
 # lightweight S3 server that streams blobs to disk; raise the cap for heavy
 # upload concurrency, or point IRONRAG_CONTENT_STORAGE_S3_ENDPOINT at an
 # external bucket and don't run s4core at all.
@@ -314,6 +332,7 @@ services:
       OTEL_SERVICE_NAME: ironrag-startup
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    dns: *ironrag-dns
     # One-shot migrator; neutral OOM priority — it exits before steady state
     # so it does not co-reside under load.
     oom_score_adj: 0
@@ -350,6 +369,7 @@ services:
       - "8080"
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    dns: *ironrag-dns
     volumes:
       - content_storage_data:/var/lib/ironrag/content-storage
     healthcheck:
@@ -386,6 +406,7 @@ services:
       - "8080"
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    dns: *ironrag-dns
     volumes:
       - content_storage_data:/var/lib/ironrag/content-storage
     healthcheck:
@@ -422,6 +443,7 @@ services:
         condition: service_healthy
     environment:
       IRONRAG_API_UPSTREAM: http://backend:8080
+    dns: *ironrag-dns
     ports:
       - "${IRONRAG_PORT:-19000}:80"
     healthcheck:

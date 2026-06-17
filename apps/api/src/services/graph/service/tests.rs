@@ -232,7 +232,7 @@ fn reconcile_entity_candidate_row_prefers_entity_for_label_type_collisions() {
 fn build_prefixed_entity_key_aliases_collapses_unbranded_product_keys() {
     let revision_id = Uuid::now_v7();
     let branded = ReconciledEntityCandidate {
-        normalization_key: "entity:acme_control_center".to_string(),
+        normalization_key: "entity:acme_operations_console".to_string(),
         row: KnowledgeEntityCandidateRow {
             key: Uuid::now_v7().to_string(),
             arango_id: None,
@@ -242,10 +242,10 @@ fn build_prefixed_entity_key_aliases_collapses_unbranded_product_keys() {
             library_id: Uuid::now_v7(),
             revision_id,
             chunk_id: Some(Uuid::now_v7()),
-            candidate_label: "Acme Control Center".to_string(),
+            candidate_label: "Acme Operations Console".to_string(),
             candidate_type: "entity".to_string(),
             candidate_sub_type: None,
-            normalization_key: "entity:acme_control_center".to_string(),
+            normalization_key: "entity:acme_operations_console".to_string(),
             confidence: None,
             extraction_method: "graph_extract".to_string(),
             candidate_state: "active".to_string(),
@@ -254,7 +254,7 @@ fn build_prefixed_entity_key_aliases_collapses_unbranded_product_keys() {
         },
     };
     let unbranded = ReconciledEntityCandidate {
-        normalization_key: "entity:control_center".to_string(),
+        normalization_key: "entity:operations_console".to_string(),
         row: KnowledgeEntityCandidateRow {
             key: Uuid::now_v7().to_string(),
             arango_id: None,
@@ -264,10 +264,10 @@ fn build_prefixed_entity_key_aliases_collapses_unbranded_product_keys() {
             library_id: Uuid::now_v7(),
             revision_id,
             chunk_id: Some(Uuid::now_v7()),
-            candidate_label: "Control Center".to_string(),
+            candidate_label: "Operations Console".to_string(),
             candidate_type: "entity".to_string(),
             candidate_sub_type: None,
-            normalization_key: "entity:control_center".to_string(),
+            normalization_key: "entity:operations_console".to_string(),
             confidence: None,
             extraction_method: "graph_extract".to_string(),
             candidate_state: "active".to_string(),
@@ -279,8 +279,8 @@ fn build_prefixed_entity_key_aliases_collapses_unbranded_product_keys() {
     let aliases = build_prefixed_entity_key_aliases(&[branded, unbranded]);
 
     assert_eq!(
-        aliases.get("entity:control_center"),
-        Some(&"entity:acme_control_center".to_string())
+        aliases.get("entity:operations_console"),
+        Some(&"entity:acme_operations_console".to_string())
     );
 }
 
@@ -296,36 +296,36 @@ fn apply_entity_key_aliases_to_relation_candidate_rebuilds_assertion() {
             library_id: Uuid::now_v7(),
             revision_id: Uuid::now_v7(),
             chunk_id: Some(Uuid::now_v7()),
-            subject_label: "Control Center".to_string(),
-            subject_candidate_key: "entity:control_center".to_string(),
+            subject_label: "Operations Console".to_string(),
+            subject_candidate_key: "entity:operations_console".to_string(),
             predicate: "manages".to_string(),
             object_label: "Register".to_string(),
             object_candidate_key: "entity:register".to_string(),
-            normalized_assertion: "entity:control_center--manages--entity:register".to_string(),
+            normalized_assertion: "entity:operations_console--manages--entity:register".to_string(),
             confidence: None,
             extraction_method: "graph_extract".to_string(),
             candidate_state: "active".to_string(),
             created_at: Utc::now(),
             updated_at: Utc::now(),
         },
-        subject_candidate_key: "entity:control_center".to_string(),
+        subject_candidate_key: "entity:operations_console".to_string(),
         predicate: "manages".to_string(),
         object_candidate_key: "entity:register".to_string(),
-        normalized_assertion: "entity:control_center--manages--entity:register".to_string(),
+        normalized_assertion: "entity:operations_console--manages--entity:register".to_string(),
     };
 
     apply_entity_key_aliases_to_relation_candidate(
         &mut candidate,
         &BTreeMap::from([(
-            "entity:control_center".to_string(),
-            "entity:acme_control_center".to_string(),
+            "entity:operations_console".to_string(),
+            "entity:acme_operations_console".to_string(),
         )]),
     );
 
-    assert_eq!(candidate.subject_candidate_key, "entity:acme_control_center");
+    assert_eq!(candidate.subject_candidate_key, "entity:acme_operations_console");
     assert_eq!(
         candidate.normalized_assertion,
-        "entity:acme_control_center--manages--entity:register"
+        "entity:acme_operations_console--manages--entity:register"
     );
 }
 

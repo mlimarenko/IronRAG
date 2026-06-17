@@ -434,6 +434,14 @@ pub trait SearchStore: Send + Sync {
         vector_kind: &str,
         freshness_generation: i64,
     ) -> anyhow::Result<usize>;
+    /// List persisted chunk-vector dimensions for a library/model/kind tuple,
+    /// ordered by the implementation's strongest evidence first.
+    async fn list_chunk_vector_dimensions(
+        &self,
+        library_id: Uuid,
+        embedding_model_key: &str,
+        vector_kind: &str,
+    ) -> anyhow::Result<Vec<u64>>;
     async fn upsert_entity_vector(
         &self,
         row: &KnowledgeEntityVectorRow,
@@ -459,6 +467,27 @@ pub trait SearchStore: Send + Sync {
         temporal_start: Option<DateTime<Utc>>,
         temporal_end: Option<DateTime<Utc>>,
     ) -> anyhow::Result<Vec<KnowledgeChunkSearchRow>>;
+    /// Config-aware variant of [`search_chunks`] that allows the caller to
+    /// supply the Postgres FTS text-search config name sourced from the
+    /// library's [`RetrievalConfig`].  The default implementation delegates
+    /// to `search_chunks` so that implementations that do not use Postgres
+    /// FTS (e.g. the Arango backend, or mocks) satisfy the trait for free.
+    /// `PgSearchStore` overrides this to use `text_search_config` in the
+    /// lexical SQL instead of the hardcoded `'simple'` default.
+    ///
+    /// [`RetrievalConfig`]: crate::domains::retrieval::RetrievalConfig
+    async fn search_chunks_with_config(
+        &self,
+        library_id: Uuid,
+        query: &str,
+        limit: usize,
+        temporal_start: Option<DateTime<Utc>>,
+        temporal_end: Option<DateTime<Utc>>,
+        text_search_config: &str,
+    ) -> anyhow::Result<Vec<KnowledgeChunkSearchRow>> {
+        let _ = text_search_config; // ignored by non-Postgres backends
+        self.search_chunks(library_id, query, limit, temporal_start, temporal_end).await
+    }
     async fn search_structured_blocks(
         &self,
         library_id: Uuid,

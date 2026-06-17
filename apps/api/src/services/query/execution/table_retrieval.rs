@@ -6,12 +6,15 @@ use uuid::Uuid;
 
 use crate::{
     app::state::AppState,
-    domains::query_ir::{QueryIR, SourceSliceDirection},
+    domains::query_ir::{QueryAct, QueryIR, QueryScope, SourceSliceDirection},
     infra::arangodb::document_store::{KnowledgeChunkRow, KnowledgeDocumentRow},
     shared::extraction::table_summary::is_table_summary_text,
 };
 
-use super::{RuntimeMatchedChunk, canonical_document_revision_id, map_chunk_hit, merge_chunks};
+use super::{
+    RuntimeChunkScoreKind, RuntimeMatchedChunk, canonical_document_revision_id, map_chunk_hit,
+    merge_chunks, question_asks_table_aggregation, question_intent::canonical_target_type_tag,
+};
 
 pub(crate) fn requested_initial_table_row_count(ir: Option<&QueryIR>) -> Option<usize> {
     let ir = ir?;
@@ -92,6 +95,9 @@ pub(crate) async fn load_table_rows_for_documents(
 }
 
 const TABLE_ROW_KEYWORD_SCORE_BOOST: f32 = 0.08;
+const TABLE_SECTION_SIBLING_FORWARD: i32 = 64;
+const TABLE_SECTION_SIBLING_BACKWARD: i32 = 3;
+const TABLE_SECTION_SIBLING_SCORE_BOOST: f32 = 2.0;
 
 fn table_row_keyword_match_count(
     chunk: &KnowledgeChunkRow,
@@ -108,6 +114,174 @@ fn table_row_keyword_match_count(
             if keyword.is_empty() { 0 } else { haystack.match_indices(&keyword).count() }
         })
         .sum()
+}
+
+pub(crate) fn query_ir_requests_table_section_siblings(ir: &QueryIR) -> bool {
+    if ir.source_slice.is_some()
+        || !matches!(ir.scope, QueryScope::SingleDocument)
+        || !matches!(ir.act, QueryAct::Describe | QueryAct::Enumerate | QueryAct::RetrieveValue)
+        || question_asks_table_aggregation("", Some(ir))
+    {
+        return false;
+    }
+    let target_types = ir
+        .target_types
+        .iter()
+        .map(|target_type| canonical_target_type_tag(target_type))
+        .collect::<BTreeSet<_>>();
+    target_types.contains("table_row") && target_types.contains("table_summary")
+}
+
+pub(crate) async fn load_table_section_sibling_chunks(
+    state: &AppState,
+    document_index: &HashMap<Uuid, KnowledgeDocumentRow>,
+    anchor_chunks: &[RuntimeMatchedChunk],
+    limit_per_section: usize,
+    keywords: &[String],
+) -> anyhow::Result<Vec<RuntimeMatchedChunk>> {
+    if anchor_chunks.is_empty() || limit_per_section == 0 {
+        return Ok(Vec::new());
+    }
+
+    let anchor_chunk_ids = anchor_chunks.iter().map(|chunk| chunk.chunk_id).collect::<Vec<_>>();
+    let anchor_scores = anchor_chunks
+        .iter()
+        .enumerate()
+        .map(|(rank, chunk)| (chunk.chunk_id, (chunk.score.unwrap_or_default(), rank)))
+        .collect::<HashMap<_, _>>();
+    let anchor_rows = state
+        .arango_document_store
+        .list_chunks_by_ids(&anchor_chunk_ids)
+        .await
+        .context("failed to hydrate table section anchor chunks")?;
+    let windows = table_section_sibling_windows(&anchor_rows);
+    if windows.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let sibling_rows = state
+        .arango_document_store
+        .list_chunks_by_revisions_windows(&windows)
+        .await
+        .context("failed to load table section sibling chunks")?;
+    let selected_rows =
+        select_table_section_sibling_rows(&sibling_rows, &anchor_rows, limit_per_section);
+    let section_scores = table_section_anchor_scores(&anchor_rows, &anchor_scores);
+    let mut chunks = Vec::new();
+    for (rank, row) in selected_rows.into_iter().enumerate() {
+        let section_key = table_section_key(&row);
+        let base_score =
+            section_scores.get(&section_key).map(|(score, _)| *score).unwrap_or_default();
+        let score = base_score + TABLE_SECTION_SIBLING_SCORE_BOOST - rank as f32 * 0.01;
+        if let Some(mut chunk) = map_chunk_hit(row, score, document_index, keywords) {
+            chunk.score_kind = RuntimeChunkScoreKind::SourceContext;
+            chunks.push(chunk);
+        }
+    }
+    Ok(chunks)
+}
+
+fn table_section_sibling_windows(rows: &[KnowledgeChunkRow]) -> Vec<(Uuid, i32, i32)> {
+    rows.iter()
+        .filter(|row| is_table_section_anchor_row(row))
+        .filter(|row| !row.section_path.is_empty())
+        .map(|row| {
+            (
+                row.revision_id,
+                row.chunk_index.saturating_sub(TABLE_SECTION_SIBLING_BACKWARD).max(0),
+                row.chunk_index.saturating_add(TABLE_SECTION_SIBLING_FORWARD),
+            )
+        })
+        .collect()
+}
+
+fn table_section_anchor_scores(
+    rows: &[KnowledgeChunkRow],
+    anchor_scores: &HashMap<Uuid, (f32, usize)>,
+) -> HashMap<(Uuid, Vec<String>), (f32, usize)> {
+    let mut scores = HashMap::<(Uuid, Vec<String>), (f32, usize)>::new();
+    for row in rows
+        .iter()
+        .filter(|row| is_table_section_anchor_row(row))
+        .filter(|row| !row.section_path.is_empty())
+    {
+        let Some((score, rank)) = anchor_scores.get(&row.chunk_id).copied() else {
+            continue;
+        };
+        let key = table_section_key(row);
+        scores
+            .entry(key)
+            .and_modify(|existing| {
+                if score > existing.0 || (score == existing.0 && rank < existing.1) {
+                    *existing = (score, rank);
+                }
+            })
+            .or_insert((score, rank));
+    }
+    scores
+}
+
+fn select_table_section_sibling_rows(
+    rows: &[KnowledgeChunkRow],
+    anchors: &[KnowledgeChunkRow],
+    limit_per_section: usize,
+) -> Vec<KnowledgeChunkRow> {
+    if rows.is_empty() || anchors.is_empty() || limit_per_section == 0 {
+        return Vec::new();
+    }
+    let anchor_sections = anchors
+        .iter()
+        .filter(|row| is_table_section_anchor_row(row))
+        .filter(|row| !row.section_path.is_empty())
+        .map(table_section_key)
+        .collect::<BTreeSet<_>>();
+    if anchor_sections.is_empty() {
+        return Vec::new();
+    }
+
+    let mut selected_by_section = HashMap::<(Uuid, Vec<String>), Vec<&KnowledgeChunkRow>>::new();
+    let mut eligible_rows = rows
+        .iter()
+        .filter(|row| table_section_sibling_row_is_visible(row))
+        .filter(|row| anchor_sections.contains(&table_section_key(row)))
+        .collect::<Vec<_>>();
+    eligible_rows.sort_by(|left, right| {
+        table_section_key(left)
+            .cmp(&table_section_key(right))
+            .then_with(|| left.chunk_index.cmp(&right.chunk_index))
+            .then_with(|| left.chunk_id.cmp(&right.chunk_id))
+    });
+    for row in eligible_rows {
+        let section_rows = selected_by_section.entry(table_section_key(row)).or_default();
+        if section_rows.len() < limit_per_section {
+            section_rows.push(row);
+        }
+    }
+
+    let mut selected = selected_by_section.into_values().flatten().cloned().collect::<Vec<_>>();
+    selected.sort_by(|left, right| {
+        left.revision_id
+            .cmp(&right.revision_id)
+            .then_with(|| left.chunk_index.cmp(&right.chunk_index))
+            .then_with(|| left.chunk_id.cmp(&right.chunk_id))
+    });
+    selected
+}
+
+fn table_section_key(row: &KnowledgeChunkRow) -> (Uuid, Vec<String>) {
+    (row.revision_id, row.section_path.clone())
+}
+
+fn is_table_section_anchor_row(row: &KnowledgeChunkRow) -> bool {
+    matches!(row.chunk_kind.as_deref(), Some("table_row"))
+        || (matches!(row.chunk_kind.as_deref(), Some("heading"))
+            && row.content_text.lines().any(|line| line.to_ascii_lowercase().contains("table:")))
+}
+
+fn table_section_sibling_row_is_visible(row: &KnowledgeChunkRow) -> bool {
+    matches!(row.chunk_kind.as_deref(), Some("heading" | "table_row"))
+        && (!row.content_text.trim().is_empty()
+            || row.window_text.as_deref().is_some_and(|text| !text.trim().is_empty()))
 }
 
 pub(crate) async fn load_table_summary_chunks_for_documents(
@@ -183,6 +357,7 @@ pub(crate) fn merge_canonical_table_aggregation_chunks(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domains::query_ir::QueryLanguage;
     use crate::infra::arangodb::document_store::KnowledgeChunkRow;
 
     fn table_row(
@@ -221,6 +396,107 @@ mod tests {
             occurred_at: None,
             occurred_until: None,
         }
+    }
+
+    fn section_row(
+        document_id: Uuid,
+        revision_id: Uuid,
+        chunk_index: usize,
+        kind: &str,
+        text: &str,
+        section_path: &[&str],
+    ) -> KnowledgeChunkRow {
+        let mut row = table_row(Uuid::now_v7(), chunk_index, text, text, kind);
+        row.document_id = document_id;
+        row.revision_id = revision_id;
+        row.section_path = section_path.iter().map(|part| (*part).to_string()).collect();
+        row
+    }
+
+    fn table_section_ir() -> QueryIR {
+        QueryIR {
+            act: QueryAct::Enumerate,
+            scope: QueryScope::SingleDocument,
+            language: QueryLanguage::Auto,
+            target_types: vec!["table_row".to_string(), "table_summary".to_string()],
+            target_entities: Vec::new(),
+            literal_constraints: Vec::new(),
+            temporal_constraints: Vec::new(),
+            comparison: None,
+            document_focus: None,
+            conversation_refs: Vec::new(),
+            needs_clarification: None,
+            source_slice: None,
+            retrieval_query: None,
+            confidence: 0.9,
+        }
+    }
+
+    #[test]
+    fn table_section_siblings_keep_heading_and_same_section_rows() {
+        let document_id = Uuid::now_v7();
+        let revision_id = Uuid::now_v7();
+        let rows = vec![
+            section_row(
+                document_id,
+                revision_id,
+                0,
+                "heading",
+                "## Table: records",
+                &["schema", "records"],
+            ),
+            section_row(
+                document_id,
+                revision_id,
+                1,
+                "table_row",
+                "| field_one | text |",
+                &["schema", "records"],
+            ),
+            section_row(
+                document_id,
+                revision_id,
+                2,
+                "table_row",
+                "| field_two | text |",
+                &["schema", "records"],
+            ),
+            section_row(document_id, revision_id, 3, "paragraph", "notes", &["schema", "records"]),
+            section_row(
+                document_id,
+                revision_id,
+                4,
+                "heading",
+                "## Table: events",
+                &["schema", "events"],
+            ),
+            section_row(
+                document_id,
+                revision_id,
+                5,
+                "table_row",
+                "| event_id | text |",
+                &["schema", "events"],
+            ),
+        ];
+        let anchors = vec![rows[2].clone()];
+
+        let selected = select_table_section_sibling_rows(&rows, &anchors, 8);
+
+        assert_eq!(selected.iter().map(|row| row.chunk_index).collect::<Vec<_>>(), vec![0, 1, 2]);
+    }
+
+    #[test]
+    fn table_section_siblings_require_typed_table_inventory_ir() {
+        let mut ir = table_section_ir();
+        assert!(query_ir_requests_table_section_siblings(&ir));
+
+        ir.target_types = vec!["table_row".to_string()];
+        assert!(!query_ir_requests_table_section_siblings(&ir));
+
+        ir = table_section_ir();
+        ir.scope = QueryScope::MultiDocument;
+        assert!(!query_ir_requests_table_section_siblings(&ir));
     }
 
     #[test]

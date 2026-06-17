@@ -5,7 +5,7 @@ info:
   license:
     name: MIT
     identifier: MIT
-  version: 0.5.0
+  version: 0.5.1
 servers:
 - url: /
   description: Same origin (paths include /v1)
@@ -1156,6 +1156,69 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/CatalogLibraryResponse'
+        '401':
+          description: Caller is not authenticated
+        '403':
+          description: Caller does not have library write permission
+        '404':
+          description: Library not found
+  /v1/catalog/libraries/{libraryId}/retrieval-config:
+    get:
+      tags:
+      - catalog
+      summary: Get catalog library retrieval config.
+      description: Manages catalog libraries and their policies. Libraries own documents, knowledge graph data, assistant sessions, ingest settings, and query readiness. Call it when the caller already has the resource identifier and needs the latest authorized server view.
+      operationId: getCatalogLibraryRetrievalConfig
+      parameters:
+      - name: libraryId
+        in: path
+        description: Library identifier
+        required: true
+        schema:
+          type: string
+          format: uuid
+      responses:
+        '200':
+          description: Library retrieval configuration
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RetrievalConfig'
+        '401':
+          description: Caller is not authenticated
+        '403':
+          description: Caller does not have library write permission
+        '404':
+          description: Library not found
+    put:
+      tags:
+      - catalog
+      summary: Update catalog library retrieval config.
+      description: Manages catalog libraries and their policies. Libraries own documents, knowledge graph data, assistant sessions, ingest settings, and query readiness. Call it to replace or partially update server-owned configuration. The request body is validated before changes are persisted.
+      operationId: updateCatalogLibraryRetrievalConfig
+      parameters:
+      - name: libraryId
+        in: path
+        description: Library identifier
+        required: true
+        schema:
+          type: string
+          format: uuid
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RetrievalConfig'
+        required: true
+      responses:
+        '200':
+          description: Library after applying the new retrieval configuration
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CatalogLibraryResponse'
+        '400':
+          description: Retrieval configuration is invalid or names an unknown text search config
         '401':
           description: Caller is not authenticated
         '403':
@@ -4259,6 +4322,7 @@ components:
       - final_answer
       - iteration_cap
       - deadline
+      - no_progress
       - tool_error
       - provider_error
     AiBindingAssignmentResponse:
@@ -4324,6 +4388,59 @@ components:
           type:
           - string
           - 'null'
+    AssistantAnswerCandidate:
+      type: object
+      description: |-
+        One typed disambiguation choice the answer pipeline surfaced alongside a
+        clarifying answer.
+
+        `kind` reuses the existing typed vocabulary where it applies — a graph
+        `node_type` for entity probes, `"document"` for a document-derived variant
+        — so agents can route a follow-up without parsing the prose answer body.
+        `confidence` is `None` when the branch has no ranking signal to expose.
+      required:
+      - label
+      - kind
+      - provenance
+      properties:
+        confidence:
+          type:
+          - number
+          - 'null'
+          format: double
+        kind:
+          type: string
+        label:
+          type: string
+        provenance:
+          $ref: '#/components/schemas/AssistantAnswerCandidateProvenance'
+    AssistantAnswerCandidateProvenance:
+      type: object
+      description: |-
+        Structured provenance for a single answer candidate.
+
+        Every field is optional because the clarify branches surface candidates
+        derived from different evidence shapes: a graph-entity probe carries an
+        `entity_id`, a document-derived variant carries a `document_id`, and a
+        label-only variant (e.g. a grouped-reference title) carries none.
+        Callers treat a present id as a stable handle for a follow-up tool call
+        and a missing id as "label only".
+      properties:
+        chunkId:
+          type:
+          - string
+          - 'null'
+          format: uuid
+        documentId:
+          type:
+          - string
+          - 'null'
+          format: uuid
+        entityId:
+          type:
+          - string
+          - 'null'
+          format: uuid
     AssistantChunkReference:
       type: object
       required:
@@ -4344,6 +4461,28 @@ components:
         score:
           type: number
           format: double
+    AssistantClarification:
+      type: object
+      description: |-
+        Typed clarification metadata attached to a grounded-answer turn.
+
+        The prose answer body stays authoritative for humans; this object is
+        additive machine-readable metadata for agent callers. `required` is
+        `true` only when the turn returned a clarifying answer; otherwise the
+        candidate list is empty and `question` is `None`.
+      required:
+      - required
+      properties:
+        answerCandidates:
+          type: array
+          items:
+            $ref: '#/components/schemas/AssistantAnswerCandidate'
+        question:
+          type:
+          - string
+          - 'null'
+        required:
+          type: boolean
     AssistantContentSourceAccess:
       type: object
       required:
@@ -4543,6 +4682,13 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/AssistantChunkReference'
+        clarification:
+          $ref: '#/components/schemas/AssistantClarification'
+          description: |-
+            Typed clarification metadata for this turn. Defaults to
+            `required: false` with no candidates for ordinary answers and for
+            historical-replay reads (the replay surface carries no clarification
+            metadata); a clarify turn populates `question` and `answer_candidates`.
         contextBundleId:
           type: string
           format: uuid
@@ -5648,6 +5794,7 @@ components:
       - displayName
       - webIngestPolicy
       - recognitionPolicy
+      - retrievalConfig
       - lifecycleState
       - includeDocumentHintInMcpAnswers
       - ingestionReadiness
@@ -5673,6 +5820,8 @@ components:
           type: string
         recognitionPolicy:
           $ref: '#/components/schemas/LibraryRecognitionPolicy'
+        retrievalConfig:
+          $ref: '#/components/schemas/RetrievalConfig'
         slug:
           type: string
         webIngestPolicy:
@@ -10815,6 +10964,30 @@ components:
           type:
           - string
           - 'null'
+    RetrievalConfig:
+      type: object
+      description: |-
+        Top-level per-library retrieval configuration persisted as the
+        `catalog_library.retrieval_config` JSONB column.
+      properties:
+        lexical:
+          $ref: '#/components/schemas/RetrievalLexicalConfig'
+          description: Lexical (full-text-search) lane configuration.
+      additionalProperties: false
+    RetrievalLexicalConfig:
+      type: object
+      description: |-
+        Lexical-lane knobs sourced by the Postgres search store when rendering the
+        full-text-search SQL.
+      properties:
+        textSearchConfig:
+          type: string
+          description: |-
+            Name of the Postgres text-search configuration (`regconfig`) used by the
+            `to_tsquery` / `websearch_to_tsquery` constructors in the lexical lane.
+            Validated against the live `pg_ts_config` catalog at write time; defaults
+            to [`DEFAULT_TEXT_SEARCH_CONFIG`].
+      additionalProperties: false
     RuntimeActionKind:
       type: string
       enum:

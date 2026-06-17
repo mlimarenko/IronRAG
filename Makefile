@@ -2,9 +2,13 @@ DOCKER_COMPOSE ?= docker compose
 DOCKER_COMPOSE_FILE ?= docker-compose.yml
 # Local source-build image names so `compose build` tags `:local` instead of
 # overwriting the published `pipingspace/*:latest` tags (see docker-compose.yml).
-LOCAL_IMAGE_ENV ?= IRONRAG_BACKEND_IMAGE=ironrag-backend:local IRONRAG_FRONTEND_IMAGE=ironrag-frontend:local
+LOCAL_BACKEND_IMAGE ?= ironrag-backend:local
+LOCAL_FRONTEND_IMAGE ?= ironrag-frontend:local
+LOCAL_IMAGE_ENV ?= IRONRAG_BACKEND_IMAGE=$(LOCAL_BACKEND_IMAGE) IRONRAG_FRONTEND_IMAGE=$(LOCAL_FRONTEND_IMAGE)
 LOCAL_DOCKER_APP_SERVICES ?= backend
 LOCAL_DOCKER_ALL_SERVICES ?= postgres redis startup backend worker frontend
+export IRONRAG_BACKEND_MEMORY_LIMIT
+export IRONRAG_WORKER_MEMORY_LIMIT
 IRONRAG_BENCHMARK_BASE_URL ?= http://127.0.0.1:19000/v1
 IRONRAG_BENCHMARK_SUITES ?= apps/api/benchmarks/grounded_query/api_baseline_suite.json apps/api/benchmarks/grounded_query/workflow_strict_suite.json apps/api/benchmarks/grounded_query/layout_noise_suite.json apps/api/benchmarks/grounded_query/graph_multihop_suite.json apps/api/benchmarks/grounded_query/multiformat_surface_suite.json
 IRONRAG_TECHNICAL_SUITES ?= apps/api/benchmarks/grounded_query/technical_contract_suite.json
@@ -274,6 +278,7 @@ docker-local-rebuild:
 	$(LOCAL_IMAGE_ENV) $(DOCKER_COMPOSE) -f $(DOCKER_COMPOSE_FILE) build --no-cache $(LOCAL_DOCKER_APP_SERVICES)
 
 docker-local-redeploy:
+	-$(LOCAL_IMAGE_ENV) $(DOCKER_COMPOSE) -f $(DOCKER_COMPOSE_FILE) rm -f startup
 	$(LOCAL_IMAGE_ENV) $(DOCKER_COMPOSE) -f $(DOCKER_COMPOSE_FILE) up -d --force-recreate $(LOCAL_DOCKER_APP_SERVICES)
 
 docker-local-refresh: docker-local-build docker-local-redeploy

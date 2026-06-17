@@ -70,6 +70,19 @@ Catalog targets use stable refs instead of opaque UUIDs: `workspace` is `<worksp
 
 Response shape: tool text contains the answer; structured output contains `executionDetail` with chunk, prepared-segment, technical-fact, graph-entity, graph-relation, verifier, runtime, request, and response fields. Top-level `runtimeExecutionId`, `executionId`, and `conversationId` are shortcuts for trace lookup. The built-in UI assistant is itself a tool-using agent over this MCP answer surface: it may call `grounded_answer`, inspect raw search/read tools, or answer directly when no library lookup is needed. External MCP clients get the same tool vocabulary, schemas, and grounded-answer result contract.
 
+**Clarification and answer candidates** — when the pipeline determines that the query is ambiguous across multiple distinct subjects, the response includes two top-level fields in `structuredContent`:
+
+- `answerCandidates` — array of objects, each with:
+  - `label` — human-readable name of the candidate subject
+  - `kind` — structural type of the candidate (e.g. `"service"`, `"component"`, `"document"`)
+  - `confidence` — optional float [0, 1] (omitted when not applicable)
+  - `provenance` — object with optional `entityId`, `documentId`, `chunkId` (camelCase UUIDs); use `entityId` to target a follow-up tool call at the exact graph node
+- `clarification` — object with:
+  - `required` — `true` when the pipeline could not resolve to a single answer and candidates are present; `false` on unambiguous answers (candidates array is empty)
+  - `question` — optional suggested disambiguation question for the agent to relay to the user
+
+On unambiguous answers `clarification.required` is `false`, `clarification.question` is absent, and `answerCandidates` is an empty array. These fields are present in every `grounded_answer` response for contract stability; agents should branch on `clarification.required` rather than checking array length.
+
 ### Discovery
 
 | Tool | Description | Required parameters |

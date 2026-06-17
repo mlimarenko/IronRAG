@@ -82,6 +82,9 @@ app:
   environment: production
   frontendOrigin: https://ironrag.example.com
   logFilter: info
+  # Deployment-wide app connection budget. Runtime divides it across
+  # worker.replicaCount plus api.replicaCount and one API rollout surge slot
+  # before opening SQLx pools.
   databaseMaxConnections: 20
   knowledgePlaneBackend: postgres
   queryAnswerSourceLinksEnabled: false

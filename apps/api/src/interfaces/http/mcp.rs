@@ -801,6 +801,7 @@ fn grounded_answer_structured_content(
     }
     let final_answer_ready = grounded_answer_final_answer_ready(execution_detail);
     let finalizable = final_answer_ready && !answer_text.trim().is_empty();
+    let clarification = &execution_detail.clarification;
     json!({
         "answerBody": answer_text,
         "executionDetail": sanitized_execution_detail,
@@ -811,6 +812,16 @@ fn grounded_answer_structured_content(
             execution_detail,
             finalizable,
         ),
+        // Typed disambiguation surface for agent callers: the prose answer
+        // body stays authoritative, while `answerCandidates` lets an agent
+        // route a follow-up without parsing the clarification tail. Empty
+        // for unambiguous answers. `clarification` reports whether this turn
+        // asked the user to choose and the question it asked.
+        "answerCandidates": clarification.answer_candidates,
+        "clarification": json!({
+            "required": clarification.required,
+            "question": clarification.question,
+        }),
         "runtimeExecutionId": execution_detail.execution.runtime_execution_id,
         "executionId": execution_detail.execution.id,
         "conversationId": execution_detail.execution.conversation_id,

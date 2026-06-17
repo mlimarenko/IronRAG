@@ -22,6 +22,7 @@ const BOOTSTRAP_PROVIDER_SECRET_ENVS: &[(&str, &str)] = &[
 ];
 pub const DEFAULT_RUNTIME_DIAGNOSTIC_PAYLOAD_BUDGET_BYTES: usize = 32_768;
 pub const DEFAULT_RUNTIME_POLICY_REASON_BUDGET_CHARS: usize = 2_000;
+const MIN_DATABASE_CONNECTIONS_PER_RUNTIME_REPLICA: u32 = 4;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RuntimeHookBehavior {
@@ -96,6 +97,8 @@ pub struct Settings {
     pub service_role: String,
     pub database_url: String,
     pub database_max_connections: u32,
+    pub api_replicas: usize,
+    pub worker_replicas: usize,
     pub knowledge_plane_backend: String,
     pub redis_url: String,
     pub arangodb_url: String,
@@ -238,6 +241,13 @@ pub struct Settings {
     pub runtime_graph_filter_empty_relations: bool,
     pub runtime_graph_filter_degenerate_self_loops: bool,
     pub runtime_graph_convergence_warning_backlog_threshold: usize,
+    /// API-role runtime graph prewarm is opt-in because large libraries can
+    /// allocate hundreds of MiB each before the first user query. Keep disabled
+    /// on constrained hosts; lazy per-library loading still works on demand.
+    pub runtime_graph_projection_prewarm_enabled: bool,
+    /// Maximum number of active libraries to prewarm when prewarm is enabled.
+    /// `0` means no library-count cap.
+    pub runtime_graph_projection_prewarm_max_libraries: usize,
     pub mcp_memory_default_read_window_chars: usize,
     pub mcp_memory_max_read_window_chars: usize,
     pub mcp_memory_default_search_limit: usize,
@@ -246,6 +256,19 @@ pub struct Settings {
     pub mcp_memory_audit_enabled: bool,
     pub chunking_max_chars: usize,
     pub chunking_overlap_chars: usize,
+    /// Maximum concurrent outbound calls to a single provider endpoint
+    /// (keyed by `provider_kind` + base URL), shared across the ingest and
+    /// query lanes. `0` (the default) means unlimited, which is a full
+    /// no-op: no semaphore is created and no call ever waits. Set a positive
+    /// cap to protect a self-hosted or rate-limited provider from being
+    /// overwhelmed by concurrent ingest fan-out plus query turns.
+    pub provider_concurrency_max_outbound: usize,
+    /// Permits reserved exclusively for the query lane out of
+    /// `provider_concurrency_max_outbound`. Guarantees latency-sensitive
+    /// query turns at least this many concurrent permits even under a fully
+    /// saturating ingest load. Clamped to the max; ignored when the max is
+    /// `0` (unlimited).
+    pub provider_concurrency_query_reserved: usize,
 }
 
 impl Settings {
@@ -284,6 +307,7 @@ impl Settings {
         validate_service_role(&settings).map_err(config::ConfigError::Message)?;
         validate_startup_authority_mode(&settings).map_err(config::ConfigError::Message)?;
         validate_dependency_modes(&settings).map_err(config::ConfigError::Message)?;
+        validate_database_settings(&settings).map_err(config::ConfigError::Message)?;
         validate_knowledge_plane_backend(&settings).map_err(config::ConfigError::Message)?;
         validate_content_storage_settings(&settings).map_err(config::ConfigError::Message)?;
         validate_service_name(&settings).map_err(config::ConfigError::Message)?;
@@ -544,7 +568,9 @@ fn settings_config_builder()
         .set_default("service_name", "ironrag-backend")?
         .set_default("environment", "local")?
         .set_default("database_url", "postgres://postgres:postgres@127.0.0.1:5432/ironrag")?
-        .set_default("database_max_connections", 64)?
+        .set_default("database_max_connections", 20)?
+        .set_default("api_replicas", 1)?
+        .set_default("worker_replicas", 1)?
         .set_default("knowledge_plane_backend", "arango")?
         .set_default("redis_url", "redis://127.0.0.1:6379")?
         .set_default("arangodb_url", "http://127.0.0.1:8529")?
@@ -602,6 +628,8 @@ fn settings_config_builder()
         .set_default("web_ingest_user_agent", "IronRAG-WebIngest/0.1")?
         .set_default("web_ingest_crawl_concurrency", 4)?
         .set_default("llm_http_timeout_seconds", 120)?
+        .set_default("provider_concurrency_max_outbound", 0)?
+        .set_default("provider_concurrency_query_reserved", 0)?
         .set_default("runtime_agent_max_turns", 4)?
         .set_default("runtime_agent_max_parallel_actions", 4)?
         .set_default(
@@ -643,6 +671,8 @@ fn settings_config_builder()
         .set_default("runtime_graph_filter_empty_relations", true)?
         .set_default("runtime_graph_filter_degenerate_self_loops", true)?
         .set_default("runtime_graph_convergence_warning_backlog_threshold", 1)?
+        .set_default("runtime_graph_projection_prewarm_enabled", false)?
+        .set_default("runtime_graph_projection_prewarm_max_libraries", 0)?
         .set_default("mcp_memory_default_read_window_chars", 48_000)?
         .set_default("mcp_memory_max_read_window_chars", 192_000)?
         .set_default("mcp_memory_default_search_limit", 10)?
@@ -676,6 +706,30 @@ fn validate_dependency_modes(settings: &Settings) -> Result<(), String> {
         {
             return Err(format!("{} must not use disabled mode", kind.as_str()));
         }
+    }
+    Ok(())
+}
+
+fn validate_database_settings(settings: &Settings) -> Result<(), String> {
+    let runtime_replicas = settings.api_replicas.saturating_add(settings.worker_replicas);
+    if settings.runs_http_api() && settings.api_replicas == 0 {
+        return Err("api_replicas must be at least 1 when service_role=api".into());
+    }
+    if settings.runs_ingestion_workers() && settings.worker_replicas == 0 {
+        return Err("worker_replicas must be at least 1 when service_role=worker".into());
+    }
+    if runtime_replicas == 0 {
+        return Err("api_replicas and worker_replicas must not both be zero".into());
+    }
+
+    let runtime_replicas = u32::try_from(runtime_replicas).unwrap_or(u32::MAX);
+    let minimum_budget =
+        MIN_DATABASE_CONNECTIONS_PER_RUNTIME_REPLICA.saturating_mul(runtime_replicas);
+    if settings.database_max_connections < minimum_budget {
+        return Err(format!(
+            "database_max_connections must be at least {minimum_budget} for api_replicas={} and worker_replicas={}",
+            settings.api_replicas, settings.worker_replicas
+        ));
     }
     Ok(())
 }

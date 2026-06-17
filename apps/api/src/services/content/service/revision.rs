@@ -1025,10 +1025,26 @@ impl ContentService {
                 base_revision.mime_type
             )));
         }
-        let raw_bytes =
+        // The source blob can be absent even though the content row exists — for
+        // example when content rows were restored from a snapshot that did not
+        // carry their blobs (`library_data` without `blobs`). Rather than failing
+        // the whole append, start a fresh source revision containing only the
+        // appended text. A blob that *is* present but cannot be read stays a hard
+        // error so a transient storage outage never silently drops existing content.
+        let raw_bytes = if state.content_storage.has_revision_source(storage_key).await.map_err(
+            |error| ApiError::internal_with_log(error, "failed to probe revision source storage"),
+        )? {
             state.content_storage.read_revision_source(storage_key).await.map_err(|error| {
                 ApiError::internal_with_log(error, "failed to read revision source from storage")
-            })?;
+            })?
+        } else {
+            tracing::warn!(
+                %document_id,
+                storage_key,
+                "appendable source blob is missing from content storage; starting a fresh source revision",
+            );
+            Vec::new()
+        };
         Ok(super::AppendableDocumentSource {
             raw_bytes,
             mime_type: base_revision.mime_type,

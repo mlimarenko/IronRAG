@@ -2,6 +2,7 @@
 use uuid::Uuid;
 
 mod answer;
+mod answer_kind;
 mod answer_pipeline;
 mod canonical_answer_context;
 mod consolidation;
@@ -15,7 +16,6 @@ mod fact_lookup;
 mod focused_document_answer;
 mod graph_retrieval;
 mod hyde;
-mod multi_query;
 mod port_answer;
 mod preflight;
 pub(crate) mod question_intent;
@@ -25,7 +25,6 @@ mod sentence_window;
 mod source_context;
 mod source_profile;
 mod structured_query_pipeline;
-mod sub_question;
 mod table_retrieval;
 mod table_row_answer;
 mod table_summary_answer;

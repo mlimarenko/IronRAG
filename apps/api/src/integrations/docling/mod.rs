@@ -38,6 +38,7 @@ const DEFAULT_PAGE_BATCH_SIZE: u32 = 10;
 const DOCLING_AUTO_MAX_CONCURRENCY: usize = 4;
 const DOCLING_AUTO_RESERVED_MEMORY_MIB: u64 = 2048;
 const DOCLING_AUTO_MEMORY_PER_PROCESS_MIB: u64 = 2560;
+const DOCLING_PROCESS_SAFETY_MARGIN_MIB: u64 = 256;
 const STDERR_PREVIEW_LIMIT: usize = 4_000;
 
 static DOCLING_MAX_CONCURRENCY: LazyLock<usize> = LazyLock::new(|| {
@@ -68,6 +69,17 @@ pub enum DoclingExtractionError {
     #[error("docling extractor failed with status {status}: {stderr}")]
     ProcessFailed { status: String, stderr: String },
 
+    #[error(
+        "docling extraction needs at least {required_mib} MiB plus {safety_margin_mib} MiB safety margin, but the worker cgroup has only {available_mib} MiB available (limit {memory_limit_mib} MiB, current RSS {current_rss_mib} MiB)"
+    )]
+    InsufficientMemory {
+        memory_limit_mib: u64,
+        current_rss_mib: u64,
+        available_mib: u64,
+        required_mib: u64,
+        safety_margin_mib: u64,
+    },
+
     #[error("docling extractor returned invalid utf-8: {0}")]
     InvalidUtf8(std::string::FromUtf8Error),
 
@@ -97,6 +109,34 @@ pub enum DoclingBatchStreamError {
 
     #[error("docling page batch handler failed: {0}")]
     Batch(anyhow::Error),
+}
+
+impl DoclingExtractionError {
+    #[must_use]
+    pub fn memory_failure_code(&self) -> Option<&'static str> {
+        match self {
+            Self::InsufficientMemory { .. } => Some("docling_insufficient_memory"),
+            Self::ProcessFailed { status, .. } if process_status_is_memory_kill(status) => {
+                Some("docling_process_oom")
+            }
+            Self::PageExtractionFailed { message, .. }
+                if process_status_is_memory_kill(message) =>
+            {
+                Some("docling_process_oom")
+            }
+            _ => None,
+        }
+    }
+}
+
+impl DoclingBatchStreamError {
+    #[must_use]
+    pub fn memory_failure_code(&self) -> Option<&'static str> {
+        match self {
+            Self::Extraction(error) => error.memory_failure_code(),
+            Self::Batch(_) => None,
+        }
+    }
 }
 
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
@@ -433,6 +473,8 @@ async fn run_docling(
     input_path: &Path,
     extra_args: &[&str],
 ) -> Result<DoclingExtractionPayload, DoclingExtractionError> {
+    ensure_docling_process_memory_headroom()?;
+
     // Log current process RSS so operators can correlate OOM kills with
     // pre-extraction baseline memory usage.
     if let Some(rss_mb) = current_rss_mb() {
@@ -450,19 +492,8 @@ async fn run_docling(
 /// Queries the page count of a PDF via `--page-count`. Returns `None`
 /// when the extractor reports that page counting is unsupported.
 async fn run_docling_page_count(input_path: &Path) -> Result<Option<u32>, DoclingExtractionError> {
-    let timeout_secs: u64 = 30;
-    let mut command = Command::new(docling_extract_bin());
-    command.arg("--page-count").arg(input_path).kill_on_drop(true);
-
-    let output = timeout(Duration::from_secs(timeout_secs), command.output())
-        .await
-        .map_err(|_| DoclingExtractionError::Timeout(timeout_secs))?
-        .map_err(DoclingExtractionError::Spawn)?;
-
-    if !output.status.success() {
-        return Ok(None);
-    }
-
+    ensure_docling_process_memory_headroom()?;
+    let output = run_docling_raw(input_path, &["--page-count"]).await?;
     let payload: DoclingPageCountPayload =
         serde_json::from_slice(&output.stdout).map_err(DoclingExtractionError::InvalidJson)?;
     Ok(payload.page_count)
@@ -478,6 +509,7 @@ async fn run_docling_batch(
     start_page: u32,
     end_page: u32,
 ) -> Result<DoclingBatchPayload, DoclingExtractionError> {
+    ensure_docling_process_memory_headroom()?;
     let range = format!("{start_page}-{end_page}");
     let output = run_docling_raw(input_path, &["--pages", &range]).await?;
     serde_json::from_slice(&output.stdout).map_err(DoclingExtractionError::InvalidJson)
@@ -497,6 +529,8 @@ where
     F: FnMut(DoclingPageRangeExtraction) -> Fut,
     Fut: Future<Output = anyhow::Result<()>>,
 {
+    ensure_docling_process_memory_headroom()?;
+
     let timeout_secs = docling_timeout_secs();
     let range = format!("{start_page}-{end_page}");
     let mut command = Command::new(docling_extract_bin());
@@ -651,6 +685,34 @@ fn current_rss_mb() -> Option<u64> {
     }
 }
 
+fn ensure_docling_process_memory_headroom() -> Result<(), DoclingExtractionError> {
+    let Some(memory_limit_bytes) = telemetry::detect_container_memory_limit_bytes() else {
+        return Ok(());
+    };
+    docling_process_memory_headroom_for_limits(memory_limit_bytes, current_rss_mb()).map(|_| ())
+}
+
+fn docling_process_memory_headroom_for_limits(
+    memory_limit_bytes: u64,
+    current_rss_mib: Option<u64>,
+) -> Result<u64, DoclingExtractionError> {
+    let memory_limit_mib = memory_limit_bytes / (1024 * 1024);
+    let current_rss_mib = current_rss_mib.unwrap_or_default();
+    let available_mib = memory_limit_mib.saturating_sub(current_rss_mib);
+    let required_with_margin =
+        DOCLING_AUTO_MEMORY_PER_PROCESS_MIB.saturating_add(DOCLING_PROCESS_SAFETY_MARGIN_MIB);
+    if available_mib < required_with_margin {
+        return Err(DoclingExtractionError::InsufficientMemory {
+            memory_limit_mib,
+            current_rss_mib,
+            available_mib,
+            required_mib: DOCLING_AUTO_MEMORY_PER_PROCESS_MIB,
+            safety_margin_mib: DOCLING_PROCESS_SAFETY_MARGIN_MIB,
+        });
+    }
+    Ok(available_mib)
+}
+
 fn signal_exit_hint(status: &std::process::ExitStatus) -> &'static str {
     #[cfg(target_family = "unix")]
     {
@@ -666,6 +728,12 @@ fn signal_exit_hint(status: &std::process::ExitStatus) -> &'static str {
         let _ = status;
         ""
     }
+}
+
+fn process_status_is_memory_kill(status_or_message: &str) -> bool {
+    status_or_message.contains("SIGKILL")
+        || status_or_message.contains("signal (SIGKILL")
+        || status_or_message.contains("likely out of memory")
 }
 
 fn build_output(
@@ -999,5 +1067,22 @@ mod tests {
         assert_eq!(auto_docling_max_concurrency_for_limits(8, Some(16 * 1024 * 1024 * 1024)), 4);
         assert_eq!(auto_docling_max_concurrency_for_limits(8, Some(4 * 1024 * 1024 * 1024)), 1);
         assert_eq!(auto_docling_max_concurrency_for_limits(8, None), 1);
+    }
+
+    #[test]
+    fn docling_process_memory_gate_rejects_limits_below_one_process_floor() {
+        let error = docling_process_memory_headroom_for_limits(768 * 1024 * 1024, Some(64))
+            .expect_err("tiny worker cap cannot safely run a docling process");
+
+        assert_eq!(error.memory_failure_code(), Some("docling_insufficient_memory"));
+    }
+
+    #[test]
+    fn docling_process_memory_gate_allows_single_process_when_headroom_exists() {
+        let available =
+            docling_process_memory_headroom_for_limits(4 * 1024 * 1024 * 1024, Some(256))
+                .expect("4 GiB worker cap has enough headroom for one docling process");
+
+        assert!(available >= DOCLING_AUTO_MEMORY_PER_PROCESS_MIB);
     }
 }

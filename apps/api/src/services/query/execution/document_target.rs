@@ -107,6 +107,49 @@ where
     BTreeSet::new()
 }
 
+fn explicit_multi_token_target_document_ids_from_values<'a, I>(
+    question: &str,
+    values: I,
+) -> BTreeSet<Uuid>
+where
+    I: IntoIterator<Item = (Uuid, &'a str)>,
+{
+    let question = current_question_segment(question);
+    let normalized_question = normalize_document_target_text(question);
+    if normalized_question.is_empty() {
+        return BTreeSet::new();
+    }
+
+    let concrete_values = values.into_iter().collect::<Vec<_>>();
+    let targets =
+        explicit_target_document_ids_from_values(question, concrete_values.iter().copied());
+    if targets.len() != 1 {
+        return BTreeSet::new();
+    }
+    let Some(target_document_id) = targets.iter().next().copied() else {
+        return BTreeSet::new();
+    };
+    let has_multi_token_identity_match = concrete_values
+        .iter()
+        .filter(|(document_id, _)| *document_id == target_document_id)
+        .any(|(_, raw_value)| {
+            ranked_document_target_candidates([*raw_value]).into_iter().any(|candidate| {
+                document_candidate_match_tokens(&candidate.text).len() >= 2
+                    && document_candidate_is_matchable_for_surface(
+                        &candidate.text,
+                        &normalized_question,
+                    )
+                    && normalized_question_contains_document_candidate(
+                        &normalized_question,
+                        candidate.text.as_str(),
+                        "",
+                    )
+            })
+        });
+
+    if has_multi_token_identity_match { targets } else { BTreeSet::new() }
+}
+
 fn explicit_document_reference_target_ids_from_values<'a, I>(
     question: &str,
     values: I,
@@ -431,6 +474,16 @@ pub(crate) fn resolve_scoped_target_document_ids(
     };
     if !query_ir_allows_document_focus_scope(ir) {
         return BTreeSet::new();
+    }
+
+    if !is_follow_up {
+        let title_targets = explicit_multi_token_target_document_ids_from_values(
+            question,
+            document_values.iter().map(|(document_id, value)| (*document_id, value.as_str())),
+        );
+        if title_targets.len() == 1 {
+            return title_targets;
+        }
     }
 
     if query_ir_has_explicit_document_focus_target(ir) {
@@ -1183,6 +1236,41 @@ mod tests {
         );
 
         assert_eq!(target_ids, BTreeSet::from([alpha_document_id]));
+    }
+
+    #[test]
+    fn resolve_scoped_target_document_ids_uses_unambiguous_title_stem_for_typed_query() {
+        let focused_document_id = Uuid::now_v7();
+        let distractor_document_id = Uuid::now_v7();
+        let index = scoped_document_index([
+            (
+                focused_document_id,
+                "alpha_matrix_records.yaml",
+                Some("Alpha Matrix Records"),
+                "alpha_matrix_records.yaml",
+            ),
+            (
+                distractor_document_id,
+                "alpha_matrix_summary.yaml",
+                Some("Alpha Matrix Summary"),
+                "alpha_matrix_summary.yaml",
+            ),
+        ]);
+        let mut ir = scoped_query_ir(QueryScope::SingleDocument, None, &["Alpha Matrix"]);
+        ir.act = QueryAct::Describe;
+        ir.target_types = vec![
+            "configuration_file".to_string(),
+            "parameter".to_string(),
+            "procedure".to_string(),
+        ];
+
+        let target_ids = resolve_scoped_target_document_ids(
+            "Which values does Alpha Matrix Records expose?",
+            Some(&ir),
+            &index,
+        );
+
+        assert_eq!(target_ids, BTreeSet::from([focused_document_id]));
     }
 
     #[test]

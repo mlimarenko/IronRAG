@@ -430,9 +430,9 @@ fn build_prepared_segment_references_prioritizes_query_matching_headings_and_lim
         revision_id: control_revision_id,
         ordinal: 0,
         block_kind: "heading".to_string(),
-        text: "control center".to_string(),
-        normalized_text: "control center".to_string(),
-        heading_trail: vec!["Acme Control Center - Example".to_string()],
+        text: "sample console".to_string(),
+        normalized_text: "sample console".to_string(),
+        heading_trail: vec!["Acme Sample Console - Example".to_string()],
         section_path: vec!["acme-control-center-example".to_string()],
         page_number: None,
         span_start: None,
@@ -456,13 +456,13 @@ fn build_prepared_segment_references_prioritizes_query_matching_headings_and_lim
         Some(&bundle),
         &blocks,
         &block_rank_refs,
-        "What is Acme Control Center?",
+        "What is Acme Sample Console?",
         &HashMap::new(),
     );
 
     assert_eq!(
         references.first().and_then(|reference| reference.heading_trail.first().cloned()),
-        Some("Acme Control Center - Example".to_string())
+        Some("Acme Sample Console - Example".to_string())
     );
     assert!(
         references.iter().all(|reference| reference.revision_id == control_revision_id),
@@ -634,6 +634,7 @@ fn build_conversation_runtime_context_keeps_standalone_question_without_rewrite(
     assert_eq!(context.effective_query_text, "tell me how to move items in the product");
     assert!(!context.contextual_follow_up);
     assert_eq!(context.prompt_history_text.as_deref(), Some("User: how to fill in a transfer"));
+    assert_eq!(context.query_planning_history_text, None);
     assert_eq!(context.prompt_history_messages.len(), 1);
     assert_eq!(context.prompt_history_messages[0].role, "user");
     assert!(
@@ -854,7 +855,7 @@ fn build_conversation_runtime_context_scopes_history_overlapping_follow_up() {
 
     assert!(context.effective_query_text.starts_with("scope: "));
     assert!(context.contextual_follow_up);
-    assert!(context.effective_query_text.contains("literal anchors:"));
+    assert!(context.effective_query_text.contains("ir.memory.anchors.v1:"));
     assert!(context.effective_query_text.contains("`alphaPackage`"));
     assert!(context.effective_query_text.contains("`/opt/alpha.conf`"));
     assert!(context.effective_query_text.ends_with("explain how to configure all settings"));
@@ -905,7 +906,7 @@ fn build_conversation_runtime_context_scopes_medium_length_assistant_follow_up()
     assert!(context.contextual_follow_up);
     assert!(context.effective_query_text.starts_with("scope: "));
     assert!(context.effective_query_text.contains("Provider Alpha"));
-    assert!(context.effective_query_text.contains("literal anchors:"));
+    assert!(context.effective_query_text.contains("ir.memory.anchors.v1:"));
     assert!(context.effective_query_text.contains("`alphaPackage`"));
     assert!(context.effective_query_text.ends_with("show me every setting now"));
     assert!(should_replay_prior_grounded_answer_context(&context));
@@ -1001,7 +1002,7 @@ fn build_conversation_runtime_context_avoids_polluted_latest_assistant_literals(
     );
 
     assert!(context.contextual_follow_up);
-    assert!(context.effective_query_text.contains("literal anchors:"));
+    assert!(context.effective_query_text.contains("ir.memory.anchors.v1:"));
     assert!(context.effective_query_text.contains("`alphaPackage`"));
     assert!(context.effective_query_text.contains("`/opt/alpha.conf`"));
     assert!(!context.effective_query_text.contains("`betaPackage`"));
@@ -1065,7 +1066,7 @@ fn build_conversation_runtime_context_keeps_new_topic_question_out_of_prior_conf
     assert!(context.effective_query_text.starts_with("scope: "));
     assert!(context.effective_query_text.contains("topic: Provider Alpha"));
     assert!(context.effective_query_text.contains("Provider Alpha terminal"));
-    assert!(!context.effective_query_text.contains("literal anchors:"));
+    assert!(!context.effective_query_text.contains("ir.memory.anchors.v1:"));
     assert!(!context.effective_query_text.contains("`alphaPackage`"));
     assert!(!context.effective_query_text.contains("`/opt/alpha.conf`"));
     assert!(!context.effective_query_text.contains("`alphaTimeout`"));
@@ -1118,10 +1119,10 @@ fn build_conversation_runtime_context_preserves_dense_assistant_literals_in_tool
         .iter()
         .find(|turn| {
             matches!(turn.turn_kind, QueryTurnKind::Assistant)
-                && turn.content_text.starts_with("literals: ")
+                && turn.content_text.starts_with("ir.memory.literals.v1: ")
         })
         .expect("assistant history should be exported");
-    assert!(assistant_history.content_text.starts_with("literals: "));
+    assert!(assistant_history.content_text.starts_with("ir.memory.literals.v1: "));
     assert!(assistant_history.content_text.contains("`pkg-alpha`"));
     assert!(assistant_history.content_text.contains("`pkg-theta`"));
     assert!(
@@ -1134,15 +1135,83 @@ fn build_conversation_runtime_context_preserves_dense_assistant_literals_in_tool
         .iter()
         .find(|message| {
             message.content.as_deref().is_some_and(|content| {
-                content.contains("Prior assistant compact literal memory")
+                content.contains("ir.context.compact-literal-memory.v1:")
                     && content.contains("`pkg-alpha`")
             })
         })
         .expect("compact literal memory should reach prompt history");
     assert_eq!(prompt_history_message.role, "system");
     let prompt_history_text = prompt_history_message.content.as_deref().unwrap_or_default();
-    assert!(prompt_history_text.contains("literals: "));
-    assert!(prompt_history_text.contains("never copy it as a user-facing answer"));
+    assert!(prompt_history_text.contains("ir.memory.literals.v1: "));
+    assert!(prompt_history_text.starts_with("ir.context.compact-literal-memory.v1:"));
+}
+
+#[test]
+fn build_conversation_runtime_context_drops_compact_memory_for_standalone_question() {
+    let conversation_id = Uuid::now_v7();
+    let first_user_turn = query_repository::QueryTurnRow {
+        id: Uuid::now_v7(),
+        conversation_id,
+        turn_index: 1,
+        turn_kind: QueryTurnKind::User,
+        author_principal_id: None,
+        content_text: "which record statuses are supported?".to_string(),
+        execution_id: None,
+        created_at: Utc::now(),
+    };
+    let assistant_turn = query_repository::QueryTurnRow {
+        id: Uuid::now_v7(),
+        conversation_id,
+        turn_index: 2,
+        turn_kind: QueryTurnKind::Assistant,
+        author_principal_id: None,
+        content_text:
+            "ir.memory.literals.v1: `status.pending`, `status.active`, `status.archived`\n\
+             The record status values are `status.pending`, `status.active`, and `status.archived`."
+                .to_string(),
+        execution_id: None,
+        created_at: Utc::now(),
+    };
+    let current_turn = query_repository::QueryTurnRow {
+        id: Uuid::now_v7(),
+        conversation_id,
+        turn_index: 3,
+        turn_kind: QueryTurnKind::User,
+        author_principal_id: None,
+        content_text: "What callback events are supported, and how are callback payloads signed?"
+            .to_string(),
+        execution_id: None,
+        created_at: Utc::now(),
+    };
+
+    let context = build_conversation_runtime_context(
+        &[first_user_turn, assistant_turn, current_turn.clone()],
+        current_turn.id,
+    );
+
+    assert!(!context.contextual_follow_up);
+    assert!(
+        context
+            .prompt_history_text
+            .as_deref()
+            .is_none_or(|text| !text.contains("ir.memory.literals.v1: ")),
+        "standalone answer history text must not inherit compact literal memory"
+    );
+    assert!(
+        context.prompt_history_messages.iter().all(|message| !message
+            .content
+            .as_deref()
+            .unwrap_or_default()
+            .contains("ir.memory.literals.v1: ")),
+        "standalone questions must not inherit compact literal memory as prompt evidence"
+    );
+    assert!(
+        context
+            .grounded_answer_tool_history
+            .iter()
+            .all(|turn| !turn.content_text.contains("ir.memory.literals.v1: ")),
+        "standalone grounded_answer calls must not inherit compact literal memory"
+    );
 }
 
 #[test]
@@ -1206,7 +1275,7 @@ fn build_conversation_runtime_context_pins_old_assistant_literals_for_follow_up(
 
     let context = build_conversation_runtime_context(&turns, follow_up_turn.id);
 
-    assert!(context.effective_query_text.contains("literal anchors:"));
+    assert!(context.effective_query_text.contains("ir.memory.anchors.v1:"));
     assert!(context.effective_query_text.contains("`pkg-alpha`"));
     assert!(context.effective_query_text.contains("`alphaTimeout`"));
 
@@ -1215,10 +1284,9 @@ fn build_conversation_runtime_context_pins_old_assistant_literals_for_follow_up(
         .iter()
         .find(|message| {
             message.role == "system"
-                && message
-                    .content
-                    .as_deref()
-                    .is_some_and(|content| content.contains("pinned literal anchors"))
+                && message.content.as_deref().is_some_and(|content| {
+                    content.contains("ir.context.pinned-literal-anchors.v1:")
+                })
         })
         .expect("pinned anchors should reach prompt history");
     let prompt_anchor_text = prompt_anchor_message.content.as_deref().unwrap_or_default();
@@ -1230,7 +1298,7 @@ fn build_conversation_runtime_context_pins_old_assistant_literals_for_follow_up(
         .first()
         .expect("pinned anchors should reach tool history");
     assert!(matches!(tool_anchor_turn.turn_kind, QueryTurnKind::Assistant));
-    assert!(tool_anchor_turn.content_text.starts_with("literal anchors:"));
+    assert!(tool_anchor_turn.content_text.starts_with("ir.memory.anchors.v1:"));
     assert!(tool_anchor_turn.content_text.contains("`pkg-alpha`"));
     assert!(tool_anchor_turn.content_text.contains("`alphaTimeout`"));
 }
@@ -1392,7 +1460,7 @@ fn build_conversation_runtime_context_preserves_prior_answer_literals_for_extern
     assert!(context.effective_query_text.starts_with("scope: "));
     assert!(context.effective_query_text.contains("which package-like modules exist"));
     assert!(!context.effective_query_text.contains("entities:"));
-    assert!(context.effective_query_text.contains("literal anchors:"));
+    assert!(context.effective_query_text.contains("ir.memory.anchors.v1:"));
     assert!(context.effective_query_text.contains("`pkg-alpha`"));
     assert!(context.effective_query_text.contains("`pkg-mu`"));
     assert!(context.effective_query_text.ends_with("describe each item"));
@@ -1424,11 +1492,11 @@ fn build_conversation_runtime_context_converts_compacted_literals_to_retrieval_a
     let external_prior_turns = vec![
         ExternalConversationTurn {
             turn_kind: QueryTurnKind::User,
-            content_text: "how do I configure Provider Alpha".to_string(),
+            content_text: "how do I configure Sample Subject".to_string(),
         },
         ExternalConversationTurn {
             turn_kind: QueryTurnKind::Assistant,
-            content_text: "literals: `alpha-provider-module`, `/opt/alpha/alpha.conf`, `enableAlpha`, `/var/log/alpha.log`\nProvider Alpha settings use a module package, a module configuration file, and parameter defaults.".to_string(),
+            content_text: "ir.memory.literals.v1: `sample-module`, `/opt/sample/sample.conf`, `enableSample`, `/var/log/sample.log`\nSample Subject settings use a module package, a module configuration file, and parameter defaults.".to_string(),
         },
     ];
 
@@ -1439,11 +1507,11 @@ fn build_conversation_runtime_context_converts_compacted_literals_to_retrieval_a
     );
 
     assert!(context.effective_query_text.starts_with("scope: "));
-    assert!(context.effective_query_text.contains("Provider Alpha settings use"));
-    assert!(!context.effective_query_text.contains("literals:"));
-    assert!(context.effective_query_text.contains("literal anchors:"));
-    assert!(context.effective_query_text.contains("`/var/log/alpha.log`"));
-    assert!(context.effective_query_text.contains("`enableAlpha`"));
+    assert!(context.effective_query_text.contains("Sample Subject settings use"));
+    assert!(!context.effective_query_text.contains("ir.memory.literals.v1:"));
+    assert!(context.effective_query_text.contains("ir.memory.anchors.v1:"));
+    assert!(context.effective_query_text.contains("`/var/log/sample.log`"));
+    assert!(context.effective_query_text.contains("`enableSample`"));
     assert!(context.effective_query_text.ends_with("explain all settings"));
 }
 
@@ -1481,7 +1549,7 @@ fn build_conversation_runtime_context_keeps_compacted_literals_case_insensitive(
     let literal_line = assistant_history
         .content_text
         .lines()
-        .find(|line| line.starts_with("literals:"))
+        .find(|line| line.starts_with("ir.memory.literals.v1:"))
         .expect("compacted literal summary");
     assert!(literal_line.contains("`AlphaKey`"));
     assert!(
@@ -1523,7 +1591,7 @@ fn build_conversation_runtime_context_scopes_four_token_external_follow_up() {
     assert!(context.effective_query_text.starts_with("scope: "));
     assert!(context.effective_query_text.contains("how do I configure Provider Alpha"));
     assert!(context.effective_query_text.contains("entities: Provider, Alpha"));
-    assert!(context.effective_query_text.contains("literal anchors:"));
+    assert!(context.effective_query_text.contains("ir.memory.anchors.v1:"));
     assert!(context.effective_query_text.contains("`alpha-provider-module`"));
     assert!(context.effective_query_text.contains("`/opt/alpha/alpha.conf`"));
     assert!(context.effective_query_text.ends_with("show full ready config"));
@@ -1565,7 +1633,7 @@ fn build_conversation_runtime_context_drops_plain_backtick_words_from_literal_an
     let anchor_line = context
         .effective_query_text
         .lines()
-        .find(|line| line.contains("literal anchors:"))
+        .find(|line| line.contains("ir.memory.anchors.v1:"))
         .expect("literal anchor scope");
     assert!(anchor_line.contains("`alphaModule`"));
     assert!(anchor_line.contains("`/etc/alpha.conf`"));
@@ -1621,10 +1689,7 @@ fn build_conversation_runtime_context_standalone_question_after_assistant_answer
             "User: how do I configure connector alpha\nAssistant: Connector Alpha uses `alphaSecret` in section [Alpha]."
         )
     );
-    assert_eq!(
-        context.query_planning_history_text.as_deref(),
-        Some("User: how do I configure connector alpha")
-    );
+    assert_eq!(context.query_planning_history_text, None);
     assert_eq!(context.prompt_history_messages.len(), 2);
     assert!(context.coreference_entities.is_empty());
     assert!(
@@ -1632,7 +1697,7 @@ fn build_conversation_runtime_context_standalone_question_after_assistant_answer
         "standalone query should not be rewritten with prior entities"
     );
     assert!(
-        !context.effective_query_text.contains("literal anchors:"),
+        !context.effective_query_text.contains("ir.memory.anchors.v1:"),
         "standalone query should not inherit prior literal anchors"
     );
     assert!(

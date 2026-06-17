@@ -139,6 +139,58 @@ pub struct AssistantRelationReference {
     pub normalized_assertion: Option<String>,
 }
 
+/// Structured provenance for a single answer candidate.
+///
+/// Every field is optional because the clarify branches surface candidates
+/// derived from different evidence shapes: a graph-entity probe carries an
+/// `entity_id`, a document-derived variant carries a `document_id`, and a
+/// label-only variant (e.g. a grouped-reference title) carries none.
+/// Callers treat a present id as a stable handle for a follow-up tool call
+/// and a missing id as "label only".
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct AssistantAnswerCandidateProvenance {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub entity_id: Option<Uuid>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub document_id: Option<Uuid>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chunk_id: Option<Uuid>,
+}
+
+/// One typed disambiguation choice the answer pipeline surfaced alongside a
+/// clarifying answer.
+///
+/// `kind` reuses the existing typed vocabulary where it applies — a graph
+/// `node_type` for entity probes, `"document"` for a document-derived variant
+/// — so agents can route a follow-up without parsing the prose answer body.
+/// `confidence` is `None` when the branch has no ranking signal to expose.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct AssistantAnswerCandidate {
+    pub label: String,
+    pub kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confidence: Option<f64>,
+    pub provenance: AssistantAnswerCandidateProvenance,
+}
+
+/// Typed clarification metadata attached to a grounded-answer turn.
+///
+/// The prose answer body stays authoritative for humans; this object is
+/// additive machine-readable metadata for agent callers. `required` is
+/// `true` only when the turn returned a clarifying answer; otherwise the
+/// candidate list is empty and `question` is `None`.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct AssistantClarification {
+    pub required: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub question: Option<String>,
+    #[serde(default)]
+    pub answer_candidates: Vec<AssistantAnswerCandidate>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct AssistantVerificationWarning {
@@ -256,6 +308,12 @@ pub struct AssistantExecutionDetail {
     pub relation_references: Vec<AssistantRelationReference>,
     pub verification_state: AssistantVerificationState,
     pub verification_warnings: Vec<AssistantVerificationWarning>,
+    /// Typed clarification metadata for this turn. Defaults to
+    /// `required: false` with no candidates for ordinary answers and for
+    /// historical-replay reads (the replay surface carries no clarification
+    /// metadata); a clarify turn populates `question` and `answer_candidates`.
+    #[serde(default)]
+    pub clarification: AssistantClarification,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]

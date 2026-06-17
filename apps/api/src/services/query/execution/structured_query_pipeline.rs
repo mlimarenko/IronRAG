@@ -9,7 +9,7 @@ use crate::{
     domains::{
         provider_profiles::EffectiveProviderProfile,
         query::RuntimeQueryMode,
-        query_ir::{QueryAct, QueryScope},
+        query_ir::{QueryAct, QueryIR, QueryScope},
     },
     infra::repositories,
     services::{
@@ -17,12 +17,14 @@ use crate::{
         query::latest_versions::query_requests_latest_versions,
         query::planner::{QueryPlanTaskInput, RuntimeQueryPlan, build_task_query_plan},
         query::support::{
-            IntentResolutionRequest, derive_query_planning_metadata, derive_rerank_metadata,
+            IntentResolutionRequest, derive_query_planning_metadata,
+            derive_query_planning_metadata_for_query_ir, derive_rerank_metadata,
         },
     },
 };
 
 use super::embed::QuestionEmbeddingResult;
+use super::retrieve::query_ir_promotes_graph_evidence;
 use super::*;
 
 /// Finalize a reranked bundle into a `RuntimeStructuredQueryResult`
@@ -127,7 +129,6 @@ fn build_query_chunk_reference_snapshots(
 ) -> Vec<QueryChunkReferenceSnapshot> {
     chunks
         .iter()
-        .filter(|chunk| !is_source_unit_runtime_chunk(chunk))
         .enumerate()
         .map(|(index, chunk)| QueryChunkReferenceSnapshot {
             chunk_id: chunk.chunk_id,
@@ -271,17 +272,21 @@ pub(crate) async fn replan_for_resolved_retrieval_query(
     resolved_query: &str,
     mode: RuntimeQueryMode,
     top_k: usize,
+    query_ir: &QueryIR,
 ) -> anyhow::Result<()> {
     let source_truth_version =
         repositories::get_library_source_truth_version(&state.persistence.postgres, library_id)
             .await
             .context("failed to load library source-truth version for resolved-query replan")?;
-    let metadata = derive_query_planning_metadata(&IntentResolutionRequest {
-        library_id,
-        question: resolved_query.to_string(),
-        explicit_mode: mode,
-        source_truth_version,
-    });
+    let metadata = derive_query_planning_metadata_for_query_ir(
+        &IntentResolutionRequest {
+            library_id,
+            question: resolved_query.to_string(),
+            explicit_mode: mode,
+            source_truth_version,
+        },
+        query_ir,
+    );
     let plan = build_task_query_plan(&QueryPlanTaskInput {
         question: resolved_query.to_string(),
         top_k: Some(top_k),
@@ -309,6 +314,57 @@ pub(crate) async fn replan_for_resolved_retrieval_query(
     planning.question_embedding = question_embedding;
     planning.hyde_embedding = hyde_embedding;
     planning.embedding_usage = embedding_usage;
+    planning.candidate_limit = candidate_limit;
+    Ok(())
+}
+
+pub(crate) fn build_compiled_ir_query_plan(
+    library_id: Uuid,
+    retrieval_question: &str,
+    mode: RuntimeQueryMode,
+    top_k: usize,
+    query_ir: &QueryIR,
+) -> anyhow::Result<(crate::domains::query::QueryPlanningMetadata, RuntimeQueryPlan)> {
+    let metadata = derive_query_planning_metadata_for_query_ir(
+        &IntentResolutionRequest {
+            library_id,
+            question: retrieval_question.to_string(),
+            explicit_mode: mode,
+            source_truth_version: 0,
+        },
+        query_ir,
+    );
+    let plan = build_task_query_plan(&QueryPlanTaskInput {
+        question: retrieval_question.to_string(),
+        top_k: Some(top_k),
+        explicit_mode: Some(mode),
+        metadata: Some(metadata.clone()),
+    })
+    .map_err(|failure| anyhow::anyhow!(failure.summary))?;
+    Ok((metadata, plan))
+}
+
+pub(crate) fn refresh_query_plan_for_compiled_ir(
+    library_id: Uuid,
+    planning: &mut StructuredQueryPlanningStage,
+    retrieval_question: &str,
+    mode: RuntimeQueryMode,
+    top_k: usize,
+    query_ir: &QueryIR,
+    rerank_enabled: bool,
+    rerank_candidate_limit: usize,
+) -> anyhow::Result<()> {
+    let (metadata, plan) =
+        build_compiled_ir_query_plan(library_id, retrieval_question, mode, top_k, query_ir)?;
+    let candidate_limit = expanded_candidate_limit(
+        plan.planned_mode,
+        plan.top_k,
+        rerank_enabled,
+        rerank_candidate_limit,
+    )
+    .max(technical_literal_candidate_limit(planning.technical_literal_intent, plan.top_k));
+    planning.planning = metadata;
+    planning.plan = plan;
     planning.candidate_limit = candidate_limit;
     Ok(())
 }
@@ -496,11 +552,19 @@ pub(crate) async fn retrieve_structured_query(
         document_chunk_count = bundle.chunks.len(),
         "graph evidence + document chunks loaded concurrently"
     );
-    if !graph_evidence.chunks.is_empty() {
+    let promote_graph_evidence = query_ir.is_some_and(query_ir_promotes_graph_evidence);
+    if !graph_evidence.chunks.is_empty() && promote_graph_evidence {
         bundle.chunks = merge_graph_evidence_chunks(
             std::mem::take(&mut bundle.chunks),
             graph_evidence.chunks,
             graph_evidence_context_top_k(candidate_limit),
+        );
+    } else if !graph_evidence.chunks.is_empty() {
+        tracing::info!(
+            stage = "retrieval.graph_evidence_demoted",
+            library_id = %library_id,
+            graph_chunk_count = graph_evidence.chunks.len(),
+            "graph evidence chunks omitted from answer-driving context for non-graph QueryIR"
         );
     }
     let stale_chunk_count =
@@ -608,7 +672,7 @@ async fn assemble_structured_query(
 
     truncate_bundle(bundle, effective_top_k, Some(query_ir), &demoted_document_ids);
 
-    let include_graph_context = !suppress_graph_context_for_query(query_ir);
+    let include_graph_context = include_graph_context_for_query(query_ir);
     if !include_graph_context {
         bundle.entities.clear();
         bundle.relationships.clear();
@@ -708,19 +772,42 @@ fn merge_technical_literal_intent(
     }
 }
 
-fn suppress_graph_context_for_query(query_ir: &crate::domains::query_ir::QueryIR) -> bool {
-    query_requests_latest_versions(query_ir)
+fn include_graph_context_for_query(query_ir: &crate::domains::query_ir::QueryIR) -> bool {
+    query_ir_promotes_graph_evidence(query_ir) && !query_requests_latest_versions(query_ir)
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::domains::query_ir::{
-        QueryAct, QueryIR, QueryLanguage, QueryScope, SourceSliceDirection, SourceSliceFilter,
-        SourceSliceSpec,
+    use std::collections::HashMap;
+
+    use crate::domains::{
+        provider_profiles::{EffectiveProviderProfile, ProviderModelSelection},
+        query_ir::{
+            EntityMention, EntityRole, QueryAct, QueryIR, QueryLanguage, QueryScope,
+            SourceSliceDirection, SourceSliceFilter, SourceSliceSpec,
+        },
     };
     use uuid::Uuid;
 
     use super::*;
+
+    fn sample_model_selection(model_name: &str) -> ProviderModelSelection {
+        ProviderModelSelection {
+            provider_kind: "provider-alpha".to_string(),
+            model_name: model_name.to_string(),
+        }
+    }
+
+    fn sample_provider_profile() -> EffectiveProviderProfile {
+        EffectiveProviderProfile {
+            indexing: sample_model_selection("alpha-index"),
+            embedding: sample_model_selection("alpha-embedding"),
+            query_retrieve: sample_model_selection("alpha-retrieve"),
+            query_compile: sample_model_selection("alpha-compile"),
+            answer: sample_model_selection("alpha-answer"),
+            vision: None,
+        }
+    }
 
     fn runtime_chunk(kind: Option<&str>, score: f32) -> RuntimeMatchedChunk {
         RuntimeMatchedChunk {
@@ -738,22 +825,24 @@ mod tests {
     }
 
     #[test]
-    fn chunk_reference_snapshots_exclude_source_units() {
+    fn chunk_reference_snapshots_include_ordered_source_units() {
         let profile = runtime_chunk(Some("source_profile"), 4.0);
         let source_unit = runtime_chunk(Some(SOURCE_UNIT_CHUNK_KIND), 3.0);
         let ordinary = runtime_chunk(Some("text"), 2.0);
 
         let snapshots = build_query_chunk_reference_snapshots(&[
             profile.clone(),
-            source_unit,
+            source_unit.clone(),
             ordinary.clone(),
         ]);
 
-        assert_eq!(snapshots.len(), 2);
+        assert_eq!(snapshots.len(), 3);
         assert_eq!(snapshots[0].chunk_id, profile.chunk_id);
         assert_eq!(snapshots[0].rank, 1);
-        assert_eq!(snapshots[1].chunk_id, ordinary.chunk_id);
+        assert_eq!(snapshots[1].chunk_id, source_unit.chunk_id);
         assert_eq!(snapshots[1].rank, 2);
+        assert_eq!(snapshots[2].chunk_id, ordinary.chunk_id);
+        assert_eq!(snapshots[2].rank, 3);
     }
 
     #[test]
@@ -773,6 +862,90 @@ mod tests {
         assert_eq!(units.len(), 2);
         assert_eq!(units[0].chunk_id, earlier.chunk_id);
         assert_eq!(units[1].chunk_id, later.chunk_id);
+    }
+
+    #[test]
+    fn compiled_ir_query_plan_refresh_is_embedding_free() {
+        let library_id = Uuid::now_v7();
+        let retrieval_question = "Common prefix shared alpha gamma";
+        let query_ir = QueryIR {
+            act: QueryAct::Describe,
+            scope: QueryScope::SingleDocument,
+            language: QueryLanguage::Auto,
+            target_types: Vec::new(),
+            target_entities: vec![EntityMention {
+                label: "Gamma Node".to_string(),
+                role: EntityRole::Subject,
+            }],
+            literal_constraints: Vec::new(),
+            temporal_constraints: Vec::new(),
+            comparison: None,
+            document_focus: None,
+            conversation_refs: Vec::new(),
+            needs_clarification: None,
+            source_slice: None,
+            retrieval_query: None,
+            confidence: 0.9,
+        };
+
+        let (metadata, plan) = build_compiled_ir_query_plan(
+            library_id,
+            retrieval_question,
+            RuntimeQueryMode::Hybrid,
+            8,
+            &query_ir,
+        )
+        .expect("compiled IR planning should be pure");
+
+        assert_eq!(metadata.keywords.high_level, vec!["gamma".to_string()]);
+        assert_eq!(plan.high_level_keywords, vec!["gamma".to_string()]);
+        assert!(plan.low_level_keywords.contains(&"common".to_string()));
+
+        let initial_planning = derive_query_planning_metadata(&IntentResolutionRequest {
+            library_id,
+            question: retrieval_question.to_string(),
+            explicit_mode: RuntimeQueryMode::Hybrid,
+            source_truth_version: 0,
+        });
+        let initial_plan = build_task_query_plan(&QueryPlanTaskInput {
+            question: retrieval_question.to_string(),
+            top_k: Some(8),
+            explicit_mode: Some(RuntimeQueryMode::Hybrid),
+            metadata: Some(initial_planning.clone()),
+        })
+        .expect("initial planning should build");
+        let question_embedding = vec![0.1, 0.2, 0.3];
+        let hyde_embedding = Some(vec![0.4, 0.5, 0.6]);
+        let mut planning = StructuredQueryPlanningStage {
+            provider_profile: sample_provider_profile(),
+            planning: initial_planning,
+            plan: initial_plan,
+            technical_literal_intent: TechnicalLiteralIntent::default(),
+            question_embedding: question_embedding.clone(),
+            hyde_embedding: hyde_embedding.clone(),
+            embedding_usage: None,
+            graph_index: QueryGraphIndex::empty(),
+            document_index: HashMap::new(),
+            candidate_limit: 1,
+        };
+
+        refresh_query_plan_for_compiled_ir(
+            library_id,
+            &mut planning,
+            retrieval_question,
+            RuntimeQueryMode::Hybrid,
+            8,
+            &query_ir,
+            false,
+            32,
+        )
+        .expect("compiled IR refresh should not require embeddings");
+
+        assert_eq!(planning.planning.keywords.high_level, vec!["gamma".to_string()]);
+        assert_eq!(planning.plan.high_level_keywords, vec!["gamma".to_string()]);
+        assert_eq!(planning.question_embedding, question_embedding);
+        assert_eq!(planning.hyde_embedding, hyde_embedding);
+        assert_eq!(planning.candidate_limit, 24);
     }
 
     #[test]
@@ -936,7 +1109,7 @@ mod tests {
     }
 
     #[test]
-    fn latest_version_queries_suppress_graph_context() {
+    fn latest_version_queries_do_not_include_graph_context() {
         let query_ir = QueryIR {
             act: QueryAct::Enumerate,
             scope: QueryScope::LibraryMeta,
@@ -958,6 +1131,6 @@ mod tests {
             confidence: 0.9,
         };
 
-        assert!(suppress_graph_context_for_query(&query_ir));
+        assert!(!include_graph_context_for_query(&query_ir));
     }
 }

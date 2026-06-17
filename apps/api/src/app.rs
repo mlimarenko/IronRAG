@@ -105,7 +105,12 @@ async fn run_http_api(
     if state.settings.knowledge_plane_backend == "arango" {
         spawn_boot_arango_healthcheck(state.clone(), shutdown.subscribe());
     }
-    spawn_runtime_graph_projection_prewarm(state.clone());
+    if state.settings.runtime_graph_projection_prewarm_enabled {
+        spawn_runtime_graph_projection_prewarm(
+            state.clone(),
+            state.settings.runtime_graph_projection_prewarm_max_libraries,
+        );
+    }
     let router = build_router(state.clone());
     let addr: SocketAddr = config.bind_addr.parse()?;
     info!(
@@ -128,6 +133,8 @@ async fn run_http_api(
         graph_filter_degenerate_self_loops = state
             .bulk_ingest_hardening
             .graph_filter_degenerate_self_loops,
+        runtime_graph_projection_prewarm_enabled = state.settings.runtime_graph_projection_prewarm_enabled,
+        runtime_graph_projection_prewarm_max_libraries = state.settings.runtime_graph_projection_prewarm_max_libraries,
         mcp_memory_default_read_window_chars = state.mcp_memory.default_read_window_chars,
         mcp_memory_max_read_window_chars = state.mcp_memory.max_read_window_chars,
         mcp_memory_default_search_limit = state.mcp_memory.default_search_limit,
@@ -342,8 +349,8 @@ fn spawn_boot_arango_healthcheck(
     });
 }
 
-/// Detached startup task that pre-loads the in-memory runtime graph
-/// projection for every active library on the backend role.
+/// Detached opt-in task that pre-loads the in-memory runtime graph
+/// projection for active libraries on the backend role.
 ///
 /// Without prewarm the first turn against a populated library incurs
 /// a ~30+ s `plan.load_graph_index` cache miss while
@@ -353,19 +360,14 @@ fn spawn_boot_arango_healthcheck(
 /// TTL evicts an entry, even though steady-state queries hit a warm
 /// cache cheaply.
 ///
-/// Runs in `tokio::spawn` so the backend reports Ready immediately —
-/// prewarm fills the cache in the background, not on the critical
-/// path. Libraries are warmed with bounded concurrency
-/// (`PREWARM_CONCURRENCY`) to cut total prewarm wall-time while
-/// keeping the startup Postgres connection-pool footprint small; the
-/// canonical query handlers stay responsive throughout. Per-library
-/// errors are logged but never fail the whole task, since one missing
-/// snapshot or empty library should not block prewarm for the rest.
-fn spawn_runtime_graph_projection_prewarm(state: state::AppState) {
+/// Runs only when explicitly enabled. Large corpora can make all-library
+/// prewarm allocate enough graph projection memory to OOM the API role; lazy
+/// per-library loading remains the default path.
+fn spawn_runtime_graph_projection_prewarm(state: state::AppState, max_libraries: usize) {
     tokio::spawn(async move {
         use futures::StreamExt;
         let prewarm_started = std::time::Instant::now();
-        let libraries = match crate::infra::repositories::catalog_repository::list_libraries(
+        let mut libraries = match crate::infra::repositories::catalog_repository::list_libraries(
             &state.persistence.postgres,
             None,
         )
@@ -380,9 +382,15 @@ fn spawn_runtime_graph_projection_prewarm(state: state::AppState) {
                 return;
             }
         };
+        let requested_library_count = libraries.len();
+        if max_libraries > 0 && libraries.len() > max_libraries {
+            libraries.truncate(max_libraries);
+        }
         info!(
             stage = "graph_projection_prewarm_start",
             library_count = libraries.len(),
+            requested_library_count,
+            max_libraries,
             "runtime graph projection prewarm starting"
         );
         const PREWARM_CONCURRENCY: usize = 4;

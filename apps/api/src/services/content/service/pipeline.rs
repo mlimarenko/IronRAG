@@ -1215,6 +1215,9 @@ impl ContentService {
             .await;
         let embed_chunk_elapsed_ms = Some(embed_chunk_start.elapsed().as_millis() as i64);
         let mut embed_chunk_failure: Option<String> = None;
+        // Whether persisted chunk vectors must survive a failure so a retry can
+        // resume from them (transient provider / store blip).
+        let mut embed_chunk_preserve_vectors = false;
         match &embed_chunk_result {
             Ok(outcome) => {
                 if let (Some(provider), Some(model), Some(usage_json)) = (
@@ -1278,6 +1281,7 @@ impl ContentService {
                 true
             }
             Err(error) => {
+                embed_chunk_preserve_vectors = error.preserves_partial_vectors();
                 embed_chunk_failure = Some(format!("chunk embedding failed: {error:#}"));
                 warn!(
                     attempt_id = %attempt_id,
@@ -1316,14 +1320,19 @@ impl ContentService {
         drop(embed_chunk_result);
 
         if let Some(reason) = embed_chunk_failure {
-            super::fail_revision_vector_graph_readiness(state, context.revision_id, &reason)
-                .await
-                .map_err(|error| {
-                    ApiError::internal_with_log(
-                        error,
-                        "failed to mark inline embed_chunk failure readiness",
-                    )
-                })?;
+            super::fail_revision_vector_graph_readiness(
+                state,
+                context.revision_id,
+                &reason,
+                !embed_chunk_preserve_vectors,
+            )
+            .await
+            .map_err(|error| {
+                ApiError::internal_with_log(
+                    error,
+                    "failed to mark inline embed_chunk failure readiness",
+                )
+            })?;
             return Err(ApiError::internal_with_log(&reason, "inline chunk embedding failed"));
         }
 

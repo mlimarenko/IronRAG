@@ -40,6 +40,7 @@ const ANSWER_RUNTIME_FINGERPRINT_SOURCES: &[(&str, &str)] = &[
     ("compiler.rs", include_str!("compiler.rs")),
     ("latest_versions.rs", include_str!("latest_versions.rs")),
     ("execution/answer.rs", include_str!("execution/answer.rs")),
+    ("execution/answer_kind.rs", include_str!("execution/answer_kind.rs")),
     ("execution/answer_pipeline.rs", include_str!("execution/answer_pipeline.rs")),
     (
         "execution/canonical_answer_context.rs",
@@ -282,6 +283,39 @@ pub(crate) async fn delete_cached_execution_id(client: &redis::Client, key: &str
     Ok(())
 }
 
+/// Structural test for a Redis *availability* failure (server down,
+/// unreachable, connection dropped, or timed out) as opposed to a
+/// protocol/server error that signals something genuinely wrong.
+///
+/// The fill-lock fast path must degrade to cache-miss latency when Redis
+/// is simply unavailable, never surface a 5xx — the answer pipeline does
+/// not need Redis to compute. We classify on the typed [`redis::RedisError`]
+/// error kind, never on message-string matching.
+#[must_use]
+fn redis_error_is_connectivity(error: &redis::RedisError) -> bool {
+    error.is_io_error()
+        || error.is_connection_refusal()
+        || error.is_connection_dropped()
+        || error.is_timeout()
+}
+
+/// Decide whether a fill-lock acquisition error should fail *open* (proceed
+/// without the lock, degrading to cache-miss behaviour) or fail *closed*
+/// (surface coordination-unavailable to the caller).
+///
+/// Errors returned by [`try_acquire_fill_guard`] are always Redis
+/// connect/command failures — genuine lock contention is reported as
+/// `Ok(None)`, not `Err`. We still distinguish the two error *classes*
+/// structurally: a connectivity failure (Redis down) fails open; any other
+/// Redis error (e.g. an unexpected server/protocol fault) keeps the
+/// conservative fail-closed semantics so a real malfunction stays visible.
+#[must_use]
+pub(crate) fn fill_lock_error_fails_open(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        cause.downcast_ref::<redis::RedisError>().is_some_and(redis_error_is_connectivity)
+    })
+}
+
 pub(crate) async fn try_acquire_fill_guard(
     client: &redis::Client,
     key: &str,
@@ -449,6 +483,42 @@ mod tests {
         let mut changed = base_input(8);
         changed.answer_runtime_fingerprint = "answer-runtime:changed";
         assert_ne!(cache_key(&base_input(8)), cache_key(&changed));
+    }
+
+    #[test]
+    fn fill_lock_connectivity_error_fails_open() {
+        // An IO-class Redis error (server down / unreachable) must degrade to
+        // cache-miss behaviour rather than surface a coordination 5xx.
+        let io = std::io::Error::new(std::io::ErrorKind::ConnectionRefused, "connection refused");
+        let redis_error = redis::RedisError::from(io);
+        assert!(redis_error.is_connection_refusal() || redis_error.is_io_error());
+        let wrapped =
+            anyhow::Error::new(redis_error).context("connect to redis for query result cache lock");
+        assert!(fill_lock_error_fails_open(&wrapped));
+    }
+
+    #[test]
+    fn fill_lock_protocol_error_fails_closed() {
+        // A non-connectivity Redis error (e.g. a server/extension fault) is not
+        // a routine outage; keep conservative fail-closed semantics so a real
+        // malfunction stays visible instead of silently skipping coordination.
+        let redis_error =
+            redis::RedisError::from((redis::ErrorKind::Extension, "unexpected server response"));
+        assert!(!redis_error.is_io_error());
+        assert!(!redis_error.is_connection_refusal());
+        assert!(!redis_error.is_connection_dropped());
+        assert!(!redis_error.is_timeout());
+        let wrapped =
+            anyhow::Error::new(redis_error).context("redis SET NX query result cache lock");
+        assert!(!fill_lock_error_fails_open(&wrapped));
+    }
+
+    #[test]
+    fn fill_lock_non_redis_error_fails_closed() {
+        // An anyhow error with no Redis cause in the chain is not a Redis
+        // availability signal and must not fail open.
+        let wrapped = anyhow::anyhow!("unrelated failure");
+        assert!(!fill_lock_error_fails_open(&wrapped));
     }
 
     #[test]

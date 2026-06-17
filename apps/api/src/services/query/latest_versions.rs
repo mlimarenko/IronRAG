@@ -11,8 +11,13 @@ pub(crate) fn query_requests_latest_versions(ir: &QueryIR) -> bool {
         .source_slice
         .as_ref()
         .is_some_and(|slice| matches!(slice.direction, SourceSliceDirection::Tail));
+    let has_release_inventory_type = ir_target_types_include(ir, &["release", "changelog"]);
+    let has_requested_count = ir
+        .literal_constraints
+        .iter()
+        .any(|literal| matches!(literal.kind, LiteralKind::NumericCode));
     matches!(ir.act, QueryAct::Describe | QueryAct::Enumerate | QueryAct::Meta)
-        && ir_target_types_include(ir, &["version", "release"])
+        && (has_explicit_tail_slice || has_release_inventory_type || has_requested_count)
         && (!has_version_literal || has_explicit_tail_slice)
         && ir
             .source_slice
@@ -131,7 +136,12 @@ fn ir_target_types_include(ir: &QueryIR, tags: &[&str]) -> bool {
 }
 
 pub(crate) fn extract_semver_like_version(text: &str) -> Option<Vec<u32>> {
+    semver_like_version_candidates(text).into_iter().next()
+}
+
+fn semver_like_version_candidates(text: &str) -> Vec<Vec<u32>> {
     let chars = text.char_indices().collect::<Vec<_>>();
+    let mut versions = Vec::new();
     for (index, &(start, ch)) in chars.iter().enumerate() {
         if !ch.is_ascii_digit() {
             continue;
@@ -156,16 +166,68 @@ pub(crate) fn extract_semver_like_version(text: &str) -> Option<Vec<u32>> {
             .filter(|part| !part.is_empty())
             .map(str::parse::<u32>)
             .collect::<Result<Vec<_>, _>>()
-            .ok()?;
+            .ok();
+        let Some(parts) = parts else {
+            continue;
+        };
         if version_parts_are_release_like(&parts) {
-            return Some(parts);
+            versions.push(parts);
         }
     }
-    None
+    versions
+}
+
+pub(crate) fn extract_release_context_version(text: &str) -> Option<Vec<u32>> {
+    let mut line_start_fallback = None;
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        for version in semver_like_version_candidates(line) {
+            if !version_parts_are_ipv4_like(&version) {
+                return Some(version);
+            }
+        }
+        if line_start_fallback.is_none()
+            && let Some(version) = extract_line_start_version(line)
+            && !version_parts_are_ipv4_like(&version)
+        {
+            line_start_fallback = Some(version);
+        }
+    }
+    line_start_fallback
+}
+
+fn extract_line_start_version(line: &str) -> Option<Vec<u32>> {
+    let trimmed = line.trim_start();
+    let version_start =
+        trimmed.char_indices().find_map(|(index, ch)| ch.is_ascii_digit().then_some(index))?;
+    if trimmed[..version_start].chars().any(|ch| !ch.is_whitespace() && !matches!(ch, 'v' | 'V')) {
+        return None;
+    }
+    extract_semver_like_version(&trimmed[version_start..])
 }
 
 fn version_parts_are_release_like(parts: &[u32]) -> bool {
-    parts.len() >= 2 && parts.first().copied().is_some_and(|major| !(1900..=2100).contains(&major))
+    parts.len() >= 2
+        && !parts.first().is_some_and(|part| (1900..=2100).contains(part))
+        && !version_parts_are_calendar_like(parts)
+}
+
+fn version_parts_are_calendar_like(parts: &[u32]) -> bool {
+    if parts.len() != 3 {
+        return false;
+    }
+    let [first, second, third] = [parts[0], parts[1], parts[2]];
+    (1900..=2100).contains(&third)
+        && (1..=31).contains(&first)
+        && (1..=31).contains(&second)
+        && (first <= 12 || second <= 12)
+}
+
+fn version_parts_are_ipv4_like(parts: &[u32]) -> bool {
+    parts.len() == 4 && parts.iter().all(|part| *part <= 255)
 }
 
 pub(crate) fn compare_version_desc(left: &[u32], right: &[u32]) -> std::cmp::Ordering {
@@ -179,4 +241,31 @@ pub(crate) fn compare_version_desc(left: &[u32], right: &[u32]) -> std::cmp::Ord
         }
     }
     std::cmp::Ordering::Equal
+}
+
+#[cfg(test)]
+mod tests {
+    use super::extract_release_context_version;
+
+    #[test]
+    fn release_context_version_extractor_rejects_dates_and_plain_ip_addresses() {
+        assert_eq!(
+            extract_release_context_version("Build 9.8.765 - Product"),
+            Some(vec![9, 8, 765])
+        );
+        assert_eq!(
+            extract_release_context_version("2.4.259 (25.06.2024) - fixed flow"),
+            Some(vec![2, 4, 259])
+        );
+        assert_eq!(
+            extract_release_context_version("Build 10.0.2000 - Product"),
+            Some(vec![10, 0, 2000])
+        );
+        assert_eq!(
+            extract_release_context_version("Host 10.0.1.108 carries build 9.8.765"),
+            Some(vec![9, 8, 765])
+        );
+        assert_eq!(extract_release_context_version("Server 10.0.1.108 is reachable"), None);
+        assert_eq!(extract_release_context_version("Screenshot 06.15.2026"), None);
+    }
 }

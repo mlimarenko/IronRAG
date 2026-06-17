@@ -83,21 +83,27 @@ fn is_short_technical_focus_token(token: &str) -> bool {
 }
 
 fn technical_keyword_stem(keyword: &str) -> Option<String> {
+    if keyword.chars().count() < 6 {
+        return None;
+    }
     let stem = keyword.chars().take(5).collect::<String>();
     (stem.chars().count() >= 4).then_some(stem)
 }
 
 pub(super) fn technical_keyword_present(lowered_text: &str, keyword: &str) -> bool {
-    lowered_text.contains(keyword)
-        || technical_keyword_stem(keyword).is_some_and(|stem| lowered_text.contains(stem.as_str()))
+    technical_keyword_exact_token_present(lowered_text, keyword)
+        || technical_keyword_stem(keyword)
+            .is_some_and(|stem| technical_keyword_stem_present(lowered_text, stem.as_str()))
         || technical_keyword_related_prefix_present(lowered_text, keyword)
 }
 
 pub(super) fn technical_keyword_weight(lowered_text: &str, keyword: &str) -> usize {
-    if lowered_text.contains(keyword) {
+    if technical_keyword_exact_token_present(lowered_text, keyword) {
         return keyword.chars().count().min(24);
     }
-    if technical_keyword_stem(keyword).is_some_and(|stem| lowered_text.contains(stem.as_str())) {
+    if technical_keyword_stem(keyword)
+        .is_some_and(|stem| technical_keyword_stem_present(lowered_text, stem.as_str()))
+    {
         return 4;
     }
     if technical_keyword_related_prefix_present(lowered_text, keyword) {
@@ -106,12 +112,25 @@ pub(super) fn technical_keyword_weight(lowered_text: &str, keyword: &str) -> usi
     0
 }
 
+fn technical_focus_text_tokens(value: &str) -> impl Iterator<Item = &str> + '_ {
+    value
+        .split(|ch: char| !ch.is_alphanumeric() && ch != '_' && ch != '/')
+        .map(str::trim)
+        .filter(|token| !token.is_empty())
+}
+
+fn technical_keyword_exact_token_present(lowered_text: &str, keyword: &str) -> bool {
+    technical_focus_text_tokens(lowered_text).any(|token| token == keyword)
+}
+
+fn technical_keyword_stem_present(lowered_text: &str, stem: &str) -> bool {
+    technical_focus_text_tokens(lowered_text)
+        .any(|token| token == stem || related_prefix_token_match(stem, token))
+}
+
 fn technical_keyword_related_prefix_present(lowered_text: &str, keyword: &str) -> bool {
     keyword.chars().count() >= 5
-        && lowered_text
-            .split(|ch: char| !ch.is_alphanumeric() && ch != '_' && ch != '/')
-            .map(str::trim)
-            .filter(|token| !token.is_empty())
+        && technical_focus_text_tokens(lowered_text)
             .any(|token| related_prefix_token_match(keyword, token))
 }
 
@@ -211,14 +230,17 @@ pub(super) fn technical_chunk_selection_score(
         .sum::<isize>()
 }
 
-fn query_ir_wants_literal_inventory_boost(question: &str, ir: Option<&QueryIR>) -> bool {
+fn query_ir_literal_inventory_boost_multiplier(question: &str, ir: Option<&QueryIR>) -> isize {
     let Some(ir) = ir else {
-        return false;
+        return 0;
     };
+    if matches!(ir.act, QueryAct::Compare) && ir.comparison.is_some() {
+        return 2;
+    }
     if ir.is_exact_literal_technical()
         || matches!(ir.act, QueryAct::ConfigureHow | QueryAct::RetrieveValue)
     {
-        return true;
+        return 1;
     }
     if ir.target_types.iter().any(|tag| {
         matches!(
@@ -240,16 +262,16 @@ fn query_ir_wants_literal_inventory_boost(question: &str, ir: Option<&QueryIR>) 
                 | "connection"
         )
     }) {
-        return true;
+        return 1;
     }
     if ir.literal_constraints.iter().any(|literal| match literal.kind {
         LiteralKind::Url | LiteralKind::Path => true,
         LiteralKind::Identifier => literal_text_is_identifier_shaped(&literal.text),
         LiteralKind::Version | LiteralKind::NumericCode | LiteralKind::Other => false,
     }) {
-        return true;
+        return 1;
     }
-    ir.confidence <= 0.3
+    if ir.confidence <= 0.3
         && matches!(ir.act, QueryAct::Describe | QueryAct::ConfigureHow)
         && matches!(ir.scope, QueryScope::SingleDocument)
         && ir.source_slice.is_none()
@@ -258,6 +280,10 @@ fn query_ir_wants_literal_inventory_boost(question: &str, ir: Option<&QueryIR>) 
         && technical_literal_focus_keywords(question, Some(ir))
             .iter()
             .any(|keyword| keyword.chars().count() < 4)
+    {
+        return 1;
+    }
+    0
 }
 
 fn technical_literal_inventory_score(text: &str) -> isize {
@@ -292,7 +318,8 @@ pub(super) fn select_document_balanced_chunks<'a>(
 
     for document_chunks in per_document_chunks.values_mut() {
         let local_keywords = document_local_focus_keywords(question, ir, document_chunks, keywords);
-        let literal_inventory_boost = query_ir_wants_literal_inventory_boost(question, ir);
+        let literal_inventory_boost_multiplier =
+            query_ir_literal_inventory_boost_multiplier(question, ir);
         let score_by_chunk_id = document_chunks
             .iter()
             .map(|chunk| {
@@ -303,9 +330,8 @@ pub(super) fn select_document_balanced_chunks<'a>(
                     &local_keywords,
                     pagination_requested,
                 );
-                let inventory_score = literal_inventory_boost
-                    .then(|| technical_literal_inventory_score(&evidence_text))
-                    .unwrap_or(0);
+                let inventory_score = technical_literal_inventory_score(&evidence_text)
+                    .saturating_mul(literal_inventory_boost_multiplier);
                 (
                     chunk.chunk_id,
                     (
@@ -403,6 +429,25 @@ mod tests {
     }
 
     #[test]
+    fn technical_keyword_weight_respects_short_token_boundaries() {
+        assert_eq!(technical_keyword_weight("liquid marker", "id"), 0);
+        assert_eq!(technical_keyword_weight("alpha id marker", "id"), 2);
+        assert_eq!(technical_keyword_weight("[alpha.qr]", "qr"), 2);
+    }
+
+    #[test]
+    fn technical_keyword_weight_respects_four_char_token_boundaries() {
+        assert_eq!(technical_keyword_weight("metamode value", "mode"), 0);
+        assert_eq!(technical_keyword_weight("mode value", "mode"), 4);
+    }
+
+    #[test]
+    fn technical_keyword_weight_keeps_long_token_prefix_matching() {
+        assert_eq!(technical_keyword_weight("config value", "configuration"), 4);
+        assert_eq!(technical_keyword_weight("configuration value", "config"), 4);
+    }
+
+    #[test]
     fn chunk_selection_uses_document_label_and_literal_inventory_for_config_chunks() {
         let document_id = Uuid::now_v7();
         let overview = test_chunk(
@@ -436,6 +481,48 @@ mod tests {
 
         assert_eq!(selected.len(), 1);
         assert_eq!(selected[0].chunk_id, config.chunk_id);
+    }
+
+    #[test]
+    fn comparison_chunk_selection_boosts_structural_literal_inventory() {
+        let document_id = Uuid::now_v7();
+        let overview = test_chunk(
+            document_id,
+            "Alpha Beta comparison",
+            0,
+            "Alpha and Beta both describe threshold control behavior in prose.",
+        );
+        let exact = test_chunk(
+            document_id,
+            "Alpha Beta comparison",
+            1,
+            "AlphaLimitRequests: read SAMPLE_LIMIT_REQUESTS=100\n\
+             AlphaLimitWindowSeconds: read SAMPLE_LIMIT_WINDOW_SECONDS=60",
+        );
+        let mut ir = test_query_ir();
+        ir.act = QueryAct::Compare;
+        ir.comparison = Some(crate::domains::query_ir::ComparisonSpec {
+            a: Some("Alpha".to_string()),
+            b: Some("Beta".to_string()),
+            dimension: "threshold control".to_string(),
+        });
+
+        let chunks = [overview, exact.clone()];
+        let selected = select_document_balanced_chunks(
+            "How do Alpha and Beta control thresholds?",
+            Some(&ir),
+            &chunks,
+            &technical_literal_focus_keywords(
+                "How do Alpha and Beta control thresholds?",
+                Some(&ir),
+            ),
+            false,
+            1,
+            1,
+        );
+
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].chunk_id, exact.chunk_id);
     }
 
     #[test]

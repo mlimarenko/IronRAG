@@ -1,0 +1,64 @@
+{
+  "suites": {
+    "synthetic_associative_graph_ranker": {
+      "cases": {
+        "two_hop_bridge_returns_endpoint": {
+          "relevantDocuments": ["alpha_relay_topology"],
+          "relevantChunks": ["Bridge Junction", "Gamma Endpoint", "Bridge Gamma Route"]
+        },
+        "multi_anchor_event_beats_single_anchor_noise": {
+          "relevantDocuments": ["beacon_transition_topology"],
+          "relevantChunks": ["Beacon Node", "Harbor Delta", "Beacon Harbor Transition"]
+        },
+        "relationship_text_disambiguates_same_source": {
+          "relevantDocuments": ["needle_disambiguation_topology"],
+          "relevantChunks": ["Router Hub", "Needle Artifact", "guarded needle route"]
+        },
+        "graph_backed_answer_does_not_pass_with_chunks_only": {
+          "relevantDocuments": ["alpha_relay_topology"],
+          "relevantChunks": ["Alpha Relay", "Bridge Junction", "Gamma Endpoint"]
+        }
+      }
+    },
+    "wikipedia_baseline_grounded": {
+      "cases": {
+        "knowledge_graph_model_and_entities": {
+          "relevantChunks": ["graph-structured data model", "objects", "events"]
+        },
+        "graph_database_relationship_priority": {
+          "relevantChunks": ["relationships", "perpetually stored"]
+        },
+        "vector_database_ann_and_use_case": {
+          "relevantChunks": ["approximate nearest neighbor", "semantic search"]
+        },
+        "llm_transformer_architecture": {
+          "relevantChunks": ["transformer architecture"]
+        },
+        "rust_memory_safety": {
+          "relevantChunks": ["memory safety", "borrow checker"]
+        },
+        "rag_external_sources_before_answering": {
+          "relevantChunks": ["specified set of documents", "reduce AI hallucinations"]
+        },
+        "ocr_machine_encoded_text": {
+          "relevantChunks": ["machine-encoded text", "scanned document"]
+        },
+        "transformer_attention_and_no_recurrence": {
+          "relevantChunks": ["multi-head attention", "no recurrent units"]
+        },
+        "semantic_web_machine_readable_standards": {
+          "relevantChunks": ["machine-readable", "RDF", "OWL"]
+        },
+        "ner_real_world_object_categories": {
+          "relevantChunks": ["person names", "organizations", "locations"]
+        },
+        "information_retrieval_search_scope": {
+          "relevantChunks": ["information system resources", "information need"]
+        },
+        "question_answering_system_types": {
+          "relevantChunks": ["open-domain", "closed-domain"]
+        }
+      }
+    }
+  }
+}

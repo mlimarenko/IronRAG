@@ -3,8 +3,8 @@
 use chrono::{DateTime, TimeZone, Utc};
 use ironrag_backend::interfaces::http::mcp::grounded_answer_contract_payload;
 use ironrag_contracts::assistant::{
-    AssistantChunkReference, AssistantContentSourceAccess, AssistantEntityReference,
-    AssistantExecution, AssistantExecutionDetail, AssistantPolicySummary,
+    AssistantChunkReference, AssistantClarification, AssistantContentSourceAccess,
+    AssistantEntityReference, AssistantExecution, AssistantExecutionDetail, AssistantPolicySummary,
     AssistantPreparedSegmentReference, AssistantRelationReference, AssistantRuntimeStageSummary,
     AssistantRuntimeSummary, AssistantTechnicalFactReference, AssistantTurn, AssistantTurnRole,
     AssistantVerificationState, AssistantVerificationWarning,
@@ -349,6 +349,8 @@ fn execution_detail_for(scenario: &Scenario, answer_text: &str) -> AssistantExec
                 related_fact_id: warning.related_fact.then(|| deterministic_id(scenario.seed, 300)),
             })
             .collect(),
+        // Scenarios represent unambiguous answers; clarification is default.
+        clarification: AssistantClarification::default(),
     }
 }
 
@@ -481,6 +483,14 @@ fn response_shape(scenario: &Scenario, response: &Value) -> Value {
                 == Some(&json!(matches!(scenario.verification_state, AssistantVerificationState::Verified))),
         },
         "executionDetailKeys": object_keys(detail),
+        // Prove the new typed candidate surface is present and correct for
+        // unambiguous answers: answerCandidates is an empty array,
+        // clarification.required is false, question is absent/null.
+        "clarificationShape": {
+            "candidateCount": structured.get("answerCandidates").and_then(Value::as_array).map(Vec::len),
+            "required": structured.pointer("/clarification/required"),
+            "questionPresent": structured.pointer("/clarification/question").is_some_and(|v| !v.is_null()),
+        },
         "citationCounts": citation_counts,
         "verifier": {
             "state": detail.get("verificationState"),

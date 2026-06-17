@@ -7,7 +7,9 @@ use anyhow::{Context, Result as AnyhowResult, anyhow};
 use uuid::Uuid;
 
 use crate::{
-    app::state::AppState, domains::ai::AiBindingPurpose, infra::repositories::ai_repository,
+    app::state::AppState,
+    domains::ai::AiBindingPurpose,
+    infra::{arangodb::search_store::KNOWLEDGE_CHUNK_VECTOR_KIND, repositories::ai_repository},
     integrations::llm::EmbeddingRequest,
 };
 
@@ -35,8 +37,8 @@ pub(crate) fn invalidate_vector_index_dimension_cache() {
 ///
 /// Reads `metadata_json["dimensions"]` from the resolved model-catalog row
 /// for the library's active `EmbedChunk` binding. When the catalog row does
-/// not carry an explicit dimension (older seeds, custom provider), falls
-/// back to a one-shot embedding probe via the LLM gateway. Cached per
+/// not carry an explicit dimension, persisted vector metadata is used before
+/// falling back to a one-shot embedding probe via the LLM gateway. Cached per
 /// process so hot-path callers can resolve without repeated DB round-trips.
 pub async fn library_vector_index_dimensions(
     state: &AppState,
@@ -81,6 +83,22 @@ pub async fn library_vector_index_dimensions(
 
     let dim = if let Some(dim) = catalog_dim {
         dim
+    } else if let Some(dim) = select_persisted_chunk_vector_dimension(
+        &state
+            .arango_search_store
+            .list_chunk_vector_dimensions(
+                library_id,
+                &binding.model_catalog_id.to_string(),
+                KNOWLEDGE_CHUNK_VECTOR_KIND,
+            )
+            .await
+            .with_context(|| {
+                format!(
+                    "failed to inspect persisted chunk vector dimensions for library {library_id}"
+                )
+            })?,
+    ) {
+        dim
     } else {
         // Fallback: probe the provider once. One probe per library per
         // process lifetime — cached below.
@@ -110,6 +128,19 @@ pub async fn library_vector_index_dimensions(
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .insert(library_id, dim);
     Ok(dim)
+}
+
+fn select_persisted_chunk_vector_dimension(dimensions: &[u64]) -> Option<u64> {
+    let mut nonzero = dimensions.iter().copied().filter(|dim| *dim > 0);
+    let selected = nonzero.next()?;
+    if nonzero.next().is_some() {
+        tracing::warn!(
+            selected_dimension = selected,
+            dimensions = ?dimensions,
+            "multiple persisted chunk vector dimensions found for active embedding binding"
+        );
+    }
+    Some(selected)
 }
 
 pub(crate) fn validate_embedding_vector_dimensions(
@@ -151,5 +182,16 @@ mod tests {
             .to_string();
         assert!(error.contains("expected 3 dimensions"));
         assert!(error.contains("got 2"));
+    }
+
+    #[test]
+    fn selects_first_persisted_chunk_vector_dimension() {
+        assert_eq!(Some(3072), select_persisted_chunk_vector_dimension(&[3072, 1536, 768]));
+    }
+
+    #[test]
+    fn ignores_zero_persisted_chunk_vector_dimensions() {
+        assert_eq!(Some(1536), select_persisted_chunk_vector_dimension(&[0, 1536]));
+        assert_eq!(None, select_persisted_chunk_vector_dimension(&[0]));
     }
 }

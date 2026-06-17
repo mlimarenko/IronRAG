@@ -1,5 +1,6 @@
 mod catalog;
 mod documents;
+mod fusion;
 mod graph;
 mod runtime;
 mod types;

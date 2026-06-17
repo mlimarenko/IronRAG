@@ -10,6 +10,7 @@ use crate::shared::extraction::{
     ExtractionLineHint, ExtractionLineSignal, ExtractionStructureHints,
     chunking::split_large_code_blocks,
     chunking::{StructuredChunkingProfile, build_structured_chunk_windows},
+    record_jsonl::split_large_record_units,
     structured_document::{
         StructuredBlockData, StructuredBlockKind, StructuredChunkWindow,
         StructuredDocumentRevisionData, StructuredDocumentValidationError, StructuredOutlineEntry,
@@ -116,6 +117,7 @@ impl StructuredPreparationService {
             .retain(|b| !b.text.trim().is_empty() || !b.normalized_text.trim().is_empty());
         ensure_not_cancelled(cancellation_token)?;
         ordered_blocks = split_large_code_blocks(&ordered_blocks, self.chunking_profile.max_chars);
+        ordered_blocks = split_large_record_units(&ordered_blocks, self.chunking_profile.max_chars);
         ensure_not_cancelled(cancellation_token)?;
         // Re-number ordinals after filtering
         for (i, block) in ordered_blocks.iter_mut().enumerate() {
@@ -350,7 +352,13 @@ fn build_structured_blocks(
 }
 
 fn detect_boilerplate(block_kind: StructuredBlockKind, text: &str) -> bool {
-    if matches!(block_kind, StructuredBlockKind::Table | StructuredBlockKind::TableRow) {
+    if matches!(
+        block_kind,
+        StructuredBlockKind::Table
+            | StructuredBlockKind::TableRow
+            | StructuredBlockKind::SourceProfile
+            | StructuredBlockKind::SourceUnit
+    ) {
         return false;
     }
     let lower = text.to_ascii_lowercase();
@@ -625,7 +633,7 @@ mod tests {
     fn prepare_revision_classifies_lists_tables_and_endpoints() {
         // Tables must use canonical markdown table syntax with header separator;
         // informal pipe-delimited text is no longer auto-classified as a table.
-        let text = "# Products\n\n- Control Center\n\n| Method | Path |\n| --- | --- |\n| GET | /v1/status |\n\nGET /v1/status\n";
+        let text = "# Products\n\n- Operations Console\n\n| Method | Path |\n| --- | --- |\n| GET | /v1/status |\n\nGET /v1/status\n";
         let prepared = StructuredPreparationService::new()
             .prepare_revision(
                 PrepareStructuredRevisionCommand {
@@ -999,6 +1007,21 @@ mod tests {
         assert!(
             !super::detect_boilerplate(StructuredBlockKind::TableRow, "| Name | Value | Status |"),
             "table rows must not be dropped as navigation boilerplate"
+        );
+    }
+
+    #[test]
+    fn detect_boilerplate_preserves_record_stream_units() {
+        let unit = "[unit_ordinal=0] fields: \
+            services.api.environment.PUBLIC_URL=http://api.local; \
+            services.api.healthcheck.test=CMD-SHELL, curl -f http://localhost:8000/health || exit 1; \
+            services.auth.environment.AUTH_URL=http://auth.local; \
+            services.user.environment.AUTH_SERVICE_URL=http://auth-service:3001; \
+            services.notification.environment.WEBHOOK_URL=https://hooks.example.test/events";
+
+        assert!(
+            !super::detect_boilerplate(StructuredBlockKind::SourceUnit, unit),
+            "structured record units are canonical evidence, not web navigation boilerplate"
         );
     }
 }

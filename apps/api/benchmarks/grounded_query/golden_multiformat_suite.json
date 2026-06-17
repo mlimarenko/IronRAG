@@ -107,7 +107,7 @@
     {
       "id": "pptx_monitoring_stack",
       "question": "What monitoring tools are mentioned in the architecture presentation?",
-      "searchQuery": "monitoring Prometheus Grafana Jaeger alerts latency",
+      "searchQuery": "architecture presentation system architecture monitoring Prometheus Grafana Jaeger alerts latency",
       "expectedDocumentsContains": ["system_architecture"],
       "searchRequiredAll": ["monitoring"],
       "answerRequiredAny": ["Prometheus", "Grafana", "Jaeger"],

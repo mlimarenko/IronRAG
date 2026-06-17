@@ -6,6 +6,7 @@ use uuid::Uuid;
 use crate::{
     app::state::AppState,
     domains::recognition::LibraryRecognitionPolicy,
+    domains::retrieval::RetrievalConfig,
     domains::{
         ai::AiBindingPurpose,
         catalog::{
@@ -86,6 +87,12 @@ pub struct UpdateLibraryWebIngestPolicyCommand {
 pub struct UpdateLibraryRecognitionPolicyCommand {
     pub library_id: Uuid,
     pub recognition_policy: LibraryRecognitionPolicy,
+}
+
+#[derive(Debug, Clone)]
+pub struct UpdateLibraryRetrievalConfigCommand {
+    pub library_id: Uuid,
+    pub retrieval_config: RetrievalConfig,
 }
 
 #[derive(Debug, Clone)]
@@ -585,6 +592,66 @@ impl CatalogService {
         map_library_row(row, readiness.ingestion, readiness.runtime)
     }
 
+    /// Updates the declarative retrieval configuration owned by one library.
+    ///
+    /// The lexical text-search config name is validated against the live
+    /// `pg_ts_config` catalog so an operator cannot persist an analyzer the
+    /// database does not know about (the lexical SQL would otherwise fail at
+    /// query time). Unknown names are rejected with a `BadRequest` the HTTP
+    /// layer surfaces as `422`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`ApiError`] when validation fails, the text-search config is
+    /// unknown, the repository update fails, readiness derivation fails, or the
+    /// library does not exist.
+    pub async fn update_library_retrieval_config(
+        &self,
+        state: &AppState,
+        command: UpdateLibraryRetrievalConfigCommand,
+    ) -> Result<CatalogLibrary, ApiError> {
+        command.retrieval_config.validate().map_err(ApiError::BadRequest)?;
+        self.ensure_text_search_config_exists(
+            state,
+            &command.retrieval_config.lexical.text_search_config,
+        )
+        .await?;
+        let config_json = command.retrieval_config.to_json().map_err(|_| ApiError::Internal)?;
+        let row = catalog_repository::update_library_retrieval_config(
+            &state.persistence.postgres,
+            command.library_id,
+            config_json,
+        )
+        .await
+        .map_err(|e| ApiError::internal_with_log(e, "internal"))?
+        .ok_or_else(|| ApiError::resource_not_found("library", command.library_id))?;
+        let policy = parse_library_policy(&row)?;
+        let readiness = self.get_library_binding_readiness(state, row.id, &policy).await?;
+        map_library_row(row, readiness.ingestion, readiness.runtime)
+    }
+
+    /// Rejects a text-search config name that is not present in the Postgres
+    /// `pg_ts_config` catalog. The name is bound as a parameter, never
+    /// interpolated, so no operator input enters the SQL string.
+    async fn ensure_text_search_config_exists(
+        &self,
+        state: &AppState,
+        text_search_config: &str,
+    ) -> Result<(), ApiError> {
+        let exists = sqlx::query_scalar::<_, bool>(
+            "select exists (select 1 from pg_ts_config where cfgname = $1)",
+        )
+        .bind(text_search_config)
+        .fetch_one(&state.persistence.postgres)
+        .await
+        .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
+        if exists {
+            Ok(())
+        } else {
+            Err(ApiError::BadRequest(format!("unknown text search config: {text_search_config}")))
+        }
+    }
+
     /// Deletes a library and its stashed storage snapshot.
     ///
     /// # Errors
@@ -1041,6 +1108,8 @@ fn map_library_row(
 ) -> Result<CatalogLibrary, ApiError> {
     let recognition_policy = LibraryRecognitionPolicy::from_json(row.recognition_policy)
         .map_err(|_| ApiError::Internal)?;
+    let retrieval_config =
+        RetrievalConfig::from_json(row.retrieval_config).map_err(|_| ApiError::Internal)?;
     Ok(CatalogLibrary {
         id: row.id,
         workspace_id: row.workspace_id,
@@ -1051,6 +1120,7 @@ fn map_library_row(
         web_ingest_policy: serde_json::from_value(row.web_ingest_policy)
             .map_err(|_| ApiError::Internal)?,
         recognition_policy,
+        retrieval_config,
         lifecycle_state: parse_lifecycle_state(&row.lifecycle_state)
             .map_err(CatalogLifecycleError::into_persisted_error)?,
         include_document_hint_in_mcp_answers: row.include_document_hint_in_mcp_answers,

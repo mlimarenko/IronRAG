@@ -25,8 +25,12 @@ set -euo pipefail
 #     secrets are asserted byte-identical after every write.
 #
 # Flags:
-#   -y, --yes, --non-interactive   Never prompt; use env / existing .env / defaults.
+#   -y, --yes, --non-interactive   Never prompt; use flags / env / existing .env / defaults.
 #       --interactive              Force the wizard even if no TTY is detected.
+#       --port <p>                 Published HTTP port (also IRONRAG_PORT).
+#       --profile <name>           Resource profile micro|small|medium|large
+#                                  (also IRONRAG_PROFILE). Default: auto from host RAM.
+#       --admin-login <name>       Bootstrap admin login (also IRONRAG_ADMIN_LOGIN).
 #       --plan-only                Detect + size + print the plan; write nothing,
 #                                  deploy nothing, touch no network. Great for review.
 #       --recompute-resources      On a re-run, recompute resource caps from the host
@@ -34,6 +38,15 @@ set -euo pipefail
 #       --reset-volumes            Same as IRONRAG_RESET_VOLUMES=1 (wipe stale data
 #                                  volumes when minting a fresh .env).
 #   -h, --help                     Show this help.
+#
+# Answer precedence (so the same install is reproducible from CI / Ansible):
+#   non-secret values  flag  >  env  >  interactive prompt / existing .env  >  default
+#   secret values      env   >  existing .env  >  interactive prompt        >  skip
+#
+# Secrets (admin password, provider API keys) are intentionally NOT accepted as
+# flags: argv is visible to other processes (`ps`, /proc/<pid>/cmdline) and leaks
+# into shell history and CI logs. Pass them via environment variables or a
+# pre-seeded .env instead — e.g. IRONRAG_ADMIN_PASSWORD, IRONRAG_OPENAI_API_KEY.
 #
 # Test seams (used by tests/install_wizard.test.sh; harmless in production):
 #   IRONRAG_INSTALL_SOURCE_ONLY=1  Define functions but do not run main (for sourcing).
@@ -101,6 +114,15 @@ banner() {
   printf '%s\n' "  ${C_BOLD}${C_BLUE}IronRAG${C_RESET} ${C_DIM}installer${C_RESET}"
   printf '%s\n' "  ${C_DIM}grounded answers over your own documents${C_RESET}"
   hr
+}
+
+# step <title> — interactive-only "Step i/N · title" header so the wizard reads
+# as a progressing flow. Silent when non-interactive (scripted runs stay terse).
+# Relies on STEP_NUM / STEP_TOTAL globals seeded in run_main.
+step() {
+  STEP_NUM=$(( STEP_NUM + 1 ))
+  [ "${INTERACTIVE:-1}" = "1" ] || return 0
+  printf '%s\n' "${C_BOLD}${C_BLUE}Step ${STEP_NUM}/${STEP_TOTAL}${C_RESET} ${C_DIM}·${C_RESET} ${C_BOLD}$*${C_RESET}"
 }
 
 # ─── Interactivity / TTY resolution ─────────────────────────────────────────
@@ -195,6 +217,50 @@ ask_yes_no() {
 mask_secret() {
   local v="$1" n=${#1}
   if [ "$n" -le 4 ]; then printf '****'; else printf '****%s' "${v: -4}"; fi
+}
+
+# ─── Value resolution (flag > env > prompt) ─────────────────────────────────
+# One resolver so every prompt is answerable from automation. A flag value (read
+# from parse_args into a FLAG_* var) wins outright — even with a TTY — so a
+# scripted `--port 8080` is honoured the same way interactive and non-interactive.
+# With no flag/env value we fall through to ask(), which itself falls back to the
+# supplied default when non-interactive. Secrets use resolve_secret (no flag tier,
+# silent prompt) so they never travel through argv.
+
+# resolve_value <out_var> <flag_value> <env_value> <prompt> <default>
+resolve_value() {
+  local __out="$1" __flag="$2" __env="$3" __prompt="$4" __default="$5" __tmp=""
+  if [ -n "$__flag" ]; then
+    printf -v "$__out" '%s' "$__flag"; return
+  fi
+  if [ -n "$__env" ]; then
+    printf -v "$__out" '%s' "$__env"; return
+  fi
+  ask __tmp "$__prompt" "$__default"
+  printf -v "$__out" '%s' "$__tmp"
+}
+
+# resolve_secret <out_var> <env_value> <prompt> <default>
+# Secret path: env wins, else prompt (silent), else default. No flag tier.
+resolve_secret() {
+  local __out="$1" __env="$2" __prompt="$3" __default="$4" __tmp=""
+  if [ -n "$__env" ]; then
+    printf -v "$__out" '%s' "$__env"; return
+  fi
+  ask_secret __tmp "$__prompt" "$__default"
+  printf -v "$__out" '%s' "$__tmp"
+}
+
+# require_resolved <display-name> <value> <has-safe-default 0|1> <how-to-set>
+# Non-interactive contract: a required value with no safe default must fail fast
+# with the exact flag/env var to set, never hang waiting for input that can't come.
+require_resolved() {
+  local name="$1" value="$2" has_default="$3" how="$4"
+  if [ "${INTERACTIVE:-1}" != "1" ] && [ -z "$value" ] && [ "$has_default" != "1" ]; then
+    err "non-interactive mode: required value '${name}' has no safe default."
+    say "  Set it via: ${how}" >&2
+    exit 3
+  fi
 }
 
 # ─── External commands / download ───────────────────────────────────────────
@@ -359,7 +425,7 @@ compute_plan() {
     large)
       db_mem=8192; be_mem=6144; wk_mem=6144; ca_mem=1536; fe_mem=512
       db_cc=400;   be_cc=800;   wk_cc=800;   ca_cc=200;   fe_cc=100
-      dbconn=40; embed=24; graph=24; redis=1280; shm=2048 ;;
+      dbconn=32; embed=24; graph=24; redis=1280; shm=2048 ;;
     *) err "unknown profile: $profile"; exit 1 ;;
   esac
 
@@ -408,7 +474,7 @@ print_plan_table() {
   printf '  %-10s %-9s %-6s\n' "redis"    "${REC_CACHE_MEM}M"    "$REC_CACHE_CPUS"
   printf '  %-10s %-9s %-6s\n' "frontend" "${REC_FRONTEND_MEM}M" "$REC_FRONTEND_CPUS"
   printf '  %s\n' "${C_DIM}─────────────────────────────────${C_RESET}"
-  printf '  steady ≈ %s GiB  (parallelism: embed %s, graph/doc %s, db pool %s)\n' \
+  printf '  steady ≈ %s GiB  (parallelism: embed %s, graph/doc %s, db budget %s)\n' \
     "$(mib_to_gib_str "$REC_STEADY_MIB")" "$REC_EMBED_PARALLELISM" \
     "$REC_GRAPH_PARALLELISM" "$REC_DATABASE_MAX_CONNECTIONS"
 }
@@ -580,23 +646,56 @@ usage() {
   # Embedded (not self-read from "$0"): under `curl … | bash` the script has no
   # file path, so reading "$0" would print nothing.
   cat <<'USAGE'
-IronRAG installer / updater — interactive setup wizard by default.
+IronRAG installer / updater — interactive setup wizard by default, fully
+scriptable for CI / Ansible.
 
 Usage: install.sh [VERSION] [INSTALL_DIR] [flags]
   VERSION       release tag to install, or "latest" (default: latest)
   INSTALL_DIR   target directory (default: ironrag)
 
 Flags:
-  -y, --yes, --non-interactive   Never prompt; use env / existing .env / defaults.
+  -y, --yes, --non-interactive   Never prompt; use flags / env / existing .env / defaults.
       --interactive              Force the wizard even if no TTY is detected.
+      --port <p>                 Published HTTP port (default: 19000 or IRONRAG_PORT).
+      --profile <name>           Resource profile: micro | small | medium | large
+                                 (default: auto-detected from host RAM).
+      --admin-login <name>       Bootstrap admin login (default: create it in the UI).
       --plan-only                Detect + size + print the plan; write/deploy nothing.
       --recompute-resources      On a re-run, recompute resource caps from the host.
       --reset-volumes            Wipe stale data volumes when minting a fresh .env.
   -h, --help                     Show this help.
 
+Environment variables (answer every prompt without a TTY):
+  IRONRAG_PORT                   Published HTTP port.
+  IRONRAG_PROFILE                Resource profile (micro|small|medium|large).
+  IRONRAG_ADMIN_LOGIN            Bootstrap admin login.
+  IRONRAG_ADMIN_PASSWORD         Bootstrap admin password (secret; env only).
+  IRONRAG_OPENAI_API_KEY         Provider API key (secret; env only).
+  IRONRAG_DEEPSEEK_API_KEY       Provider API key (secret; env only).
+  IRONRAG_QWEN_API_KEY           Provider API key (secret; env only).
+  IRONRAG_GPTUNNEL_API_KEY       Provider API key (secret; env only).
+  IRONRAG_OPENROUTER_API_KEY     Provider API key (secret; env only).
+  IRONRAG_ROUTERAI_API_KEY       Provider API key (secret; env only).
+  IRONRAG_NONINTERACTIVE=1       Same as --non-interactive.
+  IRONRAG_RESET_VOLUMES=1        Same as --reset-volumes.
+  IRONRAG_RECOMPUTE_RESOURCES=1  Same as --recompute-resources.
+
+Answer precedence:
+  non-secret  flag > env > interactive prompt / existing .env > default
+  secret      env  > existing .env > interactive prompt > skip
+
+Secrets (admin password, provider API keys) are accepted via environment
+variables or a pre-seeded .env only — never as flags, because argv is visible to
+other processes (ps, /proc/<pid>/cmdline) and leaks into shell history and CI logs.
+
 The wizard inspects the host (CPU + RAM), recommends a resource profile, and
-prompts for port, admin bootstrap, provider API keys, and telemetry. A re-run
-preserves the existing .env (secrets and tuned caps are never overwritten).
+prompts for port, admin bootstrap, and provider API keys. A re-run preserves the
+existing .env (secrets and tuned caps are never overwritten).
+
+Non-interactive example (no TTY, env-driven):
+  IRONRAG_PORT=8080 IRONRAG_PROFILE=small \
+  IRONRAG_OPENAI_API_KEY=sk-... \
+    ./install.sh --non-interactive
 USAGE
 }
 
@@ -608,7 +707,17 @@ parse_args() {
   FORCE_INTERACTIVE=0
   PLAN_ONLY=0
   RECOMPUTE_RESOURCES="${IRONRAG_RECOMPUTE_RESOURCES:-0}"
+  # Flag tier for the non-secret answers (empty => fall through to env/prompt).
+  FLAG_PORT=""
+  FLAG_PROFILE=""
+  FLAG_ADMIN_LOGIN=""
   local positional=()
+  # need_value <flag-name> <next-arg-or-empty>: require a non-flag operand.
+  need_value() {
+    if [ "$#" -lt 2 ] || [ -z "$2" ] || [ "${2:0:1}" = "-" ]; then
+      err "flag $1 requires a value"; usage; exit 2
+    fi
+  }
   while [ "$#" -gt 0 ]; do
     case "$1" in
       -y|--yes|--non-interactive) FORCE_NONINTERACTIVE=1 ;;
@@ -616,6 +725,12 @@ parse_args() {
       --plan-only|--dry-run) PLAN_ONLY=1 ;;
       --recompute-resources) RECOMPUTE_RESOURCES=1 ;;
       --reset-volumes) IRONRAG_RESET_VOLUMES=1 ;;
+      --port) need_value "$1" "${2:-}"; FLAG_PORT="$2"; shift ;;
+      --port=*) FLAG_PORT="${1#*=}" ;;
+      --profile) need_value "$1" "${2:-}"; FLAG_PROFILE="$2"; shift ;;
+      --profile=*) FLAG_PROFILE="${1#*=}" ;;
+      --admin-login) need_value "$1" "${2:-}"; FLAG_ADMIN_LOGIN="$2"; shift ;;
+      --admin-login=*) FLAG_ADMIN_LOGIN="${1#*=}" ;;
       -h|--help) usage; exit 0 ;;
       --) shift; while [ "$#" -gt 0 ]; do positional+=("$1"); shift; done; break ;;
       -*) err "unknown flag: $1"; usage; exit 2 ;;
@@ -649,28 +764,34 @@ run_main() {
   cpus="$(detect_cpus)"
   mem_mib="$(detect_mem_mib)"
 
+  # Total wizard steps for the "step i/N" progress headers (interactive only):
+  # 1 host+profile, 2 port, 3 admin, 4 provider keys, 5 summary.
+  STEP_TOTAL=5
+  STEP_NUM=0
+
   banner
   if [ "$INTERACTIVE" = "1" ]; then
     say "  Welcome. This wizard inspects your host and sets up IronRAG."
     say "  Press ${C_BOLD}Enter${C_RESET} to accept the ${C_DIM}[default]${C_RESET}; values are saved to .env."
   else
-    info "Non-interactive mode (no prompts; using env / existing .env / defaults)."
+    info "Non-interactive mode (no prompts; using flags / env / existing .env / defaults)."
   fi
   say ""
+
+  # ── Step 1: host detection + profile selection ──
+  step "Host & resource profile"
   info "Host: ${C_BOLD}${cpus}${C_RESET} vCPU, ${C_BOLD}$(mib_to_gib_str "$mem_mib")${C_RESET} GiB RAM"
 
-  # ── Profile selection ──
-  local recommended profile
+  local recommended profile pick=""
   recommended="$(recommend_profile "$mem_mib")"
-  profile="$recommended"
-  if [ "$INTERACTIVE" = "1" ]; then
-    local pick
-    ask pick "Resource profile (micro/small/medium/large)" "$recommended"
-    case "$pick" in
-      micro|small|medium|large) profile="$pick" ;;
-      *) warn "unrecognised profile '$pick'; using recommended '$recommended'"; profile="$recommended" ;;
-    esac
-  fi
+  # flag > env > interactive prompt > recommended default.
+  resolve_value pick "$FLAG_PROFILE" "${IRONRAG_PROFILE:-}" \
+    "Resource profile (micro/small/medium/large)" "$recommended"
+  case "$pick" in
+    micro|small|medium|large) profile="$pick" ;;
+    "") profile="$recommended" ;;
+    *) warn "unrecognised profile '$pick'; using recommended '$recommended'"; profile="$recommended" ;;
+  esac
   compute_plan "$cpus" "$mem_mib" "$profile"
   say ""
   info "Profile: ${C_BOLD}${REC_PROFILE}${C_RESET}${C_DIM}$( [ "$REC_PROFILE" = "$recommended" ] && printf ' (recommended)' )${C_RESET}"
@@ -687,23 +808,38 @@ run_main() {
   fi
   say ""
 
-  # ── Core: port ──
-  local port
-  ask port "Published HTTP port" "${IRONRAG_PORT:-$DEFAULT_PORT}"
+  # ── Step 2: port ──
+  step "Network port"
+  # flag > env > interactive prompt > DEFAULT_PORT. (IRONRAG_PORT as default
+  # keeps the prior env-as-default behaviour for the non-interactive path.)
+  local port=""
+  resolve_value port "$FLAG_PORT" "${IRONRAG_PORT:-}" \
+    "Published HTTP port" "${IRONRAG_PORT:-$DEFAULT_PORT}"
+  # Port always has a safe default (DEFAULT_PORT), so this never trips in normal
+  # use — it asserts the non-interactive contract at the call site: were a future
+  # value to lose its default, the run fails fast here instead of hanging.
+  require_resolved "port" "$port" 1 "--port <p> or IRONRAG_PORT"
   IRONRAG_PORT="$port"
 
-  # ── Admin + provider keys (interactive only; non-interactive keeps .env) ──
+  # ── Step 3: admin bootstrap. Login via flag/env/prompt; password is a secret
+  #    so it has no flag tier (env / prompt only). Non-interactive with no
+  #    flag/env leaves both empty => no admin write (unchanged behaviour). ──
   local admin_login="" admin_pass=""
   declare -A NEW_PROVIDER=()
   if [ "$INTERACTIVE" = "1" ]; then
     say ""
-    info "Admin bootstrap ${C_DIM}(optional — Enter to skip and create it in the UI)${C_RESET}"
-    ask admin_login "  Admin login" ""
-    if [ -n "$admin_login" ]; then
-      ask_secret admin_pass "  Admin password" ""
-    fi
+    step "Admin bootstrap"
+    info "${C_DIM}(optional — Enter to skip and create it in the UI)${C_RESET}"
+  fi
+  resolve_value admin_login "$FLAG_ADMIN_LOGIN" "${IRONRAG_ADMIN_LOGIN:-}" \
+    "  Admin login" ""
+  if [ -n "$admin_login" ]; then
+    resolve_secret admin_pass "${IRONRAG_ADMIN_PASSWORD:-}" "  Admin password" ""
+  fi
+  if [ "$INTERACTIVE" = "1" ]; then
     say ""
-    info "Provider API keys ${C_DIM}(Enter to keep existing / skip)${C_RESET}"
+    step "Provider API keys"
+    info "${C_DIM}(Enter to keep existing / skip)${C_RESET}"
   fi
 
   # ── Resolve version + download artifacts (skipped in plan-only) ──
@@ -800,24 +936,63 @@ run_main() {
   cp "$env_file" "${env_file}.bak"
 
   # ── Provider keys: only write when the operator supplies a NEW value, so an
-  #    existing key is literally never touched. ──
+  #    existing key is literally never touched. Secrets have no flag tier — a key
+  #    is taken from its env var (IRONRAG_<PROVIDER>_API_KEY) or, interactively,
+  #    typed at the prompt. A blank/unset value keeps whatever is already in .env. ──
+  local i label key existing reply env_val
+  for i in "${!PROVIDER_KEYS[@]}"; do
+    key="${PROVIDER_KEYS[$i]}"
+    label="${PROVIDER_LABELS[$i]}"
+    existing="$(env_get "$key" "$env_file")"
+    env_val="${!key:-}"
+    if [ -n "$env_val" ]; then
+      # Env-provided key wins, even under a TTY (scripted runs stay deterministic).
+      # Only record it as a change when it actually differs from what's on disk.
+      [ "$env_val" != "$existing" ] && NEW_PROVIDER["$key"]="$env_val"
+      continue
+    fi
+    [ "$INTERACTIVE" = "1" ] || continue
+    if [ -n "$existing" ]; then
+      # Silent input even when rotating: the masked current value stays in the
+      # prompt, but a freshly typed replacement key must not echo to screen.
+      ask_secret reply "  ${label} key (current $(mask_secret "$existing"))" ""
+      # Blank reply => keep current (do not write).
+      [ -n "$reply" ] && NEW_PROVIDER["$key"]="$reply"
+    else
+      ask_secret reply "  ${label} key" ""
+      [ -n "$reply" ] && NEW_PROVIDER["$key"]="$reply"
+    fi
+  done
+
+  # ── Step 5: review screen — show the resolved choices before touching .env so
+  #    an interactive operator can abort. Scripted (non-interactive) runs skip the
+  #    pause and just proceed, keeping the unattended path silent and fast. ──
   if [ "$INTERACTIVE" = "1" ]; then
-    local i label key existing reply
-    for i in "${!PROVIDER_KEYS[@]}"; do
-      key="${PROVIDER_KEYS[$i]}"
-      label="${PROVIDER_LABELS[$i]}"
-      existing="$(env_get "$key" "$env_file")"
-      if [ -n "$existing" ]; then
-        # Silent input even when rotating: the masked current value stays in the
-        # prompt, but a freshly typed replacement key must not echo to screen.
-        ask_secret reply "  ${label} key (current $(mask_secret "$existing"))" ""
-        # Blank reply => keep current (do not write).
-        [ -n "$reply" ] && NEW_PROVIDER["$key"]="$reply"
-      else
-        ask_secret reply "  ${label} key" ""
-        [ -n "$reply" ] && NEW_PROVIDER["$key"]="$reply"
+    say ""
+    step "Review"
+    hr
+    printf '  %-18s %s\n' "Resource profile" "${REC_PROFILE}"
+    printf '  %-18s %s\n' "HTTP port" "${IRONRAG_PORT}"
+    if [ -n "$admin_login" ]; then
+      printf '  %-18s %s\n' "Admin login" "${admin_login}"
+      printf '  %-18s %s\n' "Admin password" "$( [ -n "$admin_pass" ] && echo 'set' || echo 'unchanged' )"
+    else
+      printf '  %-18s %s\n' "Admin" "create in the UI on first visit"
+    fi
+    local pk pl pi
+    for pi in "${!PROVIDER_KEYS[@]}"; do
+      pk="${PROVIDER_KEYS[$pi]}"; pl="${PROVIDER_LABELS[$pi]}"
+      if [ -n "${NEW_PROVIDER[$pk]:-}" ]; then
+        printf '  %-18s %s\n' "${pl}" "will be set"
+      elif env_value_nonempty "$pk" "$env_file"; then
+        printf '  %-18s %s\n' "${pl}" "kept (existing)"
       fi
     done
+    hr
+    if ! ask_yes_no "Apply this configuration?" "y"; then
+      err "aborted by user"; exit 1
+    fi
+    say ""
   fi
 
   # ── Apply writes ──

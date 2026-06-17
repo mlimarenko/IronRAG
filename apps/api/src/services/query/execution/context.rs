@@ -32,9 +32,10 @@ use crate::{
 };
 
 use super::retrieve::{
-    excerpt_for, focused_excerpt_for, load_latest_library_generation, query_graph_status,
-    score_value,
+    command_dense_excerpt_for, excerpt_for, focused_excerpt_for, load_latest_library_generation,
+    query_graph_status, score_value,
 };
+use super::source_context::structured_literal_excerpt_for;
 use super::technical_literals::{
     select_document_balanced_chunks, technical_literal_focus_keywords,
 };
@@ -457,6 +458,13 @@ fn order_bounded_context_chunks<'a>(
             ordered.push(chunk);
         }
     }
+    if super::retrieve::query_ir_requests_versioned_update_procedure_context(question, query_ir) {
+        for chunk in procedure_context_priority_chunks(question, query_ir, chunks) {
+            if seen.insert(chunk.chunk_id) {
+                ordered.push(chunk);
+            }
+        }
+    }
     let mut identity_chunks = chunks
         .iter()
         .filter(|chunk| {
@@ -491,6 +499,184 @@ fn order_bounded_context_chunks<'a>(
     ordered
 }
 
+fn procedure_context_priority_chunks<'a>(
+    question: &str,
+    query_ir: &QueryIR,
+    chunks: &'a [RuntimeMatchedChunk],
+) -> Vec<&'a RuntimeMatchedChunk> {
+    let model = ProcedureContextModel::new(question, query_ir);
+    let mut scored = chunks
+        .iter()
+        .filter_map(|chunk| {
+            let score = procedure_context_priority_score(chunk, &model);
+            (score > 0).then_some((score, chunk))
+        })
+        .collect::<Vec<_>>();
+    scored.sort_by(|(left_score, left), (right_score, right)| {
+        right_score
+            .cmp(left_score)
+            .then_with(|| score_value(right.score).total_cmp(&score_value(left.score)))
+            .then_with(|| left.document_id.cmp(&right.document_id))
+            .then_with(|| left.chunk_index.cmp(&right.chunk_index))
+            .then_with(|| left.chunk_id.cmp(&right.chunk_id))
+    });
+    scored.into_iter().map(|(_, chunk)| chunk).collect()
+}
+
+struct ProcedureContextModel {
+    subject_terms: HashSet<String>,
+    action_terms: HashSet<String>,
+}
+
+impl ProcedureContextModel {
+    fn new(question: &str, query_ir: &QueryIR) -> Self {
+        let current_question =
+            crate::services::query::effective_query::current_question_segment(question);
+        let mut subject_terms = HashSet::<String>::new();
+        for entity in &query_ir.target_entities {
+            subject_terms.extend(normalized_alnum_tokens(&entity.label, 2));
+        }
+        if let Some(document_focus) = query_ir.document_focus.as_ref() {
+            subject_terms.extend(normalized_alnum_tokens(&document_focus.hint, 2));
+        }
+
+        let mut action_terms = normalized_alnum_tokens(current_question, 5)
+            .into_iter()
+            .filter(|term| {
+                !subject_terms.iter().any(|subject| soft_context_terms_match(term, subject))
+            })
+            .collect::<HashSet<_>>();
+        if let Some(retrieval_query) = query_ir.retrieval_query.as_deref() {
+            let current_retrieval_query =
+                crate::services::query::effective_query::current_question_segment(retrieval_query);
+            action_terms.extend(
+                normalized_alnum_tokens(current_retrieval_query, 5).into_iter().filter(|term| {
+                    !subject_terms.iter().any(|subject| soft_context_terms_match(term, subject))
+                }),
+            );
+        }
+
+        Self { subject_terms, action_terms }
+    }
+}
+
+fn procedure_context_priority_score(
+    chunk: &RuntimeMatchedChunk,
+    model: &ProcedureContextModel,
+) -> usize {
+    let text = repair_technical_layout_noise(&format!(
+        "{}\n{}\n{}",
+        chunk.document_label, chunk.excerpt, chunk.source_text
+    ));
+    let command_score = procedure_context_command_signal_score(&text);
+    if command_score == 0 {
+        return 0;
+    }
+
+    let tokens = normalized_alnum_tokens(&text, 2).into_iter().collect::<HashSet<_>>();
+    let action_overlap = soft_context_overlap_count(&model.action_terms, &tokens);
+    let subject_overlap = soft_context_overlap_count(&model.subject_terms, &tokens);
+    if action_overlap == 0 && subject_overlap == 0 {
+        return 0;
+    }
+
+    action_overlap
+        .saturating_mul(96)
+        .saturating_add(subject_overlap.saturating_mul(24))
+        .saturating_add(command_score.saturating_mul(8))
+        .saturating_add((chunk.score_kind == RuntimeChunkScoreKind::FocusedDocument) as usize * 16)
+}
+
+fn soft_context_overlap_count(expected: &HashSet<String>, available: &HashSet<String>) -> usize {
+    expected
+        .iter()
+        .filter(|term| available.iter().any(|candidate| soft_context_terms_match(term, candidate)))
+        .count()
+}
+
+fn soft_context_terms_match(left: &str, right: &str) -> bool {
+    left == right || soft_context_common_prefix_len(left, right) >= 5
+}
+
+fn soft_context_common_prefix_len(left: &str, right: &str) -> usize {
+    let mut count = 0usize;
+    for (left_ch, right_ch) in left.chars().zip(right.chars()) {
+        if left_ch != right_ch {
+            break;
+        }
+        count += 1;
+    }
+    count
+}
+
+fn procedure_context_command_signal_score(text: &str) -> usize {
+    let mut score = 0usize;
+    for line in text.lines() {
+        if procedure_context_line_has_command_shape(line) {
+            score = score.saturating_add(1);
+        }
+    }
+    score.min(8)
+}
+
+fn procedure_context_line_has_command_shape(line: &str) -> bool {
+    let mut tokens = line
+        .split_whitespace()
+        .map(|token| {
+            token
+                .trim_matches(|ch: char| {
+                    matches!(
+                        ch,
+                        '`' | '\'' | '"' | '(' | ')' | '[' | ']' | '{' | '}' | ';' | ',' | ':'
+                    )
+                })
+                .to_ascii_lowercase()
+        })
+        .filter(|token| !token.is_empty())
+        .collect::<Vec<_>>();
+    while tokens.first().is_some_and(|token| matches!(token.as_str(), "sudo" | "su")) {
+        tokens.remove(0);
+    }
+    let Some(head) = tokens.first() else {
+        return false;
+    };
+    if procedure_context_token_is_invocable_head(head) {
+        return true;
+    }
+    if !head.chars().all(|ch| ch.is_ascii_lowercase() || matches!(ch, '-' | '_' | '.')) {
+        return false;
+    }
+    tokens.iter().skip(1).take(6).any(|token| procedure_context_token_is_structural_argument(token))
+}
+
+fn procedure_context_token_is_invocable_head(token: &str) -> bool {
+    procedure_context_token_is_path_like(token)
+        || token.contains('-')
+        || token.contains('_')
+        || token.contains('.')
+        || token.chars().any(|ch| ch.is_ascii_digit())
+}
+
+fn procedure_context_token_is_structural_argument(token: &str) -> bool {
+    token.starts_with('-')
+        || token.contains('=')
+        || token.contains("://")
+        || procedure_context_token_is_path_like(token)
+        || token.contains('-')
+        || token.contains('_')
+        || token.contains('.')
+        || token.chars().any(|ch| ch.is_ascii_digit())
+}
+
+fn procedure_context_token_is_path_like(token: &str) -> bool {
+    (token.starts_with("./")
+        || token.starts_with("../")
+        || token.starts_with('/')
+        || token.contains('/'))
+        && !token.contains("://")
+        && token.chars().any(|ch| ch.is_alphanumeric())
+}
+
 fn bounded_context_document_block(
     chunk: &RuntimeMatchedChunk,
     ordinary_keywords: &[String],
@@ -515,11 +701,17 @@ fn bounded_context_document_block(
     if is_structured_source_unit_context_chunk(chunk) {
         let source_text = chunk.source_text.trim();
         let text = if source_text.is_empty() { chunk.excerpt.trim() } else { source_text };
+        let excerpt = structured_literal_excerpt_for(
+            text,
+            ordinary_keywords,
+            BOUNDED_SOURCE_UNIT_CONTEXT_CHARS,
+        )
+        .unwrap_or_else(|| excerpt_for(text, BOUNDED_SOURCE_UNIT_CONTEXT_CHARS));
         return format!(
             "[document source_unit ordinal={} document=\"{}\"]\n{}",
             chunk.chunk_index,
             context_label(&chunk.document_label),
-            excerpt_for(text, BOUNDED_SOURCE_UNIT_CONTEXT_CHARS)
+            excerpt
         );
     }
     if chunk.score_kind == RuntimeChunkScoreKind::SourceContext
@@ -527,11 +719,17 @@ fn bounded_context_document_block(
     {
         let source_text = chunk.source_text.trim();
         let text = if source_text.is_empty() { chunk.excerpt.trim() } else { source_text };
+        let excerpt = structured_literal_excerpt_for(
+            text,
+            ordinary_keywords,
+            BOUNDED_SOURCE_UNIT_CONTEXT_CHARS,
+        )
+        .unwrap_or_else(|| excerpt_for(text, BOUNDED_SOURCE_UNIT_CONTEXT_CHARS));
         return format!(
             "[document source_context ordinal={} document=\"{}\"]\n{}",
             chunk.chunk_index,
             context_label(&chunk.document_label),
-            excerpt_for(text, BOUNDED_SOURCE_UNIT_CONTEXT_CHARS)
+            excerpt
         );
     }
     if matches!(
@@ -568,6 +766,10 @@ fn query_focused_chunk_context_text(
     if source_text.is_empty() {
         return chunk.excerpt.trim().to_string();
     }
+    if let Some(excerpt) = command_dense_excerpt_for(source_text, BOUNDED_SOURCE_UNIT_CONTEXT_CHARS)
+    {
+        return excerpt;
+    }
     focused_excerpt_for(source_text, ordinary_keywords, BOUNDED_ORDINARY_CONTEXT_CHARS)
 }
 
@@ -597,6 +799,10 @@ fn assemble_ordered_source_slice_context(
         .iter()
         .filter(|chunk| !super::source_profile::is_source_profile_runtime_chunk(chunk))
         .collect::<Vec<_>>();
+    if content_chunks.iter().any(|chunk| super::source_context::is_source_unit_runtime_chunk(chunk))
+    {
+        content_chunks.retain(|chunk| super::source_context::is_source_unit_runtime_chunk(chunk));
+    }
     if content_chunks.is_empty() {
         return None;
     }
@@ -1426,7 +1632,7 @@ mod tests {
             act: QueryAct::Enumerate,
             scope: QueryScope::LibraryMeta,
             language: QueryLanguage::Auto,
-            target_types: vec!["software_module".to_string()],
+            target_types: vec!["artifact".to_string()],
             target_entities: vec![EntityMention {
                 label: target_label.to_string(),
                 role: EntityRole::Subject,
@@ -1562,15 +1768,11 @@ mod tests {
         let graph_index = graph_index_with_nodes(vec![
             runtime_graph_node(
                 "alpha-core",
-                "software_module",
+                "artifact",
                 Some("Runs the Alpha Suite core service."),
             ),
-            runtime_graph_node(
-                "alpha-sync",
-                "software_module",
-                Some("Synchronizes Alpha Suite records."),
-            ),
-            runtime_graph_node("beta-core", "software_module", Some("Unrelated component.")),
+            runtime_graph_node("alpha-sync", "artifact", Some("Synchronizes Alpha Suite records.")),
+            runtime_graph_node("beta-core", "artifact", Some("Unrelated component.")),
         ]);
 
         let lines = target_entity_context_lines(&query_ir, &graph_index);
@@ -1590,14 +1792,14 @@ mod tests {
             .map(|index| {
                 runtime_graph_node(
                     &format!("alpha-{index:03}"),
-                    "software_module",
+                    "artifact",
                     Some("Installable Alpha Suite module."),
                 )
             })
             .collect::<Vec<_>>();
         nodes.push(runtime_graph_node(
             "beta-000",
-            "software_module",
+            "artifact",
             Some("Unrelated Beta Suite module."),
         ));
         let graph_index = graph_index_with_nodes(nodes);
@@ -1617,7 +1819,7 @@ mod tests {
             .map(|index| {
                 runtime_graph_node(
                     &format!("alpha-{index:03}"),
-                    "software_module",
+                    "artifact",
                     Some("Installable Alpha Suite module."),
                 )
             })
@@ -1652,6 +1854,29 @@ mod tests {
         assert!(context.contains("returned_unit_count: 2"));
         assert!(!context.contains("SOURCE_SLICE_CHUNK"));
         assert!(context.find("u-2").unwrap() < context.find("u-3").unwrap());
+    }
+
+    #[test]
+    fn source_slice_context_prefers_source_units_over_fallback_chunks() {
+        let query_ir = source_slice_ir(SourceSliceDirection::Tail, 1);
+        let mut selected_unit = source_slice_unit(7, "[unit_id=u-7] selected record");
+        selected_unit.chunk_kind = Some(super::super::SOURCE_UNIT_CHUNK_KIND.to_string());
+        let chunks =
+            vec![ordinary_chunk("fallback paragraph", "fallback paragraph"), selected_unit];
+
+        let context = assemble_bounded_context_for_query(
+            &query_ir,
+            "show latest record",
+            &[],
+            &[],
+            &chunks,
+            &[],
+            4096,
+        );
+
+        assert!(context.contains("returned_unit_count: 1"));
+        assert!(context.contains("[unit_id=u-7] selected record"));
+        assert!(!context.contains("fallback paragraph"));
     }
 
     #[test]
@@ -1788,15 +2013,15 @@ mod tests {
     #[test]
     fn bounded_context_renders_document_identity_chunks_with_source_unit_budget() {
         let source = format!(
-            "{}\nInstall the module:\naptitude install alpha-connector\n\nConfiguration file: /opt/alpha/modules/connector/connector.conf\n[Main]\nendpointUrl = https://alpha.example.test/api\npartnerId = demo-partner",
-            "Provider Alpha overview. ".repeat(80)
+            "{}\nInstall the module:\nsample-install alpha-connector\n\nConfiguration file: /opt/alpha/modules/connector/connector.conf\n[Main]\nendpointUrl = https://alpha.example.test/api\npartnerId = demo-partner",
+            "Subject Alpha overview. ".repeat(80)
         );
-        let mut chunk = ordinary_chunk("Provider Alpha setup", &source);
+        let mut chunk = ordinary_chunk("Subject Alpha setup", &source);
         chunk.score_kind = RuntimeChunkScoreKind::DocumentIdentity;
 
         let context = assemble_bounded_context_for_query(
             &general_ir(),
-            "How do I configure Provider Alpha?",
+            "How do I configure Subject Alpha?",
             &[],
             &[],
             &[chunk],
@@ -1805,7 +2030,7 @@ mod tests {
         );
 
         assert!(context.contains("[document document_identity"));
-        assert!(context.contains("aptitude install alpha-connector"));
+        assert!(context.contains("sample-install alpha-connector"));
         assert!(context.contains("/opt/alpha/modules/connector/connector.conf"));
         assert!(context.contains("[Main]"));
         assert!(context.contains("partnerId = demo-partner"));
@@ -1813,14 +2038,14 @@ mod tests {
 
     #[test]
     fn bounded_context_orders_document_identity_chunks_by_retrieval_score() {
-        let mut overview = ordinary_chunk("Provider Alpha overview", "Provider Alpha overview.");
+        let mut overview = ordinary_chunk("Subject Alpha overview", "Subject Alpha overview.");
         overview.score_kind = RuntimeChunkScoreKind::DocumentIdentity;
         overview.score = Some(1200.0);
         overview.chunk_index = 0;
 
         let mut setup = ordinary_chunk(
-            "Provider Alpha configuration",
-            "Install the module:\naptitude install alpha-connector\nConfiguration file: /opt/alpha/modules/connector/connector.conf",
+            "Subject Alpha configuration",
+            "Install the module:\nsample-install alpha-connector\nConfiguration file: /opt/alpha/modules/connector/connector.conf",
         );
         setup.score_kind = RuntimeChunkScoreKind::DocumentIdentity;
         setup.score = Some(2600.0);
@@ -1830,7 +2055,7 @@ mod tests {
 
         let chunks = vec![overview, setup];
         let ordered = order_bounded_context_chunks(
-            "How do I configure Provider Alpha?",
+            "How do I configure Subject Alpha?",
             &general_ir(),
             &chunks,
             &[],
@@ -1840,12 +2065,78 @@ mod tests {
     }
 
     #[test]
+    fn procedure_context_prioritizes_command_runbook_before_long_noise() {
+        let mut query_ir = general_ir();
+        query_ir.act = QueryAct::ConfigureHow;
+        query_ir.target_types = vec!["artifact".to_string(), "procedure".to_string()];
+        query_ir.target_entities = vec![EntityMention {
+            label: "Alpha subject server".to_string(),
+            role: EntityRole::Subject,
+        }];
+        query_ir.retrieval_query = Some("how to update Alpha subject server?".to_string());
+
+        let mut noise = ordinary_chunk(
+            "Alpha subject server reference",
+            &format!(
+                "Alpha subject server reference. {}",
+                "Long field description with request examples. ".repeat(120)
+            ),
+        );
+        noise.score = Some(100.0);
+        noise.chunk_index = 1;
+
+        let mut runbook = ordinary_chunk(
+            "Alpha subject server versioned update",
+            "Alpha subject server update:\n\
+             1. Install package alpha-upgrade command: sample-install alpha-upgrade\n\
+             2. Run update script from /opt/alpha/bin: cd /opt/alpha/bin ./upgrade_alpha.sh",
+        );
+        runbook.score_kind = RuntimeChunkScoreKind::FocusedDocument;
+        runbook.score = Some(1.0);
+        runbook.chunk_index = 21;
+
+        let chunks = vec![noise, runbook];
+        let context = assemble_bounded_context_for_query(
+            &query_ir,
+            "how to update Alpha subject server?",
+            &[],
+            &[],
+            &chunks,
+            &[],
+            900,
+        );
+
+        assert!(context.contains("sample-install alpha-upgrade"), "{context}");
+        assert!(context.contains("./upgrade_alpha.sh"), "{context}");
+    }
+
+    #[test]
+    fn procedure_context_model_ignores_scoped_previous_question_terms() {
+        let mut query_ir = general_ir();
+        query_ir.act = QueryAct::ConfigureHow;
+        query_ir.target_types = vec!["artifact".to_string(), "procedure".to_string()];
+        query_ir.target_entities =
+            vec![EntityMention { label: "Beta Service".to_string(), role: EntityRole::Subject }];
+
+        let bare = ProcedureContextModel::new("how to update Beta Service version?", &query_ir);
+        let scoped = ProcedureContextModel::new(
+            "scope: how to update Alpha Suite\nquestion: how to update Beta Service version?",
+            &query_ir,
+        );
+
+        assert_eq!(scoped.action_terms, bare.action_terms);
+        assert_eq!(scoped.subject_terms, bare.subject_terms);
+        assert!(!scoped.action_terms.contains("alpha"));
+        assert!(!scoped.action_terms.contains("suite"));
+    }
+
+    #[test]
     fn retrieved_document_brief_preview_keeps_near_intro_identifiers() {
         let source = format!(
-            "{}GatewayModuleAlpha is the installable module for Provider Alpha.",
+            "{}GatewayModuleAlpha is the installable module for Subject Alpha.",
             "Introductory setup context. ".repeat(12)
         );
-        let chunk = ordinary_chunk("Provider Alpha setup overview.", &source);
+        let chunk = ordinary_chunk("Subject Alpha setup overview.", &source);
         let preview = focused_preview_from_bundle_chunks(&[&chunk]).unwrap();
 
         assert!(preview.contains("GatewayModuleAlpha"));
@@ -1926,14 +2217,14 @@ mod tests {
                 RuntimeMatchedEntity {
                     node_id: Uuid::now_v7(),
                     label: "alpha-core".to_string(),
-                    node_type: "software_module".to_string(),
+                    node_type: "artifact".to_string(),
                     summary: None,
                     score: Some(0.9),
                 },
                 RuntimeMatchedEntity {
                     node_id: Uuid::now_v7(),
                     label: "alpha-desktop".to_string(),
-                    node_type: "software_module".to_string(),
+                    node_type: "artifact".to_string(),
                     summary: None,
                     score: Some(0.8),
                 },
@@ -1963,7 +2254,7 @@ mod tests {
             &[RuntimeMatchedEntity {
                 node_id: Uuid::now_v7(),
                 label: "Alpha Gateway".to_string(),
-                node_type: "software_module".to_string(),
+                node_type: "artifact".to_string(),
                 summary: None,
                 score: Some(0.9),
             }],
@@ -1989,7 +2280,7 @@ mod tests {
             &[RuntimeMatchedEntity {
                 node_id: Uuid::now_v7(),
                 label: "Alpha Worker".to_string(),
-                node_type: "software_module".to_string(),
+                node_type: "artifact".to_string(),
                 summary: Some("Runs queued jobs and retries failed deliveries.".to_string()),
                 score: Some(0.9),
             }],
@@ -2004,7 +2295,7 @@ mod tests {
 
         assert!(context.contains("[graph-node] evidence:"));
         assert!(context.contains("Runs queued jobs and retries failed deliveries."));
-        assert!(context.contains("entity_hint: Alpha Worker (software_module)"));
+        assert!(context.contains("entity_hint: Alpha Worker (artifact)"));
     }
 
     #[test]

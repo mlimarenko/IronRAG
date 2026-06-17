@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useMemo, useState } from 'react';
 import { useMutation, useQueries, useQuery, useQueryClient } from '@tanstack/react-query';
 import { toast } from 'sonner';
 import { ChevronDown, ChevronRight, Library, Loader2, Building2 } from 'lucide-react';
@@ -30,6 +30,31 @@ interface UserAccessDialogProps {
   user: UserResponse | null;
   open: boolean;
   onOpenChange: (open: boolean) => void;
+}
+
+interface AccessSelection {
+  expanded: Set<string>;
+  selectedWorkspaces: Set<string>;
+  selectedLibraries: Set<string>;
+}
+
+interface AccessDraft extends AccessSelection {
+  principalId: string | null;
+}
+
+function emptyAccessSelection(): AccessSelection {
+  return {
+    expanded: new Set(),
+    selectedWorkspaces: new Set(),
+    selectedLibraries: new Set(),
+  };
+}
+
+function emptyAccessDraft(): AccessDraft {
+  return {
+    principalId: null,
+    ...emptyAccessSelection(),
+  };
 }
 
 /**
@@ -64,31 +89,23 @@ export function UserAccessDialog({ user, open, onOpenChange }: UserAccessDialogP
     enabled: open && principalId != null,
   });
 
-  const [expanded, setExpanded] = useState<Set<string>>(new Set());
-  const [selectedWorkspaces, setSelectedWorkspaces] = useState<Set<string>>(new Set());
-  const [selectedLibraries, setSelectedLibraries] = useState<Set<string>>(new Set());
-
-  // Seed the selection from the loaded access whenever a fresh user/access loads.
-  useEffect(() => {
-    if (!accessQuery.data) return;
-    setSelectedWorkspaces(new Set(accessQuery.data.workspaces.map((entry) => entry.workspaceId)));
-    setSelectedLibraries(new Set(accessQuery.data.libraries.map((entry) => entry.libraryId)));
-    // Auto-expand workspaces that already have library grants so they're visible.
-    setExpanded((prev) => {
-      const next = new Set(prev);
-      for (const entry of accessQuery.data.libraries) next.add(entry.workspaceId);
-      return next;
-    });
+  const accessSelection = useMemo<AccessSelection>(() => {
+    if (!accessQuery.data) return emptyAccessSelection();
+    return {
+      expanded: new Set(accessQuery.data.libraries.map((entry) => entry.workspaceId)),
+      selectedWorkspaces: new Set(accessQuery.data.workspaces.map((entry) => entry.workspaceId)),
+      selectedLibraries: new Set(accessQuery.data.libraries.map((entry) => entry.libraryId)),
+    };
   }, [accessQuery.data]);
-
-  // Reset local state when the dialog closes so a re-open starts clean.
-  useEffect(() => {
-    if (!open) {
-      setExpanded(new Set());
-      setSelectedWorkspaces(new Set());
-      setSelectedLibraries(new Set());
-    }
-  }, [open]);
+  const [draft, setDraft] = useState<AccessDraft>(() => emptyAccessDraft());
+  const draftApplies = draft.principalId === principalId;
+  const expanded = draftApplies ? draft.expanded : accessSelection.expanded;
+  const selectedWorkspaces = draftApplies
+    ? draft.selectedWorkspaces
+    : accessSelection.selectedWorkspaces;
+  const selectedLibraries = draftApplies
+    ? draft.selectedLibraries
+    : accessSelection.selectedLibraries;
 
   // Lazily load libraries only for expanded workspaces.
   const expandedIds = useMemo(() => [...expanded], [expanded]);
@@ -99,14 +116,11 @@ export function UserAccessDialog({ user, open, onOpenChange }: UserAccessDialogP
       enabled: open,
     })),
   });
-  const librariesByWorkspace = useMemo(() => {
-    const map = new Map<string, CatalogLibraryResponse[]>();
-    expandedIds.forEach((workspaceId, index) => {
-      const data = libraryQueries[index]?.data;
-      map.set(workspaceId, Array.isArray(data) ? data : []);
-    });
-    return map;
-  }, [expandedIds, libraryQueries]);
+  const librariesByWorkspace = new Map<string, CatalogLibraryResponse[]>();
+  expandedIds.forEach((workspaceId, index) => {
+    const data = libraryQueries[index]?.data;
+    librariesByWorkspace.set(workspaceId, Array.isArray(data) ? data : []);
+  });
 
   const saveMutation = useMutation({
     mutationKey: ['admin', 'iam', 'access', 'save'],
@@ -119,37 +133,63 @@ export function UserAccessDialog({ user, open, onOpenChange }: UserAccessDialogP
           queryKey: ['admin', 'iam', 'access', principalId],
         });
       }
-      onOpenChange(false);
+      handleDialogOpenChange(false);
     },
     onError: (err) => {
       toast.error(errorMessage(err, t('admin.users.access.saveFailed')));
     },
   });
 
+  function updateDraft(update: (current: AccessSelection) => Partial<AccessSelection>) {
+    if (principalId == null) return;
+    setDraft((prev) => {
+      const current =
+        prev.principalId === principalId
+          ? {
+              expanded: prev.expanded,
+              selectedWorkspaces: prev.selectedWorkspaces,
+              selectedLibraries: prev.selectedLibraries,
+            }
+          : accessSelection;
+      return {
+        principalId,
+        expanded: current.expanded,
+        selectedWorkspaces: current.selectedWorkspaces,
+        selectedLibraries: current.selectedLibraries,
+        ...update(current),
+      };
+    });
+  }
+
+  function handleDialogOpenChange(nextOpen: boolean) {
+    if (!nextOpen) setDraft(emptyAccessDraft());
+    onOpenChange(nextOpen);
+  }
+
   function toggleExpanded(workspaceId: string) {
-    setExpanded((prev) => {
-      const next = new Set(prev);
+    updateDraft((current) => {
+      const next = new Set(current.expanded);
       if (next.has(workspaceId)) next.delete(workspaceId);
       else next.add(workspaceId);
-      return next;
+      return { expanded: next };
     });
   }
 
   function toggleWorkspace(workspaceId: string, checked: boolean) {
-    setSelectedWorkspaces((prev) => {
-      const next = new Set(prev);
+    updateDraft((current) => {
+      const next = new Set(current.selectedWorkspaces);
       if (checked) next.add(workspaceId);
       else next.delete(workspaceId);
-      return next;
+      return { selectedWorkspaces: next };
     });
   }
 
   function toggleLibrary(libraryId: string, checked: boolean) {
-    setSelectedLibraries((prev) => {
-      const next = new Set(prev);
+    updateDraft((current) => {
+      const next = new Set(current.selectedLibraries);
       if (checked) next.add(libraryId);
       else next.delete(libraryId);
-      return next;
+      return { selectedLibraries: next };
     });
   }
 
@@ -173,7 +213,7 @@ export function UserAccessDialog({ user, open, onOpenChange }: UserAccessDialogP
   const grantedCount = selectedWorkspaces.size + selectedLibraries.size;
 
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
+    <Dialog open={open} onOpenChange={handleDialogOpenChange}>
       <DialogContent className="sm:max-w-xl">
         <DialogHeader>
           <DialogTitle>
@@ -277,7 +317,7 @@ export function UserAccessDialog({ user, open, onOpenChange }: UserAccessDialogP
             {t('admin.users.access.grantedCount', { count: grantedCount })}
           </span>
           <div className="flex gap-2">
-            <Button variant="outline" onClick={() => onOpenChange(false)}>
+            <Button variant="outline" onClick={() => handleDialogOpenChange(false)}>
               {t('admin.cancel')}
             </Button>
             <Button onClick={handleSave} disabled={isLoading || saveMutation.isPending}>

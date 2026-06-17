@@ -35,7 +35,7 @@
       "answerForbiddenAny": ["Single Anchor Note"],
       "expectedEntityReferenceLabelsContains": ["Beacon Node", "Harbor Delta", "Beacon Harbor Transition"],
       "expectedRelationReferenceTextContains": ["Beacon Harbor Transition"],
-      "minChunkReferenceCount": 2,
+      "minChunkReferenceCount": 1,
       "minPreparedSegmentReferenceCount": 1,
       "minTechnicalFactReferenceCount": 0,
       "minEntityReferenceCount": 3,

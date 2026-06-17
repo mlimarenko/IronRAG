@@ -3,6 +3,7 @@ use std::collections::{HashMap, HashSet};
 use anyhow::Context;
 use uuid::Uuid;
 
+use super::answer_kind::AnswerKind;
 use crate::{
     app::state::AppState,
     domains::query_ir::{QueryAct, QueryIR, QueryScope, literal_text_is_identifier_shaped},
@@ -10,14 +11,17 @@ use crate::{
     services::query::{
         effective_query::{current_question_segment, structured_current_question_segment},
         planner::QueryIntentProfile,
+        text_match::label_terms,
     },
 };
 
 use super::{
     CanonicalAnswerEvidence, PreparedAnswerQueryResult, RuntimeChunkScoreKind, RuntimeMatchedChunk,
-    build_canonical_answer_context, build_deterministic_grounded_answer,
-    build_missing_explicit_document_answer, load_canonical_answer_chunks,
-    load_canonical_answer_evidence, load_direct_targeted_table_answer, load_document_index,
+    augment_deterministic_grounded_answer_with_evidence, build_canonical_answer_context,
+    build_deterministic_grounded_answer, build_missing_explicit_document_answer,
+    build_setup_configuration_anchor_candidate, build_update_procedure_sequence_answer,
+    load_canonical_answer_chunks, load_canonical_answer_evidence,
+    load_direct_targeted_table_answer, load_document_index,
     question_intent::{QuestionIntent, classify_query_ir_intents, has_question_intent},
     question_intent::{
         canonical_target_type_tag, query_ir_has_focused_document_answer_intent,
@@ -40,7 +44,13 @@ pub(super) struct CanonicalAnswerPreflight {
     pub(super) canonical_answer_chunks: Vec<RuntimeMatchedChunk>,
     pub(super) canonical_evidence: CanonicalAnswerEvidence,
     pub(super) prompt_context: String,
-    pub(super) answer_override: Option<String>,
+    pub(super) answer_override: Option<CanonicalAnswerOverride>,
+}
+
+#[derive(Debug, Clone)]
+pub(super) struct CanonicalAnswerOverride {
+    pub(super) answer: String,
+    pub(super) answer_kind: AnswerKind,
 }
 
 pub(super) async fn prepare_canonical_answer_preflight(
@@ -92,6 +102,10 @@ pub(super) async fn prepare_canonical_answer_preflight(
         question,
         &prepared.query_ir,
         &prepared.structured.context_chunks,
+    ) || query_ir_requests_structured_inventory_preflight(
+        question,
+        &prepared.query_ir,
+        &prepared.structured.context_chunks,
     ) {
         extend_setup_preflight_chunks_from_structured_context(
             &mut preflight_answer_chunks,
@@ -131,21 +145,90 @@ pub(super) async fn prepare_canonical_answer_preflight(
         &preflight_answer_chunks,
         prompt_context,
     );
-    let answer_override = build_canonical_preflight_answer(
+    let primary_answer_override = build_primary_preflight_answer_override(
         question,
-        &prepared.query_ir,
-        &prepared.structured.intent_profile,
         &document_index,
-        direct_targeted_table_answer,
-        &preflight_evidence,
-        &preflight_answer_chunks,
+        direct_targeted_table_answer.as_deref(),
     );
+    let answer_override = primary_answer_override
+        .or_else(|| {
+            build_update_procedure_sequence_answer(
+                question,
+                &prepared.query_ir,
+                &preflight_answer_chunks,
+            )
+            .map(|answer| {
+                let answer = augment_deterministic_grounded_answer_with_evidence(
+                    answer,
+                    question,
+                    &prepared.query_ir,
+                    &preflight_answer_chunks,
+                );
+                CanonicalAnswerOverride { answer, answer_kind: AnswerKind::UpdateProcedureSequence }
+            })
+        })
+        .or_else(|| {
+            build_setup_configuration_anchor_answer_override(
+                question,
+                &prepared.query_ir,
+                &preflight_answer_chunks,
+            )
+            .map(|answer| CanonicalAnswerOverride {
+                answer,
+                answer_kind: AnswerKind::SetupConfigurationAnchor,
+            })
+        })
+        .or_else(|| {
+            build_canonical_preflight_answer(
+                question,
+                &prepared.query_ir,
+                &prepared.structured.intent_profile,
+                &document_index,
+                direct_targeted_table_answer,
+                &preflight_evidence,
+                &preflight_answer_chunks,
+            )
+        });
     Ok(CanonicalAnswerPreflight {
         canonical_answer_chunks: preflight_answer_chunks,
         canonical_evidence: preflight_evidence,
         prompt_context,
         answer_override,
     })
+}
+
+fn build_setup_configuration_anchor_answer_override(
+    question: &str,
+    query_ir: &QueryIR,
+    chunks: &[RuntimeMatchedChunk],
+) -> Option<String> {
+    if !matches!(query_ir.act, QueryAct::ConfigureHow) {
+        return None;
+    }
+    let answer = build_setup_configuration_anchor_candidate(question, query_ir, chunks)?;
+    if answer.should_use_as_preflight_answer(query_ir, chunks) {
+        Some(answer.into_answer())
+    } else {
+        None
+    }
+}
+
+fn build_primary_preflight_answer_override(
+    question: &str,
+    document_index: &HashMap<Uuid, KnowledgeDocumentRow>,
+    direct_targeted_table_answer: Option<&str>,
+) -> Option<CanonicalAnswerOverride> {
+    build_missing_explicit_document_answer(question, document_index)
+        .map(|answer| CanonicalAnswerOverride {
+            answer,
+            answer_kind: AnswerKind::MissingExplicitDocument,
+        })
+        .or_else(|| {
+            direct_targeted_table_answer.map(|answer| CanonicalAnswerOverride {
+                answer: answer.to_string(),
+                answer_kind: AnswerKind::TargetedTableAnswer,
+            })
+        })
 }
 
 fn prepend_preflight_source_title_inventory(
@@ -189,6 +272,272 @@ fn prepend_preflight_source_title_inventory(
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::domains::query_ir::{
+        ConversationRefKind, DocumentHint, EntityMention, EntityRole, QueryLanguage, UnresolvedRef,
+    };
+    use crate::services::query::execution::consolidation::query_has_multi_document_setup_anchors;
+
+    #[test]
+    fn setup_configuration_anchor_override_skips_single_value_query() {
+        let query_ir = query_ir(QueryAct::RetrieveValue, QueryScope::SingleDocument, &["port"]);
+        let chunk = chunk(
+            "Subject Alpha setup",
+            "Component configuration\napply artifact-alpha\n\
+             Settings are defined in /opt/subject/alpha/alpha.ini.\n\
+             port = 443",
+        );
+
+        assert!(
+            build_setup_configuration_anchor_answer_override(
+                "which port does Subject Alpha use?",
+                &query_ir,
+                &[chunk],
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn setup_configuration_anchor_override_skips_retrieve_value_multi_document_query() {
+        let query_ir = query_ir(QueryAct::RetrieveValue, QueryScope::MultiDocument, &["parameter"]);
+        let chunks = vec![
+            chunk(
+                "Subject Alpha setup",
+                "Component configuration\napply artifact-alpha\n\
+                 Settings are defined in /opt/subject/alpha/alpha.ini.\n\
+                 primaryKey = \"\"",
+            ),
+            chunk(
+                "Subject Beta setup",
+                "Component configuration\napply artifact-beta\n\
+                 Settings are defined in /opt/subject/beta/beta.conf.\n\
+                 secondaryKey = \"\"",
+            ),
+        ];
+
+        assert!(
+            build_setup_configuration_anchor_answer_override(
+                "which parameter configures Subject?",
+                &query_ir,
+                &chunks,
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn setup_configuration_anchor_override_allows_multi_document_setup() {
+        let mut query_ir =
+            query_ir(QueryAct::ConfigureHow, QueryScope::MultiDocument, &["package"]);
+        query_ir
+            .target_entities
+            .push(EntityMention { label: "Subject".to_string(), role: EntityRole::Subject });
+        let chunks = vec![
+            chunk(
+                "Subject Alpha setup",
+                "Component configuration\napply artifact-alpha\n\
+                 Settings are defined in /opt/subject/alpha/alpha.ini.\n\
+                 primaryKey = \"\"",
+            ),
+            chunk(
+                "Subject Beta setup",
+                "Component configuration\napply artifact-beta\n\
+                 Settings are defined in /opt/subject/beta/beta.conf.\n\
+                 secondaryKey = \"\"",
+            ),
+        ];
+
+        let answer = build_setup_configuration_anchor_answer_override(
+            "how to configure Subject?",
+            &query_ir,
+            &chunks,
+        )
+        .expect("multi-document setup override");
+
+        assert!(answer.contains("Subject Alpha setup"));
+        assert!(answer.contains("Subject Beta setup"));
+    }
+
+    #[test]
+    fn setup_configuration_anchor_override_allows_soft_multi_variant_setup() {
+        let mut query_ir =
+            query_ir(QueryAct::ConfigureHow, QueryScope::MultiDocument, &["parameter"]);
+        query_ir
+            .target_entities
+            .push(EntityMention { label: "Subject".to_string(), role: EntityRole::Subject });
+        let chunks = vec![
+            chunk(
+                "Subject Alpha setup",
+                "Settings are defined in /opt/subject/alpha/alpha.ini.\n\
+                 [AlphaSubject]\n\
+                 primaryKey = \"\"",
+            ),
+            chunk(
+                "Subject Beta setup",
+                "Settings are defined in /opt/subject/beta/beta.conf.\n\
+                 [BetaSubject]\n\
+                 secondaryKey = \"\"",
+            ),
+        ];
+
+        assert!(!query_has_multi_document_setup_anchors(&query_ir, &chunks));
+        let answer = build_setup_configuration_anchor_answer_override(
+            "how to configure Subject?",
+            &query_ir,
+            &chunks,
+        )
+        .expect("soft multi-variant setup override");
+
+        assert!(answer.contains("**Setup variants:**"));
+        assert!(answer.contains("Subject Alpha setup"));
+        assert!(answer.contains("Subject Beta setup"));
+    }
+
+    #[test]
+    fn setup_configuration_anchor_override_skips_soft_multi_variant_document_focus() {
+        let mut query_ir =
+            query_ir(QueryAct::ConfigureHow, QueryScope::SingleDocument, &["parameter"]);
+        query_ir.document_focus = Some(DocumentHint { hint: "Subject Alpha setup".to_string() });
+        let chunks = vec![
+            chunk(
+                "Subject Alpha setup",
+                "Settings are defined in /opt/subject/alpha/alpha.ini.\n\
+                 [AlphaSubject]\n\
+                 primaryKey = \"\"",
+            ),
+            chunk(
+                "Subject Beta setup",
+                "Settings are defined in /opt/subject/beta/beta.conf.\n\
+                 [BetaSubject]\n\
+                 secondaryKey = \"\"",
+            ),
+        ];
+
+        assert!(
+            build_setup_configuration_anchor_answer_override(
+                "how to configure Subject Alpha?",
+                &query_ir,
+                &chunks,
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn setup_configuration_anchor_override_allows_single_variant_with_parameter_details() {
+        let mut query_ir =
+            query_ir(QueryAct::ConfigureHow, QueryScope::SingleDocument, &["parameter"]);
+        query_ir.document_focus = Some(DocumentHint { hint: "Subject Alpha setup".to_string() });
+        let document_id = Uuid::now_v7();
+        let revision_id = Uuid::now_v7();
+        let mut anchor = chunk(
+            "Subject Alpha setup",
+            "Settings are defined in /opt/subject/alpha/alpha.ini.\n\
+             [AlphaSubject]",
+        );
+        anchor.document_id = document_id;
+        anchor.revision_id = revision_id;
+        let mut parameter_row = chunk(
+            "Subject Alpha setup",
+            "Sheet: Component settings | Row 12 | Name: primaryKey | Type: string | \
+             Description: Primary identifier | Notes: Required",
+        );
+        parameter_row.document_id = document_id;
+        parameter_row.revision_id = revision_id;
+
+        let answer = build_setup_configuration_anchor_answer_override(
+            "how to configure Subject Alpha?",
+            &query_ir,
+            &[anchor, parameter_row],
+        )
+        .expect("single-variant parameter table override");
+
+        assert!(answer.contains("**Parameter details:**"));
+        assert!(answer.contains("primaryKey"));
+        assert!(answer.contains("Primary identifier"));
+    }
+
+    #[test]
+    fn setup_configuration_anchor_override_skips_describe_parameter_inventory() {
+        let mut query_ir = query_ir(QueryAct::Describe, QueryScope::MultiDocument, &["parameter"]);
+        query_ir
+            .target_entities
+            .push(EntityMention { label: "S1".to_string(), role: EntityRole::Subject });
+        let chunks = vec![
+            chunk(
+                "S1 Alpha reference",
+                "Settings are defined in /x/s1-alpha.conf.\n\
+                 [Alpha]\n\
+                 firstValue = \"\"",
+            ),
+            chunk(
+                "S1 Beta reference",
+                "Sheet: Parameters | Row 4 | Name: secondValue | Type: string | \
+                 Description: Secondary value | Notes: Optional",
+            ),
+        ];
+
+        assert!(
+            build_setup_configuration_anchor_answer_override(
+                "describe S1 values",
+                &query_ir,
+                &chunks
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn canonical_preflight_does_not_skip_deterministic_candidates_only_for_follow_up_state() {
+        let mut query_ir =
+            query_ir(QueryAct::ConfigureHow, QueryScope::SingleDocument, &["procedure"]);
+        query_ir.conversation_refs.push(UnresolvedRef {
+            surface: "previous turn".to_string(),
+            kind: ConversationRefKind::Deictic,
+        });
+
+        assert!(query_ir.is_follow_up());
+        assert!(!canonical_preflight_requires_synthesis("how to update Alpha Service?", &query_ir));
+    }
+
+    fn query_ir(act: QueryAct, scope: QueryScope, target_types: &[&str]) -> QueryIR {
+        QueryIR {
+            act,
+            scope,
+            language: QueryLanguage::Auto,
+            target_types: target_types.iter().map(|value| (*value).to_string()).collect(),
+            target_entities: Vec::new(),
+            literal_constraints: Vec::new(),
+            temporal_constraints: Vec::new(),
+            comparison: None,
+            document_focus: None,
+            conversation_refs: Vec::new(),
+            needs_clarification: None,
+            source_slice: None,
+            retrieval_query: None,
+            confidence: 0.95,
+        }
+    }
+
+    fn chunk(label: &str, text: &str) -> RuntimeMatchedChunk {
+        RuntimeMatchedChunk {
+            chunk_id: Uuid::now_v7(),
+            document_id: Uuid::now_v7(),
+            revision_id: Uuid::now_v7(),
+            chunk_index: 1,
+            chunk_kind: Some("paragraph".to_string()),
+            document_label: label.to_string(),
+            excerpt: text.to_string(),
+            score_kind: RuntimeChunkScoreKind::Relevance,
+            score: Some(3.0),
+            source_text: text.to_string(),
+        }
+    }
+}
+
 fn preflight_document_title(document: &KnowledgeDocumentRow) -> Option<String> {
     document
         .title
@@ -221,7 +570,7 @@ pub(super) fn build_canonical_preflight_answer(
     direct_targeted_table_answer: Option<String>,
     canonical_evidence: &CanonicalAnswerEvidence,
     canonical_answer_chunks: &[RuntimeMatchedChunk],
-) -> Option<String> {
+) -> Option<CanonicalAnswerOverride> {
     let missing_explicit_document_answer =
         build_missing_explicit_document_answer(question, document_index);
     let requires_synthesis = canonical_preflight_requires_synthesis(question, query_ir);
@@ -260,19 +609,33 @@ pub(super) fn build_canonical_preflight_answer(
         );
     }
 
-    missing_explicit_document_answer
-        .or(direct_targeted_table_answer)
-        .or(deterministic_grounded_answer)
+    if let Some(answer) = missing_explicit_document_answer {
+        return Some(CanonicalAnswerOverride {
+            answer,
+            answer_kind: AnswerKind::MissingExplicitDocument,
+        });
+    }
+    if let Some(answer) = direct_targeted_table_answer {
+        return Some(CanonicalAnswerOverride {
+            answer,
+            answer_kind: AnswerKind::TargetedTableAnswer,
+        });
+    }
+    deterministic_grounded_answer.map(|answer| CanonicalAnswerOverride {
+        answer,
+        answer_kind: AnswerKind::DeterministicGroundedAnswer,
+    })
 }
 
 fn canonical_preflight_requires_synthesis(question: &str, query_ir: &QueryIR) -> bool {
-    query_ir.is_follow_up() || scoped_setup_literal_inventory_requires_synthesis(question, query_ir)
+    scoped_setup_literal_inventory_requires_synthesis(question, query_ir)
 }
 
 fn scoped_setup_literal_inventory_requires_synthesis(question: &str, query_ir: &QueryIR) -> bool {
-    structured_current_question_segment(question).is_some()
-        && query_ir_requests_setup_literal_context(query_ir)
+    query_ir_requests_setup_literal_context(query_ir)
         && !current_question_has_exact_technical_surface(question)
+        && (structured_current_question_segment(question).is_some()
+            || !query_ir.conversation_refs.is_empty())
 }
 
 pub(super) fn build_preflight_graph_evidence_context_lines(
@@ -421,6 +784,75 @@ pub(super) fn query_ir_requests_low_confidence_setup_preflight(
         && context_chunks.iter().any(|chunk| {
             low_confidence_context_chunk_requests_setup_bridge(question, query_ir, chunk)
         })
+}
+
+fn query_ir_requests_structured_inventory_preflight(
+    question: &str,
+    query_ir: &QueryIR,
+    context_chunks: &[RuntimeMatchedChunk],
+) -> bool {
+    if query_ir.source_slice.is_some()
+        || !matches!(
+            query_ir.act,
+            QueryAct::Compare | QueryAct::Describe | QueryAct::Enumerate | QueryAct::RetrieveValue
+        )
+        || !context_chunks.iter().any(|chunk| {
+            chunk.score_kind == RuntimeChunkScoreKind::SourceContext
+                || chunk.chunk_kind.as_deref() == Some(super::SOURCE_UNIT_CHUNK_KIND)
+        })
+    {
+        return false;
+    }
+    let intents = classify_query_ir_intents(query_ir);
+    if has_question_intent(&intents, QuestionIntent::Port)
+        || has_question_intent(&intents, QuestionIntent::Protocol)
+        || has_question_intent(&intents, QuestionIntent::ConfigKey)
+        || has_question_intent(&intents, QuestionIntent::Parameter)
+        || has_question_intent(&intents, QuestionIntent::ErrorCode)
+        || !query_ir.target_types.is_empty()
+        || !query_ir.target_entities.is_empty()
+        || !query_ir.literal_constraints.is_empty()
+    {
+        return true;
+    }
+
+    let focus_terms = structured_inventory_preflight_focus_terms(question, query_ir);
+    !focus_terms.is_empty()
+        && context_chunks
+            .iter()
+            .filter(|chunk| {
+                chunk.score_kind == RuntimeChunkScoreKind::SourceContext
+                    || chunk.chunk_kind.as_deref() == Some(super::SOURCE_UNIT_CHUNK_KIND)
+            })
+            .any(|chunk| structured_inventory_preflight_overlap_score(chunk, &focus_terms) >= 2)
+}
+
+fn structured_inventory_preflight_focus_terms(
+    question: &str,
+    query_ir: &QueryIR,
+) -> HashSet<String> {
+    let mut terms =
+        label_terms(&current_question_segment(question), 3).into_iter().collect::<HashSet<_>>();
+    for target_type in &query_ir.target_types {
+        terms.extend(label_terms(target_type, 2));
+    }
+    for entity in &query_ir.target_entities {
+        terms.extend(label_terms(&entity.label, 2));
+    }
+    for literal in &query_ir.literal_constraints {
+        terms.extend(label_terms(&literal.text, 2));
+    }
+    terms
+}
+
+fn structured_inventory_preflight_overlap_score(
+    chunk: &RuntimeMatchedChunk,
+    focus_terms: &HashSet<String>,
+) -> usize {
+    label_terms(&format!("{}\n{}\n{}", chunk.document_label, chunk.excerpt, chunk.source_text), 2)
+        .into_iter()
+        .filter(|term| focus_terms.contains(term))
+        .count()
 }
 
 fn query_ir_low_confidence_unfocused_descriptive_setup(query_ir: &QueryIR) -> bool {

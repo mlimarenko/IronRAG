@@ -83,6 +83,9 @@ pub(super) fn build_module_configuration_setup_answer(
     evidence: &CanonicalAnswerEvidence,
     chunks: &[RuntimeMatchedChunk],
 ) -> Option<String> {
+    if module_configuration_inventory_question(question, query_ir) {
+        return None;
+    }
     let explicitly_requested = query_ir_requests_module_configuration_setup(query_ir);
     if !explicitly_requested
         && !query_ir_allows_evidence_driven_module_configuration_setup(question, query_ir)
@@ -203,6 +206,24 @@ fn query_ir_requests_module_configuration_setup(query_ir: &QueryIR) -> bool {
         matches!(canonical_target_type_tag(target_type).as_str(), "package" | "parameter")
     });
     requests_configuration && (requests_module_or_parameter || has_focus_signal)
+}
+
+fn module_configuration_inventory_question(_question: &str, query_ir: &QueryIR) -> bool {
+    if matches!(query_ir.act, QueryAct::ConfigureHow) {
+        return false;
+    }
+    query_ir.target_types.iter().any(|target_type| {
+        matches!(
+            canonical_target_type_tag(target_type).as_str(),
+            "port"
+                | "service"
+                | "endpoint"
+                | "http_method"
+                | "error_code"
+                | "relationship"
+                | "protocol"
+        )
+    })
 }
 
 fn query_ir_allows_evidence_driven_module_configuration_setup(
@@ -752,13 +773,10 @@ fn build_transport_config_assignment_answer(
     chunks: &[RuntimeMatchedChunk],
 ) -> Option<String> {
     let intents = classify_question_or_ir_intents(question, query_ir);
-    if !has_question_intent(&intents, QuestionIntent::Port)
-        && !has_question_intent(&intents, QuestionIntent::Protocol)
-        && !query_ir
-            .target_types
-            .iter()
-            .any(|target_type| target_type.trim().eq_ignore_ascii_case("connection"))
-    {
+    if query_ir_requests_port_inventory_without_connection(query_ir, &intents) {
+        return None;
+    }
+    if !query_ir_requests_transport_config_assignment(query_ir, &intents) {
         return None;
     }
 
@@ -781,6 +799,52 @@ fn build_transport_config_assignment_answer(
         answer.push_str("\n```");
     }
     Some(answer)
+}
+
+fn query_ir_requests_transport_config_assignment(
+    query_ir: &QueryIR,
+    intents: &[QuestionIntent],
+) -> bool {
+    if !matches!(query_ir.act, QueryAct::RetrieveValue | QueryAct::ConfigureHow) {
+        return false;
+    }
+
+    let has_transport_intent = has_question_intent(intents, QuestionIntent::Port)
+        || has_question_intent(intents, QuestionIntent::Protocol);
+    let mut has_connection_target = false;
+    let mut has_configuration_target = false;
+    for target_type in &query_ir.target_types {
+        match canonical_target_type_tag(target_type).as_str() {
+            "connection" | "endpoint" | "url" | "base_url" | "wsdl" => {
+                has_connection_target = true;
+            }
+            "configuration_file" | "config_key" | "env_var" | "parameter" => {
+                has_configuration_target = true;
+            }
+            _ => {}
+        }
+    }
+
+    has_connection_target || has_transport_intent && has_configuration_target
+}
+
+fn query_ir_requests_port_inventory_without_connection(
+    query_ir: &QueryIR,
+    intents: &[QuestionIntent],
+) -> bool {
+    let has_port = has_question_intent(intents, QuestionIntent::Port);
+    let mut has_non_port_target = false;
+    let mut has_connection = has_question_intent(intents, QuestionIntent::Protocol);
+    for target_type in &query_ir.target_types {
+        match canonical_target_type_tag(target_type).as_str() {
+            "connection" | "endpoint" | "url" | "base_url" | "wsdl" | "protocol" => {
+                has_connection = true;
+            }
+            "port" => {}
+            _ => has_non_port_target = true,
+        }
+    }
+    has_port && has_non_port_target && !has_connection
 }
 
 fn config_assignment_candidate_from_chunk(
@@ -1001,7 +1065,7 @@ mod tests {
                 "Widget Beta setup",
                 r#"
 Install the module:
-aptitude install beta-widget
+sample-install beta-widget
 
 Settings are stored in /opt/beta/display/display.ini.
 
@@ -1014,10 +1078,10 @@ Settings are stored in /opt/beta/display/display.ini.
                 "Widget Alpha setup",
                 r#"
 Install the module:
-aptitude install alpha-connector
+sample-install alpha-connector
 
 Configure the module:
-dpkg-reconfigure alpha-connector
+sample-configure alpha-connector
 
 Connector settings are stored in /opt/alpha/modules/connector/connector.conf under [Main].
 "#,
@@ -1069,10 +1133,10 @@ Display settings use /opt/alpha/display/display.ini.
                 "Widget Gamma setup",
                 r#"
 Install the module:
-aptitude install gamma-connector
+sample-install gamma-connector
 
 Configure the module:
-dpkg-reconfigure gamma-connector
+sample-configure gamma-connector
 
 Connector settings are stored in /opt/gamma/modules/connector/connector.conf under [Main].
 "#,
@@ -1126,7 +1190,7 @@ Connector settings are stored in /opt/gamma/modules/connector/connector.conf und
                 "Widget Alpha release note",
                 r#"
 Release note:
-aptitude install alpha-connector
+sample-install alpha-connector
 Configuration file: /opt/alpha/modules/connector/connector.conf
 "#,
             ),
@@ -1136,7 +1200,7 @@ Configuration file: /opt/alpha/modules/connector/connector.conf
                 "Widget Alpha administrator guide",
                 r#"
 Install the module:
-aptitude install alpha-connector
+sample-install alpha-connector
 
 Connector settings are stored in /opt/alpha/modules/connector/connector.conf under [Main].
 "#,
@@ -1179,7 +1243,7 @@ Connector settings are stored in /opt/alpha/modules/connector/connector.conf und
                 1,
                 "Provider Alpha setup",
                 r#"
-To use the module, install it with aptitude install alpha-connector and run dpkg-reconfigure alpha-connector.
+To use the module, install it with sample-install alpha-connector and run sample-configure alpha-connector.
 
 The module configuration file is /opt/alpha/modules/connector/connector.conf.
 | endpointUrl | string | Service endpoint |
@@ -1215,7 +1279,7 @@ The module configuration file is /opt/alpha/modules/connector/connector.conf.
                 "Provider Alpha setup",
                 r#"
 Install the module:
-aptitude install alpha-connector
+sample-install alpha-connector
 
 The module configuration file is /opt/alpha/modules/connector/connector.conf.
 [Main]
@@ -1269,7 +1333,7 @@ partnerId = alpha-partner
             "Provider Alpha setup",
             r#"
 Install the module:
-aptitude install alpha-connector
+sample-install alpha-connector
 
 The module configuration file is /opt/alpha/modules/connector/connector.conf.
 [Main]
@@ -1307,7 +1371,7 @@ partnerId = alpha-partner
             "Provider Beta setup",
             r#"
 Install the module:
-aptitude install beta-connector
+sample-install beta-connector
 
 The module configuration file is /opt/beta/modules/connector/connector.conf.
 [Main]
@@ -1346,7 +1410,7 @@ visible = true
             "Cash link setup",
             r#"
 Install the module:
-aptitude install cash-link
+sample-install cash-link
 
 The module configuration file is /opt/cash/link/link.conf.
 [Main]
@@ -1385,7 +1449,7 @@ visible = true
             "PAY cash link setup",
             r#"
 Install the module:
-aptitude install cash-link
+sample-install cash-link
 
 The module configuration file is /opt/cash/link/link.conf.
 [Main]
@@ -1427,7 +1491,7 @@ visible = true
             "Provider Alpha setup",
             r#"
 Install the module:
-aptitude install alpha-connector
+sample-install alpha-connector
 
 The module configuration file is /opt/alpha/modules/connector/connector.conf.
 [Main]
@@ -1471,7 +1535,7 @@ visible = true
             "Provider Beta setup",
             r#"
 Install the module:
-aptitude install beta-connector
+sample-install beta-connector
 
 The module configuration file is /opt/beta/modules/connector/connector.conf.
 [Main]
@@ -1515,7 +1579,7 @@ visible = true
                 "Provider Delta setup",
                 r#"
 Install the module:
-aptitude install delta-connector
+sample-install delta-connector
 
 The module configuration file is /opt/delta/modules/connector/connector.conf.
 | endpointUrl | string | Service endpoint |
@@ -1582,7 +1646,7 @@ The module configuration file is /opt/delta/modules/connector/connector.conf.
             );
         install_block.ordinal = 1;
         install_block.text =
-            "Install the module:\naptitude install epsilon-connector\n\nConfigure it:\ndpkg-reconfigure epsilon-connector"
+            "Install the module:\nsample-install epsilon-connector\n\nConfigure it:\nsample-configure epsilon-connector"
                 .to_string();
         install_block.normalized_text = install_block.text.clone();
         let mut path_block = crate::services::query::execution::types::sample_structured_block_row(
@@ -1613,7 +1677,7 @@ The module configuration file is /opt/delta/modules/connector/connector.conf.
                 Uuid::now_v7(),
             );
         unrelated_block.text =
-            "Install unrelated module with `aptitude install omega-connector`; file /opt/omega/omega.conf"
+            "Install unrelated module with `sample-install omega-connector`; file /opt/omega/omega.conf"
                 .to_string();
         unrelated_block.normalized_text = unrelated_block.text.clone();
         let evidence =
@@ -1645,7 +1709,7 @@ The module configuration file is /opt/delta/modules/connector/connector.conf.
             "Provider Alpha setup",
             r#"
 Install the module:
-aptitude install alpha-connector
+sample-install alpha-connector
 
 Settings are stored in /opt/alpha/modules/connector/connector.conf under [Main].
 endpointUrl = https://alpha.example/api
@@ -1680,6 +1744,172 @@ partnerId = alpha-partner
         )
         .expect("typed configuration IR should still allow deterministic literal answer");
         assert!(answer.contains("`alpha-connector`"), "{answer}");
+    }
+
+    #[test]
+    fn module_configuration_setup_answer_abstains_for_port_inventory_question() {
+        let document_id = Uuid::now_v7();
+        let chunks = vec![runtime_chunk(
+            document_id,
+            0,
+            "sample-manifest.yaml",
+            r#"
+services:
+  api:
+    environment:
+      PORT: 8001
+      apiPort = 8001
+    ports:
+      - "8001:8001"
+  postgres:
+    postgresPort = 5432
+    ports:
+      - "5432:5432"
+"#,
+        )];
+        let mut query_ir = configuration_setup_ir();
+        query_ir.act = QueryAct::Describe;
+        query_ir.target_types =
+            vec!["configuration_file".to_string(), "service".to_string(), "port".to_string()];
+        query_ir.target_entities =
+            vec![EntityMention { label: "Sample Manifest".to_string(), role: EntityRole::Subject }];
+
+        let answer = build_module_configuration_setup_answer(
+            "What ports do the Sample Manifest services expose?",
+            &query_ir,
+            &empty_evidence(),
+            &chunks,
+        );
+
+        assert!(
+            answer.is_none(),
+            "service/port inventory questions should use synthesis over source coverage, not setup field rendering: {answer:?}"
+        );
+        let exact_answer = build_exact_technical_literal_answer(
+            "What ports do the Sample Manifest services expose?",
+            &query_ir,
+            &empty_evidence(),
+            &chunks,
+        );
+        assert!(
+            exact_answer.is_none(),
+            "service/port inventory questions should not use exact assignment rendering: {exact_answer:?}"
+        );
+    }
+
+    #[test]
+    fn transport_config_assignment_answer_requires_assignment_evidence() {
+        let document_id = Uuid::now_v7();
+        let chunks = vec![runtime_chunk(
+            document_id,
+            0,
+            "checkout_service_notes.md",
+            "The checkout service accepts HTTPS traffic and calls the inventory service on port 9443.",
+        )];
+        let mut query_ir = configuration_setup_ir();
+        query_ir.act = QueryAct::RetrieveValue;
+        query_ir.target_types = vec!["port".to_string(), "connection".to_string()];
+
+        let answer = build_transport_config_assignment_answer(
+            "Which ports and connections does the checkout service require?",
+            &query_ir,
+            &chunks,
+        );
+
+        assert!(
+            answer.is_none(),
+            "transport assignment rendering requires concrete config assignments: {answer:?}"
+        );
+    }
+
+    #[test]
+    fn transport_config_assignment_answer_abstains_for_compound_port_inventory() {
+        let document_id = Uuid::now_v7();
+        let chunks = vec![runtime_chunk(
+            document_id,
+            0,
+            "alpha_records.txt",
+            r#"
+entity.alpha = alpha
+entity.beta = beta
+entity.updated_at = now()
+"#,
+        )];
+        let mut query_ir = configuration_setup_ir();
+        query_ir.act = QueryAct::Describe;
+        query_ir.target_types =
+            vec!["configuration_file".to_string(), "port".to_string(), "procedure".to_string()];
+        query_ir.target_entities =
+            vec![EntityMention { label: "Alpha Records".to_string(), role: EntityRole::Subject }];
+
+        let answer = build_transport_config_assignment_answer(
+            "Which port values does Alpha Records expose?",
+            &query_ir,
+            &chunks,
+        );
+
+        assert!(
+            answer.is_none(),
+            "compound port inventory should not be answered by assignment-shaped rows: {answer:?}"
+        );
+    }
+
+    #[test]
+    fn transport_config_assignment_answer_abstains_for_broad_protocol_explanation() {
+        let document_id = Uuid::now_v7();
+        let chunks = vec![runtime_chunk(
+            document_id,
+            0,
+            "neighboring_config.txt",
+            r#"
+service.endpoint = https://example.invalid:9443
+service.timeout = 30
+service.enabled = true
+"#,
+        )];
+        let mut query_ir = configuration_setup_ir();
+        query_ir.act = QueryAct::Describe;
+        query_ir.target_types = vec!["protocol".to_string(), "concept".to_string()];
+
+        let answer = build_transport_config_assignment_answer(
+            "What are the main improvements of Protocol X version 2 over version 1?",
+            &query_ir,
+            &chunks,
+        );
+
+        assert!(
+            answer.is_none(),
+            "broad protocol/concept questions should be synthesized from evidence, not rendered as config assignments: {answer:?}"
+        );
+    }
+
+    #[test]
+    fn transport_config_assignment_answer_requires_connection_or_configuration_target() {
+        let document_id = Uuid::now_v7();
+        let chunks = vec![runtime_chunk(
+            document_id,
+            0,
+            "neighboring_config.txt",
+            r#"
+listener.protocol = alpha
+listener.timeout = 30
+listener.enabled = true
+"#,
+        )];
+        let mut query_ir = configuration_setup_ir();
+        query_ir.act = QueryAct::RetrieveValue;
+        query_ir.target_types = vec!["protocol".to_string()];
+
+        let answer = build_transport_config_assignment_answer(
+            "Which protocol is described?",
+            &query_ir,
+            &chunks,
+        );
+
+        assert!(
+            answer.is_none(),
+            "a protocol-only value lookup must not infer a config-assignment answer without a connection/config target: {answer:?}"
+        );
     }
 
     fn configuration_setup_ir() -> QueryIR {

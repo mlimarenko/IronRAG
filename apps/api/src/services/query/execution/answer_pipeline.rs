@@ -1,15 +1,16 @@
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use anyhow::Context as _;
 use uuid::Uuid;
 
+use crate::services::query::latest_versions::latest_version_scope_terms;
 use crate::{
     app::state::AppState,
     domains::{
         query::{QueryVerificationState, QueryVerificationWarning},
         query_ir::{
             EntityMention, EntityRole, LiteralKind, LiteralSpan, QueryAct, QueryIR, QueryLanguage,
-            QueryScope,
+            QueryScope, SourceSliceDirection, SourceSliceFilter,
         },
     },
     infra::arangodb::document_store::KnowledgeDocumentRow,
@@ -22,13 +23,14 @@ use crate::{
     },
 };
 
+use super::answer_kind::AnswerKind;
 use super::question_intent::query_ir_has_focused_document_answer_intent;
 use super::technical_literals::{
     TechnicalLiteralIntent, detect_explicit_technical_literal_intent_from_query_ir,
     detect_technical_literal_intent_from_query_ir, extract_config_assignment_literals,
     extract_config_section_literals, extract_explicit_path_literals, extract_http_methods,
     extract_package_command_literals, extract_parameter_literals, extract_prefix_literals,
-    extract_url_literals,
+    extract_url_literals, technical_literal_focus_keywords,
 };
 use super::tuning::{
     CLARIFY_DOMINANCE_RATIO, CLARIFY_MAX_VARIANTS, CLARIFY_MIN_DISTINCT_DOCUMENTS,
@@ -36,17 +38,544 @@ use super::tuning::{
     SINGLE_SHOT_CONFIDENT_ANSWER_CHARS, SINGLE_SHOT_MIN_ANSWER_CHARS,
     SINGLE_SHOT_RETRIEVAL_ESCALATION_MIN_DOCUMENTS,
 };
+use super::types::{
+    RuntimeAnswerCandidate, RuntimeAnswerCandidateProvenance, RuntimeClarification,
+};
 use super::{
     AnswerGenerationStage, AnswerVerificationStage, FocusReason, PreparedAnswerQueryResult,
     QueryChunkReferenceSnapshot, QueryCompileUsage, RuntimeAnswerQueryResult, RuntimeMatchedChunk,
-    apply_query_execution_library_summary, apply_query_execution_warning, assemble_answer_context,
-    load_query_execution_library_context, render_targeted_evidence_chunk_section,
-    should_prioritize_retrieved_context_for_query, verify_answer_against_canonical_evidence,
+    RuntimeMatchedEntity, apply_query_execution_library_summary, apply_query_execution_warning,
+    assemble_answer_context, load_query_execution_library_context,
+    render_targeted_evidence_chunk_section, should_prioritize_retrieved_context_for_query,
+    verify_answer_against_canonical_evidence,
 };
+
+/// `kind` for a clarify candidate whose only evidence is a label string
+/// (a document title or grouped-reference label) with no graph node id.
+const ANSWER_CANDIDATE_KIND_DOCUMENT: &str = "document";
+
+fn append_missing_grounded_requested_labels(
+    answer: String,
+    query_ir: &QueryIR,
+    question: &str,
+    answer_context: &str,
+    graph_entity_references: &[RuntimeMatchedEntity],
+) -> String {
+    let target_labels = query_ir
+        .target_entities
+        .iter()
+        .map(|entity| entity.label.trim())
+        .filter(|label| !label.is_empty() && contains_label_mention(answer_context, label));
+    let explicit_grounded_graph_labels =
+        graph_entity_references.iter().map(|entity| entity.label.trim()).filter(|label| {
+            !label.is_empty()
+                && contains_label_mention(question, label)
+                && contains_label_mention(answer_context, label)
+        });
+    let mut seen = HashSet::new();
+    let missing = target_labels
+        .chain(explicit_grounded_graph_labels)
+        .filter(|label| {
+            !contains_label_mention(&answer, label) && seen.insert(label.to_lowercase())
+        })
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    if missing.is_empty() {
+        return answer;
+    }
+    let suffix = format!("{}.", missing.join("; "));
+    if answer.trim().is_empty() { suffix } else { format!("{}\n\n{}", answer.trim_end(), suffix) }
+}
+
+fn contains_label_mention(haystack: &str, label: &str) -> bool {
+    let label = label.trim();
+    if haystack.is_empty() || label.is_empty() {
+        return false;
+    }
+    let haystack_lower = haystack.to_lowercase();
+    let label_lower = label.to_lowercase();
+    haystack_lower.match_indices(&label_lower).any(|(start, matched)| {
+        let end = start + matched.len();
+        let before = haystack_lower[..start].chars().next_back();
+        let after = haystack_lower[end..].chars().next();
+        !before.is_some_and(char::is_alphanumeric) && !after.is_some_and(char::is_alphanumeric)
+    })
+}
+
+async fn hydrate_runtime_document_index(
+    state: &AppState,
+    document_index: &mut HashMap<Uuid, KnowledgeDocumentRow>,
+    chunks: &[RuntimeMatchedChunk],
+) -> anyhow::Result<()> {
+    let mut missing_document_ids = chunks
+        .iter()
+        .map(|chunk| chunk.document_id)
+        .filter(|document_id| !document_index.contains_key(document_id))
+        .collect::<Vec<_>>();
+    missing_document_ids.sort_unstable();
+    missing_document_ids.dedup();
+    if missing_document_ids.is_empty() {
+        return Ok(());
+    }
+    let documents = state
+        .arango_document_store
+        .list_documents_by_ids(&missing_document_ids)
+        .await
+        .context("failed to hydrate runtime query companion documents")?;
+    for document in documents {
+        document_index.insert(document.document_id, document);
+    }
+    Ok(())
+}
+
+fn append_missing_grounded_requested_labels_for_prepared(
+    answer: String,
+    prepared: &PreparedAnswerQueryResult,
+    question: &str,
+    answer_context: &str,
+) -> String {
+    let grounded_context = prepared_postprocessor_grounding_context(prepared, answer_context);
+    let answer = append_missing_grounded_requested_labels(
+        answer,
+        &prepared.query_ir,
+        question,
+        &grounded_context,
+        &prepared.structured.graph_entity_references,
+    );
+    append_missing_focus_aligned_exact_literals(
+        answer,
+        question,
+        &prepared.query_ir,
+        &grounded_context,
+    )
+}
+
+async fn finalize_verified_answer_for_prepared(
+    state: &AppState,
+    execution_id: Uuid,
+    effective_question: &str,
+    verification_stage: AnswerVerificationStage,
+    prepared: &PreparedAnswerQueryResult,
+    question: &str,
+    answer_context: &str,
+) -> anyhow::Result<AnswerVerificationStage> {
+    let finalized_answer = append_missing_grounded_requested_labels_for_prepared(
+        verification_stage.generation.answer.clone(),
+        prepared,
+        question,
+        answer_context,
+    );
+    if finalized_answer == verification_stage.generation.answer {
+        return Ok(verification_stage);
+    }
+    let mut generation = verification_stage.generation;
+    generation.answer = finalized_answer;
+    verify_generated_answer(state, execution_id, effective_question, generation).await
+}
+
+fn prepared_postprocessor_grounding_context(
+    prepared: &PreparedAnswerQueryResult,
+    answer_context: &str,
+) -> String {
+    let mut context = String::new();
+    let mut seen = HashSet::new();
+    push_postprocessor_context_fragment(&mut context, &mut seen, answer_context);
+    if let Some(text) = prepared.structured.technical_literals_text.as_deref() {
+        push_postprocessor_context_fragment(&mut context, &mut seen, text);
+    }
+    for line in &prepared.structured.graph_evidence_context_lines {
+        push_postprocessor_context_fragment(&mut context, &mut seen, line);
+    }
+    for chunk in selected_runtime_answer_chunks(prepared) {
+        push_postprocessor_context_fragment(&mut context, &mut seen, &chunk.source_text);
+        push_postprocessor_context_fragment(&mut context, &mut seen, &chunk.excerpt);
+    }
+    context
+}
+
+fn push_postprocessor_context_fragment(
+    context: &mut String,
+    seen: &mut HashSet<String>,
+    fragment: &str,
+) {
+    let trimmed = fragment.trim();
+    if trimmed.is_empty() || !seen.insert(trimmed.to_string()) {
+        return;
+    }
+    if !context.is_empty() {
+        context.push_str("\n\n");
+    }
+    context.push_str(trimmed);
+}
+
+fn append_missing_focus_aligned_exact_literals(
+    answer: String,
+    question: &str,
+    query_ir: &QueryIR,
+    answer_context: &str,
+) -> String {
+    let mut focus_keywords = exact_literal_postprocessor_focus_keywords(question, query_ir);
+    if focus_keywords.is_empty() || answer_context.trim().is_empty() {
+        return answer;
+    }
+    extend_focus_keywords_from_answer(&mut focus_keywords, &answer);
+    let allow_path_like_literals = question.contains('/')
+        || answer.contains('/')
+        || query_ir.literal_constraints.iter().any(|literal| literal.text.contains('/'));
+    let mut seen = HashSet::new();
+    let missing = extract_focus_aligned_answer_suffix_literals(
+        answer_context,
+        &focus_keywords.iter().map(|keyword| keyword.trim().to_lowercase()).collect::<Vec<_>>(),
+        &mut seen,
+    )
+    .into_iter()
+    .filter(|literal| allow_path_like_literals || !answer_suffix_literal_has_path_shape(literal))
+    .filter(|literal| !contains_label_mention(&answer, literal))
+    .take(4)
+    .collect::<Vec<_>>();
+    if missing.is_empty() {
+        return answer;
+    }
+    let suffix = format!(
+        "Grounded exact terms: {}.",
+        missing.into_iter().map(|literal| format!("`{literal}`")).collect::<Vec<_>>().join(", ")
+    );
+    if answer.trim().is_empty() { suffix } else { format!("{}\n\n{}", answer.trim_end(), suffix) }
+}
+
+fn exact_literal_postprocessor_focus_keywords(question: &str, query_ir: &QueryIR) -> Vec<String> {
+    let mut seen = HashSet::new();
+    let text_keywords = [question.trim(), query_ir.effective_retrieval_query(question).trim()]
+        .into_iter()
+        .filter(|text| !text.is_empty())
+        .flat_map(|text| technical_literal_focus_keywords(text, Some(query_ir)));
+    let probe_keywords = [question.trim(), query_ir.effective_retrieval_query(question).trim()]
+        .into_iter()
+        .filter(|text| !text.is_empty())
+        .flat_map(structural_question_tokens);
+    text_keywords
+        .chain(probe_keywords)
+        .filter(|keyword| exact_literal_postprocessor_focus_keyword_is_eligible(keyword))
+        .filter(|keyword| seen.insert(keyword.to_lowercase()))
+        .collect()
+}
+
+fn exact_literal_postprocessor_focus_keyword_is_eligible(keyword: &str) -> bool {
+    let char_count = keyword.chars().count();
+    char_count >= 4
+        || ((2..=3).contains(&char_count)
+            && keyword.chars().all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '-')
+            && keyword.chars().any(|ch| ch.is_ascii_uppercase() || ch.is_ascii_digit()))
+}
+
+fn extract_focus_aligned_answer_suffix_literals(
+    text: &str,
+    focus_keywords: &[String],
+    seen: &mut HashSet<String>,
+) -> Vec<String> {
+    let focus_compounds = focus_keyword_compounds(focus_keywords);
+    let mut candidates = structural_question_tokens(text)
+        .into_iter()
+        .map(|token| trim_structural_literal_token(&token).to_string())
+        .filter(|token| answer_suffix_literal_token_is_eligible(token))
+        .filter_map(|token| {
+            let score = answer_suffix_literal_focus_score(&token, focus_keywords, &focus_compounds);
+            (score > 0).then_some((score, token))
+        })
+        .filter(|(_, token)| seen.insert(token.to_lowercase()))
+        .collect::<Vec<_>>();
+    candidates.sort_by(|left, right| {
+        right
+            .0
+            .cmp(&left.0)
+            .then_with(|| {
+                answer_suffix_literal_shape_rank(&right.1)
+                    .cmp(&answer_suffix_literal_shape_rank(&left.1))
+            })
+            .then_with(|| left.1.chars().count().cmp(&right.1.chars().count()))
+            .then_with(|| left.1.cmp(&right.1))
+    });
+    let Some(best_score) = candidates.first().map(|(score, _)| *score) else {
+        return Vec::new();
+    };
+    candidates
+        .into_iter()
+        .filter(|(score, _)| *score + 10 >= best_score)
+        .map(|(_, token)| token)
+        .take(4)
+        .collect()
+}
+
+fn focus_keyword_compounds(focus_keywords: &[String]) -> HashSet<String> {
+    let mut compounds = HashSet::new();
+    for window in focus_keywords.windows(2) {
+        let compound = window.iter().map(String::as_str).collect::<String>();
+        if compound.chars().count() >= 6 {
+            compounds.insert(compound);
+        }
+    }
+    for window in focus_keywords.windows(3) {
+        let compound = window.iter().map(String::as_str).collect::<String>();
+        if compound.chars().count() >= 8 {
+            compounds.insert(compound);
+        }
+    }
+    compounds
+}
+
+fn answer_suffix_literal_token_is_eligible(token: &str) -> bool {
+    let token = token.trim();
+    let char_count = token.chars().count();
+    if !(2..=96).contains(&char_count) || !token.chars().any(char::is_alphanumeric) {
+        return false;
+    }
+    let lowered = token.to_lowercase();
+    if [".py", ".rs", ".go", ".md", ".txt", ".yaml", ".yml", ".json", ".tf"]
+        .iter()
+        .any(|suffix| lowered.ends_with(suffix))
+    {
+        return false;
+    }
+    answer_suffix_literal_has_structural_shape(token)
+        || token.chars().any(char::is_numeric)
+        || token.chars().all(|ch| ch.is_ascii_uppercase() || ch.is_ascii_digit())
+        || token_has_internal_uppercase(token)
+}
+
+fn answer_suffix_literal_has_structural_shape(token: &str) -> bool {
+    if token.chars().any(|ch| matches!(ch, '_' | '/' | ':' | '@')) {
+        return true;
+    }
+    if token.contains('-') {
+        let alphabetic = token.chars().filter(|ch| ch.is_alphabetic()).collect::<Vec<_>>();
+        return token.chars().any(char::is_numeric)
+            || (!alphabetic.is_empty() && alphabetic.iter().all(|ch| ch.is_uppercase()));
+    }
+    if !token.contains('.') || token.starts_with('.') || token.ends_with('.') {
+        return false;
+    }
+    token.split('.').filter(|part| part.chars().any(char::is_alphanumeric)).count() >= 2
+}
+
+fn answer_suffix_literal_has_path_shape(token: &str) -> bool {
+    token.contains('/')
+}
+
+fn answer_suffix_literal_shape_rank(token: &str) -> usize {
+    let has_alphanumeric = token.chars().any(char::is_alphanumeric);
+    if !has_alphanumeric {
+        return 0;
+    }
+    let has_separator = token.chars().any(|ch| matches!(ch, '_' | '-' | '/' | ':' | '@' | '.'));
+    let has_lowercase = token.chars().any(char::is_lowercase);
+    let has_uppercase = token.chars().any(char::is_uppercase);
+    let all_caps_or_digits = has_uppercase
+        && !has_lowercase
+        && token.chars().all(|ch| !ch.is_alphabetic() || ch.is_uppercase());
+    usize::from(has_separator) * 4
+        + usize::from(all_caps_or_digits) * 3
+        + usize::from(token.chars().any(char::is_numeric))
+}
+
+fn token_has_internal_uppercase(token: &str) -> bool {
+    token.chars().all(char::is_alphanumeric) && token.chars().skip(1).any(char::is_uppercase)
+}
+
+fn extend_focus_keywords_from_answer(focus_keywords: &mut Vec<String>, answer: &str) {
+    let mut seen =
+        focus_keywords.iter().map(|keyword| keyword.to_lowercase()).collect::<HashSet<_>>();
+    for token in structural_question_tokens(answer)
+        .into_iter()
+        .map(|token| trim_answer_focus_literal_token(&token))
+        .filter(|token| answer_suffix_literal_token_is_eligible(token))
+    {
+        let lowered = token.to_lowercase();
+        if seen.insert(lowered.clone()) {
+            focus_keywords.push(lowered);
+        }
+        let compact =
+            token.chars().filter(|ch| ch.is_alphanumeric()).collect::<String>().to_lowercase();
+        if compact.chars().count() >= 4 && seen.insert(compact.clone()) {
+            focus_keywords.push(compact);
+        }
+    }
+}
+
+fn trim_answer_focus_literal_token(token: &str) -> String {
+    let trimmed = trim_structural_literal_token(token);
+    if let Some(stripped) = trimmed.strip_suffix('.')
+        && token_has_internal_uppercase(stripped)
+    {
+        return stripped.to_string();
+    }
+    trimmed.to_string()
+}
+
+fn answer_suffix_literal_focus_score(
+    token: &str,
+    focus_keywords: &[String],
+    focus_compounds: &HashSet<String>,
+) -> usize {
+    let lowered = token.to_lowercase();
+    let compact = lowered.chars().filter(|ch| ch.is_alphanumeric()).collect::<String>();
+    let subtokens = split_identifier_subtokens(token);
+    let mut best = 0usize;
+    if focus_compounds.contains(&compact) {
+        best = best.max(90);
+    }
+    for keyword in focus_keywords {
+        let keyword = keyword.trim();
+        if keyword.is_empty() {
+            continue;
+        }
+        if keyword == lowered.as_str() || keyword == compact.as_str() {
+            best = best.max(100);
+        } else if answer_suffix_structural_focus_prefix_match(token, keyword, &lowered, &compact) {
+            best = best.max(95);
+        } else if keyword.chars().count() < 4
+            && lowered.starts_with(keyword)
+            && token.chars().any(|ch| ch.is_ascii_uppercase() || ch.is_ascii_digit())
+        {
+            best = best.max(80);
+        } else if keyword.chars().count() >= 4 && lowered.contains(keyword) {
+            best = best.max(50);
+        } else if subtokens.iter().any(|part| part == keyword) {
+            best = best.max(35);
+        } else if subtokens.iter().any(|part| focus_keyword_matches_literal_part(keyword, part)) {
+            best = best.max(32);
+        }
+    }
+    best
+}
+
+fn focus_keyword_matches_literal_part(keyword: &str, literal_part: &str) -> bool {
+    let keyword = keyword.trim();
+    let literal_part = literal_part.trim();
+    if keyword.chars().count() < 4 || literal_part.chars().count() < 4 {
+        return false;
+    }
+    crate::services::query::text_match::related_prefix_token_match(keyword, literal_part)
+        || crate::services::query::text_match::related_prefix_token_match(literal_part, keyword)
+}
+
+fn answer_suffix_structural_focus_prefix_match(
+    token: &str,
+    keyword: &str,
+    lowered_token: &str,
+    compact_token: &str,
+) -> bool {
+    let keyword = keyword.trim().to_lowercase();
+    if keyword.chars().count() < 4 || !answer_suffix_literal_has_structural_shape(&keyword) {
+        return false;
+    }
+    let keyword_compact = keyword.chars().filter(|ch| ch.is_alphanumeric()).collect::<String>();
+    if keyword_compact.chars().count() < 6 {
+        return false;
+    }
+    lowered_token.starts_with(&format!("{keyword}_"))
+        || lowered_token.starts_with(&format!("{keyword}-"))
+        || lowered_token.starts_with(&format!("{keyword}."))
+        || lowered_token.starts_with(&format!("{keyword}/"))
+        || compact_token.starts_with(&keyword_compact)
+            && split_identifier_subtokens(token)
+                .iter()
+                .any(|part| keyword.split(|ch: char| !ch.is_alphanumeric()).any(|kw| kw == part))
+}
+
+/// Build a [`RuntimeClarification`] for the disposition-router clarify
+/// branches. Those branches only have human-readable label strings (document
+/// titles / graph node labels / grouped-reference labels), so each candidate
+/// is `kind = "document"` with no provenance id and no confidence. This is a
+/// serialization of the `variants` the branch already computed — no new
+/// retrieval.
+fn disposition_clarification(question: &str, variants: &[String]) -> RuntimeClarification {
+    RuntimeClarification {
+        required: true,
+        question: Some(question.to_string()),
+        answer_candidates: variants
+            .iter()
+            .map(|label| RuntimeAnswerCandidate {
+                label: label.clone(),
+                kind: ANSWER_CANDIDATE_KIND_DOCUMENT.to_string(),
+                confidence: None,
+                provenance: RuntimeAnswerCandidateProvenance::default(),
+            })
+            .collect(),
+    }
+}
+
+fn structural_direct_answer_candidates(
+    ir: &QueryIR,
+    chunks: &[RuntimeMatchedChunk],
+) -> RuntimeClarification {
+    if !matches!(ir.act, QueryAct::ConfigureHow | QueryAct::Describe | QueryAct::RetrieveValue) {
+        return RuntimeClarification::default();
+    }
+    let mut by_document = BTreeMap::<Uuid, RuntimeAnswerCandidate>::new();
+    for chunk in chunks {
+        if !super::retrieve::chunk_is_setup_focus_command_path_anchor(chunk) {
+            continue;
+        }
+        by_document.entry(chunk.document_id).or_insert_with(|| RuntimeAnswerCandidate {
+            label: chunk.document_label.clone(),
+            kind: ANSWER_CANDIDATE_KIND_DOCUMENT.to_string(),
+            confidence: chunk.score.map(f64::from),
+            provenance: RuntimeAnswerCandidateProvenance {
+                entity_id: None,
+                document_id: Some(chunk.document_id),
+                chunk_id: Some(chunk.chunk_id),
+            },
+        });
+    }
+    if by_document.len() < 2 {
+        return RuntimeClarification::default();
+    }
+    let mut answer_candidates = by_document.into_values().collect::<Vec<_>>();
+    answer_candidates.sort_by(|left, right| left.label.cmp(&right.label));
+    answer_candidates.truncate(CLARIFY_MAX_VARIANTS);
+    RuntimeClarification { required: false, question: None, answer_candidates }
+}
+
+fn structural_direct_answer_candidates_for_prepared(
+    prepared: &PreparedAnswerQueryResult,
+) -> RuntimeClarification {
+    structural_direct_answer_candidates(&prepared.query_ir, &prepared.structured.context_chunks)
+}
+
+/// Build a [`RuntimeClarification`] for the release-inventory clarify branch.
+/// Each candidate carries the graph `node_type` as its typed `kind` and the
+/// `node_id` as its entity provenance handle, so an agent caller can route a
+/// follow-up tool call against the exact subject without parsing prose.
+fn release_clarification(
+    question: &str,
+    entities: &[ReleaseEvidenceEntity],
+) -> RuntimeClarification {
+    RuntimeClarification {
+        required: true,
+        question: Some(question.to_string()),
+        answer_candidates: entities
+            .iter()
+            .map(|entity| RuntimeAnswerCandidate {
+                label: entity.label.clone(),
+                kind: entity.node_type.clone(),
+                confidence: None,
+                provenance: RuntimeAnswerCandidateProvenance {
+                    entity_id: Some(entity.node_id),
+                    document_id: None,
+                    chunk_id: None,
+                },
+            })
+            .collect(),
+    }
+}
 
 const COMPARE_OPERAND_PROBE_LIMIT: usize = 8;
 const COMPARE_OPERAND_PROBE_MAX_CHUNKS: usize = 6;
 const COMPARE_OPERAND_PROBE_MAX_CHUNKS_PER_OPERAND: usize = 2;
+const TECHNICAL_FOCUS_PROBE_TERM_LIMIT: usize = 8;
+const TECHNICAL_FOCUS_PROBE_HIT_LIMIT: usize = 10;
+const TECHNICAL_FOCUS_PROBE_MAX_CHUNKS: usize = 8;
+const TECHNICAL_FOCUS_PROBE_MAX_CHUNKS_PER_TERM: usize = 2;
 const STRUCTURAL_COVERAGE_MIN_CONTEXT_ANCHORS: usize = 4;
 const STRUCTURAL_COVERAGE_MIN_CONTEXT_ANCHOR_LINES: usize = 2;
 const STRUCTURAL_COVERAGE_MIN_ANSWER_ANCHORS: usize = 2;
@@ -157,8 +686,20 @@ async fn prepare_answer_query_inner(
             &retrieval_question,
             mode,
             top_k,
+            &query_ir,
         )
         .await?;
+    } else {
+        super::refresh_query_plan_for_compiled_ir(
+            library_id,
+            &mut planning_stage,
+            &retrieval_question,
+            mode,
+            top_k,
+            &query_ir,
+            state.retrieval_intelligence.rerank_enabled,
+            state.retrieval_intelligence.rerank_candidate_limit,
+        )?;
     }
     let query_ir_for_retrieval = query_ir.clone();
     let retrieve_started = std::time::Instant::now();
@@ -203,7 +744,7 @@ async fn prepare_answer_query_inner(
         "rerank done"
     );
     let stage_1_elapsed_ms = stage_1_started.elapsed().as_millis();
-    let document_index = rerank_stage.retrieval.planning.document_index.clone();
+    let mut document_index = rerank_stage.retrieval.planning.document_index.clone();
     if let Some(inferred_query_ir) = super::infer_latest_version_query_ir_from_retrieved_evidence(
         &query_ir,
         &question,
@@ -264,6 +805,12 @@ async fn prepare_answer_query_inner(
         elapsed_ms = source_context_started.elapsed().as_millis(),
         "augment_structured_source_context complete"
     );
+    hydrate_runtime_document_index(
+        state,
+        &mut document_index,
+        &rerank_stage.retrieval.bundle.chunks,
+    )
+    .await?;
     // Temporal hard-filter on the bundle AFTER source-context augmentation.
     // The companion paths (focused-match, source profile, neighbor expansion,
     // library source profile) bypass the AQL temporal filter and pull
@@ -349,6 +896,7 @@ async fn prepare_answer_query_inner(
     let topical_prune = super::prune_non_topical_document_tail(
         &mut rerank_stage.retrieval.bundle,
         &question,
+        Some(&query_ir),
         query_requests_latest_versions(&query_ir),
     );
     if topical_prune.removed_chunk_count > 0 {
@@ -432,6 +980,27 @@ async fn prepare_answer_query_inner(
             "partial compare evidence probe completed"
         );
     }
+    let technical_probe = augment_technical_focus_context(
+        state,
+        library_id,
+        &query_ir,
+        &question,
+        &document_index,
+        &plan_keywords,
+        &mut answer_context,
+        &mut structured,
+    )
+    .await?;
+    if technical_probe.attempted {
+        tracing::info!(
+            stage = "answer.technical_focus_probe",
+            library_id = %library_id,
+            probe_term_count = technical_probe.probe_term_count,
+            missing_term_count = technical_probe.missing_term_count,
+            added_chunk_count = technical_probe.added_chunk_count,
+            "technical focus evidence probe completed"
+        );
+    }
 
     tracing::info!(
         stage = "answer.prepare",
@@ -469,7 +1038,7 @@ async fn prepare_answer_query_inner(
 /// a neutral provider-free IR so the canonical grounded-answer tool can still
 /// retrieve and verify evidence instead of forcing parent agents onto weaker
 /// ad hoc search/read fallbacks.
-async fn compile_query_ir(
+pub(crate) async fn compile_query_ir(
     state: &AppState,
     library_id: Uuid,
     question: &str,
@@ -503,7 +1072,7 @@ async fn compile_query_ir(
                 model_name: outcome.model_name.clone(),
                 usage_json: outcome.usage_json.clone(),
             });
-            Ok((outcome.ir, billable_usage))
+            Ok((guard_self_contained_question_ir(question, outcome.ir), billable_usage))
         }
         Err(error) => {
             tracing::error!(
@@ -525,6 +1094,681 @@ async fn compile_query_ir(
             }
         }
     }
+}
+
+fn guard_self_contained_question_ir(question: &str, ir: QueryIR) -> QueryIR {
+    let effective_question = question.trim();
+    let current_question =
+        crate::services::query::effective_query::current_question_segment(effective_question)
+            .trim();
+    let ir = guard_ordinary_question_source_slice(current_question, ir);
+    let ir = guard_subjectless_source_slice_scope(current_question, ir);
+    let ir = guard_configure_how_procedure_document_targets(current_question, ir);
+    let ir = guard_current_question_constraint_focus(current_question, ir);
+    let Some(retrieval_query) = ir.retrieval_query.as_deref().map(str::trim).map(str::to_string)
+    else {
+        return ir;
+    };
+    if retrieval_query.is_empty()
+        || retrieval_query == current_question
+        || !question_is_self_contained_for_ir_guard(current_question)
+        || source_slice_scope_overlaps_current_question(current_question, &ir)
+    {
+        return ir;
+    }
+
+    if retrieval_query_preserves_current_question_focus(current_question, &retrieval_query) {
+        if retrieval_query_has_history_only_excess(current_question, &retrieval_query) {
+            tracing::warn!(
+                stage = "answer.compile_ir_retrieval_query_excess_guard",
+                question_len = current_question.chars().count(),
+                retrieval_query_len = retrieval_query.chars().count(),
+                "compiler preserved current focus but appended stale history-only retrieval terms; using current question retrieval focus"
+            );
+            return trim_ir_to_current_question_focus(ir, current_question);
+        }
+        return ir;
+    }
+
+    tracing::warn!(
+        stage = "answer.compile_ir_current_question_guard",
+        question_len = current_question.chars().count(),
+        retrieval_query_len = retrieval_query.chars().count(),
+        "compiler emitted a history-shaped retrieval query for a self-contained question"
+    );
+    if ir_has_current_question_supported_structured_focus(current_question, &ir) {
+        tracing::warn!(
+            stage = "answer.compile_ir_current_question_guard",
+            question_len = current_question.chars().count(),
+            retrieval_query_len = retrieval_query.chars().count(),
+            target_type_count = ir.target_types.len(),
+            target_entity_count = ir.target_entities.len(),
+            literal_count = ir.literal_constraints.len(),
+            "preserving typed current-question IR while trimming stale retrieval focus"
+        );
+        return trim_ir_to_current_question_focus(ir, current_question);
+    }
+    provider_free_fallback_query_ir(current_question)
+}
+
+fn guard_configure_how_procedure_document_targets(question: &str, mut ir: QueryIR) -> QueryIR {
+    if !matches!(ir.act, QueryAct::ConfigureHow)
+        || ir.source_slice.is_some()
+        || ir.target_types.is_empty()
+        || !question_is_self_contained_for_ir_guard(question)
+    {
+        return ir;
+    }
+
+    let mut has_procedure = false;
+    let mut has_document_context = false;
+    let mut has_artifact_context = false;
+    let mut has_setup_configuration_target = false;
+    let mut has_concept = false;
+    for target_type in &ir.target_types {
+        match super::question_intent::canonical_target_type_tag(target_type).as_str() {
+            "procedure" => has_procedure = true,
+            "document" | "primary_heading" | "secondary_heading" => has_document_context = true,
+            "artifact" => has_artifact_context = true,
+            "release" | "version" | "changelog" => {}
+            "configuration_file" | "config_key" | "parameter" | "package" => {
+                has_setup_configuration_target = true;
+            }
+            "concept" => has_concept = true,
+            _ => {}
+        }
+    }
+    if has_concept
+        || has_setup_configuration_target
+        || (!has_procedure && !has_document_context && !has_artifact_context)
+        || (has_procedure && has_document_context)
+    {
+        return ir;
+    }
+
+    tracing::warn!(
+        stage = "answer.compile_ir_configure_procedure_document_guard",
+        question_len = question.chars().count(),
+        target_type_count = ir.target_types.len(),
+        "compiler emitted configure/how-to target types without a procedure-document retrieval focus"
+    );
+    if !has_procedure {
+        ir.target_types.push("procedure".to_string());
+    }
+    if !has_document_context {
+        ir.target_types.push("document".to_string());
+    }
+    if ir.retrieval_query.as_deref().is_none_or(|query| query.trim().is_empty()) {
+        ir.retrieval_query = Some(question.trim().to_string());
+    }
+    ir.conversation_refs.clear();
+    ir
+}
+
+fn ir_has_current_question_supported_structured_focus(question: &str, ir: &QueryIR) -> bool {
+    if ir.confidence < 0.6 || ir.target_types.is_empty() {
+        return false;
+    }
+    let focus_tokens = current_question_focus_token_set_for_ir_guard(question);
+    ir.target_entities.iter().any(|entity| {
+        surface_is_supported_by_current_question(&entity.label, question, &focus_tokens)
+    }) || ir.literal_constraints.iter().any(|literal| {
+        surface_is_supported_by_current_question(&literal.text, question, &focus_tokens)
+    }) || ir.document_focus.as_ref().is_some_and(|focus| {
+        surface_is_supported_by_current_question(&focus.hint, question, &focus_tokens)
+    })
+}
+
+fn trim_ir_to_current_question_focus(mut ir: QueryIR, current_question: &str) -> QueryIR {
+    let focus_tokens = current_question_focus_token_set_for_ir_guard(current_question);
+    ir.retrieval_query = Some(current_question.trim().to_string());
+    ir.conversation_refs.clear();
+    ir.target_entities.retain(|entity| {
+        surface_is_supported_by_current_question(&entity.label, current_question, &focus_tokens)
+    });
+    ir.literal_constraints.retain(|literal| {
+        surface_is_supported_by_current_question(&literal.text, current_question, &focus_tokens)
+    });
+    if ir.document_focus.as_ref().is_some_and(|focus| {
+        !surface_is_supported_by_current_question(&focus.hint, current_question, &focus_tokens)
+    }) {
+        ir.document_focus = None;
+    }
+    ir
+}
+
+fn guard_current_question_constraint_focus(question: &str, mut ir: QueryIR) -> QueryIR {
+    let focus_tokens = current_question_focus_token_set_for_ir_guard(question);
+    if focus_tokens.is_empty() {
+        return ir;
+    }
+
+    let selected_entities =
+        selected_target_entity_indices_for_current_question(&ir, question, &focus_tokens);
+    let has_selected_entities = !selected_entities.is_empty();
+    let supported_literal_count = ir
+        .literal_constraints
+        .iter()
+        .filter(|literal| {
+            surface_is_supported_by_current_question(&literal.text, question, &focus_tokens)
+        })
+        .count();
+    if !has_selected_entities && supported_literal_count == 0 {
+        if question_is_self_contained_for_ir_guard(question)
+            && (!ir.target_entities.is_empty()
+                || !ir.literal_constraints.is_empty()
+                || ir.document_focus.is_some())
+        {
+            if ir.retrieval_query.as_deref().is_some_and(|retrieval_query| {
+                let retrieval_query = retrieval_query.trim();
+                !retrieval_query.is_empty()
+                    && retrieval_query != question
+                    && !retrieval_query_preserves_current_question_focus(question, retrieval_query)
+            }) {
+                tracing::warn!(
+                    stage = "answer.compile_ir_current_constraint_guard",
+                    question_len = question.chars().count(),
+                    "compiler carried history-shaped constraints and stale retrieval terms into a self-contained current question; rebuilding fresh retrieval IR"
+                );
+                return provider_free_fallback_query_ir(question);
+            }
+            let removed_entity_count = ir.target_entities.len();
+            let removed_literal_count = ir.literal_constraints.len();
+            ir.target_entities.clear();
+            ir.literal_constraints.clear();
+            ir.document_focus = None;
+            ir.retrieval_query = Some(question.trim().to_string());
+            ir.conversation_refs.clear();
+            tracing::warn!(
+                stage = "answer.compile_ir_current_constraint_guard",
+                question_len = question.chars().count(),
+                removed_entity_count,
+                removed_literal_count,
+                "compiler carried only history-shaped constraints into a self-contained current question; clearing them before retrieval"
+            );
+        }
+        return ir;
+    }
+
+    let original_entity_count = ir.target_entities.len();
+    let original_literal_count = ir.literal_constraints.len();
+    let original_document_focus = ir.document_focus.clone();
+
+    if has_selected_entities {
+        let mut index = 0usize;
+        ir.target_entities.retain(|_| {
+            let keep = selected_entities.contains(&index);
+            index += 1;
+            keep
+        });
+    }
+    ir.literal_constraints.retain(|literal| {
+        surface_is_supported_by_current_question(&literal.text, question, &focus_tokens)
+    });
+    if ir.document_focus.as_ref().is_some_and(|focus| {
+        !surface_is_supported_by_current_question(&focus.hint, question, &focus_tokens)
+    }) {
+        ir.document_focus = None;
+    }
+
+    let changed = original_entity_count != ir.target_entities.len()
+        || original_literal_count != ir.literal_constraints.len()
+        || original_document_focus != ir.document_focus;
+    if has_selected_entities
+        && current_question_is_short_focus_for_ir_guard(question)
+        && let Some(retrieval_query) = ir.retrieval_query.as_deref()
+        && retrieval_query.trim() != question
+        && retrieval_query_has_short_focus_excess(question, retrieval_query)
+    {
+        ir.retrieval_query = Some(question.trim().to_string());
+        ir.conversation_refs.clear();
+        tracing::warn!(
+            stage = "answer.compile_ir_short_focus_excess_guard",
+            question_len = question.chars().count(),
+            "compiler preserved a short current-question entity but appended history-only retrieval terms; using current question retrieval focus"
+        );
+        return ir;
+    }
+    if let Some(retrieval_query) = ir.retrieval_query.as_deref()
+        && retrieval_query.trim() != question
+        && retrieval_query_has_unsupported_technical_excess_for_current_focus(
+            question,
+            &ir,
+            retrieval_query,
+        )
+    {
+        ir.retrieval_query = Some(question.trim().to_string());
+        ir.conversation_refs.clear();
+        tracing::warn!(
+            stage = "answer.compile_ir_retrieval_query_technical_excess_guard",
+            question_len = question.chars().count(),
+            "compiler preserved current entity but appended stale technical retrieval terms; using current question retrieval focus"
+        );
+        return ir;
+    }
+    if !changed {
+        return ir;
+    }
+
+    if question_is_self_contained_for_ir_guard(question) {
+        ir.retrieval_query = Some(question.trim().to_string());
+        ir.conversation_refs.clear();
+    }
+    tracing::warn!(
+        stage = "answer.compile_ir_current_constraint_guard",
+        question_len = question.chars().count(),
+        removed_entity_count = original_entity_count.saturating_sub(ir.target_entities.len()),
+        removed_literal_count = original_literal_count.saturating_sub(ir.literal_constraints.len()),
+        "compiler carried stale entity or literal constraints into the current question focus; pruning them before retrieval"
+    );
+    ir
+}
+
+fn guard_ordinary_question_source_slice(question: &str, mut ir: QueryIR) -> QueryIR {
+    if ir.source_slice.is_none() || question_allows_source_slice(question, &ir) {
+        return ir;
+    }
+    tracing::warn!(
+        stage = "answer.compile_ir_source_slice_guard",
+        question_len = question.chars().count(),
+        "compiler emitted source_slice for an ordinary question; clearing ordered source-slice mode"
+    );
+    ir.source_slice = None;
+    ir
+}
+
+fn question_allows_source_slice(_question: &str, ir: &QueryIR) -> bool {
+    let Some(slice) = ir.source_slice.as_ref() else {
+        return false;
+    };
+    let has_release_marker = matches!(slice.filter, SourceSliceFilter::ReleaseMarker)
+        && ir.target_types.iter().any(|target_type| {
+            matches!(
+                super::question_intent::canonical_target_type_tag(target_type).as_str(),
+                "release" | "version" | "changelog"
+            )
+        });
+    has_release_marker
+        && (matches!(slice.direction, SourceSliceDirection::Tail)
+            || slice.count.is_some()
+            || query_requests_latest_versions(ir))
+}
+
+fn guard_subjectless_source_slice_scope(question: &str, ir: QueryIR) -> QueryIR {
+    if ir.source_slice.is_none()
+        || !question_is_self_contained_for_ir_guard(question)
+        || !query_requests_latest_versions(&ir)
+    {
+        return ir;
+    }
+    let scoped_terms = latest_version_scope_terms(&ir)
+        .into_iter()
+        .filter(|term| !term.trim().is_empty())
+        .collect::<Vec<_>>();
+    if scoped_terms.is_empty() {
+        if source_slice_scope_surfaces_overlap_question(question, &ir) {
+            return ir;
+        }
+        let has_scope_surface = !ir.target_entities.is_empty()
+            || ir.document_focus.is_some()
+            || ir.literal_constraints.iter().any(|literal| {
+                !matches!(literal.kind, LiteralKind::Version | LiteralKind::NumericCode)
+            });
+        if has_scope_surface {
+            return clear_stale_source_slice_scope(question, ir);
+        }
+        return ir;
+    }
+    if source_slice_scope_terms_overlap_question(question, &scoped_terms) {
+        return ir;
+    }
+    clear_stale_source_slice_scope(question, ir)
+}
+
+fn clear_stale_source_slice_scope(question: &str, mut ir: QueryIR) -> QueryIR {
+    tracing::warn!(
+        stage = "answer.compile_ir_source_slice_scope_guard",
+        question_len = question.chars().count(),
+        "compiler scoped a self-contained source-slice inventory to history-only terms; clearing stale scope"
+    );
+    ir.target_entities.clear();
+    ir.literal_constraints.clear();
+    ir.document_focus = None;
+    ir.conversation_refs.clear();
+    ir.retrieval_query = Some(question.trim().to_string());
+    ir
+}
+
+fn source_slice_scope_overlaps_current_question(question: &str, ir: &QueryIR) -> bool {
+    if ir.source_slice.is_none() || !query_requests_latest_versions(ir) {
+        return false;
+    }
+    let scoped_terms = latest_version_scope_terms(ir)
+        .into_iter()
+        .filter(|term| !term.trim().is_empty())
+        .collect::<Vec<_>>();
+    !scoped_terms.is_empty() && source_slice_scope_terms_overlap_question(question, &scoped_terms)
+}
+
+fn source_slice_scope_surfaces_overlap_question(question: &str, ir: &QueryIR) -> bool {
+    let focus_tokens = current_question_focus_token_set_for_ir_guard(question);
+    ir.target_entities.iter().any(|entity| {
+        surface_is_supported_by_current_question(&entity.label, question, &focus_tokens)
+    }) || ir.document_focus.as_ref().is_some_and(|focus| {
+        surface_is_supported_by_current_question(&focus.hint, question, &focus_tokens)
+    }) || ir.literal_constraints.iter().any(|literal| {
+        !matches!(literal.kind, LiteralKind::Version | LiteralKind::NumericCode)
+            && surface_is_supported_by_current_question(&literal.text, question, &focus_tokens)
+    })
+}
+
+fn source_slice_scope_terms_overlap_question(question: &str, scoped_terms: &[String]) -> bool {
+    let current_tokens = crate::shared::text_tokens::normalized_alnum_tokens(question, 3);
+    scoped_terms.iter().any(|term| {
+        let term_tokens = crate::shared::text_tokens::normalized_alnum_tokens(term, 3);
+        !term_tokens.is_empty()
+            && term_tokens.iter().any(|token| current_tokens.iter().any(|current| current == token))
+    })
+}
+
+fn question_is_self_contained_for_ir_guard(question: &str) -> bool {
+    let focus_tokens = current_question_focus_tokens_for_ir_guard(question);
+    let high_signal_count = focus_tokens
+        .iter()
+        .filter(|token| {
+            token.chars().any(|ch| ch.is_ascii_uppercase() || ch.is_ascii_digit())
+                || token.chars().any(|ch| matches!(ch, '_' | '-' | '.' | '/' | ':'))
+        })
+        .count();
+    high_signal_count > 0 || focus_tokens.len() >= 2
+}
+
+fn retrieval_query_preserves_current_question_focus(question: &str, retrieval_query: &str) -> bool {
+    if looks_like_internal_effective_query_block(retrieval_query) {
+        return false;
+    }
+    let focus_tokens = current_question_focus_tokens_for_ir_guard(question);
+    if focus_tokens.is_empty() {
+        return true;
+    }
+    let retrieval_tokens = crate::shared::text_tokens::normalized_alnum_tokens(retrieval_query, 3);
+    let high_signal_tokens =
+        focus_tokens.iter().filter(|token| token.chars().count() >= 7).collect::<Vec<_>>();
+    if high_signal_tokens.len() >= 2
+        && high_signal_tokens
+            .iter()
+            .filter(|token| retrieval_tokens.iter().any(|candidate| candidate == **token))
+            .count()
+            < high_signal_tokens.len().saturating_sub(1)
+    {
+        return false;
+    }
+    let preserved = focus_tokens
+        .iter()
+        .filter(|token| retrieval_tokens.iter().any(|candidate| candidate == *token))
+        .count();
+    preserved >= focus_tokens.len().min(5)
+}
+
+fn retrieval_query_has_history_only_excess(question: &str, retrieval_query: &str) -> bool {
+    if looks_like_internal_effective_query_block(retrieval_query) {
+        return true;
+    }
+    let focus_tokens = current_question_focus_tokens_for_ir_guard(question);
+    if focus_tokens.len() < 2 {
+        return false;
+    }
+    let focus_token_set = focus_tokens.iter().cloned().collect::<BTreeSet<_>>();
+    let retrieval_tokens = crate::shared::text_tokens::normalized_alnum_tokens(retrieval_query, 3)
+        .into_iter()
+        .filter(|token| !ir_guard_stopword(token))
+        .collect::<Vec<_>>();
+    let preserved = focus_token_set
+        .iter()
+        .filter(|token| retrieval_tokens.iter().any(|candidate| candidate == *token))
+        .count();
+    if preserved < focus_tokens.len().min(5) {
+        return false;
+    }
+    let extra_tokens = retrieval_tokens
+        .iter()
+        .filter(|token| !focus_token_set.contains(*token))
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let minimum_extra = if focus_tokens.len() >= 4 { 2 } else { 3 };
+    let minimum_length = focus_tokens.len().saturating_add(minimum_extra + 1);
+    extra_tokens.len() >= minimum_extra && retrieval_tokens.len() >= minimum_length
+}
+
+fn retrieval_query_has_short_focus_excess(question: &str, retrieval_query: &str) -> bool {
+    let focus_tokens = current_question_focus_tokens_for_ir_guard(question);
+    if focus_tokens.is_empty() || focus_tokens.len() > 2 {
+        return false;
+    }
+    let focus_token_set = focus_tokens.iter().cloned().collect::<BTreeSet<_>>();
+    let retrieval_tokens = crate::shared::text_tokens::normalized_alnum_tokens(retrieval_query, 3)
+        .into_iter()
+        .filter(|token| !ir_guard_stopword(token))
+        .collect::<Vec<_>>();
+    let preserved = focus_token_set
+        .iter()
+        .filter(|token| retrieval_tokens.iter().any(|candidate| candidate == *token))
+        .count();
+    if preserved == 0 {
+        return false;
+    }
+    let extra_tokens = retrieval_tokens
+        .iter()
+        .filter(|token| !focus_token_set.contains(*token))
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    extra_tokens.len() >= 2 && retrieval_tokens.len() >= focus_tokens.len().saturating_add(2)
+}
+
+fn retrieval_query_has_unsupported_technical_excess_for_current_focus(
+    question: &str,
+    ir: &QueryIR,
+    retrieval_query: &str,
+) -> bool {
+    let mut supported_tokens = current_question_focus_token_set_for_ir_guard(question);
+    for literal in &ir.literal_constraints {
+        supported_tokens.extend(
+            crate::shared::text_tokens::normalized_alnum_tokens(&literal.text, 2)
+                .into_iter()
+                .filter(|token| !ir_guard_stopword(token)),
+        );
+    }
+    if supported_tokens.is_empty() {
+        return false;
+    }
+
+    retrieval_query.split_whitespace().any(|raw_token| {
+        let token = clean_retrieval_query_surface_token(raw_token);
+        if token.is_empty() || !retrieval_query_surface_token_is_technical(&token) {
+            return false;
+        }
+        let token_parts = crate::shared::text_tokens::normalized_alnum_tokens(&token, 2);
+        !token_parts.is_empty()
+            && !token_parts.iter().any(|part| {
+                supported_tokens
+                    .iter()
+                    .any(|supported| near_token_match_for_ir_guard(part, supported))
+            })
+    })
+}
+
+fn clean_retrieval_query_surface_token(token: &str) -> String {
+    token
+        .trim_matches(|ch: char| {
+            ch.is_ascii_punctuation() && !matches!(ch, '/' | '\\' | '.' | '-' | '_' | ':' | '=')
+        })
+        .to_string()
+}
+
+fn retrieval_query_surface_token_is_technical(token: &str) -> bool {
+    let has_alnum = token.chars().any(|ch| ch.is_alphanumeric());
+    if !has_alnum {
+        return false;
+    }
+    token.contains('/')
+        || token.contains('\\')
+        || token.contains("://")
+        || token.contains('=')
+        || token.contains('_')
+        || token.contains('-')
+        || (token.contains('.') && token.chars().any(|ch| ch.is_ascii_digit()))
+        || (token.chars().any(|ch| ch.is_ascii_digit())
+            && token.chars().any(|ch| ch.is_alphabetic())
+            && token.chars().count() >= 5)
+}
+
+fn current_question_focus_token_set_for_ir_guard(question: &str) -> BTreeSet<String> {
+    current_question_focus_tokens_for_ir_guard(question).into_iter().collect()
+}
+
+fn current_question_is_short_focus_for_ir_guard(question: &str) -> bool {
+    let tokens = current_question_focus_tokens_for_ir_guard(question);
+    !tokens.is_empty() && tokens.len() <= 2
+}
+
+fn selected_target_entity_indices_for_current_question(
+    ir: &QueryIR,
+    current_question: &str,
+    focus_tokens: &BTreeSet<String>,
+) -> BTreeSet<usize> {
+    let strict = ir
+        .target_entities
+        .iter()
+        .enumerate()
+        .filter(|(_, entity)| {
+            surface_is_supported_by_current_question(&entity.label, current_question, focus_tokens)
+        })
+        .map(|(index, _)| index)
+        .collect::<BTreeSet<_>>();
+    if !strict.is_empty() {
+        return strict;
+    }
+
+    let loose = ir
+        .target_entities
+        .iter()
+        .enumerate()
+        .filter(|(_, entity)| label_has_any_current_question_overlap(&entity.label, focus_tokens))
+        .map(|(index, _)| index)
+        .collect::<BTreeSet<_>>();
+    if loose.len() == 1 { loose } else { BTreeSet::new() }
+}
+
+fn surface_is_supported_by_current_question(
+    surface: &str,
+    current_question: &str,
+    focus_tokens: &BTreeSet<String>,
+) -> bool {
+    let surface = surface.trim();
+    if surface.is_empty() {
+        return false;
+    }
+    if current_question.to_lowercase().contains(&surface.to_lowercase()) {
+        return true;
+    }
+    label_is_supported_by_current_question(surface, focus_tokens)
+}
+
+fn label_has_any_current_question_overlap(label: &str, focus_tokens: &BTreeSet<String>) -> bool {
+    let label_tokens = crate::shared::text_tokens::normalized_alnum_tokens(label, 2)
+        .into_iter()
+        .filter(|token| !ir_guard_stopword(token))
+        .collect::<Vec<_>>();
+    !label_tokens.is_empty()
+        && label_tokens.iter().any(|token| {
+            focus_tokens.iter().any(|focus| near_token_match_for_ir_guard(token, focus))
+        })
+}
+
+fn label_is_supported_by_current_question(label: &str, focus_tokens: &BTreeSet<String>) -> bool {
+    if focus_tokens.is_empty() {
+        return true;
+    }
+    let label_tokens = crate::shared::text_tokens::normalized_alnum_tokens(label, 2)
+        .into_iter()
+        .filter(|token| !ir_guard_stopword(token))
+        .collect::<BTreeSet<_>>();
+    if label_tokens.is_empty() {
+        return false;
+    }
+    let overlap = label_tokens
+        .iter()
+        .filter(|token| {
+            focus_tokens.iter().any(|focus| near_token_match_for_ir_guard(token, focus))
+        })
+        .count();
+    if label_tokens.len() <= 1 {
+        overlap > 0
+    } else {
+        overlap >= 2 || overlap == label_tokens.len()
+    }
+}
+
+fn near_token_match_for_ir_guard(left: &str, right: &str) -> bool {
+    left == right
+        || (left.chars().count() >= 5
+            && right.chars().count() >= 5
+            && common_prefix_len_for_ir_guard(left, right) >= 4)
+}
+
+fn common_prefix_len_for_ir_guard(left: &str, right: &str) -> usize {
+    left.chars().zip(right.chars()).take_while(|(left, right)| left == right).count()
+}
+
+fn current_question_focus_tokens_for_ir_guard(question: &str) -> Vec<String> {
+    let mut seen = HashSet::new();
+    crate::shared::text_tokens::normalized_alnum_tokens(question, 3)
+        .into_iter()
+        .filter(|token| !ir_guard_stopword(token))
+        .filter(|token| seen.insert(token.clone()))
+        .collect()
+}
+
+fn ir_guard_stopword(token: &str) -> bool {
+    matches!(
+        token,
+        "what"
+            | "and"
+            | "the"
+            | "are"
+            | "for"
+            | "have"
+            | "which"
+            | "where"
+            | "when"
+            | "who"
+            | "why"
+            | "how"
+            | "about"
+            | "does"
+            | "with"
+            | "from"
+            | "that"
+            | "this"
+            | "they"
+            | "their"
+            | "them"
+            | "each"
+            | "uses"
+            | "used"
+            | "into"
+            | "across"
+            | "between"
+            | "compare"
+            | "implement"
+            | "implements"
+            | "require"
+            | "requires"
+            | "required"
+            | "valid"
+            | "defined"
+            | "directly"
+    )
 }
 
 fn provider_free_fallback_query_ir(question: &str) -> QueryIR {
@@ -754,11 +1998,21 @@ pub(crate) async fn generate_answer_query(
                 provider: _answer_provider.clone(),
                 usage_json: serde_json::json!({
                     "deterministic": true,
-                    "answer_kind": "exact_version_change_summary",
+                    "answer_kind": AnswerKind::ExactVersionChangeSummary.as_str(),
                 }),
                 prompt_context: prepared.answer_context.clone(),
                 query_ir: prepared.query_ir.clone(),
             },
+        )
+        .await?;
+        let verification_stage = finalize_verified_answer_for_prepared(
+            state,
+            execution_id,
+            effective_question,
+            verification_stage,
+            &prepared,
+            generation_question,
+            &prepared.answer_context,
         )
         .await?;
         let final_answer = verification_stage.generation.answer.clone();
@@ -784,6 +2038,7 @@ pub(crate) async fn generate_answer_query(
             answer: final_answer,
             provider: verification_stage.generation.provider,
             usage_json: verification_stage.generation.usage_json,
+            clarification: RuntimeClarification::default(),
         });
     }
 
@@ -837,8 +2092,12 @@ pub(crate) async fn generate_answer_query(
                             entity_count = entities.len(),
                             "release-lane entity probe found multiple subjects — routing to clarify"
                         );
-                        let variants: Vec<String> =
+                        // Bound the entity list before deriving labels for
+                        // run_clarify_turn (prose) and candidates (typed).
+                        let entities: Vec<ReleaseEvidenceEntity> =
                             entities.into_iter().take(CLARIFY_MAX_VARIANTS).collect();
+                        let variants: Vec<String> =
+                            entities.iter().map(|e| e.label.clone()).collect();
                         // Ground the clarify turn on the deterministic inventory
                         // itself, and PREPEND that inventory verbatim to the
                         // returned clarification. The full flat list must stay
@@ -870,6 +2129,8 @@ pub(crate) async fn generate_answer_query(
                                     answer_len = combined_answer.len(),
                                     "release clarify appended to the deterministic inventory"
                                 );
+                                let clarification =
+                                    release_clarification(&clarify.answer, &entities);
                                 let clarify_debug = clarify.debug_iterations.clone();
                                 persist_llm_context_snapshot(
                                     state,
@@ -894,6 +2155,7 @@ pub(crate) async fn generate_answer_query(
                                     answer: combined_answer,
                                     provider: clarify.provider,
                                     usage_json: clarify.usage_json,
+                                    clarification,
                                 });
                             }
                             Ok(_) => {
@@ -937,9 +2199,9 @@ pub(crate) async fn generate_answer_query(
         let usage_json = serde_json::json!({
             "deterministic": true,
             "answer_kind": if source_slice_answer.used_context_fallback {
-                "ordered_source_slice_identity_fallback"
+                AnswerKind::OrderedSourceSliceIdentityFallback.as_str()
             } else {
-                "ordered_source_slice"
+                AnswerKind::OrderedSourceSlice.as_str()
             },
             "source_unit_count": source_slice_answer.unit_count,
             "used_context_fallback": source_slice_answer.used_context_fallback,
@@ -969,6 +2231,16 @@ pub(crate) async fn generate_answer_query(
             },
         )
         .await?;
+        let verification_stage = finalize_verified_answer_for_prepared(
+            state,
+            execution_id,
+            effective_question,
+            verification_stage,
+            &prepared,
+            generation_question,
+            &prepared.answer_context,
+        )
+        .await?;
         let final_answer = verification_stage.generation.answer.clone();
         persist_llm_context_snapshot(
             state,
@@ -992,6 +2264,270 @@ pub(crate) async fn generate_answer_query(
             answer: final_answer,
             provider: verification_stage.generation.provider,
             usage_json: verification_stage.generation.usage_json,
+            clarification: RuntimeClarification::default(),
+        });
+    }
+
+    let deterministic_setup_answer = if matches!(prepared.query_ir.act, QueryAct::ConfigureHow) {
+        super::answer::build_setup_configuration_anchor_candidate(
+            generation_question,
+            &prepared.query_ir,
+            &prepared.structured.context_chunks,
+        )
+        .filter(|answer| {
+            answer.should_use_as_direct_answer(
+                &prepared.query_ir,
+                &prepared.structured.context_chunks,
+            )
+        })
+        .map(super::answer::SetupConfigurationAnchorCandidate::into_answer)
+    } else {
+        None
+    };
+
+    let update_answer_chunks = selected_runtime_answer_chunks(&prepared);
+    if deterministic_setup_answer.is_none()
+        && let Some(update_answer) = super::build_update_procedure_sequence_answer(
+            generation_question,
+            &prepared.query_ir,
+            &update_answer_chunks,
+        )
+    {
+        let update_answer = super::augment_deterministic_grounded_answer_with_evidence(
+            update_answer,
+            generation_question,
+            &prepared.query_ir,
+            &update_answer_chunks,
+        );
+        tracing::info!(
+            stage = "answer.update_procedure_deterministic",
+            %execution_id,
+            %library_id,
+            "deterministic update-procedure answer selected before single-shot generation"
+        );
+        let verification_stage = verify_generated_answer(
+            state,
+            execution_id,
+            effective_question,
+            AnswerGenerationStage {
+                intent_profile: prepared.structured.intent_profile.clone(),
+                canonical_answer_chunks: update_answer_chunks,
+                canonical_evidence: super::CanonicalAnswerEvidence {
+                    bundle: None,
+                    chunk_rows: Vec::new(),
+                    structured_blocks: Vec::new(),
+                    technical_facts: Vec::new(),
+                },
+                assistant_grounding: selected_runtime_grounding_evidence(
+                    &prepared,
+                    AssistantGroundingEvidence::default(),
+                ),
+                answer: update_answer,
+                provider: _answer_provider.clone(),
+                usage_json: serde_json::json!({
+                    "deterministic": true,
+                    "answer_kind": AnswerKind::UpdateProcedureSequence.as_str(),
+                }),
+                prompt_context: prepared.answer_context.clone(),
+                query_ir: prepared.query_ir.clone(),
+            },
+        )
+        .await?;
+        let verification_stage = finalize_verified_answer_for_prepared(
+            state,
+            execution_id,
+            effective_question,
+            verification_stage,
+            &prepared,
+            generation_question,
+            &prepared.answer_context,
+        )
+        .await?;
+        let final_answer = verification_stage.generation.answer.clone();
+        persist_llm_context_snapshot(
+            state,
+            crate::services::query::llm_context_debug::LlmContextSnapshot {
+                execution_id,
+                library_id,
+                question: user_question.to_string(),
+                total_iterations: 0,
+                iterations: Vec::new(),
+                final_answer: Some(final_answer.clone()),
+                captured_at: chrono::Utc::now(),
+                query_ir: Some(
+                    serde_json::to_value(&prepared.query_ir).unwrap_or(serde_json::Value::Null),
+                ),
+                agent_loop: None,
+                spans: Vec::new(),
+            },
+        )
+        .await?;
+        return Ok(RuntimeAnswerQueryResult {
+            answer: final_answer,
+            provider: verification_stage.generation.provider,
+            usage_json: verification_stage.generation.usage_json,
+            clarification: RuntimeClarification::default(),
+        });
+    }
+
+    if let Some(setup_answer) = deterministic_setup_answer {
+        tracing::info!(
+            stage = "answer.setup_configuration_deterministic",
+            %execution_id,
+            %library_id,
+            "deterministic setup-configuration answer selected"
+        );
+        let answer = append_missing_grounded_requested_labels_for_prepared(
+            setup_answer,
+            &prepared,
+            generation_question,
+            &prepared.answer_context,
+        );
+        let verification_stage = verify_generated_answer(
+            state,
+            execution_id,
+            effective_question,
+            AnswerGenerationStage {
+                intent_profile: prepared.structured.intent_profile.clone(),
+                canonical_answer_chunks: selected_runtime_answer_chunks(&prepared),
+                canonical_evidence: super::CanonicalAnswerEvidence {
+                    bundle: None,
+                    chunk_rows: Vec::new(),
+                    structured_blocks: Vec::new(),
+                    technical_facts: Vec::new(),
+                },
+                assistant_grounding: selected_runtime_grounding_evidence(
+                    &prepared,
+                    AssistantGroundingEvidence::default(),
+                ),
+                answer,
+                provider: _answer_provider.clone(),
+                usage_json: serde_json::json!({
+                    "deterministic": true,
+                    "answer_kind": AnswerKind::SetupConfigurationAnchor.as_str(),
+                }),
+                prompt_context: prepared.answer_context.clone(),
+                query_ir: prepared.query_ir.clone(),
+            },
+        )
+        .await?;
+        let verification_stage = finalize_verified_answer_for_prepared(
+            state,
+            execution_id,
+            effective_question,
+            verification_stage,
+            &prepared,
+            generation_question,
+            &prepared.answer_context,
+        )
+        .await?;
+        let final_answer = verification_stage.generation.answer.clone();
+        persist_llm_context_snapshot(
+            state,
+            crate::services::query::llm_context_debug::LlmContextSnapshot {
+                execution_id,
+                library_id,
+                question: user_question.to_string(),
+                total_iterations: 0,
+                iterations: Vec::new(),
+                final_answer: Some(final_answer.clone()),
+                captured_at: chrono::Utc::now(),
+                query_ir: Some(
+                    serde_json::to_value(&prepared.query_ir).unwrap_or(serde_json::Value::Null),
+                ),
+                agent_loop: None,
+                spans: Vec::new(),
+            },
+        )
+        .await?;
+        return Ok(RuntimeAnswerQueryResult {
+            answer: final_answer,
+            provider: verification_stage.generation.provider,
+            usage_json: verification_stage.generation.usage_json,
+            clarification: RuntimeClarification::default(),
+        });
+    }
+
+    if prepared.query_ir.source_slice.is_none()
+        && matches!(
+            prepared.query_ir.act,
+            QueryAct::Compare | QueryAct::Describe | QueryAct::Enumerate | QueryAct::RetrieveValue
+        )
+        && let Some(source_unit_answer) =
+            super::answer::build_structured_source_unit_inventory_answer(
+                generation_question,
+                &prepared.query_ir,
+                &prepared.structured.context_chunks,
+            )
+    {
+        tracing::info!(
+            stage = "answer.structured_source_unit_deterministic",
+            %execution_id,
+            %library_id,
+            "deterministic structured source-unit answer selected after context augmentation"
+        );
+        let verification_stage = verify_generated_answer(
+            state,
+            execution_id,
+            effective_question,
+            AnswerGenerationStage {
+                intent_profile: prepared.structured.intent_profile.clone(),
+                canonical_answer_chunks: selected_runtime_answer_chunks(&prepared),
+                canonical_evidence: super::CanonicalAnswerEvidence {
+                    bundle: None,
+                    chunk_rows: Vec::new(),
+                    structured_blocks: Vec::new(),
+                    technical_facts: Vec::new(),
+                },
+                assistant_grounding: selected_runtime_grounding_evidence(
+                    &prepared,
+                    AssistantGroundingEvidence::default(),
+                ),
+                answer: source_unit_answer,
+                provider: _answer_provider.clone(),
+                usage_json: serde_json::json!({
+                    "deterministic": true,
+                    "answer_kind": AnswerKind::DeterministicGroundedAnswer.as_str(),
+                }),
+                prompt_context: prepared.answer_context.clone(),
+                query_ir: prepared.query_ir.clone(),
+            },
+        )
+        .await?;
+        let verification_stage = finalize_verified_answer_for_prepared(
+            state,
+            execution_id,
+            effective_question,
+            verification_stage,
+            &prepared,
+            generation_question,
+            &prepared.answer_context,
+        )
+        .await?;
+        let final_answer = verification_stage.generation.answer.clone();
+        persist_llm_context_snapshot(
+            state,
+            crate::services::query::llm_context_debug::LlmContextSnapshot {
+                execution_id,
+                library_id,
+                question: user_question.to_string(),
+                total_iterations: 0,
+                iterations: Vec::new(),
+                final_answer: Some(final_answer.clone()),
+                captured_at: chrono::Utc::now(),
+                query_ir: Some(
+                    serde_json::to_value(&prepared.query_ir).unwrap_or(serde_json::Value::Null),
+                ),
+                agent_loop: None,
+                spans: Vec::new(),
+            },
+        )
+        .await?;
+        return Ok(RuntimeAnswerQueryResult {
+            answer: final_answer,
+            provider: verification_stage.generation.provider,
+            usage_json: verification_stage.generation.usage_json,
+            clarification: RuntimeClarification::default(),
         });
     }
 
@@ -1069,10 +2605,12 @@ pub(crate) async fn generate_answer_query(
                         },
                     )
                     .await?;
+                    let clarification = disposition_clarification(&clarify.answer, &variants);
                     return Ok(RuntimeAnswerQueryResult {
                         answer: clarify.answer,
                         provider: clarify.provider,
                         usage_json: clarify.usage_json,
+                        clarification,
                     });
                 }
                 tracing::info!(
@@ -1122,6 +2660,12 @@ pub(crate) async fn generate_answer_query(
                     "answer.single_shot",
                     &prepared.query_ir,
                     single.answer.clone(),
+                );
+                let single_answer = append_missing_grounded_requested_labels_for_prepared(
+                    single_answer,
+                    &prepared,
+                    generation_question,
+                    &prepared.answer_context,
                 );
                 tracing::info!(
                     stage = "answer.single_shot_done",
@@ -1228,6 +2772,13 @@ pub(crate) async fn generate_answer_query(
                                 &verification_stage.generation.answer,
                                 &revision_answer,
                             ) {
+                                let revision_answer =
+                                    append_missing_grounded_requested_labels_for_prepared(
+                                        revision_answer,
+                                        &prepared,
+                                        generation_question,
+                                        &revision_context,
+                                    );
                                 let revised_stage = verify_generated_answer(
                                     state,
                                     execution_id,
@@ -1274,6 +2825,16 @@ pub(crate) async fn generate_answer_query(
                         }
                     }
                 }
+                verification_stage = finalize_verified_answer_for_prepared(
+                    state,
+                    execution_id,
+                    effective_question,
+                    verification_stage,
+                    &prepared,
+                    generation_question,
+                    &prepared.answer_context,
+                )
+                .await?;
                 let verify_elapsed_ms = verify_started.elapsed().as_millis();
 
                 if single_shot_answer_is_acceptable(
@@ -1309,10 +2870,12 @@ pub(crate) async fn generate_answer_query(
                         },
                     )
                     .await?;
+                    let clarification = structural_direct_answer_candidates_for_prepared(&prepared);
                     return Ok(RuntimeAnswerQueryResult {
                         answer: verification_stage.generation.answer,
                         provider: verification_stage.generation.provider,
                         usage_json: verification_stage.generation.usage_json,
+                        clarification,
                     });
                 }
                 canonical_candidate = Some(CanonicalAnswerCandidate {
@@ -1360,7 +2923,13 @@ pub(crate) async fn generate_answer_query(
         has_override = preflight.answer_override.is_some(),
         "canonical-answer preflight loaded (escalation)"
     );
-    if let Some(answer) = preflight.answer_override.clone() {
+    if let Some(answer_override) = preflight.answer_override.clone() {
+        let answer = append_missing_grounded_requested_labels_for_prepared(
+            answer_override.answer,
+            &prepared,
+            generation_question,
+            &preflight.prompt_context,
+        );
         persist_llm_context_snapshot(
             state,
             crate::services::query::llm_context_debug::LlmContextSnapshot {
@@ -1394,10 +2963,21 @@ pub(crate) async fn generate_answer_query(
                 usage_json: serde_json::json!({
                     "deterministic": true,
                     "reason": "canonical_preflight_answer",
+                    "answer_kind": answer_override.answer_kind.as_str(),
                 }),
-                prompt_context: preflight.prompt_context,
+                prompt_context: preflight.prompt_context.clone(),
                 query_ir: prepared.query_ir.clone(),
             },
+        )
+        .await?;
+        let verification_stage = finalize_verified_answer_for_prepared(
+            state,
+            execution_id,
+            effective_question,
+            verification_stage,
+            &prepared,
+            generation_question,
+            &preflight.prompt_context,
         )
         .await?;
         persist_llm_context_snapshot(
@@ -1418,10 +2998,12 @@ pub(crate) async fn generate_answer_query(
             },
         )
         .await?;
+        let clarification = structural_direct_answer_candidates_for_prepared(&prepared);
         return Ok(RuntimeAnswerQueryResult {
             answer: verification_stage.generation.answer,
             provider: verification_stage.generation.provider,
             usage_json: verification_stage.generation.usage_json,
+            clarification,
         });
     }
 
@@ -1485,10 +3067,12 @@ pub(crate) async fn generate_answer_query(
                         },
                     )
                     .await?;
+                    let clarification = disposition_clarification(&clarify.answer, &variants);
                     return Ok(RuntimeAnswerQueryResult {
                         answer: clarify.answer,
                         provider: clarify.provider,
                         usage_json: clarify.usage_json,
+                        clarification,
                     });
                 }
                 tracing::info!(
@@ -1557,6 +3141,12 @@ pub(crate) async fn generate_answer_query(
                     &prepared.query_ir,
                     preflight_single.answer.clone(),
                 );
+                let preflight_answer = append_missing_grounded_requested_labels_for_prepared(
+                    preflight_answer,
+                    &prepared,
+                    generation_question,
+                    &preflight.prompt_context,
+                );
                 let mut preflight_debug = preflight_single.debug_iterations.clone();
                 let mut verification_stage = verify_generated_answer(
                     state,
@@ -1619,6 +3209,13 @@ pub(crate) async fn generate_answer_query(
                                 &verification_stage.generation.answer,
                                 &revision_answer,
                             ) {
+                                let revision_answer =
+                                    append_missing_grounded_requested_labels_for_prepared(
+                                        revision_answer,
+                                        &prepared,
+                                        generation_question,
+                                        &revision_context,
+                                    );
                                 let revised_stage = verify_generated_answer(
                                     state,
                                     execution_id,
@@ -1659,6 +3256,16 @@ pub(crate) async fn generate_answer_query(
                         }
                     }
                 }
+                verification_stage = finalize_verified_answer_for_prepared(
+                    state,
+                    execution_id,
+                    effective_question,
+                    verification_stage,
+                    &prepared,
+                    generation_question,
+                    &preflight.prompt_context,
+                )
+                .await?;
                 if single_shot_answer_is_acceptable(
                     &verification_stage.generation.answer,
                     &verification_stage,
@@ -1696,6 +3303,7 @@ pub(crate) async fn generate_answer_query(
                         answer: verification_stage.generation.answer,
                         provider: verification_stage.generation.provider,
                         usage_json: verification_stage.generation.usage_json,
+                        clarification: RuntimeClarification::default(),
                     });
                 }
                 let verify_state = verification_stage.verification.state;
@@ -1770,6 +3378,21 @@ pub(crate) async fn generate_answer_query(
             "canonical grounded-answer generation produced no answer candidate for execution {execution_id}"
         );
     };
+    let answer_context = candidate.verification_stage.generation.prompt_context.clone();
+    let candidate = CanonicalAnswerCandidate {
+        verification_stage: finalize_verified_answer_for_prepared(
+            state,
+            execution_id,
+            effective_question,
+            candidate.verification_stage,
+            &prepared,
+            generation_question,
+            &answer_context,
+        )
+        .await?,
+        debug_iterations: candidate.debug_iterations,
+        total_iterations: candidate.total_iterations,
+    };
     tracing::info!(
         stage = "answer.fixed_evidence_finalized",
         %execution_id,
@@ -1799,6 +3422,7 @@ pub(crate) async fn generate_answer_query(
         answer: candidate.verification_stage.generation.answer,
         provider: candidate.verification_stage.generation.provider,
         usage_json: candidate.verification_stage.generation.usage_json,
+        clarification: RuntimeClarification::default(),
     })
 }
 
@@ -1886,6 +3510,12 @@ fn classify_answer_disposition(
     user_question: &str,
 ) -> AnswerDisposition {
     if consolidation_commits_to_focused_answer(&prepared.consolidation) {
+        return AnswerDisposition::Answer;
+    }
+    if super::consolidation::query_has_multi_document_setup_anchors(
+        &prepared.query_ir,
+        &prepared.structured.context_chunks,
+    ) {
         return AnswerDisposition::Answer;
     }
 
@@ -2320,6 +3950,352 @@ struct CompareContextProbeOutcome {
     unresolved_operand_count: usize,
 }
 
+#[derive(Debug, Clone, Default)]
+struct TechnicalFocusProbeOutcome {
+    attempted: bool,
+    probe_term_count: usize,
+    missing_term_count: usize,
+    added_chunk_count: usize,
+}
+
+async fn augment_technical_focus_context(
+    state: &AppState,
+    library_id: Uuid,
+    ir: &QueryIR,
+    question: &str,
+    document_index: &HashMap<Uuid, KnowledgeDocumentRow>,
+    plan_keywords: &[String],
+    answer_context: &mut String,
+    structured: &mut super::RuntimeStructuredQueryResult,
+) -> anyhow::Result<TechnicalFocusProbeOutcome> {
+    let probe_terms = collect_technical_focus_probe_terms(question, ir);
+    if probe_terms.is_empty() {
+        return Ok(TechnicalFocusProbeOutcome::default());
+    }
+    let missing_terms = probe_terms
+        .iter()
+        .filter(|term| !contains_label_mention(answer_context, term))
+        .cloned()
+        .collect::<Vec<_>>();
+    let focus_keywords = technical_literal_focus_keywords(question, Some(ir));
+    let existing_chunk_ids = structured
+        .chunk_references
+        .iter()
+        .map(|reference| reference.chunk_id)
+        .chain(structured.context_chunks.iter().map(|chunk| chunk.chunk_id))
+        .collect::<HashSet<_>>();
+    let probe_chunks = probe_missing_technical_focus_terms(
+        state,
+        library_id,
+        &missing_terms,
+        &focus_keywords,
+        document_index,
+        plan_keywords,
+        &existing_chunk_ids,
+    )
+    .await?;
+    if !probe_chunks.is_empty() {
+        let probe_question = missing_terms.join(" ");
+        let literal_inventory =
+            render_technical_focus_literal_inventory(&probe_chunks, &focus_keywords);
+        append_answer_context_section(answer_context, &literal_inventory);
+        let probe_context = render_targeted_evidence_chunk_section(&probe_question, &probe_chunks);
+        append_answer_context_section(answer_context, &probe_context);
+        append_probe_chunk_references(structured, &probe_chunks);
+        append_probe_document_titles(structured, &probe_chunks);
+        append_probe_context_chunks(structured, probe_chunks.clone());
+    }
+    Ok(TechnicalFocusProbeOutcome {
+        attempted: true,
+        probe_term_count: probe_terms.len(),
+        missing_term_count: missing_terms.len(),
+        added_chunk_count: probe_chunks.len(),
+    })
+}
+
+fn collect_technical_focus_probe_terms(question: &str, ir: &QueryIR) -> Vec<String> {
+    let mut ranked_terms = Vec::<(usize, String)>::new();
+    for literal in &ir.literal_constraints {
+        push_technical_focus_probe_term(&mut ranked_terms, &literal.text, 0);
+    }
+    for entity in &ir.target_entities {
+        push_technical_focus_probe_term(&mut ranked_terms, &entity.label, 1);
+    }
+    if let Some(focus) = &ir.document_focus {
+        push_technical_focus_probe_term(&mut ranked_terms, &focus.hint, 2);
+    }
+    for (index, token) in structural_question_tokens(question).into_iter().enumerate() {
+        let rank = if structural_token_is_high_signal_probe_term(&token, index) { 3 } else { 6 };
+        push_technical_focus_probe_term(&mut ranked_terms, &token, rank);
+    }
+    for token in technical_literal_focus_keywords(question, Some(ir)) {
+        push_technical_focus_probe_term(&mut ranked_terms, &token, 7);
+    }
+
+    let mut best_rank_by_key = HashMap::<String, (usize, String)>::new();
+    for (rank, term) in ranked_terms {
+        let trimmed = term.trim();
+        if !technical_focus_probe_term_is_eligible(trimmed) {
+            continue;
+        }
+        let key = trimmed.to_lowercase();
+        best_rank_by_key
+            .entry(key)
+            .and_modify(|existing| {
+                if rank < existing.0 {
+                    *existing = (rank, trimmed.to_string());
+                }
+            })
+            .or_insert_with(|| (rank, trimmed.to_string()));
+    }
+    let mut terms = best_rank_by_key.into_values().collect::<Vec<_>>();
+    terms.sort_by(|left, right| {
+        left.0
+            .cmp(&right.0)
+            .then_with(|| right.1.chars().count().cmp(&left.1.chars().count()))
+            .then_with(|| left.1.cmp(&right.1))
+    });
+    terms.into_iter().map(|(_, term)| term).take(TECHNICAL_FOCUS_PROBE_TERM_LIMIT).collect()
+}
+
+fn push_technical_focus_probe_term(
+    ranked_terms: &mut Vec<(usize, String)>,
+    value: &str,
+    rank: usize,
+) {
+    for token in structural_question_tokens(value) {
+        ranked_terms.push((rank, token));
+    }
+}
+
+fn structural_token_is_high_signal_probe_term(token: &str, index: usize) -> bool {
+    token_has_fallback_entity_signal(token, index)
+        || token.chars().all(|ch| ch.is_ascii_uppercase() || ch.is_ascii_digit())
+        || token.chars().any(|ch| matches!(ch, '_' | '-' | '.' | '/' | ':' | '@'))
+}
+
+fn technical_focus_probe_term_is_eligible(term: &str) -> bool {
+    let char_count = term.chars().count();
+    if !(2..=80).contains(&char_count) || !term.chars().any(char::is_alphanumeric) {
+        return false;
+    }
+    structural_token_is_high_signal_probe_term(term, usize::MAX) || char_count >= 5
+}
+
+async fn probe_missing_technical_focus_terms(
+    state: &AppState,
+    library_id: Uuid,
+    missing_terms: &[String],
+    focus_keywords: &[String],
+    document_index: &HashMap<Uuid, KnowledgeDocumentRow>,
+    plan_keywords: &[String],
+    existing_chunk_ids: &HashSet<Uuid>,
+) -> anyhow::Result<Vec<RuntimeMatchedChunk>> {
+    let mut score_by_chunk = HashMap::<Uuid, f32>::new();
+    for term in missing_terms {
+        let rows = state
+            .arango_search_store
+            .search_chunks(library_id, term, TECHNICAL_FOCUS_PROBE_HIT_LIMIT, None, None)
+            .await?;
+        let mut accepted_for_term = 0usize;
+        for row in rows {
+            if existing_chunk_ids.contains(&row.chunk_id) || !search_row_covers_operand(term, &row)
+            {
+                continue;
+            }
+            let score = row.score as f32 + (term.chars().count().min(24) as f32 / 24.0);
+            score_by_chunk
+                .entry(row.chunk_id)
+                .and_modify(|existing| {
+                    if score > *existing {
+                        *existing = score;
+                    }
+                })
+                .or_insert(score);
+            accepted_for_term += 1;
+            if accepted_for_term >= TECHNICAL_FOCUS_PROBE_MAX_CHUNKS_PER_TERM {
+                break;
+            }
+        }
+    }
+    if focus_keywords.len() >= 3 {
+        let focus_query = focus_keywords
+            .iter()
+            .take(TECHNICAL_FOCUS_PROBE_TERM_LIMIT)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(" ");
+        let rows = state
+            .arango_search_store
+            .search_chunks(library_id, &focus_query, TECHNICAL_FOCUS_PROBE_HIT_LIMIT, None, None)
+            .await?;
+        let mut accepted_for_query = 0usize;
+        for row in rows {
+            if existing_chunk_ids.contains(&row.chunk_id)
+                || score_by_chunk.contains_key(&row.chunk_id)
+                || !search_row_covers_technical_focus(&row, focus_keywords)
+            {
+                continue;
+            }
+            score_by_chunk.insert(row.chunk_id, row.score as f32);
+            accepted_for_query += 1;
+            if accepted_for_query >= TECHNICAL_FOCUS_PROBE_MAX_CHUNKS_PER_TERM {
+                break;
+            }
+        }
+    }
+    if score_by_chunk.is_empty() {
+        return Ok(Vec::new());
+    }
+    let chunk_ids = score_by_chunk.keys().copied().collect::<Vec<_>>();
+    let rows = state.arango_document_store.list_chunks_by_ids(&chunk_ids).await?;
+    let mut chunks = Vec::<RuntimeMatchedChunk>::new();
+    for row in rows {
+        let Some(score) = score_by_chunk.get(&row.chunk_id).copied() else {
+            continue;
+        };
+        let Some(chunk) = super::retrieve::map_chunk_hit(row, score, document_index, plan_keywords)
+        else {
+            continue;
+        };
+        chunks.push(chunk);
+    }
+    chunks.sort_by(|left, right| {
+        right.score.partial_cmp(&left.score).unwrap_or(std::cmp::Ordering::Equal)
+    });
+    chunks.truncate(TECHNICAL_FOCUS_PROBE_MAX_CHUNKS);
+    Ok(chunks)
+}
+
+fn render_technical_focus_literal_inventory(
+    chunks: &[RuntimeMatchedChunk],
+    focus_keywords: &[String],
+) -> String {
+    let focus_keywords = focus_keywords
+        .iter()
+        .map(|keyword| keyword.trim().to_lowercase())
+        .filter(|keyword| keyword.chars().count() >= 2)
+        .collect::<Vec<_>>();
+    if focus_keywords.is_empty() {
+        return String::new();
+    }
+    let mut seen = HashSet::<String>::new();
+    let mut lines = vec!["Exact technical literals".to_string()];
+    for chunk in chunks {
+        let text = format!("{}\n{}", chunk.excerpt, chunk.source_text);
+        let literals = extract_focus_aligned_structural_literals(&text, &focus_keywords, &mut seen);
+        if literals.is_empty() {
+            continue;
+        }
+        let rendered = literals
+            .into_iter()
+            .take(8)
+            .map(|literal| format!("`{literal}`"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        lines.push(format!("- {}: {}", chunk.document_label, rendered));
+        if seen.len() >= 32 {
+            break;
+        }
+    }
+    if lines.len() <= 1 { String::new() } else { lines.join("\n") }
+}
+
+fn extract_focus_aligned_structural_literals(
+    text: &str,
+    focus_keywords: &[String],
+    seen: &mut HashSet<String>,
+) -> Vec<String> {
+    structural_question_tokens(text)
+        .into_iter()
+        .map(|token| trim_structural_literal_token(&token).to_string())
+        .filter(|token| technical_focus_literal_token_is_eligible(token))
+        .filter(|token| technical_focus_literal_token_matches_focus(token, focus_keywords))
+        .filter(|token| seen.insert(token.to_lowercase()))
+        .take(16)
+        .collect()
+}
+
+fn trim_structural_literal_token(token: &str) -> &str {
+    token.trim_matches(|ch: char| {
+        ch.is_whitespace()
+            || matches!(ch, ',' | ';' | '(' | ')' | '[' | ']' | '{' | '}' | '"' | '\'' | '`' | ':')
+    })
+}
+
+fn technical_focus_literal_token_is_eligible(token: &str) -> bool {
+    let char_count = token.chars().count();
+    (2..=96).contains(&char_count)
+        && (structural_token_is_high_signal_probe_term(token, usize::MAX)
+            || token.chars().any(char::is_uppercase))
+}
+
+fn technical_focus_literal_token_matches_focus(token: &str, focus_keywords: &[String]) -> bool {
+    let lowered = token.to_lowercase();
+    focus_keywords.iter().any(|keyword| {
+        keyword == &lowered
+            || (keyword.chars().count() >= 4 && lowered.contains(keyword))
+            || (lowered.chars().count() >= 4 && keyword.contains(&lowered))
+            || (keyword.chars().count() < 4
+                && split_identifier_subtokens(token).iter().any(|part| part == keyword))
+            || (keyword.chars().count() < 4
+                && lowered.starts_with(keyword)
+                && token.chars().any(|ch| ch.is_ascii_uppercase() || ch.is_ascii_digit()))
+            || split_identifier_subtokens(token)
+                .iter()
+                .any(|part| part.chars().count() >= 4 && part == keyword)
+    })
+}
+
+fn split_identifier_subtokens(token: &str) -> Vec<String> {
+    let mut parts = Vec::<String>::new();
+    let mut current = String::new();
+    let mut previous_lowercase = false;
+    for ch in token.chars() {
+        if !ch.is_alphanumeric() {
+            if !current.is_empty() {
+                parts.push(current.to_lowercase());
+                current.clear();
+            }
+            previous_lowercase = false;
+            continue;
+        }
+        if previous_lowercase && ch.is_uppercase() && !current.is_empty() {
+            parts.push(current.to_lowercase());
+            current.clear();
+        }
+        previous_lowercase = ch.is_lowercase();
+        current.push(ch);
+    }
+    if !current.is_empty() {
+        parts.push(current.to_lowercase());
+    }
+    parts
+}
+
+fn search_row_covers_technical_focus(
+    row: &crate::infra::arangodb::search_store::KnowledgeChunkSearchRow,
+    focus_keywords: &[String],
+) -> bool {
+    let section = row.section_path.join(" ");
+    let heading = row.heading_trail.join(" ");
+    let evidence =
+        format!("{}\n{}\n{}\n{}", row.content_text, row.normalized_text, section, heading)
+            .to_lowercase();
+    let evidence_tokens = crate::services::query::text_match::normalized_alnum_tokens(&evidence, 2);
+    let overlap = focus_keywords
+        .iter()
+        .filter(|keyword| {
+            let keyword = keyword.trim().to_lowercase();
+            !keyword.is_empty()
+                && evidence_tokens.iter().any(|token| {
+                    crate::services::query::text_match::near_token_match(&keyword, token)
+                })
+        })
+        .count();
+    overlap >= focus_keywords.len().min(3).clamp(2, 3)
+}
+
 async fn augment_partial_compare_context(
     state: &AppState,
     library_id: Uuid,
@@ -2343,11 +4319,7 @@ async fn augment_partial_compare_context(
         added_chunk_count: 0,
         unresolved_operand_count: missing_operands.len(),
     };
-    let existing_chunk_ids = structured
-        .chunk_references
-        .iter()
-        .map(|reference| reference.chunk_id)
-        .collect::<HashSet<_>>();
+    let existing_chunk_ids = HashSet::<Uuid>::new();
     let probe_chunks = probe_missing_compare_operands(
         state,
         library_id,
@@ -2363,6 +4335,7 @@ async fn augment_partial_compare_context(
         append_answer_context_section(answer_context, &probe_context);
         append_probe_chunk_references(structured, &probe_chunks);
         append_probe_document_titles(structured, &probe_chunks);
+        append_probe_context_chunks(structured, probe_chunks.clone());
         outcome.added_chunk_count = probe_chunks.len();
     }
 
@@ -2397,29 +4370,33 @@ async fn probe_missing_compare_operands(
 ) -> anyhow::Result<Vec<RuntimeMatchedChunk>> {
     let mut score_by_chunk = HashMap::<Uuid, f32>::new();
     for operand in missing_operands {
-        let rows = state
-            .arango_search_store
-            .search_chunks(library_id, operand, COMPARE_OPERAND_PROBE_LIMIT, None, None)
-            .await?;
-        let mut accepted_for_operand = 0usize;
-        for row in rows {
-            if existing_chunk_ids.contains(&row.chunk_id)
-                || !search_row_covers_operand(operand, &row)
-            {
-                continue;
-            }
-            let score = row.score as f32;
-            score_by_chunk
-                .entry(row.chunk_id)
-                .and_modify(|existing| {
-                    if score > *existing {
-                        *existing = score;
-                    }
-                })
-                .or_insert(score);
-            accepted_for_operand += 1;
-            if accepted_for_operand >= COMPARE_OPERAND_PROBE_MAX_CHUNKS_PER_OPERAND {
-                break;
+        let query_variants = compare_operand_probe_queries(operand, plan_keywords);
+        for query in query_variants {
+            let rows = state
+                .arango_search_store
+                .search_chunks(library_id, &query, COMPARE_OPERAND_PROBE_LIMIT, None, None)
+                .await?;
+            let mut accepted_for_operand = 0usize;
+            for row in rows {
+                if existing_chunk_ids.contains(&row.chunk_id)
+                    || !search_row_covers_operand(operand, &row)
+                {
+                    continue;
+                }
+                let score =
+                    row.score as f32 + compare_probe_query_specificity_bonus(&query, operand);
+                score_by_chunk
+                    .entry(row.chunk_id)
+                    .and_modify(|existing| {
+                        if score > *existing {
+                            *existing = score;
+                        }
+                    })
+                    .or_insert(score);
+                accepted_for_operand += 1;
+                if accepted_for_operand >= COMPARE_OPERAND_PROBE_MAX_CHUNKS_PER_OPERAND {
+                    break;
+                }
             }
         }
     }
@@ -2444,6 +4421,36 @@ async fn probe_missing_compare_operands(
     });
     chunks.truncate(COMPARE_OPERAND_PROBE_MAX_CHUNKS);
     Ok(chunks)
+}
+
+fn compare_operand_probe_queries(operand: &str, plan_keywords: &[String]) -> Vec<String> {
+    let mut queries = Vec::<String>::new();
+    let mut seen = HashSet::<String>::new();
+    let mut push = |value: String| {
+        let normalized = value.trim();
+        if normalized.is_empty() {
+            return;
+        }
+        if seen.insert(normalized.to_lowercase()) {
+            queries.push(normalized.to_string());
+        }
+    };
+    push(operand.to_string());
+    let focus = plan_keywords
+        .iter()
+        .map(|keyword| keyword.trim())
+        .filter(|keyword| keyword.chars().count() >= 4)
+        .take(8)
+        .collect::<Vec<_>>()
+        .join(" ");
+    if !focus.is_empty() {
+        push(format!("{operand} {focus}"));
+    }
+    queries
+}
+
+fn compare_probe_query_specificity_bonus(query: &str, operand: &str) -> f32 {
+    if query.trim().eq_ignore_ascii_case(operand.trim()) { 0.0 } else { 1.0 }
 }
 
 fn search_row_covers_operand(
@@ -2505,6 +4512,19 @@ fn append_probe_document_titles(
     }
 }
 
+fn append_probe_context_chunks(
+    structured: &mut super::RuntimeStructuredQueryResult,
+    chunks: Vec<RuntimeMatchedChunk>,
+) {
+    let mut seen =
+        structured.context_chunks.iter().map(|chunk| chunk.chunk_id).collect::<HashSet<_>>();
+    for chunk in chunks {
+        if seen.insert(chunk.chunk_id) {
+            structured.context_chunks.push(chunk);
+        }
+    }
+}
+
 fn append_answer_context_section(answer_context: &mut String, section: &str) {
     let section = section.trim();
     if section.is_empty() {
@@ -2562,6 +4582,31 @@ fn should_use_single_shot_answer(
         );
         return false;
     }
+    if structural_literal_comparison_waits_for_preflight(
+        &prepared.query_ir,
+        &prepared.answer_context,
+    ) {
+        tracing::info!(
+            stage = "answer.single_shot_coverage",
+            query_ir_act = ?prepared.query_ir.act,
+            "comparison with exact structural literals waits for canonical preflight"
+        );
+        return false;
+    }
+    if super::build_update_procedure_sequence_answer(
+        question,
+        &prepared.query_ir,
+        &prepared.structured.context_chunks,
+    )
+    .is_some()
+    {
+        tracing::info!(
+            stage = "answer.single_shot_coverage",
+            query_ir_act = ?prepared.query_ir.act,
+            "deterministic update procedure is available; single-shot must not preempt it"
+        );
+        return false;
+    }
     // Single-shot is evidence-gated, not act-blacklisted. The
     // prepared retrieval context is authoritative when it structurally
     // covers the operands required by the IR. Questions that still
@@ -2594,6 +4639,43 @@ fn should_use_single_shot_answer(
             false
         }
     }
+}
+
+fn structural_literal_comparison_waits_for_preflight(
+    query_ir: &QueryIR,
+    answer_context: &str,
+) -> bool {
+    if !matches!(query_ir.act, QueryAct::Compare) || query_ir.comparison.is_none() {
+        return false;
+    }
+    let literal_context = answer_context_without_evidence_metadata(answer_context);
+    let exact_literals = extract_focus_aligned_answer_suffix_literals(
+        &literal_context,
+        &comparison_focus_keywords(query_ir),
+        &mut HashSet::new(),
+    );
+    if exact_literals.is_empty() {
+        return false;
+    }
+    !matches!(
+        compare_operands_covered_by_context(query_ir, answer_context),
+        EvidenceCoverage::Insufficient(_)
+    )
+}
+
+fn comparison_focus_keywords(query_ir: &QueryIR) -> Vec<String> {
+    let mut seen = HashSet::new();
+    [
+        query_ir.retrieval_query.as_deref(),
+        query_ir.comparison.as_ref().map(|comparison| comparison.dimension.as_str()),
+    ]
+    .into_iter()
+    .flatten()
+    .flat_map(structural_question_tokens)
+    .map(|token| token.to_lowercase())
+    .filter(|token| exact_literal_postprocessor_focus_keyword_is_eligible(token))
+    .filter(|token| seen.insert(token.clone()))
+    .collect()
 }
 
 fn focused_configuration_inventory_waits_for_preflight(
@@ -2877,6 +4959,9 @@ fn single_shot_answer_is_acceptable(
     if answer_chars < SINGLE_SHOT_MIN_ANSWER_CHARS {
         return false;
     }
+    if answer_contains_internal_history_marker(trimmed) {
+        return false;
+    }
     if answer_needs_literal_revision(verification) {
         return false;
     }
@@ -2907,6 +4992,11 @@ fn single_shot_answer_is_acceptable(
         return false;
     }
     true
+}
+
+fn answer_contains_internal_history_marker(answer: &str) -> bool {
+    answer.contains("Prior assistant compact literal memory.")
+        || answer.contains("Prior assistant pinned literal anchors.")
 }
 
 fn single_shot_context_lacks_query_focus_support(
@@ -3785,6 +5875,7 @@ pub(crate) async fn verify_generated_answer(
         &generation.answer,
         &generation.query_ir,
         &generation.prompt_context,
+        &generation.usage_json,
         &mut verification,
     );
     super::persist_query_verification(
@@ -3828,8 +5919,12 @@ fn apply_structural_coverage_warning(
     answer: &str,
     query_ir: &QueryIR,
     prompt_context: &str,
+    usage_json: &serde_json::Value,
     verification: &mut super::RuntimeAnswerVerification,
 ) {
+    if deterministic_generation_skips_structural_coverage_warning(usage_json) {
+        return;
+    }
     if !answer_omits_structural_context_coverage(question, answer, query_ir, prompt_context) {
         return;
     }
@@ -3846,6 +5941,22 @@ fn apply_structural_coverage_warning(
     if matches!(verification.state, QueryVerificationState::Verified) {
         verification.state = QueryVerificationState::PartiallySupported;
     }
+}
+
+fn deterministic_generation_skips_structural_coverage_warning(
+    usage_json: &serde_json::Value,
+) -> bool {
+    if usage_json.get("deterministic").and_then(serde_json::Value::as_bool) != Some(true) {
+        return false;
+    }
+    matches!(
+        AnswerKind::from_usage_json(usage_json),
+        Some(
+            AnswerKind::SetupConfigurationAnchor
+                | AnswerKind::UpdateProcedureSequence
+                | AnswerKind::DeterministicGroundedAnswer
+        )
+    )
 }
 
 fn answer_omits_structural_context_coverage(
@@ -3926,7 +6037,7 @@ fn collect_structural_coverage_anchors(
             continue;
         }
         let before = items.len();
-        push_structural_anchor_literals(line, &mut seen, &mut items);
+        push_structural_anchor_literals(strip_evidence_chunk_prefix(line), &mut seen, &mut items);
         if items.len() > before {
             line_count += 1;
         }
@@ -4108,21 +6219,31 @@ fn subjectless_release_inventory(ir: &QueryIR, context_supports_inventory: bool)
         && crate::services::query::latest_versions::latest_version_scope_terms(ir).is_empty()
 }
 
-/// Query `runtime_graph_evidence` for entity labels that appear across
-/// multiple distinct source documents within the given chunk set.
-/// Returns labels ranked by distinct-document span (descending), filtered
-/// to those meeting `RELEASE_CLARIFY_ENTITY_MIN_DOC_SPAN`.  The only
-/// semantic filter is on the closed `RuntimeNodeType` vocabulary:
-/// `document` nodes are structurally 1:1 with a source document (schema
-/// CHECK constraint) and `attribute` nodes are value-properties, so
-/// neither can be a standalone subject choice.  No NL keywords, entity
-/// names, or language-specific filtering — the cross-document span is
-/// the ranking signal.
+/// A distinct release-evidence subject the clarify probe found: the graph
+/// `node_id`, its `label`, and its `node_type` (a member of the closed
+/// `RuntimeNodeType` vocabulary). `node_type` becomes the typed candidate
+/// `kind` and `node_id` becomes the candidate provenance handle.
+pub(crate) struct ReleaseEvidenceEntity {
+    pub(crate) node_id: Uuid,
+    pub(crate) label: String,
+    pub(crate) node_type: String,
+}
+
+/// Query `runtime_graph_evidence` for entities that appear across multiple
+/// distinct source documents within the given chunk set.  Returns each
+/// distinct subject (node id, label, node type) ranked by distinct-document
+/// span (descending), filtered to those meeting
+/// `RELEASE_CLARIFY_ENTITY_MIN_DOC_SPAN`.  The only semantic filter is on the
+/// closed `RuntimeNodeType` vocabulary: `document` nodes are structurally
+/// 1:1 with a source document (schema CHECK constraint) and `attribute`
+/// nodes are value-properties, so neither can be a standalone subject
+/// choice.  No NL keywords, entity names, or language-specific filtering —
+/// the cross-document span is the ranking signal.
 async fn query_release_evidence_entities(
     state: &AppState,
     library_id: Uuid,
     chunk_ids: &[Uuid],
-) -> Result<Vec<String>, sqlx::Error> {
+) -> Result<Vec<ReleaseEvidenceEntity>, sqlx::Error> {
     if chunk_ids.is_empty() {
         return Ok(Vec::new());
     }
@@ -4132,12 +6253,14 @@ async fn query_release_evidence_entities(
     // use the runtime `query_as` builder with explicit type annotation.
     #[derive(sqlx::FromRow)]
     struct EntityRow {
+        node_id: Uuid,
         label: String,
+        node_type: String,
         #[allow(dead_code)]
         doc_count: i64,
     }
     let rows = sqlx::query_as::<_, EntityRow>(
-        "SELECT n.label, COUNT(DISTINCT e.document_id) AS doc_count
+        "SELECT n.id AS node_id, n.label, n.node_type, COUNT(DISTINCT e.document_id) AS doc_count
          FROM runtime_graph_node n
          JOIN runtime_graph_evidence e
            ON e.target_id = n.id AND e.target_kind = 'node'
@@ -4145,7 +6268,7 @@ async fn query_release_evidence_entities(
            AND e.library_id = $2
            AND n.library_id = $2
            AND n.node_type NOT IN ('document', 'attribute')
-         GROUP BY n.id, n.label
+         GROUP BY n.id, n.label, n.node_type
          HAVING COUNT(DISTINCT e.document_id) >= $3
          ORDER BY COUNT(DISTINCT e.document_id) DESC, n.support_count DESC
          LIMIT $4",
@@ -4160,14 +6283,22 @@ async fn query_release_evidence_entities(
     // Dedup by normalised label (trim + lowercase) to suppress near-duplicates
     // that differ only in case or surrounding whitespace.
     let mut seen: HashSet<String> = HashSet::new();
-    let labels = rows
+    let entities = rows
         .into_iter()
         .filter_map(|row| {
             let key = row.label.trim().to_lowercase();
-            if seen.insert(key) { Some(row.label) } else { None }
+            if seen.insert(key) {
+                Some(ReleaseEvidenceEntity {
+                    node_id: row.node_id,
+                    label: row.label,
+                    node_type: row.node_type,
+                })
+            } else {
+                None
+            }
         })
         .collect();
-    Ok(labels)
+    Ok(entities)
 }
 
 #[cfg(test)]
@@ -4175,13 +6306,13 @@ mod tests {
     use uuid::Uuid;
 
     use super::{
-        AnswerDisposition, answer_generation_question, clarify_variant_dedup_key,
-        classify_answer_disposition, classify_answer_disposition_from_evidence,
-        classify_answer_disposition_from_groups, extract_query_specific_variants,
-        literal_revision_can_replace_answer, literal_revision_targets,
-        provider_free_fallback_query_ir, selected_runtime_answer_chunks,
+        AnswerDisposition, answer_generation_question, append_missing_grounded_requested_labels,
+        clarify_variant_dedup_key, classify_answer_disposition,
+        classify_answer_disposition_from_evidence, classify_answer_disposition_from_groups,
+        extract_query_specific_variants, literal_revision_can_replace_answer,
+        literal_revision_targets, provider_free_fallback_query_ir, selected_runtime_answer_chunks,
         selected_runtime_grounding_evidence, strip_trailing_inventory_meta_paragraph,
-        verify_answer_against_canonical_evidence,
+        structural_direct_answer_candidates, verify_answer_against_canonical_evidence,
     };
     use crate::domains::query::{GroupedReference, GroupedReferenceKind, QueryVerificationState};
     use crate::domains::query_ir::{
@@ -4192,7 +6323,8 @@ mod tests {
     use crate::services::query::assistant_grounding::AssistantGroundingEvidence;
     use crate::services::query::execution::RuntimeAnswerVerification;
     use crate::services::query::execution::{
-        ConsolidationDiagnostics, FocusReason, RuntimeRetrievedDocumentBrief,
+        ConsolidationDiagnostics, FocusReason, RuntimeChunkScoreKind, RuntimeMatchedChunk,
+        RuntimeMatchedEntity, RuntimeRetrievedDocumentBrief,
     };
 
     fn sample_ir(confidence: f32, needs_clarification: Option<ClarificationReason>) -> QueryIR {
@@ -4210,7 +6342,7 @@ mod tests {
             language: QueryLanguage::Ru,
             target_types: vec!["procedure".to_string()],
             target_entities: vec![EntityMention {
-                label: "payment module".to_string(),
+                label: "workflow module".to_string(),
                 role: EntityRole::Subject,
             }],
             literal_constraints: Vec::new(),
@@ -4226,6 +6358,785 @@ mod tests {
         }
     }
 
+    fn setup_anchor_chunk(
+        document_id: Uuid,
+        label: &str,
+        package: &str,
+        path: &str,
+    ) -> RuntimeMatchedChunk {
+        RuntimeMatchedChunk {
+            chunk_id: Uuid::new_v4(),
+            document_id,
+            revision_id: Uuid::new_v4(),
+            chunk_index: 0,
+            chunk_kind: Some("paragraph".to_string()),
+            document_label: label.to_string(),
+            excerpt: format!("sample-install {package}\n{path}"),
+            score_kind: RuntimeChunkScoreKind::DocumentIdentity,
+            score: Some(42.0),
+            source_text: format!(
+                "sample-install {package}\n{path}\n[Main]\nurl = http://localhost"
+            ),
+        }
+    }
+
+    fn procedure_chunk(label: &str, text: &str) -> RuntimeMatchedChunk {
+        RuntimeMatchedChunk {
+            chunk_id: Uuid::new_v4(),
+            document_id: Uuid::new_v4(),
+            revision_id: Uuid::new_v4(),
+            chunk_index: 1,
+            chunk_kind: Some("paragraph".to_string()),
+            document_label: label.to_string(),
+            excerpt: text.to_string(),
+            score_kind: RuntimeChunkScoreKind::FocusedDocument,
+            score: Some(42.0),
+            source_text: text.to_string(),
+        }
+    }
+
+    #[test]
+    fn technical_focus_probe_terms_prefer_structural_identifiers() {
+        let mut ir = sample_ir_with_act(QueryAct::Describe, 0.8, None);
+        ir.target_entities = vec![
+            EntityMention { label: "OrderStateMachine".to_string(), role: EntityRole::Subject },
+            EntityMention { label: "TransitionHooks".to_string(), role: EntityRole::Object },
+        ];
+        ir.literal_constraints = vec![LiteralSpan {
+            text: "APP_DATABASE_URL".to_string(),
+            kind: LiteralKind::Identifier,
+        }];
+
+        let terms = super::collect_technical_focus_probe_terms(
+            "Which OrderStateMachine methods use TransitionHooks and SAMPLE_LIMIT?",
+            &ir,
+        );
+
+        assert!(terms.iter().any(|term| term == "APP_DATABASE_URL"));
+        assert!(terms.iter().any(|term| term == "OrderStateMachine"));
+        assert!(terms.iter().any(|term| term == "TransitionHooks"));
+        assert!(terms.iter().any(|term| term == "SAMPLE_LIMIT"));
+        assert!(terms.len() <= super::TECHNICAL_FOCUS_PROBE_TERM_LIMIT);
+    }
+
+    #[test]
+    fn technical_focus_probe_terms_keep_uppercase_numeric_anchors() {
+        let ir = sample_ir_with_act(QueryAct::Describe, 0.8, None);
+
+        let terms = super::collect_technical_focus_probe_terms(
+            "Terraform CloudWatch alarms CPU 85 RDS 5xx threshold",
+            &ir,
+        );
+
+        assert!(terms.iter().any(|term| term == "CPU"));
+        assert!(terms.iter().any(|term| term == "85"));
+        assert!(terms.iter().any(|term| term == "RDS"));
+        assert!(terms.iter().any(|term| term == "5xx"));
+    }
+
+    #[test]
+    fn technical_focus_literal_inventory_preserves_exact_identifiers() {
+        let mut seen = std::collections::HashSet::new();
+        let focus = vec![
+            "error".to_string(),
+            "sample".to_string(),
+            "cpu".to_string(),
+            "circuit".to_string(),
+        ];
+
+        let literals = super::extract_focus_aligned_structural_literals(
+            "pub enum OrderError { InvalidTransition } class CircuitBreaker: pass SAMPLE_LIMIT_REQUESTS aws_cloudwatch_metric_alarm.cpu",
+            &focus,
+            &mut seen,
+        );
+
+        assert!(literals.iter().any(|literal| literal == "OrderError"));
+        assert!(literals.iter().any(|literal| literal == "CircuitBreaker"));
+        assert!(literals.iter().any(|literal| literal == "SAMPLE_LIMIT_REQUESTS"));
+        assert!(literals.iter().any(|literal| literal == "aws_cloudwatch_metric_alarm.cpu"));
+    }
+
+    #[test]
+    fn current_question_ir_guard_replaces_stale_history_query() {
+        let mut ir = sample_ir_with_act(QueryAct::Compare, 0.97, None);
+        ir.retrieval_query = Some(
+            "Compare the error handling patterns between the Rust state machine and the Python data pipeline. What error types does each define?"
+                .to_string(),
+        );
+        ir.literal_constraints = vec![LiteralSpan {
+            text: "APP_DATABASE_URL".to_string(),
+            kind: LiteralKind::Identifier,
+        }];
+
+        let guarded = super::guard_self_contained_question_ir(
+            "What traits does the Rust state machine implement and what methods do they require?",
+            ir,
+        );
+
+        assert_eq!(guarded.act, QueryAct::Describe);
+        assert_eq!(
+            guarded.retrieval_query.as_deref(),
+            Some(
+                "What traits does the Rust state machine implement and what methods do they require?"
+            )
+        );
+        assert!(
+            guarded
+                .literal_constraints
+                .iter()
+                .all(|literal| literal.text != "APP_DATABASE_URL" && literal.text != "AppConfig")
+        );
+    }
+
+    #[test]
+    fn current_question_ir_guard_preserves_short_elliptic_followup() {
+        let mut ir = sample_ir_with_act(QueryAct::Describe, 0.91, None);
+        ir.retrieval_query = Some("Rust state machine timeout behavior".to_string());
+
+        let guarded = super::guard_self_contained_question_ir("What about timeout?", ir);
+
+        assert_eq!(guarded.retrieval_query.as_deref(), Some("Rust state machine timeout behavior"));
+    }
+
+    #[test]
+    fn current_question_ir_guard_rejects_previous_turn_with_generic_overlap() {
+        let mut ir = sample_ir_with_act(QueryAct::Describe, 0.95, None);
+        ir.retrieval_query = Some(
+            "What are the valid task status transitions defined in the TypeScript GraphQL schema? Can a task go directly from BACKLOG to DONE?"
+                .to_string(),
+        );
+
+        let guarded = super::guard_self_contained_question_ir(
+            "How does the Python data pipeline implement the circuit breaker pattern? What states does it have and when does it open?",
+            ir,
+        );
+
+        assert_eq!(
+            guarded.retrieval_query.as_deref(),
+            Some(
+                "How does the Python data pipeline implement the circuit breaker pattern? What states does it have and when does it open?"
+            )
+        );
+    }
+
+    #[test]
+    fn current_question_ir_guard_trims_history_tail_even_when_focus_is_preserved() {
+        let mut ir = sample_ir_with_act(QueryAct::ConfigureHow, 0.92, None);
+        ir.target_types =
+            vec!["artifact".to_string(), "version".to_string(), "procedure".to_string()];
+        ir.target_entities = vec![
+            EntityMention { label: "Stale Subject".to_string(), role: EntityRole::Subject },
+            EntityMention {
+                label: "Stale Adjacent Subject".to_string(),
+                role: EntityRole::Subject,
+            },
+            EntityMention { label: "Sample Target".to_string(), role: EntityRole::Object },
+        ];
+        ir.literal_constraints = vec![LiteralSpan {
+            text: "/var/log/alpha/alpha-node/migrate.log".to_string(),
+            kind: LiteralKind::Path,
+        }];
+        ir.retrieval_query = Some(
+            "how to update Stale Subject Stale Adjacent Subject how to update Sample Target version?"
+                .to_string(),
+        );
+
+        let guarded =
+            super::guard_self_contained_question_ir("how to update Sample Target version?", ir);
+
+        assert_eq!(
+            guarded.retrieval_query.as_deref(),
+            Some("how to update Sample Target version?")
+        );
+        assert!(guarded.target_entities.iter().any(|entity| entity.label == "Sample Target"));
+        assert!(
+            guarded.target_entities.iter().all(|entity| entity.label != "Stale Subject"
+                && entity.label != "Stale Adjacent Subject")
+        );
+        assert!(guarded.literal_constraints.is_empty());
+    }
+
+    #[test]
+    fn current_question_ir_guard_prunes_stale_constraints_for_short_entity_followup() {
+        let mut ir = sample_ir_with_act(QueryAct::ConfigureHow, 0.92, None);
+        ir.target_types =
+            vec!["procedure".to_string(), "artifact".to_string(), "config_key".to_string()];
+        ir.target_entities = vec![
+            EntityMention { label: "Subject Alpha".to_string(), role: EntityRole::Subject },
+            EntityMention { label: "Subject Gamma".to_string(), role: EntityRole::Subject },
+        ];
+        ir.literal_constraints = vec![
+            LiteralSpan {
+                text: "subject-alpha-artifact".to_string(),
+                kind: LiteralKind::Identifier,
+            },
+            LiteralSpan { text: "/etc/subject-alpha.ini".to_string(), kind: LiteralKind::Path },
+        ];
+        ir.retrieval_query = Some("how to configure workflow adapter Gamma".to_string());
+
+        let guarded = super::guard_self_contained_question_ir("Gamma", ir);
+
+        assert_eq!(guarded.retrieval_query.as_deref(), Some("Gamma"));
+        assert_eq!(guarded.target_entities.len(), 1);
+        assert_eq!(guarded.target_entities[0].label, "Subject Gamma");
+        assert!(guarded.literal_constraints.is_empty());
+    }
+
+    #[test]
+    fn current_question_ir_guard_trims_technical_history_tail_for_short_entity_followup() {
+        let mut ir = sample_ir_with_act(QueryAct::ConfigureHow, 0.92, None);
+        ir.target_types =
+            vec!["procedure".to_string(), "artifact".to_string(), "config_key".to_string()];
+        ir.target_entities =
+            vec![EntityMention { label: "Subject Gamma".to_string(), role: EntityRole::Subject }];
+        ir.retrieval_query = Some(
+            "how to configure workflow adapter Subject Alpha subject-alpha-artifact /etc/subject-alpha.ini Gamma"
+                .to_string(),
+        );
+
+        let guarded = super::guard_self_contained_question_ir("Gamma", ir);
+
+        assert_eq!(guarded.retrieval_query.as_deref(), Some("Gamma"));
+        assert_eq!(guarded.target_entities.len(), 1);
+        assert_eq!(guarded.target_entities[0].label, "Subject Gamma");
+    }
+
+    #[test]
+    fn current_question_ir_guard_clears_history_only_constraints_for_self_contained_question() {
+        let mut ir = sample_ir_with_act(QueryAct::ConfigureHow, 0.94, None);
+        ir.target_types = vec!["concept".to_string()];
+        ir.target_entities = vec![
+            EntityMention { label: "Sample Target".to_string(), role: EntityRole::Subject },
+            EntityMention { label: "Alpha Worker".to_string(), role: EntityRole::Subject },
+        ];
+        ir.literal_constraints = vec![
+            LiteralSpan { text: "alpha-console".to_string(), kind: LiteralKind::Identifier },
+            LiteralSpan { text: "/etc/alpha/console.toml".to_string(), kind: LiteralKind::Path },
+        ];
+        ir.retrieval_query = Some("How to configure ABC?".to_string());
+
+        let guarded = super::guard_self_contained_question_ir("How to configure ABC?", ir);
+
+        assert_eq!(guarded.retrieval_query.as_deref(), Some("How to configure ABC?"));
+        assert!(guarded.target_entities.is_empty());
+        assert!(guarded.literal_constraints.is_empty());
+    }
+
+    #[test]
+    fn current_question_ir_guard_rejects_internal_history_query_block() {
+        let mut ir = sample_ir_with_act(QueryAct::Describe, 0.95, None);
+        ir.retrieval_query = Some(
+            "scope: Which systems in this corpus use PostgreSQL and how do they configure the connection?\n\
+entities: These, PostgreSQL, APP_DATABASE_URL, AppConfig\n\
+literal anchors: `APP_DATABASE_URL`, `AppConfig`\n\
+question: Compare the error handling patterns between the Rust state machine and the Python data pipeline. What error types does each define?"
+                .to_string(),
+        );
+
+        let guarded = super::guard_self_contained_question_ir(
+            "Compare the error handling patterns between the Rust state machine and the Python data pipeline. What error types does each define?",
+            ir,
+        );
+
+        assert_eq!(
+            guarded.retrieval_query.as_deref(),
+            Some(
+                "Compare the error handling patterns between the Rust state machine and the Python data pipeline. What error types does each define?"
+            )
+        );
+        assert!(
+            guarded
+                .literal_constraints
+                .iter()
+                .all(|literal| literal.text != "APP_DATABASE_URL" && literal.text != "AppConfig")
+        );
+    }
+
+    #[test]
+    fn current_question_ir_guard_keeps_typed_focus_when_retrieval_query_is_history_block() {
+        let mut ir = sample_ir_with_act(QueryAct::ConfigureHow, 0.93, None);
+        ir.target_types =
+            vec!["artifact".to_string(), "version".to_string(), "procedure".to_string()];
+        ir.target_entities = vec![EntityMention {
+            label: "Alpha Control Console".to_string(),
+            role: EntityRole::Subject,
+        }];
+        ir.literal_constraints = vec![LiteralSpan {
+            text: "/etc/alpha/worker.toml".to_string(),
+            kind: LiteralKind::Path,
+        }];
+        ir.retrieval_query = Some(
+            "scope: How does the previous workflow adapter store callbacks?\n\
+entities: Legacy Adapter, callbackToken, /etc/alpha/worker.toml\n\
+question: How do I update Alpha Control Console?"
+                .to_string(),
+        );
+
+        let guarded =
+            super::guard_self_contained_question_ir("How do I update Alpha Control Console?", ir);
+
+        assert_eq!(guarded.act, QueryAct::ConfigureHow);
+        assert_eq!(
+            guarded.retrieval_query.as_deref(),
+            Some("How do I update Alpha Control Console?")
+        );
+        assert!(guarded.target_types.iter().any(|target_type| target_type == "procedure"));
+        assert!(
+            guarded.target_entities.iter().any(|entity| entity.label == "Alpha Control Console")
+        );
+        assert!(guarded.literal_constraints.is_empty());
+        assert!(guarded.confidence > 0.6);
+    }
+
+    #[test]
+    fn current_question_ir_guard_extracts_current_question_from_effective_query_block() {
+        let mut ir = sample_ir_with_act(QueryAct::Describe, 0.95, None);
+        ir.retrieval_query = Some(
+            "scope: What are the valid task status transitions defined in the TypeScript GraphQL schema?\n\
+entities: BACKLOG, TODO, DONE\n\
+question: How does the Python data pipeline implement the circuit breaker pattern? What states does it have and when does it open?"
+                .to_string(),
+        );
+
+        let guarded = super::guard_self_contained_question_ir(
+            "scope: What are the valid task status transitions defined in the TypeScript GraphQL schema?\n\
+entities: BACKLOG, TODO, DONE\n\
+question: How does the Python data pipeline implement the circuit breaker pattern? What states does it have and when does it open?",
+            ir,
+        );
+
+        assert_eq!(
+            guarded.retrieval_query.as_deref(),
+            Some(
+                "How does the Python data pipeline implement the circuit breaker pattern? What states does it have and when does it open?"
+            )
+        );
+    }
+
+    #[test]
+    fn configure_how_ir_guard_keeps_metadata_only_targets_structural() {
+        let mut ir = sample_ir_with_act(QueryAct::ConfigureHow, 0.93, None);
+        ir.target_types = vec!["release".to_string(), "version".to_string()];
+        ir.retrieval_query = Some("How do I update Subject Alpha?".to_string());
+
+        let guarded = super::guard_self_contained_question_ir("How do I update Subject Alpha?", ir);
+
+        assert_eq!(guarded.act, QueryAct::ConfigureHow);
+        assert_eq!(guarded.retrieval_query.as_deref(), Some("How do I update Subject Alpha?"));
+        assert_eq!(guarded.target_types, vec!["release".to_string(), "version".to_string()]);
+        assert!(guarded.source_slice.is_none());
+    }
+
+    #[test]
+    fn configure_how_ir_guard_adds_document_to_procedure_revision_targets() {
+        let mut ir = sample_ir_with_act(QueryAct::ConfigureHow, 0.93, None);
+        ir.target_types = vec!["procedure".to_string(), "release".to_string()];
+        ir.retrieval_query = Some("How do I update Subject Alpha?".to_string());
+
+        let guarded = super::guard_self_contained_question_ir("How do I update Subject Alpha?", ir);
+
+        assert_eq!(
+            guarded.target_types,
+            vec!["procedure".to_string(), "release".to_string(), "document".to_string()]
+        );
+        assert!(guarded.source_slice.is_none());
+    }
+
+    #[test]
+    fn configure_how_ir_guard_adds_procedure_document_to_artifact_version_targets() {
+        let mut ir = sample_ir_with_act(QueryAct::ConfigureHow, 0.93, None);
+        ir.target_types = vec!["artifact".to_string(), "version".to_string()];
+        ir.retrieval_query = Some("How do I update Subject Alpha?".to_string());
+
+        let guarded = super::guard_self_contained_question_ir("How do I update Subject Alpha?", ir);
+
+        assert_eq!(
+            guarded.target_types,
+            vec![
+                "artifact".to_string(),
+                "version".to_string(),
+                "procedure".to_string(),
+                "document".to_string()
+            ]
+        );
+        assert!(guarded.source_slice.is_none());
+    }
+
+    #[test]
+    fn configure_how_ir_guard_keeps_setup_configuration_targets() {
+        let mut ir = sample_ir_with_act(QueryAct::ConfigureHow, 0.93, None);
+        ir.target_types = vec!["configuration_file".to_string(), "config_key".to_string()];
+        ir.retrieval_query = Some("How do I configure Subject Alpha?".to_string());
+
+        let guarded =
+            super::guard_self_contained_question_ir("How do I configure Subject Alpha?", ir);
+
+        assert_eq!(guarded.target_types, vec!["configuration_file", "config_key"]);
+        assert!(guarded.source_slice.is_none());
+    }
+
+    #[test]
+    fn source_slice_scope_guard_clears_history_subject_from_subjectless_inventory() {
+        let mut ir = sample_ir_with_act(QueryAct::Enumerate, 0.92, None);
+        ir.target_types = vec!["release".to_string(), "version".to_string()];
+        ir.target_entities = vec![EntityMention {
+            label: "Alpha Receipt Upload".to_string(),
+            role: EntityRole::Subject,
+        }];
+        ir.literal_constraints = vec![LiteralSpan {
+            text: "alphaReceiptUploadToken".to_string(),
+            kind: LiteralKind::Identifier,
+        }];
+        ir.retrieval_query = Some("Alpha Receipt Upload latest 10 releases".to_string());
+        ir.source_slice = Some(crate::domains::query_ir::SourceSliceSpec {
+            count: Some(10),
+            filter: crate::domains::query_ir::SourceSliceFilter::ReleaseMarker,
+            direction: crate::domains::query_ir::SourceSliceDirection::Tail,
+        });
+
+        let guarded =
+            super::guard_self_contained_question_ir("What is new in the latest 10 releases?", ir);
+
+        assert!(guarded.source_slice.is_some());
+        assert!(guarded.target_entities.is_empty());
+        assert!(guarded.literal_constraints.is_empty());
+        assert!(guarded.document_focus.is_none());
+        assert_eq!(
+            guarded.retrieval_query.as_deref(),
+            Some("What is new in the latest 10 releases?")
+        );
+    }
+
+    #[test]
+    fn source_slice_scope_guard_clears_short_history_subject_from_subjectless_inventory() {
+        let mut ir = sample_ir_with_act(QueryAct::Enumerate, 0.92, None);
+        ir.target_types = vec!["release".to_string(), "version".to_string()];
+        ir.target_entities =
+            vec![EntityMention { label: "AX".to_string(), role: EntityRole::Subject }];
+        ir.retrieval_query = Some("AX latest 10 releases".to_string());
+        ir.source_slice = Some(crate::domains::query_ir::SourceSliceSpec {
+            count: Some(10),
+            filter: crate::domains::query_ir::SourceSliceFilter::ReleaseMarker,
+            direction: crate::domains::query_ir::SourceSliceDirection::Tail,
+        });
+
+        let guarded =
+            super::guard_self_contained_question_ir("What is new in the latest 10 releases?", ir);
+
+        assert!(guarded.source_slice.is_some());
+        assert!(guarded.target_entities.is_empty());
+        assert_eq!(
+            guarded.retrieval_query.as_deref(),
+            Some("What is new in the latest 10 releases?")
+        );
+    }
+
+    #[test]
+    fn source_slice_scope_guard_keeps_explicit_short_inventory_subject() {
+        let mut ir = sample_ir_with_act(QueryAct::Enumerate, 0.92, None);
+        ir.target_types = vec!["release".to_string(), "version".to_string()];
+        ir.target_entities =
+            vec![EntityMention { label: "AX".to_string(), role: EntityRole::Subject }];
+        ir.retrieval_query = Some("AX latest 10 releases".to_string());
+        ir.source_slice = Some(crate::domains::query_ir::SourceSliceSpec {
+            count: Some(10),
+            filter: crate::domains::query_ir::SourceSliceFilter::ReleaseMarker,
+            direction: crate::domains::query_ir::SourceSliceDirection::Tail,
+        });
+
+        let guarded = super::guard_self_contained_question_ir(
+            "What is new in the latest 10 AX releases?",
+            ir,
+        );
+
+        assert_eq!(guarded.target_entities.len(), 1);
+        assert_eq!(guarded.target_entities[0].label, "AX");
+    }
+
+    #[test]
+    fn source_slice_scope_guard_keeps_explicit_inventory_subject() {
+        let mut ir = sample_ir_with_act(QueryAct::Enumerate, 0.92, None);
+        ir.target_types = vec!["release".to_string(), "version".to_string()];
+        ir.target_entities =
+            vec![EntityMention { label: "Alpha Gateway".to_string(), role: EntityRole::Subject }];
+        ir.retrieval_query = Some("Alpha Gateway latest 10 releases".to_string());
+        ir.source_slice = Some(crate::domains::query_ir::SourceSliceSpec {
+            count: Some(10),
+            filter: crate::domains::query_ir::SourceSliceFilter::ReleaseMarker,
+            direction: crate::domains::query_ir::SourceSliceDirection::Tail,
+        });
+
+        let guarded = super::guard_self_contained_question_ir(
+            "What is new in the latest 10 Alpha Gateway releases?",
+            ir,
+        );
+
+        assert_eq!(guarded.target_entities.len(), 1);
+        assert_eq!(guarded.target_entities[0].label, "Alpha Gateway");
+    }
+
+    #[test]
+    fn source_slice_guard_clears_ordinary_version_inventory_question() {
+        let mut ir = sample_ir_with_act(QueryAct::Enumerate, 0.95, None);
+        ir.target_types = vec!["document".to_string()];
+        ir.source_slice = Some(crate::domains::query_ir::SourceSliceSpec {
+            count: Some(10),
+            filter: crate::domains::query_ir::SourceSliceFilter::ReleaseMarker,
+            direction: crate::domains::query_ir::SourceSliceDirection::Tail,
+        });
+        ir.retrieval_query = Some("Which subjects mention version-shaped identifiers?".to_string());
+
+        let guarded = super::guard_self_contained_question_ir(
+            "Which subjects mention version-shaped identifiers?",
+            ir,
+        );
+
+        assert!(guarded.source_slice.is_none());
+    }
+
+    #[test]
+    fn exact_literal_postprocessor_adds_only_focus_aligned_missing_identifiers() {
+        let ir = sample_ir_with_act(QueryAct::Describe, 0.8, None);
+        let answer = super::append_missing_focus_aligned_exact_literals(
+            "The module defines concrete error types.".to_string(),
+            "What error types does the module define?",
+            &ir,
+            "pub enum OrderError { InvalidTransition } DATABASE_URL SAMPLE_LIMIT_REQUESTS",
+        );
+
+        assert!(answer.contains("OrderError"));
+        assert!(!answer.contains("DATABASE_URL"));
+        assert!(!answer.contains("SAMPLE_LIMIT_REQUESTS"));
+    }
+
+    #[test]
+    fn exact_literal_postprocessor_rejects_unrelated_context_identifiers() {
+        let ir = sample_ir_with_act(QueryAct::Compare, 0.8, None);
+        let answer = super::append_missing_focus_aligned_exact_literals(
+            "The service uses bearer authentication.".to_string(),
+            "Compare the authentication mechanisms and token format.",
+            &ir,
+            "Authorization: Bearer <token>\nOPERATOR_NAME=alpha\nPAYMENT_TIMEOUT_SECONDS=30",
+        );
+
+        assert!(!answer.contains("OPERATOR_NAME"));
+        assert!(!answer.contains("PAYMENT_TIMEOUT_SECONDS"));
+    }
+
+    #[test]
+    fn exact_literal_postprocessor_keeps_short_uppercase_focus_terms() {
+        let ir = sample_ir_with_act(QueryAct::Describe, 0.8, None);
+        let answer = super::append_missing_focus_aligned_exact_literals(
+            "The alarms include memory thresholds.".to_string(),
+            "What CloudWatch alarms cover CPU and memory thresholds?",
+            &ir,
+            "resource \"aws_cloudwatch_metric_alarm\" \"ecs_cpu_high\" { metric_name = \"CPUUtilization\" }",
+        );
+
+        assert!(answer.contains("CPUUtilization"));
+    }
+
+    #[test]
+    fn exact_literal_postprocessor_adds_focus_aligned_uppercase_config_literals() {
+        let ir = sample_ir_with_act(QueryAct::Describe, 0.8, None);
+        let answer = super::append_missing_focus_aligned_exact_literals(
+            "The limiter uses request and window fields.".to_string(),
+            "How is retry limiting configured with RETRY_LIMIT?",
+            &ir,
+            "The setting is controlled by RETRY_LIMIT_REQUESTS and RETRY_LIMIT_WINDOW_SECONDS. how... limiting. configuration.",
+        );
+
+        assert!(answer.contains("RETRY_LIMIT_REQUESTS"), "{answer}");
+        assert!(answer.contains("RETRY_LIMIT_WINDOW_SECONDS"), "{answer}");
+        assert!(!answer.contains("how..."), "{answer}");
+        assert!(!answer.contains("limiting."), "{answer}");
+        assert!(!answer.contains("configuration."), "{answer}");
+    }
+
+    #[test]
+    fn exact_literal_postprocessor_prefers_structural_focus_expansions() {
+        let ir = sample_ir_with_act(QueryAct::Describe, 0.8, None);
+        let answer = super::append_missing_focus_aligned_exact_literals(
+            "The setting uses request and window fields.".to_string(),
+            "Which retry limit configuration controls throttling?",
+            &ir,
+            "retry_limit_requests=100\nretry_limit_window_seconds=60\nApiError\ncomponent_id",
+        );
+
+        assert!(answer.contains("retry_limit_requests"), "{answer}");
+        assert!(answer.contains("retry_limit_window_seconds"), "{answer}");
+        assert!(!answer.contains("ApiError"), "{answer}");
+        assert!(!answer.contains("component_id"), "{answer}");
+    }
+
+    #[test]
+    fn exact_literal_postprocessor_recovers_exact_form_from_answer_identifier() {
+        let ir = sample_ir_with_act(QueryAct::Describe, 0.8, None);
+        let answer = super::append_missing_focus_aligned_exact_literals(
+            "The component uses SampleLimitRequests and SampleLimitWindowSeconds.".to_string(),
+            "Which controls are used by the component?",
+            &ir,
+            "SAMPLE_LIMIT_REQUESTS=100\nSAMPLE_LIMIT_WINDOW_SECONDS=60\nAPI.",
+        );
+
+        assert!(answer.contains("SAMPLE_LIMIT_REQUESTS"), "{answer}");
+        assert!(answer.contains("SAMPLE_LIMIT_WINDOW_SECONDS"), "{answer}");
+        assert!(!answer.contains("`API.`"), "{answer}");
+    }
+
+    #[test]
+    fn exact_literal_postprocessor_recovers_exact_form_from_field_comment_context() {
+        let ir = sample_ir_with_act(QueryAct::Compare, 0.8, None);
+        let answer = super::append_missing_focus_aligned_exact_literals(
+            "The component uses SampleLimitRequests and SampleLimitWindowSeconds.".to_string(),
+            "How do Alpha and Beta implement sample limiting? What configuration controls the limits?",
+            &ir,
+            concat!(
+                "// SAMPLE_LIMIT_REQUESTS - Max requests per window. Default: 100\n",
+                "SampleLimitRequests int\n",
+                "SampleLimitRequests: envInt(\"SAMPLE_LIMIT_REQUESTS\", 100)\n",
+                "// SAMPLE_LIMIT_WINDOW_SECONDS - Window duration in seconds. Default: 60\n",
+                "SampleLimitWindowSeconds int\n",
+                "SampleLimitWindowSeconds: envInt(\"SAMPLE_LIMIT_WINDOW_SECONDS\", 60)"
+            ),
+        );
+
+        assert!(answer.contains("SAMPLE_LIMIT_REQUESTS"), "{answer}");
+        assert!(answer.contains("SAMPLE_LIMIT_WINDOW_SECONDS"), "{answer}");
+    }
+
+    #[test]
+    fn exact_literal_postprocessor_recovers_exact_form_from_inflected_focus_terms() {
+        let ir = sample_ir_with_act(QueryAct::Compare, 0.8, None);
+        let answer = super::append_missing_focus_aligned_exact_literals(
+            "The component uses request and window fields.".to_string(),
+            "How do Alpha and Beta implement sample limiting? What controls the limits?",
+            &ir,
+            concat!(
+                "SampleLimitRequests int\n",
+                "SAMPLE_LIMIT_REQUESTS=100\n",
+                "SampleLimitWindowSeconds int\n",
+                "SAMPLE_LIMIT_WINDOW_SECONDS=60\n",
+                "UnrelatedController\n",
+                "UNRELATED_TIMEOUT_SECONDS=30"
+            ),
+        );
+
+        assert!(answer.contains("SAMPLE_LIMIT_REQUESTS"), "{answer}");
+        assert!(answer.contains("SAMPLE_LIMIT_WINDOW_SECONDS"), "{answer}");
+        assert!(!answer.contains("UNRELATED_TIMEOUT_SECONDS"), "{answer}");
+    }
+
+    #[test]
+    fn exact_literal_postprocessor_skips_path_literals_without_path_focus() {
+        let ir = sample_ir_with_act(QueryAct::Describe, 0.8, None);
+        let answer = super::append_missing_focus_aligned_exact_literals(
+            "`accounts` columns:\n- `email`: type `TEXT`".to_string(),
+            "What columns does the accounts table have?",
+            &ir,
+            "Endpoint /accounts lists account records. Table: accounts. Column: email.",
+        );
+
+        assert!(!answer.contains("`/accounts`"), "{answer}");
+    }
+
+    #[test]
+    fn exact_literal_postprocessor_skips_title_case_hyphen_labels() {
+        let ir = sample_ir_with_act(QueryAct::Describe, 0.8, None);
+        let answer = super::append_missing_focus_aligned_exact_literals(
+            "The document describes account columns.".to_string(),
+            "What columns does the account table have in the Example-Commerce schema?",
+            &ir,
+            "Example-Commerce Schema\nACCOUNT_ID\naccount table columns",
+        );
+
+        assert!(answer.contains("ACCOUNT_ID"), "{answer}");
+        assert!(!answer.contains("`Example-Commerce`"), "{answer}");
+    }
+
+    #[test]
+    fn appends_only_grounded_missing_target_entities() {
+        let mut ir = sample_ir_with_act(QueryAct::RetrieveValue, 0.9, None);
+        ir.target_entities = vec![
+            EntityMention { label: "Beacon Node".to_string(), role: EntityRole::Subject },
+            EntityMention { label: "Harbor Delta".to_string(), role: EntityRole::Object },
+            EntityMention { label: "Unseen Node".to_string(), role: EntityRole::Object },
+        ];
+
+        let answer = append_missing_grounded_requested_labels(
+            "The transition is Beacon Harbor Transition.".to_string(),
+            &ir,
+            "Which transition joins Beacon Node to Harbor Delta?",
+            "Beacon Node emits Beacon Harbor Transition. Harbor Delta receives it.",
+            &[],
+        );
+
+        assert!(answer.contains("Beacon Node"));
+        assert!(answer.contains("Harbor Delta"));
+        assert!(!answer.contains("Unseen Node"));
+    }
+
+    #[test]
+    fn appends_grounded_resolved_target_entities_not_literal_in_question() {
+        let mut ir = sample_ir_with_act(QueryAct::RetrieveValue, 0.9, None);
+        ir.target_entities = vec![
+            EntityMention { label: "Beacon Node".to_string(), role: EntityRole::Subject },
+            EntityMention { label: "Harbor Delta".to_string(), role: EntityRole::Object },
+        ];
+
+        let answer = append_missing_grounded_requested_labels(
+            "The transition is Beacon Harbor Transition.".to_string(),
+            &ir,
+            "Which transition joins these endpoints?",
+            "Beacon Node emits Beacon Harbor Transition. Harbor Delta receives it.",
+            &[],
+        );
+
+        assert!(answer.contains("Beacon Node"));
+        assert!(answer.contains("Harbor Delta"));
+    }
+
+    #[test]
+    fn appends_grounded_graph_entities_without_ir_targets() {
+        let mut ir = sample_ir_with_act(QueryAct::RetrieveValue, 0.9, None);
+        ir.target_entities.clear();
+        let graph_entities = vec![
+            RuntimeMatchedEntity {
+                node_id: Uuid::nil(),
+                label: "Beacon Node".to_string(),
+                node_type: "entity".to_string(),
+                summary: None,
+                score: Some(1.0),
+            },
+            RuntimeMatchedEntity {
+                node_id: Uuid::nil(),
+                label: "Harbor Delta".to_string(),
+                node_type: "entity".to_string(),
+                summary: None,
+                score: Some(1.0),
+            },
+            RuntimeMatchedEntity {
+                node_id: Uuid::nil(),
+                label: "Delta Archive".to_string(),
+                node_type: "entity".to_string(),
+                summary: None,
+                score: Some(1.0),
+            },
+        ];
+
+        let answer = append_missing_grounded_requested_labels(
+            "The transition is Beacon Harbor Transition.".to_string(),
+            &ir,
+            "Which transition joins Beacon Node to Harbor Delta, and which archive records it?",
+            "Beacon Node emits Beacon Harbor Transition. Harbor Delta receives it.",
+            &graph_entities,
+        );
+
+        assert!(answer.contains("Beacon Node"));
+        assert!(answer.contains("Harbor Delta"));
+        assert!(!answer.contains("Delta Archive"));
+    }
+
     fn sample_ir_with_two_target_entities(
         act: QueryAct,
         confidence: f32,
@@ -4233,8 +7144,8 @@ mod tests {
     ) -> QueryIR {
         let mut ir = sample_ir_with_act(act, confidence, needs_clarification);
         ir.target_entities = vec![
-            EntityMention { label: "Alpha Suite".to_string(), role: EntityRole::Subject },
-            EntityMention { label: "payments".to_string(), role: EntityRole::Object },
+            EntityMention { label: "Sample Subject".to_string(), role: EntityRole::Subject },
+            EntityMention { label: "workflows".to_string(), role: EntityRole::Object },
         ];
         ir
     }
@@ -4511,6 +7422,63 @@ mod tests {
     }
 
     #[test]
+    fn setup_configuration_builder_output_verifies_without_label_literals() {
+        let mut prepared = prepared_for_single_shot(sample_ir(0.8, None));
+        prepared.query_ir.target_types =
+            vec!["configuration_file".to_string(), "parameter".to_string()];
+        prepared.structured.context_chunks = vec![
+            setup_anchor_chunk(
+                Uuid::now_v7(),
+                "workflow module alpha guide",
+                "alpha-agent",
+                "/etc/alpha-agent.conf",
+            ),
+            setup_anchor_chunk(
+                Uuid::now_v7(),
+                "workflow module beta guide",
+                "beta-agent",
+                "/etc/beta-agent.conf",
+            ),
+        ];
+
+        let chunks = selected_runtime_answer_chunks(&prepared);
+        let grounding =
+            selected_runtime_grounding_evidence(&prepared, AssistantGroundingEvidence::default());
+        let answer = super::super::answer::build_setup_configuration_anchor_answer(
+            "How do I configure the workflow module?",
+            &prepared.query_ir,
+            &prepared.structured.context_chunks,
+        )
+        .expect("setup configuration answer");
+
+        let verification = verify_answer_against_canonical_evidence(
+            "How do I configure the workflow module?",
+            &answer,
+            &prepared.structured.intent_profile,
+            &super::super::CanonicalAnswerEvidence {
+                bundle: None,
+                chunk_rows: Vec::new(),
+                structured_blocks: Vec::new(),
+                technical_facts: Vec::new(),
+            },
+            &chunks,
+            &prepared.answer_context,
+            &grounding,
+        );
+
+        let ru_labels = crate::services::query::i18n::RU_DETERMINISTIC_ANSWER_LABELS;
+        assert!(answer.contains(&format!("**{}:**", ru_labels.variants)), "{answer}");
+        assert!(!answer.contains("`setup_variants`:"));
+        assert!(!answer.contains("`source`:"));
+        assert_eq!(verification.state, QueryVerificationState::Verified);
+        assert!(
+            verification.warnings.iter().all(|warning| warning.code != "unsupported_literal"),
+            "{:?}",
+            verification.warnings
+        );
+    }
+
+    #[test]
     fn latest_version_enumeration_uses_single_shot_when_context_is_prepared() {
         let mut ir = sample_ir_with_act(QueryAct::Enumerate, 0.8, None);
         ir.target_types = vec!["version".to_string()];
@@ -4531,12 +7499,12 @@ mod tests {
         let mut ir = sample_ir_with_act(QueryAct::ConfigureHow, 0.8, None);
         ir.target_types =
             vec!["configuration_file".to_string(), "config_key".to_string(), "concept".to_string()];
-        ir.document_focus = Some(DocumentHint { hint: "Provider Alpha setup".to_string() });
+        ir.document_focus = Some(DocumentHint { hint: "Subject Alpha setup".to_string() });
         ir.target_entities =
-            vec![EntityMention { label: "Provider Alpha".to_string(), role: EntityRole::Subject }];
+            vec![EntityMention { label: "Subject Alpha".to_string(), role: EntityRole::Subject }];
         let mut prepared = prepared_for_single_shot(ir);
         prepared.answer_context = r#"
-[EVIDENCE_CHUNK document="target"] Provider Alpha setup installs `alpha-connector`.
+[EVIDENCE_CHUNK document="target"] Subject Alpha setup installs `alpha-connector`.
 Use `/opt/alpha/modules/connector/connector.conf`.
 [Main]
 endpointUrl = https://alpha.example/api
@@ -4553,11 +7521,74 @@ visible = true
     }
 
     #[test]
+    fn versioned_update_procedure_waits_for_deterministic_answer_before_single_shot() {
+        let mut ir = sample_ir_with_act(QueryAct::ConfigureHow, 0.95, None);
+        ir.target_types = vec!["artifact".to_string(), "procedure".to_string()];
+        ir.target_entities =
+            vec![EntityMention { label: "Sample Target".to_string(), role: EntityRole::Subject }];
+        ir.retrieval_query = Some("how to update Sample Target?".to_string());
+        let mut prepared = prepared_for_single_shot(ir);
+        prepared.structured.context_chunks = vec![procedure_chunk(
+            "Sample Target runbook",
+            "Sample Target update:\n\
+             1. Stop Alpha subject workers.\n\
+             2. Install alpha-subject-2.0.0.\n\
+             3. Start Alpha subject workers.",
+        )];
+
+        assert!(
+            !super::should_use_single_shot_answer("how to update Sample Target?", &prepared, None,),
+            "command-bearing versioned procedures should be answered by the deterministic path instead of the initial single-shot fast path"
+        );
+    }
+
+    #[test]
+    fn update_procedure_builder_uses_selected_runtime_chunks() {
+        let mut ir = sample_ir_with_act(QueryAct::ConfigureHow, 0.95, None);
+        ir.target_types = vec!["artifact".to_string(), "procedure".to_string()];
+        ir.target_entities =
+            vec![EntityMention { label: "Sample Target".to_string(), role: EntityRole::Subject }];
+        ir.retrieval_query = Some("how to update Sample Target?".to_string());
+        let mut prepared = prepared_for_single_shot(ir);
+        prepared.structured.context_chunks =
+            vec![procedure_chunk("Sample Target overview", "Sample Target overview only.")];
+        let mut selected_unit = procedure_chunk(
+            "Sample Target update",
+            "Sample Target update:\n\
+             1. stop sample workers\n\
+             2. run sample updater\n\
+             3. start sample workers",
+        );
+        selected_unit.chunk_kind = Some(super::super::SOURCE_UNIT_CHUNK_KIND.to_string());
+        prepared.structured.ordered_source_units = vec![selected_unit];
+
+        assert!(
+            super::super::answer::build_update_procedure_sequence_answer(
+                "how to update Sample Target?",
+                &prepared.query_ir,
+                &prepared.structured.context_chunks,
+            )
+            .is_none()
+        );
+        let selected_chunks = selected_runtime_answer_chunks(&prepared);
+        let answer = super::super::answer::build_update_procedure_sequence_answer(
+            "how to update Sample Target?",
+            &prepared.query_ir,
+            &selected_chunks,
+        )
+        .expect("update procedure answer from selected chunks");
+
+        assert!(answer.contains("run sample updater"), "{answer}");
+        assert!(answer.contains("start sample workers"), "{answer}");
+        assert!(!answer.contains("overview only"), "{answer}");
+    }
+
+    #[test]
     fn low_confidence_structural_configuration_inventory_waits_for_canonical_preflight() {
         let mut ir = sample_ir_with_act(QueryAct::Describe, 0.25, None);
         ir.target_types.clear();
         ir.target_entities =
-            vec![EntityMention { label: "Provider Alpha".to_string(), role: EntityRole::Subject }];
+            vec![EntityMention { label: "Subject Alpha".to_string(), role: EntityRole::Subject }];
         ir.literal_constraints =
             vec![LiteralSpan { text: "alphaMode".to_string(), kind: LiteralKind::Identifier }];
         ir.temporal_constraints.clear();
@@ -4566,7 +7597,7 @@ visible = true
         ir.conversation_refs.clear();
         let mut prepared = prepared_for_single_shot(ir);
         prepared.answer_context = r#"
-[EVIDENCE_CHUNK document="target"] Provider Alpha setup installs `alpha-connector`.
+[EVIDENCE_CHUNK document="target"] Subject Alpha setup installs `alpha-connector`.
 Use `/opt/alpha/modules/connector/connector.conf`.
 [Main]
 endpointUrl = https://alpha.example/api
@@ -4587,7 +7618,7 @@ visible = true
         let mut ir = sample_ir_with_act(QueryAct::Describe, 0.25, None);
         ir.target_types.clear();
         ir.target_entities =
-            vec![EntityMention { label: "Provider Alpha".to_string(), role: EntityRole::Subject }];
+            vec![EntityMention { label: "Subject Alpha".to_string(), role: EntityRole::Subject }];
         ir.literal_constraints.clear();
         ir.temporal_constraints.clear();
         ir.document_focus = None;
@@ -4595,7 +7626,7 @@ visible = true
         ir.conversation_refs.clear();
         let mut prepared = prepared_for_single_shot(ir);
         prepared.answer_context = r#"
-[EVIDENCE_CHUNK document="target"] Provider Alpha configuration fragment.
+[EVIDENCE_CHUNK document="target"] Subject Alpha configuration fragment.
 [Main]
 endpointUrl
 partnerId
@@ -4617,12 +7648,12 @@ visible
         let mut ir = sample_ir_with_act(QueryAct::ConfigureHow, 0.8, None);
         ir.target_types =
             vec!["configuration_file".to_string(), "config_key".to_string(), "concept".to_string()];
-        ir.document_focus = Some(DocumentHint { hint: "Provider Alpha setup".to_string() });
+        ir.document_focus = Some(DocumentHint { hint: "Subject Alpha setup".to_string() });
         ir.target_entities =
-            vec![EntityMention { label: "Provider Alpha".to_string(), role: EntityRole::Subject }];
+            vec![EntityMention { label: "Subject Alpha".to_string(), role: EntityRole::Subject }];
         let mut prepared = prepared_for_single_shot(ir);
         prepared.answer_context = r#"
-[EVIDENCE_CHUNK document="target"] Provider Alpha setup uses `/opt/alpha/display/display.ini`.
+[EVIDENCE_CHUNK document="target"] Subject Alpha setup uses `/opt/alpha/display/display.ini`.
 [UI.ScanPanel.qrCode]
 visible = true
 "#
@@ -4634,6 +7665,30 @@ visible = true
                 &prepared.answer_context,
             ),
             "a focused single-setting fragment is not a broader configuration inventory"
+        );
+    }
+
+    #[test]
+    fn structural_literal_comparison_with_exact_literals_waits_for_preflight() {
+        let mut ir = sample_ir_with_act(QueryAct::Compare, 0.93, None);
+        ir.retrieval_query =
+            Some("Alpha unit and Beta unit SAMPLE_LIMIT threshold controls".to_string());
+        ir.comparison = Some(crate::domains::query_ir::ComparisonSpec {
+            a: Some("Alpha unit".to_string()),
+            b: Some("Beta unit".to_string()),
+            dimension: "SAMPLE_LIMIT threshold controls".to_string(),
+        });
+        let mut prepared = prepared_for_single_shot(ir);
+        prepared.answer_context = r#"
+[EVIDENCE_CHUNK document="alpha.txt"] Alpha unit applies SAMPLE_LIMIT_REQUESTS before admitting a record.
+
+[EVIDENCE_CHUNK document="beta.txt"] Beta unit applies SAMPLE_LIMIT_WINDOW_SECONDS before expiring a record.
+"#
+        .to_string();
+
+        assert!(
+            !super::should_use_single_shot_answer("q", &prepared, None),
+            "cross-surface comparisons with exact structural literals need canonical preflight"
         );
     }
 
@@ -4761,6 +7816,19 @@ visible = true
     }
 
     #[test]
+    fn internal_history_markers_are_never_acceptable_answer_text() {
+        assert!(super::answer_contains_internal_history_marker(
+            "Prior assistant compact literal memory. Use anchors only.\nliterals: `alpha`"
+        ));
+        assert!(super::answer_contains_internal_history_marker(
+            "Prior assistant pinned literal anchors. `alpha`"
+        ));
+        assert!(!super::answer_contains_internal_history_marker(
+            "Use `alpha` as the source-backed value."
+        ));
+    }
+
+    #[test]
     fn low_confidence_unfocused_answer_requires_structural_anchor_coverage() {
         let mut ir = sample_ir_with_act(QueryAct::Describe, 0.25, None);
         ir.target_types.clear();
@@ -4830,6 +7898,32 @@ EVIDENCE_CHUNK blocks
     }
 
     #[test]
+    fn structural_anchor_coverage_ignores_evidence_chunk_metadata_literals() {
+        let mut ir = sample_ir_with_act(QueryAct::Describe, 0.25, None);
+        ir.target_types.clear();
+        ir.target_entities.clear();
+        ir.literal_constraints.clear();
+        ir.temporal_constraints.clear();
+        ir.document_focus = None;
+        ir.source_slice = None;
+        ir.conversation_refs.clear();
+        let context = r#"
+EVIDENCE_CHUNK blocks
+- [EVIDENCE_CHUNK document="FocusTokenA D0" chunk_index=0] This paragraph has no quoted value.
+- [EVIDENCE_CHUNK document="FocusTokenA D1" chunk_index=1] This paragraph also has no config value.
+- [EVIDENCE_CHUNK document="FocusTokenA D2" chunk_index=2] This paragraph is descriptive only.
+- [EVIDENCE_CHUNK document="FocusTokenA D3" chunk_index=3] This paragraph is still descriptive.
+"#;
+
+        assert!(!super::answer_omits_structural_context_coverage(
+            "FocusTokenA requested state coverage",
+            "Use the available fallback from the selected source.",
+            &ir,
+            context,
+        ));
+    }
+
+    #[test]
     fn structural_anchor_coverage_uses_token_boundaries_for_single_token_anchors() {
         let answer_tokens =
             crate::services::query::text_match::normalized_alnum_tokens("A10x B20x", 1);
@@ -4862,6 +7956,7 @@ EVIDENCE_CHUNK blocks
 [graph-evidence target="FocusTokenA P0"] Choose "A0", then press "B1".
 [graph-evidence target="FocusTokenA P1"] If state is "C2", use "D3".
 "#,
+            &serde_json::json!({}),
             &mut verification,
         );
 
@@ -4870,18 +7965,53 @@ EVIDENCE_CHUNK blocks
     }
 
     #[test]
+    fn structural_anchor_coverage_preserves_deterministic_anchor_inventory_answers() {
+        let mut ir = sample_ir_with_act(QueryAct::ConfigureHow, 0.8, None);
+        ir.target_types =
+            vec!["package".to_string(), "configuration_file".to_string(), "config_key".to_string()];
+        let mut verification = RuntimeAnswerVerification {
+            state: QueryVerificationState::Verified,
+            warnings: Vec::new(),
+            unsupported_literals: Vec::new(),
+        };
+        let ru_labels = crate::services::query::i18n::RU_DETERMINISTIC_ANSWER_LABELS;
+        let answer = format!(
+            "**{}:**\n\n**{}:** **Subject Alpha setup**\n- **{}:** `/opt/alpha/connector.conf`\n- **{}:** `endpointUrl = https://example.invalid`",
+            ru_labels.variants, ru_labels.source, ru_labels.path, ru_labels.parameter
+        );
+
+        super::apply_structural_coverage_warning(
+            "Subject Alpha configuration coverage",
+            &answer,
+            &ir,
+            r#"
+[graph-evidence target="Subject Alpha P0"] Choose "A0", then press "B1".
+[graph-evidence target="Subject Alpha P1"] If state is "C2", use "D3".
+"#,
+            &serde_json::json!({
+                "deterministic": true,
+                "answer_kind": super::AnswerKind::SetupConfigurationAnchor.as_str(),
+            }),
+            &mut verification,
+        );
+
+        assert_eq!(verification.state, QueryVerificationState::Verified);
+        assert!(verification.warnings.is_empty());
+    }
+
+    #[test]
     fn configure_setup_answer_requires_focused_parameter_coverage() {
         let mut ir = sample_ir_with_act(QueryAct::ConfigureHow, 0.8, None);
         ir.target_types =
             vec!["package".to_string(), "configuration_file".to_string(), "config_key".to_string()];
         ir.target_entities =
-            vec![EntityMention { label: "Provider Alpha".to_string(), role: EntityRole::Subject }];
+            vec![EntityMention { label: "Subject Alpha".to_string(), role: EntityRole::Subject }];
         let context = r#"
 Exact technical literals
-- Document: `Provider Alpha setup`
+- Document: `Subject Alpha setup`
   Paths: `/opt/alpha/modules/connector/connector.conf`
   Parameters: `endpointUrl`, `partnerId`, `secretKey`, `retryTimeout`, `sendDetails`
-- Document: `Provider Beta setup`
+- Document: `Subject Beta setup`
   Parameters: `otherEndpoint`, `otherSecret`, `otherTimeout`, `otherFlag`
 "#;
 
@@ -4921,10 +8051,10 @@ Exact technical literals
         ir.target_types =
             vec!["package".to_string(), "configuration_file".to_string(), "config_key".to_string()];
         ir.target_entities =
-            vec![EntityMention { label: "Provider Alpha".to_string(), role: EntityRole::Subject }];
+            vec![EntityMention { label: "Subject Alpha".to_string(), role: EntityRole::Subject }];
         let context = r#"
 Exact technical literals
-- Document: `Provider Alpha setup`
+- Document: `Subject Alpha setup`
   Paths: `/opt/alpha/modules/connector/connector.conf`
   Sections:
     - `[CFG]`
@@ -4952,10 +8082,10 @@ Exact technical literals
         ir.target_types =
             vec!["package".to_string(), "configuration_file".to_string(), "config_key".to_string()];
         ir.target_entities =
-            vec![EntityMention { label: "Provider Alpha".to_string(), role: EntityRole::Subject }];
+            vec![EntityMention { label: "Subject Alpha".to_string(), role: EntityRole::Subject }];
         let context = r#"
 Exact technical literals
-- Document: `Provider Alpha setup`
+- Document: `Subject Alpha setup`
   Paths:
     - `/opt/alpha/modules/connector/connector.conf`
   Parameters:
@@ -4965,8 +8095,8 @@ Exact technical literals
     - `retryInterval`
 
 Prepared segments
-- metadata_block > Provider Alpha setup: Table Summary | Sheet: Module setup | Column: Name | Value Kind: categorical | Most Frequent Values: retryTimeout; sendDetails; auditMode
-- paragraph > Provider Alpha setup: The `sendDetails` flag controls whether payment details are forwarded.
+- metadata_block > Subject Alpha setup: Table Summary | Sheet: Module setup | Column: Name | Value Kind: categorical | Most Frequent Values: retryTimeout; sendDetails; auditMode
+- paragraph > Subject Alpha setup: The `sendDetails` flag controls whether workflow details are forwarded.
 "#;
 
         let expected = super::collect_focused_context_parameter_literals(context, &ir, 32);
@@ -4993,10 +8123,10 @@ Prepared segments
         ir.target_types =
             vec!["package".to_string(), "configuration_file".to_string(), "config_key".to_string()];
         ir.target_entities =
-            vec![EntityMention { label: "Provider Alpha".to_string(), role: EntityRole::Subject }];
+            vec![EntityMention { label: "Subject Alpha".to_string(), role: EntityRole::Subject }];
         let context = r#"
 Exact technical literals
-- Document: `Provider Alpha setup`
+- Document: `Subject Alpha setup`
   Parameters:
     - `endpointUrl`
     - `partnerId`
@@ -5004,8 +8134,8 @@ Exact technical literals
     - `retryTimeout`
 
 Prepared segments
-- paragraph > Provider Alpha setup: Operators may inspect `LOG_LEVEL` while diagnosing a setup issue.
-- list_item > Provider Alpha setup: Keep `backupBeforeChange` enabled for maintenance notes.
+- paragraph > Subject Alpha setup: Operators may inspect `LOG_LEVEL` while diagnosing a setup issue.
+- list_item > Subject Alpha setup: Keep `backupBeforeChange` enabled for maintenance notes.
 "#;
 
         let expected = super::collect_focused_context_parameter_literals(context, &ir, 32);
@@ -5025,7 +8155,7 @@ Prepared segments
         ir.target_types = vec!["configuration_file".to_string(), "config_key".to_string()];
         let context = r#"
 EVIDENCE_CHUNK blocks
-- [EVIDENCE_CHUNK document="Provider Alpha setup" chunk_index=2] Example:
+- [EVIDENCE_CHUNK document="Subject Alpha setup" chunk_index=2] Example:
 [Main]
 alphaFlag = true
 [UI.Component]
@@ -5051,7 +8181,7 @@ visible = true
         ir.target_entities.clear();
         let context = r#"
 EVIDENCE_CHUNK blocks
-- [EVIDENCE_CHUNK document="Provider Alpha setup" chunk_index=2] Example:
+- [EVIDENCE_CHUNK document="Subject Alpha setup" chunk_index=2] Example:
 [Main]
 alphaFlag = true
 [Check]
@@ -5083,7 +8213,8 @@ printSlip = false
         ];
         let mut prepared = prepared_for_single_shot(ir);
         prepared.answer_context =
-            "[EVIDENCE_CHUNK document=\"nearby\"] Alpha Suite setup uses `/srv/scans`.".to_string();
+            "[EVIDENCE_CHUNK document=\"nearby\"] Sample Subject setup uses `/srv/scans`."
+                .to_string();
 
         assert!(
             !super::should_use_single_shot_answer(
@@ -5107,7 +8238,7 @@ printSlip = false
             EntityMention { label: "RareProtocol daemon".to_string(), role: EntityRole::Object },
         ];
         let unrelated_context =
-            "[EVIDENCE_CHUNK document=\"nearby\"] Alpha Suite setup uses `/srv/scans`.";
+            "[EVIDENCE_CHUNK document=\"nearby\"] Sample Subject setup uses `/srv/scans`.";
         let focused_context =
             "[EVIDENCE_CHUNK document=\"target\"] RareProtocol daemon setup uses `/srv/scans`.";
 
@@ -5182,12 +8313,12 @@ printSlip = false
     fn compare_uses_single_shot_when_prepared_context_covers_operands() {
         let mut ir = sample_ir_with_act(QueryAct::Compare, 0.8, None);
         ir.comparison = Some(ComparisonSpec {
-            a: Some("Alpha Suite".to_string()),
+            a: Some("Sample Subject".to_string()),
             b: Some("Beta Suite".to_string()),
             dimension: "capability".to_string(),
         });
         let mut prepared = prepared_for_single_shot(ir);
-        prepared.answer_context = "[EVIDENCE_CHUNK scope=excerpt coverage=sampled document=\"alpha\"] Alpha Suite stores audit events.\n\
+        prepared.answer_context = "[EVIDENCE_CHUNK scope=excerpt coverage=sampled document=\"alpha\"] Sample Subject stores audit events.\n\
 [EVIDENCE_CHUNK scope=excerpt coverage=sampled document=\"beta\"] Beta Suite stores billing events."
             .to_string();
 
@@ -5201,13 +8332,13 @@ printSlip = false
     fn compare_uses_single_shot_when_prepared_context_partially_covers_operands() {
         let mut ir = sample_ir_with_act(QueryAct::Compare, 0.8, None);
         ir.comparison = Some(ComparisonSpec {
-            a: Some("Alpha Suite".to_string()),
+            a: Some("Sample Subject".to_string()),
             b: Some("Beta Suite".to_string()),
             dimension: "capability".to_string(),
         });
         let mut prepared = prepared_for_single_shot(ir);
         prepared.answer_context =
-            "[EVIDENCE_CHUNK scope=excerpt coverage=sampled document=\"alpha\"] Alpha Suite stores audit events."
+            "[EVIDENCE_CHUNK scope=excerpt coverage=sampled document=\"alpha\"] Sample Subject stores audit events."
                 .to_string();
 
         assert!(
@@ -5220,7 +8351,7 @@ printSlip = false
     fn compare_skips_initial_fast_path_when_no_operand_is_covered() {
         let mut ir = sample_ir_with_act(QueryAct::Compare, 0.8, None);
         ir.comparison = Some(ComparisonSpec {
-            a: Some("Alpha Suite".to_string()),
+            a: Some("Sample Subject".to_string()),
             b: Some("Beta Suite".to_string()),
             dimension: "capability".to_string(),
         });
@@ -5239,14 +8370,14 @@ printSlip = false
     fn comparison_coverage_metadata_does_not_count_as_grounding_evidence() {
         let mut ir = sample_ir_with_act(QueryAct::Compare, 0.8, None);
         ir.comparison = Some(ComparisonSpec {
-            a: Some("Alpha Suite".to_string()),
+            a: Some("Sample Subject".to_string()),
             b: Some("Beta Suite".to_string()),
             dimension: "capability".to_string(),
         });
         let coverage = super::compare_operands_covered_by_context(
             &ir,
             "COMPARISON_COVERAGE status=partial\n\
-- covered_operand: Alpha Suite\n\
+- covered_operand: Sample Subject\n\
 - uncovered_operand: Beta Suite",
         );
 
@@ -5259,7 +8390,7 @@ printSlip = false
     #[test]
     fn disposition_keeps_confident_ir_on_answer_path() {
         let disposition = classify_answer_disposition_from_groups(
-            "how do i configure target payments?",
+            "how do i configure target workflows?",
             &sample_ir(0.9, None),
             &[],
             &sample_groups(),
@@ -5271,7 +8402,7 @@ printSlip = false
     #[test]
     fn disposition_keeps_low_confidence_ir_on_answer_path_without_explicit_reason() {
         let disposition = classify_answer_disposition_from_groups(
-            "how do i configure target payments?",
+            "how do i configure target workflows?",
             &sample_ir(0.4, None),
             &[],
             &sample_groups(),
@@ -5329,7 +8460,7 @@ printSlip = false
     #[test]
     fn disposition_can_clarify_when_compiler_explicitly_requests_it() {
         let disposition = classify_answer_disposition_from_groups(
-            "how do i configure provider payments?",
+            "how do i configure provider workflows?",
             &sample_ir(0.4, Some(ClarificationReason::MultipleInterpretations)),
             &[],
             &sample_groups(),
@@ -5356,7 +8487,7 @@ printSlip = false
         ir.target_types = vec!["endpoint".to_string()];
 
         let disposition = classify_answer_disposition_from_groups(
-            "which provider endpoint handles payment module status?",
+            "which provider endpoint handles workflow module status?",
             &ir,
             &[],
             &sample_groups(),
@@ -5378,7 +8509,7 @@ printSlip = false
         ir.target_types = vec!["attribute".to_string()];
 
         let disposition = classify_answer_disposition_from_groups(
-            "which provider configuration owns the payment module state?",
+            "which provider configuration owns the workflow module state?",
             &ir,
             &[],
             &sample_groups(),
@@ -5396,10 +8527,10 @@ printSlip = false
         // logical prefix and differ only in the trailing filename qualifier.
         // They must collapse to one dedup key so they cannot pad a clarify
         // menu with near-duplicate "variants".
-        let a = clarify_variant_dedup_key("Payment setup: screen-a.png");
-        let b = clarify_variant_dedup_key("Payment setup: screen-b.png");
+        let a = clarify_variant_dedup_key("Workflow setup: screen-a.png");
+        let b = clarify_variant_dedup_key("Workflow setup: screen-b.png");
         assert_eq!(a, b);
-        assert_eq!(a.as_deref(), Some("payment setup"));
+        assert_eq!(a.as_deref(), Some("workflow setup"));
     }
 
     #[test]
@@ -5417,8 +8548,8 @@ printSlip = false
         // ends with a filename-shaped word but has no `:` separator is prose,
         // not an attachment qualifier, and is preserved verbatim.
         assert_eq!(
-            clarify_variant_dedup_key("Provider Alpha configuration"),
-            Some("provider alpha configuration".to_string())
+            clarify_variant_dedup_key("Subject Alpha configuration"),
+            Some("subject alpha configuration".to_string())
         );
         assert_eq!(
             clarify_variant_dedup_key("How to edit config.ini"),
@@ -5427,18 +8558,41 @@ printSlip = false
     }
 
     #[test]
+    fn query_specific_variants_keep_all_matching_provider_titles() {
+        let documents = vec![
+            retrieved_doc("Subject Subject Alpha", "alpha"),
+            retrieved_doc("Subject Subject Beta", "beta"),
+            retrieved_doc("Subject Subject Gamma", "gamma"),
+            retrieved_doc("Subject Provider Delta", "delta"),
+        ];
+
+        let variants =
+            extract_query_specific_variants("how to configure Subject", &documents, &[], &[]);
+
+        assert_eq!(
+            variants,
+            vec![
+                "Subject Subject Alpha",
+                "Subject Subject Beta",
+                "Subject Subject Gamma",
+                "Subject Provider Delta"
+            ]
+        );
+    }
+
+    #[test]
     fn extract_variants_collapses_same_page_image_attachments() {
         // Five same-page image attachments share a title prefix; after the
         // structural collapse only one logical variant survives.
         let documents = vec![
-            retrieved_doc("Payment setup: a.png", "page#1"),
-            retrieved_doc("Payment setup: b.png", "page#1"),
-            retrieved_doc("Payment setup: c.png", "page#1"),
-            retrieved_doc("Payment setup: d.png", "page#1"),
-            retrieved_doc("Payment setup: e.png", "page#1"),
+            retrieved_doc("Workflow setup: a.png", "page#1"),
+            retrieved_doc("Workflow setup: b.png", "page#1"),
+            retrieved_doc("Workflow setup: c.png", "page#1"),
+            retrieved_doc("Workflow setup: d.png", "page#1"),
+            retrieved_doc("Workflow setup: e.png", "page#1"),
         ];
 
-        let variants = extract_query_specific_variants("payment setup", &documents, &[], &[]);
+        let variants = extract_query_specific_variants("workflow setup", &documents, &[], &[]);
 
         assert!(
             variants.len() <= 1,
@@ -5457,7 +8611,7 @@ printSlip = false
                 id: format!("document:{index}"),
                 kind: GroupedReferenceKind::Document,
                 rank: index + 1,
-                title: format!("Payment setup: attachment-{index}.png"),
+                title: format!("Workflow setup: attachment-{index}.png"),
                 excerpt: None,
                 evidence_count: 2,
                 support_ids: vec![format!("chunk:{index}")],
@@ -5465,7 +8619,7 @@ printSlip = false
             .collect::<Vec<_>>();
 
         let disposition = classify_answer_disposition_from_groups(
-            "payment setup",
+            "workflow setup",
             &sample_ir_with_act(QueryAct::ConfigureHow, 0.3, None),
             &[],
             &groups,
@@ -5484,7 +8638,7 @@ printSlip = false
                 id: "document:1".to_string(),
                 kind: GroupedReferenceKind::Document,
                 rank: 1,
-                title: "TargetName Provider Alpha Manual".to_string(),
+                title: "TargetName Subject Alpha Manual".to_string(),
                 excerpt: None,
                 evidence_count: 9,
                 support_ids: vec!["chunk:1".to_string()],
@@ -5493,7 +8647,7 @@ printSlip = false
                 id: "document:2".to_string(),
                 kind: GroupedReferenceKind::Document,
                 rank: 2,
-                title: "TargetName Provider Beta Manual".to_string(),
+                title: "TargetName Subject Beta Manual".to_string(),
                 excerpt: None,
                 evidence_count: 2,
                 support_ids: vec!["chunk:2".to_string()],
@@ -5523,13 +8677,13 @@ printSlip = false
     }
 
     #[test]
-    fn disposition_answers_with_dominant_topic_match_for_checkout_query() {
+    fn disposition_answers_with_dominant_topic_match_for_rollout_query() {
         let groups = vec![
             GroupedReference {
                 id: "document:1".to_string(),
                 kind: GroupedReferenceKind::Document,
                 rank: 1,
-                title: "checkout_runtime_contract.md".to_string(),
+                title: "rollout_runtime_contract.md".to_string(),
                 excerpt: None,
                 evidence_count: 2,
                 support_ids: vec!["chunk:1".to_string()],
@@ -5555,7 +8709,7 @@ printSlip = false
         ];
 
         let disposition = classify_answer_disposition_from_groups(
-            "Which endpoint in checkout runtime returns current server info?",
+            "Which endpoint in rollout runtime returns current server info?",
             &sample_ir(0.4, Some(ClarificationReason::AmbiguousTooShort)),
             &[],
             &groups,
@@ -5563,7 +8717,7 @@ printSlip = false
 
         assert!(
             matches!(disposition, AnswerDisposition::Answer),
-            "query-word-dominant checkout intent should answer directly over broad evidence counts"
+            "query-word-dominant rollout intent should answer directly over broad evidence counts"
         );
     }
 
@@ -5672,7 +8826,7 @@ printSlip = false
                 id: "document:1".to_string(),
                 kind: GroupedReferenceKind::Document,
                 rank: 1,
-                title: "TargetName Provider Alpha Manual".to_string(),
+                title: "TargetName Subject Alpha Manual".to_string(),
                 excerpt: None,
                 evidence_count: 8,
                 support_ids: vec!["chunk:1".to_string()],
@@ -5681,7 +8835,7 @@ printSlip = false
                 id: "document:2".to_string(),
                 kind: GroupedReferenceKind::Document,
                 rank: 2,
-                title: "TargetName Provider Beta Manual".to_string(),
+                title: "TargetName Subject Beta Manual".to_string(),
                 excerpt: None,
                 evidence_count: 7,
                 support_ids: vec!["chunk:2".to_string()],
@@ -5709,8 +8863,8 @@ printSlip = false
                 assert_eq!(
                     variants,
                     vec![
-                        "TargetName Provider Alpha Manual".to_string(),
-                        "TargetName Provider Beta Manual".to_string()
+                        "TargetName Subject Alpha Manual".to_string(),
+                        "TargetName Subject Beta Manual".to_string()
                     ]
                 );
             }
@@ -5727,7 +8881,7 @@ printSlip = false
                 id: "document:1".to_string(),
                 kind: GroupedReferenceKind::Document,
                 rank: 1,
-                title: "TargetName Provider Alpha Manual".to_string(),
+                title: "TargetName Subject Alpha Manual".to_string(),
                 excerpt: None,
                 evidence_count: 2,
                 support_ids: vec!["chunk:1".to_string()],
@@ -5736,7 +8890,7 @@ printSlip = false
                 id: "document:2".to_string(),
                 kind: GroupedReferenceKind::Document,
                 rank: 2,
-                title: "TargetName Provider Beta Manual".to_string(),
+                title: "TargetName Subject Beta Manual".to_string(),
                 excerpt: None,
                 evidence_count: 1,
                 support_ids: vec!["chunk:2".to_string()],
@@ -5764,8 +8918,8 @@ printSlip = false
                 assert_eq!(
                     variants,
                     vec![
-                        "TargetName Provider Alpha Manual".to_string(),
-                        "TargetName Provider Beta Manual".to_string()
+                        "TargetName Subject Alpha Manual".to_string(),
+                        "TargetName Subject Beta Manual".to_string()
                     ]
                 );
             }
@@ -5808,7 +8962,7 @@ printSlip = false
                 id: "document:1".to_string(),
                 kind: GroupedReferenceKind::Document,
                 rank: 1,
-                title: "PaymentLink Provider Alpha Manual".to_string(),
+                title: "WorkflowLink Subject Alpha Manual".to_string(),
                 excerpt: None,
                 evidence_count: 3,
                 support_ids: vec!["chunk:1".to_string()],
@@ -5817,7 +8971,7 @@ printSlip = false
                 id: "document:2".to_string(),
                 kind: GroupedReferenceKind::Document,
                 rank: 2,
-                title: "PaymentLink Provider Beta Manual".to_string(),
+                title: "WorkflowLink Subject Beta Manual".to_string(),
                 excerpt: None,
                 evidence_count: 3,
                 support_ids: vec!["chunk:2".to_string()],
@@ -5826,7 +8980,7 @@ printSlip = false
                 id: "document:3".to_string(),
                 kind: GroupedReferenceKind::Document,
                 rank: 3,
-                title: "PaymentLink Provider Gamma Manual".to_string(),
+                title: "WorkflowLink Subject Gamma Manual".to_string(),
                 excerpt: None,
                 evidence_count: 2,
                 support_ids: vec!["chunk:3".to_string()],
@@ -5834,7 +8988,7 @@ printSlip = false
         ];
 
         let disposition = classify_answer_disposition_from_groups(
-            "how configure paymentlink?",
+            "how configure workflowlink?",
             &sample_ir(0.6, None),
             &[],
             &groups,
@@ -5845,9 +8999,9 @@ printSlip = false
                 assert_eq!(
                     variants,
                     vec![
-                        "PaymentLink Provider Alpha Manual".to_string(),
-                        "PaymentLink Provider Beta Manual".to_string(),
-                        "PaymentLink Provider Gamma Manual".to_string(),
+                        "WorkflowLink Subject Alpha Manual".to_string(),
+                        "WorkflowLink Subject Beta Manual".to_string(),
+                        "WorkflowLink Subject Gamma Manual".to_string(),
                     ]
                 );
             }
@@ -5864,7 +9018,7 @@ printSlip = false
                 id: "document:1".to_string(),
                 kind: GroupedReferenceKind::Document,
                 rank: 1,
-                title: "PaymentLink Provider Alpha Manual".to_string(),
+                title: "WorkflowLink Subject Alpha Manual".to_string(),
                 excerpt: None,
                 evidence_count: 3,
                 support_ids: vec!["chunk:1".to_string()],
@@ -5873,7 +9027,7 @@ printSlip = false
                 id: "document:2".to_string(),
                 kind: GroupedReferenceKind::Document,
                 rank: 2,
-                title: "PaymentLink Provider Beta Manual".to_string(),
+                title: "WorkflowLink Subject Beta Manual".to_string(),
                 excerpt: None,
                 evidence_count: 3,
                 support_ids: vec!["chunk:2".to_string()],
@@ -5882,7 +9036,7 @@ printSlip = false
                 id: "document:3".to_string(),
                 kind: GroupedReferenceKind::Document,
                 rank: 3,
-                title: "PaymentLink Provider Gamma Manual".to_string(),
+                title: "WorkflowLink Subject Gamma Manual".to_string(),
                 excerpt: None,
                 evidence_count: 2,
                 support_ids: vec!["chunk:3".to_string()],
@@ -5890,7 +9044,7 @@ printSlip = false
         ];
 
         let disposition = classify_answer_disposition_from_groups(
-            "how should operators configure paymentlink provider routing before checkout?",
+            "how should operators configure workflowlink provider routing before rollout?",
             &sample_ir(0.6, None),
             &[],
             &groups,
@@ -5909,7 +9063,7 @@ printSlip = false
                 id: "document:1".to_string(),
                 kind: GroupedReferenceKind::Document,
                 rank: 1,
-                title: "PaymentLink Provider Alpha Manual".to_string(),
+                title: "WorkflowLink Subject Alpha Manual".to_string(),
                 excerpt: None,
                 evidence_count: 3,
                 support_ids: vec!["chunk:1".to_string()],
@@ -5918,7 +9072,7 @@ printSlip = false
                 id: "document:2".to_string(),
                 kind: GroupedReferenceKind::Document,
                 rank: 2,
-                title: "PaymentLink Provider Beta Manual".to_string(),
+                title: "WorkflowLink Subject Beta Manual".to_string(),
                 excerpt: None,
                 evidence_count: 3,
                 support_ids: vec!["chunk:2".to_string()],
@@ -5927,7 +9081,7 @@ printSlip = false
                 id: "document:3".to_string(),
                 kind: GroupedReferenceKind::Document,
                 rank: 3,
-                title: "PaymentLink Provider Gamma Manual".to_string(),
+                title: "WorkflowLink Subject Gamma Manual".to_string(),
                 excerpt: None,
                 evidence_count: 2,
                 support_ids: vec!["chunk:3".to_string()],
@@ -5935,7 +9089,7 @@ printSlip = false
         ];
 
         let disposition = classify_answer_disposition_from_groups(
-            "paymentlink platform",
+            "workflowlink platform",
             &sample_ir_with_two_target_entities(QueryAct::RetrieveValue, 0.6, None),
             &[],
             &groups,
@@ -6009,7 +9163,7 @@ printSlip = false
                 id: "document:2".to_string(),
                 kind: GroupedReferenceKind::Document,
                 rank: 2,
-                title: "PaymentLink Provider Alpha Manual".to_string(),
+                title: "WorkflowLink Subject Alpha Manual".to_string(),
                 excerpt: None,
                 evidence_count: 3,
                 support_ids: vec!["chunk:2".to_string()],
@@ -6027,7 +9181,7 @@ printSlip = false
                 id: "document:4".to_string(),
                 kind: GroupedReferenceKind::Document,
                 rank: 4,
-                title: "PaymentLink Provider Beta Manual".to_string(),
+                title: "WorkflowLink Subject Beta Manual".to_string(),
                 excerpt: None,
                 evidence_count: 2,
                 support_ids: vec!["chunk:4".to_string()],
@@ -6035,7 +9189,7 @@ printSlip = false
         ];
 
         let disposition = classify_answer_disposition_from_groups(
-            "how configure paymentlink?",
+            "how configure workflowlink?",
             &sample_ir(0.4, Some(ClarificationReason::MultipleInterpretations)),
             &[],
             &groups,
@@ -6046,8 +9200,8 @@ printSlip = false
                 assert_eq!(
                     variants,
                     vec![
-                        "PaymentLink Provider Alpha Manual".to_string(),
-                        "PaymentLink Provider Beta Manual".to_string(),
+                        "WorkflowLink Subject Alpha Manual".to_string(),
+                        "WorkflowLink Subject Beta Manual".to_string(),
                     ]
                 );
             }
@@ -6064,7 +9218,7 @@ printSlip = false
                 id: "document:1".to_string(),
                 kind: GroupedReferenceKind::Document,
                 rank: 1,
-                title: "Platform Pay Provider Alpha Manual".to_string(),
+                title: "Platform Pay Subject Alpha Manual".to_string(),
                 excerpt: None,
                 evidence_count: 3,
                 support_ids: vec!["chunk:1".to_string()],
@@ -6082,7 +9236,7 @@ printSlip = false
                 id: "document:3".to_string(),
                 kind: GroupedReferenceKind::Document,
                 rank: 3,
-                title: "Platform Pay Provider Beta Manual".to_string(),
+                title: "Platform Pay Subject Beta Manual".to_string(),
                 excerpt: None,
                 evidence_count: 2,
                 support_ids: vec!["chunk:3".to_string()],
@@ -6105,8 +9259,8 @@ printSlip = false
                 assert_eq!(
                     variants,
                     vec![
-                        "Platform Pay Provider Alpha Manual".to_string(),
-                        "Platform Pay Provider Beta Manual".to_string(),
+                        "Platform Pay Subject Alpha Manual".to_string(),
+                        "Platform Pay Subject Beta Manual".to_string(),
                     ]
                 );
             }
@@ -6149,19 +9303,19 @@ printSlip = false
         ];
         let retrieved_documents = vec![
             crate::services::query::execution::types::RuntimeRetrievedDocumentBrief {
-                title: "PaymentLink Provider Alpha Manual".to_string(),
+                title: "WorkflowLink Subject Alpha Manual".to_string(),
                 preview_excerpt: String::new(),
                 document_hint: None,
             },
             crate::services::query::execution::types::RuntimeRetrievedDocumentBrief {
-                title: "PaymentLink Provider Beta Manual".to_string(),
+                title: "WorkflowLink Subject Beta Manual".to_string(),
                 preview_excerpt: String::new(),
                 document_hint: None,
             },
         ];
 
         let disposition = classify_answer_disposition_from_groups(
-            "how configure paymentlink?",
+            "how configure workflowlink?",
             &sample_ir(0.4, Some(ClarificationReason::MultipleInterpretations)),
             &retrieved_documents,
             &groups,
@@ -6172,8 +9326,8 @@ printSlip = false
                 assert_eq!(
                     variants,
                     vec![
-                        "PaymentLink Provider Alpha Manual".to_string(),
-                        "PaymentLink Provider Beta Manual".to_string(),
+                        "WorkflowLink Subject Alpha Manual".to_string(),
+                        "WorkflowLink Subject Beta Manual".to_string(),
                     ]
                 );
             }
@@ -6190,7 +9344,7 @@ printSlip = false
                 id: "document:1".to_string(),
                 kind: GroupedReferenceKind::Document,
                 rank: 1,
-                title: "PaymentLink Provider Alpha Manual".to_string(),
+                title: "WorkflowLink Subject Alpha Manual".to_string(),
                 excerpt: None,
                 evidence_count: 6,
                 support_ids: vec!["chunk:1".to_string()],
@@ -6199,21 +9353,21 @@ printSlip = false
                 id: "document:2".to_string(),
                 kind: GroupedReferenceKind::Document,
                 rank: 2,
-                title: "PaymentLink Provider Beta Manual".to_string(),
+                title: "WorkflowLink Subject Beta Manual".to_string(),
                 excerpt: None,
                 evidence_count: 2,
                 support_ids: vec!["chunk:2".to_string()],
             },
         ];
         let context_titles = vec![
-            "PaymentLink Provider Alpha Manual".to_string(),
-            "PaymentLink Provider Beta Manual".to_string(),
-            "PaymentLink Provider Gamma Manual".to_string(),
-            "PaymentLink Provider Delta Manual".to_string(),
+            "WorkflowLink Subject Alpha Manual".to_string(),
+            "WorkflowLink Subject Beta Manual".to_string(),
+            "WorkflowLink Subject Gamma Manual".to_string(),
+            "WorkflowLink Provider Delta Manual".to_string(),
         ];
 
         let disposition = classify_answer_disposition_from_evidence(
-            "how configure paymentlink?",
+            "how configure workflowlink?",
             &sample_ir(0.4, Some(ClarificationReason::MultipleInterpretations)),
             &[],
             &context_titles,
@@ -6281,7 +9435,7 @@ printSlip = false
                 id: "document:1".to_string(),
                 kind: GroupedReferenceKind::Document,
                 rank: 1,
-                title: "TargetName Payment Connector Manual".to_string(),
+                title: "TargetName Workflow Connector Manual".to_string(),
                 excerpt: None,
                 evidence_count: 3,
                 support_ids: vec!["chunk:1".to_string()],
@@ -6468,7 +9622,7 @@ printSlip = false
                 id: "document:1".to_string(),
                 kind: GroupedReferenceKind::Document,
                 rank: 1,
-                title: "TargetName Provider Alpha Manual".to_string(),
+                title: "TargetName Subject Alpha Manual".to_string(),
                 excerpt: None,
                 evidence_count: 3,
                 support_ids: vec!["chunk:1".to_string()],
@@ -6486,7 +9640,7 @@ printSlip = false
                 id: "document:3".to_string(),
                 kind: GroupedReferenceKind::Document,
                 rank: 3,
-                title: "TargetName Provider Beta Manual".to_string(),
+                title: "TargetName Subject Beta Manual".to_string(),
                 excerpt: None,
                 evidence_count: 3,
                 support_ids: vec!["chunk:3".to_string()],
@@ -6505,8 +9659,8 @@ printSlip = false
                 assert_eq!(
                     variants,
                     vec![
-                        "TargetName Provider Alpha Manual".to_string(),
-                        "TargetName Provider Beta Manual".to_string(),
+                        "TargetName Subject Alpha Manual".to_string(),
+                        "TargetName Subject Beta Manual".to_string(),
                     ]
                 );
             }
@@ -6523,7 +9677,7 @@ printSlip = false
     #[test]
     fn subject_guard_falls_back_when_rewrite_drops_the_scope_subject() {
         let question =
-            "scope: Alpha Suite update procedure\nquestion: give the detailed instruction";
+            "scope: Sample Subject update procedure\nquestion: give the detailed instruction";
         // Compiler rewrite kept only the refinement — zero scope tokens.
         let resolved = "detailed instruction steps";
         assert_eq!(guarded_followup_retrieval_question(resolved, question), question);
@@ -6532,22 +9686,22 @@ printSlip = false
     #[test]
     fn subject_guard_trusts_rewrite_that_retains_a_subject_token() {
         let question =
-            "scope: Alpha Suite update procedure\nquestion: give the detailed instruction";
-        let resolved = "Alpha Suite detailed update instruction";
+            "scope: Sample Subject update procedure\nquestion: give the detailed instruction";
+        let resolved = "Sample Subject detailed update instruction";
         assert_eq!(guarded_followup_retrieval_question(resolved, question), resolved);
     }
 
     #[test]
     fn subject_guard_ignores_plain_unscoped_questions() {
-        let question = "how to configure Alpha Suite exports?";
-        let resolved = "Alpha Suite export configuration";
+        let question = "how to configure Sample Subject exports?";
+        let resolved = "Sample Subject export configuration";
         assert_eq!(guarded_followup_retrieval_question(resolved, question), resolved);
     }
 
     #[test]
     fn subject_guard_passes_through_identity_resolution() {
         let question =
-            "scope: Alpha Suite update procedure\nquestion: give the detailed instruction";
+            "scope: Sample Subject update procedure\nquestion: give the detailed instruction";
         assert_eq!(guarded_followup_retrieval_question(question, question), question);
     }
 
@@ -6576,7 +9730,7 @@ printSlip = false
     fn release_clarify_gate_skips_when_query_names_a_subject() {
         let mut ir = release_inventory_ir();
         ir.target_entities =
-            vec![EntityMention { label: "Alpha Suite".to_string(), role: EntityRole::Subject }];
+            vec![EntityMention { label: "Sample Subject".to_string(), role: EntityRole::Subject }];
         assert!(!subjectless_release_inventory(&ir, false));
     }
 
@@ -6632,5 +9786,161 @@ printSlip = false
         let mut ir = sample_ir_with_act(QueryAct::Describe, 0.2, None);
         ir.target_entities = Vec::new();
         assert!(!subjectless_release_inventory(&ir, false));
+    }
+
+    // ---------------------------------------------------------------------------
+    // RuntimeClarification builder unit tests
+    // ---------------------------------------------------------------------------
+
+    use super::{
+        ReleaseEvidenceEntity, RuntimeClarification, disposition_clarification,
+        release_clarification,
+    };
+
+    #[test]
+    fn disposition_clarification_emits_candidates_for_each_variant() {
+        let question = "Which component do you mean?";
+        let variants = vec!["Sample Subject".to_string(), "Subject Beta".to_string()];
+        let clar = disposition_clarification(question, &variants);
+
+        assert!(clar.required);
+        assert_eq!(clar.question.as_deref(), Some(question));
+        assert_eq!(clar.answer_candidates.len(), 2);
+
+        let first = &clar.answer_candidates[0];
+        assert_eq!(first.label, "Sample Subject");
+        assert_eq!(first.kind, "document");
+        assert!(first.confidence.is_none());
+        assert!(first.provenance.entity_id.is_none());
+        assert!(first.provenance.document_id.is_none());
+        assert!(first.provenance.chunk_id.is_none());
+    }
+
+    #[test]
+    fn disposition_clarification_empty_variants_gives_no_candidates() {
+        let clar = disposition_clarification("Which one?", &[]);
+        assert!(clar.required);
+        assert!(clar.answer_candidates.is_empty());
+    }
+
+    #[test]
+    fn release_clarification_carries_entity_provenance() {
+        let entity_id_a = Uuid::new_v4();
+        let entity_id_b = Uuid::new_v4();
+        let entities = vec![
+            ReleaseEvidenceEntity {
+                node_id: entity_id_a,
+                label: "Adapter Alpha".to_string(),
+                node_type: "service".to_string(),
+            },
+            ReleaseEvidenceEntity {
+                node_id: entity_id_b,
+                label: "Connector Beta".to_string(),
+                node_type: "component".to_string(),
+            },
+        ];
+        let question = "Which release are you asking about?";
+        let clar = release_clarification(question, &entities);
+
+        assert!(clar.required);
+        assert_eq!(clar.question.as_deref(), Some(question));
+        assert_eq!(clar.answer_candidates.len(), 2);
+
+        let first = &clar.answer_candidates[0];
+        assert_eq!(first.label, "Adapter Alpha");
+        assert_eq!(first.kind, "service");
+        assert!(first.confidence.is_none());
+        assert_eq!(first.provenance.entity_id, Some(entity_id_a));
+        assert!(first.provenance.document_id.is_none());
+
+        let second = &clar.answer_candidates[1];
+        assert_eq!(second.kind, "component");
+        assert_eq!(second.provenance.entity_id, Some(entity_id_b));
+    }
+
+    #[test]
+    fn structural_direct_answer_candidates_are_emitted_without_clarification() {
+        let document_id_a = Uuid::new_v4();
+        let document_id_b = Uuid::new_v4();
+        let chunks = vec![
+            setup_anchor_chunk(
+                document_id_a,
+                "Subject Subject Alpha",
+                "alpha-subject",
+                "/opt/subject/alpha.ini",
+            ),
+            setup_anchor_chunk(
+                document_id_b,
+                "Subject Subject Beta",
+                "beta-subject",
+                "/opt/subject/beta.ini",
+            ),
+        ];
+        let clar = structural_direct_answer_candidates(
+            &sample_ir_with_act(QueryAct::ConfigureHow, 0.9, None),
+            &chunks,
+        );
+
+        assert!(!clar.required);
+        assert!(clar.question.is_none());
+        assert_eq!(clar.answer_candidates.len(), 2);
+        assert_eq!(clar.answer_candidates[0].kind, "document");
+        assert_eq!(clar.answer_candidates[0].provenance.document_id, Some(document_id_a));
+        assert!(clar.answer_candidates[0].provenance.chunk_id.is_some());
+        assert_eq!(clar.answer_candidates[1].provenance.document_id, Some(document_id_b));
+    }
+
+    #[test]
+    fn unambiguous_path_clarification_is_not_required() {
+        // Represent the non-clarify path: a caller that constructs default
+        // RuntimeClarification (as answer_pipeline does for all non-clarify
+        // outcomes).
+        let clar = RuntimeClarification::default();
+        assert!(!clar.required);
+        assert!(clar.question.is_none());
+        assert!(clar.answer_candidates.is_empty());
+    }
+
+    // Serde round-trips for the contract types.
+    #[test]
+    fn assistant_clarification_serde_roundtrip_empty() {
+        use ironrag_contracts::assistant::AssistantClarification;
+        let value = AssistantClarification::default();
+        let json = serde_json::to_string(&value).expect("serialize");
+        let back: AssistantClarification = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(value, back);
+        // required=false, no question, empty candidates — the field must be
+        // present in JSON but compact (skip_serializing_if on inner options).
+        assert!(json.contains("\"required\":false"));
+        assert!(!json.contains("\"question\""));
+    }
+
+    #[test]
+    fn assistant_clarification_serde_roundtrip_with_candidates() {
+        use ironrag_contracts::assistant::{
+            AssistantAnswerCandidate, AssistantAnswerCandidateProvenance, AssistantClarification,
+        };
+        let entity_id = Uuid::new_v4();
+        let value = AssistantClarification {
+            required: true,
+            question: Some("Which module?".to_string()),
+            answer_candidates: vec![AssistantAnswerCandidate {
+                label: "Synthetic Alpha".to_string(),
+                kind: "service".to_string(),
+                confidence: Some(0.9),
+                provenance: AssistantAnswerCandidateProvenance {
+                    entity_id: Some(entity_id),
+                    document_id: None,
+                    chunk_id: None,
+                },
+            }],
+        };
+        let json = serde_json::to_string(&value).expect("serialize");
+        let back: AssistantClarification = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(value, back);
+        assert!(json.contains("\"required\":true"));
+        assert!(json.contains("\"question\""));
+        assert!(json.contains("\"answerCandidates\""));
+        assert!(json.contains("\"confidence\":0.9"));
     }
 }

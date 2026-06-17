@@ -717,6 +717,7 @@ fn normalize_compiled_ir(
 ) -> QueryIR {
     repair_target_entity_labels(question, history, &mut ir);
     repair_history_backed_elliptic_ref(question, history, &mut ir);
+    repair_history_injected_raw_question_comparison(question, history, &mut ir);
     normalize_latest_version_source_slice(&mut ir);
     normalize_source_slice_filter(&mut ir);
     normalize_structural_configuration_request(question, &mut ir);
@@ -759,6 +760,85 @@ fn normalize_compiled_ir(
         }
     }
     ir
+}
+
+fn repair_history_injected_raw_question_comparison(
+    question: &str,
+    history: &[CompileHistoryTurn],
+    ir: &mut QueryIR,
+) {
+    if history.is_empty() || !matches!(ir.act, QueryAct::Compare) {
+        return;
+    }
+    let Some(comparison) = ir.comparison.as_ref() else {
+        return;
+    };
+    let current_question = current_question_segment(question);
+    let Some((raw_current_side, history_side)) =
+        comparison_raw_current_and_history_sides(current_question, history, comparison)
+    else {
+        return;
+    };
+
+    tracing::info!(
+        target: "ironrag::query_compile",
+        question_len = current_question.len(),
+        raw_current_side_len = raw_current_side.chars().count(),
+        history_side_len = history_side.chars().count(),
+        history_turn_count = history.len(),
+        "query compile repaired history-injected raw-question comparison"
+    );
+    ir.act = QueryAct::Describe;
+    ir.comparison = None;
+    ir.conversation_refs.clear();
+    if ir.needs_clarification.as_ref().is_some_and(|clarification| {
+        matches!(clarification.reason, ClarificationReason::AnaphoraUnresolved)
+    }) {
+        ir.needs_clarification = None;
+    }
+}
+
+fn comparison_raw_current_and_history_sides<'a>(
+    current_question: &str,
+    history: &[CompileHistoryTurn],
+    comparison: &'a crate::domains::query_ir::ComparisonSpec,
+) -> Option<(&'a str, &'a str)> {
+    let a = comparison.a.as_deref()?.trim();
+    let b = comparison.b.as_deref()?.trim();
+    if comparison_side_is_raw_current_question(current_question, a)
+        && comparison_side_is_history_only(current_question, history, b)
+    {
+        return Some((a, b));
+    }
+    if comparison_side_is_raw_current_question(current_question, b)
+        && comparison_side_is_history_only(current_question, history, a)
+    {
+        return Some((b, a));
+    }
+    None
+}
+
+fn comparison_side_is_raw_current_question(current_question: &str, side: &str) -> bool {
+    let current_tokens = normalized_repair_tokens(current_question);
+    let side_tokens = normalized_repair_tokens(side);
+    if current_tokens.len() < 4 || side_tokens.len() < 4 {
+        return false;
+    }
+    let ratio = side_tokens.len() as f32 / current_tokens.len() as f32;
+    ratio >= 0.65
+        && (contains_label_token_sequence(current_question, side)
+            || contains_label_token_sequence(side, current_question))
+}
+
+fn comparison_side_is_history_only(
+    current_question: &str,
+    history: &[CompileHistoryTurn],
+    side: &str,
+) -> bool {
+    if side.trim().is_empty() || contains_label_token_sequence(current_question, side) {
+        return false;
+    }
+    history.iter().any(|turn| contains_label_token_sequence(&turn.content, side))
 }
 
 fn normalize_latest_version_source_slice(ir: &mut QueryIR) {
@@ -1445,11 +1525,11 @@ user-assistant turns, not to positions, ranges, neighboring units, or anchors in
 documents being searched. `act = follow_up` is typical when the question cannot stand on its own.\n\
 6. `target_types` are canonical ontology tags. Use built-in tags exactly as written when they fit: \
 endpoint, url, path, wsdl, base_url, port, parameter, http_method, protocol, config_key, \
-configuration_file, filesystem_path, software_module, package, error_code, env_var, version, release, \
+configuration_file, filesystem_path, artifact, package, error_code, env_var, version, release, \
 procedure, metric, table_row, table_summary, table_average, table_frequency, document, \
 primary_heading, secondary_heading, formats_under_test, concept, relationship. For graph facts, \
 use runtime node-type tags: person, organization, location, event, artifact, natural, process, \
-concept, attribute, entity, software_module. \
+concept, attribute, entity. \
 Endpoint-like tags (`endpoint`, `url`, `path`, `wsdl`, `base_url`) identify exact network or \
 interface identifiers only; do not use them for timing, severity, status, count, metric, or \
 outcome attributes unless the user asks for the identifier itself. You may invent a new singular \
@@ -1474,17 +1554,19 @@ current question points back to them, but they are not source evidence by themse
 10. `language` must use one of the schema enum values; prefer `auto` when the signal is mixed or \
 unclear.\n\
 11. `retrieval_query` is a self-contained search string a fresh retriever could run with no access \
-to the prior turns. When the current question already stands on its own, copy it verbatim. When it \
-depends on prior turns — a bare selection, a pronoun, an omitted subject — fold the subject and \
-scope recovered FROM THE PRIOR TURNS into one standalone phrasing while keeping the user's intent \
-and granularity. Compose it ONLY from terms that literally appear in the current question or the \
-prior turns; never invent a subject the conversation did not mention and never add words from \
-outside the transcript. Preserve the exact writing system and spelling of every carried-over term; \
-never translate, transliterate, or substitute look-alike glyphs. Mechanically: if the prior turns \
-established a subject token S and the current turn supplies only a refinement token R, then \
-`retrieval_query` is a standalone phrasing whose tokens are drawn verbatim from {S, R} in the \
-transcript; if the current turn already carries its own subject token, `retrieval_query` equals the \
-current question verbatim.\n\
+to the prior turns. It is a SEARCH SURFACE, not a canonical label: keep every target entity, \
+document hint, and literal exactly as specified above. You may append only short generic \
+action/facet words that are already represented by the typed IR fields or visible in the user \
+turns. Do not translate, transliterate, normalize the writing system, infer domain vocabulary, or \
+invent a new subject, product, provider, version, endpoint, path, or answer value. When the \
+question depends on prior turns — a bare selection, a \
+pronoun, an omitted subject — fold the subject and scope recovered FROM THE PRIOR TURNS into one \
+standalone phrasing while preserving the exact spelling of every carried-over subject or literal. \
+Mechanically: if the prior turns established a subject token S and the current turn supplies only a \
+refinement token R, `retrieval_query` is a standalone phrasing containing S and R verbatim, plus \
+optional source-preserving action/facet terms; if the current turn already carries its own subject \
+token, `retrieval_query` starts from the current question and may add only source-preserving \
+action/facet terms.\n\
 \n\
 Output nothing but the JSON object described by the schema.";
 
@@ -1527,7 +1609,7 @@ fn preview(text: &str, max: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domains::query_ir::QueryLanguage;
+    use crate::domains::query_ir::{ComparisonSpec, EntityMention, QueryLanguage};
     use crate::integrations::llm::{
         ChatRequest, ChatResponse, EmbeddingBatchRequest, EmbeddingBatchResponse, EmbeddingRequest,
         EmbeddingResponse, VisionRequest, VisionResponse,
@@ -2219,6 +2301,82 @@ mod tests {
 
         assert_eq!(outcome.ir.act, QueryAct::FollowUp);
         assert_eq!(outcome.ir.conversation_refs.len(), 1);
+    }
+
+    #[test]
+    fn normalization_drops_history_injected_raw_question_comparison() {
+        let current = "Which entries does Alpha Catalog include, and how are messages signed?";
+        let prior =
+            "Which status values are valid for Alpha Catalog, and which code means rejected?";
+        let ir = QueryIR {
+            act: QueryAct::Compare,
+            scope: QueryScope::SingleDocument,
+            language: QueryLanguage::En,
+            target_types: vec!["document".to_string(), "concept".to_string()],
+            target_entities: vec![EntityMention {
+                label: "Alpha Catalog".to_string(),
+                role: EntityRole::Subject,
+            }],
+            literal_constraints: Vec::new(),
+            temporal_constraints: Vec::new(),
+            comparison: Some(ComparisonSpec {
+                a: Some(current.to_string()),
+                b: Some(prior.to_string()),
+                dimension: "catalog entries versus status values".to_string(),
+            }),
+            document_focus: None,
+            conversation_refs: Vec::new(),
+            needs_clarification: None,
+            source_slice: None,
+            retrieval_query: Some(current.to_string()),
+            confidence: 0.8,
+        };
+        let normalized = normalize_compiled_ir(
+            current,
+            &[CompileHistoryTurn { role: "user".to_string(), content: prior.to_string() }],
+            ir,
+        );
+
+        assert_eq!(normalized.act, QueryAct::Describe);
+        assert!(normalized.comparison.is_none());
+        assert!(normalized.conversation_refs.is_empty());
+    }
+
+    #[test]
+    fn normalization_preserves_real_history_backed_comparison() {
+        let current = "How does Beta mode compare to it?";
+        let prior = "Summarize Alpha mode.";
+        let ir = QueryIR {
+            act: QueryAct::Compare,
+            scope: QueryScope::SingleDocument,
+            language: QueryLanguage::En,
+            target_types: vec!["attribute".to_string()],
+            target_entities: vec![EntityMention {
+                label: "Beta mode".to_string(),
+                role: EntityRole::Subject,
+            }],
+            literal_constraints: Vec::new(),
+            temporal_constraints: Vec::new(),
+            comparison: Some(ComparisonSpec {
+                a: Some("Alpha mode".to_string()),
+                b: Some("Beta mode".to_string()),
+                dimension: "mode behavior".to_string(),
+            }),
+            document_focus: None,
+            conversation_refs: Vec::new(),
+            needs_clarification: None,
+            source_slice: None,
+            retrieval_query: Some(current.to_string()),
+            confidence: 0.8,
+        };
+        let normalized = normalize_compiled_ir(
+            current,
+            &[CompileHistoryTurn { role: "user".to_string(), content: prior.to_string() }],
+            ir,
+        );
+
+        assert_eq!(normalized.act, QueryAct::Compare);
+        assert!(normalized.comparison.is_some());
     }
 
     #[tokio::test]

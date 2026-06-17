@@ -14,6 +14,7 @@ use crate::{
         ai::AiBindingPurpose,
         catalog::{CatalogLibrary, CatalogLifecycleState, CatalogWorkspace},
         recognition::LibraryRecognitionPolicy,
+        retrieval::RetrievalConfig,
     },
     interfaces::http::{
         auth::AuthContext,
@@ -28,7 +29,7 @@ use crate::{
         catalog_service::{
             CatalogDeletionAdmission, CreateLibraryCommand, CreateWorkspaceCommand,
             UpdateLibraryCommand, UpdateLibraryRecognitionPolicyCommand,
-            UpdateLibraryWebIngestPolicyCommand,
+            UpdateLibraryRetrievalConfigCommand, UpdateLibraryWebIngestPolicyCommand,
         },
         iam::audit::{AppendAuditEventCommand, AppendAuditEventSubjectCommand},
     },
@@ -62,6 +63,7 @@ pub struct CatalogLibraryResponse {
     pub extraction_prompt: Option<String>,
     pub web_ingest_policy: WebIngestPolicy,
     pub recognition_policy: LibraryRecognitionPolicy,
+    pub retrieval_config: RetrievalConfig,
     pub lifecycle_state: String,
     pub include_document_hint_in_mcp_answers: bool,
     pub ingestion_readiness: CatalogLibraryIngestionReadinessResponse,
@@ -115,6 +117,11 @@ pub struct UpdateLibraryRecognitionPolicyRequest {
     pub raster_image_engine: crate::domains::recognition::RecognitionEngine,
 }
 
+/// Request body for replacing a library's declarative retrieval configuration.
+/// Carries the full [`RetrievalConfig`]; absent keys resolve to defaults that
+/// reproduce today's hardcoded lexical behaviour.
+pub type UpdateLibraryRetrievalConfigRequest = RetrievalConfig;
+
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/catalog/workspaces", get(list_workspaces).post(create_workspace))
@@ -132,6 +139,10 @@ pub fn router() -> Router<AppState> {
         .route(
             "/catalog/libraries/{library_id}/recognition-policy",
             put(update_library_recognition_policy),
+        )
+        .route(
+            "/catalog/libraries/{library_id}/retrieval-config",
+            get(get_library_retrieval_config).put(update_library_retrieval_config),
         )
 }
 
@@ -763,6 +774,101 @@ pub async fn update_library_recognition_policy(
     Ok(Json(map_library(library)))
 }
 
+#[utoipa::path(
+    get,
+    path = "/v1/catalog/libraries/{libraryId}/retrieval-config",
+    tag = "catalog",
+    operation_id = "getCatalogLibraryRetrievalConfig",
+    params(("libraryId" = uuid::Uuid, Path, description = "Library identifier")),
+    responses(
+        (status = 200, description = "Library retrieval configuration", body = RetrievalConfig),
+        (status = 401, description = "Caller is not authenticated"),
+        (status = 403, description = "Caller does not have library write permission"),
+        (status = 404, description = "Library not found"),
+    ),
+)]
+#[tracing::instrument(
+    level = "info",
+    name = "http.get_library_retrieval_config",
+    skip_all,
+    fields(library_id = %library_id)
+)]
+pub async fn get_library_retrieval_config(
+    auth: AuthContext,
+    State(state): State<AppState>,
+    Path(library_id): Path<Uuid>,
+) -> Result<Json<RetrievalConfig>, ApiError> {
+    let library =
+        load_library_and_authorize(&auth, &state, library_id, POLICY_LIBRARY_WRITE).await?;
+    let config =
+        RetrievalConfig::from_json(library.retrieval_config).map_err(|_| ApiError::Internal)?;
+    Ok(Json(config))
+}
+
+#[utoipa::path(
+    put,
+    path = "/v1/catalog/libraries/{libraryId}/retrieval-config",
+    tag = "catalog",
+    operation_id = "updateCatalogLibraryRetrievalConfig",
+    params(("libraryId" = uuid::Uuid, Path, description = "Library identifier")),
+    request_body = UpdateLibraryRetrievalConfigRequest,
+    responses(
+        (status = 200, description = "Library after applying the new retrieval configuration", body = CatalogLibraryResponse),
+        (status = 400, description = "Retrieval configuration is invalid or names an unknown text search config"),
+        (status = 401, description = "Caller is not authenticated"),
+        (status = 403, description = "Caller does not have library write permission"),
+        (status = 404, description = "Library not found"),
+    ),
+)]
+#[tracing::instrument(
+    level = "info",
+    name = "http.update_library_retrieval_config",
+    skip_all,
+    fields(library_id = %library_id)
+)]
+pub async fn update_library_retrieval_config(
+    auth: AuthContext,
+    State(state): State<AppState>,
+    request_id: Option<axum::Extension<RequestId>>,
+    Path(library_id): Path<Uuid>,
+    Json(payload): Json<UpdateLibraryRetrievalConfigRequest>,
+) -> Result<Json<CatalogLibraryResponse>, ApiError> {
+    let existing =
+        load_library_and_authorize(&auth, &state, library_id, POLICY_LIBRARY_WRITE).await?;
+
+    let library = state
+        .canonical_services
+        .catalog
+        .update_library_retrieval_config(
+            &state,
+            UpdateLibraryRetrievalConfigCommand { library_id, retrieval_config: payload },
+        )
+        .await?;
+
+    record_catalog_audit_event(
+        &state,
+        &auth,
+        request_id.map(|value| value.0.0),
+        "catalog.library.retrieval_config.update",
+        "succeeded",
+        Some(format!("library {} retrieval configuration updated", library.display_name)),
+        Some(format!(
+            "principal {} updated retrieval configuration for library {} in workspace {}",
+            auth.principal_id, library.id, library.workspace_id
+        )),
+        vec![AppendAuditEventSubjectCommand {
+            subject_kind: "library".to_string(),
+            subject_id: library.id,
+            workspace_id: Some(existing.workspace_id),
+            library_id: Some(library.id),
+            document_id: None,
+        }],
+    )
+    .await;
+
+    Ok(Json(map_library(library)))
+}
+
 fn spawn_workspace_deletion_worker(
     state: AppState,
     operation_id: Uuid,
@@ -943,6 +1049,7 @@ fn map_library(library: CatalogLibrary) -> CatalogLibraryResponse {
         extraction_prompt: library.extraction_prompt,
         web_ingest_policy: library.web_ingest_policy,
         recognition_policy: library.recognition_policy,
+        retrieval_config: library.retrieval_config,
         lifecycle_state: lifecycle_state_label(&library.lifecycle_state).to_string(),
         include_document_hint_in_mcp_answers: library.include_document_hint_in_mcp_answers,
         ingestion_readiness: CatalogLibraryIngestionReadinessResponse {

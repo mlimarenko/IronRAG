@@ -1,5 +1,257 @@
 # Changelog
 
+## Unreleased
+
+## 0.5.1 — 2026-06-18
+
+### Changed
+
+- **Grounded answer generation is now driven by typed intent and evidence
+  shape instead of broad relevance alone.** Compared with 0.5.0, query
+  execution relies more on document identity, exact literals, table rows,
+  ordered procedures, source-local context, and verifier-visible citations.
+  Deterministic answer builders now cover setup variants, versioned
+  procedures, latest-version inventories, exact literal recovery, and
+  table-field inventories without corpus-specific routing or knowledge-domain
+  keyword lists.
+
+- **Local and single-host deployments now default to bounded ingest fan-out.**
+  The Docker-local envelope is aligned with the worker's memory-aware lease
+  claiming, so small swapless hosts prefer predictable progress over claiming
+  many memory-heavy extraction or graph jobs at once.
+
+### Fixed
+
+- **Ingest workers no longer stack memory-heavy jobs beyond their cgroup
+  budget.** The worker process now derives a local job-claim cap from its
+  resolved memory soft limit, reserving headroom and budgeting each active
+  canonical ingest job before claiming more leases. Docker Compose and
+  `.env.example` now default the deployment-wide ingest caps to
+  `global=4`, `workspace=2`, `library=1`, so several replicas cannot
+  simultaneously pile graph-merge / extraction work onto a small swapless host.
+  This addresses host-level OOM pressure by reducing in-process fan-out rather
+  than relying on larger containers.
+
+- **Docling extraction fails fast when a worker cannot fit one extractor
+  process.** Before spawning the embedded Python extractor, the worker checks
+  detected cgroup memory headroom against the one-process Docling budget.
+  Undersized workers now mark the affected document with a terminal
+  `docling_insufficient_memory` ingest error instead of entering a
+  SIGKILL/retry loop; larger PDF / office / OCR imports should raise
+  `IRONRAG_WORKER_MEMORY_LIMIT` explicitly.
+
+- **Focused setup answers and latest-version inventories use the typed query
+  plan more precisely.** Configure/how-to questions that name one concrete
+  subject now enter the focused-document retrieval lane even when the compiler
+  emitted generic target types, while ambiguous, comparative, temporal, or
+  literal-constrained queries stay out of that shortcut. Explicit "latest N"
+  source-slice answers can also build deterministic ordered responses from
+  focused release-history chunks when version markers live in the chunk body
+  rather than the document title, without admitting ordinary relevance noise.
+
+- **Broad setup and versioned procedure questions stay on grounded procedure
+  evidence instead of clarifying or drifting to adjacent transition text.**
+  Multi-document setup requests can now return a deterministic
+  setup-variants answer built from item, command, path, section, and
+  parameter anchors, while document-focused setup requests keep their focused
+  answer path. Versioned procedure questions use subject and acronym overlap
+  plus ordered procedure evidence to rank transition documents ahead of
+  generic release or compatibility pages. Exact instruction-title anchors are retained
+  through context truncation and topical pruning, rerank no longer lowers
+  absolute scores from protected evidence lanes, and inferred latest-version
+  source-slice fallback now yields to typed lifecycle-procedure intent instead of
+  preempting the deterministic procedure extractor. Exact transport assignment
+  rendering is gated by typed `QueryIR` targets and concrete `name = value`
+  evidence, so service/port inventories do not steal setup answers.
+
+- **Table-column inventory answers keep table metadata separate from row
+  fields.** Row-oriented table chunks now treat `Sheet` and `Table` as
+  structural metadata only before the `Row N` marker; after the row marker they
+  remain ordinary cell fields. This prevents index or relation tables whose
+  data columns are named `Table`/`Column` from being mistaken for the schema
+  table being described, while preserving the same generic table representation
+  across PDF, office, and spreadsheet extraction paths.
+
+### Added
+
+- **Retrieval rank metrics for live grounded-query benchmarks.** The benchmark
+  runner now emits document and chunk ranking metrics for cases with known
+  relevance: `hit@1`, `hit@3`, `hit@5`, `hit@10`, and `MRR`. Document relevance
+  is derived from each synthetic suite's expected document checks, with optional
+  `rank_relevance.json` entries for explicit document IDs and stable chunk
+  markers. Each run writes per-suite and matrix summaries and appends a compact
+  `rank_metrics_trend.jsonl` record under the configured output directory;
+  `compare_benchmarks.py` now reports rank-metric deltas between two result
+  directories.
+
+- **Shared per-provider outbound concurrency budget with query-lane priority.**
+  All outbound provider calls (embedding, chat, tool-use, vision) now pass
+  through an aggregate concurrency limiter keyed by provider endpoint identity,
+  shared across the ingest and query lanes. A configurable per-provider cap
+  (`IRONRAG_PROVIDER_CONCURRENCY_MAX_OUTBOUND`) bounds in-flight calls so a
+  self-hosted or rate-limited provider is not overwhelmed when heavy ingest
+  fan-out and concurrent query turns hit the same endpoint at once. A
+  configurable query reserve (`IRONRAG_PROVIDER_CONCURRENCY_QUERY_RESERVED`)
+  guarantees latency-sensitive query turns a minimum of concurrent permits even
+  under saturating ingest load, so ingest can never starve query. The default is
+  unlimited (cap `0`), preserving previous behaviour until an operator opts in.
+
+- **Declarative per-library retrieval configuration.** Each library now stores a
+  typed `RetrievalConfig` (jsonb column `retrieval_config` on `catalog_library`,
+  added by migration `0002_retrieval_config.sql`). The initial knob is
+  `lexical.textSearchConfig` — the PostgreSQL FTS text-search config name used
+  in the lexical search lane (default: `"simple"`, matching historical
+  behaviour). New GET/PUT endpoints `/v1/catalog/libraries/{id}/retrieval-config`
+  let operators read and update the config; the text-search config name is
+  validated against `pg_ts_config` at write time, so unknown config names are
+  rejected with a 400 error.
+
+- **Typed answer candidates and clarification metadata in `grounded_answer`.**
+  When the pipeline resolves an ambiguous query to multiple distinct subjects,
+  `structuredContent` now includes `answerCandidates` (array of
+  `{ label, kind, confidence?, provenance: { entityId?, documentId?, chunkId? } }`)
+  and `clarification` (`{ required, question? }`). On unambiguous answers both
+  fields are present but empty/false for contract stability. The same fields are
+  carried through the REST turn-completion payload (`AssistantExecutionDetail`)
+  for MCP–UI parity. No new retrieval is performed; the data is sourced from
+  already-computed clarify structures in the answer pipeline.
+
+- **Installer non-interactive mode and TUI wizard.** `install.sh` now answers
+  every prompt from flags and environment variables, so the same install is
+  reproducible from CI / Ansible. New `--port`, `--profile`, and `--admin-login`
+  flags join the existing `IRONRAG_PORT` / `IRONRAG_PROFILE` / `IRONRAG_ADMIN_LOGIN`
+  and provider-key environment variables; precedence is flags > env > prompt for
+  non-secret values. Secrets (admin password, provider API keys) are accepted via
+  environment variables or a pre-seeded `.env` only — never as flags — because
+  argv is visible to other processes and shell history. Non-interactive mode is
+  auto-selected when stdin is not a TTY (the canonical `curl | bash` path) and
+  fails fast with the exact flag/env var to set rather than hanging when a
+  required value has no safe default. `--help` documents every flag and variable.
+  Interactively, the wizard now shows numbered step headers and a review screen of
+  the chosen values before writing `.env`. Behaviour with default answers is
+  unchanged: the generated `.env` is byte-identical to the previous installer.
+
+### Changed
+
+- **Typed QueryIR now drives lexical high/low retrieval lanes.** The retrieval
+  planner removed the positional keyword split and derives lane seeds from the
+  compiled `QueryIR`: subject/object entities, target types, document focus,
+  comparison operands, and exact literals feed the high-level lane; modifiers,
+  comparison dimensions, temporal constraints, and source-slice refinements feed
+  the low-level lane. When the IR is absent, low-confidence, seedless, or does
+  not match any extracted keyword, both lanes fall back to the full keyword set,
+  preserving the previous lexical SQL behavior instead of reintroducing
+  position-based routing.
+
+### Removed
+
+- **Unreachable query helper paths.** The dead multi-query and sub-question
+  helper functions were removed after reachability checks found no production
+  callers. The HyDE flag path remains in place because it is still consumed by
+  the embedding planning flow.
+
+### Fixed
+
+- **Postgres pool fan-out is bounded by one deployment-wide app connection
+  budget.** `IRONRAG_DATABASE_MAX_CONNECTIONS` now represents the total app
+  connection budget for the expected API and worker process count, rather than a
+  large per-process SQLx pool size. The runtime divides that budget across API
+  and worker roles, caps per-process pools, uses shorter idle/lifetime bounds,
+  and limits each worker's DB-backed ingest claim loop to the slots it can
+  service. Docker Compose exposes `IRONRAG_API_REPLICAS` and
+  `IRONRAG_WORKER_REPLICAS`; Helm wires the same values and reserves one API
+  rollout surge slot. This prevents worker/API scale-out from opening oversized
+  idle Postgres backend sets and pushing bundled PostgreSQL into memory
+  pressure.
+
+- **`search_documents` now fuses per-lane scores instead of taking a raw
+  cross-lane `max`.** The MCP document search merges three retrieval lanes
+  (document metadata, lexical chunk, vector chunk) whose scores live on
+  incommensurate scales (metadata/lexical text-rank are unbounded `>= 0`,
+  vector cosine is `0..=1`). The merge combined them by `max` over the raw
+  values, so a hit on a numerically larger lexical/metadata scale always
+  buried a vector-strong document and cross-lane ordering was wrong. Each
+  lane is now normalized with Reciprocal Rank Fusion (rank-based, scale-free)
+  before combining: a document earns one RRF contribution per lane it appears
+  in (using its best rank in that lane), and the contributions are summed, so
+  a document present in multiple lanes ranks above an otherwise
+  equally-ranked single-lane document. Ordering is deterministic with a
+  stable document-id tie-break. Readability bucketing (readable hits before
+  failed/unavailable) is unchanged; fusion only reorders within a bucket.
+
+- **Redis outage degrades turn caching instead of failing the turn.** The
+  query turn took a Redis-based fill/coalesce lock before computing a fresh
+  grounded answer. When Redis was unreachable, the lock-acquisition error
+  propagated and every fresh turn returned a 5xx for the whole outage, even
+  though the answer pipeline never needs Redis to compute. A Redis
+  *connectivity* failure (server down, connection refused/dropped, or timeout —
+  classified structurally on the typed Redis error kind, never by message text)
+  now degrades to cache-miss latency: the turn logs one warning and proceeds
+  without the fill lock. Genuine lock contention (the lock is held by another
+  filler) keeps its existing wait/coalesce semantics, and a non-connectivity
+  Redis fault still fails closed so a real malfunction stays visible.
+
+- **Question-embedding cache keys on full identity, not a 64-bit hash.** The
+  in-process LRU for question embeddings keyed entries by a `u64` from
+  `DefaultHasher` and returned silently on collision, so a hash collision could
+  hand back the wrong embedding for a different question — wrong retrieval with
+  no error — and `DefaultHasher` is not stable across releases. Entries are now
+  keyed by a 32-byte SHA-256 of the canonical identity tuple (trimmed question
+  text plus every embedding-scoping binding dimension) with equality on the full
+  digest width, so distinct questions or bindings can never alias. LRU bounds
+  and eviction are unchanged.
+- **Retryable ingest stage failures now requeue instead of permanently failing
+  the document.** A transient provider error (rate limit / timeout / connection
+  reset) during ingest previously killed the document on the first failure: the
+  attempt was requeued, but the dispatcher's terminal-failure handler then
+  clobbered that requeue back to `failed`, so the retry path was unreachable.
+  Retryable failures now requeue with exponential backoff via the existing
+  `available_at` mechanism, bounded by a per-job attempt budget; only once the
+  budget is exhausted is the document marked terminally failed, with the attempt
+  count surfaced in the failure message.
+
+- **Persisted chunk-embedding batches survive a transient embed failure.** When
+  the chunk-embedding stage failed partway through a large document, the cleanup
+  path discarded every embedding batch already persisted for the revision, so a
+  blip near the end threw away all the work done so far. Successfully persisted
+  vectors are now kept across a transient failure; the retry resumes by
+  re-embedding only the chunks still missing a vector. Readiness remains gated on
+  full coverage — a revision is promoted to ready only when the persisted vector
+  count equals its chunk count — and terminal/correctness failures still clear
+  partial state.
+- **UI/MCP agent loop bounds each tool call and stops no-progress loops early.**
+  Every tool execution future is now wrapped in a per-call timeout bounded by the
+  smaller of the remaining turn deadline and a canonical per-tool-call max, so a
+  single hung tool can no longer run past every budget; a timed-out call yields a
+  structured `is_error` outcome (which clears the dedup fingerprint, so a retry is
+  not suppressed). Separately, when several consecutive iterations produce no
+  successful *new* tool result — every call errored, was suppressed as a
+  duplicate, or replayed an earlier result — the loop now routes into the existing
+  forced-final path instead of spinning the rest of the iteration/deadline budget.
+  The early stop is observable in the turn debug payload via a new `no_progress`
+  `stoppedReason`, distinct from `deadline`/`iteration_cap`.
+
+- **Source-format append tolerates a missing source blob.** Appending text to a
+  document whose stored source bytes are absent — for example after a snapshot
+  restore that carried content rows without their blobs (`library_data` without
+  `blobs`) — no longer fails the whole request with a 500. The append now starts
+  a fresh source revision from the appended text and logs a warning. A source
+  blob that *is* present but cannot be read still surfaces as an error, so a
+  transient storage outage never silently drops existing content.
+
+- **UI-agent tool-call dedup no longer suppresses a distinct follow-up
+  question.** The agent loop dedups same-iteration and cross-iteration tool
+  calls by an *effective* fingerprint computed after argument normalization
+  (history compaction, default `conversationTurns`/`topK` injection). Two
+  genuinely different raw queries could normalize to the same effective
+  fingerprint, so a correct follow-up call was rejected as a duplicate of an
+  earlier unrelated call and the assistant answered the wrong subject. The
+  dedup map now also keys on a hash of the raw, pre-normalization arguments:
+  only a true same-raw in-flight call is suppressed, a duplicate of a call
+  that already completed replays the cached successful result instead of
+  returning a refusal, and a distinct raw call is never dead-ended. Errored
+  entries continue to clear so the call can be retried.
+
 ## 0.5.0 — 2026-06-11
 
 ArangoDB is removed as the knowledge-plane database. The knowledge plane —
@@ -444,13 +696,12 @@ restore is required.
   vectors can now snapshot+restore end-to-end. Full anyhow error
   chain is also logged at the import entrypoint so future failures
   surface their underlying cause instead of a top-level wrapper.
-- The deterministic module-configuration answer renderer no longer
-  embeds hardcoded natural-language section labels. The fallback now
-  emits only the grounded values (source document, package commands,
-  configuration paths, parameter rows) as language-neutral markdown,
-  leaving all phrasing and language to the model. This removes a
-  per-language label dictionary from the answer path, in line with the
-  project's no-hardcoded-language policy.
+- The deterministic module-configuration answer renderer now uses only
+  generic localized labels for grounded answer fields (source document,
+  command anchors, configuration paths, parameter rows) and keeps
+  domain-specific phrasing out of the answer path. `Auto` language
+  selection follows the question script before falling back to English,
+  so direct answers do not leak English labels into Cyrillic questions.
 - The startup AI-catalog preset seed no longer overwrites an operator-set
   `max_output_tokens_override` on every boot. An operator-raised model
   output budget now persists across restarts instead of silently reverting

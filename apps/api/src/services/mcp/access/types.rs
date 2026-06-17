@@ -10,7 +10,10 @@ use crate::{
         McpChunkReference, McpEntityReference, McpEvidenceReference, McpLibraryDescriptor,
         McpReadabilityState, McpRelationReference, McpTechnicalFactReference,
     },
-    services::mcp::support::preview_hit,
+    services::mcp::{
+        access::fusion::{LaneRankFusion, SearchLane},
+        support::preview_hit,
+    },
 };
 
 #[derive(Debug, Clone)]
@@ -85,7 +88,10 @@ pub(crate) struct McpDocumentAccumulator {
     pub(crate) workspace_id: Uuid,
     pub(crate) readable_revision_id: Uuid,
     pub(crate) document_title: String,
-    pub(crate) score: f64,
+    /// Per-lane RRF rank accumulator. The exposed document score is its
+    /// [`LaneRankFusion::fused_score`], replacing the previous raw-`max`
+    /// combine that compared incommensurate per-lane score scales.
+    pub(crate) fusion: LaneRankFusion,
     pub(crate) excerpt: Option<String>,
     pub(crate) excerpt_start_offset: Option<usize>,
     pub(crate) excerpt_end_offset: Option<usize>,
@@ -114,7 +120,7 @@ impl McpDocumentAccumulator {
             workspace_id: row.workspace_id,
             readable_revision_id: row.readable_revision_id,
             document_title,
-            score: row.metadata_score,
+            fusion: LaneRankFusion::default(),
             excerpt: None,
             excerpt_start_offset: None,
             excerpt_end_offset: None,
@@ -128,7 +134,6 @@ impl McpDocumentAccumulator {
     pub(crate) fn from_knowledge(
         document: &crate::infra::arangodb::document_store::KnowledgeDocumentRow,
         revision: &crate::infra::arangodb::document_store::KnowledgeRevisionRow,
-        hit: &crate::infra::arangodb::search_store::KnowledgeChunkSearchRow,
     ) -> Self {
         let document_title = revision
             .title
@@ -141,7 +146,7 @@ impl McpDocumentAccumulator {
             workspace_id: document.workspace_id,
             readable_revision_id: revision.revision_id,
             document_title,
-            score: hit.score,
+            fusion: LaneRankFusion::default(),
             excerpt: None,
             excerpt_start_offset: None,
             excerpt_end_offset: None,
@@ -183,8 +188,18 @@ impl McpDocumentAccumulator {
         self.suggested_start_offset_score = score;
     }
 
-    pub(crate) fn bump_score(&mut self, score: f64) {
-        self.score = self.score.max(score);
+    /// Record that this document appeared in `lane` at the given 1-based
+    /// `rank`, keeping the best (lowest) rank per lane. The document's
+    /// exposed score is then the RRF fusion over its observed lanes
+    /// ([`Self::fused_score`]), so cross-lane ordering no longer depends on
+    /// raw, incommensurate per-lane score magnitudes.
+    pub(crate) fn observe_lane(&mut self, lane: SearchLane, rank: i32) {
+        self.fusion.observe(lane, rank);
+    }
+
+    /// Reciprocal-rank-fusion score across the lanes this document hit.
+    pub(crate) fn fused_score(&self) -> f64 {
+        self.fusion.fused_score()
     }
 
     pub(crate) fn merge_chunk_reference(

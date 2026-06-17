@@ -23,6 +23,7 @@ pub struct CatalogLibraryRow {
     pub extraction_prompt: Option<String>,
     pub web_ingest_policy: Value,
     pub recognition_policy: Value,
+    pub retrieval_config: Value,
     pub lifecycle_state: String,
     pub include_document_hint_in_mcp_answers: bool,
     #[sqlx(default)]
@@ -165,7 +166,7 @@ pub async fn list_libraries(
     match workspace_id {
         Some(workspace_id) => {
             sqlx::query_as::<_, CatalogLibraryRow>(
-                "select id, workspace_id, slug, display_name, description, extraction_prompt, web_ingest_policy, recognition_policy, lifecycle_state::text as lifecycle_state, include_document_hint_in_mcp_answers, coalesce(chunking_template, 'naive') as chunking_template, created_at, updated_at
+                "select id, workspace_id, slug, display_name, description, extraction_prompt, web_ingest_policy, recognition_policy, retrieval_config, lifecycle_state::text as lifecycle_state, include_document_hint_in_mcp_answers, coalesce(chunking_template, 'naive') as chunking_template, created_at, updated_at
                  from catalog_library
                  where workspace_id = $1
                  order by created_at desc",
@@ -176,7 +177,7 @@ pub async fn list_libraries(
         }
         None => {
             sqlx::query_as::<_, CatalogLibraryRow>(
-                "select id, workspace_id, slug, display_name, description, extraction_prompt, web_ingest_policy, recognition_policy, lifecycle_state::text as lifecycle_state, include_document_hint_in_mcp_answers, coalesce(chunking_template, 'naive') as chunking_template, created_at, updated_at
+                "select id, workspace_id, slug, display_name, description, extraction_prompt, web_ingest_policy, recognition_policy, retrieval_config, lifecycle_state::text as lifecycle_state, include_document_hint_in_mcp_answers, coalesce(chunking_template, 'naive') as chunking_template, created_at, updated_at
                  from catalog_library
                  order by created_at desc",
             )
@@ -191,7 +192,7 @@ pub async fn get_library_by_id(
     library_id: Uuid,
 ) -> Result<Option<CatalogLibraryRow>, sqlx::Error> {
     sqlx::query_as::<_, CatalogLibraryRow>(
-        "select id, workspace_id, slug, display_name, description, extraction_prompt, web_ingest_policy, recognition_policy, lifecycle_state::text as lifecycle_state, include_document_hint_in_mcp_answers, coalesce(chunking_template, 'naive') as chunking_template, created_at, updated_at
+        "select id, workspace_id, slug, display_name, description, extraction_prompt, web_ingest_policy, recognition_policy, retrieval_config, lifecycle_state::text as lifecycle_state, include_document_hint_in_mcp_answers, coalesce(chunking_template, 'naive') as chunking_template, created_at, updated_at
          from catalog_library
          where id = $1",
     )
@@ -206,7 +207,7 @@ pub async fn get_library_by_workspace_and_slug(
     slug: &str,
 ) -> Result<Option<CatalogLibraryRow>, sqlx::Error> {
     sqlx::query_as::<_, CatalogLibraryRow>(
-        "select id, workspace_id, slug, display_name, description, extraction_prompt, web_ingest_policy, recognition_policy, lifecycle_state::text as lifecycle_state, include_document_hint_in_mcp_answers, coalesce(chunking_template, 'naive') as chunking_template, created_at, updated_at
+        "select id, workspace_id, slug, display_name, description, extraction_prompt, web_ingest_policy, recognition_policy, retrieval_config, lifecycle_state::text as lifecycle_state, include_document_hint_in_mcp_answers, coalesce(chunking_template, 'naive') as chunking_template, created_at, updated_at
          from catalog_library
          where workspace_id = $1 and slug = $2",
     )
@@ -259,7 +260,7 @@ pub async fn create_library_with_recognition_policy(
             updated_at
         )
         values ($1, $2, $3, $4, $5, $6, 'active', $7, now(), now())
-        returning id, workspace_id, slug, display_name, description, extraction_prompt, web_ingest_policy, recognition_policy, lifecycle_state::text as lifecycle_state, include_document_hint_in_mcp_answers, coalesce(chunking_template, 'naive') as chunking_template, created_at, updated_at",
+        returning id, workspace_id, slug, display_name, description, extraction_prompt, web_ingest_policy, recognition_policy, retrieval_config, lifecycle_state::text as lifecycle_state, include_document_hint_in_mcp_answers, coalesce(chunking_template, 'naive') as chunking_template, created_at, updated_at",
     )
     .bind(Uuid::now_v7())
     .bind(workspace_id)
@@ -324,7 +325,7 @@ pub async fn update_library(
              include_document_hint_in_mcp_answers = $7,
              updated_at = now()
          where id = $1
-         returning id, workspace_id, slug, display_name, description, extraction_prompt, web_ingest_policy, recognition_policy, lifecycle_state::text as lifecycle_state, include_document_hint_in_mcp_answers, coalesce(chunking_template, 'naive') as chunking_template, created_at, updated_at",
+         returning id, workspace_id, slug, display_name, description, extraction_prompt, web_ingest_policy, recognition_policy, retrieval_config, lifecycle_state::text as lifecycle_state, include_document_hint_in_mcp_answers, coalesce(chunking_template, 'naive') as chunking_template, created_at, updated_at",
     )
     .bind(library_id)
     .bind(slug)
@@ -347,7 +348,7 @@ pub async fn update_library_web_ingest_policy(
          set web_ingest_policy = $2,
              updated_at = now()
          where id = $1
-         returning id, workspace_id, slug, display_name, description, extraction_prompt, web_ingest_policy, recognition_policy, lifecycle_state::text as lifecycle_state, include_document_hint_in_mcp_answers, coalesce(chunking_template, 'naive') as chunking_template, created_at, updated_at",
+         returning id, workspace_id, slug, display_name, description, extraction_prompt, web_ingest_policy, recognition_policy, retrieval_config, lifecycle_state::text as lifecycle_state, include_document_hint_in_mcp_answers, coalesce(chunking_template, 'naive') as chunking_template, created_at, updated_at",
     )
     .bind(library_id)
     .bind(web_ingest_policy)
@@ -365,10 +366,28 @@ pub async fn update_library_recognition_policy(
          set recognition_policy = $2,
              updated_at = now()
          where id = $1
-         returning id, workspace_id, slug, display_name, description, extraction_prompt, web_ingest_policy, recognition_policy, lifecycle_state::text as lifecycle_state, include_document_hint_in_mcp_answers, coalesce(chunking_template, 'naive') as chunking_template, created_at, updated_at",
+         returning id, workspace_id, slug, display_name, description, extraction_prompt, web_ingest_policy, recognition_policy, retrieval_config, lifecycle_state::text as lifecycle_state, include_document_hint_in_mcp_answers, coalesce(chunking_template, 'naive') as chunking_template, created_at, updated_at",
     )
     .bind(library_id)
     .bind(recognition_policy)
+    .fetch_optional(postgres)
+    .await
+}
+
+pub async fn update_library_retrieval_config(
+    postgres: &PgPool,
+    library_id: Uuid,
+    retrieval_config: Value,
+) -> Result<Option<CatalogLibraryRow>, sqlx::Error> {
+    sqlx::query_as::<_, CatalogLibraryRow>(
+        "update catalog_library
+         set retrieval_config = $2,
+             updated_at = now()
+         where id = $1
+         returning id, workspace_id, slug, display_name, description, extraction_prompt, web_ingest_policy, recognition_policy, retrieval_config, lifecycle_state::text as lifecycle_state, include_document_hint_in_mcp_answers, coalesce(chunking_template, 'naive') as chunking_template, created_at, updated_at",
+    )
+    .bind(library_id)
+    .bind(retrieval_config)
     .fetch_optional(postgres)
     .await
 }
@@ -382,7 +401,7 @@ pub async fn archive_library(
          set lifecycle_state = 'archived',
              updated_at = now()
          where id = $1
-         returning id, workspace_id, slug, display_name, description, extraction_prompt, web_ingest_policy, recognition_policy, lifecycle_state::text as lifecycle_state, include_document_hint_in_mcp_answers, coalesce(chunking_template, 'naive') as chunking_template, created_at, updated_at",
+         returning id, workspace_id, slug, display_name, description, extraction_prompt, web_ingest_policy, recognition_policy, retrieval_config, lifecycle_state::text as lifecycle_state, include_document_hint_in_mcp_answers, coalesce(chunking_template, 'naive') as chunking_template, created_at, updated_at",
     )
     .bind(library_id)
     .fetch_optional(postgres)

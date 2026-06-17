@@ -47,12 +47,29 @@ curl -fsSL https://raw.githubusercontent.com/mlimarenko/IronRAG/master/install.s
 
 The installer is an interactive wizard: it inspects the host (CPU + RAM),
 recommends a resource profile (per-service memory/CPU caps and ingest
-parallelism), and prompts for the port, optional admin bootstrap, provider API
-keys, and telemetry — each with a default you accept with Enter. On a re-run it
-preserves the existing `.env` (secrets and tuned caps are not overwritten).
-Pipe-friendly: with no terminal, or with `--yes`, it runs non-interactively
-from environment variables and existing `.env` values. Use `--plan-only` to see
-the detected profile without writing or deploying anything.
+parallelism), and prompts step by step for the port, optional admin bootstrap,
+and provider API keys — each with a default you accept with Enter — then shows a
+review screen before writing anything. On a re-run it preserves the existing
+`.env` (secrets and tuned caps are not overwritten).
+
+The installer also runs fully non-interactively. With no terminal (the piped
+`curl | bash` form), or with `--yes` / `--non-interactive`, it takes every answer
+from flags, environment variables, and existing `.env` values. Answer precedence
+is flags > env > prompt for non-secret values; secrets (admin password, provider
+API keys) are accepted via environment variables or a pre-seeded `.env` only —
+never as flags, since argv is visible to other processes and shell history. Run
+`./install.sh --help` for the full flag and environment-variable list, or
+`--plan-only` to print the detected profile without writing or deploying anything.
+
+Non-interactive example (CI / Ansible):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/mlimarenko/IronRAG/master/install.sh -o install.sh
+IRONRAG_PORT=8080 \
+IRONRAG_PROFILE=small \
+IRONRAG_OPENAI_API_KEY=sk-... \
+  bash install.sh --non-interactive
+```
 
 Or from source:
 
@@ -184,6 +201,12 @@ IRONRAG_DB_MEMORY_LIMIT=6144M \
   docker compose up -d
 ```
 
+The default Compose stack keeps ingest conservative on small swapless hosts:
+`IRONRAG_INGESTION_MAX_PARALLEL_JOBS_GLOBAL=4`,
+`IRONRAG_INGESTION_MAX_PARALLEL_JOBS_PER_WORKSPACE=2`, and
+`IRONRAG_INGESTION_MAX_PARALLEL_JOBS_PER_LIBRARY=1`. Raise those only together
+with worker memory, database connection budget, and provider concurrency.
+
 Helm (Kubernetes):
 
 ```bash
@@ -196,7 +219,7 @@ helm upgrade --install ironrag charts/ironrag \
 By default the chart deploys the API, worker, and web images with the
 `v<appVersion>` image tag derived from `Chart.appVersion`. Override
 `api.image.tag`, `worker.image.tag`, and `web.image.tag` only when pinning
-a different published image, for example `--set web.image.tag=v0.5.0`.
+a different published image, for example `--set web.image.tag=v0.5.1`.
 
 Bundled dependencies (same pins as Docker Compose): `pgvector/pgvector:pg18`
 for PostgreSQL and `redis:8.8` for Redis. Override via

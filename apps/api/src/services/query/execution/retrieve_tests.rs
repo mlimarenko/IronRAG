@@ -13,16 +13,17 @@ use super::{
     DOCUMENT_IDENTITY_SCORE_FLOOR, RuntimeChunkScoreKind, apply_graph_evidence_texts_to_chunks,
     build_lexical_queries, canonical_document_revision_id, chunk_answer_source_text,
     combine_chunk_retrieval_lanes, combine_lexical_query_results,
-    combine_query_ir_focus_search_results, document_identity_chunk_score,
-    document_identity_focus_terms, entity_bio_chunk_score, graph_evidence_chunk_hits_from_rows,
-    graph_evidence_chunk_score, graph_evidence_context_line, graph_evidence_source_document_ids,
-    graph_evidence_source_document_ids_from_scored_targets,
+    combine_query_ir_focus_search_results, command_dense_excerpt_for,
+    document_identity_chunk_score, document_identity_focus_terms, entity_bio_chunk_score,
+    graph_evidence_chunk_hits_from_rows, graph_evidence_chunk_score, graph_evidence_context_line,
+    graph_evidence_source_document_ids, graph_evidence_source_document_ids_from_scored_targets,
     graph_evidence_source_document_ids_with_priority, graph_evidence_targets,
     graph_evidence_targets_for_query, graph_evidence_text_search_document_scope,
-    latest_version_documents, linked_anchor_focus_queries, linked_anchor_hydration_target_filter,
-    map_chunk_hit, merge_chunks, merge_entity_bio_chunks, merge_graph_evidence_chunks,
-    merge_query_ir_focus_chunks, query_ir_focus_chunk_score, query_ir_focus_search_queries,
-    query_ir_lexical_focus_queries, rank_graph_evidence_context_rows,
+    is_answer_driving_search_chunk_row, latest_version_documents, linked_anchor_focus_queries,
+    linked_anchor_hydration_target_filter, map_chunk_hit, merge_chunks, merge_entity_bio_chunks,
+    merge_graph_evidence_chunks, merge_query_ir_focus_chunks, query_ir_focus_chunk_score,
+    query_ir_focus_search_queries, query_ir_lexical_focus_queries,
+    query_ir_promotes_graph_evidence, rank_graph_evidence_context_rows,
     retain_canonical_document_head_chunks, retain_entity_bio_candidates, retain_scoped_documents,
     truncate_bundle,
 };
@@ -49,6 +50,28 @@ use crate::services::query::{
     },
     planner::{QueryIntentProfile, RuntimeQueryPlan, build_query_plan},
 };
+
+#[test]
+fn command_dense_excerpt_preserves_multiline_shell_procedure() {
+    let excerpt = command_dense_excerpt_for(
+        concat!(
+            "Procedure\n",
+            "1. sudo su\n",
+            "2. sample-transfer https://example.invalid/alpha/runner.sh -o /tmp/sample-runner.sh\n",
+            "3. sample-prepare +x /tmp/sample-runner.sh\n",
+            "4. /tmp/sample-runner.sh\n"
+        ),
+        4_000,
+    )
+    .expect("command-dense excerpt");
+
+    assert!(excerpt.contains("sudo su\n"));
+    assert!(excerpt.contains(
+        "sample-transfer https://example.invalid/alpha/runner.sh -o /tmp/sample-runner.sh\n"
+    ));
+    assert!(excerpt.contains("sample-prepare +x /tmp/sample-runner.sh\n"));
+    assert!(excerpt.contains("/tmp/sample-runner.sh"));
+}
 
 fn release_query_ir(count: Option<&str>, entity: Option<&str>) -> QueryIR {
     QueryIR {
@@ -154,11 +177,11 @@ fn transport_inventory_query_ir() -> QueryIR {
 #[test]
 fn document_identity_focus_terms_include_structural_prefixes() {
     let mut query_ir = target_entities_query_ir(&["integrated connector", "connection variants"]);
-    query_ir.document_focus = Some(DocumentHint { hint: "Alpha Suite setup".to_string() });
+    query_ir.document_focus = Some(DocumentHint { hint: "Sample Subject setup".to_string() });
 
     let terms = document_identity_focus_terms(&["setup".to_string()], Some(&query_ir));
 
-    assert!(terms.contains(&"Alpha Suite setup".to_string()));
+    assert!(terms.contains(&"Sample Subject setup".to_string()));
     assert!(terms.contains(&"integrated connector".to_string()));
     assert!(terms.contains(&"integr".to_string()));
     assert!(terms.contains(&"connec".to_string()));
@@ -172,7 +195,7 @@ fn linked_anchor_focus_queries_follow_relevant_source_links() {
         revision_id: Uuid::now_v7(),
         chunk_index: 0,
         chunk_kind: Some("paragraph".to_string()),
-        document_label: "Alpha Suite overview".to_string(),
+        document_label: "Sample Subject overview".to_string(),
         excerpt: "See [Integrated connector catalog](/connectors) for details.".to_string(),
         score_kind: RuntimeChunkScoreKind::Relevance,
         score: Some(1.0),
@@ -205,7 +228,7 @@ fn linked_anchor_focus_queries_add_numeric_free_prefix_variants() {
         revision_id: Uuid::now_v7(),
         chunk_index: 0,
         chunk_kind: Some("paragraph".to_string()),
-        document_label: "Alpha Suite overview".to_string(),
+        document_label: "Sample Subject overview".to_string(),
         excerpt: "See [15 integrated connectors](/connectors) for details.".to_string(),
         score_kind: RuntimeChunkScoreKind::Relevance,
         score: Some(1.0),
@@ -229,6 +252,37 @@ fn linked_anchor_hydration_is_cross_document() {
         linked_anchor_hydration_target_filter().is_empty(),
         "linked markdown anchors point at related documents, so hydration must not inherit the source document scope filter"
     );
+}
+
+#[test]
+fn source_profile_rows_are_not_answer_driving_search_hits() {
+    let document = sample_document_row("records.jsonl", "Records");
+    let row = knowledge_chunk_row(
+        &document,
+        0,
+        Some("source_profile"),
+        "[source_profile source_format=record_jsonl unit_count=42]",
+    );
+    let document_index = HashMap::from([(document.document_id, document)]);
+
+    assert!(!is_answer_driving_search_chunk_row(&row));
+    assert!(
+        map_chunk_hit(row, 1.0, &document_index, &[]).is_some(),
+        "specialized source-context paths still map source profiles explicitly"
+    );
+}
+
+#[test]
+fn ordinary_content_rows_remain_answer_driving_search_hits() {
+    let document = sample_document_row("records.jsonl", "Records");
+    let row = knowledge_chunk_row(
+        &document,
+        1,
+        Some("source_unit"),
+        "[unit_id=alpha] service-a listens on port 8080",
+    );
+
+    assert!(is_answer_driving_search_chunk_row(&row));
 }
 
 #[test]
@@ -303,6 +357,44 @@ fn metadata_summary_answer_context_uses_normalized_text_when_content_is_empty() 
     };
 
     assert!(chunk_answer_source_text(&chunk).starts_with("Table Summary |"));
+}
+
+#[test]
+fn source_unit_answer_context_prefers_full_record_over_window_excerpt() {
+    let chunk = KnowledgeChunkRow {
+        key: Uuid::now_v7().to_string(),
+        arango_id: None,
+        arango_rev: None,
+        chunk_id: Uuid::now_v7(),
+        workspace_id: Uuid::now_v7(),
+        library_id: Uuid::now_v7(),
+        document_id: Uuid::now_v7(),
+        revision_id: Uuid::now_v7(),
+        chunk_index: 1,
+        chunk_kind: Some("source_unit".to_string()),
+        content_text: "[unit_ordinal=0] fields: resources.alpha.events.type=array; resources.alpha.secret.description=HMAC-SHA256 signing secret".to_string(),
+        normalized_text: "[unit_ordinal=0] fields: resources.alpha.events.type=array; resources.alpha.secret.description=HMAC-SHA256 signing secret".to_string(),
+        span_start: None,
+        span_end: None,
+        token_count: Some(16),
+        support_block_ids: Vec::new(),
+        section_path: vec!["resources".to_string()],
+        heading_trail: vec!["resources".to_string()],
+        literal_digest: None,
+        chunk_state: "ready".to_string(),
+        text_generation: Some(1),
+        vector_generation: Some(1),
+        quality_score: Some(1.0),
+        window_text: Some("[unit_ordinal=0] fields: resources.alpha.events.type=array".to_string()),
+        raptor_level: None,
+        occurred_at: None,
+        occurred_until: None,
+    };
+
+    let source_text = chunk_answer_source_text(&chunk);
+
+    assert!(source_text.contains("events.type=array"));
+    assert!(source_text.contains("HMAC-SHA256"));
 }
 
 #[test]
@@ -584,9 +676,9 @@ fn latest_version_documents_do_not_collapse_same_version_across_titles() {
 #[test]
 fn latest_version_documents_deduplicate_before_family_selection() {
     let docs = [
-        sample_document_row("alpha-1.2.12-a.html", "Version 1.2.12 - Alpha Suite"),
-        sample_document_row("alpha-1.2.12-b.html", "Version 1.2.12 - Alpha Suite"),
-        sample_document_row("alpha-1.2.11.html", "Version 1.2.11 - Alpha Suite"),
+        sample_document_row("alpha-1.2.12-a.html", "Version 1.2.12 - Sample Subject"),
+        sample_document_row("alpha-1.2.12-b.html", "Version 1.2.12 - Sample Subject"),
+        sample_document_row("alpha-1.2.11.html", "Version 1.2.11 - Sample Subject"),
         sample_document_row("beta-9.9.999.html", "Version 9.9.999 - Beta Suite"),
     ];
     let index = docs
@@ -601,8 +693,8 @@ fn latest_version_documents_deduplicate_before_family_selection() {
         selected.into_iter().map(|document| document.title).collect::<Vec<_>>(),
         vec![
             "Version 9.9.999 - Beta Suite".to_string(),
-            "Version 1.2.12 - Alpha Suite".to_string(),
-            "Version 1.2.11 - Alpha Suite".to_string(),
+            "Version 1.2.12 - Sample Subject".to_string(),
+            "Version 1.2.11 - Sample Subject".to_string(),
         ]
     );
 }
@@ -610,9 +702,9 @@ fn latest_version_documents_deduplicate_before_family_selection() {
 #[test]
 fn latest_version_documents_choose_dominant_release_family_for_multi_release_queries() {
     let docs = [
-        sample_document_row("alpha-1.2.12.html", "Version 1.2.12 - Alpha Suite"),
-        sample_document_row("alpha-1.2.11.html", "Version 1.2.11 - Alpha Suite"),
-        sample_document_row("alpha-1.2.10.html", "Version 1.2.10 - Alpha Suite"),
+        sample_document_row("alpha-1.2.12.html", "Version 1.2.12 - Sample Subject"),
+        sample_document_row("alpha-1.2.11.html", "Version 1.2.11 - Sample Subject"),
+        sample_document_row("alpha-1.2.10.html", "Version 1.2.10 - Sample Subject"),
         sample_document_row("beta-9.9.999.html", "Version 9.9.999 - Beta Suite"),
     ];
     let index = docs
@@ -626,9 +718,9 @@ fn latest_version_documents_choose_dominant_release_family_for_multi_release_que
     assert_eq!(
         titles,
         vec![
-            "Version 1.2.12 - Alpha Suite".to_string(),
-            "Version 1.2.11 - Alpha Suite".to_string(),
-            "Version 1.2.10 - Alpha Suite".to_string(),
+            "Version 1.2.12 - Sample Subject".to_string(),
+            "Version 1.2.11 - Sample Subject".to_string(),
+            "Version 1.2.10 - Sample Subject".to_string(),
         ]
     );
 }
@@ -636,11 +728,11 @@ fn latest_version_documents_choose_dominant_release_family_for_multi_release_que
 #[test]
 fn latest_version_family_key_normalizes_only_the_version_literal() {
     assert_eq!(
-        latest_version_family_key("Version 1.2.12 - Alpha Suite"),
-        latest_version_family_key("Version 1.2.11 - Alpha Suite")
+        latest_version_family_key("Version 1.2.12 - Sample Subject"),
+        latest_version_family_key("Version 1.2.11 - Sample Subject")
     );
     assert_ne!(
-        latest_version_family_key("Version 1.2.12 - Alpha Suite"),
+        latest_version_family_key("Version 1.2.12 - Sample Subject"),
         latest_version_family_key("Version 1.2.12 - Beta Suite")
     );
 }
@@ -670,13 +762,13 @@ fn map_chunk_hit_drops_orphan_documents_without_heads() {
         chunk_index: 0,
         chunk_kind: Some("table_row".to_string()),
         content_text: "stale".to_string(),
-        normalized_text: "Sheet: people | Row 1 | Name: Stale".to_string(),
+        normalized_text: "Sheet: records | Row 1 | Name: Stale".to_string(),
         span_start: None,
         span_end: None,
         token_count: Some(4),
         support_block_ids: Vec::new(),
-        section_path: vec!["people".to_string()],
-        heading_trail: vec!["people".to_string()],
+        section_path: vec!["records".to_string()],
+        heading_trail: vec!["records".to_string()],
         literal_digest: None,
         chunk_state: "ready".to_string(),
         text_generation: Some(1),
@@ -736,6 +828,32 @@ fn map_chunk_hit_drops_orphan_raptor_chunks_without_heads() {
     };
 
     assert!(map_chunk_hit(chunk, 1.0, &document_index, &[]).is_none());
+}
+
+#[test]
+fn map_chunk_hit_preserves_structured_literals_from_window_and_content() {
+    let document = sample_document_row("sample-guide.md", "Sample Guide");
+    let document_index = HashMap::from([(document.document_id, document.clone())]);
+    let mut chunk = knowledge_chunk_row(
+        &document,
+        3,
+        Some("paragraph"),
+        "[Main]\nalphaMode = strict\nconfiguration path: /etc/sample/service.conf",
+    );
+    chunk.window_text = Some(
+        "Run the reload command after editing the configuration:\n\
+         samplectl reload alpha-plugin --config /etc/sample/service.conf"
+            .to_string(),
+    );
+
+    let mapped = map_chunk_hit(chunk, 1.0, &document_index, &[]).unwrap();
+
+    assert!(mapped.source_text.contains("[Main]"));
+    assert!(mapped.source_text.contains("alphaMode = strict"));
+    assert!(mapped.source_text.contains("samplectl reload alpha-plugin"));
+    assert!(mapped.excerpt.contains("[Main]"));
+    assert!(mapped.excerpt.contains("alphaMode = strict"));
+    assert!(mapped.excerpt.contains("samplectl reload alpha-plugin"));
 }
 
 #[test]
@@ -853,7 +971,12 @@ fn latest_version_document_scope_drops_non_release_tail() {
         runtime_chunk_for_document(generic, "Operator Workflow Guide", 8.0),
     ];
 
-    retain_scoped_documents(&mut chunks, &BTreeSet::new(), &BTreeSet::from([release_a, release_b]));
+    retain_scoped_documents(
+        &mut chunks,
+        &BTreeSet::new(),
+        &BTreeSet::from([release_a, release_b]),
+        &BTreeSet::new(),
+    );
 
     assert_eq!(chunks.len(), 2);
     assert!(chunks.iter().all(|chunk| chunk.document_id != generic));
@@ -864,7 +987,7 @@ fn latest_version_document_scope_falls_back_when_no_release_documents() {
     let generic = Uuid::now_v7();
     let mut chunks = vec![runtime_chunk_for_document(generic, "Operator Workflow Guide", 8.0)];
 
-    retain_scoped_documents(&mut chunks, &BTreeSet::new(), &BTreeSet::new());
+    retain_scoped_documents(&mut chunks, &BTreeSet::new(), &BTreeSet::new(), &BTreeSet::new());
 
     assert_eq!(chunks.len(), 1);
     assert_eq!(chunks[0].document_id, generic);
@@ -881,7 +1004,12 @@ fn latest_version_document_scope_unions_with_targeted_documents() {
         runtime_chunk_for_document(generic, "Operator Workflow Guide", 8.0),
     ];
 
-    retain_scoped_documents(&mut chunks, &BTreeSet::from([targeted]), &BTreeSet::from([release]));
+    retain_scoped_documents(
+        &mut chunks,
+        &BTreeSet::from([targeted]),
+        &BTreeSet::from([release]),
+        &BTreeSet::new(),
+    );
 
     let retained = chunks.iter().map(|chunk| chunk.document_id).collect::<BTreeSet<_>>();
     assert_eq!(retained, BTreeSet::from([release, targeted]));
@@ -919,6 +1047,66 @@ fn graph_evidence_chunks_use_explicit_merge_lane_priority() {
 
     assert_eq!(merged[0].chunk_id, graph_evidence.chunk_id);
     assert_eq!(merged[0].score, Some(graph_evidence_chunk_score(0)));
+}
+
+#[test]
+fn graph_evidence_promotes_for_structural_relationship_ir() {
+    let mut query_ir = target_entities_query_ir(&["Alpha Node", "Beta Endpoint"]);
+    query_ir.target_types = vec!["relationship".to_string()];
+
+    assert!(query_ir_promotes_graph_evidence(&query_ir));
+}
+
+#[test]
+fn graph_evidence_promotes_for_relation_like_event_ir() {
+    let query_ir = target_entities_query_ir(&["Beacon Node", "Harbor Delta"]);
+
+    assert!(query_ir_promotes_graph_evidence(&query_ir));
+}
+
+#[test]
+fn graph_evidence_promotes_for_artifact_selection_ir() {
+    let mut query_ir = target_entities_query_ir(&["Router Hub"]);
+    query_ir.target_types = vec!["artifact".to_string()];
+
+    assert!(query_ir_promotes_graph_evidence(&query_ir));
+}
+
+#[test]
+fn graph_evidence_does_not_promote_for_single_document_concept_ir() {
+    let mut query_ir = target_entities_query_ir(&["Transition Hooks"]);
+    query_ir.act = QueryAct::Describe;
+    query_ir.target_types = vec!["concept".to_string()];
+
+    assert!(!query_ir_promotes_graph_evidence(&query_ir));
+}
+
+#[test]
+fn graph_evidence_promotes_for_fact_value_ir() {
+    let mut query_ir = target_entities_query_ir(&["Transition Hooks"]);
+    query_ir.act = QueryAct::RetrieveValue;
+    query_ir.target_types = vec!["concept".to_string()];
+
+    assert!(query_ir_promotes_graph_evidence(&query_ir));
+}
+
+#[test]
+fn graph_evidence_promotes_for_fact_inventory_ir() {
+    let mut query_ir = target_entities_query_ir(&["Transition Hooks"]);
+    query_ir.act = QueryAct::Enumerate;
+    query_ir.target_types = vec!["concept".to_string()];
+
+    assert!(query_ir_promotes_graph_evidence(&query_ir));
+}
+
+#[test]
+fn graph_evidence_does_not_promote_for_exact_technical_ir() {
+    let mut query_ir = target_entities_query_ir(&["Alpha Node", "Beta Endpoint"]);
+    query_ir.target_types = vec!["relationship".to_string()];
+    query_ir.literal_constraints =
+        vec![LiteralSpan { text: "/v1/alpha".to_string(), kind: LiteralKind::Path }];
+
+    assert!(!query_ir_promotes_graph_evidence(&query_ir));
 }
 
 #[test]
@@ -1092,11 +1280,11 @@ fn truncate_bundle_reserves_setup_focus_anchor_for_configure_how() {
     // top_k by score, pushing the low-scored install anchor out. The reserved
     // slot must keep the anchor (package command + config path) in context.
     let mut chunks = (0..8)
-        .map(|index| runtime_chunk("Alpha Suite admin guide", 10_000.0 - index as f32))
+        .map(|index| runtime_chunk("Sample Subject admin guide", 10_000.0 - index as f32))
         .collect::<Vec<_>>();
-    let mut anchor = runtime_chunk("Alpha Suite admin guide", 1.0);
+    let mut anchor = runtime_chunk("Sample Subject admin guide", 1.0);
     anchor.source_text =
-        "Module configuration\naptitude install alpha-connector\nSettings in the file /opt/alpha/connector/connector.conf".to_string();
+        "Module configuration\nsample-runner --install sample-link\nSettings in the file /opt/alpha/connector/connector.conf".to_string();
     let anchor_id = anchor.chunk_id;
     chunks.push(anchor);
     let mut bundle = RetrievalBundle { entities: Vec::new(), relationships: Vec::new(), chunks };
@@ -1104,7 +1292,7 @@ fn truncate_bundle_reserves_setup_focus_anchor_for_configure_how() {
     truncate_bundle(
         &mut bundle,
         4,
-        Some(&configure_how_focus_query_ir("Alpha Suite")),
+        Some(&configure_how_focus_query_ir("Sample Subject")),
         &std::collections::HashSet::new(),
     );
 
@@ -1116,21 +1304,117 @@ fn truncate_bundle_reserves_setup_focus_anchor_for_configure_how() {
 }
 
 #[test]
+fn truncate_bundle_reserves_versioned_update_procedure_body() {
+    let mut chunks = (0..8)
+        .map(|index| {
+            let mut chunk = runtime_chunk(
+                &format!("identity-noise-{index}"),
+                DOCUMENT_IDENTITY_SCORE_FLOOR + 100.0 - index as f32,
+            );
+            chunk.score_kind = RuntimeChunkScoreKind::DocumentIdentity;
+            chunk
+        })
+        .collect::<Vec<_>>();
+    let mut focused_noise = runtime_chunk("Sample Target overview", 9_000.0);
+    focused_noise.score_kind = RuntimeChunkScoreKind::FocusedDocument;
+    chunks.push(focused_noise);
+    let mut procedure = runtime_chunk("Sample Target update guide", 1.0);
+    procedure.score_kind = RuntimeChunkScoreKind::FocusedDocument;
+    procedure.document_label = "Sample Target update guide".to_string();
+    procedure.source_text = "Procedure\n\
+        1. Remove /etc/alpha/sources.list.\n\
+        2. Install alpha-upgrade package.\n\
+        3. Run ./upgrade_alpha.sh."
+        .to_string();
+    let procedure_id = procedure.chunk_id;
+    chunks.push(procedure);
+    let mut query_ir = target_entities_query_ir(&["Sample Target"]);
+    query_ir.act = QueryAct::ConfigureHow;
+    query_ir.target_types = vec!["artifact".to_string(), "procedure".to_string()];
+    query_ir.retrieval_query = Some("how to update Sample Target?".to_string());
+    let mut bundle = RetrievalBundle { entities: Vec::new(), relationships: Vec::new(), chunks };
+
+    truncate_bundle(&mut bundle, 4, Some(&query_ir), &std::collections::HashSet::new());
+
+    assert!(
+        bundle.chunks.iter().any(|chunk| chunk.chunk_id == procedure_id),
+        "versioned update body chunk must survive final context truncation"
+    );
+}
+
+#[test]
+fn truncate_bundle_prefers_exact_versioned_update_runbook_over_short_title_anchors() {
+    let mut chunks = (0..8)
+        .map(|index| {
+            let mut chunk = runtime_chunk(
+                &format!("identity-noise-{index}"),
+                DOCUMENT_IDENTITY_SCORE_FLOOR + 500.0 - index as f32,
+            );
+            chunk.score_kind = RuntimeChunkScoreKind::DocumentIdentity;
+            chunk
+        })
+        .collect::<Vec<_>>();
+
+    for (label, score) in
+        [("Sample Target update note", 10_000.0), ("Sample Target update checklist", 9_999.0)]
+    {
+        let mut short_anchor = runtime_chunk(label, score);
+        short_anchor.score_kind = RuntimeChunkScoreKind::FocusedDocument;
+        short_anchor.source_text = format!(
+            "{label}\n\
+             1. Check the current Sample Target version.\n\
+             2. Read the release note.\n\
+             3. Run sample-runner --refresh."
+        );
+        chunks.push(short_anchor);
+    }
+
+    let mut runbook = runtime_chunk("Sample Target update runbook", 1.0);
+    runbook.score_kind = RuntimeChunkScoreKind::FocusedDocument;
+    runbook.source_text = "Sample Target update runbook\n\
+         1. Run sample-runner --refresh.\n\
+         2. Run sample-runner --apply.\n\
+         3. Run sudo sample-configure alpha-rest.\n\
+         4. Run sudo service alpha-rest restart."
+        .to_string();
+    let runbook_id = runbook.chunk_id;
+    chunks.push(runbook);
+
+    let mut query_ir = target_entities_query_ir(&["Sample Target"]);
+    query_ir.act = QueryAct::ConfigureHow;
+    query_ir.target_types = vec!["artifact".to_string(), "procedure".to_string()];
+    query_ir.retrieval_query = Some("how to update Sample Target?".to_string());
+    let mut bundle = RetrievalBundle { entities: Vec::new(), relationships: Vec::new(), chunks };
+
+    truncate_bundle(&mut bundle, 4, Some(&query_ir), &std::collections::HashSet::new());
+
+    assert!(
+        bundle.chunks.iter().any(|chunk| chunk.chunk_id == runbook_id),
+        "exact-target command runbook must outrank shorter exact-title anchors: {:#?}",
+        bundle
+            .chunks
+            .iter()
+            .map(|chunk| (&chunk.document_label, &chunk.source_text))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
 fn truncate_bundle_does_not_reserve_anchor_without_document_focus() {
     // Same chunks, but the query has no document_focus → no reservation, the
     // low-scored anchor is truncated like any other chunk.
     let mut chunks = (0..8)
-        .map(|index| runtime_chunk("Alpha Suite admin guide", 10_000.0 - index as f32))
+        .map(|index| runtime_chunk("Sample Subject admin guide", 10_000.0 - index as f32))
         .collect::<Vec<_>>();
-    let mut anchor = runtime_chunk("Alpha Suite admin guide", 1.0);
+    let mut anchor = runtime_chunk("Sample Subject admin guide", 1.0);
     anchor.source_text =
-        "aptitude install alpha-connector\nSettings in the file /opt/alpha/connector/connector.conf"
+        "sample-runner --install sample-link\nSettings in the file /opt/alpha/connector/connector.conf"
             .to_string();
     let anchor_id = anchor.chunk_id;
     chunks.push(anchor);
     let mut bundle = RetrievalBundle { entities: Vec::new(), relationships: Vec::new(), chunks };
 
-    let mut query_ir = configure_how_focus_query_ir("Alpha Suite");
+    let mut query_ir = configure_how_focus_query_ir("Sample Subject");
     query_ir.document_focus = None;
     truncate_bundle(&mut bundle, 4, Some(&query_ir), &std::collections::HashSet::new());
 
@@ -1234,6 +1518,42 @@ fn truncate_bundle_keeps_requested_latest_version_document_coverage() {
         bundle.chunks.iter().map(|chunk| chunk.document_id).collect::<HashSet<_>>();
     assert_eq!(effective_top_k, 11);
     assert_eq!(retained_documents.len(), requested_count);
+}
+
+#[test]
+fn truncate_bundle_reserves_latest_version_chunks_before_stale_document_identity_hits() {
+    let requested_count = 5;
+    let mut chunks = (0..8)
+        .map(|index| {
+            let mut chunk =
+                runtime_chunk(&format!("latest releases stale context {index}"), 1_000_000.0);
+            chunk.score_kind = RuntimeChunkScoreKind::DocumentIdentity;
+            chunk
+        })
+        .collect::<Vec<_>>();
+    chunks.extend((0..requested_count).map(|document_rank| {
+        latest_version_identity_chunk(Uuid::now_v7(), requested_count, document_rank, 0)
+    }));
+    let mut query_ir = release_query_ir_with_source_slice_count(Some(requested_count as u16));
+    query_ir.scope = QueryScope::MultiDocument;
+    let mut bundle = RetrievalBundle { entities: Vec::new(), relationships: Vec::new(), chunks };
+
+    truncate_bundle(
+        &mut bundle,
+        requested_count,
+        Some(&query_ir),
+        &std::collections::HashSet::new(),
+    );
+
+    assert_eq!(bundle.chunks.len(), requested_count);
+    assert_eq!(
+        bundle
+            .chunks
+            .iter()
+            .filter(|chunk| chunk.score_kind == RuntimeChunkScoreKind::LatestVersion)
+            .count(),
+        requested_count
+    );
 }
 
 #[test]
@@ -1655,19 +1975,19 @@ fn graph_evidence_text_overlay_focuses_long_mixed_rows() {
     evidence_texts_by_chunk.insert(
         chunk_id,
         vec![format!(
-            "{filler} | Checkout connectors: Provider One, Provider Two, custom gateway | More unrelated CRM material."
+            "{filler} | Sample connectors: Option One, Option Two, custom route | More unrelated material."
         )],
     );
 
     apply_graph_evidence_texts_to_chunks(
         std::slice::from_mut(&mut chunk),
         &evidence_texts_by_chunk,
-        &["checkout".to_string(), "connectors".to_string()],
-        &["checkout".to_string(), "connectors".to_string(), "gateway".to_string()],
+        &["sample".to_string(), "connectors".to_string()],
+        &["sample".to_string(), "connectors".to_string(), "route".to_string()],
     );
 
-    assert!(chunk.source_text.contains("Checkout connectors"));
-    assert!(chunk.source_text.contains("custom gateway"));
+    assert!(chunk.source_text.contains("Sample connectors"));
+    assert!(chunk.source_text.contains("custom route"));
     assert!(!chunk.source_text.contains("Generic section 0"));
 }
 
@@ -1786,16 +2106,16 @@ fn graph_evidence_context_line_formats_delimited_row_fields() {
 
 #[test]
 fn graph_evidence_context_line_focuses_long_mixed_rows() {
-    let target = runtime_graph_node("Alpha Suite", "artifact", None);
+    let target = runtime_graph_node("Sample Subject", "artifact", None);
     let graph_index = graph_index_with_nodes(vec![target.clone()]);
     let filler = (0..80)
-        .map(|index| format!("Generic section {index}: customer forms and archive notes."))
+        .map(|index| format!("Generic section {index}: record forms and archive notes."))
         .collect::<Vec<_>>()
         .join(" | ");
     let row = runtime_graph_evidence_row(
         target.id,
         &format!(
-            "{filler} | Checkout connectors: Provider One, Provider Two, custom gateway | More unrelated CRM material after the focused sentence."
+            "{filler} | Sample connectors: Option One, Option Two, custom route | More unrelated material after the focused sentence."
         ),
     );
 
@@ -1803,12 +2123,12 @@ fn graph_evidence_context_line_focuses_long_mixed_rows() {
         &row,
         &graph_index,
         &HashMap::new(),
-        &["checkout".to_string(), "connectors".to_string(), "gateway".to_string()],
+        &["sample".to_string(), "connectors".to_string(), "route".to_string()],
     )
     .expect("graph evidence line");
 
-    assert!(line.contains("Checkout connectors"));
-    assert!(line.contains("custom gateway"));
+    assert!(line.contains("Sample connectors"));
+    assert!(line.contains("custom route"));
     assert!(!line.contains("Generic section 0"));
 }
 
@@ -2045,11 +2365,11 @@ fn merge_canonical_table_aggregation_chunks_prefers_table_analytics() {
         chunk_index: 0,
         chunk_kind: None,
         document_id,
-        document_label: "customers-100.xlsx".to_string(),
-        excerpt: "customers-100".to_string(),
+        document_label: "records-b.xlsx".to_string(),
+        excerpt: "records-b".to_string(),
         score_kind: crate::services::query::execution::RuntimeChunkScoreKind::Relevance,
         score: Some(1.0),
-        source_text: "customers-100".to_string(),
+        source_text: "records-b".to_string(),
     };
     let summary = RuntimeMatchedChunk {
         chunk_id: Uuid::now_v7(),
@@ -2057,11 +2377,11 @@ fn merge_canonical_table_aggregation_chunks_prefers_table_analytics() {
         chunk_index: 0,
         chunk_kind: None,
         document_id,
-        document_label: "customers-100.xlsx".to_string(),
+        document_label: "records-b.xlsx".to_string(),
         excerpt: "City".to_string(),
         score_kind: crate::services::query::execution::RuntimeChunkScoreKind::Relevance,
         score: Some(1.0),
-        source_text: "Table Summary | Sheet: customers-100 | Column: City | Value Kind: categorical | Value Shape: label | Aggregation Priority: 2 | Row Count: 100 | Non-empty Count: 100 | Distinct Count: 100 | Most Frequent Count: 1 | Most Frequent Tie Count: 100".to_string(),
+        source_text: "Table Summary | Sheet: records-b | Column: City | Value Kind: categorical | Value Shape: label | Aggregation Priority: 2 | Row Count: 100 | Non-empty Count: 100 | Distinct Count: 100 | Most Frequent Count: 1 | Most Frequent Tie Count: 100".to_string(),
     };
     let row = RuntimeMatchedChunk {
         chunk_id: Uuid::now_v7(),
@@ -2069,11 +2389,11 @@ fn merge_canonical_table_aggregation_chunks_prefers_table_analytics() {
         chunk_index: 0,
         chunk_kind: None,
         document_id,
-        document_label: "customers-100.xlsx".to_string(),
+        document_label: "records-b.xlsx".to_string(),
         excerpt: "Row 1".to_string(),
         score_kind: crate::services::query::execution::RuntimeChunkScoreKind::Relevance,
         score: Some(1.0),
-        source_text: "Sheet: customers-100 | Row 1 | City: Acevedoville".to_string(),
+        source_text: "Sheet: records-b | Row 1 | City: Acevedoville".to_string(),
     };
 
     let merged = merge_canonical_table_aggregation_chunks(
@@ -2097,11 +2417,11 @@ fn merge_canonical_table_aggregation_chunks_keeps_existing_when_no_direct_analyt
         chunk_index: 0,
         chunk_kind: None,
         document_id: Uuid::now_v7(),
-        document_label: "customers-100.xlsx".to_string(),
-        excerpt: "customers-100".to_string(),
+        document_label: "records-b.xlsx".to_string(),
+        excerpt: "records-b".to_string(),
         score_kind: crate::services::query::execution::RuntimeChunkScoreKind::Relevance,
         score: Some(1.0),
-        source_text: "customers-100".to_string(),
+        source_text: "records-b".to_string(),
     };
 
     let merged =
@@ -2295,6 +2615,43 @@ fn sample_document_row(file_name: &str, title: &str) -> KnowledgeDocumentRow {
         created_at: Utc::now(),
         updated_at: Utc::now(),
         deleted_at: None,
+    }
+}
+
+fn knowledge_chunk_row(
+    document: &KnowledgeDocumentRow,
+    chunk_index: i32,
+    chunk_kind: Option<&str>,
+    text: &str,
+) -> KnowledgeChunkRow {
+    KnowledgeChunkRow {
+        key: Uuid::now_v7().to_string(),
+        arango_id: None,
+        arango_rev: None,
+        chunk_id: Uuid::now_v7(),
+        workspace_id: document.workspace_id,
+        library_id: document.library_id,
+        document_id: document.document_id,
+        revision_id: document.readable_revision_id.unwrap_or_else(Uuid::now_v7),
+        chunk_index,
+        chunk_kind: chunk_kind.map(str::to_string),
+        content_text: text.to_string(),
+        normalized_text: text.to_string(),
+        span_start: None,
+        span_end: None,
+        token_count: Some(text.split_whitespace().count() as i32),
+        support_block_ids: Vec::new(),
+        section_path: Vec::new(),
+        heading_trail: Vec::new(),
+        literal_digest: None,
+        chunk_state: "ready".to_string(),
+        text_generation: Some(1),
+        vector_generation: Some(1),
+        quality_score: Some(1.0),
+        window_text: None,
+        raptor_level: None,
+        occurred_at: None,
+        occurred_until: None,
     }
 }
 

@@ -7,10 +7,14 @@ use uuid::Uuid;
 use crate::{
     domains::query::{
         ContextAssemblyMetadata, ContextAssemblyStatus, GroupedReference, GroupedReferenceKind,
-        IntentKeywords, QueryIntentCacheStatus, QueryPlanningMetadata, RerankMetadata,
-        RerankStatus, RuntimeQueryMode,
+        QueryIntentCacheStatus, QueryPlanningMetadata, RerankMetadata, RerankStatus,
+        RuntimeQueryMode,
     },
-    services::query::{error::QueryServiceError, planner::extract_keywords},
+    domains::query_ir::QueryIR,
+    services::query::{
+        error::QueryServiceError,
+        planner::{derive_lexical_lane_keywords, extract_keywords},
+    },
 };
 
 #[derive(Debug, Clone)]
@@ -115,7 +119,16 @@ pub async fn invalidate_library_source_truth(
 #[must_use]
 pub fn derive_query_planning_metadata(request: &IntentResolutionRequest) -> QueryPlanningMetadata {
     let _ = (request.library_id, request.source_truth_version);
-    derive_planning_metadata(request, QueryIntentCacheStatus::Miss)
+    derive_planning_metadata(request, QueryIntentCacheStatus::Miss, None)
+}
+
+#[must_use]
+pub fn derive_query_planning_metadata_for_query_ir(
+    request: &IntentResolutionRequest,
+    query_ir: &QueryIR,
+) -> QueryPlanningMetadata {
+    let _ = (request.library_id, request.source_truth_version);
+    derive_planning_metadata(request, QueryIntentCacheStatus::Miss, Some(query_ir))
 }
 
 #[must_use]
@@ -244,16 +257,16 @@ struct GroupAccumulator {
 fn derive_planning_metadata(
     request: &IntentResolutionRequest,
     cache_status: QueryIntentCacheStatus,
+    query_ir: Option<&QueryIR>,
 ) -> QueryPlanningMetadata {
     let keywords = extract_keywords(&request.question);
-    let high_level = keywords.iter().take(3).cloned().collect::<Vec<_>>();
-    let low_level = keywords.iter().skip(3).cloned().collect::<Vec<_>>();
+    let keywords = derive_lexical_lane_keywords(&keywords, query_ir);
 
     QueryPlanningMetadata {
         requested_mode: request.explicit_mode,
         planned_mode: request.explicit_mode,
         intent_cache_status: cache_status,
-        keywords: IntentKeywords { high_level, low_level },
+        keywords,
         warnings: Vec::new(),
     }
 }

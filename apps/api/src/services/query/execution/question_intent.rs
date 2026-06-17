@@ -5,7 +5,9 @@
 //! owns language understanding, and this module only translates typed IR
 //! tags into local answer-builder intents.
 
-use crate::domains::query_ir::{LiteralKind, QueryAct, QueryIR, literal_text_is_identifier_shaped};
+use crate::domains::query_ir::{
+    EntityRole, LiteralKind, QueryAct, QueryIR, literal_text_is_identifier_shaped,
+};
 
 /// A recognized question intent. Downstream builders use these to
 /// pick the right answer strategy (fact-store lookup, evidence scan,
@@ -165,6 +167,59 @@ fn query_ir_has_specific_endpoint_lookup_target(query_ir: &QueryIR) -> bool {
 
 pub(crate) fn canonical_target_type_tag(value: &str) -> String {
     value.trim().to_ascii_lowercase()
+}
+
+pub(crate) fn query_ir_has_setup_configuration_target(query_ir: &QueryIR) -> bool {
+    query_ir.target_types.iter().any(|target_type| {
+        matches!(
+            canonical_target_type_tag(target_type).as_str(),
+            "configuration_file" | "config_key" | "parameter" | "package"
+        )
+    })
+}
+
+pub(crate) fn query_ir_is_unambiguous_versioned_procedure(query_ir: &QueryIR) -> bool {
+    let mut has_procedure = false;
+    let mut has_concept = false;
+    let mut has_version_or_release = false;
+    for target_type in &query_ir.target_types {
+        match canonical_target_type_tag(target_type).as_str() {
+            "procedure" => has_procedure = true,
+            "concept" => has_concept = true,
+            "version" | "release" => has_version_or_release = true,
+            _ => {}
+        }
+    }
+    let has_procedure_action = matches!(query_ir.act, QueryAct::ConfigureHow);
+    let has_procedure_signal = has_version_or_release && (has_procedure || has_procedure_action);
+    let has_subject_signal =
+        query_ir.target_entities.iter().any(|entity| matches!(entity.role, EntityRole::Subject))
+            || (has_version_or_release && query_ir.document_focus.is_some());
+    has_procedure_signal
+        && has_subject_signal
+        && !has_concept
+        && (!query_ir_has_setup_configuration_target(query_ir) || has_procedure)
+        && query_ir.needs_clarification.is_none()
+}
+
+pub(crate) fn query_ir_allows_procedure_runbook_target(query_ir: &QueryIR) -> bool {
+    if query_ir.needs_clarification.is_some() || query_ir_has_setup_configuration_target(query_ir) {
+        return false;
+    }
+    let mut has_procedure = false;
+    let mut has_runbook_document_target = false;
+    let mut has_generic_concept = false;
+    for target_type in &query_ir.target_types {
+        match canonical_target_type_tag(target_type).as_str() {
+            "procedure" => has_procedure = true,
+            "document" | "primary_heading" | "secondary_heading" => {
+                has_runbook_document_target = true;
+            }
+            "concept" => has_generic_concept = true,
+            _ => {}
+        }
+    }
+    has_procedure && has_runbook_document_target && !has_generic_concept
 }
 
 fn target_type_tag_is_endpoint_lookup(tag: &str) -> bool {
@@ -410,6 +465,55 @@ mod tests {
         assert!(!query_ir_has_focused_document_answer_intent(&test_ir(["endpoint"])));
     }
 
+    #[test]
+    fn detects_versioned_update_from_configure_version_target() {
+        let configure =
+            test_ir_with_document_focus(QueryAct::ConfigureHow, ["artifact", "version"]);
+        let describe_procedure =
+            test_ir_with_document_focus(QueryAct::Describe, ["procedure", "release"]);
+        let describe_release_document =
+            test_ir_with_document_focus(QueryAct::Describe, ["document", "release"]);
+        let setup_version =
+            test_ir_with_document_focus(QueryAct::ConfigureHow, ["package", "version"]);
+        let setup_procedure_version = test_ir_with_document_focus(
+            QueryAct::ConfigureHow,
+            ["package", "procedure", "version"],
+        );
+        assert!(query_ir_is_unambiguous_versioned_procedure(&configure));
+        assert!(query_ir_is_unambiguous_versioned_procedure(&describe_procedure));
+        assert!(!query_ir_is_unambiguous_versioned_procedure(&describe_release_document));
+        assert!(!query_ir_is_unambiguous_versioned_procedure(&setup_version));
+        assert!(query_ir_is_unambiguous_versioned_procedure(&setup_procedure_version));
+        assert!(!query_ir_is_unambiguous_versioned_procedure(&test_ir_with_act(
+            QueryAct::RetrieveValue,
+            ["artifact", "version"]
+        )));
+        assert!(!query_ir_is_unambiguous_versioned_procedure(&test_ir_with_act(
+            QueryAct::ConfigureHow,
+            ["artifact", "version"]
+        )));
+    }
+
+    #[test]
+    fn procedure_runbook_target_requires_procedure_document_without_setup_or_concept() {
+        assert!(query_ir_allows_procedure_runbook_target(&test_ir_with_act(
+            QueryAct::ConfigureHow,
+            ["procedure", "document"]
+        )));
+        assert!(query_ir_allows_procedure_runbook_target(&test_ir_with_act(
+            QueryAct::Describe,
+            ["procedure", "primary_heading"]
+        )));
+        assert!(!query_ir_allows_procedure_runbook_target(&test_ir_with_act(
+            QueryAct::ConfigureHow,
+            ["procedure", "document", "concept"]
+        )));
+        assert!(!query_ir_allows_procedure_runbook_target(&test_ir_with_act(
+            QueryAct::ConfigureHow,
+            ["procedure", "document", "package"]
+        )));
+    }
+
     fn test_ir<const N: usize>(target_types: [&str; N]) -> QueryIR {
         QueryIR {
             act: QueryAct::RetrieveValue,
@@ -431,5 +535,17 @@ mod tests {
 
     fn test_ir_with_act<const N: usize>(act: QueryAct, target_types: [&str; N]) -> QueryIR {
         QueryIR { act, ..test_ir(target_types) }
+    }
+
+    fn test_ir_with_document_focus<const N: usize>(
+        act: QueryAct,
+        target_types: [&str; N],
+    ) -> QueryIR {
+        QueryIR {
+            document_focus: Some(crate::domains::query_ir::DocumentHint {
+                hint: "Alpha Service".to_string(),
+            }),
+            ..test_ir_with_act(act, target_types)
+        }
     }
 }

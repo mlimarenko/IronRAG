@@ -1,15 +1,18 @@
 #!/usr/bin/env python3
-"""Compare two golden benchmark result sets and print a diff report."""
+"""Compare two grounded benchmark result sets and print a diff report."""
 
 import json
 import sys
 from pathlib import Path
 
 
+RANK_METRIC_KEYS = ("mrr", "hit@1", "hit@3", "hit@5", "hit@10")
+
+
 def load_suite_results(result_dir: Path) -> dict:
     """Load all suite result files from a directory."""
     suites = {}
-    for path in sorted(result_dir.glob("golden_*_suite.result.json")):
+    for path in sorted(result_dir.glob("*_suite.result.json")):
         data = json.loads(path.read_text())
         suite_id = data.get("suite", {}).get("suiteId", path.stem)
         suites[suite_id] = data
@@ -28,6 +31,35 @@ def count_dimensions(cases: list) -> dict:
             else:
                 dims[dim_name]["fail"] += 1
     return dims
+
+
+def has_rank_metrics(metrics: dict) -> bool:
+    return any(
+        isinstance(metrics.get(family), dict)
+        and int(metrics[family].get("caseCount", 0)) > 0
+        for family in ("documents", "chunks")
+    )
+
+
+def print_rank_metric_delta(label: str, baseline_metrics: dict, improved_metrics: dict) -> None:
+    if not has_rank_metrics(baseline_metrics) and not has_rank_metrics(improved_metrics):
+        return
+
+    print(label)
+    for family in ("documents", "chunks"):
+        b_family = baseline_metrics.get(family, {}) if isinstance(baseline_metrics, dict) else {}
+        i_family = improved_metrics.get(family, {}) if isinstance(improved_metrics, dict) else {}
+        if not b_family and not i_family:
+            continue
+
+        b_cases = int(b_family.get("caseCount", 0))
+        i_cases = int(i_family.get("caseCount", 0))
+        print(f"  {family} cases: {b_cases} -> {i_cases}")
+        for key in RANK_METRIC_KEYS:
+            bv = float(b_family.get(key, 0.0))
+            iv = float(i_family.get(key, 0.0))
+            delta = iv - bv
+            print(f"    {key:6s} {bv:.6f} -> {iv:.6f} ({delta:+.6f})")
 
 
 def main():
@@ -58,6 +90,12 @@ def main():
         arrow = "↑" if delta > 0 else ("↓" if delta < 0 else "=")
         print(f"  {key:20s}  {bv:6d} → {iv:6d}  ({arrow} {abs(delta):+d}, {pct:+.0f}%)")
 
+    print_rank_metric_delta(
+        "\n--- Retrieval Rank Metrics ---",
+        baseline_matrix.get("summary", {}).get("rankMetrics", {}),
+        improved_matrix.get("summary", {}).get("rankMetrics", {}),
+    )
+
     # Per-suite case results
     baseline_suites = load_suite_results(baseline_dir)
     improved_suites = load_suite_results(improved_dir)
@@ -73,6 +111,11 @@ def main():
         i_cases = i_suite.get("cases", [])
 
         print(f"\n--- {suite_id} ---")
+        print_rank_metric_delta(
+            "  Rank metrics:",
+            b_suite.get("summary", {}).get("rankMetrics", {}),
+            i_suite.get("summary", {}).get("rankMetrics", {}),
+        )
 
         # Build case lookup
         b_case_map = {c["caseId"]: c for c in b_cases}

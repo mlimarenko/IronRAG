@@ -287,13 +287,15 @@ fn format_most_frequent_table_summary_answer(
 pub(crate) fn question_asks_table_aggregation(question: &str, ir: Option<&QueryIR>) -> bool {
     let _ = question;
     ir.is_some_and(|ir| {
+        let target_types =
+            ir.target_types.iter().map(|tag| normalized_ir_tag(tag)).collect::<Vec<_>>();
+        let has_table_summary = target_types.iter().any(|tag| tag == "table_summary");
+        let has_table_row = target_types.iter().any(|tag| tag == "table_row");
         question_asks_average(Some(ir))
             || question_asks_most_frequent(Some(ir))
             || (matches!(ir.act, QueryAct::RetrieveValue | QueryAct::Enumerate)
-                && ir
-                    .target_types
-                    .iter()
-                    .any(|tag| matches!(normalized_ir_tag(tag).as_str(), "table_summary")))
+                && has_table_summary
+                && !has_table_row)
     })
 }
 

@@ -1068,10 +1068,10 @@ mod tests {
                             block_id: Uuid::now_v7(),
                             ordinal: 1,
                             block_kind: StructuredBlockKind::ListItem,
-                            text: "- [Control Center](https://docs.example.test/control-center)"
+                            text: "- [Operations Console](https://docs.example.test/operations-console)"
                                 .to_string(),
                             normalized_text:
-                                "- [Control Center](https://docs.example.test/control-center)"
+                                "- [Operations Console](https://docs.example.test/operations-console)"
                                     .to_string(),
                             heading_trail: vec![
                                 "Acme Software Products - Acme Software Products - Example"

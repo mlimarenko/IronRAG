@@ -65,10 +65,22 @@ pub(crate) fn graph_state_after_successful_extract(graph_ready: bool) -> &'stati
 /// purely additive and needs no schema migration.
 pub(crate) const GRAPH_STATE_DEGRADED: &str = "graph_degraded";
 
+/// Mark a revision's vector + graph lanes failed after an embed/graph stage
+/// error.
+///
+/// `delete_vectors` controls whether the chunk vectors already persisted for
+/// this revision are wiped. On a TERMINAL failure they must be removed so a
+/// half-embedded revision cannot linger. On a TRANSIENT/retryable embed failure
+/// the caller passes `false` so the persisted batches survive for the next
+/// attempt to resume from (see
+/// [`QueryServiceError::preserves_partial_vectors`]); the revision still flips
+/// to `vector_state = failed` until a later attempt completes the remainder and
+/// the count-gated readiness promotes it back to ready.
 pub(crate) async fn fail_revision_vector_graph_readiness(
     state: &AppState,
     revision_id: Uuid,
     reason: &str,
+    delete_vectors: bool,
 ) -> anyhow::Result<u64> {
     let revision = state
         .arango_document_store
@@ -99,6 +111,15 @@ pub(crate) async fn fail_revision_vector_graph_readiness(
         return Err(anyhow::anyhow!(
             "knowledge revision {revision_id} disappeared during failed readiness update"
         ));
+    }
+
+    if !delete_vectors {
+        tracing::info!(
+            revision_id = %revision_id,
+            reason,
+            "marked revision vector/graph failed but preserved persisted chunk vectors for retry",
+        );
+        return Ok(0);
     }
 
     let deleted =

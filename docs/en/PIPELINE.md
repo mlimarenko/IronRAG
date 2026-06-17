@@ -55,11 +55,20 @@ pages are streamed through one Docling process (default: 40 pages), and
 `IRONRAG_DOCLING_MAX_CONCURRENCY` bounds local Docling processes. Already
 completed page ranges are reused after worker restart, backend restart, lease
 loss, or network interruption.
+Before launching a Docling process, the worker checks current cgroup hard
+memory headroom against the minimum one-process budget. If one process cannot
+fit, the document fails with a terminal `docling_insufficient_memory` ingest
+error instead of spawning Python and entering a SIGKILL/retry loop.
 `IRONRAG_INGESTION_HEAVY_PIPELINE_PARALLELISM=auto` controls how many large
 PDF pipelines may be active before provider-bound stages. The automatic value
 uses the worker CPU and memory cgroup limits and is capped at 4 by default;
 it is also bounded by the configured Docling subprocess concurrency so heavy
 jobs do not pile up unbounded behind `IRONRAG_DOCLING_MAX_CONCURRENCY`.
+The worker's canonical ingest claim loop has a second memory guard: it derives
+the maximum active jobs for that process from the resolved cgroup soft memory
+limit before claiming more leases. This guard is independent from the
+deployment-wide global / workspace / library caps and protects small swapless
+hosts from stacking several memory-heavy jobs in one worker process.
 
 ### Table contract
 
@@ -148,6 +157,31 @@ stay coherent across:
 
 ## 6. Query and answer path
 
+### Per-library retrieval configuration
+
+Each library carries a `retrieval_config` JSON object that controls how its
+retrieval lanes are parameterized. The configuration is stored in the
+`catalog_library.retrieval_config` column and is read and updated through
+`GET /v1/catalog/libraries/{id}/retrieval-config` and
+`PUT /v1/catalog/libraries/{id}/retrieval-config` (admin write permission
+required).
+
+**Current knobs** (absent keys resolve to their defaults):
+
+| Key path | Type | Default | Effect |
+|---|---|---|---|
+| `lexical.textSearchConfig` | string | `"simple"` | PostgreSQL FTS text-search configuration name used in the lexical lane (`websearch_to_tsquery` and `to_tsquery` calls). Must name an entry in `pg_ts_config`; unknown names are rejected with HTTP 400. |
+
+The default value `"simple"` reproduces the historical hardcoded behavior
+byte-for-byte: rendered SQL with the default config is string-identical to the
+original constant. Changing the config to, for example, `"english"` switches
+the lexical lane to the English dictionary with stemming, which improves recall
+for morphologically related terms at the cost of exact-form matching.
+
+The configuration is validated at write time: the backend queries
+`pg_ts_config` and rejects config names not present in the database. This
+catches typos before they silently degrade retrieval.
+
 The query path uses one retrieval stack:
 
 - lexical retrieval
@@ -157,7 +191,36 @@ The query path uses one retrieval stack:
 - answer generation
 - verification
 
+The lexical lane planner derives its high-level and low-level seeds from the
+compiled `QueryIR`, not from keyword position. Subjects, objects, target types,
+document focus, comparison operands, and exact literals feed the high-level
+lane; modifiers, comparison dimensions, temporal constraints, and source-slice
+refinements feed the low-level lane. If the IR is absent, low-confidence,
+seedless, or produces no keyword matches, both lanes use the full extracted
+keyword set to preserve the previous lexical behavior.
+
 Exact-literal technical questions use the same answer contract but may take a lexical-only fast path when the question clearly targets an endpoint, parameter name, or transport literal.
+
+Setup and versioned procedure questions have additional structural
+lanes before free-form answer generation. Broad setup requests can return a
+deterministic setup-variants answer when retrieved documents expose
+grounded item anchors, command anchors, paths, sections, or
+parameters across multiple plausible variants. A request that already focuses
+one document or subject keeps the focused path instead of being broadened by
+the multi-variant shortcut. Versioned procedure questions build a
+subject/acronym profile from the typed query plan and document labels, then
+require ordered procedure evidence before a transition document can dominate
+generic release notes or compatibility pages. Exact instruction-title procedure
+anchors are protected while retrieval is truncated and while topical pruning
+removes generic tails. Reranking can raise ordinary relevance chunks, but it
+does not lower absolute scores from protected evidence lanes such as document
+identity, focused document, query-IR focus, or procedure anchors. When a query
+is typed as an update procedure, the inferred latest-version inventory fallback
+is disabled so release/changelog lists cannot preempt the deterministic
+procedure answer. Transport assignment rendering remains separate: it requires
+typed port/protocol/connection intent plus concrete `name = value` evidence,
+and typed service/port inventories without a connection signal stay on the
+normal synthesis path.
 
 Documents whose typed role is `attached_context` (raster-image attachments of a parent page) are subordinate context, not competing peers: their chunks are demoted below peer and primary content when the final context is selected, they are excluded from the clarify-vs-answer disposition, and they never become a clarify variant. A page's one-chunk image attachments therefore cannot flood an answer's context or a clarification menu and displace the parent page's own evidence. The exception is a query that explicitly focuses on the attachment itself, which keeps it in the primary band.
 

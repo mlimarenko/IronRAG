@@ -188,6 +188,8 @@ const API_DESCRIPTION: &str = concat!(
         crate::interfaces::http::ai::delete_binding_assignment,
         crate::interfaces::http::catalog::update_library,
         crate::interfaces::http::catalog::update_library_recognition_policy,
+        crate::interfaces::http::catalog::get_library_retrieval_config,
+        crate::interfaces::http::catalog::update_library_retrieval_config,
         crate::interfaces::http::billing::list_library_document_costs,
         crate::interfaces::http::ops::get_library_dashboard,
         crate::interfaces::http::iam::session::resolve_session,

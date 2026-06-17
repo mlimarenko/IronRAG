@@ -30,7 +30,7 @@ use crate::{
     services::{
         ai_catalog_service::ResolvedRuntimeBinding,
         ingest::{
-            cancellation::{StageError, ensure_not_cancelled},
+            cancellation::{StageError, anyhow_is_cancelled, ensure_not_cancelled},
             service::{INGEST_STAGE_EMBED_CHUNK, RecordStageUnitProgressCommand},
         },
     },
@@ -661,8 +661,15 @@ impl SearchService {
             }
         };
         ensure_not_cancelled(cancellation_token)?;
+        // Resume path: only the chunks not already covered by a persisted /
+        // reusable vector are embedded on this attempt. After a transient failure
+        // that preserved partial vectors, the prior batches land in
+        // `reused_chunk_ids` and the retry pays only for the missing remainder.
+        let chunk_ids = chunks.iter().map(|chunk| chunk.chunk_id).collect::<Vec<_>>();
+        let missing_chunk_ids: BTreeSet<Uuid> =
+            chunk_ids_missing_vectors(&chunk_ids, &reused_chunk_ids).into_iter().collect();
         let chunks_to_embed: Vec<&KnowledgeChunkRow> =
-            chunks.iter().filter(|chunk| !reused_chunk_ids.contains(&chunk.chunk_id)).collect();
+            chunks.iter().filter(|chunk| missing_chunk_ids.contains(&chunk.chunk_id)).collect();
         sync_embed_chunk_stage_progress(state, attempt_id, reused_chunk_ids.len(), chunks.len())
             .await;
 
@@ -740,7 +747,13 @@ impl SearchService {
             let (batch, batch_response) = match batch_result {
                 Ok(batch_response) => batch_response,
                 Err(error) => {
-                    return fail_embed_chunks_after_cleanup(state, revision_id, error).await;
+                    // Transient provider failure (429 / timeout / connection
+                    // reset). Keep the batches already persisted so the retry
+                    // resumes from them instead of re-paying for every vector.
+                    if anyhow_is_cancelled(&error) {
+                        return fail_embed_chunks_after_cleanup(state, revision_id, error).await;
+                    }
+                    return fail_embed_chunks_preserving_partial(revision_id, error);
                 }
             };
             if batch_response.embeddings.len() != batch.len() {
@@ -830,7 +843,15 @@ impl SearchService {
             let persisted_count = match persist_result {
                 Ok(persisted_count) => persisted_count,
                 Err(error) => {
-                    return fail_embed_chunks_after_cleanup(state, revision_id, error).await;
+                    // A vector-store write blip is transient and retryable, and
+                    // every batch persisted before it stays valid (dimension
+                    // validation runs *before* persist, so a bad vector is never
+                    // written). Keep the partial state so the retry resumes from
+                    // it. Cancellation is the only delete case here.
+                    if anyhow_is_cancelled(&error) {
+                        return fail_embed_chunks_after_cleanup(state, revision_id, error).await;
+                    }
+                    return fail_embed_chunks_preserving_partial(revision_id, error);
                 }
             };
             if persisted_count > 0 {
@@ -847,8 +868,7 @@ impl SearchService {
         }
 
         fail_embed_chunks_if_cancelled(state, revision_id, cancellation_token).await?;
-        let covered_chunk_count = chunks_embedded.saturating_add(reused_chunk_ids.len());
-        if covered_chunk_count != chunks.len() {
+        if !embed_coverage_is_complete(chunks_embedded, reused_chunk_ids.len(), chunks.len()) {
             return fail_embed_chunks_after_cleanup(
                 state,
                 revision_id,
@@ -1374,6 +1394,48 @@ async fn fail_embed_chunks_after_cleanup<T>(
     Err(error.into())
 }
 
+/// Fail the embed_chunk stage on a TRANSIENT/retryable error WITHOUT deleting
+/// the chunk vectors already persisted for this revision. The successfully
+/// persisted batches stay valid, so the next attempt resumes from them
+/// (`load_current_revision_chunk_vector_ids`) and embeds only the missing
+/// remainder — a provider blip near the end of a large document no longer
+/// discards every paid-for vector.
+///
+/// The returned error is classified `ProviderUnavailable` so that
+/// [`QueryServiceError::preserves_partial_vectors`] is `true`, which the ingest
+/// caller uses to skip the revision-level vector cleanup in
+/// `fail_revision_vector_graph_readiness` as well. Readiness stays count-gated:
+/// the revision only flips to `vector_state = ready` once persisted vector count
+/// equals chunk count on a fully successful run.
+fn fail_embed_chunks_preserving_partial<T>(
+    revision_id: Uuid,
+    error: anyhow::Error,
+) -> std::result::Result<T, QueryServiceError> {
+    tracing::warn!(
+        revision_id = %revision_id,
+        error = %format!("{error:#}"),
+        "embed_chunk stage failed transiently; preserving persisted chunk vectors for retry",
+    );
+    Err(QueryServiceError::ProviderUnavailable { message: format!("{error:#}") })
+}
+
+/// Chunk ids that still need a vector on this attempt: every chunk whose id is
+/// not already covered by a persisted/reusable vector. Drives the embed-only-the-
+/// remainder resume path so a retry after a transient failure re-embeds just the
+/// missing chunks instead of the whole revision.
+fn chunk_ids_missing_vectors(chunk_ids: &[Uuid], already_covered: &BTreeSet<Uuid>) -> Vec<Uuid> {
+    chunk_ids.iter().copied().filter(|id| !already_covered.contains(id)).collect()
+}
+
+/// Count-gated readiness: a revision is only fully embedded when the chunks
+/// embedded on this attempt plus the chunks reused from prior attempts/parents
+/// exactly cover every chunk. A half-embedded revision (e.g. after a transient
+/// failure that preserved partial vectors) fails this gate and never flips to
+/// `vector_state = ready`.
+fn embed_coverage_is_complete(chunks_embedded: usize, chunks_reused: usize, total: usize) -> bool {
+    chunks_embedded.saturating_add(chunks_reused) == total
+}
+
 async fn fail_embed_chunks_if_cancelled(
     state: &AppState,
     revision_id: Uuid,
@@ -1821,5 +1883,45 @@ mod tests {
             occurred_at: None,
             occurred_until: None,
         }
+    }
+
+    // BUG B (c): after a transient failure that preserved the already-persisted
+    // batches, the retry embeds ONLY the missing remainder — chunks whose
+    // vectors survived are skipped.
+    #[test]
+    fn retry_embeds_only_chunks_missing_vectors() {
+        let chunk_a = Uuid::now_v7();
+        let chunk_b = Uuid::now_v7();
+        let chunk_c = Uuid::now_v7();
+        let all = [chunk_a, chunk_b, chunk_c];
+
+        // Fresh revision: nothing persisted yet, so every chunk is embedded.
+        let none_covered = BTreeSet::new();
+        assert_eq!(chunk_ids_missing_vectors(&all, &none_covered), vec![chunk_a, chunk_b, chunk_c]);
+
+        // Retry after a blip persisted A and B: only C remains.
+        let mut partially_covered = BTreeSet::new();
+        partially_covered.insert(chunk_a);
+        partially_covered.insert(chunk_b);
+        assert_eq!(chunk_ids_missing_vectors(&all, &partially_covered), vec![chunk_c]);
+
+        // Final retry after the remainder also persisted: nothing left to embed.
+        let fully_covered: BTreeSet<Uuid> = all.iter().copied().collect();
+        assert!(chunk_ids_missing_vectors(&all, &fully_covered).is_empty());
+    }
+
+    // BUG B (d): readiness stays gated on FULL coverage. A revision is only
+    // complete when embedded + reused == total; a half-embedded revision
+    // (transient failure preserved partial vectors) never passes the gate.
+    #[test]
+    fn embed_readiness_is_gated_on_full_coverage() {
+        // Fully covered by a single clean run.
+        assert!(embed_coverage_is_complete(3, 0, 3));
+        // Fully covered by resume: 1 reused from a prior attempt + 2 embedded now.
+        assert!(embed_coverage_is_complete(2, 1, 3));
+        // Half-embedded: a transient failure left only 2 of 3 covered.
+        assert!(!embed_coverage_is_complete(2, 0, 3));
+        // Still short after a partial resume.
+        assert!(!embed_coverage_is_complete(1, 1, 3));
     }
 }

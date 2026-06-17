@@ -23,7 +23,9 @@ use crate::{
             pg_graph_store::PgGraphStore, pg_search_store::PgSearchStore,
         },
     },
+    integrations::concurrency_gateway::ConcurrencyLimitedGateway,
     integrations::llm::{LlmGateway, UnifiedGateway},
+    integrations::provider_budget::{ProviderBudgetConfig, ProviderBudgetRegistry},
     services::{
         ai_catalog_service::AiCatalogService,
         catalog_service::CatalogService,
@@ -462,9 +464,22 @@ impl AppState {
             )),
             agent_runtime.hooks(),
         );
+        // Install the process-wide per-provider outbound concurrency budget.
+        // The default config (max_outbound == 0) is unlimited, so without an
+        // explicit operator opt-in the registry never caps or waits and the
+        // decorator below is a transparent pass-through.
+        let provider_budget_config = ProviderBudgetConfig {
+            max_outbound: settings.provider_concurrency_max_outbound,
+            query_reserved: settings.provider_concurrency_query_reserved,
+        };
+        crate::integrations::provider_budget::install_global_registry(Arc::new(
+            ProviderBudgetRegistry::uniform(provider_budget_config),
+        ));
+        let llm_gateway: Arc<dyn LlmGateway> =
+            Arc::new(ConcurrencyLimitedGateway::new(UnifiedGateway::from_settings(&settings)));
         Ok(Self {
             agent_runtime,
-            llm_gateway: Arc::new(UnifiedGateway::from_settings(&settings)),
+            llm_gateway,
             content_storage,
             deployment_diagnostics,
             worker_runtime,

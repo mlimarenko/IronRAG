@@ -41,7 +41,7 @@ fn canonical_preflight_answer_prefers_missing_explicit_document_before_other_pat
     )
     .expect("missing explicit document answer");
 
-    assert!(answer.contains("missing-contract.md"));
+    assert!(answer.answer.contains("missing-contract.md"));
 }
 
 #[test]
@@ -97,7 +97,7 @@ fn canonical_preflight_answer_reuses_single_endpoint_override_for_live_path() {
     )
     .expect("single endpoint preflight answer");
 
-    assert_eq!(answer, "The endpoint is `GET /system/info`.");
+    assert_eq!(answer.answer, "The endpoint is `GET /system/info`.");
 }
 
 #[test]
@@ -173,7 +173,7 @@ fn build_preflight_answer_chunks_prioritizes_technical_literal_candidates() {
     )
     .expect("single endpoint preflight answer from merged candidates");
 
-    assert_eq!(answer, "The endpoint is `GET /system/info`.");
+    assert_eq!(answer.answer, "The endpoint is `GET /system/info`.");
 }
 
 #[test]
@@ -200,7 +200,7 @@ fn setup_preflight_extends_override_context_with_late_parameter_chunks() {
     let mut preflight_chunks = vec![chunk(
         setup_document_id,
         0,
-        "Install module with aptitude install alpha-connector and configure /opt/alpha/alpha.conf.",
+        "Install module with sample-install alpha-connector and configure /opt/alpha/alpha.conf.",
     )];
     let duplicate_id = preflight_chunks[0].chunk_id;
     let mut duplicate = preflight_chunks[0].clone();
@@ -297,7 +297,7 @@ fn canonical_preflight_answer_keeps_follow_up_setup_questions_generative() {
             source_text: repair_technical_layout_noise(
                 r#"
 Install the module:
-aptitude install alpha-connector
+sample-install alpha-connector
 
 Connector settings are stored in /opt/alpha/modules/connector/connector.conf under [Main].
 "#,
@@ -341,7 +341,7 @@ Connector settings are stored in /opt/alpha/modules/connector/connector.conf und
     )
     .expect("initial setup preflight answer");
 
-    assert!(initial_answer.contains("`alpha-connector`"), "{initial_answer}");
+    assert!(initial_answer.answer.contains("`alpha-connector`"), "{initial_answer:?}");
     query_ir.conversation_refs = vec![crate::domains::query_ir::UnresolvedRef {
         kind: crate::domains::query_ir::ConversationRefKind::Elliptic,
         surface: "those settings".to_string(),
@@ -381,7 +381,7 @@ fn canonical_preflight_answer_keeps_scoped_setup_inventory_generative() {
         source_text: repair_technical_layout_noise(
             r#"
 Install the module:
-aptitude install alpha-connector
+sample-install alpha-connector
 
 Connector settings are stored in /opt/alpha/modules/connector/connector.conf under [Main].
 Row 1 | Name: alphaTimeout | Type: integer | Default: 10 | Description: Poll interval.
@@ -485,8 +485,8 @@ fn canonical_preflight_answer_preserves_scoped_exact_setup_literal_answers() {
     )
     .expect("scoped exact setup literal answer");
 
-    assert!(answer.contains("`alphaTimeout`"), "{answer}");
-    assert!(answer.contains("integer"), "{answer}");
+    assert!(answer.answer.contains("`alphaTimeout`"), "{answer:?}");
+    assert!(answer.answer.contains("integer"), "{answer:?}");
 }
 
 #[test]
@@ -523,7 +523,7 @@ fn canonical_preflight_answer_preserves_direct_table_follow_up_answers() {
     )
     .expect("direct table follow-up answer");
 
-    assert_eq!(answer, "direct table answer");
+    assert_eq!(answer.answer, "direct table answer");
 }
 
 #[test]
@@ -652,7 +652,7 @@ fn select_technical_literal_chunks_keeps_setup_block_for_configuration_answers()
     let chunks = vec![
         chunk(
             1,
-            "Install module:\naptitude install alpha-connector\n\nConfigure module:\ndpkg-reconfigure alpha-connector\n\nSettings are stored in /opt/alpha/modules/connector/connector.conf in section [Main].",
+            "Install module:\nsample-install alpha-connector\n\nConfigure module:\nsample-configure alpha-connector\n\nSettings are stored in /opt/alpha/modules/connector/connector.conf in section [Main].",
             0.80,
         ),
         chunk(2, "| merchantId | string | Partner identifier |", 0.99),
@@ -678,7 +678,7 @@ fn select_technical_literal_chunks_keeps_setup_block_for_configuration_answers()
         false,
     );
 
-    assert!(selected.iter().any(|chunk| chunk.source_text.contains("aptitude install")));
+    assert!(selected.iter().any(|chunk| chunk.source_text.contains("sample-install")));
     assert!(
         selected
             .iter()
@@ -1344,7 +1344,7 @@ fn focused_document_preflight_ignores_spurious_exact_literal_document_scope() {
     )
     .expect("focused document preflight answer");
 
-    assert_eq!(answer, "Quarterly graph report");
+    assert_eq!(answer.answer, "Quarterly graph report");
 }
 
 #[test]
@@ -1540,8 +1540,8 @@ fn canonical_preflight_answer_uses_literal_scoped_evidence_for_parameter_questio
     )
     .expect("parameter preflight answer");
 
-    assert!(answer.contains("`pageNumber`"), "{answer}");
-    assert!(!answer.contains("inventory"), "{answer}");
+    assert!(answer.answer.contains("`pageNumber`"), "{answer:?}");
+    assert!(!answer.answer.contains("inventory"), "{answer:?}");
 }
 
 #[test]
@@ -2034,10 +2034,10 @@ fn canonical_preflight_answer_handles_english_transport_comparison_without_graph
     )
     .expect("comparison preflight answer");
 
-    let lowered = answer.to_lowercase();
-    assert!(lowered.contains("rewards accounts"), "{answer}");
-    assert!(lowered.contains("inventory"), "{answer}");
-    assert!(lowered.contains("rest"), "{answer}");
-    assert!(lowered.contains("wsdl"), "{answer}");
-    assert!(!lowered.contains("graphql"), "{answer}");
+    let lowered = answer.answer.to_lowercase();
+    assert!(lowered.contains("rewards accounts"), "{answer:?}");
+    assert!(lowered.contains("inventory"), "{answer:?}");
+    assert!(lowered.contains("rest"), "{answer:?}");
+    assert!(lowered.contains("wsdl"), "{answer:?}");
+    assert!(!lowered.contains("graphql"), "{answer:?}");
 }

@@ -72,6 +72,20 @@ const GROUNDED_EVIDENCE_LEDGER_TEXT_CHARS: usize = 10_000;
 const GROUNDED_EVIDENCE_LEDGER_GUARD_MIN_ANCHORS: usize = 3;
 const GROUNDED_EVIDENCE_LEDGER_GUARD_MIN_MISSING_HIGH_SIGNAL_ANCHORS: usize = 2;
 const SOFT_FINAL_ANSWER_MIN_SUCCESSFUL_TOOLS: usize = 4;
+/// Consecutive tool-running iterations that may yield zero successful *new*
+/// tool results (every call errored, was suppressed as a duplicate, or
+/// replayed an earlier result) before the loop forces a final answer instead
+/// of spinning the remaining iteration/deadline budget on a stuck model. Two
+/// is the smallest window that tolerates a single transient miss while still
+/// catching a genuine no-progress loop early.
+const NO_PROGRESS_ITERATION_LIMIT: usize = 2;
+/// Hard upper bound for a single tool-call wait, independent of how much turn
+/// deadline is left. The per-call wait is `min(remaining turn deadline, this)`
+/// so one hung tool future can never consume the whole turn budget. Falls back
+/// to this when the caller supplies no soft tool-collection target; otherwise
+/// the soft target (the canonical per-tool-call SLO threaded into the turn)
+/// bounds the wait.
+const PER_TOOL_CALL_MAX_WAIT: Duration = Duration::from_secs(35);
 const VERBATIM_USER_FRAGMENT_LIMIT: usize = 6;
 const VERBATIM_USER_FRAGMENT_MIN_CHARS: usize = 4;
 const VERBATIM_USER_FRAGMENT_MAX_CHARS: usize = 400;
@@ -94,6 +108,10 @@ const USER_FRAGMENT_QUOTE_PAIRS: [(char, char); 8] = [
     ('"', '"'),
     ('`', '`'),
 ];
+const HISTORY_COMPACT_LITERAL_MEMORY_CONTEXT_PREFIX: &str = "ir.context.compact-literal-memory.v1:";
+const HISTORY_PINNED_LITERAL_ANCHORS_CONTEXT_PREFIX: &str = "ir.context.pinned-literal-anchors.v1:";
+const HISTORY_DENSE_LITERAL_PREFIX: &str = "ir.memory.literals.v1:";
+const HISTORY_LITERAL_ANCHOR_PREFIX: &str = "ir.memory.anchors.v1:";
 
 /// Final result of one assistant turn.
 #[derive(Debug, Clone)]
@@ -209,6 +227,12 @@ struct ToolExecutionOutcome {
     grounded_answer_completed: bool,
     grounded_answer_needs_follow_up: bool,
     is_error: bool,
+    /// True when this outcome was replayed from a prior successful call's
+    /// cached payload (effective-duplicate) rather than produced by a fresh
+    /// execution. A replay is not a *new* successful tool result, so the
+    /// no-progress guard treats it the same as an error/duplicate when
+    /// deciding whether an iteration made progress.
+    is_replay: bool,
     /// Wall-clock the tool ran. Set centrally in `execute_tool_calls`;
     /// constructors default to 0.
     duration_ms: u64,
@@ -613,6 +637,14 @@ pub async fn run_mcp_tool_agent_turn(
     let mut last_completed_grounded_answer: Option<String> = None;
     let mut grounded_answer_evidence_ledger = GroundedAnswerEvidenceLedger::default();
     let mut incomplete_grounded_answer_needs_follow_up = false;
+    // No-progress early-stop: count consecutive tool-running iterations that
+    // produced zero successful *new* tool results. Once it reaches
+    // `NO_PROGRESS_ITERATION_LIMIT` the next iteration is forced into the
+    // existing forced-final machinery instead of burning the rest of the
+    // budget on a stuck model. `no_progress_force_final` carries that decision
+    // into the loop body and marks the stop reason as `NoProgress`.
+    let mut no_progress_iterations = 0usize;
+    let mut no_progress_force_final = false;
     // There is no hidden post-loop synthesis pass: the model must spend
     // one of these iterations on a final answer after seeing tool results.
     // The caller budgets one extra iteration beyond the tool-round cap.
@@ -622,17 +654,18 @@ pub async fn run_mcp_tool_agent_turn(
             break;
         };
 
-        let force_final_answer = force_final_answer_iteration(
-            iteration,
-            iteration_cap,
-            total_tool_call_count,
-            successful_tool_call_count,
-            verified_grounded_answer_count,
-            &successful_tool_names,
-            incomplete_grounded_answer_needs_follow_up,
-            deadline_started,
-            input.soft_final_answer_deadline,
-        );
+        let force_final_answer = no_progress_force_final
+            || force_final_answer_iteration(
+                iteration,
+                iteration_cap,
+                total_tool_call_count,
+                successful_tool_call_count,
+                verified_grounded_answer_count,
+                &successful_tool_names,
+                incomplete_grounded_answer_needs_follow_up,
+                deadline_started,
+                input.soft_final_answer_deadline,
+            );
         let require_tool_call = should_require_tool_call_before_final(
             force_final_answer,
             &tool_defs,
@@ -813,6 +846,27 @@ pub async fn run_mcp_tool_agent_turn(
             }
         }
 
+        if should_inject_required_grounded_answer_tool_call(
+            response.tool_calls.is_empty(),
+            require_tool_call,
+            force_final_answer,
+            &tool_defs,
+        ) {
+            tracing::warn!(
+                request_id = input.request_id,
+                library_id = %input.library_id,
+                iteration,
+                provider = %binding.provider_kind,
+                model = %binding.model_name,
+                has_output_text = !response.output_text.trim().is_empty(),
+                "assistant agent omitted a required MCP tool call; executing grounded_answer fallback"
+            );
+            response.tool_calls.push(required_grounded_answer_tool_call(
+                input.user_question,
+                input.grounded_answer_top_k,
+            ));
+        }
+
         if response.tool_calls.is_empty() {
             let answer = response.output_text.trim().to_string();
             emit_activity(
@@ -851,7 +905,7 @@ pub async fn run_mcp_tool_agent_turn(
             });
             if require_tool_call {
                 if last_required_tool_refusal_answer.is_some() || iteration == iteration_cap {
-                    stopped_reason = AgentStopReason::FinalAnswer;
+                    stopped_reason = final_answer_stop_reason(no_progress_force_final);
                     let prior_answer_guard = prior_assistant_answer_fallback_candidate(
                         input.grounded_answer_tool_history,
                         input.conversation_history,
@@ -902,7 +956,7 @@ pub async fn run_mcp_tool_agent_turn(
                 messages.push(ChatMessage::system(tool_requirement_reminder()));
                 continue;
             }
-            stopped_reason = AgentStopReason::FinalAnswer;
+            stopped_reason = final_answer_stop_reason(no_progress_force_final);
             let prior_answer_guard = prior_assistant_answer_fallback_candidate(
                 input.grounded_answer_tool_history,
                 input.conversation_history,
@@ -985,6 +1039,10 @@ pub async fn run_mcp_tool_agent_turn(
         let mut iteration_child_query_execution_ids = Vec::new();
         let mut iteration_had_incomplete_grounded_answer = false;
         let mut iteration_had_follow_up_after_incomplete_grounded_answer = false;
+        // A *new* successful tool result resets the no-progress streak; a
+        // replay (effective-duplicate cache hit), a suppressed duplicate, or an
+        // error does not count as progress.
+        let mut iteration_made_progress = false;
         for (call, outcome) in tool_calls.iter().zip(outcomes.iter()) {
             child_query_execution_ids.extend(outcome.child_query_execution_ids.iter().copied());
             iteration_child_query_execution_ids
@@ -993,6 +1051,9 @@ pub async fn run_mcp_tool_agent_turn(
             if !outcome.is_error {
                 successful_tool_call_count = successful_tool_call_count.saturating_add(1);
                 successful_tool_names.insert(call.name.clone());
+                if !outcome.is_replay {
+                    iteration_made_progress = true;
+                }
                 if incomplete_grounded_answer_needs_follow_up
                     && tool_outcome_satisfies_incomplete_grounded_follow_up(&call.name, outcome)
                 {
@@ -1094,6 +1155,20 @@ pub async fn run_mcp_tool_agent_turn(
         }
         incomplete_grounded_answer_needs_follow_up =
             next_incomplete_grounded_answer_needs_follow_up;
+
+        let force_final_for_no_progress;
+        (no_progress_iterations, force_final_for_no_progress) =
+            next_no_progress_state(no_progress_iterations, iteration_made_progress);
+        if force_final_for_no_progress {
+            tracing::warn!(
+                request_id = input.request_id,
+                library_id = %input.library_id,
+                iteration,
+                no_progress_iterations,
+                "query.agent_loop.no_progress_forced_final"
+            );
+            no_progress_force_final = true;
+        }
     }
 
     if matches!(stopped_reason, AgentStopReason::IterationCap)
@@ -1186,6 +1261,9 @@ pub async fn run_mcp_tool_agent_turn(
             "assistant agent reached its iteration cap before producing a final answer"
         }
         AgentStopReason::FinalAnswer => "assistant agent stopped before producing a final answer",
+        AgentStopReason::NoProgress => {
+            "assistant agent stopped after consecutive iterations made no progress"
+        }
         AgentStopReason::ToolError => "assistant agent stopped after a tool error",
         AgentStopReason::ProviderError => "assistant agent stopped after a provider error",
     }
@@ -1198,6 +1276,31 @@ pub async fn run_mcp_tool_agent_turn(
         debug_iterations,
         agent_loop_metadata(iteration_cap, input.deadline, stopped_reason, total_tool_call_count),
     ))
+}
+
+/// Advance the no-progress streak counter after one tool-running iteration.
+///
+/// A *new* successful tool result (`iteration_made_progress`) resets the
+/// streak; otherwise it grows by one. Returns the updated streak and whether
+/// it has reached [`NO_PROGRESS_ITERATION_LIMIT`], at which point the next
+/// iteration must be forced into the final-answer path instead of burning the
+/// remaining budget on a stuck model.
+fn next_no_progress_state(
+    no_progress_iterations: usize,
+    iteration_made_progress: bool,
+) -> (usize, bool) {
+    if iteration_made_progress {
+        return (0, false);
+    }
+    let updated = no_progress_iterations.saturating_add(1);
+    (updated, updated >= NO_PROGRESS_ITERATION_LIMIT)
+}
+
+/// Stop reason for a model-emitted final answer: `NoProgress` when the loop
+/// forced this final answer because of a no-progress streak, otherwise the
+/// ordinary `FinalAnswer`.
+fn final_answer_stop_reason(no_progress_force_final: bool) -> AgentStopReason {
+    if no_progress_force_final { AgentStopReason::NoProgress } else { AgentStopReason::FinalAnswer }
 }
 
 fn agent_loop_metadata(
@@ -1263,6 +1366,30 @@ fn should_require_tool_call_before_final(
         return true;
     }
     successful_tool_names.is_empty()
+}
+
+fn should_inject_required_grounded_answer_tool_call(
+    response_tool_calls_empty: bool,
+    require_tool_call: bool,
+    force_final_answer: bool,
+    tool_defs: &[ChatToolDef],
+) -> bool {
+    response_tool_calls_empty
+        && require_tool_call
+        && !force_final_answer
+        && tool_defs.iter().any(|tool| tool.name == GROUNDED_ANSWER_TOOL_NAME)
+}
+
+fn required_grounded_answer_tool_call(user_question: &str, grounded_top_k: usize) -> ChatToolCall {
+    ChatToolCall {
+        id: format!("call_{GROUNDED_ANSWER_TOOL_NAME}_fallback"),
+        name: GROUNDED_ANSWER_TOOL_NAME.to_string(),
+        arguments_json: serde_json::json!({
+            "query": user_question,
+            "topK": grounded_top_k.max(1),
+        })
+        .to_string(),
+    }
 }
 
 fn next_incomplete_grounded_answer_follow_up_required(
@@ -1547,7 +1674,11 @@ fn strip_compact_literal_memory_line(value: &str) -> String {
             return trimmed.to_string();
         };
         let first = first.trim_start();
-        if first.starts_with("literals:") && first.contains('`') {
+        if first.starts_with(HISTORY_COMPACT_LITERAL_MEMORY_CONTEXT_PREFIX)
+            || first.starts_with(HISTORY_PINNED_LITERAL_ANCHORS_CONTEXT_PREFIX)
+            || (first.starts_with(HISTORY_DENSE_LITERAL_PREFIX) && first.contains('`'))
+            || (first.starts_with(HISTORY_LITERAL_ANCHOR_PREFIX) && first.contains('`'))
+        {
             trimmed = rest.trim_start();
             continue;
         }
@@ -2033,7 +2164,7 @@ async fn execute_tool_calls(
     tool_calls: &[ChatToolCall],
     max_parallel_actions: usize,
     deadline_started: Instant,
-    seen_effective_payloads: &mut BTreeMap<String, EffectiveToolPayloadState>,
+    seen_effective_payloads: &mut BTreeMap<String, EffectiveToolPayloadEntry>,
 ) -> Vec<ToolExecutionOutcome> {
     let mut outcomes: Vec<Option<ToolExecutionOutcome>> = vec![None; tool_calls.len()];
     let single_tool_iteration = tool_calls.len() == 1;
@@ -2062,8 +2193,22 @@ async fn execute_tool_calls(
                     },
                 );
                 let mut outcome = match deadline_remaining(deadline_started, input.deadline) {
-                    Some(_) => {
-                        execute_one_tool_call(&input, &pending.call, single_tool_iteration).await
+                    Some(remaining) => {
+                        // Bound the per-tool-call wait by the smaller of the
+                        // remaining turn deadline and the canonical per-tool-call
+                        // max, so one hung tool future can never run past every
+                        // budget. On timeout produce a structured error outcome;
+                        // the error path clears the dedup fingerprint so a retry
+                        // of the same call is not suppressed.
+                        let per_call_wait =
+                            per_tool_call_wait(remaining, input.soft_final_answer_deadline);
+                        run_tool_call_within_budget(
+                            execute_one_tool_call(&input, &pending.call, single_tool_iteration),
+                            per_call_wait,
+                            &pending.call.name,
+                            iteration,
+                        )
+                        .await
                     }
                     None => tool_execution_error(format!(
                         "tool '{}' was not started because the assistant turn deadline expired",
@@ -2083,16 +2228,22 @@ async fn execute_tool_calls(
                         result_preview: outcome.result_text.as_deref().map(activity_result_preview),
                     },
                 );
-                (pending.index, pending.fingerprint, outcome)
+                let raw_args_key = raw_tool_call_argument_key(&pending.call.arguments_json);
+                (pending.index, pending.fingerprint, raw_args_key, outcome)
             }
         })
         .buffer_unordered(max_parallel_actions)
         .collect::<Vec<_>>()
         .await;
 
-    for (pending_index, fingerprint, outcome) in pending_results {
+    for (pending_index, fingerprint, raw_args_key, outcome) in pending_results {
         if let Some(fingerprint) = fingerprint {
-            record_effective_tool_payload_outcome(seen_effective_payloads, fingerprint, &outcome);
+            record_effective_tool_payload_outcome(
+                seen_effective_payloads,
+                fingerprint,
+                raw_args_key,
+                &outcome,
+            );
         }
         outcomes[pending_index] = Some(outcome);
     }
@@ -2107,10 +2258,46 @@ async fn execute_tool_calls(
         .collect()
 }
 
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+/// Replay payload cached for a successfully completed tool call so a later
+/// effective-duplicate of the same call replays the real data instead of
+/// dead-ending the agent with a refusal message.
+#[derive(Debug, Clone)]
+struct CompletedToolPayload {
+    message_content: String,
+    result_text: Option<String>,
+    result_json: Option<Value>,
+    grounding_text: Option<String>,
+    grounded_answer_ready: bool,
+    grounded_answer_completed: bool,
+    grounded_answer_needs_follow_up: bool,
+}
+
+#[derive(Debug, Clone)]
 enum EffectiveToolPayloadState {
     InFlight,
-    Completed,
+    Completed(Box<CompletedToolPayload>),
+}
+
+/// One entry in the cross-iteration dedup map keyed by the *effective*
+/// (post-normalization) fingerprint. `raw_args_key` is the canonical hash of
+/// the *raw* arguments the model actually sent, so two distinct raw queries
+/// that normalize to the same effective fingerprint are not confused for each
+/// other: only a genuine raw duplicate is suppressed, while a distinct raw call
+/// replays a prior successful result (or runs on its own when none exists yet).
+#[derive(Debug, Clone)]
+struct EffectiveToolPayloadEntry {
+    raw_args_key: String,
+    state: EffectiveToolPayloadState,
+}
+
+/// How a pending call is dispatched after dedup classification.
+enum PreparedToolCallDisposition {
+    /// Execute the call; record its outcome under `fingerprint` afterwards.
+    Execute,
+    /// Suppress as a genuine same-raw in-flight duplicate.
+    SuppressDuplicate,
+    /// Replay a prior successful call's cached result instead of executing.
+    Replay(Box<CompletedToolPayload>),
 }
 
 #[derive(Debug, Clone)]
@@ -2127,7 +2314,7 @@ fn prepare_agent_tool_calls(
     grounded_top_k: usize,
     library_ref: &str,
     grounded_answer_tool_history: &[ExternalConversationTurn],
-    seen_effective_payloads: &mut BTreeMap<String, EffectiveToolPayloadState>,
+    seen_effective_payloads: &mut BTreeMap<String, EffectiveToolPayloadEntry>,
     outcomes: &mut [Option<ToolExecutionOutcome>],
 ) -> Vec<PendingAgentToolCall> {
     prepare_agent_tool_calls_with_context(
@@ -2151,7 +2338,7 @@ fn prepare_agent_tool_calls_with_context(
     grounded_top_k: usize,
     library_ref: &str,
     grounded_answer_tool_history: &[ExternalConversationTurn],
-    seen_effective_payloads: &mut BTreeMap<String, EffectiveToolPayloadState>,
+    seen_effective_payloads: &mut BTreeMap<String, EffectiveToolPayloadEntry>,
     outcomes: &mut [Option<ToolExecutionOutcome>],
 ) -> Vec<PendingAgentToolCall> {
     tool_calls
@@ -2170,29 +2357,130 @@ fn prepare_agent_tool_calls_with_context(
                 grounded_answer_tool_history,
             );
             if let Some(fingerprint) = &fingerprint {
-                if seen_effective_payloads.contains_key(fingerprint) {
-                    outcomes[pending_index] =
-                        Some(tool_execution_error(duplicate_tool_call_message(&call.name)));
-                    return None;
+                let raw_args_key = raw_tool_call_argument_key(&call.arguments_json);
+                match classify_effective_tool_call(
+                    seen_effective_payloads,
+                    fingerprint,
+                    &raw_args_key,
+                ) {
+                    PreparedToolCallDisposition::SuppressDuplicate => {
+                        outcomes[pending_index] =
+                            Some(tool_execution_error(duplicate_tool_call_message(&call.name)));
+                        return None;
+                    }
+                    PreparedToolCallDisposition::Replay(payload) => {
+                        outcomes[pending_index] = Some(replayed_tool_execution_outcome(*payload));
+                        return None;
+                    }
+                    PreparedToolCallDisposition::Execute => {
+                        seen_effective_payloads.insert(
+                            fingerprint.clone(),
+                            EffectiveToolPayloadEntry {
+                                raw_args_key,
+                                state: EffectiveToolPayloadState::InFlight,
+                            },
+                        );
+                    }
                 }
-                seen_effective_payloads
-                    .insert(fingerprint.clone(), EffectiveToolPayloadState::InFlight);
             }
             Some(PendingAgentToolCall { index: pending_index, call, fingerprint })
         })
         .collect::<Vec<_>>()
 }
 
+/// Decide how a pending tool call is dispatched given the dedup map.
+///
+/// The dedup map exists to curb genuine same-arguments spam, not to dead-end a
+/// distinct raw call that merely *normalizes* to the same effective fingerprint
+/// as an earlier call. Therefore:
+/// - a genuine same-raw in-flight duplicate is suppressed (true spam);
+/// - a same-raw completed duplicate replays the cached successful result;
+/// - a distinct-raw call replays a prior *completed* result (effective args are
+///   identical, so the answer is the same), or, when the colliding entry is
+///   still in-flight (same iteration batch, no result yet), is allowed to run so
+///   the model's distinct intent is never dead-ended.
+fn classify_effective_tool_call(
+    seen_effective_payloads: &BTreeMap<String, EffectiveToolPayloadEntry>,
+    fingerprint: &str,
+    raw_args_key: &str,
+) -> PreparedToolCallDisposition {
+    let Some(entry) = seen_effective_payloads.get(fingerprint) else {
+        return PreparedToolCallDisposition::Execute;
+    };
+    match &entry.state {
+        EffectiveToolPayloadState::Completed(payload) => {
+            PreparedToolCallDisposition::Replay(payload.clone())
+        }
+        EffectiveToolPayloadState::InFlight => {
+            if entry.raw_args_key == raw_args_key {
+                PreparedToolCallDisposition::SuppressDuplicate
+            } else {
+                PreparedToolCallDisposition::Execute
+            }
+        }
+    }
+}
+
 fn record_effective_tool_payload_outcome(
-    seen_effective_payloads: &mut BTreeMap<String, EffectiveToolPayloadState>,
+    seen_effective_payloads: &mut BTreeMap<String, EffectiveToolPayloadEntry>,
     fingerprint: String,
+    raw_args_key: String,
     outcome: &ToolExecutionOutcome,
 ) {
     if outcome.is_error {
         seen_effective_payloads.remove(&fingerprint);
         return;
     }
-    seen_effective_payloads.insert(fingerprint, EffectiveToolPayloadState::Completed);
+    seen_effective_payloads.insert(
+        fingerprint,
+        EffectiveToolPayloadEntry {
+            raw_args_key,
+            state: EffectiveToolPayloadState::Completed(Box::new(CompletedToolPayload {
+                message_content: outcome.message_content.clone(),
+                result_text: outcome.result_text.clone(),
+                result_json: outcome.result_json.clone(),
+                grounding_text: outcome.grounding_text.clone(),
+                grounded_answer_ready: outcome.grounded_answer_ready,
+                grounded_answer_completed: outcome.grounded_answer_completed,
+                grounded_answer_needs_follow_up: outcome.grounded_answer_needs_follow_up,
+            })),
+        },
+    );
+}
+
+/// Canonical hash of the *raw* (pre-normalization) tool-call arguments, used to
+/// tell genuine same-arguments duplicates apart from distinct raw calls that
+/// happen to normalize to the same effective fingerprint. Unparseable JSON
+/// falls back to the verbatim string so it still keys deterministically.
+fn raw_tool_call_argument_key(arguments_json: &str) -> String {
+    match serde_json::from_str::<Value>(arguments_json) {
+        Ok(value) => serde_json::to_string(&canonical_json_value(&value))
+            .unwrap_or_else(|_| arguments_json.to_string()),
+        Err(_) => arguments_json.to_string(),
+    }
+}
+
+/// Rebuild a successful tool-execution outcome from a cached replay payload so a
+/// later effective-duplicate call receives the same data the original produced
+/// instead of a refusal. Replays carry no child execution ids: the canonical
+/// child trace belongs to the original call, not the replay.
+fn replayed_tool_execution_outcome(payload: CompletedToolPayload) -> ToolExecutionOutcome {
+    ToolExecutionOutcome {
+        arguments_json: None,
+        requested_arguments_json: None,
+        message_content: payload.message_content,
+        result_text: payload.result_text,
+        result_json: payload.result_json,
+        grounding_text: payload.grounding_text,
+        grounded_answer_ready: payload.grounded_answer_ready,
+        grounded_answer_completed: payload.grounded_answer_completed,
+        grounded_answer_needs_follow_up: payload.grounded_answer_needs_follow_up,
+        is_error: false,
+        is_replay: true,
+        duration_ms: 0,
+        child_query_execution_ids: Vec::new(),
+        child_runtime_execution_ids: Vec::new(),
+    }
 }
 
 fn duplicate_tool_call_message(tool_name: &str) -> String {
@@ -2275,6 +2563,7 @@ async fn execute_one_tool_call(
         grounded_answer_completed,
         grounded_answer_needs_follow_up,
         is_error,
+        is_replay: false,
         duration_ms: 0,
         child_query_execution_ids,
         child_runtime_execution_ids,
@@ -2416,11 +2705,7 @@ fn apply_agent_tool_argument_defaults_with_context(
     }
     let bounded_top_k = grounded_top_k.max(1);
     if tool_name == GROUNDED_ANSWER_TOOL_NAME {
-        let model_requested_history = object
-            .get("conversationTurns")
-            .and_then(Value::as_array)
-            .is_some_and(|turns| !turns.is_empty());
-        let use_contextual_history = contextual_follow_up || model_requested_history;
+        let use_contextual_history = contextual_follow_up;
         let contextual_history = use_contextual_history.then_some(grounded_answer_tool_history);
         if let Some(query) = object.get("query").and_then(Value::as_str) {
             let compact_query = if use_contextual_history {
@@ -3360,6 +3645,7 @@ fn tool_execution_error(message: impl Into<String>) -> ToolExecutionOutcome {
         grounded_answer_completed: false,
         grounded_answer_needs_follow_up: false,
         is_error: true,
+        is_replay: false,
         duration_ms: 0,
         child_query_execution_ids: Vec::new(),
         child_runtime_execution_ids: Vec::new(),
@@ -3368,6 +3654,50 @@ fn tool_execution_error(message: impl Into<String>) -> ToolExecutionOutcome {
 
 fn deadline_remaining(started: Instant, deadline: Duration) -> Option<Duration> {
     deadline.checked_sub(started.elapsed()).filter(|remaining| !remaining.is_zero())
+}
+
+/// Bound a single tool-call's wait by the smaller of the remaining turn
+/// deadline and a per-tool-call max. The max is the caller-supplied soft
+/// tool-collection target (the canonical per-tool-call SLO threaded into the
+/// turn) when present, otherwise [`PER_TOOL_CALL_MAX_WAIT`]; either way it is
+/// itself clamped to `PER_TOOL_CALL_MAX_WAIT` so a misconfigured soft target
+/// can never let one call run for the whole turn.
+fn per_tool_call_wait(
+    remaining_turn_deadline: Duration,
+    soft_final_answer_deadline: Option<Duration>,
+) -> Duration {
+    let per_call_max =
+        soft_final_answer_deadline.unwrap_or(PER_TOOL_CALL_MAX_WAIT).min(PER_TOOL_CALL_MAX_WAIT);
+    remaining_turn_deadline.min(per_call_max)
+}
+
+/// Run one tool-execution future under a per-call wait. If the future does not
+/// resolve within `wait`, produce a structured error outcome (`is_error =
+/// true`) stating the call timed out, so the loop classifies it as a failed
+/// call: the dedup fingerprint is cleared on the error path, no `is_replay`
+/// flag is set, and the no-progress guard counts it as no progress.
+async fn run_tool_call_within_budget(
+    fut: impl std::future::Future<Output = ToolExecutionOutcome>,
+    wait: Duration,
+    tool_name: &str,
+    iteration: usize,
+) -> ToolExecutionOutcome {
+    let call_started = Instant::now();
+    match tokio::time::timeout(wait, fut).await {
+        Ok(outcome) => outcome,
+        Err(_) => {
+            let waited_ms = call_started.elapsed().as_millis().try_into().unwrap_or(u64::MAX);
+            tracing::warn!(
+                tool_name,
+                iteration,
+                waited_ms,
+                "MCP-backed assistant agent tool call timed out before producing a result"
+            );
+            tool_execution_error(format!(
+                "tool '{tool_name}' timed out after {waited_ms} ms before producing a result"
+            ))
+        }
+    }
 }
 
 fn debug_tool_result_json(result: &crate::interfaces::http::mcp::McpToolResult) -> Value {
@@ -4825,6 +5155,32 @@ mod tests {
     }
 
     #[test]
+    fn required_grounded_answer_fallback_only_runs_before_forced_final() {
+        let tool_defs = [ChatToolDef {
+            name: GROUNDED_ANSWER_TOOL_NAME.to_string(),
+            description: String::new(),
+            parameters: serde_json::json!({}),
+        }];
+
+        assert!(should_inject_required_grounded_answer_tool_call(true, true, false, &tool_defs,));
+        assert!(!should_inject_required_grounded_answer_tool_call(false, true, false, &tool_defs,));
+        assert!(!should_inject_required_grounded_answer_tool_call(true, false, false, &tool_defs,));
+        assert!(!should_inject_required_grounded_answer_tool_call(true, true, true, &tool_defs,));
+        assert!(!should_inject_required_grounded_answer_tool_call(true, true, false, &[]));
+    }
+
+    #[test]
+    fn required_grounded_answer_fallback_preserves_query_and_top_k() {
+        let call = required_grounded_answer_tool_call("Q?", 0);
+        let arguments =
+            serde_json::from_str::<serde_json::Value>(&call.arguments_json).expect("json");
+
+        assert_eq!(call.name, GROUNDED_ANSWER_TOOL_NAME);
+        assert_eq!(arguments["query"], "Q?");
+        assert_eq!(arguments["topK"], 1);
+    }
+
+    #[test]
     fn final_answer_requires_follow_up_after_incomplete_grounded_answer() {
         let tool_defs =
             [GROUNDED_ANSWER_TOOL_NAME, SEARCH_DOCUMENTS_TOOL_NAME, READ_DOCUMENT_TOOL_NAME]
@@ -5233,6 +5589,7 @@ mod tests {
             grounded_answer_completed: true,
             grounded_answer_needs_follow_up: false,
             is_error: false,
+            is_replay: false,
             duration_ms: 0,
             child_query_execution_ids: Vec::new(),
             child_runtime_execution_ids: Vec::new(),
@@ -5381,28 +5738,47 @@ mod tests {
         let history = vec![
             ExternalConversationTurn {
                 turn_kind: QueryTurnKind::Assistant,
-                content_text: "Choose a provider before setup can continue.".to_string(),
+                content_text: "A0".to_string(),
             },
             ExternalConversationTurn {
                 turn_kind: QueryTurnKind::Assistant,
-                content_text:
-                    "literals: `alpha-package`, `/etc/alpha.ini`, `alphaTimeout`\nInstall `alpha-package`, edit `/etc/alpha.ini`, and set `alphaTimeout` from the source table."
-                        .to_string(),
+                content_text: format!(
+                    "{HISTORY_DENSE_LITERAL_PREFIX} `A1`, `/p/A1`, `K1`\n`A1` `/p/A1` `K1`"
+                ),
             },
         ];
 
         let answer = prior_assistant_answer_fallback_candidate(&history, &[])
             .expect("anchored prior assistant answer");
 
-        assert!(answer.starts_with("Install `alpha-package`"));
-        assert!(!answer.starts_with("literals:"));
+        assert!(answer.starts_with("`A1`"));
+        assert!(!answer.starts_with(HISTORY_DENSE_LITERAL_PREFIX));
+    }
+
+    #[test]
+    fn prior_assistant_answer_fallback_strips_compact_literal_system_wrapper() {
+        let history = vec![ExternalConversationTurn {
+            turn_kind: QueryTurnKind::Assistant,
+            content_text: format!(
+                "{HISTORY_COMPACT_LITERAL_MEMORY_CONTEXT_PREFIX}\n\
+                 {HISTORY_DENSE_LITERAL_PREFIX} `A1`, `/p/A1`, `K1`\n\
+                 `A1` `/p/A1` `K1`"
+            ),
+        }];
+
+        let answer = prior_assistant_answer_fallback_candidate(&history, &[])
+            .expect("anchored prior assistant answer");
+
+        assert!(answer.starts_with("`A1`"));
+        assert!(!answer.contains(HISTORY_COMPACT_LITERAL_MEMORY_CONTEXT_PREFIX));
+        assert!(!answer.starts_with(HISTORY_DENSE_LITERAL_PREFIX));
     }
 
     #[test]
     fn prior_assistant_answer_fallback_ignores_unanchored_history() {
         let history = vec![ExternalConversationTurn {
             turn_kind: QueryTurnKind::Assistant,
-            content_text: "Choose a provider before setup can continue.".to_string(),
+            content_text: "A0".to_string(),
         }];
 
         assert!(prior_assistant_answer_fallback_candidate(&history, &[]).is_none());
@@ -5426,7 +5802,7 @@ mod tests {
         let compact_tool_history = vec![ExternalConversationTurn {
             turn_kind: QueryTurnKind::Assistant,
             content_text:
-                "literals: `alpha-package`, `/etc/alpha.ini`, `alphaTimeout`, `alphaMode`, `alphaUrl`, `alphaRetry`\nUse `alpha-package`, `/etc/alpha.ini`, and `alphaTimeout`."
+                "ir.memory.literals.v1: `alpha-package`, `/etc/alpha.ini`, `alphaTimeout`, `alphaMode`, `alphaUrl`, `alphaRetry`\nUse `alpha-package`, `/etc/alpha.ini`, and `alphaTimeout`."
                     .to_string(),
         }];
         let conversation_history = vec![ChatMessage::assistant_text(
@@ -5440,7 +5816,7 @@ mod tests {
 
         assert!(answer.contains("`alphaRetry`"));
         assert!(answer.contains("`alphaMode`"));
-        assert!(!answer.starts_with("literals:"));
+        assert!(!answer.starts_with("ir.memory.literals.v1:"));
     }
 
     #[test]
@@ -5950,24 +6326,24 @@ mod tests {
 
     #[test]
     fn duplicate_effective_tool_payload_is_suppressed_before_dispatch() {
+        // Two calls with *identical raw arguments* in the same in-flight batch
+        // are genuine same-args spam and must still be curbed.
+        let raw_arguments = serde_json::json!({
+            "library": "workspace-a/library-b",
+            "query": "focused subquestion",
+            "topK": 8
+        })
+        .to_string();
         let tool_calls = vec![
             ChatToolCall {
                 id: "call-1".to_string(),
                 name: GROUNDED_ANSWER_TOOL_NAME.to_string(),
-                arguments_json: serde_json::json!({
-                    "library": "workspace-a/library-b",
-                    "query": "focused subquestion",
-                    "topK": 8
-                })
-                .to_string(),
+                arguments_json: raw_arguments.clone(),
             },
             ChatToolCall {
                 id: "call-2".to_string(),
                 name: GROUNDED_ANSWER_TOOL_NAME.to_string(),
-                arguments_json: serde_json::json!({
-                    "query": "focused subquestion"
-                })
-                .to_string(),
+                arguments_json: raw_arguments,
             },
         ];
         let mut outcomes = vec![None; tool_calls.len()];
@@ -5997,6 +6373,405 @@ mod tests {
     }
 
     #[test]
+    fn distinct_raw_call_is_not_suppressed_by_in_flight_effective_collision() {
+        // The stage bug: a history-bleed call and the clean call normalize to
+        // the same effective fingerprint. While the first is still in-flight in
+        // the same batch, the distinct-raw clean call must NOT be dead-ended.
+        let tool_calls = vec![
+            ChatToolCall {
+                id: "call-1".to_string(),
+                name: GROUNDED_ANSWER_TOOL_NAME.to_string(),
+                arguments_json: serde_json::json!({
+                    "library": "workspace-a/library-b",
+                    "query": "how to update the edge service component? Release 9.7.1 added Alpha Suite cache; Release 9.7.0 shipped Provider Beta connector; Release 9.6.3 patched Gamma module logging",
+                    "topK": 8
+                })
+                .to_string(),
+            },
+            ChatToolCall {
+                id: "call-2".to_string(),
+                name: GROUNDED_ANSWER_TOOL_NAME.to_string(),
+                arguments_json: serde_json::json!({
+                    "library": "workspace-a/library-b",
+                    "query": "how to update the edge service component?",
+                    "topK": 8
+                })
+                .to_string(),
+            },
+        ];
+        let user_question = "how to update the edge service component?";
+        let history = vec![
+            ExternalConversationTurn {
+                turn_kind: QueryTurnKind::User,
+                content_text: "list the latest ten releases".to_string(),
+            },
+            ExternalConversationTurn {
+                turn_kind: QueryTurnKind::Assistant,
+                content_text: "Release 9.7.1 added Alpha Suite cache; Release 9.7.0 shipped Provider Beta connector; Release 9.6.3 patched Gamma module logging".to_string(),
+            },
+        ];
+        let mut outcomes = vec![None; tool_calls.len()];
+        let mut seen = BTreeMap::new();
+
+        let pending = prepare_agent_tool_calls(
+            &tool_calls,
+            user_question,
+            8,
+            "workspace-a/library-b",
+            &history,
+            &mut seen,
+            &mut outcomes,
+        );
+
+        // Sanity: today both calls collapse to the SAME effective fingerprint.
+        let fingerprint_a = effective_tool_call_fingerprint(
+            GROUNDED_ANSWER_TOOL_NAME,
+            &tool_calls[0].arguments_json,
+            user_question,
+            8,
+            "workspace-a/library-b",
+            &history,
+        )
+        .expect("fingerprint a");
+        let fingerprint_b = effective_tool_call_fingerprint(
+            GROUNDED_ANSWER_TOOL_NAME,
+            &tool_calls[1].arguments_json,
+            user_question,
+            8,
+            "workspace-a/library-b",
+            &history,
+        )
+        .expect("fingerprint b");
+        assert_eq!(
+            fingerprint_a, fingerprint_b,
+            "the collision repro requires both calls to normalize identically"
+        );
+        // But their RAW arguments differ, so the clean call is NOT suppressed.
+        assert_ne!(tool_calls[0].arguments_json, tool_calls[1].arguments_json);
+
+        assert_eq!(pending.len(), 2);
+        assert!(outcomes[0].is_none());
+        assert!(outcomes[1].is_none());
+    }
+
+    #[test]
+    fn clean_call_runs_after_junk_errored_call_clears_fingerprint() {
+        // Cross-iteration shape: the junk history-bleed call errored (its
+        // fingerprint is removed), so the later clean call runs unimpeded even
+        // though it normalizes to the same effective fingerprint.
+        let user_question = "how to update the edge service component?";
+        let history = vec![
+            ExternalConversationTurn {
+                turn_kind: QueryTurnKind::User,
+                content_text: "list the latest ten releases".to_string(),
+            },
+            ExternalConversationTurn {
+                turn_kind: QueryTurnKind::Assistant,
+                content_text: "Release 9.7.1 added Alpha Suite cache; Release 9.7.0 shipped Provider Beta connector; Release 9.6.3 patched Gamma module logging".to_string(),
+            },
+        ];
+        let junk_call = ChatToolCall {
+            id: "call-junk".to_string(),
+            name: GROUNDED_ANSWER_TOOL_NAME.to_string(),
+            arguments_json: serde_json::json!({
+                "library": "workspace-a/library-b",
+                "query": "how to update the edge service component? Release 9.7.1 added Alpha Suite cache; Release 9.7.0 shipped Provider Beta connector; Release 9.6.3 patched Gamma module logging",
+                "topK": 8
+            })
+            .to_string(),
+        };
+        let clean_call = ChatToolCall {
+            id: "call-clean".to_string(),
+            name: GROUNDED_ANSWER_TOOL_NAME.to_string(),
+            arguments_json: serde_json::json!({
+                "library": "workspace-a/library-b",
+                "query": "how to update the edge service component?",
+                "topK": 8
+            })
+            .to_string(),
+        };
+        let mut seen = BTreeMap::new();
+
+        let mut first_outcomes = vec![None; 1];
+        let first_pending = prepare_agent_tool_calls(
+            std::slice::from_ref(&junk_call),
+            user_question,
+            8,
+            "workspace-a/library-b",
+            &history,
+            &mut seen,
+            &mut first_outcomes,
+        );
+        let fingerprint = first_pending[0].fingerprint.clone().expect("fingerprint");
+        let raw_args_key = raw_tool_call_argument_key(&junk_call.arguments_json);
+        let error = tool_execution_error("upstream timeout");
+        record_effective_tool_payload_outcome(&mut seen, fingerprint, raw_args_key, &error);
+
+        let mut second_outcomes = vec![None; 1];
+        let second_pending = prepare_agent_tool_calls(
+            std::slice::from_ref(&clean_call),
+            user_question,
+            8,
+            "workspace-a/library-b",
+            &history,
+            &mut seen,
+            &mut second_outcomes,
+        );
+
+        assert_eq!(second_pending.len(), 1);
+        assert!(second_outcomes[0].is_none());
+    }
+
+    fn synthetic_success_outcome() -> ToolExecutionOutcome {
+        ToolExecutionOutcome {
+            arguments_json: Some("{}".to_string()),
+            requested_arguments_json: None,
+            message_content: "{}".to_string(),
+            result_text: Some("ok".to_string()),
+            result_json: None,
+            grounding_text: None,
+            grounded_answer_ready: false,
+            grounded_answer_completed: false,
+            grounded_answer_needs_follow_up: false,
+            is_error: false,
+            is_replay: false,
+            duration_ms: 0,
+            child_query_execution_ids: Vec::new(),
+            child_runtime_execution_ids: Vec::new(),
+        }
+    }
+
+    // GUARD 1 — `per_tool_call_wait` is bounded by the smaller of the remaining
+    // turn deadline and the canonical per-tool-call max.
+    #[test]
+    fn per_tool_call_wait_is_bounded_by_remaining_and_soft_target() {
+        // Synthetic soft target below the hard max, standing in for the caller's
+        // tool-collection target threaded into the turn.
+        let soft = Duration::from_secs(20);
+        assert!(soft < PER_TOOL_CALL_MAX_WAIT);
+        // Plenty of turn deadline left: the soft tool-collection target caps it.
+        assert_eq!(per_tool_call_wait(Duration::from_secs(120), Some(soft)), soft);
+        // Little turn deadline left: the remaining deadline caps it.
+        assert_eq!(per_tool_call_wait(Duration::from_secs(2), Some(soft)), Duration::from_secs(2));
+        // No soft target supplied: the hard per-call max applies.
+        assert_eq!(per_tool_call_wait(Duration::from_secs(120), None), PER_TOOL_CALL_MAX_WAIT);
+        // A misconfigured oversized soft target can never exceed the hard max.
+        assert_eq!(
+            per_tool_call_wait(Duration::from_secs(600), Some(Duration::from_secs(300))),
+            PER_TOOL_CALL_MAX_WAIT
+        );
+    }
+
+    // GUARD 1 — per-tool-call timeout.
+    #[tokio::test]
+    async fn hanging_tool_future_times_out_within_budget_with_structured_error() {
+        // A future that never resolves must yield a structured timeout error
+        // within the (small, real-time) budget rather than hang the loop.
+        let wait = Duration::from_millis(20);
+        let hanging = async {
+            std::future::pending::<()>().await;
+            synthetic_success_outcome()
+        };
+        let outcome = run_tool_call_within_budget(hanging, wait, "search_documents", 3).await;
+        assert!(outcome.is_error);
+        assert!(!outcome.is_replay);
+        let message = outcome.result_text.unwrap_or_default();
+        assert!(
+            message.contains("timed out") && message.contains("search_documents"),
+            "expected a structured timeout error, got: {message}"
+        );
+    }
+
+    #[tokio::test]
+    async fn tool_call_within_budget_returns_real_outcome() {
+        // A future that resolves before the budget passes its outcome through
+        // untouched.
+        let wait = Duration::from_secs(5);
+        let quick = async { synthetic_success_outcome() };
+        let outcome = run_tool_call_within_budget(quick, wait, "search_documents", 1).await;
+        assert!(!outcome.is_error);
+        assert_eq!(outcome.result_text.as_deref(), Some("ok"));
+    }
+
+    // GUARD 1 — a timed-out call's error outcome clears the dedup fingerprint so
+    // a retry of the same call is not suppressed.
+    #[tokio::test]
+    async fn timed_out_tool_call_clears_dedup_fingerprint() {
+        let call = ChatToolCall {
+            id: "call-1".to_string(),
+            name: GROUNDED_ANSWER_TOOL_NAME.to_string(),
+            arguments_json: serde_json::json!({
+                "library": "workspace-a/library-b",
+                "query": "how to configure the gateway?",
+                "topK": 8
+            })
+            .to_string(),
+        };
+        let mut seen = BTreeMap::new();
+        let mut outcomes = vec![None; 1];
+        let pending = prepare_agent_tool_calls(
+            std::slice::from_ref(&call),
+            "how to configure the gateway?",
+            8,
+            "workspace-a/library-b",
+            &[],
+            &mut seen,
+            &mut outcomes,
+        );
+        let fingerprint = pending[0].fingerprint.clone().expect("fingerprint");
+        let raw_args_key = raw_tool_call_argument_key(&call.arguments_json);
+
+        // Simulate the hung call: the timeout wrapper produces an error outcome.
+        let wait = Duration::from_millis(20);
+        let hanging = async {
+            std::future::pending::<()>().await;
+            synthetic_success_outcome()
+        };
+        let outcome = run_tool_call_within_budget(hanging, wait, &call.name, 1).await;
+        assert!(outcome.is_error);
+        record_effective_tool_payload_outcome(&mut seen, fingerprint, raw_args_key, &outcome);
+
+        // The identical call must run again, not be suppressed as a duplicate.
+        let mut retry_outcomes = vec![None; 1];
+        let retry_pending = prepare_agent_tool_calls(
+            std::slice::from_ref(&call),
+            "how to configure the gateway?",
+            8,
+            "workspace-a/library-b",
+            &[],
+            &mut seen,
+            &mut retry_outcomes,
+        );
+        assert_eq!(retry_pending.len(), 1);
+        assert!(retry_outcomes[0].is_none(), "retry must not be suppressed after a timeout");
+    }
+
+    // GUARD 2 — no-progress early-stop.
+    #[test]
+    fn no_progress_iterations_force_final_after_limit() {
+        let mut streak = 0usize;
+        let mut force_final = false;
+        // `NO_PROGRESS_ITERATION_LIMIT` consecutive error/replay-only iterations
+        // route into the forced-final path.
+        for _ in 0..NO_PROGRESS_ITERATION_LIMIT {
+            let (next, force) = next_no_progress_state(streak, false);
+            streak = next;
+            force_final = force_final || force;
+        }
+        assert!(force_final);
+        assert_eq!(streak, NO_PROGRESS_ITERATION_LIMIT);
+        // The forced final answer carries the observable `NoProgress` stop
+        // reason, distinct from deadline/iteration-cap.
+        assert_eq!(final_answer_stop_reason(true), AgentStopReason::NoProgress);
+    }
+
+    #[test]
+    fn replayed_outcome_is_flagged_as_replay() {
+        // A replay is a cache hit, not a fresh successful tool result; the
+        // no-progress guard relies on `is_replay` to avoid counting it as
+        // progress.
+        let payload = CompletedToolPayload {
+            message_content: "{}".to_string(),
+            result_text: Some("cached".to_string()),
+            result_json: None,
+            grounding_text: None,
+            grounded_answer_ready: false,
+            grounded_answer_completed: false,
+            grounded_answer_needs_follow_up: false,
+        };
+        let outcome = replayed_tool_execution_outcome(payload);
+        assert!(!outcome.is_error);
+        assert!(outcome.is_replay);
+    }
+
+    #[test]
+    fn one_no_progress_iteration_below_limit_does_not_force_final() {
+        // A single miss must not trip the guard when the limit is above one.
+        let (streak, force_final) = next_no_progress_state(0, false);
+        assert_eq!(streak, 1);
+        assert_eq!(force_final, NO_PROGRESS_ITERATION_LIMIT <= 1);
+    }
+
+    // GUARD 2 — a successful NEW tool result resets the no-progress counter.
+    #[test]
+    fn successful_new_tool_result_resets_no_progress_counter() {
+        // Build a streak just under the limit, then a progress iteration resets
+        // it so the loop is given a fresh window.
+        let mut streak = NO_PROGRESS_ITERATION_LIMIT.saturating_sub(1);
+        let (reset_streak, force_after_progress) = next_no_progress_state(streak, true);
+        assert_eq!(reset_streak, 0);
+        assert!(!force_after_progress);
+        streak = reset_streak;
+        // After the reset, a single fresh miss must not immediately force final
+        // (proving the counter restarted rather than carrying over).
+        let (after_miss, force_after_miss) = next_no_progress_state(streak, false);
+        assert_eq!(after_miss, 1);
+        assert_eq!(force_after_miss, NO_PROGRESS_ITERATION_LIMIT <= 1);
+    }
+
+    #[test]
+    fn completed_effective_tool_payload_replays_cached_result() {
+        // A duplicate of a COMPLETED call replays the stored data instead of a
+        // refusal, so the agent gets the answer it asked for.
+        let tool_calls = vec![ChatToolCall {
+            id: "call-1".to_string(),
+            name: GROUNDED_ANSWER_TOOL_NAME.to_string(),
+            arguments_json: serde_json::json!({
+                "library": "workspace-a/library-b",
+                "query": "focused subquestion",
+                "topK": 8
+            })
+            .to_string(),
+        }];
+        let mut first_outcomes = vec![None; tool_calls.len()];
+        let mut seen = BTreeMap::new();
+        let first_pending = prepare_agent_tool_calls(
+            &tool_calls,
+            "focused subquestion",
+            8,
+            "workspace-a/library-b",
+            &[],
+            &mut seen,
+            &mut first_outcomes,
+        );
+        let fingerprint = first_pending[0].fingerprint.clone().expect("fingerprint");
+        let raw_args_key = raw_tool_call_argument_key(&tool_calls[0].arguments_json);
+
+        // The original call completed successfully with a real answer body.
+        let mut success = tool_execution_error("placeholder");
+        success.is_error = false;
+        success.message_content = "{\"answer\":\"edge service upgrade steps\"}".to_string();
+        success.result_text = Some("edge service upgrade steps".to_string());
+        success.grounded_answer_ready = true;
+        success.grounded_answer_completed = true;
+        record_effective_tool_payload_outcome(&mut seen, fingerprint, raw_args_key, &success);
+
+        let mut second_outcomes = vec![None; tool_calls.len()];
+        let second_pending = prepare_agent_tool_calls(
+            &tool_calls,
+            "focused subquestion",
+            8,
+            "workspace-a/library-b",
+            &[],
+            &mut seen,
+            &mut second_outcomes,
+        );
+
+        assert!(second_pending.is_empty());
+        let replay = second_outcomes[0].as_ref().expect("replayed outcome");
+        assert!(!replay.is_error);
+        assert!(replay.grounded_answer_ready);
+        assert!(replay.grounded_answer_completed);
+        assert_eq!(replay.result_text.as_deref(), Some("edge service upgrade steps"));
+        assert!(
+            replay
+                .result_text
+                .as_deref()
+                .is_some_and(|text| !text.contains("duplicate MCP tool call suppressed"))
+        );
+    }
+
+    #[test]
     fn completed_effective_tool_payload_tracking_is_turn_scoped() {
         let tool_calls = vec![ChatToolCall {
             id: "call-1".to_string(),
@@ -6020,7 +6795,22 @@ mod tests {
             &mut first_outcomes,
         );
         let fingerprint = first_pending[0].fingerprint.clone().expect("fingerprint");
-        seen.insert(fingerprint, EffectiveToolPayloadState::Completed);
+        let raw_args_key = raw_tool_call_argument_key(&tool_calls[0].arguments_json);
+        seen.insert(
+            fingerprint,
+            EffectiveToolPayloadEntry {
+                raw_args_key,
+                state: EffectiveToolPayloadState::Completed(Box::new(CompletedToolPayload {
+                    message_content: "{\"answer\":\"cached body\"}".to_string(),
+                    result_text: Some("cached body".to_string()),
+                    result_json: None,
+                    grounding_text: None,
+                    grounded_answer_ready: true,
+                    grounded_answer_completed: true,
+                    grounded_answer_needs_follow_up: false,
+                })),
+            },
+        );
         let mut second_outcomes = vec![None; tool_calls.len()];
         let second_pending = prepare_agent_tool_calls(
             &tool_calls,
@@ -6032,11 +6822,15 @@ mod tests {
             &mut second_outcomes,
         );
 
+        // The dedup entry is turn-scoped and persists across prepare rounds, so
+        // the second identical call is not re-dispatched; it replays the cached
+        // successful result instead of dead-ending.
         assert_eq!(first_pending.len(), 1);
         assert!(second_pending.is_empty());
         assert!(first_outcomes[0].is_none());
-        let duplicate = second_outcomes[0].as_ref().expect("duplicate outcome");
-        assert!(duplicate.is_error);
+        let replay = second_outcomes[0].as_ref().expect("replayed outcome");
+        assert!(!replay.is_error);
+        assert_eq!(replay.result_text.as_deref(), Some("cached body"));
     }
 
     #[test]
@@ -6063,8 +6857,9 @@ mod tests {
             &mut first_outcomes,
         );
         let fingerprint = first_pending[0].fingerprint.clone().expect("fingerprint");
+        let raw_args_key = raw_tool_call_argument_key(&tool_calls[0].arguments_json);
         let error = tool_execution_error("upstream timeout");
-        record_effective_tool_payload_outcome(&mut seen, fingerprint, &error);
+        record_effective_tool_payload_outcome(&mut seen, fingerprint, raw_args_key, &error);
         let mut second_outcomes = vec![None; tool_calls.len()];
         let second_pending = prepare_agent_tool_calls(
             &tool_calls,
@@ -6443,7 +7238,7 @@ mod tests {
     }
 
     #[test]
-    fn ui_agent_keeps_model_requested_grounded_answer_history_from_server_context() {
+    fn ui_agent_drops_model_requested_grounded_answer_history_without_follow_up_gate() {
         let mut arguments = serde_json::json!({
             "library": "workspace-a/library-b",
             "query": "show full ready config",
@@ -6475,16 +7270,7 @@ mod tests {
             &history,
         );
 
-        assert_eq!(
-            arguments["conversationTurns"],
-            serde_json::json!([
-                {"role": "user", "content": "configure Connector Alpha"},
-                {
-                    "role": "assistant",
-                    "content": "Install `pkg-alpha`, edit `/opt/alpha/alpha.conf`, set `alphaSecret`."
-                }
-            ])
-        );
+        assert_eq!(arguments["conversationTurns"], serde_json::json!([]));
         assert_eq!(arguments["topK"], 24);
     }
 
@@ -6532,6 +7318,42 @@ mod tests {
             &mut arguments,
             "new standalone topic",
             8,
+            "workspace-a/library-b",
+            &history,
+        );
+
+        assert_eq!(arguments["conversationTurns"], serde_json::json!([]));
+    }
+
+    #[test]
+    fn ui_agent_drops_model_requested_history_for_non_contextual_grounded_answer() {
+        let mut arguments = serde_json::json!({
+            "library": "workspace-a/library-b",
+            "query": "Which Alpha service workers connect to the message bus and what URL format is used?",
+            "conversationTurns": [
+                {"role": "user", "content": "previous model supplied topic"},
+                {"role": "assistant", "content": "previous model supplied answer"}
+            ]
+        });
+        let history = vec![
+            ExternalConversationTurn {
+                turn_kind: QueryTurnKind::User,
+                content_text: "Alpha service setup inventory".to_string(),
+            },
+            ExternalConversationTurn {
+                turn_kind: QueryTurnKind::Assistant,
+                content_text: "`alpha-api` and `alpha-worker` expose local runtime settings."
+                    .to_string(),
+            },
+        ];
+
+        apply_agent_tool_argument_defaults_with_context(
+            GROUNDED_ANSWER_TOOL_NAME,
+            &mut arguments,
+            "Which Alpha service workers connect to the message bus and what URL format is used?",
+            false,
+            false,
+            24,
             "workspace-a/library-b",
             &history,
         );
@@ -6844,7 +7666,7 @@ mod tests {
         });
         let history = vec![ExternalConversationTurn {
             turn_kind: QueryTurnKind::Assistant,
-            content_text: "literals: `alpha-package`, `/etc/alpha.ini`, `[Main]`, `retryTimeout`, `plainword`\nUse `alpha-package` and `retryTimeout`."
+            content_text: "ir.memory.literals.v1: `alpha-package`, `/etc/alpha.ini`, `[Main]`, `retryTimeout`, `plainword`\nUse `alpha-package` and `retryTimeout`."
                 .to_string(),
         }];
 
@@ -7051,6 +7873,7 @@ mod tests {
             grounded_answer_completed: true,
             grounded_answer_needs_follow_up: false,
             is_error: false,
+            is_replay: false,
             duration_ms: 0,
             child_query_execution_ids: Vec::new(),
             child_runtime_execution_ids: Vec::new(),
@@ -7095,6 +7918,7 @@ mod tests {
             grounded_answer_completed: true,
             grounded_answer_needs_follow_up: false,
             is_error: false,
+            is_replay: false,
             duration_ms: 0,
             child_query_execution_ids: Vec::new(),
             child_runtime_execution_ids: Vec::new(),
@@ -7362,6 +8186,7 @@ Parameters: `url`, `staticQrPayload`.";
             grounded_answer_completed: true,
             grounded_answer_needs_follow_up: true,
             is_error: false,
+            is_replay: false,
             duration_ms: 0,
             child_query_execution_ids: Vec::new(),
             child_runtime_execution_ids: Vec::new(),

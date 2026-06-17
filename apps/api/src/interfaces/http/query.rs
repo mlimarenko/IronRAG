@@ -959,6 +959,11 @@ fn map_execution_detail(
         relation_references: evidence.relation_references,
         verification_state: evidence.verification_state,
         verification_warnings: evidence.verification_warnings,
+        // Historical-replay reads carry no clarification metadata: the typed
+        // clarification surface is live-turn-only metadata (see the doc note
+        // on `AssistantClarification`) and is not persisted with the
+        // execution detail.
+        clarification: ironrag_contracts::assistant::AssistantClarification::default(),
     }
 }
 
@@ -1062,6 +1067,36 @@ pub(crate) fn map_turn_execution_response(
             .into_iter()
             .map(map_verification_warning)
             .collect(),
+        clarification: map_runtime_clarification(outcome.clarification),
+    }
+}
+
+fn map_runtime_clarification(
+    clarification: crate::services::query::execution::RuntimeClarification,
+) -> ironrag_contracts::assistant::AssistantClarification {
+    ironrag_contracts::assistant::AssistantClarification {
+        required: clarification.required,
+        question: clarification.question,
+        answer_candidates: clarification
+            .answer_candidates
+            .into_iter()
+            .map(map_runtime_answer_candidate)
+            .collect(),
+    }
+}
+
+fn map_runtime_answer_candidate(
+    candidate: crate::services::query::execution::RuntimeAnswerCandidate,
+) -> ironrag_contracts::assistant::AssistantAnswerCandidate {
+    ironrag_contracts::assistant::AssistantAnswerCandidate {
+        label: candidate.label,
+        kind: candidate.kind,
+        confidence: candidate.confidence,
+        provenance: ironrag_contracts::assistant::AssistantAnswerCandidateProvenance {
+            entity_id: candidate.provenance.entity_id,
+            document_id: candidate.provenance.document_id,
+            chunk_id: candidate.provenance.chunk_id,
+        },
     }
 }
 

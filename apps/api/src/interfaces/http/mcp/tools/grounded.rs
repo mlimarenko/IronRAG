@@ -549,6 +549,7 @@ mod tests {
             }],
             verification_state: AssistantVerificationState::Verified,
             verification_warnings: Vec::new(),
+            clarification: ironrag_contracts::assistant::AssistantClarification::default(),
         }
     }
 }

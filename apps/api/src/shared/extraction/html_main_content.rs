@@ -1973,16 +1973,16 @@ mod tests {
             <!DOCTYPE html>
             <html>
               <head>
-                <title>Acme Control Center</title>
+                <title>Acme Operations Console</title>
               </head>
               <body>
                 <div id="content">
                   <div class="page-metadata">Created by Alice</div>
                   <div id="page-metadata-banner">3 attachments</div>
-                  <div id="breadcrumbs">Docs / Products / Control Center</div>
+                  <div id="breadcrumbs">Docs / Products / Operations Console</div>
                   <div id="main-content" class="wiki-content">
-                    <h1>Acme Control Center</h1>
-                    <p>Control Center is used to manage distributed retail operations.</p>
+                    <h1>Acme Operations Console</h1>
+                    <p>Operations Console is used to manage distributed workflows.</p>
                     <p>It centralizes settings, notifications, and remote administration flows.</p>
                   </div>
                 </div>
@@ -1993,9 +1993,9 @@ mod tests {
         let output =
             extract_html_main_content(html.as_bytes(), Some("text/html")).expect("confluence html");
 
-        assert!(output.content_text.contains("Control Center is used to manage"));
+        assert!(output.content_text.contains("Operations Console is used to manage"));
         assert!(!output.content_text.contains("Created by Alice"));
         assert!(!output.content_text.contains("3 attachments"));
-        assert!(!output.content_text.contains("Docs / Products / Control Center"));
+        assert!(!output.content_text.contains("Docs / Products / Operations Console"));
     }
 }

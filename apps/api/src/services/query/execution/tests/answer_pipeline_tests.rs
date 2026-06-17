@@ -179,6 +179,43 @@ fn assemble_bounded_context_interleaves_graph_and_document_support() {
 }
 
 #[test]
+fn assemble_bounded_context_keeps_late_structured_source_context_literals() {
+    let filler = (0..240)
+        .map(|index| format!("background paragraph line {index} without structured data"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let source_text = format!(
+        "{filler}\n\
+         [Main]\n\
+         alphaMode = strict\n\
+         samplectl reload alpha-plugin --config /etc/sample/service.conf"
+    );
+    let context = assemble_bounded_context(
+        &[],
+        &[],
+        &[RuntimeMatchedChunk {
+            chunk_id: Uuid::now_v7(),
+            revision_id: Uuid::now_v7(),
+            chunk_index: 17,
+            chunk_kind: None,
+            document_id: Uuid::now_v7(),
+            document_label: "sample-guide.md".to_string(),
+            excerpt: "background".to_string(),
+            score_kind: crate::services::query::execution::RuntimeChunkScoreKind::SourceContext,
+            score: Some(0.8),
+            source_text,
+        }],
+        6_000,
+    );
+
+    assert!(context.contains("[document source_context ordinal=17"));
+    assert!(context.contains("[Main]"));
+    assert!(context.contains("alphaMode = strict"));
+    assert!(context.contains("samplectl reload alpha-plugin"));
+    assert!(context.contains("/etc/sample/service.conf"));
+}
+
+#[test]
 fn build_answer_prompt_prioritizes_library_context() {
     let prompt = build_answer_prompt(
         "What documents mention IronRAG?",

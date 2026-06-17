@@ -20,16 +20,20 @@ use uuid::Uuid;
 
 use crate::app::state::AppState;
 use crate::{
-    domains::query_ir::{EntityRole, QueryIR},
+    domains::query_ir::{EntityRole, QueryAct, QueryIR},
     services::query::{
         planner::extract_keywords,
-        text_match::{near_token_overlap_count, normalized_alnum_tokens},
+        text_match::{
+            add_label_terms_with_acronyms, near_token_overlap_count, normalized_alnum_tokens,
+        },
     },
 };
 
 use super::{RetrievalBundle, RuntimeMatchedChunk};
 use super::{
+    RuntimeChunkScoreKind,
     document_target::query_ir_allows_document_focus_scope,
+    question_intent::canonical_target_type_tag,
     source_anchor_window,
     source_profile::{is_source_profile_chunk_row, is_source_profile_runtime_chunk},
 };
@@ -60,6 +64,14 @@ pub(crate) enum FocusReason {
     /// Retrieval returned exactly one document, so fetching contiguous
     /// neighbours cannot crowd out a competing document.
     OnlyRetrievedDocument,
+    /// A lifecycle-procedure query has an exact-target document containing
+    /// dense ordered evidence, so pack that runbook instead of letting
+    /// generic notes crowd it out.
+    VersionedProcedureRunbook,
+    /// A single-document query carried explicit subject/literal focus, and one
+    /// document's own evidence text matched that focus better than siblings
+    /// even though the document titles alone were ambiguous.
+    QueryFocusEvidence,
 }
 
 impl FocusReason {
@@ -71,6 +83,8 @@ impl FocusReason {
             Self::EvidenceDominance => "evidence_dominance",
             Self::ScoreDominance => "score_dominance",
             Self::OnlyRetrievedDocument => "only_retrieved_document",
+            Self::VersionedProcedureRunbook => "versioned_procedure_runbook",
+            Self::QueryFocusEvidence => "query_focus_evidence",
         }
     }
 }
@@ -161,6 +175,48 @@ fn title_tokens_by_document(
     map
 }
 
+#[derive(Debug, Default)]
+struct LabelOverlapTerms {
+    tokens: BTreeSet<String>,
+    acronym_terms: BTreeSet<String>,
+    primary_term_count: usize,
+}
+
+impl LabelOverlapTerms {
+    fn is_empty(&self) -> bool {
+        self.tokens.is_empty() && self.acronym_terms.is_empty()
+    }
+
+    fn total_term_count(&self) -> usize {
+        self.primary_term_count
+    }
+}
+
+fn label_overlap_terms(label: &str, min_token_chars: usize) -> LabelOverlapTerms {
+    let mut terms = LabelOverlapTerms {
+        primary_term_count: normalized_alnum_tokens(label, min_token_chars).len(),
+        ..Default::default()
+    };
+    add_label_terms_with_acronyms(
+        &mut terms.tokens,
+        &mut terms.acronym_terms,
+        label,
+        min_token_chars,
+    );
+    terms
+}
+
+fn subject_title_tokens_for_document(
+    document_id: Uuid,
+    chunks: &[RuntimeMatchedChunk],
+) -> BTreeSet<String> {
+    chunks
+        .iter()
+        .find(|chunk| chunk.document_id == document_id)
+        .map(|chunk| normalized_alnum_tokens(&chunk.document_label, 2))
+        .unwrap_or_default()
+}
+
 fn topical_title_tokens(question: &str, chunks: &[RuntimeMatchedChunk]) -> BTreeSet<String> {
     let query_tokens = significant_tokens(question);
     if query_tokens.is_empty() {
@@ -212,6 +268,7 @@ const ADDITIVE_EVIDENCE_PRUNE_SCORE_FLOOR: f32 = 0.9;
 pub(crate) fn prune_non_topical_document_tail(
     bundle: &mut RetrievalBundle,
     question: &str,
+    query_ir: Option<&QueryIR>,
     skip_prune: bool,
 ) -> TopicalPruneDiagnostics {
     if skip_prune {
@@ -230,6 +287,11 @@ pub(crate) fn prune_non_topical_document_tail(
             let title_tokens = significant_tokens(&chunk.document_label);
             near_token_overlap_count(&topical_tokens, &title_tokens) > 0
                 || is_additive_evidence_chunk(chunk)
+                || query_ir.is_some_and(|ir| {
+                    super::retrieve::chunk_is_versioned_update_instruction_title_anchor(
+                        question, ir, chunk,
+                    )
+                })
         })
         .cloned()
         .collect::<Vec<_>>();
@@ -425,12 +487,66 @@ fn pick_by_overlap<'agg>(
     Some(top.1)
 }
 
+fn pick_by_subject_overlap<'agg>(
+    reference_terms: &LabelOverlapTerms,
+    chunks: &[RuntimeMatchedChunk],
+    aggregates: &'agg [DocumentAggregate],
+) -> Option<&'agg DocumentAggregate> {
+    if reference_terms.is_empty() {
+        return None;
+    }
+    let mut scored: Vec<(usize, usize, usize, &DocumentAggregate)> = aggregates
+        .iter()
+        .filter_map(|agg| {
+            let title_tokens = subject_title_tokens_for_document(agg.document_id, chunks);
+            let token_overlap = near_token_overlap_count(&reference_terms.tokens, &title_tokens);
+            let acronym_overlap =
+                near_token_overlap_count(&reference_terms.acronym_terms, &title_tokens);
+            let score = token_overlap.saturating_add(acronym_overlap.saturating_mul(3));
+            subject_overlap_is_selective(
+                token_overlap,
+                acronym_overlap,
+                reference_terms.total_term_count(),
+            )
+            .then_some((score, token_overlap, acronym_overlap, agg))
+        })
+        .collect();
+    if scored.is_empty() {
+        return None;
+    }
+    scored.sort_by(|a, b| {
+        b.0.cmp(&a.0)
+            .then_with(|| b.1.cmp(&a.1))
+            .then_with(|| b.2.cmp(&a.2))
+            .then_with(|| b.3.evidence_count.cmp(&a.3.evidence_count))
+            .then_with(|| {
+                b.3.best_score.partial_cmp(&a.3.best_score).unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .then_with(|| a.3.document_id.cmp(&b.3.document_id))
+    });
+    let top = scored[0];
+    if let Some(runner) = scored.get(1)
+        && top.0 <= runner.0
+    {
+        return None;
+    }
+    Some(top.3)
+}
+
 fn is_selective_title_overlap(
     overlap: usize,
     reference_token_count: usize,
     _title_token_count: usize,
 ) -> bool {
     overlap >= 2 || (overlap == 1 && reference_token_count == 1)
+}
+
+fn subject_overlap_is_selective(
+    token_overlap: usize,
+    acronym_overlap: usize,
+    reference_term_count: usize,
+) -> bool {
+    acronym_overlap >= 1 || token_overlap >= 2 || (token_overlap == 1 && reference_term_count == 1)
 }
 
 /// Pick a winner from IR `document_focus.hint` by title-overlap size.
@@ -449,13 +565,158 @@ fn winner_from_subject<'agg>(
     chunks: &[RuntimeMatchedChunk],
     aggregates: &'agg [DocumentAggregate],
 ) -> Option<&'agg DocumentAggregate> {
-    let subject_tokens: BTreeSet<String> = ir
+    if !query_ir_subject_can_pin_document(ir) {
+        return None;
+    }
+    let subject_tokens: LabelOverlapTerms = ir
         .target_entities
         .iter()
         .filter(|entity| entity.role == EntityRole::Subject)
-        .flat_map(|entity| significant_tokens(&entity.label).into_iter())
-        .collect();
-    pick_by_overlap(&subject_tokens, chunks, aggregates)
+        .fold(LabelOverlapTerms::default(), |mut terms, entity| {
+            let entity_terms = label_overlap_terms(&entity.label, 2);
+            terms.tokens.extend(entity_terms.tokens);
+            terms.acronym_terms.extend(entity_terms.acronym_terms);
+            terms.primary_term_count += entity_terms.primary_term_count;
+            terms
+        });
+    pick_by_subject_overlap(&subject_tokens, chunks, aggregates)
+}
+
+fn winner_from_query_focus_evidence<'agg>(
+    ir: &QueryIR,
+    chunks: &[RuntimeMatchedChunk],
+    aggregates: &'agg [DocumentAggregate],
+) -> Option<&'agg DocumentAggregate> {
+    if !matches!(ir.scope, crate::domains::query_ir::QueryScope::SingleDocument)
+        || ir.source_slice.is_some()
+        || ir.comparison.is_some()
+        || !matches!(ir.act, QueryAct::ConfigureHow | QueryAct::Describe)
+    {
+        return None;
+    }
+    let focus = QueryFocusEvidenceTerms::new(ir);
+    if focus.is_empty() {
+        return None;
+    }
+    let mut scored = aggregates
+        .iter()
+        .filter_map(|aggregate| {
+            let score = query_focus_evidence_document_score(aggregate.document_id, chunks, &focus);
+            (score > 0).then_some((score, aggregate))
+        })
+        .collect::<Vec<_>>();
+    if scored.is_empty() {
+        return None;
+    }
+    scored.sort_by(|left, right| {
+        right
+            .0
+            .cmp(&left.0)
+            .then_with(|| right.1.evidence_count.cmp(&left.1.evidence_count))
+            .then_with(|| right.1.best_score.total_cmp(&left.1.best_score))
+            .then_with(|| left.1.document_id.cmp(&right.1.document_id))
+    });
+    let (top_score, top) = scored[0];
+    if let Some((runner_score, _)) = scored.get(1)
+        && top_score <= *runner_score
+    {
+        return None;
+    }
+    Some(top)
+}
+
+#[derive(Debug, Default)]
+struct QueryFocusEvidenceTerms {
+    subject_tokens: BTreeSet<String>,
+    subject_acronym_terms: BTreeSet<String>,
+    literal_tokens: BTreeSet<String>,
+    document_tokens: BTreeSet<String>,
+}
+
+impl QueryFocusEvidenceTerms {
+    fn new(ir: &QueryIR) -> Self {
+        let mut terms = Self::default();
+        for entity in ir.target_entities.iter().filter(|entity| entity.role == EntityRole::Subject)
+        {
+            let label_terms = label_overlap_terms(&entity.label, 2);
+            terms.subject_tokens.extend(label_terms.tokens);
+            terms.subject_acronym_terms.extend(label_terms.acronym_terms);
+        }
+        if let Some(document_focus) = ir.document_focus.as_ref() {
+            terms.document_tokens.extend(normalized_alnum_tokens(&document_focus.hint, 2));
+        }
+        for literal in &ir.literal_constraints {
+            terms.literal_tokens.extend(normalized_alnum_tokens(&literal.text, 2));
+        }
+        terms
+    }
+
+    fn is_empty(&self) -> bool {
+        self.subject_tokens.is_empty()
+            && self.subject_acronym_terms.is_empty()
+            && self.literal_tokens.is_empty()
+            && self.document_tokens.is_empty()
+    }
+}
+
+fn query_focus_evidence_document_score(
+    document_id: Uuid,
+    chunks: &[RuntimeMatchedChunk],
+    focus: &QueryFocusEvidenceTerms,
+) -> usize {
+    let mut title_tokens = BTreeSet::<String>::new();
+    let mut evidence_tokens = BTreeSet::<String>::new();
+    for chunk in chunks.iter().filter(|chunk| chunk.document_id == document_id) {
+        title_tokens.extend(normalized_alnum_tokens(&chunk.document_label, 2));
+        evidence_tokens.extend(normalized_alnum_tokens(
+            &format!("{} {}", chunk.excerpt, chunk.source_text),
+            2,
+        ));
+    }
+    if title_tokens.is_empty() && evidence_tokens.is_empty() {
+        return 0;
+    }
+    let subject_title_overlap = near_token_overlap_count(&focus.subject_tokens, &title_tokens)
+        + near_token_overlap_count(&focus.subject_acronym_terms, &title_tokens) * 3;
+    let subject_evidence_overlap =
+        near_token_overlap_count(&focus.subject_tokens, &evidence_tokens)
+            + near_token_overlap_count(&focus.subject_acronym_terms, &evidence_tokens) * 3;
+    let literal_overlap = near_token_overlap_count(&focus.literal_tokens, &evidence_tokens);
+    let document_overlap = near_token_overlap_count(&focus.document_tokens, &title_tokens)
+        + near_token_overlap_count(&focus.document_tokens, &evidence_tokens);
+
+    if !focus.subject_tokens.is_empty()
+        && subject_title_overlap == 0
+        && subject_evidence_overlap == 0
+    {
+        return 0;
+    }
+    if !focus.literal_tokens.is_empty()
+        && literal_overlap == 0
+        && subject_evidence_overlap <= subject_title_overlap
+    {
+        return 0;
+    }
+
+    subject_title_overlap
+        .saturating_mul(96)
+        .saturating_add(subject_evidence_overlap.saturating_mul(32))
+        .saturating_add(literal_overlap.saturating_mul(40))
+        .saturating_add(document_overlap.saturating_mul(64))
+}
+
+fn query_ir_subject_can_pin_document(ir: &QueryIR) -> bool {
+    if ir
+        .target_types
+        .iter()
+        .any(|target_type| canonical_target_type_tag(target_type) == "document")
+    {
+        return true;
+    }
+    ir.target_entities.iter().filter(|entity| entity.role == EntityRole::Subject).any(|entity| {
+        let terms = label_overlap_terms(&entity.label, 2);
+        !terms.is_empty() && terms.total_term_count() <= 3
+    })
 }
 
 /// Soft signal: one document clearly dominates by evidence count and
@@ -511,6 +772,63 @@ fn winner_from_score_dominance<'agg>(
         return Some(top);
     }
     None
+}
+
+fn winner_from_versioned_procedure_runbook(
+    query_ir: &QueryIR,
+    question: &str,
+    chunks: &[RuntimeMatchedChunk],
+    aggregates: &[DocumentAggregate],
+) -> Option<DocumentAggregate> {
+    let aggregates_by_document =
+        aggregates.iter().map(|agg| (agg.document_id, agg)).collect::<HashMap<_, _>>();
+    let mut scored_by_document = HashMap::<Uuid, (usize, f32, Vec<i32>)>::new();
+    for chunk in chunks {
+        let Some(runbook_score) = super::retrieve::versioned_update_procedure_runbook_anchor_score(
+            question, query_ir, chunk,
+        ) else {
+            continue;
+        };
+        let retrieval_score = chunk.score.unwrap_or(0.0);
+        scored_by_document
+            .entry(chunk.document_id)
+            .and_modify(|(best_runbook_score, best_retrieval_score, anchors)| {
+                *best_runbook_score = (*best_runbook_score).max(runbook_score);
+                *best_retrieval_score = best_retrieval_score.max(retrieval_score);
+                if !anchors.contains(&chunk.chunk_index) {
+                    anchors.push(chunk.chunk_index);
+                }
+            })
+            .or_insert_with(|| (runbook_score, retrieval_score, vec![chunk.chunk_index]));
+    }
+    let mut scored = scored_by_document
+        .into_iter()
+        .filter_map(|(document_id, (runbook_score, retrieval_score, mut anchors))| {
+            let aggregate = aggregates_by_document.get(&document_id)?;
+            anchors.sort_unstable();
+            Some((runbook_score, retrieval_score, document_id, anchors, (*aggregate).clone()))
+        })
+        .collect::<Vec<_>>();
+    if scored.is_empty() {
+        return None;
+    }
+    scored.sort_by(|left, right| {
+        right
+            .0
+            .cmp(&left.0)
+            .then_with(|| right.1.total_cmp(&left.1))
+            .then_with(|| right.4.evidence_count.cmp(&left.4.evidence_count))
+            .then_with(|| left.2.cmp(&right.2))
+    });
+    let (_, _, _, runbook_anchors, mut winner) = scored.into_iter().next()?;
+    let mut ranked = runbook_anchors;
+    for anchor in &winner.ranked_content_anchors {
+        if !ranked.contains(anchor) {
+            ranked.push(*anchor);
+        }
+    }
+    winner.ranked_content_anchors = ranked;
+    Some(winner)
 }
 
 fn winner_anchor_expansion_forward(winner: &DocumentAggregate, budget: usize) -> i32 {
@@ -665,9 +983,9 @@ pub(crate) fn decide_focus(
         );
     }
 
-    // Priority order: explicit hint → single-doc subject → only
-    // retrieved document → evidence dominance. The first match wins;
-    // later branches do not run.
+    // Priority order: explicit hint → structural runbook evidence →
+    // single-doc subject → only retrieved document → evidence
+    // dominance. The first match wins; later branches do not run.
     if let Some(hint) = query_ir.document_focus.as_ref()
         && let Some(winner) = winner_from_hint(&hint.hint, &bundle.chunks, &aggregates)
     {
@@ -677,12 +995,37 @@ pub(crate) fn decide_focus(
             explicit_focus_budget(top_k),
         ));
     }
+    if query_has_multi_document_setup_anchors(query_ir, &bundle.chunks) {
+        return None;
+    }
+    if let Some(winner) =
+        winner_from_versioned_procedure_runbook(query_ir, question, &bundle.chunks, &aggregates)
+    {
+        return Some((
+            winner,
+            FocusReason::VersionedProcedureRunbook,
+            explicit_focus_budget(top_k),
+        ));
+    }
     if let Some(winner) = winner_from_subject(query_ir, &bundle.chunks, &aggregates) {
         return Some((
             winner.clone(),
             FocusReason::SingleDocumentSubject,
             explicit_focus_budget(top_k),
         ));
+    }
+    if let Some(winner) = winner_from_query_focus_evidence(query_ir, &bundle.chunks, &aggregates) {
+        return Some((
+            winner.clone(),
+            FocusReason::QueryFocusEvidence,
+            explicit_focus_budget(top_k),
+        ));
+    }
+    if query_has_multi_document_versioned_procedure_anchors(query_ir, question, &bundle.chunks) {
+        return None;
+    }
+    if super::retrieve::query_ir_requests_versioned_update_procedure_context(question, query_ir) {
+        return None;
     }
     if aggregates.len() == 1 {
         return aggregates.first().cloned().map(|winner| {
@@ -700,6 +1043,47 @@ pub(crate) fn decide_focus(
         ));
     }
     None
+}
+
+pub(super) fn query_has_multi_document_setup_anchors(
+    query_ir: &QueryIR,
+    chunks: &[RuntimeMatchedChunk],
+) -> bool {
+    if !matches!(query_ir.act, QueryAct::ConfigureHow | QueryAct::Describe)
+        || query_ir.document_focus.is_some()
+        || query_ir.source_slice.is_some()
+        || !query_ir.literal_constraints.is_empty()
+        || super::retrieve::query_ir_requests_versioned_update_procedure_context("", query_ir)
+        || query_ir
+            .target_types
+            .iter()
+            .any(|target_type| canonical_target_type_tag(target_type).as_str() == "document")
+    {
+        return false;
+    }
+    let anchored_documents = chunks
+        .iter()
+        .filter(|chunk| super::retrieve::chunk_is_setup_focus_command_path_anchor(chunk))
+        .map(|chunk| chunk.document_id)
+        .collect::<BTreeSet<_>>();
+    anchored_documents.len() >= 2
+}
+
+fn query_has_multi_document_versioned_procedure_anchors(
+    query_ir: &QueryIR,
+    question: &str,
+    chunks: &[RuntimeMatchedChunk],
+) -> bool {
+    if !super::retrieve::query_ir_requests_versioned_update_procedure_context(question, query_ir) {
+        return false;
+    }
+    chunks
+        .iter()
+        .filter(|chunk| chunk.score_kind == RuntimeChunkScoreKind::FocusedDocument)
+        .map(|chunk| chunk.document_id)
+        .collect::<BTreeSet<_>>()
+        .len()
+        >= 2
 }
 
 /// Materialize `fetched_rows` into winner-chunk `RuntimeMatchedChunk`s,
@@ -1009,6 +1393,19 @@ mod tests {
         }
     }
 
+    fn focused_chunk(
+        document_id: Uuid,
+        revision_id: Uuid,
+        chunk_index: i32,
+        document_label: &str,
+        score: f32,
+    ) -> RuntimeMatchedChunk {
+        RuntimeMatchedChunk {
+            score_kind: crate::services::query::execution::RuntimeChunkScoreKind::FocusedDocument,
+            ..sample_chunk(document_id, revision_id, chunk_index, document_label, score)
+        }
+    }
+
     fn run_apply(
         bundle: &mut RetrievalBundle,
         query_ir: &QueryIR,
@@ -1046,7 +1443,7 @@ mod tests {
             entities: Vec::new(),
             relationships: Vec::new(),
             chunks: vec![
-                sample_chunk(subject_doc, subject_rev, 0, "Provider Alpha Admin Guide", 0.9),
+                sample_chunk(subject_doc, subject_rev, 0, "Subject Alpha Admin Guide", 0.9),
                 sample_chunk(tangential_doc, tangential_rev, 0, "Provider B Manual", 0.8),
                 sample_chunk(tangential_doc, tangential_rev, 1, "Provider B Manual", 0.7),
                 sample_chunk(tangential_doc, tangential_rev, 2, "Provider B Manual", 0.6),
@@ -1055,7 +1452,7 @@ mod tests {
 
         let mut query_ir = ir(QueryScope::SingleDocument);
         query_ir.target_entities =
-            vec![EntityMention { label: "Provider Alpha".to_string(), role: EntityRole::Subject }];
+            vec![EntityMention { label: "Subject Alpha".to_string(), role: EntityRole::Subject }];
 
         // Winner revision has 6 chunks (0..=5). Fetched range will
         // respect budget = 75% of 8 = 6 slots.
@@ -1274,6 +1671,35 @@ mod tests {
     }
 
     #[test]
+    fn test_consolidation_rejects_long_descriptive_subject_pin() {
+        let services_doc = Uuid::now_v7();
+        let services_rev = Uuid::now_v7();
+        let compose_doc = Uuid::now_v7();
+        let compose_rev = Uuid::now_v7();
+
+        let mut bundle = RetrievalBundle {
+            entities: Vec::new(),
+            relationships: Vec::new(),
+            chunks: vec![
+                sample_chunk(services_doc, services_rev, 0, "Kubernetes Services", 0.95),
+                sample_chunk(compose_doc, compose_rev, 0, "Sample Manifest Microservices", 0.9),
+                sample_chunk(compose_doc, compose_rev, 1, "Sample Manifest Microservices", 0.8),
+            ],
+        };
+
+        let mut query_ir = ir(QueryScope::SingleDocument);
+        query_ir.target_entities = vec![EntityMention {
+            label: "docker compose services and ports".to_string(),
+            role: EntityRole::Subject,
+        }];
+
+        let diag = run_apply(&mut bundle, &query_ir, 8, Vec::new());
+
+        assert_eq!(diag.focus_reason, FocusReason::None);
+        assert_eq!(diag.focused_document_id, None);
+    }
+
+    #[test]
     fn test_consolidation_subject_match_tolerates_single_token_edit() {
         let subject_doc = Uuid::now_v7();
         let subject_rev = Uuid::now_v7();
@@ -1305,6 +1731,87 @@ mod tests {
     }
 
     #[test]
+    fn test_consolidation_query_focus_evidence_packs_ambiguous_title_winner() {
+        let focused_doc = Uuid::now_v7();
+        let focused_rev = Uuid::now_v7();
+        let sibling_doc = Uuid::now_v7();
+        let sibling_rev = Uuid::now_v7();
+        let mut query_ir = ir(QueryScope::SingleDocument);
+        query_ir.target_entities =
+            vec![EntityMention { label: "Variant Red".to_string(), role: EntityRole::Subject }];
+        query_ir.literal_constraints = vec![crate::domains::query_ir::LiteralSpan {
+            text: "redMode".to_string(),
+            kind: crate::domains::query_ir::LiteralKind::Identifier,
+        }];
+        let bundle = RetrievalBundle {
+            entities: Vec::new(),
+            relationships: Vec::new(),
+            chunks: vec![
+                text_chunk(
+                    sibling_doc,
+                    sibling_rev,
+                    0,
+                    "Shared setup",
+                    80.0,
+                    "Variant Blue uses blueMode and unrelated sibling values.",
+                ),
+                text_chunk(
+                    focused_doc,
+                    focused_rev,
+                    0,
+                    "Shared setup",
+                    10.0,
+                    "Variant Red setup uses redMode and the selected procedure.",
+                ),
+            ],
+        };
+
+        let Some((winner, reason, _)) =
+            decide_focus(&bundle, &query_ir, "configure Variant Red", 8)
+        else {
+            panic!("query-focus evidence winner expected");
+        };
+
+        assert_eq!(reason, FocusReason::QueryFocusEvidence);
+        assert_eq!(winner.document_id, focused_doc);
+    }
+
+    #[test]
+    fn test_consolidation_query_focus_evidence_rejects_ties() {
+        let left_doc = Uuid::now_v7();
+        let left_rev = Uuid::now_v7();
+        let right_doc = Uuid::now_v7();
+        let right_rev = Uuid::now_v7();
+        let mut query_ir = ir(QueryScope::SingleDocument);
+        query_ir.target_entities =
+            vec![EntityMention { label: "Variant Red".to_string(), role: EntityRole::Subject }];
+        let bundle = RetrievalBundle {
+            entities: Vec::new(),
+            relationships: Vec::new(),
+            chunks: vec![
+                text_chunk(
+                    left_doc,
+                    left_rev,
+                    0,
+                    "Shared setup",
+                    80.0,
+                    "Variant Red setup overview.",
+                ),
+                text_chunk(
+                    right_doc,
+                    right_rev,
+                    0,
+                    "Shared setup",
+                    70.0,
+                    "Variant Red setup checklist.",
+                ),
+            ],
+        };
+
+        assert!(decide_focus(&bundle, &query_ir, "configure Variant Red", 8).is_none());
+    }
+
+    #[test]
     fn test_consolidation_multi_document_negative() {
         let doc_a = Uuid::now_v7();
         let doc_b = Uuid::now_v7();
@@ -1332,6 +1839,44 @@ mod tests {
         assert_eq!(diag.focused_document_id, None);
         let after_ids: Vec<Uuid> = bundle.chunks.iter().map(|c| c.chunk_id).collect();
         assert_eq!(after_ids, original_ids, "bundle must be untouched on multi-document scope");
+    }
+
+    #[test]
+    fn setup_anchor_variants_skip_single_document_subject_consolidation() {
+        let alpha_doc = Uuid::now_v7();
+        let alpha_rev = Uuid::now_v7();
+        let beta_doc = Uuid::now_v7();
+        let beta_rev = Uuid::now_v7();
+
+        let bundle = RetrievalBundle {
+            entities: Vec::new(),
+            relationships: Vec::new(),
+            chunks: vec![
+                text_chunk(
+                    alpha_doc,
+                    alpha_rev,
+                    0,
+                    "QRP Alpha setup",
+                    120.0,
+                    "sample-install alpha-qrp\nSettings file: /opt/qrp/alpha/alpha.ini",
+                ),
+                text_chunk(
+                    beta_doc,
+                    beta_rev,
+                    0,
+                    "QRP Beta setup",
+                    110.0,
+                    "sample-install beta-qrp\nSettings file: /opt/qrp/beta/beta.conf",
+                ),
+            ],
+        };
+
+        let mut query_ir = ir(QueryScope::SingleDocument);
+        query_ir.target_types = vec!["concept".to_string(), "procedure".to_string()];
+        query_ir.target_entities =
+            vec![EntityMention { label: "QRP".to_string(), role: EntityRole::Subject }];
+
+        assert!(decide_focus(&bundle, &query_ir, "how to configure QRP?", 8).is_none());
     }
 
     #[test]
@@ -1367,6 +1912,272 @@ mod tests {
         // Budget cap ≈ 60% of 8 = 5 → winner chunk count should be
         // at most 5 (not the full 6 available).
         assert!(diag.winner_chunk_count <= 5);
+    }
+
+    #[test]
+    fn test_consolidation_preserves_multi_document_versioned_procedure_anchors() {
+        let dominant_doc = Uuid::now_v7();
+        let dominant_rev = Uuid::now_v7();
+        let procedure_doc = Uuid::now_v7();
+        let procedure_rev = Uuid::now_v7();
+
+        let bundle = RetrievalBundle {
+            entities: Vec::new(),
+            relationships: Vec::new(),
+            chunks: vec![
+                focused_chunk(dominant_doc, dominant_rev, 0, "Dominant support note", 10_000.0),
+                focused_chunk(dominant_doc, dominant_rev, 1, "Dominant support note", 9_999.0),
+                focused_chunk(dominant_doc, dominant_rev, 2, "Dominant support note", 9_998.0),
+                focused_chunk(dominant_doc, dominant_rev, 3, "Dominant support note", 9_997.0),
+                focused_chunk(procedure_doc, procedure_rev, 0, "Upgrade procedure", 9_900.0),
+            ],
+        };
+
+        let generic_ir = ir(QueryScope::SingleDocument);
+        let Some((_, generic_reason, _)) =
+            decide_focus(&bundle, &generic_ir, "how to update Alpha Service?", 8)
+        else {
+            panic!("generic evidence dominance should still consolidate this shape");
+        };
+        assert_eq!(generic_reason, FocusReason::EvidenceDominance);
+
+        let mut procedure_ir = ir(QueryScope::SingleDocument);
+        procedure_ir.target_types = vec!["artifact".to_string(), "procedure".to_string()];
+        procedure_ir.target_entities =
+            vec![EntityMention { label: "Alpha Service".to_string(), role: EntityRole::Subject }];
+
+        assert!(
+            decide_focus(&bundle, &procedure_ir, "how to update Alpha Service?", 8).is_none(),
+            "soft evidence dominance must not collapse multi-document focused procedure evidence"
+        );
+    }
+
+    #[test]
+    fn test_consolidation_skips_evidence_dominance_for_single_versioned_procedure_anchor() {
+        let dominant_doc = Uuid::now_v7();
+        let dominant_rev = Uuid::now_v7();
+        let procedure_doc = Uuid::now_v7();
+        let procedure_rev = Uuid::now_v7();
+
+        let bundle = RetrievalBundle {
+            entities: Vec::new(),
+            relationships: Vec::new(),
+            chunks: vec![
+                sample_chunk(dominant_doc, dominant_rev, 0, "Alpha support notes", 0.9),
+                sample_chunk(dominant_doc, dominant_rev, 1, "Alpha support notes", 0.85),
+                sample_chunk(dominant_doc, dominant_rev, 2, "Alpha support notes", 0.8),
+                sample_chunk(dominant_doc, dominant_rev, 3, "Alpha support notes", 0.75),
+                focused_chunk(
+                    procedure_doc,
+                    procedure_rev,
+                    0,
+                    "Alpha versioned update guide",
+                    9_900.0,
+                ),
+            ],
+        };
+
+        let mut procedure_ir = ir(QueryScope::SingleDocument);
+        procedure_ir.target_types = vec!["artifact".to_string(), "procedure".to_string()];
+        procedure_ir.target_entities = vec![EntityMention {
+            label: "Alpha subject server".to_string(),
+            role: EntityRole::Subject,
+        }];
+
+        assert!(
+            decide_focus(&bundle, &procedure_ir, "how to update Alpha subject server?", 8)
+                .is_none(),
+            "versioned procedure retrieval must leave the mixed context intact for the deterministic procedure extractor"
+        );
+    }
+
+    #[test]
+    fn test_consolidation_packs_exact_versioned_procedure_runbook() {
+        let dominant_doc = Uuid::now_v7();
+        let dominant_rev = Uuid::now_v7();
+        let runbook_doc = Uuid::now_v7();
+        let runbook_rev = Uuid::now_v7();
+        let runbook_text = concat!(
+            "Alpha Console update runbook\n",
+            "1. Run sudo sample-runner update\n",
+            "2. Run sudo sample-runner upgrade\n",
+            "3. Run sudo sample-configure alpha-rest\n",
+            "4. Run sudo service alpha-rest restart"
+        );
+        let mut bundle = RetrievalBundle {
+            entities: Vec::new(),
+            relationships: Vec::new(),
+            chunks: vec![
+                focused_chunk(dominant_doc, dominant_rev, 0, "Alpha Console update note", 20_000.0),
+                focused_chunk(dominant_doc, dominant_rev, 1, "Alpha Console update note", 19_999.0),
+                focused_chunk(dominant_doc, dominant_rev, 2, "Alpha Console update note", 19_998.0),
+                text_chunk(
+                    runbook_doc,
+                    runbook_rev,
+                    3,
+                    "Alpha Console update runbook",
+                    1.0,
+                    runbook_text,
+                ),
+            ],
+        };
+        let mut query_ir = ir(QueryScope::SingleDocument);
+        query_ir.target_types =
+            vec!["artifact".to_string(), "procedure".to_string(), "version".to_string()];
+        query_ir.target_entities =
+            vec![EntityMention { label: "Alpha Console".to_string(), role: EntityRole::Subject }];
+
+        let revision_rows = (0..7)
+            .map(|idx| {
+                let content = if idx == 3 { runbook_text } else { "neighbor update context" };
+                chunk_row(runbook_doc, runbook_rev, idx, content)
+            })
+            .collect::<Vec<_>>();
+        let diag = run_apply_with_question(
+            &mut bundle,
+            &query_ir,
+            "how to update Alpha Console?",
+            8,
+            revision_rows,
+        );
+
+        assert_eq!(diag.focus_reason, FocusReason::VersionedProcedureRunbook);
+        assert_eq!(diag.focused_document_id, Some(runbook_doc));
+        assert_eq!(bundle.chunks.first().map(|chunk| chunk.document_id), Some(runbook_doc));
+        assert_eq!(bundle.chunks.first().map(|chunk| chunk.chunk_index), Some(3));
+        assert!(bundle.chunks.iter().any(|chunk| {
+            chunk.source_text.contains("sample-configure")
+                && chunk.source_text.contains("service alpha-rest restart")
+        }));
+    }
+
+    #[test]
+    fn test_consolidation_prefers_command_runbook_over_subject_title_note_for_procedure_query() {
+        let subject_doc = Uuid::now_v7();
+        let subject_rev = Uuid::now_v7();
+        let runbook_doc = Uuid::now_v7();
+        let runbook_rev = Uuid::now_v7();
+        let runbook_text = concat!(
+            "Support Node update procedure\n",
+            "1. sample-fetch https://host.invalid/update-bundle.sh -o /tmp/update-bundle.sh\n",
+            "2. chmod +x /tmp/update-bundle.sh\n",
+            "3. /tmp/update-bundle.sh\n",
+            "4. sample-service reload support-node"
+        );
+        let mut bundle = RetrievalBundle {
+            entities: Vec::new(),
+            relationships: Vec::new(),
+            chunks: vec![
+                text_chunk(
+                    subject_doc,
+                    subject_rev,
+                    0,
+                    "Support Node overview",
+                    20_000.0,
+                    "Support Node overview. The package inventory is described here.",
+                ),
+                text_chunk(
+                    subject_doc,
+                    subject_rev,
+                    1,
+                    "Support Node overview",
+                    19_999.0,
+                    "Support Node compatibility notes and background facts.",
+                ),
+                text_chunk(
+                    subject_doc,
+                    subject_rev,
+                    2,
+                    "Support Node overview",
+                    19_998.0,
+                    "Support Node release checklist without executable steps.",
+                ),
+                text_chunk(
+                    runbook_doc,
+                    runbook_rev,
+                    21,
+                    "Maintenance instructions",
+                    1.0,
+                    runbook_text,
+                ),
+            ],
+        };
+        let mut query_ir = ir(QueryScope::SingleDocument);
+        query_ir.target_types = vec!["procedure".to_string(), "concept".to_string()];
+        query_ir.target_entities =
+            vec![EntityMention { label: "Support Node".to_string(), role: EntityRole::Subject }];
+        query_ir.retrieval_query = Some("how to update Support Node".to_string());
+
+        let revision_rows = (18..=24)
+            .map(|idx| {
+                let content = if idx == 21 { runbook_text } else { "neighbor procedure context" };
+                chunk_row(runbook_doc, runbook_rev, idx, content)
+            })
+            .collect::<Vec<_>>();
+        let diag = run_apply_with_question(
+            &mut bundle,
+            &query_ir,
+            "how to update Support Node?",
+            8,
+            revision_rows,
+        );
+
+        assert_eq!(diag.focus_reason, FocusReason::VersionedProcedureRunbook);
+        assert_eq!(diag.focused_document_id, Some(runbook_doc));
+        assert_eq!(bundle.chunks.first().map(|chunk| chunk.document_id), Some(runbook_doc));
+        assert!(bundle.chunks.iter().any(|chunk| chunk.source_text.contains("update-bundle.sh")));
+    }
+
+    #[test]
+    fn test_consolidation_exact_versioned_procedure_runbook_tie_uses_retrieval_score() {
+        let first_doc = Uuid::now_v7();
+        let first_rev = Uuid::now_v7();
+        let preferred_doc = Uuid::now_v7();
+        let preferred_rev = Uuid::now_v7();
+        let runbook_text = concat!(
+            "Alpha Console update runbook\n",
+            "1. sudo sample-runner update\n",
+            "2. sudo sample-runner upgrade\n",
+            "3. sudo sample-configure alpha-rest\n",
+            "4. sudo service alpha-rest restart"
+        );
+        let bundle = RetrievalBundle {
+            entities: Vec::new(),
+            relationships: Vec::new(),
+            chunks: vec![
+                text_chunk(
+                    first_doc,
+                    first_rev,
+                    1,
+                    "Alpha Console update runbook",
+                    10.0,
+                    runbook_text,
+                ),
+                text_chunk(
+                    preferred_doc,
+                    preferred_rev,
+                    2,
+                    "Alpha Console update runbook",
+                    20.0,
+                    runbook_text,
+                ),
+            ],
+        };
+        let mut query_ir = ir(QueryScope::SingleDocument);
+        query_ir.target_types =
+            vec!["artifact".to_string(), "procedure".to_string(), "version".to_string()];
+        query_ir.target_entities =
+            vec![EntityMention { label: "Alpha Console".to_string(), role: EntityRole::Subject }];
+
+        let Some((winner, reason, _)) =
+            decide_focus(&bundle, &query_ir, "how to update Alpha Console?", 8)
+        else {
+            panic!("exact-target runbook winner expected");
+        };
+
+        assert_eq!(reason, FocusReason::VersionedProcedureRunbook);
+        assert_eq!(winner.document_id, preferred_doc);
+        assert_eq!(winner.ranked_content_anchors.first().copied(), Some(2));
     }
 
     #[test]
@@ -1417,6 +2228,70 @@ mod tests {
         let query_ir = ir(QueryScope::SingleDocument);
 
         assert!(decide_focus(&bundle, &query_ir, DEFAULT_TEST_QUESTION, 8).is_none());
+    }
+
+    #[test]
+    fn test_consolidation_subject_acronym_pin_beats_focused_evidence_dominance() {
+        let dominant_doc = Uuid::now_v7();
+        let dominant_rev = Uuid::now_v7();
+        let procedure_doc = Uuid::now_v7();
+        let procedure_rev = Uuid::now_v7();
+
+        let bundle = RetrievalBundle {
+            entities: Vec::new(),
+            relationships: Vec::new(),
+            chunks: vec![
+                focused_chunk(
+                    dominant_doc,
+                    dominant_rev,
+                    0,
+                    "Alpha Service support guide",
+                    10_000.0,
+                ),
+                focused_chunk(
+                    dominant_doc,
+                    dominant_rev,
+                    1,
+                    "Alpha Service support guide",
+                    9_999.0,
+                ),
+                focused_chunk(
+                    dominant_doc,
+                    dominant_rev,
+                    2,
+                    "Alpha Service support guide",
+                    9_998.0,
+                ),
+                focused_chunk(
+                    dominant_doc,
+                    dominant_rev,
+                    3,
+                    "Alpha Service support guide",
+                    9_997.0,
+                ),
+                focused_chunk(procedure_doc, procedure_rev, 0, "AS update guide", 9_900.0),
+            ],
+        };
+        let generic_ir = ir(QueryScope::SingleDocument);
+        let Some((_, generic_reason, _)) =
+            decide_focus(&bundle, &generic_ir, "how to update Alpha Service?", 8)
+        else {
+            panic!("generic evidence dominance should still consolidate this shape");
+        };
+        assert_eq!(generic_reason, FocusReason::EvidenceDominance);
+
+        let mut query_ir = ir(QueryScope::SingleDocument);
+        query_ir.target_types = vec!["artifact".to_string(), "procedure".to_string()];
+        query_ir.target_entities =
+            vec![EntityMention { label: "Alpha Service".to_string(), role: EntityRole::Subject }];
+
+        let Some((winner, reason, _)) =
+            decide_focus(&bundle, &query_ir, "how to update Alpha Service?", 8)
+        else {
+            panic!("subject acronym pin should select the procedure document");
+        };
+        assert_eq!(reason, FocusReason::SingleDocumentSubject);
+        assert_eq!(winner.document_id, procedure_doc);
     }
 
     #[test]
@@ -1839,26 +2714,26 @@ mod tests {
 
     #[test]
     fn topical_prune_keeps_title_family_and_drops_generic_tail() {
-        let payment_a = Uuid::now_v7();
-        let payment_b = Uuid::now_v7();
+        let workflow_a = Uuid::now_v7();
+        let workflow_b = Uuid::now_v7();
         let generic = Uuid::now_v7();
         let rev = Uuid::now_v7();
         let mut bundle = RetrievalBundle {
             entities: Vec::new(),
             relationships: Vec::new(),
             chunks: vec![
-                sample_chunk(payment_a, rev, 0, "Payment Alpha Admin Guide", 0.9),
-                sample_chunk(payment_b, rev, 0, "Payment Beta Admin Guide", 0.8),
+                sample_chunk(workflow_a, rev, 0, "Workflow Alpha Admin Guide", 0.9),
+                sample_chunk(workflow_b, rev, 0, "Workflow Beta Admin Guide", 0.8),
                 sample_chunk(generic, rev, 0, "Generic Installation HOWTO", 0.7),
             ],
         };
 
         let diagnostics =
-            prune_non_topical_document_tail(&mut bundle, "how to configure payment", false);
+            prune_non_topical_document_tail(&mut bundle, "how to configure workflow", None, false);
 
         assert_eq!(diagnostics.removed_chunk_count, 1);
         assert_eq!(diagnostics.kept_chunk_count, 2);
-        assert!(bundle.chunks.iter().all(|chunk| chunk.document_label.contains("Payment")));
+        assert!(bundle.chunks.iter().all(|chunk| chunk.document_label.contains("Workflow")));
     }
 
     #[test]
@@ -1880,11 +2755,65 @@ mod tests {
         };
 
         let diagnostics =
-            prune_non_topical_document_tail(&mut bundle, "how to configure scanner", false);
+            prune_non_topical_document_tail(&mut bundle, "how to configure scanner", None, false);
 
         assert_eq!(diagnostics.removed_chunk_count, 1);
         assert_eq!(diagnostics.kept_chunk_count, 3);
         assert!(bundle.chunks.iter().any(|chunk| chunk.document_id == rare_evidence));
+        assert!(!bundle.chunks.iter().any(|chunk| chunk.document_id == generic));
+    }
+
+    #[test]
+    fn topical_prune_preserves_versioned_update_instruction_title_anchor() {
+        let topical_a = Uuid::now_v7();
+        let topical_b = Uuid::now_v7();
+        let instruction_doc = Uuid::now_v7();
+        let generic = Uuid::now_v7();
+        let rev = Uuid::now_v7();
+        let mut instruction = sample_chunk(
+            instruction_doc,
+            rev,
+            0,
+            "Instruction for updating Alpha Control Service",
+            0.02,
+        );
+        instruction.score_kind = RuntimeChunkScoreKind::FocusedDocument;
+        instruction.source_text = concat!(
+            "Alpha Control Service update procedure\n",
+            "1. sudo sample-runner update\n",
+            "2. sudo sample-runner upgrade\n",
+            "3. sudo sample-configure alpha-control\n",
+            "4. sudo service alpha-control restart"
+        )
+        .to_string();
+        let mut bundle = RetrievalBundle {
+            entities: Vec::new(),
+            relationships: Vec::new(),
+            chunks: vec![
+                sample_chunk(topical_a, rev, 0, "Workflow Alpha Guide", 0.02),
+                sample_chunk(topical_b, rev, 0, "Workflow Beta Guide", 0.02),
+                instruction,
+                sample_chunk(generic, rev, 0, "Generic Installation HOWTO", 0.02),
+            ],
+        };
+        let mut query_ir = ir(QueryScope::SingleDocument);
+        query_ir.target_types = vec!["artifact".to_string(), "procedure".to_string()];
+        query_ir.target_entities = vec![EntityMention {
+            label: "Alpha Control Service".to_string(),
+            role: EntityRole::Subject,
+        }];
+        query_ir.document_focus = Some(DocumentHint { hint: "Alpha Control Service".to_string() });
+        query_ir.retrieval_query = Some("how to update Alpha Control Service version?".to_string());
+
+        let diagnostics = prune_non_topical_document_tail(
+            &mut bundle,
+            "how to configure workflow",
+            Some(&query_ir),
+            false,
+        );
+
+        assert_eq!(diagnostics.removed_chunk_count, 1);
+        assert!(bundle.chunks.iter().any(|chunk| chunk.document_id == instruction_doc));
         assert!(!bundle.chunks.iter().any(|chunk| chunk.document_id == generic));
     }
 
@@ -1904,7 +2833,8 @@ mod tests {
             ],
         };
 
-        let diagnostics = prune_non_topical_document_tail(&mut bundle, "latest releases", true);
+        let diagnostics =
+            prune_non_topical_document_tail(&mut bundle, "latest releases", None, true);
 
         assert_eq!(diagnostics.removed_chunk_count, 0);
         assert_eq!(bundle.chunks.len(), 3);
@@ -1924,7 +2854,8 @@ mod tests {
         let mut bundle =
             RetrievalBundle { entities: Vec::new(), relationships: Vec::new(), chunks: original };
 
-        let diagnostics = prune_non_topical_document_tail(&mut bundle, "platform setup", false);
+        let diagnostics =
+            prune_non_topical_document_tail(&mut bundle, "platform setup", None, false);
 
         assert_eq!(diagnostics.removed_chunk_count, 0);
         assert_eq!(bundle.chunks.len(), 3);
@@ -1934,8 +2865,8 @@ mod tests {
     fn significant_tokens_language_agnostic() {
         // Hint-matching must not rely on domain vocabulary — any
         // 3+ char alphanumeric token counts, regardless of language.
-        let tokens = significant_tokens("ProviderA PaymentModule Guide v2.0");
-        assert!(tokens.contains("providera"));
-        assert!(tokens.contains("paymentmodule"));
+        let tokens = significant_tokens("SubjectA WorkflowModule Guide v2.0");
+        assert!(tokens.contains("subjecta"));
+        assert!(tokens.contains("workflowmodule"));
     }
 }
