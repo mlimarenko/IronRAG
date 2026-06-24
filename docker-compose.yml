@@ -348,7 +348,7 @@ services:
       dockerfile: apps/api/Dockerfile
       args:
         APP_VERSION: ${IRONRAG_VERSION:-0.0.0-dev}
-        DOCLING_VERSION: ${DOCLING_VERSION:-2.93.0}
+        DOCLING_VERSION: ${DOCLING_VERSION:-2.107.0}
         TORCH_VERSION: ${TORCH_VERSION:-2.11.0+cpu}
         TORCHVISION_VERSION: ${TORCHVISION_VERSION:-0.26.0+cpu}
     restart: unless-stopped

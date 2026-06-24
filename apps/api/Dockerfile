@@ -8,7 +8,10 @@ ARG APP_VERSION=0.0.0-dev
 # Wild 0.9.0 linker for fast native-speed dockerfile builds (~2x mold on incremental link).
 ARG WILD_VERSION=0.9.0
 ARG WILD_SHA256=deb6ee0e5caec798053ec4aafaba042e20a8edf91f08cb4d36268571cc628d3b
+COPY docker/apt/debian-backports.sources /etc/apt/sources.list.d/debian-backports.sources
+COPY docker/apt/90-backports /etc/apt/preferences.d/90-backports
 RUN apt-get update \
+  && apt-get upgrade -y \
   && apt-get install -y --no-install-recommends pkg-config libssl-dev ca-certificates clang curl \
   && curl -fsSL "https://github.com/wild-linker/wild/releases/download/${WILD_VERSION}/wild-linker-${WILD_VERSION}-x86_64-unknown-linux-gnu.tar.gz" -o /tmp/wild.tgz \
   && echo "${WILD_SHA256}  /tmp/wild.tgz" | sha256sum -c - \
@@ -67,7 +70,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,id=ironrag-cargo-reg,sha
 # application-code changes without re-downloading model weights.
 FROM python:3.14.4-slim-trixie AS docling-base
 WORKDIR /app
-ARG DOCLING_VERSION=2.101.0
+ARG DOCLING_VERSION=2.107.0
 # rapidocr is a transitive docling dependency and must stay pinned: its 3.8.2
 # wheel ships without the pytorch inference-engine data files
 # (networks/arch_config.yaml), and with torch present in the venv rapidocr
@@ -80,7 +83,10 @@ ENV VIRTUAL_ENV=/opt/ironrag-docling
 ENV PATH="${VIRTUAL_ENV}/bin:${PATH}"
 ENV PYTHONUNBUFFERED=1
 
+COPY docker/apt/debian-backports.sources /etc/apt/sources.list.d/debian-backports.sources
+COPY docker/apt/90-backports /etc/apt/preferences.d/90-backports
 RUN apt-get update \
+  && apt-get upgrade -y \
   && apt-get install -y --no-install-recommends \
     ca-certificates \
     curl \

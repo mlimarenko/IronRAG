@@ -2,6 +2,33 @@
 
 ## Unreleased
 
+## 0.5.2 — 2026-06-25
+
+### Changed
+
+- **Backend and embedded extraction images now consume Debian Trixie
+  backports during image builds.** The Rust builder and Docling runtime stages
+  enable a pinned `trixie-backports` source and run a package upgrade before
+  installing build/runtime dependencies, keeping the shipped image base current
+  without changing the public runtime contract.
+
+- **The embedded Docling extraction runtime is refreshed to Docling 2.107.0.**
+  The Dockerfile and local Compose build default now agree on the same Docling
+  version, so local image builds exercise the extractor stack that the release
+  image ships.
+
+- **Frontend build tooling lockfile entries are refreshed.** The web
+  package-lock now tracks current transitive tooling packages from the existing
+  dependency graph, reducing stale frontend build/runtime dependencies without
+  changing the product UI contract.
+
+### Fixed
+
+- **Local Compose builds no longer drift from the release Dockerfile's
+  extraction stack.** The default `DOCLING_VERSION` build argument in
+  `docker-compose.yml` now matches the Docker image default, preventing local
+  validation from accidentally testing an older embedded extractor.
+
 ## 0.5.1 — 2026-06-18
 
 ### Changed
