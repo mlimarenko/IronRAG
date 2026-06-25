@@ -17,6 +17,14 @@
   version, so local image builds exercise the extractor stack that the release
   image ships.
 
+- **The local Compose build now uses the same PyTorch CPU runtime defaults as
+  the release Dockerfile.** The local backend image build no longer overrides
+  the Dockerfile's torch and torchvision versions with older defaults.
+
+- **Release metadata is aligned across runtime, API contract, Helm, and docs.**
+  The Rust workspace package version, generated OpenAPI `info.version`, Helm
+  chart, and README image-tag example now point at 0.5.2.
+
 - **Frontend build tooling lockfile entries are refreshed.** The web
   package-lock now tracks current transitive tooling packages from the existing
   dependency graph, reducing stale frontend build/runtime dependencies without
@@ -25,9 +33,21 @@
 ### Fixed
 
 - **Local Compose builds no longer drift from the release Dockerfile's
-  extraction stack.** The default `DOCLING_VERSION` build argument in
-  `docker-compose.yml` now matches the Docker image default, preventing local
-  validation from accidentally testing an older embedded extractor.
+  extraction stack.** The default Docling, torch, and torchvision build
+  arguments in `docker-compose.yml` now match the Docker image defaults,
+  preventing local validation from accidentally testing older embedded
+  extractor dependencies.
+
+- **Fresh release image builds can resolve PyTorch CPU transitive
+  dependencies.** The Dockerfile keeps PyTorch wheels on the CPU index while
+  allowing dependency packages such as resolver-only pure Python wheels to come
+  from PyPI, fixing the `mpmath` resolver failure seen in the 0.5.2 image
+  publication workflow.
+
+- **Release image builds tolerate transient external tool download failures.**
+  The backend Dockerfile now bounds and retries the linker archive download,
+  keeps checksum verification for any downloaded archive, and falls back to the
+  system linker when the external asset is temporarily unreachable.
 
 ## 0.5.1 — 2026-06-18
 

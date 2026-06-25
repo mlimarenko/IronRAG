@@ -13,10 +13,16 @@ COPY docker/apt/90-backports /etc/apt/preferences.d/90-backports
 RUN apt-get update \
   && apt-get upgrade -y \
   && apt-get install -y --no-install-recommends pkg-config libssl-dev ca-certificates clang curl \
-  && curl -fsSL "https://github.com/wild-linker/wild/releases/download/${WILD_VERSION}/wild-linker-${WILD_VERSION}-x86_64-unknown-linux-gnu.tar.gz" -o /tmp/wild.tgz \
-  && echo "${WILD_SHA256}  /tmp/wild.tgz" | sha256sum -c - \
-  && tar -xzf /tmp/wild.tgz -C /tmp \
-  && install -m 0755 "/tmp/wild-linker-${WILD_VERSION}-x86_64-unknown-linux-gnu/wild" /usr/local/bin/wild \
+  && if curl -fsSL --connect-timeout 30 --max-time 300 --retry 5 --retry-delay 5 --retry-all-errors "https://github.com/wild-linker/wild/releases/download/${WILD_VERSION}/wild-linker-${WILD_VERSION}-x86_64-unknown-linux-gnu.tar.gz" -o /tmp/wild.tgz; then \
+       echo "${WILD_SHA256}  /tmp/wild.tgz" | sha256sum -c - \
+       && tar -xzf /tmp/wild.tgz -C /tmp \
+       && install -m 0755 "/tmp/wild-linker-${WILD_VERSION}-x86_64-unknown-linux-gnu/wild" /usr/local/bin/wild; \
+     else \
+       status="$?"; \
+       if [ "${status}" = "22" ]; then exit "${status}"; fi; \
+       echo "wild download failed; using system ld fallback" >&2 \
+       && ln -s /usr/bin/ld /usr/local/bin/wild; \
+     fi \
   && rm -rf /tmp/wild.tgz "/tmp/wild-linker-${WILD_VERSION}-x86_64-unknown-linux-gnu" \
   && rm -rf /var/lib/apt/lists/*
 
@@ -99,6 +105,7 @@ RUN python -m venv "${VIRTUAL_ENV}" \
   && "${VIRTUAL_ENV}/bin/pip" install --no-cache-dir --upgrade pip \
   && "${VIRTUAL_ENV}/bin/pip" install --no-cache-dir \
     --index-url https://download.pytorch.org/whl/cpu \
+    --extra-index-url https://pypi.org/simple \
     "torch==${TORCH_VERSION}" \
     "torchvision==${TORCHVISION_VERSION}" \
   && "${VIRTUAL_ENV}/bin/pip" install --no-cache-dir \
