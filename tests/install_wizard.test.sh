@@ -112,6 +112,34 @@ env_file_set IRONRAG_OPENAI_API_KEY 'new&val|with\specials' "$TMP_ENV"
 check "verbatim special write"     "$(env_get IRONRAG_OPENAI_API_KEY "$TMP_ENV")" 'new&val|with\specials'
 rm -f "$TMP_ENV"
 
+echo "── release image pin sync: official pins update, custom overrides survive ──"
+TMP_ENV="$(mktemp)"
+{
+  printf 'IRONRAG_BACKEND_IMAGE=pipingspace/ironrag-backend:v0.5.1\n'
+  printf 'IRONRAG_FRONTEND_IMAGE=docker.io/pipingspace/ironrag-frontend:v0.5.1\n'
+} >"$TMP_ENV"
+IRONRAG_IMAGE_PINS_UPDATED=0
+IRONRAG_TARGET_IMAGE_TAG=""
+sync_release_image_pins "$TMP_ENV" "v0.5.2"
+check "official backend pin updated"  "$(env_get IRONRAG_BACKEND_IMAGE "$TMP_ENV")" "pipingspace/ironrag-backend:v0.5.2"
+check "official frontend pin updated" "$(env_get IRONRAG_FRONTEND_IMAGE "$TMP_ENV")" "pipingspace/ironrag-frontend:v0.5.2"
+check "pin update flag set"           "$IRONRAG_IMAGE_PINS_UPDATED" "1"
+rm -f "$TMP_ENV"
+
+TMP_ENV="$(mktemp)"
+{
+  printf 'IRONRAG_BACKEND_IMAGE=ironrag-backend:local\n'
+  printf 'IRONRAG_FRONTEND_IMAGE=registry.example.invalid/ironrag-frontend:v0.5.1\n'
+  printf 'IRONRAG_REDIS_IMAGE=redis:8.8\n'
+} >"$TMP_ENV"
+IRONRAG_IMAGE_PINS_UPDATED=0
+sync_release_image_pins "$TMP_ENV" "v0.5.2"
+check "custom backend override kept"  "$(env_get IRONRAG_BACKEND_IMAGE "$TMP_ENV")" "ironrag-backend:local"
+check "custom frontend override kept" "$(env_get IRONRAG_FRONTEND_IMAGE "$TMP_ENV")" "registry.example.invalid/ironrag-frontend:v0.5.1"
+check "unrelated image kept"          "$(env_get IRONRAG_REDIS_IMAGE "$TMP_ENV")" "redis:8.8"
+check "pin update flag clear"         "$IRONRAG_IMAGE_PINS_UPDATED" "0"
+rm -f "$TMP_ENV"
+
 # ── Layer 2: offline integration of the full main flow. ─────────────────────
 echo "── integration: non-interactive re-run preserves provider secrets ──"
 run_install() { # run_install <dir> [extra args...]
@@ -120,6 +148,14 @@ run_install() { # run_install <dir> [extra args...]
   IRONRAG_INSTALL_SKIP_DOWNLOAD=1 \
   IRONRAG_INSTALL_SKIP_DEPLOY=1 \
     bash "$INSTALL_SH" local "$dir" "$@" </dev/null >/dev/null 2>&1
+}
+
+run_install_version() { # run_install_version <version> <dir> [extra args...]
+  local version="$1" dir="$2"; shift 2
+  IRONRAG_NONINTERACTIVE=1 \
+  IRONRAG_INSTALL_SKIP_DOWNLOAD=1 \
+  IRONRAG_INSTALL_SKIP_DEPLOY=1 \
+    bash "$INSTALL_SH" "$version" "$dir" "$@" </dev/null >/dev/null 2>&1
 }
 
 WORK="$(mktemp -d)"
@@ -144,6 +180,30 @@ check "boot token intact"   "$(env_get IRONRAG_BOOTSTRAP_TOKEN "${WORK}/.env")" 
 check "caps filled on update" "$([ -n "$(env_get IRONRAG_DB_MEMORY_LIMIT "${WORK}/.env")" ] && echo yes)" "yes"
 # No leftover backup file.
 check "no .env.bak left" "$([ -e "${WORK}/.env.bak" ] && echo present || echo gone)" "gone"
+rm -rf "$WORK"
+
+echo "── integration: release re-run upgrades official image tags ──"
+WORK="$(mktemp -d)"
+cp "${ROOT_DIR}/docker-compose.yml" "${WORK}/docker-compose.yml"
+cp "${ROOT_DIR}/.env.example"      "${WORK}/.env.example"
+{
+  printf 'IRONRAG_OPENAI_API_KEY=sk-release-pin-0001\n'  # pragma: allowlist secret
+  printf 'IRONRAG_BACKEND_IMAGE=pipingspace/ironrag-backend:v0.5.1\n'
+  printf 'IRONRAG_FRONTEND_IMAGE=pipingspace/ironrag-frontend:v0.5.1\n'
+} >"${WORK}/.env"
+run_install_version "v0.5.2" "$WORK"
+check "release backend image tag upgraded"  "$(env_get IRONRAG_BACKEND_IMAGE "${WORK}/.env")" "pipingspace/ironrag-backend:v0.5.2"
+check "release frontend image tag upgraded" "$(env_get IRONRAG_FRONTEND_IMAGE "${WORK}/.env")" "pipingspace/ironrag-frontend:v0.5.2"
+check "release secret intact"               "$(env_get IRONRAG_OPENAI_API_KEY "${WORK}/.env")" "sk-release-pin-0001"
+rm -rf "$WORK"
+
+echo "── integration: fresh release install pins image tags deterministically ──"
+WORK="$(mktemp -d)"
+cp "${ROOT_DIR}/docker-compose.yml" "${WORK}/docker-compose.yml"
+cp "${ROOT_DIR}/.env.example"      "${WORK}/.env.example"
+run_install_version "v0.5.2" "$WORK"
+check "fresh backend image tag pinned"  "$(env_get IRONRAG_BACKEND_IMAGE "${WORK}/.env")" "pipingspace/ironrag-backend:v0.5.2"
+check "fresh frontend image tag pinned" "$(env_get IRONRAG_FRONTEND_IMAGE "${WORK}/.env")" "pipingspace/ironrag-frontend:v0.5.2"
 rm -rf "$WORK"
 
 echo "── integration: re-run keeps pinned caps unless --recompute-resources ──"

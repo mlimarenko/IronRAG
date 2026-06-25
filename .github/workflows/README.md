@@ -13,5 +13,7 @@ Builds the canonical `pipingspace/ironrag-backend` and
 `pipingspace/ironrag-frontend` images using BuildKit + GHA cache and
 pushes them to Docker Hub under the release tag (and `latest` when
 the dispatch input opts in).
+Each run is titled with the release Docker tag, so manual and release-triggered
+runs group cleanly in the Actions list.
 
 That is the entire CI surface for this repository.

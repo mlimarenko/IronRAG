@@ -25,6 +25,10 @@
   The Rust workspace package version, generated OpenAPI `info.version`, Helm
   chart, and README image-tag example now point at 0.5.2.
 
+- **Release Docker workflows are titled by tag.** Manual and release-triggered
+  image publication runs now show the Docker tag as the run title in GitHub
+  Actions instead of a generic workflow title.
+
 - **Frontend build tooling lockfile entries are refreshed.** The web
   package-lock now tracks current transitive tooling packages from the existing
   dependency graph, reducing stale frontend build/runtime dependencies without
@@ -48,6 +52,11 @@
   The backend Dockerfile now bounds and retries the linker archive download,
   keeps checksum verification for any downloaded archive, and falls back to the
   system linker when the external asset is temporarily unreachable.
+
+- **Installer upgrades no longer keep stale official IronRAG image tags.**
+  Re-running the installer for a new release now updates official
+  `pipingspace/ironrag-*` image pins in `.env` to the selected release tag while
+  preserving secrets, resource caps, and custom/local image overrides.
 
 ## 0.5.1 — 2026-06-18
 

@@ -50,7 +50,8 @@ recommends a resource profile (per-service memory/CPU caps and ingest
 parallelism), and prompts step by step for the port, optional admin bootstrap,
 and provider API keys — each with a default you accept with Enter — then shows a
 review screen before writing anything. On a re-run it preserves the existing
-`.env` (secrets and tuned caps are not overwritten).
+`.env` secrets and tuned caps, while official IronRAG image pins are advanced
+to the selected release tag.
 
 The installer also runs fully non-interactively. With no terminal (the piped
 `curl | bash` form), or with `--yes` / `--non-interactive`, it takes every answer

@@ -11,8 +11,9 @@ set -euo pipefail
 # The wizard greets you, inspects the host (CPU + RAM), recommends a resource
 # profile, and prompts for the important variables (port, admin, provider API
 # keys, telemetry, storage) — each with a sensible default you can accept with
-# Enter or skip. On a re-run it preserves your existing .env (secrets and tuned
-# caps are never clobbered) and only fills what is missing.
+# Enter or skip. On a re-run it preserves your existing .env secrets and tuned
+# caps, fills missing values, and advances official image pins to the selected
+# release tag.
 #
 # Design constraints (do not regress):
 #   * Single self-contained file — `curl | bash` ships only this script, so it
@@ -23,6 +24,8 @@ set -euo pipefail
 #     IRONRAG_PORT / IRONRAG_RESET_VOLUMES / … keep working unchanged.
 #   * .env is rewritten atomically (temp + mv, never sed -i) and provider
 #     secrets are asserted byte-identical after every write.
+#   * Official IronRAG image pins are upgraded to the selected release tag on
+#     re-run; custom image overrides are preserved.
 #
 # Flags:
 #   -y, --yes, --non-interactive   Never prompt; use flags / env / existing .env / defaults.
@@ -58,6 +61,8 @@ set -euo pipefail
 
 REPOSITORY="${IRONRAG_GITHUB_REPOSITORY:-mlimarenko/IronRAG}"
 DEFAULT_PORT="${IRONRAG_DEFAULT_PORT:-19000}"
+OFFICIAL_BACKEND_IMAGE="pipingspace/ironrag-backend"
+OFFICIAL_FRONTEND_IMAGE="pipingspace/ironrag-frontend"
 
 # Provider key env vars the wizard can prompt for and must never clobber.
 PROVIDER_KEYS=(
@@ -319,6 +324,58 @@ env_value_nonempty() {
   local v
   v="$(env_get "$1" "$2")"
   [ -n "${v//[[:space:]]/}" ]
+}
+
+image_tag_for_version() {
+  local version="$1"
+  case "$version" in
+    v[0-9]*|[0-9]*|latest)
+      printf '%s\n' "$version"
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+is_mutable_official_image_pin() {
+  local current="$1" image="$2"
+  case "$current" in
+    ""|"$image"|"$image":*|"docker.io/$image"|"docker.io/$image":*)
+      case "$current" in
+        *@sha256:*) return 1 ;;
+        *) return 0 ;;
+      esac
+      ;;
+  esac
+  return 1
+}
+
+sync_release_image_pin() {
+  local key="$1" image="$2" tag="$3" file="$4"
+  local current desired
+  current="$(env_get "$key" "$file")"
+  desired="${image}:${tag}"
+  if is_mutable_official_image_pin "$current" "$image"; then
+    if [ "$current" != "$desired" ]; then
+      env_file_set "$key" "$desired" "$file"
+      return 0
+    fi
+  fi
+  return 1
+}
+
+sync_release_image_pins() {
+  local file="$1" version="$2" tag changed=0
+  if ! tag="$(image_tag_for_version "$version")"; then
+    return 1
+  fi
+  sync_release_image_pin "IRONRAG_BACKEND_IMAGE" "$OFFICIAL_BACKEND_IMAGE" "$tag" "$file" && changed=1
+  sync_release_image_pin "IRONRAG_FRONTEND_IMAGE" "$OFFICIAL_FRONTEND_IMAGE" "$tag" "$file" && changed=1
+  IRONRAG_TARGET_IMAGE_TAG="$tag"
+  IRONRAG_IMAGE_PINS_UPDATED="$changed"
+  return 0
 }
 
 # Atomic, sed-free upsert: rebuild the file to a temp and mv it into place so a
@@ -621,6 +678,9 @@ print_configuration_summary() {
   printf '%s\n' "${C_BOLD}Configuration${C_RESET}"
   if [ "${IRONRAG_NEW_ENV_SECRETS:-0}" = "1" ]; then
     ok "New .env created with random Postgres password + bootstrap token (not printed)."
+  elif [ "${IRONRAG_IMAGE_PINS_UPDATED:-0}" = "1" ]; then
+    ok "Existing .env preserved; official IronRAG images pinned to ${IRONRAG_TARGET_IMAGE_TAG}."
+    info "Secrets, resource caps, and custom image overrides were left unchanged."
   else
     ok "Existing .env preserved; secrets and your tuned values unchanged."
   fi
@@ -690,7 +750,8 @@ other processes (ps, /proc/<pid>/cmdline) and leaks into shell history and CI lo
 
 The wizard inspects the host (CPU + RAM), recommends a resource profile, and
 prompts for port, admin bootstrap, and provider API keys. A re-run preserves the
-existing .env (secrets and tuned caps are never overwritten).
+existing .env secrets and tuned caps while advancing official IronRAG image pins
+to the selected release tag.
 
 Non-interactive example (no TTY, env-driven):
   IRONRAG_PORT=8080 IRONRAG_PROFILE=small \
@@ -999,6 +1060,7 @@ run_main() {
   # Port + derived frontend origin.
   env_file_set "IRONRAG_PORT" "$IRONRAG_PORT" "$env_file"
   sync_frontend_origin_to_port "$env_file" "$IRONRAG_PORT"
+  sync_release_image_pins "$env_file" "$VERSION" || true
 
   # Admin bootstrap (only when freshly provided this run).
   if [ -n "$admin_login" ]; then
