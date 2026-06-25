@@ -1,7 +1,5 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use std::sync::Arc;
-
 use anyhow::{Context, Result};
 use axum::{
     Router,
@@ -19,7 +17,6 @@ use uuid::Uuid;
 use ironrag_backend::{
     app::{config::Settings, state::AppState},
     infra::{
-        arangodb::client::ArangoClient,
         persistence::Persistence,
         repositories::{ai_repository, audit_repository, catalog_repository, iam_repository},
     },
@@ -449,8 +446,6 @@ fn build_test_state(settings: Settings, postgres: PgPool) -> Result<AppState> {
     let redis = redis::Client::open(settings.redis_url.clone())
         .context("failed to create redis client for governance auth test state")?;
     let persistence = Persistence::for_tests(postgres, redis);
-    let arango_client = Arc::new(ArangoClient::from_settings(&settings)?);
-
     AppState::from_dependencies(
         Settings {
             ui_bootstrap_admin_login: bootstrap_settings
@@ -472,7 +467,6 @@ fn build_test_state(settings: Settings, postgres: PgPool) -> Result<AppState> {
             ..settings
         },
         persistence,
-        arango_client,
     )
 }
 
@@ -714,7 +708,7 @@ fn tool_names(response: &Value) -> Result<Vec<String>> {
 }
 
 #[tokio::test]
-#[ignore = "requires local postgres, redis, and arango services"]
+#[ignore = "requires local postgres and redis services"]
 async fn workspace_scoped_discovery_only_returns_visible_workspace_and_libraries() -> Result<()> {
     let fixture = GovernanceAuthFixture::create().await?;
 
@@ -754,7 +748,7 @@ async fn workspace_scoped_discovery_only_returns_visible_workspace_and_libraries
 }
 
 #[tokio::test]
-#[ignore = "requires local postgres, redis, and arango services"]
+#[ignore = "requires local postgres and redis services"]
 async fn workspace_scoped_grants_match_between_discovery_and_mutation_probes() -> Result<()> {
     let fixture = GovernanceAuthFixture::create().await?;
 
@@ -805,7 +799,7 @@ async fn workspace_scoped_grants_match_between_discovery_and_mutation_probes() -
 }
 
 #[tokio::test]
-#[ignore = "requires local postgres, redis, and arango services"]
+#[ignore = "requires local postgres and redis services"]
 async fn library_scoped_grants_match_between_discovery_and_mutation_probes() -> Result<()> {
     let fixture = GovernanceAuthFixture::create().await?;
 
@@ -867,7 +861,7 @@ async fn library_scoped_grants_match_between_discovery_and_mutation_probes() -> 
 }
 
 #[tokio::test]
-#[ignore = "requires local postgres, redis, and arango services"]
+#[ignore = "requires local postgres and redis services"]
 async fn document_scoped_grants_match_between_discovery_and_mutation_probes() -> Result<()> {
     let fixture = GovernanceAuthFixture::create().await?;
 
@@ -929,7 +923,7 @@ async fn document_scoped_grants_match_between_discovery_and_mutation_probes() ->
 }
 
 #[tokio::test]
-#[ignore = "requires local postgres, redis, and arango services"]
+#[ignore = "requires local postgres and redis services"]
 async fn document_scoped_chunk_reads_use_canonical_content_chunks() -> Result<()> {
     let fixture = GovernanceAuthFixture::create().await?;
 
@@ -1008,7 +1002,7 @@ async fn document_scoped_chunk_reads_use_canonical_content_chunks() -> Result<()
 }
 
 #[tokio::test]
-#[ignore = "requires local postgres, redis, and arango services"]
+#[ignore = "requires local postgres and redis services"]
 async fn library_scoped_binding_admin_can_create_library_binding() -> Result<()> {
     let fixture = GovernanceAuthFixture::create().await?;
 
@@ -1090,7 +1084,7 @@ async fn library_scoped_binding_admin_can_create_library_binding() -> Result<()>
 }
 
 #[tokio::test]
-#[ignore = "requires local postgres, redis, and arango services"]
+#[ignore = "requires local postgres and redis services"]
 async fn workspace_scoped_iam_admin_cannot_mint_foreign_workspace_token() -> Result<()> {
     let fixture = GovernanceAuthFixture::create().await?;
 
@@ -1135,7 +1129,7 @@ async fn workspace_scoped_iam_admin_cannot_mint_foreign_workspace_token() -> Res
 }
 
 #[tokio::test]
-#[ignore = "requires local postgres, redis, and arango services"]
+#[ignore = "requires local postgres and redis services"]
 async fn mcp_tools_list_hides_unauthorized_mutation_and_admin_tools() -> Result<()> {
     let fixture = GovernanceAuthFixture::create().await?;
 
@@ -1169,7 +1163,7 @@ async fn mcp_tools_list_hides_unauthorized_mutation_and_admin_tools() -> Result<
 }
 
 #[tokio::test]
-#[ignore = "requires local postgres, redis, and arango services"]
+#[ignore = "requires local postgres and redis services"]
 async fn mcp_tools_list_respects_system_workspace_library_and_document_grants() -> Result<()> {
     let fixture = GovernanceAuthFixture::create().await?;
 
@@ -1289,7 +1283,7 @@ async fn mcp_tools_list_respects_system_workspace_library_and_document_grants() 
 }
 
 #[tokio::test]
-#[ignore = "requires local postgres, redis, and arango services"]
+#[ignore = "requires local postgres and redis services"]
 async fn anonymous_governance_and_operational_reads_are_rejected() -> Result<()> {
     let fixture = GovernanceAuthFixture::create().await?;
 
@@ -1324,7 +1318,7 @@ async fn anonymous_governance_and_operational_reads_are_rejected() -> Result<()>
 }
 
 #[tokio::test]
-#[ignore = "requires local postgres, redis, and arango services"]
+#[ignore = "requires local postgres and redis services"]
 async fn workspace_audit_reader_gets_redacted_visible_events_only() -> Result<()> {
     let fixture = GovernanceAuthFixture::create().await?;
 

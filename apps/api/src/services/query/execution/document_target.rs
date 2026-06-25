@@ -5,7 +5,7 @@ use uuid::Uuid;
 use crate::domains::query_ir::{
     LiteralKind, QueryAct, QueryIR, QueryScope, literal_text_is_identifier_shaped,
 };
-use crate::infra::arangodb::document_store::KnowledgeDocumentRow;
+use crate::infra::knowledge_rows::KnowledgeDocumentRow;
 use crate::services::query::effective_query::{
     current_question_segment, structured_current_question_segment,
 };
@@ -1102,17 +1102,14 @@ mod tests {
 
     fn scoped_document_index<'a>(
         entries: impl IntoIterator<Item = (Uuid, &'a str, Option<&'a str>, &'a str)>,
-    ) -> HashMap<Uuid, crate::infra::arangodb::document_store::KnowledgeDocumentRow> {
+    ) -> HashMap<Uuid, crate::infra::knowledge_rows::KnowledgeDocumentRow> {
         let mut index = HashMap::new();
         let library_id = Uuid::now_v7();
         let workspace_id = Uuid::now_v7();
         for (document_id, file_name, title, external_key) in entries {
             index.insert(
                 document_id,
-                crate::infra::arangodb::document_store::KnowledgeDocumentRow {
-                    key: Uuid::now_v7().to_string(),
-                    arango_id: None,
-                    arango_rev: None,
+                crate::infra::knowledge_rows::KnowledgeDocumentRow {
                     document_id,
                     workspace_id,
                     library_id,

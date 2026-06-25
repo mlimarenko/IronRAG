@@ -8,9 +8,7 @@ use crate::{
     domains::query_ir::{
         QueryAct, QueryIR, QueryScope, SourceSliceDirection, SourceSliceFilter, SourceSliceSpec,
     },
-    infra::arangodb::document_store::{
-        KnowledgeChunkRow, KnowledgeDocumentRow, KnowledgeStructuredBlockRow,
-    },
+    infra::knowledge_rows::{KnowledgeChunkRow, KnowledgeDocumentRow, KnowledgeStructuredBlockRow},
     shared::extraction::{
         record_jsonl::focused_record_unit_excerpt, text_render::repair_technical_layout_noise,
     },
@@ -239,7 +237,7 @@ pub(crate) async fn augment_structured_source_context(
         seed_document_head_source_context_anchors(&mut candidates);
     }
     // T2: source-slice loader now honours `temporal_constraints` via the
-    // AQL substring filter on `occurred_at=ISO` headers, so we no longer
+    // storage substring filter on `occurred_at=ISO` headers, so we no longer
     // skip the slice path when bounds are present. Tail-N inside a
     // bounded window now returns the chronological tail within the
     // window instead of the unconditional tail of the file.
@@ -267,7 +265,7 @@ pub(crate) async fn augment_structured_source_context(
     let candidate_revision_ids = unique_candidate_revision_ids(&candidates);
     let focused_rows_by_revision = chunks_by_revision(
         state
-            .arango_document_store
+            .document_store
             .list_chunks_by_revisions_matching_terms(
                 &candidate_revision_ids,
                 &focus_keywords,
@@ -285,7 +283,7 @@ pub(crate) async fn augment_structured_source_context(
     let path_rows_by_revision = if path_context_requested {
         chunks_by_revision(
             state
-                .arango_document_store
+                .document_store
                 .list_chunks_by_revisions_matching_terms(
                     &candidate_revision_ids,
                     &path_terms,
@@ -311,7 +309,7 @@ pub(crate) async fn augment_structured_source_context(
             })
             .collect::<Vec<_>>();
         chunks_by_revision(
-            state.arango_document_store.list_chunks_by_revisions_windows(&windows).await.context(
+            state.document_store.list_chunks_by_revisions_windows(&windows).await.context(
                 "failed to load setup path source context chunks for candidate revisions",
             )?,
         )
@@ -421,7 +419,7 @@ pub(crate) async fn augment_structured_source_context(
     let procedural_rows_by_revision = if procedural_context_requested {
         chunks_by_revision(
             state
-                .arango_document_store
+                .document_store
                 .list_chunks_by_revisions_windows(&procedural_windows)
                 .await
                 .context(
@@ -448,7 +446,7 @@ pub(crate) async fn augment_structured_source_context(
         .collect::<Vec<_>>();
     let neighbor_rows_by_revision = chunks_by_revision(
         state
-            .arango_document_store
+            .document_store
             .list_chunks_by_revisions_windows(&neighbor_windows)
             .await
             .context("failed to load structured source neighbor chunks for candidate revisions")?,
@@ -510,7 +508,7 @@ pub(crate) async fn augment_structured_source_context(
         }
 
         let profile_rows = state
-            .arango_document_store
+            .document_store
             .list_chunks_by_revision_range(candidate.revision_id, 0, 0)
             .await
             .with_context(|| {
@@ -618,7 +616,7 @@ pub(crate) async fn augment_structured_source_context(
             SOURCE_CONTEXT_DOCUMENT_LIMIT * 4,
         );
         let rows = state
-            .arango_document_store
+            .document_store
             .list_source_profile_chunks_by_revisions(
                 library_id,
                 &revision_ids,
@@ -716,7 +714,7 @@ async fn apply_ordered_source_slice_context(
     let release_marker_required = matches!(slice.filter, SourceSliceFilter::ReleaseMarker);
     let unit_blocks = match slice.direction {
         SourceSliceDirection::Head | SourceSliceDirection::All => state
-            .arango_document_store
+            .document_store
             .list_head_source_unit_blocks_by_revision(
                 candidate.revision_id,
                 count,
@@ -732,7 +730,7 @@ async fn apply_ordered_source_slice_context(
                 )
             })?,
         SourceSliceDirection::Tail => state
-            .arango_document_store
+            .document_store
             .list_tail_source_unit_blocks_by_revision(
                 candidate.revision_id,
                 count,
@@ -801,7 +799,7 @@ async fn source_unit_support_chunks_by_block(
     }
     let unit_block_ids = unit_blocks.iter().map(|block| block.block_id).collect::<HashSet<_>>();
     let support_refs = state
-        .arango_document_store
+        .document_store
         .list_chunk_support_references_by_revision(revision_id)
         .await
         .with_context(|| {
@@ -823,7 +821,7 @@ async fn source_unit_support_chunks_by_block(
 
     let chunk_ids = chunk_ids_by_block.values().copied().collect::<Vec<_>>();
     let support_chunks = state
-        .arango_document_store
+        .document_store
         .list_chunks_by_ids(&chunk_ids)
         .await
         .with_context(|| {
@@ -849,7 +847,7 @@ async fn first_record_stream_candidate_profile(
 ) -> anyhow::Result<Option<(SourceContextCandidate, KnowledgeChunkRow)>> {
     for candidate in candidates {
         let profile_rows = state
-            .arango_document_store
+            .document_store
             .list_chunks_by_revision_range(candidate.revision_id, 0, 0)
             .await
             .with_context(|| {
@@ -874,7 +872,7 @@ async fn first_record_stream_candidate_profile(
         return Ok(None);
     }
     let library_rows = state
-        .arango_document_store
+        .document_store
         .list_source_profile_chunks_by_revisions(
             library_id,
             &canonical_revision_ids,
@@ -1323,7 +1321,7 @@ async fn load_fallback_structured_search_source_context(
     let mut score_by_chunk = HashMap::<Uuid, f32>::new();
     for term in search_terms {
         let rows = state
-            .arango_search_store
+            .search_store
             .search_chunks(
                 library_id,
                 &term,
@@ -1355,7 +1353,7 @@ async fn load_fallback_structured_search_source_context(
         .collect::<HashSet<_>>();
     let chunk_ids = score_by_chunk.keys().copied().collect::<Vec<_>>();
     let rows = state
-        .arango_document_store
+        .document_store
         .list_chunks_by_ids(&chunk_ids)
         .await
         .context("failed to hydrate fallback structured source context chunks")?;
@@ -1440,7 +1438,7 @@ async fn load_structured_inventory_profile_source_context(
     let mut revision_scores = HashMap::<Uuid, f32>::new();
     for term in search_terms {
         let rows = state
-            .arango_search_store
+            .search_store
             .search_chunks(
                 library_id,
                 &term,
@@ -1480,7 +1478,7 @@ async fn load_structured_inventory_profile_source_context(
         .chain(companions.iter().map(|companion| companion.chunk.chunk_id))
         .collect::<HashSet<_>>();
     let rows = state
-        .arango_document_store
+        .document_store
         .list_source_profile_chunks_by_revisions(
             library_id,
             &revision_ids,
@@ -1631,7 +1629,7 @@ async fn load_code_pattern_source_context(
     }
     let global_best_score = chunks.iter().map(|chunk| score_value(chunk.score)).fold(0.0, f32::max);
     let rows = state
-        .arango_document_store
+        .document_store
         .search_code_pattern_chunks_by_terms(
             library_id,
             &terms,
@@ -1687,7 +1685,7 @@ async fn load_transport_pattern_source_context(
     }
     let global_best_score = chunks.iter().map(|chunk| score_value(chunk.score)).fold(0.0, f32::max);
     let rows = state
-        .arango_document_store
+        .document_store
         .search_transport_pattern_chunks_by_terms(
             library_id,
             &terms,
@@ -1744,7 +1742,7 @@ async fn hydrate_missing_companion_documents(
         return Ok(());
     }
     let documents = state
-        .arango_document_store
+        .document_store
         .list_documents_by_ids(&missing_document_ids)
         .await
         .context("failed to hydrate source-context companion documents")?;
@@ -2980,9 +2978,6 @@ mod tests {
         text: &str,
     ) -> KnowledgeChunkRow {
         KnowledgeChunkRow {
-            key: Uuid::now_v7().to_string(),
-            arango_id: None,
-            arango_rev: None,
             chunk_id: Uuid::now_v7(),
             workspace_id: Uuid::now_v7(),
             library_id: Uuid::now_v7(),
@@ -3012,9 +3007,6 @@ mod tests {
 
     fn document_row(document_id: Uuid, revision_id: Uuid) -> KnowledgeDocumentRow {
         KnowledgeDocumentRow {
-            key: document_id.to_string(),
-            arango_id: None,
-            arango_rev: None,
             document_id,
             workspace_id: Uuid::now_v7(),
             library_id: Uuid::now_v7(),
@@ -3042,9 +3034,6 @@ mod tests {
         text: &str,
     ) -> KnowledgeStructuredBlockRow {
         KnowledgeStructuredBlockRow {
-            key: Uuid::now_v7().to_string(),
-            arango_id: None,
-            arango_rev: None,
             block_id: Uuid::now_v7(),
             workspace_id: Uuid::now_v7(),
             library_id: Uuid::now_v7(),

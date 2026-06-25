@@ -37,19 +37,12 @@ use crate::{
         ai::AiBindingPurpose,
     },
     infra::{
-        arangodb::{
-            collections::{
-                KNOWLEDGE_CHUNK_COLLECTION, KNOWLEDGE_CONTEXT_BUNDLE_COLLECTION,
-                KNOWLEDGE_ENTITY_COLLECTION, KNOWLEDGE_EVIDENCE_COLLECTION,
-                KNOWLEDGE_RELATION_COLLECTION,
-            },
-            context_store::{
-                KnowledgeBundleChunkEdgeRow, KnowledgeBundleChunkReferenceRow,
-                KnowledgeBundleEntityEdgeRow, KnowledgeBundleEntityReferenceRow,
-                KnowledgeBundleEvidenceEdgeRow, KnowledgeBundleEvidenceReferenceRow,
-                KnowledgeBundleRelationEdgeRow, KnowledgeBundleRelationReferenceRow,
-                KnowledgeContextBundleReferenceSetRow, KnowledgeContextBundleRow,
-            },
+        knowledge_rows::{
+            KnowledgeBundleChunkEdgeRow, KnowledgeBundleChunkReferenceRow,
+            KnowledgeBundleEntityEdgeRow, KnowledgeBundleEntityReferenceRow,
+            KnowledgeBundleEvidenceEdgeRow, KnowledgeBundleEvidenceReferenceRow,
+            KnowledgeBundleRelationEdgeRow, KnowledgeBundleRelationReferenceRow,
+            KnowledgeContextBundleReferenceSetRow, KnowledgeContextBundleRow,
         },
         repositories::{
             ai_repository, catalog_repository, query_repository, query_result_cache_repository,
@@ -2748,7 +2741,7 @@ async fn materialize_agent_grounding_from_child_execution(
             continue;
         }
         let Some(reference_set) = state
-            .arango_context_store
+            .context_store
             .get_bundle_reference_set_by_query_execution(child_execution_id)
             .await?
         else {
@@ -2793,9 +2786,6 @@ async fn materialize_agent_grounding_from_child_execution(
 
     let now = Utc::now();
     let mut bundle = reference_set.bundle.clone();
-    bundle.key = parent_context_bundle_id.to_string();
-    bundle.arango_id = None;
-    bundle.arango_rev = None;
     bundle.bundle_id = parent_context_bundle_id;
     bundle.workspace_id = parent_execution.workspace_id;
     bundle.library_id = parent_execution.library_id;
@@ -2815,9 +2805,9 @@ async fn materialize_agent_grounding_from_child_execution(
     sort_relation_references(&mut relation_references);
     sort_evidence_references(&mut evidence_references);
 
-    state.arango_context_store.upsert_bundle(&bundle).await?;
+    state.context_store.upsert_bundle(&bundle).await?;
     state
-        .arango_context_store
+        .context_store
         .replace_bundle_chunk_edges(
             parent_context_bundle_id,
             parent_execution.library_id,
@@ -2825,7 +2815,7 @@ async fn materialize_agent_grounding_from_child_execution(
         )
         .await?;
     state
-        .arango_context_store
+        .context_store
         .replace_bundle_entity_edges(
             parent_context_bundle_id,
             parent_execution.library_id,
@@ -2833,7 +2823,7 @@ async fn materialize_agent_grounding_from_child_execution(
         )
         .await?;
     state
-        .arango_context_store
+        .context_store
         .replace_bundle_relation_edges(
             parent_context_bundle_id,
             parent_execution.library_id,
@@ -2841,7 +2831,7 @@ async fn materialize_agent_grounding_from_child_execution(
         )
         .await?;
     state
-        .arango_context_store
+        .context_store
         .replace_bundle_evidence_edges(
             parent_context_bundle_id,
             parent_execution.library_id,
@@ -2925,15 +2915,12 @@ async fn ensure_agent_tool_context_bundle(
     verification_state: QueryVerificationState,
     verification_warnings: serde_json::Value,
 ) -> anyhow::Result<()> {
-    if state.arango_context_store.get_bundle_by_query_execution(execution.id).await?.is_some() {
+    if state.context_store.get_bundle_by_query_execution(execution.id).await?.is_some() {
         return Ok(());
     }
 
     let now = Utc::now();
     let bundle = KnowledgeContextBundleRow {
-        key: context_bundle_id.to_string(),
-        arango_id: None,
-        arango_rev: None,
         bundle_id: context_bundle_id,
         workspace_id: execution.workspace_id,
         library_id: execution.library_id,
@@ -2958,7 +2945,7 @@ async fn ensure_agent_tool_context_bundle(
         created_at: now,
         updated_at: now,
     };
-    state.arango_context_store.upsert_bundle(&bundle).await?;
+    state.context_store.upsert_bundle(&bundle).await?;
     Ok(())
 }
 
@@ -3389,11 +3376,6 @@ fn clone_chunk_reference_edges(
     references
         .iter()
         .map(|reference| KnowledgeBundleChunkEdgeRow {
-            key: format!("{bundle_id}:{}", reference.chunk_id),
-            arango_id: None,
-            arango_rev: None,
-            from: format!("{KNOWLEDGE_CONTEXT_BUNDLE_COLLECTION}/{bundle_id}"),
-            to: format!("{KNOWLEDGE_CHUNK_COLLECTION}/{}", reference.chunk_id),
             bundle_id,
             chunk_id: reference.chunk_id,
             rank: reference.rank,
@@ -3412,11 +3394,6 @@ fn clone_entity_reference_edges(
     references
         .iter()
         .map(|reference| KnowledgeBundleEntityEdgeRow {
-            key: format!("{bundle_id}:{}", reference.entity_id),
-            arango_id: None,
-            arango_rev: None,
-            from: format!("{KNOWLEDGE_CONTEXT_BUNDLE_COLLECTION}/{bundle_id}"),
-            to: format!("{KNOWLEDGE_ENTITY_COLLECTION}/{}", reference.entity_id),
             bundle_id,
             entity_id: reference.entity_id,
             rank: reference.rank,
@@ -3435,11 +3412,6 @@ fn clone_relation_reference_edges(
     references
         .iter()
         .map(|reference| KnowledgeBundleRelationEdgeRow {
-            key: format!("{bundle_id}:{}", reference.relation_id),
-            arango_id: None,
-            arango_rev: None,
-            from: format!("{KNOWLEDGE_CONTEXT_BUNDLE_COLLECTION}/{bundle_id}"),
-            to: format!("{KNOWLEDGE_RELATION_COLLECTION}/{}", reference.relation_id),
             bundle_id,
             relation_id: reference.relation_id,
             rank: reference.rank,
@@ -3458,11 +3430,6 @@ fn clone_evidence_reference_edges(
     references
         .iter()
         .map(|reference| KnowledgeBundleEvidenceEdgeRow {
-            key: format!("{bundle_id}:{}", reference.evidence_id),
-            arango_id: None,
-            arango_rev: None,
-            from: format!("{KNOWLEDGE_CONTEXT_BUNDLE_COLLECTION}/{bundle_id}"),
-            to: format!("{KNOWLEDGE_EVIDENCE_COLLECTION}/{}", reference.evidence_id),
             bundle_id,
             evidence_id: reference.evidence_id,
             rank: reference.rank,

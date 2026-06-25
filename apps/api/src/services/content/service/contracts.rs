@@ -312,7 +312,7 @@ pub struct PreparedRevisionPersistenceSummary {
     pub normalization_profile: String,
     /// Time spent on the structured preparation step (block extraction + chunking).
     pub prepare_structure_elapsed_ms: i64,
-    /// Time spent on chunk persistence (Postgres + Arango).
+    /// Time spent on chunk persistence.
     pub chunk_content_elapsed_ms: i64,
     /// Time spent on technical-fact extraction.
     pub extract_technical_facts_elapsed_ms: i64,

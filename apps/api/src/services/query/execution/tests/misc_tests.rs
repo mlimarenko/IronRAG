@@ -24,8 +24,8 @@ fn build_lexical_queries_keeps_broader_unique_query_set() {
     let question = "If the agent needs the current checkout server status and the rewards service accounts list separately, which two endpoints does it need?";
     let queries = build_lexical_queries(question, &plan, &[], None);
 
-    // Raw question goes first — Arango's full-text analyser already
-    // splits it into relevant tokens and the broader phrasing is the
+    // Raw question goes first — the full-text analyzer already splits it into
+    // relevant tokens and the broader phrasing is the
     // highest-signal single query we can dispatch. The combined
     // keyword phrase ("program profile discount tier") is still
     // emitted, but one slot later.
@@ -33,8 +33,8 @@ fn build_lexical_queries_keeps_broader_unique_query_set() {
     assert!(queries.contains(&"program profile discount tier".to_string()));
     // Without QueryIR, retrieval-time segmentation still carries the
     // identifying terms ("current checkout server status" and
-    // "rewards service accounts list") and Arango's analyser strips
-    // the framing tokens downstream.
+    // "rewards service accounts list") and the analyzer strips the framing
+    // tokens downstream.
     assert!(
         queries.iter().any(|query| query.contains("current checkout server status")),
         "segments should include the checkout clause: {queries:?}"
@@ -629,9 +629,6 @@ fn apply_rerank_outcome_reorders_bundle_before_final_truncation() {
 #[test]
 fn maps_query_graph_status_from_library_generation() {
     let ready_generation = KnowledgeLibraryGenerationRow {
-        key: "ready".to_string(),
-        arango_id: None,
-        arango_rev: None,
         generation_id: Uuid::now_v7(),
         workspace_id: Uuid::now_v7(),
         library_id: Uuid::now_v7(),

@@ -14,15 +14,13 @@ use uuid::Uuid;
 use crate::{
     domains::content::READABLE_TEXT_STATES,
     infra::{
-        arangodb::{
-            document_store::{
-                KnowledgeChunkRow, KnowledgeChunkSupportReferenceRow, KnowledgeDocumentRow,
-                KnowledgeRevisionRow, KnowledgeStructuredBlockRow, KnowledgeStructuredRevisionRow,
-                KnowledgeTechnicalFactRow, LibraryGenerationSignals, StructuredRevisionCounts,
-            },
-            search_store::KNOWLEDGE_CHUNK_VECTOR_KIND,
-        },
         knowledge_plane::DocumentStore,
+        knowledge_rows::{
+            KNOWLEDGE_CHUNK_VECTOR_KIND, KnowledgeChunkRow, KnowledgeChunkSupportReferenceRow,
+            KnowledgeDocumentRow, KnowledgeRevisionRow, KnowledgeStructuredBlockRow,
+            KnowledgeStructuredRevisionRow, KnowledgeTechnicalFactRow, LibraryGenerationSignals,
+            StructuredRevisionCounts,
+        },
     },
 };
 
@@ -38,17 +36,13 @@ const CODE_PATTERN_SECTION_REGEX: &str = r"(^|[\r\n])\s*\[[^\]\r\n]{2,80}\]";
 const SOURCE_UNIT_RELEASE_MARKER_REGEX: &str = r"(^|[^0-9.])[0-9]+\.[0-9]+(\.[0-9]+)?([^0-9.]|$)";
 const SOURCE_UNIT_OCCURRED_AT_REGEX: &str = r"occurred_at=([0-9T:+\-]+)";
 
-// LEGACY-SHIM(arango-era, remove>=0.7.0): `NULL::text AS arango_id`,
-// `NULL::text AS arango_rev`, and `<pk>::text AS key` in every *_COLUMNS
-// projection exist solely to satisfy the shared Arango-era row structs
 // (KnowledgeDocumentRow etc.) — safe to simplify to direct column lists
-// once those structs shed their arango_id/arango_rev/key fields.
-const DOCUMENT_COLUMNS: &str = "document_id::text AS key, NULL::text AS arango_id, NULL::text AS arango_rev, document_id, workspace_id, library_id, external_key, file_name, title, NULL::text AS source_uri, NULL::text AS document_hint, document_state, active_revision_id, readable_revision_id, latest_revision_no, parent_document_id, document_role, created_at, updated_at, deleted_at";
-const REVISION_COLUMNS: &str = "revision_id::text AS key, NULL::text AS arango_id, NULL::text AS arango_rev, revision_id, workspace_id, library_id, document_id, revision_number, revision_state, revision_kind, storage_ref, source_uri, document_hint, mime_type, checksum, title, byte_size, normalized_text, text_checksum, image_checksum, text_state, vector_state, graph_state, text_readable_at, vector_ready_at, graph_ready_at, superseded_by_revision_id, created_at";
-const CHUNK_COLUMNS: &str = "chunk_id::text AS key, NULL::text AS arango_id, NULL::text AS arango_rev, chunk_id, workspace_id, library_id, document_id, revision_id, chunk_index, chunk_kind, content_text, normalized_text, span_start, span_end, token_count, support_block_ids, section_path, heading_trail, literal_digest, chunk_state, text_generation, vector_generation, quality_score, window_text, raptor_level, occurred_at, occurred_until";
-const STRUCTURED_REVISION_COLUMNS: &str = "revision_id::text AS key, NULL::text AS arango_id, NULL::text AS arango_rev, revision_id, workspace_id, library_id, document_id, preparation_state, normalization_profile, source_format, language_code, block_count::int4 AS block_count, chunk_count::int4 AS chunk_count, typed_fact_count::int4 AS typed_fact_count, outline_json, prepared_at, updated_at";
-const STRUCTURED_BLOCK_COLUMNS: &str = "block_id::text AS key, NULL::text AS arango_id, NULL::text AS arango_rev, block_id, workspace_id, library_id, document_id, revision_id, ordinal, block_kind, text, normalized_text, heading_trail, section_path, page_number, span_start, span_end, parent_block_id, table_coordinates_json, code_language, created_at, updated_at";
-const TECHNICAL_FACT_COLUMNS: &str = "fact_id::text AS key, NULL::text AS arango_id, NULL::text AS arango_rev, fact_id, workspace_id, library_id, document_id, revision_id, fact_kind, canonical_value_text, canonical_value_exact, canonical_value_json, display_value, qualifiers_json, support_block_ids, support_chunk_ids, confidence, extraction_kind, conflict_group_id, created_at, updated_at";
+const DOCUMENT_COLUMNS: &str = "document_id, workspace_id, library_id, external_key, file_name, title, NULL::text AS source_uri, NULL::text AS document_hint, document_state, active_revision_id, readable_revision_id, latest_revision_no, parent_document_id, document_role, created_at, updated_at, deleted_at";
+const REVISION_COLUMNS: &str = "revision_id, workspace_id, library_id, document_id, revision_number, revision_state, revision_kind, storage_ref, source_uri, document_hint, mime_type, checksum, title, byte_size, normalized_text, text_checksum, image_checksum, text_state, vector_state, graph_state, text_readable_at, vector_ready_at, graph_ready_at, superseded_by_revision_id, created_at";
+const CHUNK_COLUMNS: &str = "chunk_id, workspace_id, library_id, document_id, revision_id, chunk_index, chunk_kind, content_text, normalized_text, span_start, span_end, token_count, support_block_ids, section_path, heading_trail, literal_digest, chunk_state, text_generation, vector_generation, quality_score, window_text, raptor_level, occurred_at, occurred_until";
+const STRUCTURED_REVISION_COLUMNS: &str = "revision_id, workspace_id, library_id, document_id, preparation_state, normalization_profile, source_format, language_code, block_count::int4 AS block_count, chunk_count::int4 AS chunk_count, typed_fact_count::int4 AS typed_fact_count, outline_json, prepared_at, updated_at";
+const STRUCTURED_BLOCK_COLUMNS: &str = "block_id, workspace_id, library_id, document_id, revision_id, ordinal, block_kind, text, normalized_text, heading_trail, section_path, page_number, span_start, span_end, parent_block_id, table_coordinates_json, code_language, created_at, updated_at";
+const TECHNICAL_FACT_COLUMNS: &str = "fact_id, workspace_id, library_id, document_id, revision_id, fact_kind, canonical_value_text, canonical_value_exact, canonical_value_json, display_value, qualifiers_json, support_block_ids, support_chunk_ids, confidence, extraction_kind, conflict_group_id, created_at, updated_at";
 
 #[derive(Clone)]
 pub struct PgDocumentStore {
@@ -58,9 +52,6 @@ pub struct PgDocumentStore {
 impl<'r> FromRow<'r, PgRow> for KnowledgeDocumentRow {
     fn from_row(row: &'r PgRow) -> Result<Self, sqlx::Error> {
         Ok(Self {
-            key: row.try_get("key")?,
-            arango_id: row.try_get("arango_id")?,
-            arango_rev: row.try_get("arango_rev")?,
             document_id: row.try_get("document_id")?,
             workspace_id: row.try_get("workspace_id")?,
             library_id: row.try_get("library_id")?,
@@ -85,9 +76,6 @@ impl<'r> FromRow<'r, PgRow> for KnowledgeDocumentRow {
 impl<'r> FromRow<'r, PgRow> for KnowledgeRevisionRow {
     fn from_row(row: &'r PgRow) -> Result<Self, sqlx::Error> {
         Ok(Self {
-            key: row.try_get("key")?,
-            arango_id: row.try_get("arango_id")?,
-            arango_rev: row.try_get("arango_rev")?,
             revision_id: row.try_get("revision_id")?,
             workspace_id: row.try_get("workspace_id")?,
             library_id: row.try_get("library_id")?,
@@ -120,9 +108,6 @@ impl<'r> FromRow<'r, PgRow> for KnowledgeRevisionRow {
 impl<'r> FromRow<'r, PgRow> for KnowledgeChunkRow {
     fn from_row(row: &'r PgRow) -> Result<Self, sqlx::Error> {
         Ok(Self {
-            key: row.try_get("key")?,
-            arango_id: row.try_get("arango_id")?,
-            arango_rev: row.try_get("arango_rev")?,
             chunk_id: row.try_get("chunk_id")?,
             workspace_id: row.try_get("workspace_id")?,
             library_id: row.try_get("library_id")?,
@@ -163,9 +148,6 @@ impl<'r> FromRow<'r, PgRow> for KnowledgeChunkSupportReferenceRow {
 impl<'r> FromRow<'r, PgRow> for KnowledgeStructuredRevisionRow {
     fn from_row(row: &'r PgRow) -> Result<Self, sqlx::Error> {
         Ok(Self {
-            key: row.try_get("key")?,
-            arango_id: row.try_get("arango_id")?,
-            arango_rev: row.try_get("arango_rev")?,
             revision_id: row.try_get("revision_id")?,
             workspace_id: row.try_get("workspace_id")?,
             library_id: row.try_get("library_id")?,
@@ -196,9 +178,6 @@ impl<'r> FromRow<'r, PgRow> for StructuredRevisionCounts {
 impl<'r> FromRow<'r, PgRow> for KnowledgeStructuredBlockRow {
     fn from_row(row: &'r PgRow) -> Result<Self, sqlx::Error> {
         Ok(Self {
-            key: row.try_get("key")?,
-            arango_id: row.try_get("arango_id")?,
-            arango_rev: row.try_get("arango_rev")?,
             block_id: row.try_get("block_id")?,
             workspace_id: row.try_get("workspace_id")?,
             library_id: row.try_get("library_id")?,
@@ -225,9 +204,6 @@ impl<'r> FromRow<'r, PgRow> for KnowledgeStructuredBlockRow {
 impl<'r> FromRow<'r, PgRow> for KnowledgeTechnicalFactRow {
     fn from_row(row: &'r PgRow) -> Result<Self, sqlx::Error> {
         Ok(Self {
-            key: row.try_get("key")?,
-            arango_id: row.try_get("arango_id")?,
-            arango_rev: row.try_get("arango_rev")?,
             fact_id: row.try_get("fact_id")?,
             workspace_id: row.try_get("workspace_id")?,
             library_id: row.try_get("library_id")?,

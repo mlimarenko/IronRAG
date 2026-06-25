@@ -6,7 +6,7 @@
 //!
 //! Algorithm
 //! ---------
-//! 1. Load all leaf (non-RAPTOR) chunks for the library from ArangoDB.
+//! 1. Load all leaf (non-RAPTOR) chunks for the library from PostgreSQL.
 //! 2. Partition the chunks into `k` clusters.
 //!    Clustering uses a simple sliding-window bucketing strategy so that
 //!    neighbouring chunks (which share context) end up in the same cluster.
@@ -26,9 +26,8 @@ use tracing::{info, warn};
 use uuid::Uuid;
 
 use crate::{
-    app::state::AppState, domains::ai::AiBindingPurpose,
-    infra::arangodb::document_store::KnowledgeChunkRow, integrations::llm::build_text_chat_request,
-    services::graph::error::GraphServiceError,
+    app::state::AppState, domains::ai::AiBindingPurpose, infra::knowledge_rows::KnowledgeChunkRow,
+    integrations::llm::build_text_chat_request, services::graph::error::GraphServiceError,
 };
 
 /// Minimum number of chunks in a cluster before we ask the LLM to summarise it.
@@ -51,13 +50,13 @@ pub struct RaptorBuildResult {
 /// Build one level of the RAPTOR tree for a library.
 ///
 /// # Arguments
-/// * `state`        – Application state (Arango store + LLM gateway + AI catalog).
+/// * `state`        – Application state (knowledge stores + LLM gateway + AI catalog).
 /// * `library_id`   – Library to build the tree for.
 /// * `level`        – Tree level to build (1 = first summary layer over raw chunks).
 /// * `cluster_size` – Target number of source chunks per cluster.
 ///
 /// # Errors
-/// Returns an error when ArangoDB or the LLM provider call fails.
+/// Returns an error when PostgreSQL or the LLM provider call fails.
 pub async fn build_raptor_tree(
     state: &AppState,
     library_id: Uuid,
@@ -73,7 +72,7 @@ pub async fn build_raptor_tree(
 
     // 1. Load all non-RAPTOR chunks for the library.
     let chunks = state
-        .arango_document_store
+        .document_store
         .list_chunks_by_library(library_id)
         .await
         .context("failed to load library chunks for RAPTOR")?;
@@ -148,9 +147,6 @@ pub async fn build_raptor_tree(
             format!("sha256:{}", hex::encode(Sha256::digest(summary_text.as_bytes())));
 
         let row = KnowledgeChunkRow {
-            key: summary_chunk_id.to_string(),
-            arango_id: None,
-            arango_rev: None,
             chunk_id: summary_chunk_id,
             workspace_id: first.workspace_id,
             library_id: first.library_id,
@@ -179,7 +175,7 @@ pub async fn build_raptor_tree(
             occurred_until: None,
         };
 
-        state.arango_document_store.upsert_chunk(&row).await.with_context(|| {
+        state.document_store.upsert_chunk(&row).await.with_context(|| {
             format!("failed to persist RAPTOR summary chunk for cluster {cluster_idx}")
         })?;
 
@@ -247,9 +243,6 @@ mod tests {
         // Actually with MIN_CLUSTER_SIZE=2, the tail of 5 ≥ 2 so we get 3 clusters.
         let chunks: Vec<KnowledgeChunkRow> = (0_i32..25)
             .map(|i| KnowledgeChunkRow {
-                key: Uuid::nil().to_string(),
-                arango_id: None,
-                arango_rev: None,
                 chunk_id: Uuid::now_v7(),
                 workspace_id: Uuid::nil(),
                 library_id: Uuid::nil(),
@@ -290,9 +283,6 @@ mod tests {
         // 11 chunks with target_size=10 → 1 full (10) + tail of 1 < MIN_CLUSTER_SIZE → merged.
         let chunks: Vec<KnowledgeChunkRow> = (0_i32..11)
             .map(|i| KnowledgeChunkRow {
-                key: Uuid::nil().to_string(),
-                arango_id: None,
-                arango_rev: None,
                 chunk_id: Uuid::now_v7(),
                 workspace_id: Uuid::nil(),
                 library_id: Uuid::nil(),

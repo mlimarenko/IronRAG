@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 use anyhow::{Context, Result};
 use rust_decimal::Decimal;
 use sqlx::{PgPool, postgres::PgPoolOptions};
@@ -9,7 +7,6 @@ use ironrag_backend::{
     app::{config::Settings, state::AppState},
     domains::agent_runtime::{RuntimeExecutionOwnerKind, RuntimeLifecycleState, RuntimeTaskKind},
     infra::{
-        arangodb::client::ArangoClient,
         persistence::Persistence,
         repositories::{query_repository, runtime_repository},
     },
@@ -256,8 +253,7 @@ fn build_test_state(settings: Settings, postgres: PgPool) -> Result<AppState> {
     let redis = redis::Client::open(settings.redis_url.clone())
         .context("failed to create redis client for billing_rollups test state")?;
     let persistence = Persistence::for_tests(postgres, redis);
-    let arango_client = Arc::new(ArangoClient::from_settings(&settings)?);
-    AppState::from_dependencies(settings, persistence, arango_client)
+    AppState::from_dependencies(settings, persistence)
 }
 
 fn replace_database_name(database_url: &str, new_database: &str) -> Result<String> {
@@ -497,7 +493,7 @@ async fn execution_cost_returns_zero_rollup_for_ingest_attempt_without_provider_
 }
 
 #[tokio::test]
-#[ignore = "requires local postgres, redis, and arango"]
+#[ignore = "requires local postgres and redis"]
 async fn inline_ingest_billing_capture_produces_provider_calls_and_rollup() -> Result<()> {
     let fixture = BillingRollupsFixture::create().await?;
 

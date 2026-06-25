@@ -3,7 +3,7 @@ use uuid::Uuid;
 
 use crate::{
     app::state::AppState, domains::ingest::IngestStageEvent,
-    infra::arangodb::document_store::KnowledgeRevisionRow,
+    infra::knowledge_rows::KnowledgeRevisionRow,
 };
 
 use super::FailedRevisionReadiness;
@@ -83,7 +83,7 @@ pub(crate) async fn fail_revision_vector_graph_readiness(
     delete_vectors: bool,
 ) -> anyhow::Result<u64> {
     let revision = state
-        .arango_document_store
+        .document_store
         .get_revision(revision_id)
         .await
         .map_err(|error| {
@@ -92,7 +92,7 @@ pub(crate) async fn fail_revision_vector_graph_readiness(
         .ok_or_else(|| anyhow::anyhow!("knowledge revision {revision_id} not found"))?;
     let now = Utc::now();
     let updated = state
-        .arango_document_store
+        .document_store
         .update_revision_readiness(
             revision_id,
             "text_readable",
@@ -122,14 +122,13 @@ pub(crate) async fn fail_revision_vector_graph_readiness(
         return Ok(0);
     }
 
-    let deleted =
-        state.arango_search_store.delete_chunk_vectors_by_revision(revision_id).await.map_err(
-            |error| {
-                anyhow::anyhow!(
-                    "failed to remove chunk vectors for failed revision {revision_id}: {error:#}"
-                )
-            },
-        )?;
+    let deleted = state.search_store.delete_chunk_vectors_by_revision(revision_id).await.map_err(
+        |error| {
+            anyhow::anyhow!(
+                "failed to remove chunk vectors for failed revision {revision_id}: {error:#}"
+            )
+        },
+    )?;
     if deleted > 0 {
         tracing::warn!(
             revision_id = %revision_id,
@@ -150,17 +149,12 @@ mod tests {
         derive_failed_revision_readiness, graph_extract_success_message,
         graph_state_after_successful_extract,
     };
-    use crate::{
-        domains::ingest::IngestStageEvent, infra::arangodb::document_store::KnowledgeRevisionRow,
-    };
+    use crate::{domains::ingest::IngestStageEvent, infra::knowledge_rows::KnowledgeRevisionRow};
 
     fn revision(text_state: &str, vector_state: &str, graph_state: &str) -> KnowledgeRevisionRow {
         let now = Utc::now();
         let revision_id = Uuid::now_v7();
         KnowledgeRevisionRow {
-            key: revision_id.to_string(),
-            arango_id: None,
-            arango_rev: None,
             revision_id,
             workspace_id: Uuid::now_v7(),
             library_id: Uuid::now_v7(),

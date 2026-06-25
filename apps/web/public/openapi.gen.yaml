@@ -1,11 +1,11 @@
 openapi: 3.1.0
 info:
   title: IronRAG API
-  description: Public HTTP API for the ArangoDB-backed IronRAG service (`apps/api/src/interfaces/http`). Operation paths include the `/v1` prefix. `servers.url` is the API origin without the `/v1` suffix.
+  description: Public HTTP API for the IronRAG service (`apps/api/src/interfaces/http`). Operation paths include the `/v1` prefix. `servers.url` is the API origin without the `/v1` suffix.
   license:
     name: MIT
     identifier: MIT
-  version: 0.5.0
+  version: 0.5.3
 servers:
 - url: /
   description: Same origin (paths include /v1)
@@ -1162,6 +1162,69 @@ paths:
           description: Caller does not have library write permission
         '404':
           description: Library not found
+  /v1/catalog/libraries/{libraryId}/retrieval-config:
+    get:
+      tags:
+      - catalog
+      summary: Get catalog library retrieval config.
+      description: Manages catalog libraries and their policies. Libraries own documents, knowledge graph data, assistant sessions, ingest settings, and query readiness. Call it when the caller already has the resource identifier and needs the latest authorized server view.
+      operationId: getCatalogLibraryRetrievalConfig
+      parameters:
+      - name: libraryId
+        in: path
+        description: Library identifier
+        required: true
+        schema:
+          type: string
+          format: uuid
+      responses:
+        '200':
+          description: Library retrieval configuration
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RetrievalConfig'
+        '401':
+          description: Caller is not authenticated
+        '403':
+          description: Caller does not have library write permission
+        '404':
+          description: Library not found
+    put:
+      tags:
+      - catalog
+      summary: Update catalog library retrieval config.
+      description: Manages catalog libraries and their policies. Libraries own documents, knowledge graph data, assistant sessions, ingest settings, and query readiness. Call it to replace or partially update server-owned configuration. The request body is validated before changes are persisted.
+      operationId: updateCatalogLibraryRetrievalConfig
+      parameters:
+      - name: libraryId
+        in: path
+        description: Library identifier
+        required: true
+        schema:
+          type: string
+          format: uuid
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RetrievalConfig'
+        required: true
+      responses:
+        '200':
+          description: Library after applying the new retrieval configuration
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CatalogLibraryResponse'
+        '400':
+          description: Retrieval configuration is invalid or names an unknown text search config
+        '401':
+          description: Caller is not authenticated
+        '403':
+          description: Caller does not have library write permission
+        '404':
+          description: Library not found
   /v1/catalog/libraries/{libraryId}/web-ingest-policy:
     put:
       tags:
@@ -1547,6 +1610,16 @@ paths:
           `canceled`, `failed`, `processing`, `queued`, `ready`. Empty or
           absent = no filter. Matches the canonical `derived_status` column
           in the list CTE and the 5 status pills on the documents page.
+        required: false
+        schema:
+          type: string
+      - name: ids
+        in: query
+        description: |-
+          Comma-separated list of document ids to keep. Empty or absent = no
+          filter. Lets a caller resolve specific documents (e.g. a deep link
+          carrying `documentId`) through the same canonical list derivation
+          that powers the table, instead of a divergent per-id detail mapper.
         required: false
         schema:
           type: string
@@ -4249,6 +4322,7 @@ components:
       - final_answer
       - iteration_cap
       - deadline
+      - no_progress
       - tool_error
       - provider_error
     AiBindingAssignmentResponse:
@@ -4314,6 +4388,59 @@ components:
           type:
           - string
           - 'null'
+    AssistantAnswerCandidate:
+      type: object
+      description: |-
+        One typed disambiguation choice the answer pipeline surfaced alongside a
+        clarifying answer.
+
+        `kind` reuses the existing typed vocabulary where it applies — a graph
+        `node_type` for entity probes, `"document"` for a document-derived variant
+        — so agents can route a follow-up without parsing the prose answer body.
+        `confidence` is `None` when the branch has no ranking signal to expose.
+      required:
+      - label
+      - kind
+      - provenance
+      properties:
+        confidence:
+          type:
+          - number
+          - 'null'
+          format: double
+        kind:
+          type: string
+        label:
+          type: string
+        provenance:
+          $ref: '#/components/schemas/AssistantAnswerCandidateProvenance'
+    AssistantAnswerCandidateProvenance:
+      type: object
+      description: |-
+        Structured provenance for a single answer candidate.
+
+        Every field is optional because the clarify branches surface candidates
+        derived from different evidence shapes: a graph-entity probe carries an
+        `entity_id`, a document-derived variant carries a `document_id`, and a
+        label-only variant (e.g. a grouped-reference title) carries none.
+        Callers treat a present id as a stable handle for a follow-up tool call
+        and a missing id as "label only".
+      properties:
+        chunkId:
+          type:
+          - string
+          - 'null'
+          format: uuid
+        documentId:
+          type:
+          - string
+          - 'null'
+          format: uuid
+        entityId:
+          type:
+          - string
+          - 'null'
+          format: uuid
     AssistantChunkReference:
       type: object
       required:
@@ -4334,6 +4461,28 @@ components:
         score:
           type: number
           format: double
+    AssistantClarification:
+      type: object
+      description: |-
+        Typed clarification metadata attached to a grounded-answer turn.
+
+        The prose answer body stays authoritative for humans; this object is
+        additive machine-readable metadata for agent callers. `required` is
+        `true` only when the turn returned a clarifying answer; otherwise the
+        candidate list is empty and `question` is `None`.
+      required:
+      - required
+      properties:
+        answerCandidates:
+          type: array
+          items:
+            $ref: '#/components/schemas/AssistantAnswerCandidate'
+        question:
+          type:
+          - string
+          - 'null'
+        required:
+          type: boolean
     AssistantContentSourceAccess:
       type: object
       required:
@@ -4533,6 +4682,13 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/AssistantChunkReference'
+        clarification:
+          $ref: '#/components/schemas/AssistantClarification'
+          description: |-
+            Typed clarification metadata for this turn. Defaults to
+            `required: false` with no candidates for ordinary answers and for
+            historical-replay reads (the replay surface carries no clarification
+            metadata); a clarify turn populates `question` and `answer_candidates`.
         contextBundleId:
           type: string
           format: uuid
@@ -5638,6 +5794,7 @@ components:
       - displayName
       - webIngestPolicy
       - recognitionPolicy
+      - retrievalConfig
       - lifecycleState
       - includeDocumentHintInMcpAnswers
       - ingestionReadiness
@@ -5663,6 +5820,8 @@ components:
           type: string
         recognitionPolicy:
           $ref: '#/components/schemas/LibraryRecognitionPolicy'
+        retrievalConfig:
+          $ref: '#/components/schemas/RetrievalConfig'
         slug:
           type: string
         webIngestPolicy:
@@ -5902,11 +6061,6 @@ components:
       - cost
       - costCurrencyCode
       properties:
-        completedAt:
-          type:
-          - string
-          - 'null'
-          format: date-time
         cost:
           type: string
           description: |-
@@ -6402,6 +6556,15 @@ components:
           type:
           - string
           - 'null'
+        parentExternalKey:
+          type:
+          - string
+          - 'null'
+          description: |-
+            Optional connector-declared structural parent identity
+            (`content_document.external_key` of the parent document). When the
+            parent already exists in the library it is resolved at admission;
+            otherwise the deferred resolver reconciles it later.
         sourceUri:
           type:
           - string
@@ -7101,7 +7264,6 @@ components:
       type: string
       enum:
       - uploaded_at
-      - completed_at
       - file_name
       - file_type
       - file_size
@@ -8129,15 +8291,12 @@ components:
     KnowledgeBundleChunkReferenceRow:
       type: object
       required:
-      - _key
       - bundle_id
       - chunk_id
       - rank
       - score
       - created_at
       properties:
-        _key:
-          type: string
         bundle_id:
           type: string
           format: uuid
@@ -8160,15 +8319,12 @@ components:
     KnowledgeBundleEntityReferenceRow:
       type: object
       required:
-      - _key
       - bundle_id
       - entity_id
       - rank
       - score
       - created_at
       properties:
-        _key:
-          type: string
         bundle_id:
           type: string
           format: uuid
@@ -8191,15 +8347,12 @@ components:
     KnowledgeBundleEvidenceReferenceRow:
       type: object
       required:
-      - _key
       - bundle_id
       - evidence_id
       - rank
       - score
       - created_at
       properties:
-        _key:
-          type: string
         bundle_id:
           type: string
           format: uuid
@@ -8222,15 +8375,12 @@ components:
     KnowledgeBundleRelationReferenceRow:
       type: object
       required:
-      - _key
       - bundle_id
       - relation_id
       - rank
       - score
       - created_at
       properties:
-        _key:
-          type: string
         bundle_id:
           type: string
           format: uuid
@@ -8253,7 +8403,6 @@ components:
     KnowledgeChunkRow:
       type: object
       required:
-      - _key
       - chunk_id
       - workspace_id
       - library_id
@@ -8266,16 +8415,6 @@ components:
       - heading_trail
       - chunk_state
       properties:
-        _id:
-          type:
-          - string
-          - 'null'
-        _key:
-          type: string
-        _rev:
-          type:
-          - string
-          - 'null'
         chunk_id:
           type: string
           format: uuid
@@ -8314,7 +8453,7 @@ components:
           description: |-
             Earliest record timestamp aggregated into this chunk (JSONL ingest
             only; None for non-temporal sources). Mirrored from
-            `content_chunk.occurred_at` so AQL FILTER can hard-bound by time.
+            `content_chunk.occurred_at` so search can hard-bound by time.
         occurred_until:
           type:
           - string
@@ -8496,7 +8635,6 @@ components:
     KnowledgeContextBundleRow:
       type: object
       required:
-      - _key
       - bundle_id
       - workspace_id
       - library_id
@@ -8511,16 +8649,6 @@ components:
       - created_at
       - updated_at
       properties:
-        _id:
-          type:
-          - string
-          - 'null'
-        _key:
-          type: string
-        _rev:
-          type:
-          - string
-          - 'null'
         assembly_diagnostics: {}
         bundle_id:
           type: string
@@ -8611,7 +8739,6 @@ components:
     KnowledgeDocumentRow:
       type: object
       required:
-      - _key
       - document_id
       - workspace_id
       - library_id
@@ -8620,16 +8747,6 @@ components:
       - created_at
       - updated_at
       properties:
-        _id:
-          type:
-          - string
-          - 'null'
-        _key:
-          type: string
-        _rev:
-          type:
-          - string
-          - 'null'
         active_revision_id:
           type:
           - string
@@ -8643,9 +8760,18 @@ components:
           - string
           - 'null'
           format: date-time
+        document_hint:
+          type:
+          - string
+          - 'null'
         document_id:
           type: string
           format: uuid
+        document_role:
+          type: string
+          description: |-
+            Typed document role mirrored from `content_document.document_role`
+            (`primary` | `attachment` | `attached_context`).
         document_state:
           type: string
         external_key:
@@ -8662,11 +8788,23 @@ components:
         library_id:
           type: string
           format: uuid
+        parent_document_id:
+          type:
+          - string
+          - 'null'
+          format: uuid
+          description: |-
+            Canonical structural source parent (mirrored from
+            `content_document.parent_document_id`). `None` for primary documents.
         readable_revision_id:
           type:
           - string
           - 'null'
           format: uuid
+        source_uri:
+          type:
+          - string
+          - 'null'
         title:
           type:
           - string
@@ -8769,7 +8907,6 @@ components:
     KnowledgeEntityMentionEdgeRow:
       type: object
       required:
-      - key
       - entityId
       - chunkId
       - createdAt
@@ -8787,8 +8924,6 @@ components:
           type:
           - string
           - 'null'
-        key:
-          type: string
         rank:
           type:
           - integer
@@ -8866,7 +9001,6 @@ components:
     KnowledgeEvidenceRow:
       type: object
       required:
-      - _key
       - evidence_id
       - workspace_id
       - library_id
@@ -8878,16 +9012,6 @@ components:
       - created_at
       - updated_at
       properties:
-        _id:
-          type:
-          - string
-          - 'null'
-        _key:
-          type: string
-        _rev:
-          type:
-          - string
-          - 'null'
         block_id:
           type:
           - string
@@ -8954,7 +9078,6 @@ components:
     KnowledgeEvidenceSupportEntityEdgeRow:
       type: object
       required:
-      - key
       - evidenceId
       - entityId
       - createdAt
@@ -8972,8 +9095,6 @@ components:
           type:
           - string
           - 'null'
-        key:
-          type: string
         rank:
           type:
           - integer
@@ -8987,7 +9108,6 @@ components:
     KnowledgeEvidenceSupportRelationEdgeRow:
       type: object
       required:
-      - key
       - evidenceId
       - relationId
       - createdAt
@@ -9002,8 +9122,6 @@ components:
           type:
           - string
           - 'null'
-        key:
-          type: string
         rank:
           type:
           - integer
@@ -9203,7 +9321,6 @@ components:
     KnowledgeRetrievalTraceRow:
       type: object
       required:
-      - _key
       - trace_id
       - workspace_id
       - library_id
@@ -9217,16 +9334,6 @@ components:
       - created_at
       - updated_at
       properties:
-        _id:
-          type:
-          - string
-          - 'null'
-        _key:
-          type: string
-        _rev:
-          type:
-          - string
-          - 'null'
         bundle_id:
           type: string
           format: uuid
@@ -9261,7 +9368,6 @@ components:
     KnowledgeRevisionRow:
       type: object
       required:
-      - _key
       - revision_id
       - workspace_id
       - library_id
@@ -9277,16 +9383,6 @@ components:
       - graph_state
       - created_at
       properties:
-        _id:
-          type:
-          - string
-          - 'null'
-        _key:
-          type: string
-        _rev:
-          type:
-          - string
-          - 'null'
         byte_size:
           type: integer
           format: int64
@@ -9690,7 +9786,7 @@ components:
             $ref: '#/components/schemas/TurnSpan'
           description: |-
             Fine-grained timed sub-operations recorded during this execution
-            (individual DB/Arango queries, retrieval lanes, …) so the inspector can
+            (individual DB queries, retrieval lanes, …) so the inspector can
             surface where time went and operators can catch heavy sections. Empty
             on records written before span capture existed.
         totalIterations:
@@ -10781,6 +10877,30 @@ components:
           type:
           - string
           - 'null'
+    RetrievalConfig:
+      type: object
+      description: |-
+        Top-level per-library retrieval configuration persisted as the
+        `catalog_library.retrieval_config` JSONB column.
+      properties:
+        lexical:
+          $ref: '#/components/schemas/RetrievalLexicalConfig'
+          description: Lexical (full-text-search) lane configuration.
+      additionalProperties: false
+    RetrievalLexicalConfig:
+      type: object
+      description: |-
+        Lexical-lane knobs sourced by the Postgres search store when rendering the
+        full-text-search SQL.
+      properties:
+        textSearchConfig:
+          type: string
+          description: |-
+            Name of the Postgres text-search configuration (`regconfig`) used by the
+            `to_tsquery` / `websearch_to_tsquery` constructors in the lexical lane.
+            Validated against the live `pg_ts_config` catalog at write time; defaults
+            to [`DEFAULT_TEXT_SEARCH_CONFIG`].
+      additionalProperties: false
     RuntimeActionKind:
       type: string
       enum:
@@ -10959,7 +11079,6 @@ components:
     RuntimeKnowledgeEntityRow:
       type: object
       required:
-      - key
       - entityId
       - workspaceId
       - libraryId
@@ -11000,8 +11119,6 @@ components:
         freshnessGeneration:
           type: integer
           format: int64
-        key:
-          type: string
         libraryId:
           type: string
           format: uuid
@@ -11021,7 +11138,6 @@ components:
     RuntimeKnowledgeEvidenceRow:
       type: object
       required:
-      - key
       - evidenceId
       - workspaceId
       - libraryId
@@ -11063,8 +11179,6 @@ components:
         freshnessGeneration:
           type: integer
           format: int64
-        key:
-          type: string
         libraryId:
           type: string
           format: uuid
@@ -11092,7 +11206,6 @@ components:
     RuntimeKnowledgeRelationRow:
       type: object
       required:
-      - key
       - relationId
       - workspaceId
       - libraryId
@@ -11120,8 +11233,6 @@ components:
         freshnessGeneration:
           type: integer
           format: int64
-        key:
-          type: string
         libraryId:
           type: string
           format: uuid
@@ -11968,7 +12079,7 @@ components:
           description: 'Coarse category for grouping/colour: `db` | `lane` | `stage` | `llm`.'
         name:
           type: string
-          description: Operator-facing label, e.g. `arango.cursor`, `retrieve.vector`.
+          description: Operator-facing label, e.g. `db.cursor`, `retrieve.vector`.
         rows:
           type:
           - integer
@@ -12839,27 +12950,8 @@ components:
       - libraryId
       - slug
       - postgresRowsByTable
-      - arangoDocsByStore
-      - arangoEdgesByStore
-      - skippedArangoEdgesByStore
       - blobsRestored
       properties:
-        arangoDocsByStore:
-          type: object
-          additionalProperties:
-            type: integer
-            format: int64
-            minimum: 0
-          propertyNames:
-            type: string
-        arangoEdgesByStore:
-          type: object
-          additionalProperties:
-            type: integer
-            format: int64
-            minimum: 0
-          propertyNames:
-            type: string
         blobsRestored:
           type: integer
           format: int64
@@ -12868,14 +12960,6 @@ components:
           type: string
           format: uuid
         postgresRowsByTable:
-          type: object
-          additionalProperties:
-            type: integer
-            format: int64
-            minimum: 0
-          propertyNames:
-            type: string
-        skippedArangoEdgesByStore:
           type: object
           additionalProperties:
             type: integer

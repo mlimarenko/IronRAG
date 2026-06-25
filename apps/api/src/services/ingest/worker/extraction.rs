@@ -7,7 +7,7 @@ use uuid::Uuid;
 
 use crate::{
     app::state::AppState,
-    infra::{arangodb::document_store::KnowledgeRevisionRow, repositories::ingest_repository},
+    infra::{knowledge_rows::KnowledgeRevisionRow, repositories::ingest_repository},
     integrations::docling,
     services::ingest::worker::{CanonicalExtractContentError, CanonicalExtractedContent},
     shared::extraction::{
@@ -717,7 +717,7 @@ pub(super) async fn generate_document_summary_from_blocks(
     revision_id: Uuid,
 ) -> anyhow::Result<String> {
     let blocks = state
-        .arango_document_store
+        .document_store
         .list_structured_blocks_by_revision(revision_id)
         .await
         .unwrap_or_default();

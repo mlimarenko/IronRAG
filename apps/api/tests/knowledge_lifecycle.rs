@@ -1,21 +1,11 @@
-use std::{sync::Arc, time::Duration};
-
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result};
 use chrono::Utc;
-use reqwest::Client;
 use sqlx::{PgPool, postgres::PgPoolOptions};
 use uuid::Uuid;
 
 use ironrag_backend::{
     app::{config::Settings, state::AppState},
-    infra::{
-        arangodb::{
-            bootstrap::{ArangoBootstrapOptions, bootstrap_knowledge_plane},
-            client::ArangoClient,
-            search_store::KnowledgeChunkVectorRow,
-        },
-        persistence::Persistence,
-    },
+    infra::{knowledge_rows::KnowledgeChunkVectorRow, persistence::Persistence},
     services::{
         catalog_service::{CreateLibraryCommand, CreateWorkspaceCommand},
         knowledge::service::{
@@ -70,69 +60,9 @@ impl TempPostgresDatabase {
     }
 }
 
-struct TempArangoDatabase {
-    base_url: String,
-    username: String,
-    password: String,
-    name: String,
-    http: Client,
-}
-
-impl TempArangoDatabase {
-    async fn create(settings: &Settings) -> Result<Self> {
-        let base_url = settings.arangodb_url.trim().trim_end_matches('/').to_string();
-        let name = format!("knowledge_lifecycle_{}", Uuid::now_v7().simple());
-        let http = Client::builder()
-            .timeout(Duration::from_secs(settings.arangodb_request_timeout_seconds.max(1)))
-            .build()
-            .context("failed to build ArangoDB admin http client")?;
-        let response = http
-            .post(format!("{base_url}/_api/database"))
-            .basic_auth(&settings.arangodb_username, Some(&settings.arangodb_password))
-            .json(&serde_json::json!({ "name": name }))
-            .send()
-            .await
-            .context("failed to create temp ArangoDB database for knowledge_lifecycle")?;
-        if !response.status().is_success() {
-            return Err(anyhow!(
-                "failed to create temp ArangoDB database {}: status {}",
-                name,
-                response.status()
-            ));
-        }
-
-        Ok(Self {
-            base_url,
-            username: settings.arangodb_username.clone(),
-            password: settings.arangodb_password.clone(),
-            name,
-            http,
-        })
-    }
-
-    async fn drop(self) -> Result<()> {
-        let response = self
-            .http
-            .delete(format!("{}/_api/database/{}", self.base_url, self.name))
-            .basic_auth(&self.username, Some(&self.password))
-            .send()
-            .await
-            .context("failed to drop temp ArangoDB database for knowledge_lifecycle")?;
-        if response.status() != reqwest::StatusCode::NOT_FOUND && !response.status().is_success() {
-            return Err(anyhow!(
-                "failed to drop temp ArangoDB database {}: status {}",
-                self.name,
-                response.status()
-            ));
-        }
-        Ok(())
-    }
-}
-
 struct KnowledgeLifecycleFixture {
     state: AppState,
     postgres: TempPostgresDatabase,
-    arango: TempArangoDatabase,
     workspace_id: Uuid,
     library_id: Uuid,
 }
@@ -142,9 +72,7 @@ impl KnowledgeLifecycleFixture {
         let mut settings =
             Settings::from_env().context("failed to load settings for knowledge_lifecycle")?;
         let postgres = TempPostgresDatabase::create(&settings.database_url).await?;
-        let arango = TempArangoDatabase::create(&settings).await?;
         settings.database_url = postgres.database_url.clone();
-        settings.arangodb_database = arango.name.clone();
 
         let postgres_pool = PgPoolOptions::new()
             .max_connections(4)
@@ -158,30 +86,8 @@ impl KnowledgeLifecycleFixture {
 
         let redis = redis::Client::open(settings.redis_url.clone())
             .context("failed to create redis client for knowledge_lifecycle")?;
-        let arango_client = Arc::new(
-            ArangoClient::from_settings(&settings).context("failed to build Arango client")?,
-        );
-        bootstrap_knowledge_plane(
-            &arango_client,
-            &ArangoBootstrapOptions {
-                collections: true,
-                views: true,
-                graph: true,
-                vector_indexes: false,
-                vector_dimensions: 3072,
-                vector_index_n_lists: 100,
-                vector_index_default_n_probe: 8,
-                vector_index_training_iterations: 25,
-            },
-        )
-        .await
-        .context("failed to bootstrap Arango knowledge plane for knowledge_lifecycle")?;
-
-        let state = AppState::from_dependencies(
-            settings,
-            Persistence::for_tests(postgres_pool, redis),
-            arango_client,
-        )?;
+        let state =
+            AppState::from_dependencies(settings, Persistence::for_tests(postgres_pool, redis))?;
 
         let suffix = Uuid::now_v7().simple().to_string();
         let workspace = state
@@ -213,12 +119,11 @@ impl KnowledgeLifecycleFixture {
             .await
             .context("failed to create knowledge_lifecycle library")?;
 
-        Ok(Self { state, postgres, arango, workspace_id: workspace.id, library_id: library.id })
+        Ok(Self { state, postgres, workspace_id: workspace.id, library_id: library.id })
     }
 
     async fn cleanup(self) -> Result<()> {
         self.state.persistence.postgres.close().await;
-        self.arango.drop().await?;
         self.postgres.drop().await
     }
 }
@@ -336,7 +241,7 @@ async fn write_chunk(
 }
 
 #[tokio::test]
-#[ignore = "requires local postgres, redis, and arango"]
+#[ignore = "requires local postgres and redis"]
 async fn canonical_knowledge_lifecycle_persists_document_shell_revisions_pointers_and_chunks()
 -> Result<()> {
     let fixture = KnowledgeLifecycleFixture::create().await?;
@@ -416,11 +321,11 @@ async fn canonical_knowledge_lifecycle_persists_document_shell_revisions_pointer
 
         let document = fixture
             .state
-            .arango_document_store
+            .document_store
             .get_document(document_id)
             .await
             .context("failed to reload knowledge document")?
-            .context("knowledge document missing from arango")?;
+            .context("knowledge document missing from store")?;
         assert_eq!(document.external_key, external_key);
         assert_eq!(document.document_state, "active");
         assert_eq!(document.active_revision_id, Some(revision_id));
@@ -429,7 +334,7 @@ async fn canonical_knowledge_lifecycle_persists_document_shell_revisions_pointer
 
         let revisions = fixture
             .state
-            .arango_document_store
+            .document_store
             .list_revisions_by_document(document_id)
             .await
             .context("failed to list knowledge revisions")?;
@@ -439,7 +344,7 @@ async fn canonical_knowledge_lifecycle_persists_document_shell_revisions_pointer
 
         let chunks = fixture
             .state
-            .arango_document_store
+            .document_store
             .list_chunks_by_revision(revision_id)
             .await
             .context("failed to list knowledge chunks")?;
@@ -461,7 +366,7 @@ async fn canonical_knowledge_lifecycle_persists_document_shell_revisions_pointer
 }
 
 #[tokio::test]
-#[ignore = "requires local postgres, redis, and arango"]
+#[ignore = "requires local postgres and redis"]
 async fn canonical_knowledge_lifecycle_handles_append_replace_and_delete_without_postgres_content_truth()
 -> Result<()> {
     let fixture = KnowledgeLifecycleFixture::create().await?;
@@ -515,11 +420,8 @@ async fn canonical_knowledge_lifecycle_handles_append_replace_and_delete_without
         let embedding_model_id = Uuid::now_v7();
         fixture
             .state
-            .arango_search_store
+            .search_store
             .upsert_chunk_vector(&KnowledgeChunkVectorRow {
-                key: format!("{revision_one_chunk_id}:{embedding_model_id}:1"),
-                arango_id: None,
-                arango_rev: None,
                 vector_id: Uuid::now_v7(),
                 workspace_id: fixture.workspace_id,
                 library_id: fixture.library_id,
@@ -602,7 +504,7 @@ async fn canonical_knowledge_lifecycle_handles_append_replace_and_delete_without
 
         let split_pointer_document = fixture
             .state
-            .arango_document_store
+            .document_store
             .get_document(document_id)
             .await
             .context("failed to reload split pointer document")?
@@ -649,7 +551,7 @@ async fn canonical_knowledge_lifecycle_handles_append_replace_and_delete_without
         assert!(
             fixture
                 .state
-                .arango_document_store
+                .document_store
                 .list_chunks_by_revision(revision_one_id)
                 .await
                 .context("failed to re-list revision one chunks")?
@@ -657,7 +559,7 @@ async fn canonical_knowledge_lifecycle_handles_append_replace_and_delete_without
         );
         let revision_one_vectors = fixture
             .state
-            .arango_search_store
+            .search_store
             .count_chunk_vectors_by_revision(
                 revision_one_id,
                 &embedding_model_id.to_string(),
@@ -688,7 +590,7 @@ async fn canonical_knowledge_lifecycle_handles_append_replace_and_delete_without
 
         let tombstoned = fixture
             .state
-            .arango_document_store
+            .document_store
             .get_document(document_id)
             .await
             .context("failed to reload tombstoned document")?
@@ -701,7 +603,7 @@ async fn canonical_knowledge_lifecycle_handles_append_replace_and_delete_without
 
         let revisions = fixture
             .state
-            .arango_document_store
+            .document_store
             .list_revisions_by_document(document_id)
             .await
             .context("failed to list mutation revisions")?;
@@ -719,7 +621,7 @@ async fn canonical_knowledge_lifecycle_handles_append_replace_and_delete_without
 }
 
 #[tokio::test]
-#[ignore = "requires local postgres, redis, and arango"]
+#[ignore = "requires local postgres and redis"]
 async fn deleted_document_revision_cleanup_is_not_capped_at_one_hundred_revisions() -> Result<()> {
     let fixture = KnowledgeLifecycleFixture::create().await?;
 
@@ -783,11 +685,8 @@ async fn deleted_document_revision_cleanup_is_not_capped_at_one_hundred_revision
                 oldest_chunk_id = Some(chunk_id);
                 fixture
                     .state
-                    .arango_search_store
+                    .search_store
                     .upsert_chunk_vector(&KnowledgeChunkVectorRow {
-                        key: format!("{chunk_id}:{embedding_model_id}:1"),
-                        arango_id: None,
-                        arango_rev: None,
                         vector_id: Uuid::now_v7(),
                         workspace_id: fixture.workspace_id,
                         library_id: fixture.library_id,
@@ -809,7 +708,7 @@ async fn deleted_document_revision_cleanup_is_not_capped_at_one_hundred_revision
 
         let revisions = fixture
             .state
-            .arango_document_store
+            .document_store
             .list_revisions_by_document(document_id)
             .await
             .context("failed to list all document revisions")?;
@@ -834,7 +733,7 @@ async fn deleted_document_revision_cleanup_is_not_capped_at_one_hundred_revision
         assert!(
             fixture
                 .state
-                .arango_document_store
+                .document_store
                 .list_chunks_by_revision(oldest_revision_id)
                 .await
                 .context("failed to re-list oldest revision chunks")?
@@ -843,7 +742,7 @@ async fn deleted_document_revision_cleanup_is_not_capped_at_one_hundred_revision
         assert!(
             fixture
                 .state
-                .arango_search_store
+                .search_store
                 .list_chunk_vectors_by_chunk(oldest_chunk_id)
                 .await
                 .context("failed to list oldest revision vectors")?
@@ -859,7 +758,7 @@ async fn deleted_document_revision_cleanup_is_not_capped_at_one_hundred_revision
 }
 
 #[tokio::test]
-#[ignore = "requires local postgres, redis, and arango"]
+#[ignore = "requires local postgres and redis"]
 async fn knowledge_readiness_coherence_keeps_readable_pointer_until_new_revision_is_ready()
 -> Result<()> {
     let fixture = KnowledgeLifecycleFixture::create().await?;
@@ -965,7 +864,7 @@ async fn knowledge_readiness_coherence_keeps_readable_pointer_until_new_revision
 
         let document = fixture
             .state
-            .arango_document_store
+            .document_store
             .get_document(document_id)
             .await
             .context("failed to reload readiness coherence document")?
@@ -977,13 +876,13 @@ async fn knowledge_readiness_coherence_keeps_readable_pointer_until_new_revision
 
         let readable_chunks = fixture
             .state
-            .arango_document_store
+            .document_store
             .list_chunks_by_revision(readable_revision_id)
             .await
             .context("failed to list readable baseline chunks")?;
         let active_chunks = fixture
             .state
-            .arango_document_store
+            .document_store
             .list_chunks_by_revision(active_revision_id)
             .await
             .context("failed to list active processing chunks")?;

@@ -583,9 +583,9 @@ pub async fn get_library_dashboard(
 }
 
 /// Builds a `DocumentSummary` for the dashboard "Recent documents" strip
-/// from a slim `ContentDocumentListEntry`. All fields that require a
-/// per-document Arango revision fetch are omitted — the dashboard
-/// surface does not display them on this card.
+/// from a slim `ContentDocumentListEntry`. Fields that require a per-document
+/// knowledge revision fetch are omitted — the dashboard surface does not
+/// display them on this card.
 fn map_list_entry_to_dashboard_summary(
     entry: crate::services::content::service::ContentDocumentListEntry,
 ) -> DocumentSummary {

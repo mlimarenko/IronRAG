@@ -5,7 +5,7 @@ use uuid::Uuid;
 use crate::{
     app::state::AppState,
     domains::knowledge::{GraphEvidenceLiteralSpan, GraphEvidenceRecord, TypedTechnicalFact},
-    infra::arangodb::graph_store::{
+    infra::knowledge_rows::{
         KnowledgeEntityCandidateRow, KnowledgeEntityRow, KnowledgeEvidenceRow,
         KnowledgeRelationCandidateRow, KnowledgeRelationRow, NewKnowledgeEntityCandidate,
         NewKnowledgeEvidence, NewKnowledgeRelationCandidate,
@@ -13,7 +13,7 @@ use crate::{
 };
 
 use super::{
-    ArangoRevisionContext, GraphService, ReconciledRelationCandidate, canonical_evidence_id,
+    GraphRevisionContext, GraphService, ReconciledRelationCandidate, canonical_evidence_id,
 };
 
 #[derive(Debug, Clone, Default)]
@@ -24,14 +24,14 @@ pub(super) struct ResolvedGraphEvidenceSupport {
     pub(super) evidence_kind: String,
 }
 
-pub(super) trait ArangoEntityEvidenceCandidate {
+pub(super) trait EntityEvidenceCandidate {
     fn chunk_id(&self) -> Option<Uuid>;
     fn candidate_label(&self) -> &str;
     fn extraction_method(&self) -> &str;
     fn confidence(&self) -> Option<f64>;
 }
 
-impl ArangoEntityEvidenceCandidate for KnowledgeEntityCandidateRow {
+impl EntityEvidenceCandidate for KnowledgeEntityCandidateRow {
     fn chunk_id(&self) -> Option<Uuid> {
         self.chunk_id
     }
@@ -49,7 +49,7 @@ impl ArangoEntityEvidenceCandidate for KnowledgeEntityCandidateRow {
     }
 }
 
-impl ArangoEntityEvidenceCandidate for NewKnowledgeEntityCandidate {
+impl EntityEvidenceCandidate for NewKnowledgeEntityCandidate {
     fn chunk_id(&self) -> Option<Uuid> {
         self.chunk_id
     }
@@ -67,7 +67,7 @@ impl ArangoEntityEvidenceCandidate for NewKnowledgeEntityCandidate {
     }
 }
 
-pub(super) trait ArangoRelationEvidenceCandidate {
+pub(super) trait RelationEvidenceCandidate {
     fn chunk_id(&self) -> Option<Uuid>;
     fn subject_candidate_key(&self) -> &str;
     fn predicate(&self) -> &str;
@@ -77,7 +77,7 @@ pub(super) trait ArangoRelationEvidenceCandidate {
     fn confidence(&self) -> Option<f64>;
 }
 
-impl ArangoRelationEvidenceCandidate for KnowledgeRelationCandidateRow {
+impl RelationEvidenceCandidate for KnowledgeRelationCandidateRow {
     fn chunk_id(&self) -> Option<Uuid> {
         self.chunk_id
     }
@@ -107,7 +107,7 @@ impl ArangoRelationEvidenceCandidate for KnowledgeRelationCandidateRow {
     }
 }
 
-impl ArangoRelationEvidenceCandidate for NewKnowledgeRelationCandidate {
+impl RelationEvidenceCandidate for NewKnowledgeRelationCandidate {
     fn chunk_id(&self) -> Option<Uuid> {
         self.chunk_id
     }
@@ -137,7 +137,7 @@ impl ArangoRelationEvidenceCandidate for NewKnowledgeRelationCandidate {
     }
 }
 
-impl ArangoRelationEvidenceCandidate for ReconciledRelationCandidate {
+impl RelationEvidenceCandidate for ReconciledRelationCandidate {
     fn chunk_id(&self) -> Option<Uuid> {
         self.row.chunk_id
     }
@@ -171,15 +171,15 @@ impl GraphService {
     pub(super) async fn upsert_current_entity_evidence<C>(
         &self,
         state: &AppState,
-        revision: &ArangoRevisionContext,
+        revision: &GraphRevisionContext,
         candidate: &C,
         entity: &KnowledgeEntityRow,
         canonical_key: &str,
-        supporting_chunk: Option<&crate::infra::arangodb::document_store::KnowledgeChunkRow>,
+        supporting_chunk: Option<&crate::infra::knowledge_rows::KnowledgeChunkRow>,
         revision_facts: &[TypedTechnicalFact],
     ) -> Result<KnowledgeEvidenceRow>
     where
-        C: ArangoEntityEvidenceCandidate,
+        C: EntityEvidenceCandidate,
     {
         let evidence_id = canonical_evidence_id(
             revision.library_id,
@@ -209,7 +209,7 @@ impl GraphService {
             created_at: Utc::now(),
         };
         let row = state
-            .arango_graph_store
+            .graph_store
             .upsert_evidence_with_edges(
                 &graph_evidence_record_to_new_evidence(
                     revision.workspace_id,
@@ -225,7 +225,7 @@ impl GraphService {
                 revision.library_id,
             )
             .await
-            .context("failed to upsert arango entity evidence")?;
+            .context("failed to upsert knowledge entity evidence")?;
         if let Some(chunk_id) = candidate.chunk_id() {
             self.upsert_chunk_mentions_entity_edge(
                 state,
@@ -242,14 +242,14 @@ impl GraphService {
     pub(super) async fn upsert_current_relation_evidence<C>(
         &self,
         state: &AppState,
-        revision: &ArangoRevisionContext,
+        revision: &GraphRevisionContext,
         candidate: &C,
         relation: &KnowledgeRelationRow,
-        supporting_chunk: Option<&crate::infra::arangodb::document_store::KnowledgeChunkRow>,
+        supporting_chunk: Option<&crate::infra::knowledge_rows::KnowledgeChunkRow>,
         revision_facts: &[TypedTechnicalFact],
     ) -> Result<KnowledgeEvidenceRow>
     where
-        C: ArangoRelationEvidenceCandidate,
+        C: RelationEvidenceCandidate,
     {
         let evidence_id = canonical_evidence_id(
             revision.library_id,
@@ -286,7 +286,7 @@ impl GraphService {
             created_at: Utc::now(),
         };
         let row = state
-            .arango_graph_store
+            .graph_store
             .upsert_evidence_with_edges(
                 &graph_evidence_record_to_new_evidence(
                     revision.workspace_id,
@@ -302,7 +302,7 @@ impl GraphService {
                 revision.library_id,
             )
             .await
-            .context("failed to upsert arango relation evidence")?;
+            .context("failed to upsert knowledge relation evidence")?;
         let subject = self
             .upsert_placeholder_entity_for_key(
                 state,
@@ -360,7 +360,7 @@ fn graph_evidence_record_to_new_evidence(
 pub(super) fn resolve_entity_evidence_support(
     candidate_label: &str,
     quote_text: &str,
-    supporting_chunk: Option<&crate::infra::arangodb::document_store::KnowledgeChunkRow>,
+    supporting_chunk: Option<&crate::infra::knowledge_rows::KnowledgeChunkRow>,
     revision_facts: &[TypedTechnicalFact],
 ) -> ResolvedGraphEvidenceSupport {
     let fact = revision_facts
@@ -389,7 +389,7 @@ fn resolve_relation_evidence_support(
     predicate: &str,
     object: &str,
     quote_text: &str,
-    supporting_chunk: Option<&crate::infra::arangodb::document_store::KnowledgeChunkRow>,
+    supporting_chunk: Option<&crate::infra::knowledge_rows::KnowledgeChunkRow>,
     revision_facts: &[TypedTechnicalFact],
 ) -> ResolvedGraphEvidenceSupport {
     let fact = revision_facts
@@ -415,7 +415,7 @@ fn resolve_relation_evidence_support(
 
 fn fact_supports_chunk(
     fact: &TypedTechnicalFact,
-    supporting_chunk: Option<&crate::infra::arangodb::document_store::KnowledgeChunkRow>,
+    supporting_chunk: Option<&crate::infra::knowledge_rows::KnowledgeChunkRow>,
 ) -> bool {
     let Some(chunk) = supporting_chunk else {
         return true;

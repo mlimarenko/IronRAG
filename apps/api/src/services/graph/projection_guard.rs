@@ -1,4 +1,4 @@
-use crate::infra::arangodb::graph_store::GraphViewWriteError;
+use crate::infra::knowledge_rows::GraphViewWriteError;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GraphWriteFailureDecision {

@@ -14,10 +14,7 @@ use tokio::sync::{Mutex, RwLock};
 use crate::{
     app::state::AppState,
     domains::deployment::{DependencyKind, DependencyMode, ServiceRole, StartupAuthorityMode},
-    infra::persistence::{
-        canonical_baseline_present, validate_arango_bootstrap_state,
-        validate_postgres_migration_state,
-    },
+    infra::persistence::{canonical_baseline_present, validate_postgres_migration_state},
     services::content::storage::types::ContentStorageProbeStatus,
 };
 
@@ -334,11 +331,6 @@ impl DeploymentDiagnosticsService {
                 postgres_knowledge_plane_ready(state).await,
                 "postgres knowledge plane not ready".to_string(),
             ),
-            "arango" => dependency_status(
-                state.settings.dependency_mode(DependencyKind::ArangoDb),
-                state.arango_client.ping().await.is_ok(),
-                "arangodb unreachable".to_string(),
-            ),
             backend => DependencyStatus {
                 mode: DEPENDENCY_MODE_MISCONFIGURED.to_string(),
                 status: DependencyHealth::Misconfigured,
@@ -518,24 +510,20 @@ impl DeploymentDiagnosticsService {
                 message: Some("startup authority is executing".to_string()),
             };
         }
-        if state.settings.knowledge_plane_backend == "postgres" {
+        if state.settings.knowledge_plane_backend != "postgres" {
             return StartupAuthorityStatus {
                 mode: mode.as_str().to_string(),
-                state: StartupAuthorityState::Succeeded,
-                message: None,
+                state: StartupAuthorityState::Pending,
+                message: Some(format!(
+                    "unsupported knowledge_plane_backend `{}`",
+                    state.settings.knowledge_plane_backend
+                )),
             };
         }
-        match validate_arango_bootstrap_state(&state.arango_client, &state.settings).await {
-            Ok(()) => StartupAuthorityStatus {
-                mode: mode.as_str().to_string(),
-                state: StartupAuthorityState::Succeeded,
-                message: None,
-            },
-            Err(error) => StartupAuthorityStatus {
-                mode: mode.as_str().to_string(),
-                state: StartupAuthorityState::Pending,
-                message: Some(error.to_string()),
-            },
+        StartupAuthorityStatus {
+            mode: mode.as_str().to_string(),
+            state: StartupAuthorityState::Succeeded,
+            message: None,
         }
     }
 }

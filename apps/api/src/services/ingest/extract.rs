@@ -64,7 +64,7 @@ impl ExtractService {
         revision_id: Uuid,
     ) -> Result<ExtractContent, ApiError> {
         let revision = state
-            .arango_document_store
+            .document_store
             .get_revision(revision_id)
             .await
             .map_err(|e| ApiError::internal_with_log(e, "internal"))?

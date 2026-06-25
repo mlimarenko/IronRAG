@@ -18,7 +18,7 @@ use uuid::Uuid;
 use crate::{
     app::state::AppState,
     domains::knowledge::{KnowledgeLibraryGeneration, TypedTechnicalFact},
-    infra::arangodb::{document_store::KnowledgeChunkRow, graph_store::KnowledgeEvidenceRow},
+    infra::knowledge_rows::{KnowledgeChunkRow, KnowledgeEvidenceRow},
     infra::repositories,
     interfaces::http::{
         auth::AuthContext,
@@ -118,7 +118,6 @@ pub struct KnowledgeGraphEvidenceSummary {
 #[derive(Debug, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 struct KnowledgeEntityMentionEdgeRow {
-    key: String,
     entity_id: Uuid,
     chunk_id: Uuid,
     rank: Option<i32>,
@@ -130,7 +129,6 @@ struct KnowledgeEntityMentionEdgeRow {
 #[derive(Debug, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 struct KnowledgeEvidenceSupportEntityEdgeRow {
-    key: String,
     evidence_id: Uuid,
     entity_id: Uuid,
     rank: Option<i32>,
@@ -142,7 +140,6 @@ struct KnowledgeEvidenceSupportEntityEdgeRow {
 #[derive(Debug, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 struct KnowledgeEvidenceSupportRelationEdgeRow {
-    key: String,
     evidence_id: Uuid,
     relation_id: Uuid,
     rank: Option<i32>,
@@ -154,7 +151,6 @@ struct KnowledgeEvidenceSupportRelationEdgeRow {
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 struct RuntimeKnowledgeEntityRow {
-    key: String,
     entity_id: Uuid,
     workspace_id: Uuid,
     library_id: Uuid,
@@ -174,7 +170,6 @@ struct RuntimeKnowledgeEntityRow {
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 struct RuntimeKnowledgeRelationRow {
-    key: String,
     relation_id: Uuid,
     workspace_id: Uuid,
     library_id: Uuid,
@@ -194,7 +189,6 @@ struct RuntimeKnowledgeRelationRow {
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 struct RuntimeKnowledgeEvidenceRow {
-    key: String,
     evidence_id: Uuid,
     workspace_id: Uuid,
     library_id: Uuid,
@@ -386,7 +380,7 @@ async fn load_chunks_by_ids(
         return Ok(Vec::new());
     }
     state
-        .arango_document_store
+        .document_store
         .list_chunks_by_ids(chunk_ids)
         .await
         .map_err(|e| ApiError::internal_with_log(e, "internal"))
@@ -491,7 +485,6 @@ fn map_runtime_graph_node_to_entity_row(
     library_id: Uuid,
 ) -> RuntimeKnowledgeEntityRow {
     RuntimeKnowledgeEntityRow {
-        key: row.canonical_key.clone(),
         entity_id: row.id,
         workspace_id,
         library_id,
@@ -519,7 +512,6 @@ fn map_runtime_graph_edge_to_relation_row(
     row: repositories::RuntimeGraphEdgeRow,
 ) -> RuntimeKnowledgeRelationRow {
     RuntimeKnowledgeRelationRow {
-        key: row.canonical_key.clone(),
         relation_id: row.id,
         workspace_id,
         library_id,
@@ -564,7 +556,6 @@ async fn load_runtime_graph_supporting_evidence(
         .filter_map(|row| {
             let document_id = row.document_id?;
             Some(RuntimeKnowledgeEvidenceRow {
-                key: row.id.to_string(),
                 evidence_id: row.id,
                 workspace_id,
                 library_id,
@@ -600,7 +591,6 @@ fn build_runtime_entity_mention_edges(
             continue;
         }
         edges.push(KnowledgeEntityMentionEdgeRow {
-            key: format!("{}:{chunk_id}", row.evidence_id),
             entity_id,
             chunk_id,
             rank: None,
@@ -619,7 +609,6 @@ fn build_runtime_entity_evidence_support_edges(
     evidence_rows
         .iter()
         .map(|row| KnowledgeEvidenceSupportEntityEdgeRow {
-            key: row.key.clone(),
             evidence_id: row.evidence_id,
             entity_id,
             rank: None,
@@ -637,7 +626,6 @@ fn build_runtime_relation_evidence_support_edges(
     evidence_rows
         .iter()
         .map(|row| KnowledgeEvidenceSupportRelationEdgeRow {
-            key: row.key.clone(),
             evidence_id: row.evidence_id,
             relation_id,
             rank: None,

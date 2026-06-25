@@ -5,28 +5,25 @@ use axum::{
 use serde::Serialize;
 use uuid::Uuid;
 
+use super::{
+    KnowledgeGraphEvidenceSummary, KnowledgeLibrarySummaryResponse,
+    KnowledgeTechnicalFactProvenanceSummary, summarize_graph_evidence,
+    summarize_typed_technical_facts,
+};
 use crate::{
     app::state::AppState,
     domains::knowledge::{KnowledgeLibraryGeneration, TypedTechnicalFact},
-    infra::arangodb::{
-        context_store::{
-            KnowledgeBundleChunkReferenceRow, KnowledgeBundleEntityReferenceRow,
-            KnowledgeBundleEvidenceReferenceRow, KnowledgeBundleRelationReferenceRow,
-            KnowledgeContextBundleRow, KnowledgeRetrievalTraceRow,
-        },
-        document_store::{KnowledgeChunkRow, KnowledgeDocumentRow, KnowledgeRevisionRow},
+    infra::knowledge_rows::{
+        KnowledgeBundleChunkReferenceRow, KnowledgeBundleEntityReferenceRow,
+        KnowledgeBundleEvidenceReferenceRow, KnowledgeBundleRelationReferenceRow,
+        KnowledgeChunkRow, KnowledgeContextBundleRow, KnowledgeDocumentRow,
+        KnowledgeRetrievalTraceRow, KnowledgeRevisionRow,
     },
     interfaces::http::{
         auth::AuthContext,
         authorization::{POLICY_KNOWLEDGE_READ, load_library_and_authorize},
         router_support::ApiError,
     },
-};
-
-use super::{
-    KnowledgeGraphEvidenceSummary, KnowledgeLibrarySummaryResponse,
-    KnowledgeTechnicalFactProvenanceSummary, summarize_graph_evidence,
-    summarize_typed_technical_facts,
 };
 
 #[derive(Debug, Serialize, utoipa::ToSchema)]
@@ -78,7 +75,7 @@ pub async fn list_context_bundles(
     let span = tracing::Span::current();
     let _ = load_library_and_authorize(&auth, &state, library_id, POLICY_KNOWLEDGE_READ).await?;
     let bundles = state
-        .arango_context_store
+        .context_store
         .list_bundles_by_library(library_id)
         .await
         .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
@@ -113,7 +110,7 @@ pub async fn list_documents(
     let library =
         load_library_and_authorize(&auth, &state, library_id, POLICY_KNOWLEDGE_READ).await?;
     let documents = state
-        .arango_document_store
+        .document_store
         .list_documents_by_library(library.workspace_id, library.id, false)
         .await
         .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
@@ -191,7 +188,7 @@ pub async fn get_document(
     let library =
         load_library_and_authorize(&auth, &state, library_id, POLICY_KNOWLEDGE_READ).await?;
     let document = state
-        .arango_document_store
+        .document_store
         .get_document(document_id)
         .await
         .map_err(|e| ApiError::internal_with_log(e, "internal"))?
@@ -200,14 +197,14 @@ pub async fn get_document(
         return Err(ApiError::resource_not_found("knowledge_document", document_id));
     }
     let revisions = state
-        .arango_document_store
+        .document_store
         .list_revisions_by_document(document_id)
         .await
         .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
     let latest_revision = revisions.first().cloned();
     let latest_revision_chunks = match latest_revision.as_ref() {
         Some(revision) => state
-            .arango_document_store
+            .document_store
             .list_chunks_by_revision(revision.revision_id)
             .await
             .map_err(|e| ApiError::internal_with_log(e, "internal"))?,
@@ -225,7 +222,7 @@ pub async fn get_document(
     };
     let latest_revision_evidence = match latest_revision.as_ref() {
         Some(revision) => state
-            .arango_graph_store
+            .graph_store
             .list_evidence_by_revision(revision.revision_id)
             .await
             .map_err(|e| ApiError::internal_with_log(e, "internal"))?,
@@ -267,7 +264,7 @@ pub async fn get_context_bundle(
     Path(bundle_id): Path<Uuid>,
 ) -> Result<Json<KnowledgeContextBundleDetailResponse>, ApiError> {
     let bundle_set = state
-        .arango_context_store
+        .context_store
         .get_bundle_reference_set(bundle_id)
         .await
         .map_err(|e| ApiError::internal_with_log(e, "internal"))?
@@ -280,7 +277,7 @@ pub async fn get_context_bundle(
     )
     .await?;
     let traces = state
-        .arango_context_store
+        .context_store
         .list_traces_by_bundle(bundle_set.bundle.bundle_id)
         .await
         .map_err(|e| ApiError::internal_with_log(e, "internal"))?;

@@ -6,7 +6,7 @@ use uuid::Uuid;
 use crate::{
     app::state::AppState,
     domains::query::{QueryVerificationState, QueryVerificationWarning},
-    infra::arangodb::document_store::KnowledgeTechnicalFactRow,
+    infra::knowledge_rows::KnowledgeTechnicalFactRow,
     services::query::assistant_grounding::AssistantGroundingEvidence,
     services::query::planner::QueryIntentProfile,
     shared::text_tokens::literal_wildcard_prefixes,
@@ -793,7 +793,7 @@ pub(crate) async fn persist_query_verification(
     assistant_grounding: &AssistantGroundingEvidence,
 ) -> anyhow::Result<()> {
     let Some(bundle) =
-        state.arango_context_store.get_bundle_by_query_execution(execution_id).await.with_context(
+        state.context_store.get_bundle_by_query_execution(execution_id).await.with_context(
             || format!("failed to load context bundle for verification {execution_id}"),
         )?
     else {
@@ -813,7 +813,7 @@ pub(crate) async fn persist_query_verification(
         assistant_grounding,
     );
     let _ = state
-        .arango_context_store
+        .context_store
         .update_bundle_state(
             bundle.bundle_id,
             &bundle.bundle_state,

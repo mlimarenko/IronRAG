@@ -176,7 +176,7 @@ fn endpoint_fact_score(
 }
 
 fn endpoint_fact_has_query_focused_support(
-    fact: &crate::infra::arangodb::document_store::KnowledgeTechnicalFactRow,
+    fact: &crate::infra::knowledge_rows::KnowledgeTechnicalFactRow,
     chunks: &[RuntimeMatchedChunk],
     query_ir: &QueryIR,
     question_keywords: &[String],
@@ -242,7 +242,7 @@ fn endpoint_support_focus_segments(
 }
 
 fn endpoint_method_literal(
-    endpoint_fact: &crate::infra::arangodb::document_store::KnowledgeTechnicalFactRow,
+    endpoint_fact: &crate::infra::knowledge_rows::KnowledgeTechnicalFactRow,
     evidence: &CanonicalAnswerEvidence,
 ) -> Option<String> {
     let qualifiers = serde_json::from_value::<Vec<TechnicalFactQualifier>>(

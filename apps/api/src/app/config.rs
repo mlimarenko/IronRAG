@@ -70,23 +70,6 @@ pub struct PublicOriginSettings {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ArangoSettings {
-    pub url: String,
-    pub database: String,
-    pub username: String,
-    pub password: String,
-    pub request_timeout_seconds: u64,
-    pub bootstrap_collections: bool,
-    pub bootstrap_views: bool,
-    pub bootstrap_graph: bool,
-    pub bootstrap_vector_indexes: bool,
-    pub vector_dimensions: u64,
-    pub vector_index_n_lists: u64,
-    pub vector_index_default_n_probe: u64,
-    pub vector_index_training_iterations: u64,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DestructiveFreshBootstrapSettings {
     pub required: bool,
 }
@@ -101,19 +84,6 @@ pub struct Settings {
     pub worker_replicas: usize,
     pub knowledge_plane_backend: String,
     pub redis_url: String,
-    pub arangodb_url: String,
-    pub arangodb_database: String,
-    pub arangodb_username: String,
-    pub arangodb_password: String,
-    pub arangodb_request_timeout_seconds: u64,
-    pub arangodb_bootstrap_collections: bool,
-    pub arangodb_bootstrap_views: bool,
-    pub arangodb_bootstrap_graph: bool,
-    pub arangodb_bootstrap_vector_indexes: bool,
-    pub arangodb_vector_dimensions: u64,
-    pub arangodb_vector_index_n_lists: u64,
-    pub arangodb_vector_index_default_n_probe: u64,
-    pub arangodb_vector_index_training_iterations: u64,
     pub service_name: String,
     pub environment: String,
     pub log_filter: String,
@@ -147,7 +117,6 @@ pub struct Settings {
     pub startup_authority_mode: String,
     pub dependency_postgres_mode: String,
     pub dependency_redis_mode: String,
-    pub dependency_arangodb_mode: String,
     pub dependency_object_storage_mode: String,
     pub content_storage_provider: String,
     pub content_storage_topology: String,
@@ -292,8 +261,6 @@ impl Settings {
         settings.dependency_postgres_mode =
             settings.dependency_postgres_mode.trim().to_ascii_lowercase();
         settings.dependency_redis_mode = settings.dependency_redis_mode.trim().to_ascii_lowercase();
-        settings.dependency_arangodb_mode =
-            settings.dependency_arangodb_mode.trim().to_ascii_lowercase();
         settings.knowledge_plane_backend =
             settings.knowledge_plane_backend.trim().to_ascii_lowercase();
         settings.dependency_object_storage_mode =
@@ -311,7 +278,6 @@ impl Settings {
         validate_knowledge_plane_backend(&settings).map_err(config::ConfigError::Message)?;
         validate_content_storage_settings(&settings).map_err(config::ConfigError::Message)?;
         validate_service_name(&settings).map_err(config::ConfigError::Message)?;
-        validate_arangodb_settings(&settings).map_err(config::ConfigError::Message)?;
         validate_ingestion_settings(&settings).map_err(config::ConfigError::Message)?;
         validate_recognition_settings(&settings).map_err(config::ConfigError::Message)?;
         validate_runtime_agent_settings(&settings).map_err(config::ConfigError::Message)?;
@@ -364,25 +330,6 @@ impl Settings {
             .parse::<RecognitionEngine>()
             .expect("recognition_default_raster_image_engine must be validated before use");
         LibraryRecognitionPolicy { raster_image_engine }
-    }
-
-    #[must_use]
-    pub fn arango_settings(&self) -> ArangoSettings {
-        ArangoSettings {
-            url: self.arangodb_url.clone(),
-            database: self.arangodb_database.clone(),
-            username: self.arangodb_username.clone(),
-            password: self.arangodb_password.clone(),
-            request_timeout_seconds: self.arangodb_request_timeout_seconds,
-            bootstrap_collections: self.arangodb_bootstrap_collections,
-            bootstrap_views: self.arangodb_bootstrap_views,
-            bootstrap_graph: self.arangodb_bootstrap_graph,
-            bootstrap_vector_indexes: self.arangodb_bootstrap_vector_indexes,
-            vector_dimensions: self.arangodb_vector_dimensions,
-            vector_index_n_lists: self.arangodb_vector_index_n_lists,
-            vector_index_default_n_probe: self.arangodb_vector_index_default_n_probe,
-            vector_index_training_iterations: self.arangodb_vector_index_training_iterations,
-        }
     }
 
     #[must_use]
@@ -554,7 +501,6 @@ impl Settings {
         match kind {
             DependencyKind::Postgres => self.dependency_postgres_mode.parse(),
             DependencyKind::Redis => self.dependency_redis_mode.parse(),
-            DependencyKind::ArangoDb => self.dependency_arangodb_mode.parse(),
             DependencyKind::ObjectStorage => self.dependency_object_storage_mode.parse(),
         }
     }
@@ -571,27 +517,8 @@ fn settings_config_builder()
         .set_default("database_max_connections", 20)?
         .set_default("api_replicas", 1)?
         .set_default("worker_replicas", 1)?
-        .set_default("knowledge_plane_backend", "arango")?
+        .set_default("knowledge_plane_backend", "postgres")?
         .set_default("redis_url", "redis://127.0.0.1:6379")?
-        .set_default("arangodb_url", "http://127.0.0.1:8529")?
-        .set_default("arangodb_database", "ironrag")?
-        .set_default("arangodb_username", "root")?
-        .set_default("arangodb_password", "ironrag-dev")?
-        // 15s was too tight on reference libraries: the two Arango
-        // cursors called per turn (`aggregate_library_generation_signals`
-        // and `list_documents_by_library`) each push past 15s under
-        // ingest-concurrent load, surfacing as `error sending request
-        // for url ... /_api/cursor`. 30s covers the observed tail
-        // without masking genuine failures.
-        .set_default("arangodb_request_timeout_seconds", 30)?
-        .set_default("arangodb_bootstrap_collections", true)?
-        .set_default("arangodb_bootstrap_views", true)?
-        .set_default("arangodb_bootstrap_graph", true)?
-        .set_default("arangodb_bootstrap_vector_indexes", true)?
-        .set_default("arangodb_vector_dimensions", 3072)?
-        .set_default("arangodb_vector_index_n_lists", 100)?
-        .set_default("arangodb_vector_index_default_n_probe", 8)?
-        .set_default("arangodb_vector_index_training_iterations", 25)?
         .set_default("log_filter", "info")?
         .set_default("destructive_fresh_bootstrap_required", false)?
         .set_default("frontend_origin", "http://127.0.0.1:19000,http://localhost:19000")?
@@ -603,7 +530,6 @@ fn settings_config_builder()
         .set_default("startup_authority_mode", "not_required")?
         .set_default("dependency_postgres_mode", "external")?
         .set_default("dependency_redis_mode", "external")?
-        .set_default("dependency_arangodb_mode", "external")?
         .set_default("dependency_object_storage_mode", "disabled")?
         .set_default("content_storage_provider", "filesystem")?
         .set_default("content_storage_topology", "single_node")?
@@ -692,17 +618,10 @@ fn validate_startup_authority_mode(settings: &Settings) -> Result<(), String> {
 }
 
 fn validate_dependency_modes(settings: &Settings) -> Result<(), String> {
-    for kind in [
-        DependencyKind::Postgres,
-        DependencyKind::Redis,
-        DependencyKind::ArangoDb,
-        DependencyKind::ObjectStorage,
-    ] {
+    for kind in [DependencyKind::Postgres, DependencyKind::Redis, DependencyKind::ObjectStorage] {
         let mode = settings.dependency_mode(kind)?;
-        if matches!(
-            kind,
-            DependencyKind::Postgres | DependencyKind::Redis | DependencyKind::ArangoDb
-        ) && matches!(mode, DependencyMode::Disabled)
+        if matches!(kind, DependencyKind::Postgres | DependencyKind::Redis)
+            && matches!(mode, DependencyMode::Disabled)
         {
             return Err(format!("{} must not use disabled mode", kind.as_str()));
         }
@@ -736,8 +655,8 @@ fn validate_database_settings(settings: &Settings) -> Result<(), String> {
 
 fn validate_knowledge_plane_backend(settings: &Settings) -> Result<(), String> {
     match settings.knowledge_plane_backend.as_str() {
-        "arango" | "postgres" => Ok(()),
-        _ => Err("knowledge_plane_backend must be one of: arango, postgres".into()),
+        "postgres" => Ok(()),
+        _ => Err("knowledge_plane_backend must be postgres".into()),
     }
 }
 
@@ -843,34 +762,6 @@ fn resolved_ui_bootstrap_ai_binding_default(
         provider_kind,
         model_name,
     })
-}
-
-fn validate_arangodb_settings(settings: &Settings) -> Result<(), String> {
-    if settings.arangodb_url.trim().is_empty() {
-        return Err("arangodb_url must not be empty".into());
-    }
-    if settings.arangodb_database.trim().is_empty() {
-        return Err("arangodb_database must not be empty".into());
-    }
-    if settings.arangodb_username.trim().is_empty() {
-        return Err("arangodb_username must not be empty".into());
-    }
-    if settings.arangodb_request_timeout_seconds == 0 {
-        return Err("arangodb_request_timeout_seconds must be greater than zero".into());
-    }
-    if settings.arangodb_vector_dimensions == 0 {
-        return Err("arangodb_vector_dimensions must be greater than zero".into());
-    }
-    if settings.arangodb_vector_index_n_lists == 0 {
-        return Err("arangodb_vector_index_n_lists must be greater than zero".into());
-    }
-    if settings.arangodb_vector_index_default_n_probe == 0 {
-        return Err("arangodb_vector_index_default_n_probe must be greater than zero".into());
-    }
-    if settings.arangodb_vector_index_training_iterations == 0 {
-        return Err("arangodb_vector_index_training_iterations must be greater than zero".into());
-    }
-    Ok(())
 }
 
 fn validate_ingestion_settings(settings: &Settings) -> Result<(), String> {

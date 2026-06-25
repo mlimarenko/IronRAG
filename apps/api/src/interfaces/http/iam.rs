@@ -1405,7 +1405,7 @@ async fn resolve_grant_workspace_id(
         }
         IamGrantResourceKind::Document => {
             state
-                .arango_document_store
+                .document_store
                 .get_document(resource_id)
                 .await
                 .map_err(|error| {

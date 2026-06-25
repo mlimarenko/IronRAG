@@ -13,7 +13,7 @@ use crate::{
             QueryScope, SourceSliceDirection, SourceSliceFilter,
         },
     },
-    infra::arangodb::document_store::KnowledgeDocumentRow,
+    infra::knowledge_rows::KnowledgeDocumentRow,
     integrations::llm::ChatMessage,
     interfaces::http::router_support::ApiError,
     services::query::{
@@ -118,7 +118,7 @@ async fn hydrate_runtime_document_index(
         return Ok(());
     }
     let documents = state
-        .arango_document_store
+        .document_store
         .list_documents_by_ids(&missing_document_ids)
         .await
         .context("failed to hydrate runtime query companion documents")?;
@@ -813,13 +813,13 @@ async fn prepare_answer_query_inner(
     .await?;
     // Temporal hard-filter on the bundle AFTER source-context augmentation.
     // The companion paths (focused-match, source profile, neighbor expansion,
-    // library source profile) bypass the AQL temporal filter and pull
+    // library source profile) bypass the retrieval temporal filter and pull
     // chunks regardless of `occurred_at`. When the user explicitly scoped
     // the question to a date range, drop any chunk whose underlying
     // `KnowledgeChunkRow.occurred_at` is null OR falls outside the bounds.
     // Verified necessary on stage 2026-05-03: image-OCR chunks (no
     // occurred_at) were leaking into "messages in March 2026" answers via
-    // the prepared-segment / source-context path. Single Arango round-trip
+    // the prepared-segment / source-context path. Single knowledge-store read
     // via `list_chunks_by_ids`; no per-chunk lookup.
     let (bundle_temporal_start, bundle_temporal_end) = query_ir.resolved_temporal_bounds();
     if bundle_temporal_start.is_some()
@@ -828,10 +828,9 @@ async fn prepare_answer_query_inner(
     {
         let chunk_ids: Vec<uuid::Uuid> =
             rerank_stage.retrieval.bundle.chunks.iter().map(|c| c.chunk_id).collect();
-        let rows =
-            state.arango_document_store.list_chunks_by_ids(&chunk_ids).await.map_err(|error| {
-                anyhow::anyhow!("failed to look up chunks for bundle-temporal post-filter: {error}")
-            })?;
+        let rows = state.document_store.list_chunks_by_ids(&chunk_ids).await.map_err(|error| {
+            anyhow::anyhow!("failed to look up chunks for bundle-temporal post-filter: {error}")
+        })?;
         let allowed: std::collections::HashSet<uuid::Uuid> = rows
             .into_iter()
             .filter(|row| {
@@ -3576,7 +3575,7 @@ fn classify_answer_disposition_from_evidence(
     }
     // Temporal hard-filter already scoped retrieval. If the IR carries
     // resolved RFC3339 bounds the user has narrowed the question by
-    // window — the AQL filter (T1.4) drops every off-window chunk before
+    // window — the retrieval filter drops every off-window chunk before
     // ranking, so the retrieved cluster is by construction a single
     // window. Routing into the multi-variant clarify prompt then asks
     // the user to disambiguate between off-window topics that
@@ -4094,7 +4093,7 @@ async fn probe_missing_technical_focus_terms(
     let mut score_by_chunk = HashMap::<Uuid, f32>::new();
     for term in missing_terms {
         let rows = state
-            .arango_search_store
+            .search_store
             .search_chunks(library_id, term, TECHNICAL_FOCUS_PROBE_HIT_LIMIT, None, None)
             .await?;
         let mut accepted_for_term = 0usize;
@@ -4126,7 +4125,7 @@ async fn probe_missing_technical_focus_terms(
             .collect::<Vec<_>>()
             .join(" ");
         let rows = state
-            .arango_search_store
+            .search_store
             .search_chunks(library_id, &focus_query, TECHNICAL_FOCUS_PROBE_HIT_LIMIT, None, None)
             .await?;
         let mut accepted_for_query = 0usize;
@@ -4148,7 +4147,7 @@ async fn probe_missing_technical_focus_terms(
         return Ok(Vec::new());
     }
     let chunk_ids = score_by_chunk.keys().copied().collect::<Vec<_>>();
-    let rows = state.arango_document_store.list_chunks_by_ids(&chunk_ids).await?;
+    let rows = state.document_store.list_chunks_by_ids(&chunk_ids).await?;
     let mut chunks = Vec::<RuntimeMatchedChunk>::new();
     for row in rows {
         let Some(score) = score_by_chunk.get(&row.chunk_id).copied() else {
@@ -4274,7 +4273,7 @@ fn split_identifier_subtokens(token: &str) -> Vec<String> {
 }
 
 fn search_row_covers_technical_focus(
-    row: &crate::infra::arangodb::search_store::KnowledgeChunkSearchRow,
+    row: &crate::infra::knowledge_rows::KnowledgeChunkSearchRow,
     focus_keywords: &[String],
 ) -> bool {
     let section = row.section_path.join(" ");
@@ -4373,7 +4372,7 @@ async fn probe_missing_compare_operands(
         let query_variants = compare_operand_probe_queries(operand, plan_keywords);
         for query in query_variants {
             let rows = state
-                .arango_search_store
+                .search_store
                 .search_chunks(library_id, &query, COMPARE_OPERAND_PROBE_LIMIT, None, None)
                 .await?;
             let mut accepted_for_operand = 0usize;
@@ -4404,7 +4403,7 @@ async fn probe_missing_compare_operands(
         return Ok(Vec::new());
     }
     let chunk_ids = score_by_chunk.keys().copied().collect::<Vec<_>>();
-    let rows = state.arango_document_store.list_chunks_by_ids(&chunk_ids).await?;
+    let rows = state.document_store.list_chunks_by_ids(&chunk_ids).await?;
     let mut chunks = Vec::<RuntimeMatchedChunk>::new();
     for row in rows {
         let Some(score) = score_by_chunk.get(&row.chunk_id).copied() else {
@@ -4455,7 +4454,7 @@ fn compare_probe_query_specificity_bonus(query: &str, operand: &str) -> f32 {
 
 fn search_row_covers_operand(
     operand: &str,
-    row: &crate::infra::arangodb::search_store::KnowledgeChunkSearchRow,
+    row: &crate::infra::knowledge_rows::KnowledgeChunkSearchRow,
 ) -> bool {
     let section = row.section_path.join(" ");
     let heading = row.heading_trail.join(" ");

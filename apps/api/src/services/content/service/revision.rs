@@ -16,7 +16,7 @@ use crate::{
     domains::ops::ASYNC_OP_STATUS_READY,
     domains::provider_profiles::ProviderModelSelection,
     domains::recognition::LibraryRecognitionPolicy,
-    infra::arangodb::document_store::{
+    infra::knowledge_rows::{
         KnowledgeChunkRow, KnowledgeDocumentRow, KnowledgeRevisionRow, KnowledgeStructuredBlockRow,
         KnowledgeStructuredRevisionRow, KnowledgeTechnicalFactRow,
     },
@@ -439,7 +439,7 @@ impl ContentService {
         revision_id: Uuid,
     ) -> Result<Option<String>, ApiError> {
         let revision = state
-            .arango_document_store
+            .document_store
             .get_revision(revision_id)
             .await
             .map_err(|error| ApiError::internal_with_log(error, "internal"))?;
@@ -487,7 +487,7 @@ impl ContentService {
         let checksum = format!("sha256:{}", sha256_hex_text(&text_source));
         let file_name = rendered_revision_text_source_file_name(revision);
         let storage_key = self
-            .persist_inline_file_source(
+            .persist_inline_file_source_with_storage_lock(
                 state,
                 revision.workspace_id,
                 revision.library_id,
@@ -513,7 +513,7 @@ impl ContentService {
         revision: &ContentRevision,
     ) -> Result<Option<ReprocessRevisionSource>, ApiError> {
         let Some(structured_revision) = state
-            .arango_document_store
+            .document_store
             .get_structured_revision(revision.id)
             .await
             .map_err(|e| ApiError::internal_with_log(e, "internal"))?
@@ -525,7 +525,7 @@ impl ContentService {
         }
 
         let blocks = state
-            .arango_document_store
+            .document_store
             .list_structured_blocks_by_revision(revision.id)
             .await
             .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
@@ -557,7 +557,7 @@ impl ContentService {
         let checksum = format!("sha256:{}", sha256_hex_text(&payload));
         let file_name = record_stream_reprocess_file_name(revision);
         let storage_key = self
-            .persist_inline_file_source(
+            .persist_inline_file_source_with_storage_lock(
                 state,
                 revision.workspace_id,
                 revision.library_id,
@@ -840,7 +840,7 @@ impl ContentService {
                 latest_revision_no,
                 deleted_at: document.deleted_at,
             },
-            "knowledge document sync failed after canonical head update; Postgres head is committed and the Arango mirror may be stale until retry",
+            "knowledge document sync failed after canonical head update; Postgres head is committed and the knowledge projection may be stale until retry",
         )
         .await?;
         Ok(ContentDocumentHead {
@@ -957,6 +957,35 @@ impl ContentService {
             .persist_revision_source(workspace_id, library_id, file_name, checksum, file_bytes)
             .await
             .map_err(|e| ApiError::internal_with_log(e, "internal"))
+    }
+
+    pub(crate) async fn persist_inline_file_source_with_storage_lock(
+        &self,
+        state: &AppState,
+        workspace_id: Uuid,
+        library_id: Uuid,
+        file_name: &str,
+        checksum: &str,
+        file_bytes: &[u8],
+    ) -> Result<String, ApiError> {
+        let storage_lock = content_repository::acquire_content_library_storage_lock(
+            &state.persistence.postgres,
+            library_id,
+        )
+        .await
+        .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
+        let storage_key = self
+            .persist_inline_file_source(
+                state,
+                workspace_id,
+                library_id,
+                file_name,
+                checksum,
+                file_bytes,
+            )
+            .await?;
+        storage_lock.commit().await.map_err(|e| ApiError::internal_with_log(e, "internal"))?;
+        Ok(storage_key)
     }
 
     pub(super) async fn lease_inline_attempt(
@@ -1106,7 +1135,7 @@ impl ContentService {
                 .map_err(|e| ApiError::internal_with_log(e, "internal"))?
                 .ok_or_else(|| ApiError::resource_not_found("revision", revision_id))?;
         if let Some(structured_revision) = state
-            .arango_document_store
+            .document_store
             .get_structured_revision(revision_id)
             .await
             .map_err(|e| ApiError::internal_with_log(e, "internal"))?
@@ -1132,19 +1161,19 @@ impl ContentService {
                 )
                 .await
                 .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
-                let arango_chunk_count = state
-                    .arango_document_store
+                let knowledge_chunk_count = state
+                    .document_store
                     .count_chunks_by_revision(revision_id)
                     .await
                     .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
-                let arango_fact_count = state
-                    .arango_document_store
+                let knowledge_fact_count = state
+                    .document_store
                     .count_technical_facts_by_revision(revision_id)
                     .await
                     .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
                 if postgres_chunk_count == expected_chunk_count
-                    && arango_chunk_count == expected_chunk_count
-                    && arango_fact_count == expected_fact_count
+                    && knowledge_chunk_count == expected_chunk_count
+                    && knowledge_fact_count == expected_fact_count
                 {
                     let normalization_profile = structured_revision.normalization_profile.clone();
                     let prepared_revision = map_structured_revision_row(structured_revision);
@@ -1174,9 +1203,9 @@ impl ContentService {
                     library_id = %revision.library_id,
                     expected_chunk_count,
                     postgres_chunk_count,
-                    arango_chunk_count,
+                    knowledge_chunk_count,
                     expected_fact_count,
-                    arango_fact_count,
+                    knowledge_fact_count,
                     "structured revision persistence resume found incomplete artifacts; rebuilding prepared structure"
                 );
             } else {
@@ -1255,11 +1284,8 @@ impl ContentService {
         let chunk_content_start = std::time::Instant::now();
         let now = Utc::now();
         let _ = state
-            .arango_document_store
+            .document_store
             .upsert_structured_revision(&KnowledgeStructuredRevisionRow {
-                key: revision_id.to_string(),
-                arango_id: None,
-                arango_rev: None,
                 revision_id,
                 workspace_id: revision.workspace_id,
                 library_id: revision.library_id,
@@ -1283,9 +1309,6 @@ impl ContentService {
             .ordered_blocks
             .iter()
             .map(|block| KnowledgeStructuredBlockRow {
-                key: block.block_id.to_string(),
-                arango_id: None,
-                arango_rev: None,
                 block_id: block.block_id,
                 workspace_id: revision.workspace_id,
                 library_id: revision.library_id,
@@ -1310,7 +1333,7 @@ impl ContentService {
             })
             .collect::<Vec<_>>();
         let _ = state
-            .arango_document_store
+            .document_store
             .replace_structured_blocks(revision_id, &structured_block_rows)
             .await
             .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
@@ -1441,9 +1464,6 @@ impl ContentService {
                 .into_iter()
                 .collect::<Vec<_>>();
             technical_fact_rows.push(KnowledgeTechnicalFactRow {
-                key: fact.fact_id.to_string(),
-                arango_id: None,
-                arango_rev: None,
                 fact_id: fact.fact_id,
                 workspace_id: fact.workspace_id,
                 library_id: fact.library_id,
@@ -1472,7 +1492,7 @@ impl ContentService {
             });
         }
         let _ = state
-            .arango_document_store
+            .document_store
             .replace_technical_facts(revision_id, &technical_fact_rows)
             .await
             .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
@@ -1511,7 +1531,7 @@ impl ContentService {
             ))
         })?;
         let revision = state
-            .arango_document_store
+            .document_store
             .get_revision(command.revision_id)
             .await
             .map_err(|e| ApiError::internal_with_log(e, "internal"))?
@@ -1520,7 +1540,7 @@ impl ContentService {
             })?;
         ensure_not_cancelled(cancellation_token)?;
         let document = state
-            .arango_document_store
+            .document_store
             .get_document(revision.document_id)
             .await
             .map_err(|e| ApiError::internal_with_log(e, "internal"))?
@@ -1548,13 +1568,13 @@ impl ContentService {
         }
         ensure_not_cancelled(cancellation_token)?;
         let all_chunks = state
-            .arango_document_store
+            .document_store
             .list_chunks_by_revision(command.revision_id)
             .await
             .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
         ensure_not_cancelled(cancellation_token)?;
         let structured_revision = state
-            .arango_document_store
+            .document_store
             .get_structured_revision(command.revision_id)
             .await
             .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
@@ -1566,7 +1586,7 @@ impl ContentService {
             .await?;
         ensure_not_cancelled(cancellation_token)?;
         let structured_blocks = state
-            .arango_document_store
+            .document_store
             .list_structured_blocks_by_revision(command.revision_id)
             .await
             .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
@@ -1614,13 +1634,13 @@ impl ContentService {
         let chunks = all_chunks;
 
         let _ = state
-            .arango_graph_store
+            .graph_store
             .delete_entity_candidates_by_revision(command.revision_id)
             .await
             .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
         ensure_not_cancelled(cancellation_token)?;
         let _ = state
-            .arango_graph_store
+            .graph_store
             .delete_relation_candidates_by_revision(command.revision_id)
             .await
             .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
@@ -2353,7 +2373,7 @@ struct RevisionTableGraphContext {
 impl RevisionTableGraphContext {
     fn profile_for_chunk(
         &self,
-        chunk: &crate::infra::arangodb::document_store::KnowledgeChunkRow,
+        chunk: &crate::infra::knowledge_rows::KnowledgeChunkRow,
     ) -> Option<&TableGraphProfile> {
         chunk.support_block_ids.iter().find_map(|block_id| self.by_row_block_id.get(block_id))
     }
@@ -2554,15 +2574,12 @@ mod tests {
         test_graph_input_hashes_by_chunk,
     };
     use crate::{
-        infra::arangodb::document_store::{KnowledgeChunkRow, KnowledgeStructuredBlockRow},
+        infra::knowledge_rows::{KnowledgeChunkRow, KnowledgeStructuredBlockRow},
         shared::extraction::table_graph::build_graph_table_row_text,
     };
 
     fn make_chunk(normalized_text: &str) -> KnowledgeChunkRow {
         KnowledgeChunkRow {
-            key: Uuid::nil().to_string(),
-            arango_id: None,
-            arango_rev: None,
             chunk_id: Uuid::now_v7(),
             workspace_id: Uuid::now_v7(),
             library_id: Uuid::now_v7(),
@@ -2612,9 +2629,6 @@ mod tests {
         parent_block_id: Option<Uuid>,
     ) -> KnowledgeStructuredBlockRow {
         KnowledgeStructuredBlockRow {
-            key: block_id.to_string(),
-            arango_id: None,
-            arango_rev: None,
             block_id,
             workspace_id: Uuid::now_v7(),
             library_id: Uuid::now_v7(),
@@ -2639,12 +2653,9 @@ mod tests {
 
     fn make_structured_revision(
         source_format: &str,
-    ) -> crate::infra::arangodb::document_store::KnowledgeStructuredRevisionRow {
+    ) -> crate::infra::knowledge_rows::KnowledgeStructuredRevisionRow {
         let revision_id = Uuid::now_v7();
-        crate::infra::arangodb::document_store::KnowledgeStructuredRevisionRow {
-            key: revision_id.to_string(),
-            arango_id: None,
-            arango_rev: None,
+        crate::infra::knowledge_rows::KnowledgeStructuredRevisionRow {
             revision_id,
             workspace_id: Uuid::now_v7(),
             library_id: Uuid::now_v7(),

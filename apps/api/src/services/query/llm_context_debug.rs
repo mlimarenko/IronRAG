@@ -127,7 +127,7 @@ pub struct LlmContextSnapshot {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_loop: Option<AgentLoopMetadata>,
     /// Fine-grained timed sub-operations recorded during this execution
-    /// (individual DB/Arango queries, retrieval lanes, …) so the inspector can
+    /// (individual DB queries, retrieval lanes, …) so the inspector can
     /// surface where time went and operators can catch heavy sections. Empty
     /// on records written before span capture existed.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

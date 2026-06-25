@@ -72,9 +72,6 @@ pub struct SnapshotImportReportResponse {
     pub overwrite_mode: OverwriteMode,
     pub include_kinds: Vec<IncludeKind>,
     pub postgres_rows_by_table: BTreeMap<String, u64>,
-    pub arango_docs_by_store: BTreeMap<String, u64>,
-    pub arango_edges_by_store: BTreeMap<String, u64>,
-    pub skipped_arango_edges_by_store: BTreeMap<String, u64>,
     pub blobs_restored: u64,
 }
 
@@ -95,12 +92,6 @@ impl From<SnapshotImportReport> for SnapshotImportReportResponse {
             overwrite_mode: report.overwrite_mode,
             include_kinds: report.include_kinds,
             postgres_rows_by_table: report.postgres_rows_by_table.into_iter().collect(),
-            arango_docs_by_store: report.arango_docs_by_collection.into_iter().collect(),
-            arango_edges_by_store: report.arango_edges_by_collection.into_iter().collect(),
-            skipped_arango_edges_by_store: report
-                .skipped_arango_edges_by_collection
-                .into_iter()
-                .collect(),
             blobs_restored: report.blobs_restored,
         }
     }
@@ -113,9 +104,6 @@ pub struct WorkspaceLibraryImportReportResponse {
     pub library_id: Uuid,
     pub slug: String,
     pub postgres_rows_by_table: BTreeMap<String, u64>,
-    pub arango_docs_by_store: BTreeMap<String, u64>,
-    pub arango_edges_by_store: BTreeMap<String, u64>,
-    pub skipped_arango_edges_by_store: BTreeMap<String, u64>,
     pub blobs_restored: u64,
 }
 
@@ -142,12 +130,6 @@ impl From<WorkspaceSnapshotImportReport> for WorkspaceSnapshotImportReportRespon
                     library_id: library.library_id,
                     slug: library.slug,
                     postgres_rows_by_table: library.postgres_rows_by_table.into_iter().collect(),
-                    arango_docs_by_store: library.arango_docs_by_collection.into_iter().collect(),
-                    arango_edges_by_store: library.arango_edges_by_collection.into_iter().collect(),
-                    skipped_arango_edges_by_store: library
-                        .skipped_arango_edges_by_collection
-                        .into_iter()
-                        .collect(),
                     blobs_restored: library.blobs_restored,
                 })
                 .collect(),

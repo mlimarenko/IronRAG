@@ -130,7 +130,7 @@ pub async fn update_document(
     )
     .await?;
     let document = state
-        .arango_document_store
+        .document_store
         .get_document(request.document_id)
         .await
         .map_err(|e| ApiError::internal_with_log(e, "internal"))?
@@ -413,7 +413,7 @@ pub(crate) async fn ensure_matching_mutation_payload_identity(
             state.canonical_services.content.list_mutation_items(state, mutation_id).await?;
         if let Some(revision_id) = items.iter().find_map(|item| item.result_revision_id) {
             state
-                .arango_document_store
+                .document_store
                 .get_revision(revision_id)
                 .await
                 .map_err(|e| ApiError::internal_with_log(e, "internal"))?
@@ -758,7 +758,7 @@ pub(crate) async fn resolve_mutation_receipt(
         && let Some(revision_id) = items.iter().find_map(|item| item.result_revision_id)
     {
         document_id = state
-            .arango_document_store
+            .document_store
             .get_revision(revision_id)
             .await
             .map_err(|e| ApiError::internal_with_log(e, "internal"))?
@@ -767,7 +767,7 @@ pub(crate) async fn resolve_mutation_receipt(
 
     if let Some(document_id) = document_id {
         let document = state
-            .arango_document_store
+            .document_store
             .get_document(document_id)
             .await
             .map_err(|e| ApiError::internal_with_log(e, "internal"))?
@@ -793,7 +793,7 @@ pub(crate) async fn resolve_mutation_receipt(
         && let Some(result_revision_id) = items.iter().find_map(|item| item.result_revision_id)
     {
         let current_revision_id = state
-            .arango_document_store
+            .document_store
             .get_document(document_id)
             .await
             .map_err(|e| ApiError::internal_with_log(e, "internal"))?

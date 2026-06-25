@@ -10,7 +10,7 @@ use crate::services::graph::projection_guard::GraphWriteFailureDecision;
 use crate::{
     app::state::AppState,
     infra::{
-        arangodb::graph_store::{
+        knowledge_rows::{
             GraphViewData, GraphViewEdgeWrite, GraphViewNodeWrite, GraphViewWriteError,
             sanitize_graph_view_writes,
         },
@@ -229,7 +229,7 @@ pub async fn project_canonical_graph(
 
     if let Err(error) =
         execute_projection_write_with_guard(state, scope, "library_projection", || {
-            state.arango_graph_store.replace_library_projection(
+            state.graph_store.replace_library_projection(
                 scope.library_id,
                 scope.projection_version,
                 &projection_writes.nodes,
@@ -435,30 +435,30 @@ async fn synchronize_projection_support_counts(
     .context("failed to prune zero-support graph nodes before projection")?;
 
     if !deleted_node_keys.is_empty() {
-        let arango_deleted = state
-            .arango_graph_store
+        let deleted = state
+            .graph_store
             .delete_entities_by_canonical_keys(scope.library_id, &deleted_node_keys)
             .await
             .unwrap_or(0);
         tracing::info!(
             library_id = %scope.library_id,
             pg_deleted = deleted_node_keys.len(),
-            arango_deleted = arango_deleted,
-            "synced orphaned entity deletions to ArangoDB"
+            deleted = deleted,
+            "synced orphaned entity deletions to PostgreSQL"
         );
     }
 
     if !deleted_edge_keys.is_empty() {
-        let arango_deleted = state
-            .arango_graph_store
+        let deleted = state
+            .graph_store
             .delete_relations_by_canonical_keys(scope.library_id, &deleted_edge_keys)
             .await
             .unwrap_or(0);
         tracing::info!(
             library_id = %scope.library_id,
             pg_deleted = deleted_edge_keys.len(),
-            arango_deleted = arango_deleted,
-            "synced orphaned relation deletions to ArangoDB"
+            deleted = deleted,
+            "synced orphaned relation deletions to PostgreSQL"
         );
     }
 
@@ -547,7 +547,7 @@ async fn project_targeted_canonical_graph(
         .collect::<Vec<_>>();
 
     execute_projection_write_with_guard(state, scope, "targeted_projection", || {
-        state.arango_graph_store.refresh_library_projection_targets(
+        state.graph_store.refresh_library_projection_targets(
             scope.library_id,
             scope.projection_version,
             &remove_node_ids,

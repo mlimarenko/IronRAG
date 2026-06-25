@@ -735,7 +735,7 @@ fn union_targeted_ids(changed_ids: &[Uuid], superseded_ids: &BTreeSet<Uuid>) -> 
 
 /// Re-derives support counts for `node_ids`/`edge_ids` from surviving active
 /// evidence, prunes any that dropped to zero support, drops their orphaned
-/// canonical summaries, and mirrors the node/edge deletions into ArangoDB.
+/// canonical summaries, and mirrors the node/edge deletions into PostgreSQL.
 ///
 /// Mirrors `refresh_deleted_library_graph_projection_for_cleanup` step-for-step
 /// so the superseded revision's contributions leave no graph trace while shared
@@ -791,17 +791,17 @@ async fn prune_superseded_revision_graph(
     .context("failed to prune orphan canonical summaries for superseded revision")?;
     if !deleted_edge_keys.is_empty() {
         state
-            .arango_graph_store
+            .graph_store
             .delete_relations_by_canonical_keys(library_id, &deleted_edge_keys)
             .await
-            .context("failed to sync superseded relation deletions to ArangoDB")?;
+            .context("failed to sync superseded relation deletions to PostgreSQL")?;
     }
     if !deleted_node_keys.is_empty() {
         state
-            .arango_graph_store
+            .graph_store
             .delete_entities_by_canonical_keys(library_id, &deleted_node_keys)
             .await
-            .context("failed to sync superseded entity deletions to ArangoDB")?;
+            .context("failed to sync superseded entity deletions to PostgreSQL")?;
     }
     Ok(())
 }

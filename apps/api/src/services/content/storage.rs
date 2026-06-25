@@ -238,9 +238,9 @@ impl ContentStorageService {
     ) -> Result<(), ContentServiceError> {
         match &self.backend {
             ContentStorageBackend::Filesystem(provider) => {
-                provider.persist(storage_key, file_bytes).await
+                provider.write(storage_key, file_bytes).await
             }
-            ContentStorageBackend::S3(provider) => provider.persist(storage_key, file_bytes).await,
+            ContentStorageBackend::S3(provider) => provider.write(storage_key, file_bytes).await,
         }
     }
 
@@ -284,6 +284,20 @@ impl ContentStorageService {
             }
             ContentStorageBackend::S3(provider) => {
                 provider.restore_stashed_directory(stashed_directory).await
+            }
+        }
+    }
+
+    pub async fn restore_stashed_directory_replacing_current(
+        &self,
+        stashed_directory: &StashedContentDirectory,
+    ) -> Result<(), ContentServiceError> {
+        match &self.backend {
+            ContentStorageBackend::Filesystem(provider) => {
+                provider.restore_stashed_directory_replacing_current(stashed_directory).await
+            }
+            ContentStorageBackend::S3(provider) => {
+                provider.restore_stashed_directory_replacing_current(stashed_directory).await
             }
         }
     }
@@ -448,6 +462,32 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn raw_snapshot_write_overwrites_existing_source_bytes() {
+        let tempdir = tempdir().expect("tempdir");
+        let storage = filesystem_storage(&tempdir);
+        let workspace_id = Uuid::now_v7();
+        let library_id = Uuid::now_v7();
+        let storage_key = storage
+            .persist_revision_source(
+                workspace_id,
+                library_id,
+                "runtime-upload-check.pdf",
+                "sha256:abc123",
+                b"stale bytes",
+            )
+            .await
+            .expect("persist stale source");
+
+        storage
+            .write_revision_source_raw(&storage_key, b"snapshot bytes")
+            .await
+            .expect("overwrite raw source");
+
+        let loaded = storage.read_revision_source(&storage_key).await.expect("read source");
+        assert_eq!(loaded, b"snapshot bytes");
+    }
+
+    #[tokio::test]
     async fn stash_restore_and_purge_library_storage_round_trips_directory() {
         let tempdir = tempdir().expect("tempdir");
         let storage = filesystem_storage(&tempdir);
@@ -473,8 +513,28 @@ mod tests {
 
         assert!(!storage.has_revision_source(&storage_key).await.expect("source inspection"));
 
-        storage.restore_stashed_directory(&stashed).await.expect("restore stashed directory");
+        let replacement_key = storage
+            .persist_revision_source(
+                workspace_id,
+                library_id,
+                "replacement.md",
+                "sha256:replacement",
+                b"partial replacement",
+            )
+            .await
+            .expect("persist replacement source");
+        assert!(
+            storage.has_revision_source(&replacement_key).await.expect("replacement inspection")
+        );
+
+        storage
+            .restore_stashed_directory_replacing_current(&stashed)
+            .await
+            .expect("restore stashed directory");
         assert!(storage.has_revision_source(&storage_key).await.expect("source inspection"));
+        assert!(
+            !storage.has_revision_source(&replacement_key).await.expect("replacement inspection")
+        );
 
         let stashed_again = storage
             .stash_library_storage(workspace_id, library_id)

@@ -12,13 +12,13 @@ use uuid::Uuid;
 use crate::domains::query_ir::literal_text_is_identifier_shaped;
 use crate::domains::retrieval::DEFAULT_TEXT_SEARCH_CONFIG;
 use crate::infra::{
-    arangodb::search_store::{
+    knowledge_plane::SearchStore,
+    knowledge_rows::{
         KNOWLEDGE_CHUNK_VECTOR_KIND, KNOWLEDGE_ENTITY_VECTOR_KIND, KnowledgeChunkSearchRow,
         KnowledgeChunkVectorRow, KnowledgeChunkVectorSearchRow, KnowledgeEntitySearchRow,
         KnowledgeEntityVectorRow, KnowledgeEntityVectorSearchRow, KnowledgeRelationSearchRow,
         KnowledgeStructuredBlockSearchRow, KnowledgeTechnicalFactSearchRow,
     },
-    knowledge_plane::SearchStore,
 };
 
 const TITLE_NGRAM_MIN_TERM_CHARS: usize = 8;
@@ -233,7 +233,6 @@ pub struct PgSearchStore {
 
 #[derive(Debug, Clone, FromRow)]
 struct PgChunkVectorRow {
-    key: String,
     vector_id: Uuid,
     workspace_id: Uuid,
     library_id: Uuid,
@@ -251,7 +250,6 @@ struct PgChunkVectorRow {
 
 #[derive(Debug, Clone, FromRow)]
 struct PgEntityVectorRow {
-    key: String,
     vector_id: Uuid,
     workspace_id: Uuid,
     library_id: Uuid,
@@ -640,7 +638,7 @@ impl PgSearchStore {
                 embedding_model_key, vector_kind, dimensions, embedding::text as vector_text,
                 freshness_generation, created_at, occurred_at, occurred_until"
         ))
-        .bind(&row.key)
+        .bind(row.vector_id.to_string())
         .bind(row.vector_id)
         .bind(row.workspace_id)
         .bind(row.library_id)
@@ -687,7 +685,7 @@ impl PgSearchStore {
                 embedding_model_key, vector_kind, dimensions, embedding::text as vector_text,
                 freshness_generation, created_at"
         ))
-        .bind(&row.key)
+        .bind(row.vector_id.to_string())
         .bind(row.vector_id)
         .bind(row.workspace_id)
         .bind(row.library_id)
@@ -1938,9 +1936,6 @@ fn parse_pgvector_text(value: &str) -> anyhow::Result<Vec<f32>> {
 
 fn chunk_vector_from_pg(row: PgChunkVectorRow) -> anyhow::Result<KnowledgeChunkVectorRow> {
     Ok(KnowledgeChunkVectorRow {
-        key: row.key,
-        arango_id: None,
-        arango_rev: None,
         vector_id: row.vector_id,
         workspace_id: row.workspace_id,
         library_id: row.library_id,
@@ -1959,9 +1954,6 @@ fn chunk_vector_from_pg(row: PgChunkVectorRow) -> anyhow::Result<KnowledgeChunkV
 
 fn entity_vector_from_pg(row: PgEntityVectorRow) -> anyhow::Result<KnowledgeEntityVectorRow> {
     Ok(KnowledgeEntityVectorRow {
-        key: row.key,
-        arango_id: None,
-        arango_rev: None,
         vector_id: row.vector_id,
         workspace_id: row.workspace_id,
         library_id: row.library_id,

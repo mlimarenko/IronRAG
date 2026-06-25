@@ -19,7 +19,7 @@ use crate::{
         },
     },
     infra::{
-        arangodb::document_store::{
+        knowledge_rows::{
             KnowledgeChunkRow, KnowledgeDocumentRow, KnowledgeLibraryGenerationRow,
             KnowledgeRevisionRow,
         },
@@ -247,9 +247,6 @@ fn query_document_index_row_to_knowledge_document_row(
 ) -> KnowledgeDocumentRow {
     let file_name = Some(row.external_key.clone());
     KnowledgeDocumentRow {
-        key: row.document_id.to_string(),
-        arango_id: None,
-        arango_rev: None,
         document_id: row.document_id,
         workspace_id: row.workspace_id,
         library_id: row.library_id,
@@ -532,7 +529,7 @@ async fn load_entity_bio_chunks(
             break;
         }
         let hits = state
-            .arango_search_store
+            .search_store
             .search_chunks(library_id, mention.label.trim(), remaining.max(4), None, None)
             .await
             .context("failed to run lexical entity-label search for entity-bio retrieval")?;
@@ -565,7 +562,7 @@ async fn load_entity_bio_chunks(
     let candidates =
         batch_hydrate_hits(state, hits, document_index, plan_keywords, targeted_document_ids)
             .await?;
-    // Post-filter: ArangoSearch BM25 stems tokens, so a surname like
+    // Post-filter: full-text BM25 stems tokens, so a surname like
     // "Foster" can retrieve chunks mentioning "forest" that share a
     // stem but have nothing to do with the target person. Similarly,
     // a graph entity whose label contains the mention as substring may
@@ -756,7 +753,7 @@ async fn load_graph_evidence_context_source_labels(
     .unwrap_or(true);
 
     state
-        .arango_document_store
+        .document_store
         .list_revisions_by_ids(&revision_ids)
         .await
         .unwrap_or_default()
@@ -1100,7 +1097,7 @@ async fn filter_graph_evidence_rows_for_target_documents(
     }
 
     let chunk_rows = state
-        .arango_document_store
+        .document_store
         .list_chunks_by_ids(&fallback_chunk_ids.iter().copied().collect::<Vec<_>>())
         .await
         .context("failed to resolve chunk document ids for scoped graph evidence filtering")?;
@@ -1701,7 +1698,7 @@ async fn load_query_ir_focus_chunks(
 
     let per_query_futures = search_queries.iter().cloned().map(|focus_query| async move {
         state
-            .arango_search_store
+            .search_store
             .search_chunks(
                 library_id,
                 &focus_query,
@@ -1768,7 +1765,7 @@ async fn load_document_evidence_anchor_chunks(
             continue;
         };
         let rows = state
-            .arango_document_store
+            .document_store
             .list_chunks_by_revision_matching_terms(
                 revision_id,
                 &focus_terms,
@@ -1783,7 +1780,7 @@ async fn load_document_evidence_anchor_chunks(
             })?;
         let rows = if rows.is_empty() {
             state
-                .arango_document_store
+                .document_store
                 .list_chunks_by_revision_range(
                     revision_id,
                     0,
@@ -1879,7 +1876,7 @@ async fn load_setup_focus_document_chunks(
             continue;
         };
         let rows = state
-            .arango_document_store
+            .document_store
             .list_chunks_by_revision_range(revision_id, 0, SETUP_FOCUS_DOCUMENT_SCAN_CHUNKS)
             .await
             .with_context(|| {
@@ -1965,7 +1962,7 @@ async fn load_setup_variant_document_chunks(
     let fetched_results = stream::iter(fetch_inputs.into_iter().map(
         |(document_rank, document_id, revision_id)| async move {
             let rows = state
-                .arango_document_store
+                .document_store
                 .list_chunks_by_revision_range(revision_id, 0, SETUP_FOCUS_DOCUMENT_SCAN_CHUNKS)
                 .await
                 .with_context(|| {
@@ -2491,7 +2488,7 @@ async fn load_versioned_update_procedure_chunks(
             async move {
                 let mut rows = if candidate.seed_chunk_indices.is_empty() {
                     state
-                        .arango_document_store
+                        .document_store
                         .list_chunks_by_revision_matching_terms(
                             revision_id,
                             &focus_terms,
@@ -2519,7 +2516,7 @@ async fn load_versioned_update_procedure_chunks(
                         )
                     })?;
                     let probe_rows = state
-                        .arango_document_store
+                        .document_store
                         .list_chunks_by_revision_matching_terms(
                             revision_id,
                             &focus_terms,
@@ -2558,7 +2555,7 @@ async fn load_versioned_update_procedure_chunks(
                 }
                 if versioned_update_procedure_candidate_has_strong_subject_title(&candidate) {
                     let head_rows = state
-                        .arango_document_store
+                        .document_store
                         .list_chunks_by_revision_range(
                             revision_id,
                             0,
@@ -2602,7 +2599,7 @@ async fn load_versioned_update_procedure_chunks(
                 }
                 if rows.is_empty() && candidate.allow_head_fallback {
                     rows = state
-                        .arango_document_store
+                        .document_store
                         .list_chunks_by_revision_range(
                             revision_id,
                             0,
@@ -2856,7 +2853,7 @@ async fn load_versioned_update_procedure_instruction_title_anchor_chunks(
     let fetched = stream::iter(fetch_inputs.into_iter().map(
         |(document_rank, document_id, revision_id)| async move {
             let rows = state
-                .arango_document_store
+                .document_store
                 .list_chunks_by_revision_range(
                     revision_id,
                     0,
@@ -2941,7 +2938,7 @@ async fn load_versioned_update_procedure_exact_target_runbook_chunks(
                 && candidate.source_local_anchor_indices.is_empty()
             {
                 state
-                    .arango_document_store
+                    .document_store
                     .list_chunks_by_revision_range(
                         revision_id,
                         0,
@@ -2975,7 +2972,7 @@ async fn load_versioned_update_procedure_exact_target_runbook_chunks(
                 })?;
                 let term_model = versioned_update_procedure_term_model(question, Some(query_ir));
                 let probe_rows = state
-                    .arango_document_store
+                    .document_store
                     .list_chunks_by_revision_matching_terms(
                         revision_id,
                         focus_terms,
@@ -3127,7 +3124,7 @@ async fn load_versioned_update_procedure_source_local_runbook_chunks(
                 Vec::new()
             } else {
                 state
-                    .arango_document_store
+                    .document_store
                     .list_chunks_by_revision_windows(revision_id, &windows)
                     .await
                     .with_context(|| {
@@ -3137,7 +3134,7 @@ async fn load_versioned_update_procedure_source_local_runbook_chunks(
                     })?
             };
             let probe_rows = state
-                .arango_document_store
+                .document_store
                 .list_chunks_by_revision_matching_terms(
                     revision_id,
                     focus_terms,
@@ -3311,7 +3308,7 @@ async fn load_versioned_update_procedure_reference_document_chunks(
             let reference_focus_terms = reference_focus_terms.clone();
             async move {
                 let mut rows = state
-                    .arango_document_store
+                    .document_store
                     .list_chunks_by_revision_matching_terms(
                         revision_id,
                         &reference_focus_terms,
@@ -3576,7 +3573,7 @@ async fn load_versioned_update_procedure_reference_chunks(
     }
     let per_query_futures = search_queries.iter().cloned().map(|search_query| async move {
         state
-            .arango_search_store
+            .search_store
             .search_chunks(
                 library_id,
                 &search_query,
@@ -3775,7 +3772,7 @@ async fn load_versioned_update_procedure_structural_source_chunks(
     let fetched = stream::iter(fetch_inputs.into_iter().map(
         |(document_rank, candidate, revision_id)| async move {
             let rows = state
-                .arango_document_store
+                .document_store
                 .list_chunks_by_revision_range(
                     revision_id,
                     0,
@@ -4318,7 +4315,7 @@ async fn expand_versioned_update_procedure_context_rows(
     }
     let windows = versioned_update_procedure_context_windows(&rows, limit);
     let expanded_rows =
-        state.arango_document_store.list_chunks_by_revision_windows(revision_id, &windows).await?;
+        state.document_store.list_chunks_by_revision_windows(revision_id, &windows).await?;
     Ok(merge_versioned_update_procedure_context_rows(rows, expanded_rows, limit))
 }
 
@@ -4341,7 +4338,7 @@ async fn load_versioned_update_procedure_seed_context_rows(
         })
         .collect::<Vec<_>>();
     let mut rows =
-        state.arango_document_store.list_chunks_by_revision_windows(revision_id, &windows).await?;
+        state.document_store.list_chunks_by_revision_windows(revision_id, &windows).await?;
     rows.sort_by(|left, right| {
         left.chunk_index.cmp(&right.chunk_index).then_with(|| left.chunk_id.cmp(&right.chunk_id))
     });
@@ -5964,7 +5961,7 @@ async fn load_versioned_update_procedure_evidence_candidates(
     }
     let per_query_futures = search_queries.iter().cloned().map(|search_query| async move {
         state
-            .arango_search_store
+            .search_store
             .search_chunks(
                 library_id,
                 &search_query,
@@ -6088,7 +6085,7 @@ async fn expand_versioned_update_procedure_evidence_chunks(
             })
             .collect::<Vec<_>>();
         let rows = state
-            .arango_document_store
+            .document_store
             .list_chunks_by_revision_windows(group.revision_id, &windows)
             .await?;
         Ok::<_, anyhow::Error>((group.best_score, rows))
@@ -8506,7 +8503,7 @@ async fn load_linked_anchor_context_chunks(
 
     let per_query_futures = anchor_queries.iter().cloned().map(|anchor_query| async move {
         state
-            .arango_search_store
+            .search_store
             .search_chunks(
                 library_id,
                 &anchor_query,
@@ -8628,7 +8625,7 @@ async fn load_artifact_sibling_source_rows_for_document(
 ) -> anyhow::Result<Vec<KnowledgeChunkRow>> {
     let revision_ids = if include_revision_history {
         let revisions = state
-            .arango_document_store
+            .document_store
             .list_revisions_by_document(document.document_id)
             .await
             .with_context(|| {
@@ -8661,16 +8658,15 @@ async fn load_artifact_sibling_source_rows_for_document(
     if include_revision_history {
         let windows =
             revision_ids.iter().map(|revision_id| (*revision_id, 0, 0)).collect::<Vec<_>>();
-        for row in state
-            .arango_document_store
-            .list_chunks_by_revisions_windows(&windows)
-            .await
-            .with_context(|| {
-                format!(
-                    "failed to load artifact sibling source head chunks for document {}",
-                    document.document_id
-                )
-            })?
+        for row in
+            state.document_store.list_chunks_by_revisions_windows(&windows).await.with_context(
+                || {
+                    format!(
+                        "failed to load artifact sibling source head chunks for document {}",
+                        document.document_id
+                    )
+                },
+            )?
         {
             if seen.insert(row.chunk_id) {
                 rows.push(row);
@@ -8683,7 +8679,7 @@ async fn load_artifact_sibling_source_rows_for_document(
 
     if !focus_terms.is_empty() && rows.len() < chunk_cap {
         for row in state
-            .arango_document_store
+            .document_store
             .list_chunks_by_revisions_matching_terms(&revision_ids, focus_terms, chunk_cap)
             .await
             .with_context(|| {
@@ -8705,7 +8701,7 @@ async fn load_artifact_sibling_source_rows_for_document(
     if rows.len() < chunk_cap {
         let fallback_max_index = ARTIFACT_SIBLING_SOURCE_CHUNKS_PER_DOCUMENT.saturating_sub(1);
         for row in state
-            .arango_document_store
+            .document_store
             .list_chunks_by_revision_range(canonical_revision_id, 0, fallback_max_index)
             .await
             .with_context(|| {
@@ -9151,7 +9147,7 @@ async fn retrieve_document_chunks_with_targets(
     let lexical_limit = limit.saturating_mul(2).max(24);
     let plan_keywords = &plan.keywords;
     let targeted_document_ids_ref = &targeted_document_ids;
-    // Resolved temporal bounds — applied as AQL hard-filter on every
+    // Resolved temporal bounds — applied as a hard filter on every
     // chunk-touching search lane. None when QueryIR has no temporal
     // constraints or none parsed as RFC3339.
     let (temporal_start, temporal_end) =
@@ -9185,7 +9181,7 @@ async fn retrieve_document_chunks_with_targets(
             "runtime chunk search",
         )?;
         let raw_hits = state
-            .arango_search_store
+            .search_store
             .search_chunk_vectors_by_similarity(
                 library_dim,
                 library_id,
@@ -9205,8 +9201,8 @@ async fn retrieve_document_chunks_with_targets(
             limit = limit.max(1),
             "vector search returned raw hits"
         );
-        // Batch-hydrate all hits in one `list_chunks_by_ids` call to
-        // avoid an N+1 Arango round-trip per vector match.
+        // Batch-hydrate all hits in one `list_chunks_by_ids` call to avoid an
+        // N+1 knowledge-store round-trip per vector match.
         let hits = batch_hydrate_hits(
             state,
             raw_hits.iter().map(|hit| (hit.chunk_id, hit.score as f32)).collect(),
@@ -9226,12 +9222,12 @@ async fn retrieve_document_chunks_with_targets(
         Ok((hits, elapsed.as_millis()))
     };
 
-    // Run lexical queries concurrently so the Arango coordinator can
-    // fan them out; the RRF merge below preserves output order.
+    // Run lexical queries concurrently; the RRF merge below preserves output
+    // order.
     let lexical_future = async {
         let started = std::time::Instant::now();
         let lexical_query_count = lexical_queries.len();
-        // Fan the AQL searches out in parallel — same as before — but
+        // Fan lexical searches out in parallel — same as before — but
         // hydrate each query's hits through `batch_hydrate_hits` to
         // replace the per-hit `get_chunk` N+1 with a single
         // `list_chunks_by_ids` round-trip. With 4 lexical queries × ~20
@@ -9242,7 +9238,7 @@ async fn retrieve_document_chunks_with_targets(
             let text_search_config_owned = text_search_config_owned.clone();
             async move {
                 let hits = state
-                    .arango_search_store
+                    .search_store
                     .search_chunks_with_config(
                         library_id,
                         &lexical_query,
@@ -9766,14 +9762,14 @@ async fn retrieve_document_chunks_with_targets(
     // scopes a question to a window we drop any chunk whose underlying
     // `KnowledgeChunkRow.occurred_at` is null OR falls outside the bounds.
     // RuntimeMatchedChunk does not carry temporal data, so we re-query
-    // `list_chunks_by_ids` once over the surviving set — single Arango
-    // round-trip, no per-chunk lookup. Verified necessary on stage
+    // `list_chunks_by_ids` once over the surviving set — single knowledge-store
+    // read, no per-chunk lookup. Verified necessary on stage
     // 2026-05-03: image-OCR chunks (no occurred_at) were leaking into
     // "messages in March 2026" answers via source_context companions.
     if temporal_start.is_some() && temporal_end.is_some() && !chunks.is_empty() {
         let chunk_ids: Vec<Uuid> = chunks.iter().map(|c| c.chunk_id).collect();
         let rows = state
-            .arango_document_store
+            .document_store
             .list_chunks_by_ids(&chunk_ids)
             .await
             .context("failed to look up chunks for temporal post-filter")?;
@@ -10116,7 +10112,7 @@ async fn load_document_identity_chunks_for_targets(
             continue;
         };
         let rows = state
-            .arango_document_store
+            .document_store
             .list_chunks_by_revision_range(
                 revision_id,
                 0,
@@ -10138,7 +10134,7 @@ async fn load_document_identity_chunks_for_targets(
             }
         }
         let focused_rows = state
-            .arango_document_store
+            .document_store
             .list_chunks_by_revision_matching_terms(
                 revision_id,
                 &focus_terms,
@@ -10442,7 +10438,7 @@ async fn load_latest_version_document_chunks(
     let mut chunks = Vec::new();
     for (rank, document) in documents.iter().enumerate() {
         let rows = state
-            .arango_document_store
+            .document_store
             .list_chunks_by_revision_range(
                 document.revision_id,
                 0,
@@ -10559,7 +10555,7 @@ async fn load_latest_version_semantic_document_chunks(
     let mut deep_scan_document_count = 0usize;
     for (document_rank, document) in candidates.iter().enumerate() {
         let chunk_rows = state
-            .arango_document_store
+            .document_store
             .list_chunks_by_revision_range(
                 document.revision_id,
                 0,
@@ -10582,7 +10578,7 @@ async fn load_latest_version_semantic_document_chunks(
             && deep_scan_document_count < LATEST_VERSION_SEMANTIC_DEEP_DOCUMENT_CAP
         {
             let deep_rows = state
-                .arango_document_store
+                .document_store
                 .list_chunks_by_revision_range(
                     document.revision_id,
                     LATEST_VERSION_SEMANTIC_CHUNK_SCAN_LIMIT as i32 + 1,
@@ -11299,10 +11295,10 @@ fn dedupe_latest_version_documents(rows: Vec<LatestVersionDocument>) -> Vec<Late
 }
 
 /// Hydrate a bag of `(chunk_id, score)` hits into ranked
-/// `RuntimeMatchedChunk` rows with exactly ONE Arango round-trip.
+/// `RuntimeMatchedChunk` rows with exactly one knowledge-store read.
 /// The previous `join_all(get_chunk)` pattern turned every hit into a
 /// separate coordinator call — on a typical 16-hit vector + 4×20-hit
-/// lexical fan-out that was ~100 sequential Arango fetches per
+/// lexical fan-out that was ~100 sequential chunk fetches per
 /// grounded_answer turn. Batch hydration collapses them into ≤5.
 ///
 /// Score/order is preserved via an id→score map: `list_chunks_by_ids`
@@ -11337,7 +11333,7 @@ async fn batch_hydrate_hits(
     }
     let chunk_ids: Vec<Uuid> = score_by_chunk.keys().copied().collect();
     let chunk_rows = state
-        .arango_document_store
+        .document_store
         .list_chunks_by_ids(&chunk_ids)
         .await
         .context("failed to batch-load runtime query chunks")?;
@@ -11416,9 +11412,8 @@ pub(crate) const fn should_skip_vector_search(_plan: &RuntimeQueryPlan) -> bool 
     false
 }
 
-/// Hard cap on the number of lexical AQL searches dispatched to
-/// Arango per query. Every additional query is a full
-/// `search_chunks` round-trip; with a ~500 ms p50 per query and a
+/// Hard cap on the number of lexical searches dispatched per query. Every
+/// additional query is a full `search_chunks` round-trip; with a ~500 ms p50 per query and a
 /// 1000+ document corpus, a 10-query fan-out added 5–8 s of
 /// retrieval latency even when every query returned zero hits.
 /// Eight is the empirical sweet spot: enough to carry multiple focus
@@ -11497,8 +11492,8 @@ pub(crate) fn build_lexical_queries(
         queries.push(normalized);
     };
 
-    // Priority 1 — the raw user question. Arango's full-text
-    // analyser already splits it into relevant tokens; this is the
+    // Priority 1 — the raw user question. The full-text analyzer already
+    // splits it into relevant tokens; this is the
     // highest-signal query and must always go first.
     let retrieval_question = strip_leading_question_marker(question);
     push_query(retrieval_question.to_string(), &mut queries);
@@ -18580,9 +18575,6 @@ mod document_index_tests {
     ) -> KnowledgeDocumentRow {
         let document_id = Uuid::now_v7();
         KnowledgeDocumentRow {
-            key: document_id.to_string(),
-            arango_id: None,
-            arango_rev: None,
             document_id,
             workspace_id: Uuid::now_v7(),
             library_id: Uuid::now_v7(),
@@ -18611,9 +18603,6 @@ mod document_index_tests {
     ) -> KnowledgeRevisionRow {
         let now = Utc::now();
         KnowledgeRevisionRow {
-            key: revision_id.to_string(),
-            arango_id: None,
-            arango_rev: None,
             revision_id,
             workspace_id: Uuid::now_v7(),
             library_id: Uuid::now_v7(),
@@ -18686,9 +18675,6 @@ mod document_index_tests {
     ) -> KnowledgeChunkRow {
         let chunk_id = Uuid::now_v7();
         KnowledgeChunkRow {
-            key: chunk_id.to_string(),
-            arango_id: None,
-            arango_rev: None,
             chunk_id,
             workspace_id,
             library_id,

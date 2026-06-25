@@ -18,7 +18,7 @@ use uuid::Uuid;
 use ironrag_backend::{
     app::{config::Settings, state::AppState},
     infra::{
-        arangodb::document_store::KnowledgeDocumentRow,
+        knowledge_rows::KnowledgeDocumentRow,
         repositories::{self, content_repository, iam_repository},
     },
     interfaces::http::{
@@ -86,71 +86,9 @@ impl TempDatabase {
     }
 }
 
-struct TempArangoDatabase {
-    base_url: String,
-    username: String,
-    password: String,
-    name: String,
-    http: reqwest::Client,
-}
-
-impl TempArangoDatabase {
-    async fn create(settings: &Settings) -> Result<Self> {
-        let base_url = settings.arangodb_url.trim().trim_end_matches('/').to_string();
-        let name = format!("mcp_knowledge_{}", Uuid::now_v7().simple());
-        let http = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(
-                settings.arangodb_request_timeout_seconds.max(1),
-            ))
-            .build()
-            .context("failed to build ArangoDB admin http client for MCP knowledge test")?;
-        let response = http
-            .post(format!("{base_url}/_api/database"))
-            .basic_auth(&settings.arangodb_username, Some(&settings.arangodb_password))
-            .json(&serde_json::json!({ "name": name }))
-            .send()
-            .await
-            .context("failed to create temp ArangoDB database for mcp_knowledge")?;
-        if !response.status().is_success() {
-            return Err(anyhow::anyhow!(
-                "failed to create temp ArangoDB database {}: status {}",
-                name,
-                response.status()
-            ));
-        }
-
-        Ok(Self {
-            base_url,
-            username: settings.arangodb_username.clone(),
-            password: settings.arangodb_password.clone(),
-            name,
-            http,
-        })
-    }
-
-    async fn drop(self) -> Result<()> {
-        let response = self
-            .http
-            .delete(format!("{}/_api/database/{}", self.base_url, self.name))
-            .basic_auth(&self.username, Some(&self.password))
-            .send()
-            .await
-            .context("failed to drop temp ArangoDB database for mcp_knowledge")?;
-        if response.status() != reqwest::StatusCode::NOT_FOUND && !response.status().is_success() {
-            return Err(anyhow::anyhow!(
-                "failed to drop temp ArangoDB database {}: status {}",
-                self.name,
-                response.status()
-            ));
-        }
-        Ok(())
-    }
-}
-
 struct McpKnowledgeFixture {
     state: AppState,
     temp_database: TempDatabase,
-    temp_arango: TempArangoDatabase,
     workspace_id: Uuid,
     library_id: Uuid,
     library_ref: String,
@@ -171,11 +109,8 @@ impl McpKnowledgeFixture {
         let mut settings =
             Settings::from_env().context("failed to load settings for mcp knowledge test")?;
         let temp_database = TempDatabase::create(&settings.database_url).await?;
-        let temp_arango = TempArangoDatabase::create(&settings).await?;
         settings.database_url = temp_database.database_url.clone();
-        settings.arangodb_database = temp_arango.name.clone();
         settings.destructive_fresh_bootstrap_required = true;
-        settings.arangodb_bootstrap_vector_indexes = false;
 
         let postgres = PgPoolOptions::new()
             .max_connections(4)
@@ -221,7 +156,6 @@ impl McpKnowledgeFixture {
         Ok(Self {
             state,
             temp_database,
-            temp_arango,
             workspace_id: workspace.id,
             library_id: library.id,
             library_ref: format!("{}/{}", workspace.slug, library.slug),
@@ -230,7 +164,6 @@ impl McpKnowledgeFixture {
 
     async fn cleanup(self) -> Result<()> {
         self.state.persistence.postgres.close().await;
-        self.temp_arango.drop().await?;
         self.temp_database.drop().await
     }
 
@@ -335,11 +268,8 @@ impl McpKnowledgeFixture {
         .with_context(|| format!("failed to create content document {external_key}"))?;
         let now = Utc::now();
         self.state
-            .arango_document_store
+            .document_store
             .upsert_document(&KnowledgeDocumentRow {
-                key: document.id.to_string(),
-                arango_id: None,
-                arango_rev: None,
                 document_id: document.id,
                 workspace_id: self.workspace_id,
                 library_id: self.library_id,
@@ -359,7 +289,7 @@ impl McpKnowledgeFixture {
                 document_role: "primary".to_string(),
             })
             .await
-            .with_context(|| format!("failed to upsert arango document {external_key}"))
+            .with_context(|| format!("failed to upsert knowledge document {external_key}"))
     }
 
     async fn seed_graph_quality_fixture(&self) -> Result<SeededGraphFixture> {
@@ -643,7 +573,7 @@ async fn terminate_database_connections(postgres: &PgPool, database_name: &str) 
 }
 
 #[tokio::test]
-#[ignore = "requires local postgres, redis, and arango services"]
+#[ignore = "requires local postgres and redis services"]
 async fn mcp_tool_visibility_tracks_grants_without_legacy_fallbacks() -> Result<()> {
     let fixture = McpKnowledgeFixture::create().await?;
 
@@ -722,7 +652,7 @@ async fn mcp_tool_visibility_tracks_grants_without_legacy_fallbacks() -> Result<
 }
 
 #[tokio::test]
-#[ignore = "requires local postgres, redis, and arango services"]
+#[ignore = "requires local postgres and redis services"]
 async fn graph_tools_return_ranked_coherent_subgraphs_instead_of_orphaned_slices() -> Result<()> {
     let fixture = McpKnowledgeFixture::create().await?;
 
@@ -857,7 +787,7 @@ async fn graph_tools_return_ranked_coherent_subgraphs_instead_of_orphaned_slices
 }
 
 #[tokio::test]
-#[ignore = "requires local postgres, redis, and arango services"]
+#[ignore = "requires local postgres and redis services"]
 async fn upload_status_and_grounded_search_read_share_canonical_knowledge_truth() -> Result<()> {
     let fixture = McpKnowledgeFixture::create().await?;
 

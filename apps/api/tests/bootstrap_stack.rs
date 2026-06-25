@@ -1,20 +1,10 @@
 use anyhow::{Context, Result};
-use reqwest::Client;
 use sqlx::{PgPool, postgres::PgPoolOptions};
 use uuid::Uuid;
 
 use ironrag_backend::{
     app::{config::Settings, state::AppState},
-    infra::{
-        arangodb::collections::{
-            DOCUMENT_COLLECTIONS, EDGE_COLLECTIONS, KNOWLEDGE_CHUNK_VECTOR_COLLECTION,
-            KNOWLEDGE_CHUNK_VECTOR_INDEX, KNOWLEDGE_ENTITY_VECTOR_COLLECTION,
-            KNOWLEDGE_ENTITY_VECTOR_INDEX, KNOWLEDGE_GRAPH_NAME, KNOWLEDGE_PERSISTENT_INDEXES,
-            KNOWLEDGE_SEARCH_VIEW, chunk_vector_collection_for_dim,
-            entity_vector_collection_for_dim,
-        },
-        persistence::{canonical_ai_catalog_seeded, canonical_baseline_present},
-    },
+    infra::persistence::{canonical_ai_catalog_seeded, canonical_baseline_present},
 };
 
 const SEEDED_PROVIDER_COUNT: i64 = 3;
@@ -69,187 +59,9 @@ impl TempDatabase {
     }
 }
 
-struct TempArangoDatabase {
-    name: String,
-    base_url: String,
-    username: String,
-    password: String,
-    http: Client,
-}
-
-impl TempArangoDatabase {
-    fn new(base_url: &str, username: &str, password: &str) -> Result<Self> {
-        Ok(Self {
-            name: format!("bootstrap_stack_{}", Uuid::now_v7().simple()),
-            base_url: base_url.trim_end_matches('/').to_string(),
-            username: username.to_string(),
-            password: password.to_string(),
-            http: Client::builder()
-                .timeout(std::time::Duration::from_secs(15))
-                .build()
-                .context("failed to build bootstrap-stack arango client")?,
-        })
-    }
-
-    fn db_api_url(&self, path: &str) -> String {
-        format!("{}/_db/{}/{}", self.base_url, self.name, path.trim_start_matches('/'))
-    }
-
-    async fn database_exists(&self) -> Result<bool> {
-        let response = self
-            .http
-            .get(format!("{}/_api/database/user", self.base_url))
-            .basic_auth(&self.username, Some(&self.password))
-            .send()
-            .await
-            .context("failed to list Arango databases")?;
-        let payload = response
-            .error_for_status()
-            .context("Arango database listing failed")?
-            .json::<serde_json::Value>()
-            .await
-            .context("failed to decode Arango database list")?;
-        let names = payload
-            .get("result")
-            .and_then(serde_json::Value::as_array)
-            .context("Arango database list missing `result`")?;
-        Ok(names.iter().any(|name| name.as_str() == Some(self.name.as_str())))
-    }
-
-    async fn collection_names(&self) -> Result<Vec<String>> {
-        let payload = self
-            .http
-            .get(self.db_api_url("_api/collection"))
-            .basic_auth(&self.username, Some(&self.password))
-            .send()
-            .await
-            .context("failed to list Arango collections")?
-            .error_for_status()
-            .context("Arango collection listing failed")?
-            .json::<serde_json::Value>()
-            .await
-            .context("failed to decode Arango collection list")?;
-        let collections = payload
-            .get("result")
-            .and_then(serde_json::Value::as_array)
-            .context("Arango collection list missing `result`")?;
-        Ok(collections
-            .iter()
-            .filter_map(|row| row.get("name").and_then(serde_json::Value::as_str))
-            .filter(|name| !name.starts_with('_'))
-            .map(ToOwned::to_owned)
-            .collect())
-    }
-
-    async fn has_view(&self, view_name: &str) -> Result<bool> {
-        let response = self
-            .http
-            .get(self.db_api_url(&format!("_api/view/{view_name}")))
-            .basic_auth(&self.username, Some(&self.password))
-            .send()
-            .await
-            .context("failed to read Arango view")?;
-        Ok(response.status().is_success())
-    }
-
-    async fn has_graph(&self, graph_name: &str) -> Result<bool> {
-        let response = self
-            .http
-            .get(self.db_api_url(&format!("_api/gharial/{graph_name}")))
-            .basic_auth(&self.username, Some(&self.password))
-            .send()
-            .await
-            .context("failed to read Arango named graph")?;
-        Ok(response.status().is_success())
-    }
-
-    async fn has_index(&self, collection: &str, index_name: &str) -> Result<bool> {
-        let payload = self
-            .http
-            .get(self.db_api_url(&format!("_api/index?collection={collection}")))
-            .basic_auth(&self.username, Some(&self.password))
-            .send()
-            .await
-            .context("failed to list Arango indexes")?
-            .error_for_status()
-            .context("Arango index listing failed")?
-            .json::<serde_json::Value>()
-            .await
-            .context("failed to decode Arango index list")?;
-        let indexes = payload
-            .get("indexes")
-            .and_then(serde_json::Value::as_array)
-            .context("Arango index list missing `indexes`")?;
-        Ok(indexes
-            .iter()
-            .any(|row| row.get("name").and_then(serde_json::Value::as_str) == Some(index_name)))
-    }
-
-    async fn has_persistent_index(
-        &self,
-        collection: &str,
-        index_name: &str,
-        fields: &[&str],
-        unique: bool,
-        sparse: bool,
-    ) -> Result<bool> {
-        let payload = self
-            .http
-            .get(self.db_api_url(&format!("_api/index?collection={collection}")))
-            .basic_auth(&self.username, Some(&self.password))
-            .send()
-            .await
-            .context("failed to list Arango indexes")?
-            .error_for_status()
-            .context("Arango index listing failed")?
-            .json::<serde_json::Value>()
-            .await
-            .context("failed to decode Arango index list")?;
-        let indexes = payload
-            .get("indexes")
-            .and_then(serde_json::Value::as_array)
-            .context("Arango index list missing `indexes`")?;
-
-        Ok(indexes.iter().any(|row| {
-            row.get("name").and_then(serde_json::Value::as_str) == Some(index_name)
-                && row.get("type").and_then(serde_json::Value::as_str) == Some("persistent")
-                && row.get("fields").and_then(serde_json::Value::as_array).is_some_and(
-                    |actual_fields| {
-                        actual_fields.len() == fields.len()
-                            && actual_fields
-                                .iter()
-                                .zip(fields.iter().copied())
-                                .all(|(actual, expected)| actual.as_str() == Some(expected))
-                    },
-                )
-                && row.get("unique").and_then(serde_json::Value::as_bool) == Some(unique)
-                && row.get("sparse").and_then(serde_json::Value::as_bool) == Some(sparse)
-        }))
-    }
-
-    async fn drop(self) -> Result<()> {
-        let response = self
-            .http
-            .delete(format!("{}/_api/database/{}", self.base_url, self.name))
-            .basic_auth(&self.username, Some(&self.password))
-            .send()
-            .await
-            .context("failed to delete Arango test database")?;
-        if response.status().is_success() || response.status().as_u16() == 404 {
-            return Ok(());
-        }
-        Err(anyhow::anyhow!(
-            "failed to delete Arango test database {}: status {}",
-            self.name,
-            response.status()
-        ))
-    }
-}
-
 struct BootstrapStackFixture {
     state: AppState,
     temp_database: TempDatabase,
-    temp_arango: TempArangoDatabase,
 }
 
 impl BootstrapStackFixture {
@@ -257,23 +69,16 @@ impl BootstrapStackFixture {
         let mut settings =
             Settings::from_env().context("failed to load settings for bootstrap-stack test")?;
         let temp_database = TempDatabase::create(&settings.database_url).await?;
-        let temp_arango = TempArangoDatabase::new(
-            &settings.arangodb_url,
-            &settings.arangodb_username,
-            &settings.arangodb_password,
-        )?;
         settings.database_url = temp_database.database_url.clone();
-        settings.arangodb_database = temp_arango.name.clone();
         settings.destructive_fresh_bootstrap_required = true;
 
         let state = AppState::new(settings).await?;
-        Ok(Self { state, temp_database, temp_arango })
+        Ok(Self { state, temp_database })
     }
 
     async fn cleanup(self) -> Result<()> {
         self.state.persistence.postgres.close().await;
-        self.temp_database.drop().await?;
-        self.temp_arango.drop().await
+        self.temp_database.drop().await
     }
 }
 
@@ -313,9 +118,18 @@ async fn scalar_count(postgres: &PgPool, table_name: &str) -> Result<i64> {
         .with_context(|| format!("failed to count rows in {table_name}"))
 }
 
+async fn table_exists(postgres: &PgPool, table_name: &str) -> Result<bool> {
+    sqlx::query_scalar::<_, Option<String>>("select to_regclass($1)::text")
+        .bind(table_name)
+        .fetch_one(postgres)
+        .await
+        .with_context(|| format!("failed to check table {table_name}"))
+        .map(|table| table.is_some())
+}
+
 #[tokio::test]
-#[ignore = "requires local postgres, redis, and arango services"]
-async fn fresh_startup_bootstraps_postgres_catalog_and_arango_knowledge_plane() -> Result<()> {
+#[ignore = "requires local postgres and redis services"]
+async fn fresh_startup_bootstraps_postgres_catalog_and_knowledge_plane() -> Result<()> {
     let fixture = BootstrapStackFixture::create().await?;
 
     let result = async {
@@ -334,72 +148,18 @@ async fn fresh_startup_bootstraps_postgres_catalog_and_arango_knowledge_plane() 
             SEEDED_PRICE_COUNT
         );
 
-        assert!(fixture.temp_arango.database_exists().await?);
-
-        let collections = fixture.temp_arango.collection_names().await?;
-        for collection in DOCUMENT_COLLECTIONS {
+        for table in [
+            "knowledge_document",
+            "knowledge_revision",
+            "knowledge_chunk",
+            "knowledge_chunk_vector",
+            "knowledge_entity",
+            "knowledge_relation",
+            "knowledge_context_bundle",
+        ] {
             assert!(
-                collections.iter().any(|candidate| candidate == collection),
-                "missing document collection {collection}"
-            );
-        }
-        for collection in EDGE_COLLECTIONS {
-            assert!(
-                collections.iter().any(|candidate| candidate == collection),
-                "missing edge collection {collection}"
-            );
-        }
-
-        assert!(fixture.temp_arango.has_view(KNOWLEDGE_SEARCH_VIEW).await?);
-        assert!(fixture.temp_arango.has_graph(KNOWLEDGE_GRAPH_NAME).await?);
-        assert!(
-            fixture
-                .temp_arango
-                .has_index(KNOWLEDGE_CHUNK_VECTOR_COLLECTION, KNOWLEDGE_CHUNK_VECTOR_INDEX)
-                .await?
-        );
-        assert!(
-            fixture
-                .temp_arango
-                .has_index(KNOWLEDGE_ENTITY_VECTOR_COLLECTION, KNOWLEDGE_ENTITY_VECTOR_INDEX)
-                .await?
-        );
-
-        // Per-dim vector shards (`knowledge_chunk_vector_d<dim>` /
-        // `knowledge_entity_vector_d<dim>`) are lazy-created on the first
-        // write for that dim. A fresh bootstrap has never written a vector,
-        // so for any sample dim the per-dim shard must not exist yet —
-        // only the legacy single-dim collection is materialised at
-        // bootstrap. Sample two dims to make the assertion robust to
-        // future default-binding changes.
-        for sample_dim in [3u64, 1536u64] {
-            let chunk_shard = chunk_vector_collection_for_dim(sample_dim);
-            let entity_shard = entity_vector_collection_for_dim(sample_dim);
-            assert!(
-                !collections.iter().any(|candidate| candidate == &chunk_shard),
-                "per-dim chunk vector shard {chunk_shard} must not exist before any write"
-            );
-            assert!(
-                !collections.iter().any(|candidate| candidate == &entity_shard),
-                "per-dim entity vector shard {entity_shard} must not exist before any write"
-            );
-        }
-
-        for index in KNOWLEDGE_PERSISTENT_INDEXES {
-            assert!(
-                fixture
-                    .temp_arango
-                    .has_persistent_index(
-                        index.collection,
-                        index.name,
-                        index.fields,
-                        index.unique,
-                        index.sparse,
-                    )
-                    .await?,
-                "missing or mismatched persistent index {} on {}",
-                index.name,
-                index.collection
+                table_exists(&fixture.state.persistence.postgres, table).await?,
+                "missing {table}"
             );
         }
 

@@ -5,14 +5,6 @@ use std::{collections::HashMap, time::Duration};
 use redis::Client as RedisClient;
 use sqlx::{PgPool, Row, postgres::PgPoolOptions};
 
-use crate::infra::arangodb::{
-    client::ArangoClient,
-    collections::{
-        DOCUMENT_COLLECTIONS, KNOWLEDGE_CHUNK_VECTOR_COLLECTION, KNOWLEDGE_CHUNK_VECTOR_INDEX,
-        KNOWLEDGE_ENTITY_VECTOR_COLLECTION, KNOWLEDGE_ENTITY_VECTOR_INDEX, KNOWLEDGE_GRAPH_NAME,
-        KNOWLEDGE_PERSISTENT_INDEXES, KNOWLEDGE_SEARCH_VIEW,
-    },
-};
 use crate::{app::config::Settings, domains::deployment::ServiceRole};
 
 // Forces the crate to rebuild whenever the migration set changes, including file deletions.
@@ -299,72 +291,6 @@ pub async fn validate_canonical_bootstrap_state(
         canonical_ai_catalog_seeded(postgres).await?,
         "canonical bootstrap validation failed: ai_provider_catalog, ai_model_catalog, or ai_price_catalog is missing seeded rows after migration"
     );
-
-    Ok(())
-}
-
-pub async fn validate_arango_bootstrap_state(
-    arango_client: &ArangoClient,
-    settings: &Settings,
-) -> anyhow::Result<()> {
-    for collection in DOCUMENT_COLLECTIONS {
-        anyhow::ensure!(
-            arango_client.collection_exists(collection).await?,
-            "canonical bootstrap validation failed: required Arango collection `{collection}` is missing",
-        );
-    }
-
-    for index in KNOWLEDGE_PERSISTENT_INDEXES {
-        anyhow::ensure!(
-            arango_client
-                .persistent_index_matches(
-                    index.collection,
-                    index.name,
-                    index.fields,
-                    index.unique,
-                    index.sparse
-                )
-                .await?,
-            "canonical bootstrap validation failed: required Arango persistent index `{}` on `{}` is missing or mismatched",
-            index.name,
-            index.collection,
-        );
-    }
-
-    if settings.arangodb_bootstrap_views {
-        anyhow::ensure!(
-            arango_client.view_exists(KNOWLEDGE_SEARCH_VIEW).await?,
-            "canonical bootstrap validation failed: required Arango view `{KNOWLEDGE_SEARCH_VIEW}` is missing",
-        );
-    }
-
-    if settings.arangodb_bootstrap_graph {
-        anyhow::ensure!(
-            arango_client.graph_exists(KNOWLEDGE_GRAPH_NAME).await?,
-            "canonical bootstrap validation failed: required Arango named graph `{KNOWLEDGE_GRAPH_NAME}` is missing",
-        );
-    }
-
-    if settings.arangodb_bootstrap_vector_indexes {
-        anyhow::ensure!(
-            arango_client
-                .vector_index_exists(
-                    KNOWLEDGE_CHUNK_VECTOR_COLLECTION,
-                    KNOWLEDGE_CHUNK_VECTOR_INDEX
-                )
-                .await?,
-            "canonical bootstrap validation failed: chunk vector index `{KNOWLEDGE_CHUNK_VECTOR_INDEX}` is missing",
-        );
-        anyhow::ensure!(
-            arango_client
-                .vector_index_exists(
-                    KNOWLEDGE_ENTITY_VECTOR_COLLECTION,
-                    KNOWLEDGE_ENTITY_VECTOR_INDEX
-                )
-                .await?,
-            "canonical bootstrap validation failed: entity vector index `{KNOWLEDGE_ENTITY_VECTOR_INDEX}` is missing",
-        );
-    }
 
     Ok(())
 }

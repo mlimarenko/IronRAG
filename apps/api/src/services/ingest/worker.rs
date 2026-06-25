@@ -957,10 +957,9 @@ async fn run_canonical_ingest_pipeline(
 
     let extract_content_start = Instant::now();
 
-    // Read revision metadata from Postgres — the canonical source of truth.
-    // ArangoDB is a derived cache; if the revision hasn't been mirrored yet
-    // (e.g. after an ArangoDB outage during upload) populate it here so the
-    // pipeline has a consistent view.
+    // Read revision metadata from Postgres — the canonical source of truth. If
+    // the knowledge-plane row has not been materialized yet, populate it here so
+    // the pipeline has a consistent view.
     let revision_row =
         content_repository::get_revision_by_id(&state.persistence.postgres, revision_id)
             .await
@@ -987,21 +986,21 @@ async fn run_canonical_ingest_pipeline(
         );
     }
 
-    let arango_revision = state
-        .arango_document_store
+    let knowledge_revision = state
+        .document_store
         .get_revision(revision_id)
         .await
-        .context("failed to load knowledge revision from arango")?;
+        .context("failed to load knowledge revision from store")?;
 
-    let revision = if let Some(existing) = arango_revision {
+    let revision = if let Some(existing) = knowledge_revision {
         existing
     } else {
         tracing::info!(
             %revision_id,
-            "revision missing from ArangoDB — self-healing from Postgres"
+            "revision missing from knowledge store — self-healing from Postgres"
         );
 
-        // Ensure the document shell exists in ArangoDB before writing the
+        // Ensure the document shell exists before writing the
         // revision — write_revision also upserts a document→revision edge
         // which requires the document node to be present.
         let document = content_repository::get_document_by_id(
@@ -1013,10 +1012,10 @@ async fn run_canonical_ingest_pipeline(
         .with_context(|| format!("document {} not found in Postgres", revision_row.document_id))?;
 
         if state
-            .arango_document_store
+            .document_store
             .get_document(revision_row.document_id)
             .await
-            .context("failed to check document in ArangoDB")?
+            .context("failed to check document in knowledge store")?
             .is_none()
         {
             state
@@ -1036,7 +1035,7 @@ async fn run_canonical_ingest_pipeline(
                 )
                 .await
                 .with_context(|| {
-                    format!("failed to self-heal knowledge document {} in ArangoDB", document.id)
+                    format!("failed to self-heal knowledge document {} in store", document.id)
                 })?;
         }
 
@@ -1066,16 +1065,18 @@ async fn run_canonical_ingest_pipeline(
             superseded_by_revision_id: None,
         };
         state.canonical_services.knowledge.write_revision(state, cmd).await.with_context(|| {
-            format!("failed to self-heal knowledge revision {revision_id} in ArangoDB")
+            format!("failed to self-heal knowledge revision {revision_id} in store")
         })?;
-        // Re-read from ArangoDB so we have the canonical row.
+        // Re-read from the knowledge store so we have the canonical row.
         state
-            .arango_document_store
+            .document_store
             .get_revision(revision_id)
             .await
-            .context("failed to load self-healed revision from arango")?
+            .context("failed to load self-healed revision from knowledge store")?
             .with_context(|| {
-                format!("self-healed revision {revision_id} was not persisted to arango")
+                format!(
+                    "self-healed revision {revision_id} was not persisted to the knowledge store"
+                )
             })?
     };
 
@@ -1150,11 +1151,11 @@ async fn run_canonical_ingest_pipeline(
         .await
         .context("failed to persist extracted content")?;
 
-    // Persist image_checksum as a supplementary field on the Arango revision document.
+    // Persist image_checksum as a supplementary field on the knowledge revision.
     // Fire-and-forget: a write failure is non-fatal (worst case: chunk reuse skipped on next revision).
     if let Some(ref checksum) = extracted_content.extraction_plan.image_checksum {
         if let Err(e) = state
-            .arango_document_store
+            .document_store
             .update_revision_image_checksum(revision_id, Some(checksum.as_str()))
             .await
         {
@@ -1969,7 +1970,7 @@ async fn run_canonical_ingest_pipeline(
     let vector_state_label = if embed_chunk_success { "ready" } else { "failed" };
     let vector_ready_at = embed_chunk_success.then_some(now);
     let _ = state
-        .arango_document_store
+        .document_store
         .update_revision_readiness(
             revision_id,
             "ready",
@@ -2003,13 +2004,10 @@ async fn run_canonical_ingest_pipeline(
     // completes atomically or stays in the failed bucket where
     // operators can see it.
     //
-    // Not a Postgres `Transaction` yet because `promote_document_head`
-    // writes to both Postgres and Arango and crossing databases inside
-    // one `BEGIN` is a larger refactor (see
-    // `services/content/service/revision.rs::promote_document_head`).
-    // The fail-loud ordering gives us the same drift-prevention
-    // guarantee for all future ingests without changing the executor
-    // plumbing.
+    // Not wrapped in a larger transaction yet because `promote_document_head`
+    // coordinates multiple persistence paths. The fail-loud ordering gives us
+    // the same drift-prevention guarantee for all future ingests without
+    // changing the executor plumbing.
     if let Some(mutation_id) = job.mutation_id {
         let items =
             content_repository::list_mutation_items(&state.persistence.postgres, mutation_id)
@@ -2047,10 +2045,10 @@ async fn run_canonical_ingest_pipeline(
         })?;
     }
 
-    // Promote the document head through the canonical service so
-    // Postgres and Arango stay aligned. Runs AFTER mutation updates
-    // succeed — any earlier error above has already bubbled out and
-    // prevented the head from reaching the readable-revision state.
+    // Promote the document head through the canonical service so persistence
+    // projections stay aligned. Runs AFTER mutation updates succeed — any
+    // earlier error above has already bubbled out and prevented the head from
+    // reaching the readable-revision state.
     state
         .canonical_services
         .content

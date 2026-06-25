@@ -5,8 +5,6 @@
 //! ```text
 //! manifest.json                         # first — declares include kinds and table list
 //! postgres/<table>/part-NNNNNN.ndjson   # chunked per table, 64 MiB cap per part
-//! arango/<collection>/part-NNNNNN.ndjson
-//! arango-edges/<collection>/part-NNNNNN.ndjson
 //! blobs/<escaped-storage-key>           # raw bytes, one entry per content blob
 //! summary.json                          # last — row counts observed during export
 //! ```
@@ -41,30 +39,11 @@ use uuid::Uuid;
 
 use crate::{
     app::state::AppState,
-    infra::arangodb::{
-        client::ArangoClient,
-        collections::{
-            KNOWLEDGE_BLOCK_CHUNK_EDGE, KNOWLEDGE_BUNDLE_CHUNK_EDGE, KNOWLEDGE_BUNDLE_ENTITY_EDGE,
-            KNOWLEDGE_BUNDLE_EVIDENCE_EDGE, KNOWLEDGE_BUNDLE_RELATION_EDGE,
-            KNOWLEDGE_CHUNK_COLLECTION, KNOWLEDGE_CHUNK_MENTIONS_ENTITY_EDGE,
-            KNOWLEDGE_CHUNK_VECTOR_COLLECTION, KNOWLEDGE_CONTEXT_BUNDLE_COLLECTION,
-            KNOWLEDGE_DOCUMENT_COLLECTION, KNOWLEDGE_DOCUMENT_REVISION_EDGE,
-            KNOWLEDGE_ENTITY_COLLECTION, KNOWLEDGE_ENTITY_VECTOR_COLLECTION,
-            KNOWLEDGE_EVIDENCE_COLLECTION, KNOWLEDGE_EVIDENCE_SOURCE_EDGE,
-            KNOWLEDGE_EVIDENCE_SUPPORTS_ENTITY_EDGE, KNOWLEDGE_EVIDENCE_SUPPORTS_RELATION_EDGE,
-            KNOWLEDGE_FACT_EVIDENCE_EDGE, KNOWLEDGE_RELATION_COLLECTION,
-            KNOWLEDGE_RELATION_OBJECT_EDGE, KNOWLEDGE_RELATION_SUBJECT_EDGE,
-            KNOWLEDGE_REVISION_BLOCK_EDGE, KNOWLEDGE_REVISION_CHUNK_EDGE,
-            KNOWLEDGE_REVISION_COLLECTION, KNOWLEDGE_STRUCTURED_BLOCK_COLLECTION,
-            KNOWLEDGE_STRUCTURED_REVISION_COLLECTION, KNOWLEDGE_TECHNICAL_FACT_COLLECTION,
-        },
-    },
-    services::content::error::ContentServiceError,
+    infra::repositories::content_repository,
+    services::content::{error::ContentServiceError, storage::StashedContentDirectory},
 };
 
-/// Prefix of every per-dim chunk-vector relation/shard. Matches both the
-/// legacy Arango collection shape and the new PostgreSQL runtime vector
-/// relation shape.
+/// Prefix of every per-dim chunk-vector relation/shard.
 const PER_DIM_CHUNK_VECTOR_PREFIX: &str = "knowledge_chunk_vector_d";
 /// Prefix of every per-dim entity-vector shard.
 const PER_DIM_ENTITY_VECTOR_PREFIX: &str = "knowledge_entity_vector_d";
@@ -73,24 +52,6 @@ const PG_HNSW_DEFAULT_BUILD_BUDGET_BYTES: u64 = 3_000_000_000;
 const PG_HNSW_MIN_M: u64 = 8;
 const PG_HNSW_MID_M: u64 = 16;
 const PG_HNSW_LARGE_M: u64 = 24;
-
-/// `true` when `name` refers to any vector collection — per-dim
-/// chunk/entity shards or the legacy single-dim
-/// `knowledge_chunk_vector` / `knowledge_entity_vector` collections.
-fn is_vector_collection_name(name: &str) -> bool {
-    is_per_dim_vector_collection_name(name)
-        || name == KNOWLEDGE_CHUNK_VECTOR_COLLECTION
-        || name == KNOWLEDGE_ENTITY_VECTOR_COLLECTION
-}
-
-/// `true` if `name` is a per-dim vector shard such as
-/// `knowledge_chunk_vector_d1024`, `knowledge_entity_vector_d3072`, or
-/// an Arango per-library shard with the same prefix plus `_l<hex>`.
-/// Used by the snapshot validator to accept runtime-discovered shards
-/// alongside the static collection list.
-fn is_per_dim_vector_collection_name(name: &str) -> bool {
-    parse_per_dim_vector_collection_dim(name).is_some()
-}
 
 /// Parse the dim suffix off a per-dim vector shard name.
 /// Returns `None` when the name does not match the per-dim shape.
@@ -102,21 +63,10 @@ fn parse_per_dim_vector_collection_dim(name: &str) -> Option<u64> {
 }
 
 fn parse_per_dim_vector_suffix_dim(suffix: &str) -> Option<u64> {
-    let (dim, library_suffix) =
-        suffix.split_once("_l").map_or((suffix, None), |(dim, library)| (dim, Some(library)));
-    if dim.is_empty() || !dim.bytes().all(|b| b.is_ascii_digit()) {
+    if suffix.is_empty() || !suffix.bytes().all(|b| b.is_ascii_digit()) {
         return None;
     }
-    if let Some(library_suffix) = library_suffix
-        && !is_lowercase_hex_suffix(library_suffix)
-    {
-        return None;
-    }
-    dim.parse::<u64>().ok()
-}
-
-fn is_lowercase_hex_suffix(suffix: &str) -> bool {
-    !suffix.is_empty() && suffix.bytes().all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+    suffix.parse::<u64>().ok()
 }
 
 fn is_canonical_per_dim_vector_collection_name(name: &str) -> bool {
@@ -126,13 +76,12 @@ fn is_canonical_per_dim_vector_collection_name(name: &str) -> bool {
     else {
         return false;
     };
-    !suffix.contains("_l") && parse_per_dim_vector_suffix_dim(suffix).is_some()
+    parse_per_dim_vector_suffix_dim(suffix).is_some()
 }
 
 /// `true` when `name` is a per-dim chunk-vector shard
-/// (`knowledge_chunk_vector_d<dim>`), including Arango per-library
-/// shards (`knowledge_chunk_vector_d<dim>_l<hex>`). Used to decide whether the
-/// restore path should ensure a chunk-side vs entity-side shard.
+/// (`knowledge_chunk_vector_d<dim>`). Used to decide whether the restore path
+/// should ensure a chunk-side vs entity-side relation.
 fn is_per_dim_chunk_vector_collection_name(name: &str) -> bool {
     name.strip_prefix(PER_DIM_CHUNK_VECTOR_PREFIX)
         .is_some_and(|suffix| parse_per_dim_vector_suffix_dim(suffix).is_some())
@@ -164,9 +113,8 @@ pub struct VectorShardEntry {
 /// Schema version of the snapshot archive format. Bumped any time the
 /// manifest shape or on-disk layout changes in a backwards-incompatible
 /// way.
-pub const SNAPSHOT_SCHEMA_VERSION: u32 = 6;
-// LEGACY-SHIM(old-archive-compat, remove>=0.7.0): lower bound of 5 admits v5 (ArangoDB-era) archives — safe to raise to 6 once no v5 archives remain in the field.
-const MIN_SUPPORTED_SNAPSHOT_SCHEMA_VERSION: u32 = 5;
+pub const SNAPSHOT_SCHEMA_VERSION: u32 = 7;
+const MIN_SUPPORTED_SNAPSHOT_SCHEMA_VERSION: u32 = 6;
 
 /// Soft cap for a single NDJSON part inside the tar stream. Small enough
 /// that no individual table part holds the entire table in memory, large
@@ -213,8 +161,7 @@ pub enum IncludeKind {
     /// deployment's existing AI configuration.
     AiConfig,
     /// Everything owned by a library that is NOT a raw source file —
-    /// postgres rows (content + runtime graph) and arango documents /
-    /// edges (knowledge base).
+    /// PostgreSQL rows for content, runtime graph, and knowledge data.
     LibraryData,
     /// Original uploaded files (PDFs, docx, images, …) keyed by
     /// `content_revision.storage_key`.
@@ -276,12 +223,10 @@ pub enum OverwriteMode {
     /// Fail the request if the library already exists (default).
     #[default]
     Reject,
-    /// Delete all owned content/runtime rows, graph documents, and blobs
-    /// under this library id, then insert everything from the archive
-    /// under the selected library identity. Not atomic across Postgres,
-    /// Arango, and the blob store — a failed restore may leave graph/blob
-    /// state partially refreshed, and the same archive must be re-applied
-    /// to converge.
+    /// Delete all owned content/runtime rows and blobs under this library id,
+    /// then insert everything from the archive under the selected library
+    /// identity. PostgreSQL rows are restored atomically; blob writes are staged
+    /// and rolled back separately when possible.
     Replace,
 }
 
@@ -317,6 +262,39 @@ enum RestoreStatsMode {
     Deferred,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TargetRestoreFootprint {
+    Empty,
+    Populated,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RestoreLibraryDataAction {
+    Skip,
+    ImportIntoEmptyTarget,
+    ReplaceTarget,
+    RejectPopulatedTarget,
+}
+
+fn plan_restore_library_data(
+    include_kinds: &[IncludeKind],
+    overwrite: OverwriteMode,
+    target_footprint: TargetRestoreFootprint,
+) -> RestoreLibraryDataAction {
+    if !include_kinds.contains(&IncludeKind::LibraryData) {
+        return RestoreLibraryDataAction::Skip;
+    }
+    match (overwrite, target_footprint) {
+        (OverwriteMode::Reject, TargetRestoreFootprint::Empty) => {
+            RestoreLibraryDataAction::ImportIntoEmptyTarget
+        }
+        (OverwriteMode::Reject, TargetRestoreFootprint::Populated) => {
+            RestoreLibraryDataAction::RejectPopulatedTarget
+        }
+        (OverwriteMode::Replace, _) => RestoreLibraryDataAction::ReplaceTarget,
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct SnapshotManifest {
     pub schema_version: u32,
@@ -326,16 +304,12 @@ pub struct SnapshotManifest {
     pub source_version: String,
     pub include_kinds: Vec<IncludeKind>,
     pub postgres_tables: Vec<String>,
-    pub arango_doc_collections: Vec<String>,
-    pub arango_edge_collections: Vec<String>,
     pub has_blobs: bool,
     /// Per-dim vector shards (`knowledge_chunk_vector_d<dim>` /
     /// `knowledge_entity_vector_d<dim>`) observed at export time. The
     /// restore path lazy-ensures each shard before streaming its rows
     /// back so the target deployment ends up with the same per-dim
-    /// layout the source had. `#[serde(default)]` keeps older v5
-    /// archives that pre-date per-library vector dimensions parseable.
-    // LEGACY-SHIM(old-archive-compat, remove>=0.7.0): `#[serde(default)]` tolerates v5 manifests that lack `vector_shards` — safe to remove once no pre-per-dim-vector (v5) archives remain in the field.
+    /// layout the source had. `#[serde(default)]` keeps v6 manifests parseable.
     #[serde(default)]
     pub vector_shards: Vec<VectorShardEntry>,
 }
@@ -343,8 +317,6 @@ pub struct SnapshotManifest {
 #[derive(Debug, Default, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct SnapshotSummary {
     pub postgres_row_counts: BTreeMap<String, u64>,
-    pub arango_doc_counts: BTreeMap<String, u64>,
-    pub arango_edge_counts: BTreeMap<String, u64>,
     pub blob_count: u64,
     pub missing_blob_keys: Vec<String>,
 }
@@ -353,9 +325,6 @@ pub struct SnapshotSummary {
 pub struct SnapshotImportReport {
     pub library_id: Uuid,
     pub postgres_rows_by_table: Vec<(String, u64)>,
-    pub arango_docs_by_collection: Vec<(String, u64)>,
-    pub arango_edges_by_collection: Vec<(String, u64)>,
-    pub skipped_arango_edges_by_collection: Vec<(String, u64)>,
     pub blobs_restored: u64,
     pub overwrite_mode: OverwriteMode,
     pub include_kinds: Vec<IncludeKind>,
@@ -450,39 +419,6 @@ const POSTGRES_AI_CONFIG_TABLES: &[&str] = &[
 
 const POSTGRES_LIBRARY_ROOT_TABLES: &[&str] = &["catalog_library"];
 
-const ARANGO_DOC_COLLECTIONS: &[&str] = &[
-    KNOWLEDGE_DOCUMENT_COLLECTION,
-    KNOWLEDGE_REVISION_COLLECTION,
-    KNOWLEDGE_CHUNK_COLLECTION,
-    KNOWLEDGE_STRUCTURED_REVISION_COLLECTION,
-    KNOWLEDGE_STRUCTURED_BLOCK_COLLECTION,
-    KNOWLEDGE_TECHNICAL_FACT_COLLECTION,
-    KNOWLEDGE_CHUNK_VECTOR_COLLECTION,
-    KNOWLEDGE_ENTITY_VECTOR_COLLECTION,
-    KNOWLEDGE_ENTITY_COLLECTION,
-    KNOWLEDGE_RELATION_COLLECTION,
-    KNOWLEDGE_EVIDENCE_COLLECTION,
-    KNOWLEDGE_CONTEXT_BUNDLE_COLLECTION,
-];
-
-const ARANGO_EDGE_COLLECTIONS: &[&str] = &[
-    KNOWLEDGE_DOCUMENT_REVISION_EDGE,
-    KNOWLEDGE_REVISION_BLOCK_EDGE,
-    KNOWLEDGE_REVISION_CHUNK_EDGE,
-    KNOWLEDGE_BLOCK_CHUNK_EDGE,
-    KNOWLEDGE_CHUNK_MENTIONS_ENTITY_EDGE,
-    KNOWLEDGE_RELATION_SUBJECT_EDGE,
-    KNOWLEDGE_RELATION_OBJECT_EDGE,
-    KNOWLEDGE_EVIDENCE_SOURCE_EDGE,
-    KNOWLEDGE_FACT_EVIDENCE_EDGE,
-    KNOWLEDGE_EVIDENCE_SUPPORTS_ENTITY_EDGE,
-    KNOWLEDGE_EVIDENCE_SUPPORTS_RELATION_EDGE,
-    KNOWLEDGE_BUNDLE_CHUNK_EDGE,
-    KNOWLEDGE_BUNDLE_ENTITY_EDGE,
-    KNOWLEDGE_BUNDLE_RELATION_EDGE,
-    KNOWLEDGE_BUNDLE_EVIDENCE_EDGE,
-];
-
 #[derive(Debug)]
 struct SnapshotRowScope {
     source_library_id: Uuid,
@@ -502,13 +438,6 @@ struct SnapshotRowScope {
     revision_ids: HashSet<Uuid>,
     mutation_ids: HashSet<Uuid>,
     declared_blob_keys: HashSet<(String, String)>,
-    arango_document_ids: HashSet<String>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum SnapshotArangoRowAction {
-    Import,
-    SkipDanglingEdge,
 }
 
 impl SnapshotRowScope {
@@ -528,7 +457,6 @@ impl SnapshotRowScope {
             revision_ids: HashSet::new(),
             mutation_ids: HashSet::new(),
             declared_blob_keys: HashSet::new(),
-            arango_document_ids: HashSet::new(),
         }
     }
 
@@ -685,72 +613,6 @@ impl SnapshotRowScope {
         Ok(())
     }
 
-    fn normalize_arango_row(
-        &mut self,
-        collection: &str,
-        row: &mut serde_json::Value,
-    ) -> anyhow::Result<SnapshotArangoRowAction> {
-        if let Some(library_id) = optional_uuid_field(row, "library_id")
-            .with_context(|| format!("parse {collection}.library_id"))?
-        {
-            if library_id != self.source_library_id {
-                bail!(
-                    "snapshot {collection} document belongs to library {library_id}, expected {}",
-                    self.source_library_id
-                );
-            }
-            set_uuid_field(collection, row, "library_id", self.target_library_id)?;
-        } else {
-            bail!("snapshot {collection} document missing library_id");
-        }
-        if row.get("workspace_id").is_some() {
-            let workspace_id = required_uuid_field(collection, row, "workspace_id")?;
-            self.bind_workspace(collection, workspace_id)?;
-            set_uuid_field(collection, row, "workspace_id", self.target_workspace_id)?;
-        }
-        if collection == KNOWLEDGE_REVISION_COLLECTION
-            && let Some(storage_ref) = string_field(row, "storage_ref")
-        {
-            let target_ref = self.rewrite_storage_key(collection, storage_ref)?;
-            set_string_field(collection, row, "storage_ref", &target_ref)?;
-        }
-        if ARANGO_DOC_COLLECTIONS.contains(&collection)
-            || is_per_dim_vector_collection_name(collection)
-        {
-            self.arango_document_ids.insert(arango_document_id(collection, row)?);
-            Ok(SnapshotArangoRowAction::Import)
-        } else if ARANGO_EDGE_COLLECTIONS.contains(&collection) {
-            let from_exists = self.validate_arango_edge_endpoint(collection, row, "_from")?;
-            let to_exists = self.validate_arango_edge_endpoint(collection, row, "_to")?;
-            Ok(if from_exists && to_exists {
-                SnapshotArangoRowAction::Import
-            } else {
-                SnapshotArangoRowAction::SkipDanglingEdge
-            })
-        } else {
-            bail!(
-                "snapshot import has no row-scope validator for arango collection `{collection}`"
-            );
-        }
-    }
-
-    fn validate_arango_edge_endpoint(
-        &self,
-        collection: &str,
-        row: &serde_json::Value,
-        field: &str,
-    ) -> anyhow::Result<bool> {
-        let endpoint = required_string_field(collection, row, field)?;
-        let (endpoint_collection, endpoint_key) = endpoint.split_once('/').ok_or_else(|| {
-            anyhow!("snapshot {collection} edge has malformed {field} endpoint `{endpoint}`")
-        })?;
-        require_known_arango_doc_collection(endpoint_collection)?;
-        if endpoint_key.is_empty() || endpoint_key.contains('/') {
-            bail!("snapshot {collection} edge has malformed {field} endpoint `{endpoint}`");
-        }
-        Ok(self.arango_document_ids.contains(endpoint))
-    }
-
     fn normalize_blob_key(&self, storage_key: &str) -> anyhow::Result<String> {
         let target_key = self.rewrite_storage_key("blob", storage_key)?;
         if !self.declared_blob_keys.contains(&(storage_key.to_string(), target_key.clone())) {
@@ -865,14 +727,6 @@ fn required_string_field<'a>(
         .ok_or_else(|| anyhow!("snapshot {table} row missing required string field `{field}`"))
 }
 
-fn arango_document_id(collection: &str, row: &serde_json::Value) -> anyhow::Result<String> {
-    if let Some(id) = string_field(row, "_id") {
-        return Ok(id.to_string());
-    }
-    let key = required_string_field(collection, row, "_key")?;
-    Ok(format!("{collection}/{key}"))
-}
-
 fn optional_uuid_field(row: &serde_json::Value, field: &str) -> anyhow::Result<Option<Uuid>> {
     match row.get(field) {
         None | Some(serde_json::Value::Null) => Ok(None),
@@ -937,8 +791,6 @@ fn null_field_if_present(row: &mut serde_json::Value, field: &str) {
 #[derive(Debug)]
 struct SnapshotManifestSections {
     postgres_tables: HashSet<String>,
-    arango_doc_collections: HashSet<String>,
-    arango_edge_collections: HashSet<String>,
 }
 
 impl SnapshotManifestSections {
@@ -957,25 +809,7 @@ impl SnapshotManifestSections {
             }
         }
 
-        let mut arango_doc_collections = HashSet::new();
-        for collection in &manifest.arango_doc_collections {
-            let collection = require_known_arango_doc_collection(collection)?;
-            if !arango_doc_collections.insert(collection.to_string()) {
-                bail!("snapshot manifest declares arango collection `{collection}` more than once");
-            }
-        }
-
-        let mut arango_edge_collections = HashSet::new();
-        for collection in &manifest.arango_edge_collections {
-            let collection = require_known_arango_edge_collection(collection)?;
-            if !arango_edge_collections.insert(collection.to_string()) {
-                bail!(
-                    "snapshot manifest declares arango edge collection `{collection}` more than once"
-                );
-            }
-        }
-
-        Ok(Self { postgres_tables, arango_doc_collections, arango_edge_collections })
+        Ok(Self { postgres_tables })
     }
 
     fn require_postgres_table<'a>(&self, table: &'a str) -> anyhow::Result<&'a str> {
@@ -984,24 +818,6 @@ impl SnapshotManifestSections {
             Ok(table)
         } else {
             bail!("snapshot entry references undeclared postgres table `{table}`")
-        }
-    }
-
-    fn require_arango_doc_collection<'a>(&self, collection: &'a str) -> anyhow::Result<&'a str> {
-        let collection = require_known_arango_doc_collection(collection)?;
-        if self.arango_doc_collections.contains(collection) {
-            Ok(collection)
-        } else {
-            bail!("snapshot entry references undeclared arango collection `{collection}`")
-        }
-    }
-
-    fn require_arango_edge_collection(&self, collection: &str) -> anyhow::Result<&str> {
-        let collection = require_known_arango_edge_collection(collection)?;
-        if self.arango_edge_collections.contains(collection) {
-            Ok(collection)
-        } else {
-            bail!("snapshot entry references undeclared arango edge collection `{collection}`")
         }
     }
 }
@@ -1082,30 +898,6 @@ fn pg_error_is_retryable_restore_contention(error: &sqlx::Error) -> bool {
     })
 }
 
-/// Returned name. For static collections this is the `'static` slot from
-/// [`ARANGO_DOC_COLLECTIONS`]. For per-dim vector shards discovered at
-/// runtime the caller's borrowed name is returned, since the shard name is
-/// not in the static table — callers therefore must accept either lifetime.
-fn require_known_arango_doc_collection<'a>(collection: &'a str) -> anyhow::Result<&'a str> {
-    if let Some(canonical) =
-        ARANGO_DOC_COLLECTIONS.iter().copied().find(|candidate| *candidate == collection)
-    {
-        return Ok(canonical);
-    }
-    if is_per_dim_vector_collection_name(collection) {
-        return Ok(collection);
-    }
-    Err(anyhow!("unknown snapshot arango collection `{collection}`"))
-}
-
-fn require_known_arango_edge_collection(collection: &str) -> anyhow::Result<&'static str> {
-    ARANGO_EDGE_COLLECTIONS
-        .iter()
-        .copied()
-        .find(|candidate| *candidate == collection)
-        .ok_or_else(|| anyhow!("unknown snapshot arango edge collection `{collection}`"))
-}
-
 // ===========================================================================
 // Export
 // ===========================================================================
@@ -1125,9 +917,8 @@ where
     export_library_archive_inner(state, library_id, include, writer).await.map_err(|error| {
         // Log the full anyhow chain BEFORE collapsing to ContentServiceError —
         // the user-facing error type only carries the top message, but the
-        // root cause (Arango cursor error code, network error, etc.) lives
-        // deeper in the chain and is invaluable when debugging large-corpus
-        // export failures.
+        // root cause (database cursor error, storage error, etc.) lives deeper
+        // in the chain and is invaluable when debugging large-corpus exports.
         tracing::error!(
             %library_id,
             error_chain = format!("{error:#}"),
@@ -1271,8 +1062,6 @@ where
             .extend(list_pg_vector_relations_for_library(pool, library_id).await?);
         manifest_postgres_tables.extend(library_postgres_tables.iter().cloned());
     }
-    let arango_docs: Vec<String> = Vec::new();
-    let arango_edges: Vec<String> = Vec::new();
     let mut vector_shards: Vec<VectorShardEntry> = Vec::new();
     if include_library_data {
         for shard in
@@ -1295,8 +1084,6 @@ where
         source_version: env!("CARGO_PKG_VERSION").to_string(),
         include_kinds: include.to_vec(),
         postgres_tables: manifest_postgres_tables.clone(),
-        arango_doc_collections: arango_docs.clone(),
-        arango_edge_collections: arango_edges.clone(),
         has_blobs,
         vector_shards,
     };
@@ -1360,13 +1147,7 @@ where
         "snapshot export stage postgres done",
     );
 
-    // 3. In schema v6 the knowledge plane is exported from PostgreSQL.
-    // Arango sections intentionally remain empty; restore still accepts
-    // v5 archives with arango/arango-edges sections for the manual
-    // 0.4.x -> 0.5.0 upgrade boundary.
-    // LEGACY-SHIM(old-archive-compat, remove>=0.7.0): export produces empty arango lists for v6; restore accepts non-empty arango/* and arango-edges/* sections only for v5 archives — the corresponding restore branches below can be deleted once no v5 archives remain in the field.
-
-    // 4. blobs (if included). Each storage_key gathered from the
+    // 3. blobs (if included). Each storage_key gathered from the
     //    content_revision pass becomes one raw entry under `blobs/`.
     if has_blobs {
         for storage_key in &storage_keys {
@@ -1394,7 +1175,7 @@ where
         }
     }
 
-    // 5. summary.json — last, so it carries the real observed counts.
+    // 4. summary.json — last, so it carries the real observed counts.
     append_json_entry(builder, "summary.json", &summary).await?;
 
     Ok(())
@@ -1881,25 +1662,17 @@ fn build_pg_select(table: &str) -> anyhow::Result<String> {
 // Import
 // ===========================================================================
 
-/// Maximum number of rows included in a single Postgres or Arango
-/// INSERT statement during restore. 1000 strikes a good balance: large
+/// Maximum number of rows included in a single PostgreSQL INSERT statement
+/// during restore. 1000 strikes a good balance: large
 /// enough to amortize round-trip latency across a ten-thousand-row
 /// table, small enough that a single statement's JSONB payload stays
 /// under a few MiB and any parser bug only wastes a small slice.
 const IMPORT_BATCH_ROWS: usize = 1000;
-/// Edge bulk-insert batch size. Edge rows are tiny compared to
-/// vector rows (`_from`/`_to`/small payload), but at million-row
-/// scale a 1000-row batch can still push several MiB per HTTP body.
-/// 500 keeps batches well below the Arango bulk-doc HTTP limits with
-/// negligible round-trip overhead.
-const IMPORT_EDGE_BATCH_ROWS: usize = 500;
-const ARANGO_CLEAR_BATCH_ROWS: usize = 10_000;
-
 /// Restores a library from a tar.zst archive body. `body` is any
 /// `AsyncRead` — typically the request body stream. Rows are flushed
 /// to storage in batches as the archive streams in, so memory footprint
-/// stays roughly one batch per backend (postgres/arango docs/arango edges)
-/// rather than scaling with total archive size.
+/// stays roughly one PostgreSQL batch rather than scaling with total archive
+/// size.
 pub async fn restore_library_archive<R>(
     state: &AppState,
     library_id: Uuid,
@@ -1914,8 +1687,7 @@ where
         .map_err(|error| {
             // Log the full anyhow chain BEFORE collapsing to ContentServiceError —
             // symmetric to the export side. ContentServiceError only carries the
-            // top message, but the underlying Arango/HTTP/io error code (bulk
-            // payload too large, AQL memory limit, cursor timeout, …) lives
+            // top message, but the underlying database/storage/io error lives
             // deeper in the chain and is what an operator needs to act on.
             tracing::error!(
                 %library_id,
@@ -1943,9 +1715,6 @@ where
     let mut report =
         SnapshotImportReport { library_id, overwrite_mode: overwrite, ..Default::default() };
     let mut counts_pg: BTreeMap<String, u64> = BTreeMap::new();
-    let mut counts_arango_doc: BTreeMap<String, u64> = BTreeMap::new();
-    let mut counts_arango_edge: BTreeMap<String, u64> = BTreeMap::new();
-    let mut skipped_arango_edge: BTreeMap<String, u64> = BTreeMap::new();
 
     // Stage 1 — manifest must be the first tar entry. Any archive that
     // puts data ahead of it violates the snapshot protocol.
@@ -1978,70 +1747,65 @@ where
         bail!("snapshot archive missing manifest.json");
     };
 
-    // Stage 2 — pre-check the target library and prepare external
-    // replace state BEFORE we start inserting. Postgres owned-state
-    // clearing happens inside the import transaction so a parse/import
-    // error cannot delete the selected library identity row.
-    let existing_library: Option<(Uuid, String)> =
-        sqlx::query_as("SELECT id, slug FROM catalog_library WHERE id = $1")
-            .bind(library_id)
-            .fetch_optional(&state.persistence.postgres)
+    let mut stashed_storage: Option<StashedContentDirectory> = None;
+    let restore_result: anyhow::Result<SnapshotImportReport> = async {
+        // Stage 2 — from here until commit the selected library identity row is
+        // locked. Concurrent ingests/imports that reference the same library block on
+        // the FK parent row lock, so `overwrite=reject` cannot pass an empty-target
+        // check and then race with new content rows.
+        let pool = &state.persistence.postgres;
+        let mut tx = pool.begin().await.context("begin snapshot tx")?;
+        content_repository::acquire_content_library_storage_lock_in_tx(&mut tx, library_id)
             .await
-            .context("pre-check catalog_library")?;
-    let exists: Option<Uuid> = existing_library.as_ref().map(|(id, _)| *id);
-    let target_library_slug: Option<String> =
-        existing_library.as_ref().map(|(_, slug)| slug.clone());
-    let existing_workspace_id = if exists.is_some() {
-        load_library_workspace(&state.persistence.postgres, library_id).await?
+            .context("acquire library storage lock before snapshot restore")?;
+        let locked_target = lock_catalog_library_for_restore(&mut tx, library_id).await?;
+    let target_workspace_id = locked_target.workspace_id;
+    let target_library_slug = Some(locked_target.slug);
+    let existing_workspace_id = Some(target_workspace_id);
+    let target_footprint = if manifest.include_kinds.contains(&IncludeKind::LibraryData)
+        && overwrite == OverwriteMode::Reject
+        && tx_library_has_restore_footprint(state, &mut tx, library_id).await?
+    {
+        TargetRestoreFootprint::Populated
     } else {
-        None
+        TargetRestoreFootprint::Empty
     };
-    if exists.is_none() {
-        bail!(
-            "target library {library_id} does not exist; create/select a library before restoring a snapshot"
-        );
-    }
-    let target_workspace_id = existing_workspace_id
-        .ok_or_else(|| anyhow!("target library {library_id} has no workspace mapping"))?;
-    match (exists.is_some(), overwrite) {
-        (true, OverwriteMode::Reject) => {
+    let library_data_action =
+        plan_restore_library_data(&manifest.include_kinds, overwrite, target_footprint);
+    match library_data_action {
+        RestoreLibraryDataAction::Skip | RestoreLibraryDataAction::ImportIntoEmptyTarget => {}
+        RestoreLibraryDataAction::RejectPopulatedTarget => {
             bail!(
-                "library {library_id} already exists — pass overwrite=replace to restore over it"
+                "target library data conflict: library {library_id} already contains data — pass overwrite=replace to restore over it"
             );
         }
-        (true, OverwriteMode::Replace) => {
-            prepare_replace_library_footprint(state, library_id, existing_workspace_id).await?;
+        RestoreLibraryDataAction::ReplaceTarget => {
+            stashed_storage =
+                prepare_replace_library_footprint(state, library_id, existing_workspace_id).await?;
         }
-        (false, _) => {}
     }
-    let replace_existing = exists.is_some() && overwrite == OverwriteMode::Replace;
 
-    // Lazy-ensure every per-dim vector shard the source archive carried
-    // so the row-insertion path lands on collections that already exist
-    // with the matching ANN + persistent indexes. Older v5 archives
-    // pre-dating per-library vector dims simply have an empty
-    // `vector_shards` list and skip this step.
+    let import_result: anyhow::Result<SnapshotImportReport> = async {
+    // Lazy-ensure every per-dim vector shard the source archive carried so the
+    // row-insertion path lands on relations that already exist with matching
+    // ANN + persistent indexes.
     ensure_manifest_vector_shards(state, &manifest)
         .await
         .context("ensure per-dim vector shards declared by snapshot manifest")?;
 
-    // Stage 3 — stream remaining entries and flush in batches. We keep
+    // Stream remaining entries and flush in batches. We keep
     // a single Postgres transaction alive for the whole restore so FKs
-    // are satisfied all at once at commit time. For arango there is no
-    // cross-collection transaction, so each batch stands on its own.
-    let pool = &state.persistence.postgres;
-    let mut tx = pool.begin().await.context("begin snapshot tx")?;
+    // are satisfied all at once at commit time.
     sqlx::query("SET LOCAL session_replication_role = 'replica'")
         .execute(&mut *tx)
         .await
         .context("disable FK checks for snapshot import")?;
-    if replace_existing {
+    if library_data_action == RestoreLibraryDataAction::ReplaceTarget {
         clear_library_postgres_footprint(&mut tx, library_id).await?;
     }
 
     let mut pg_batcher = PgBatcher::new();
     let mut knowledge_dedup = KnowledgeDocumentDedup::default();
-    let mut arango_edge_batcher = ArangoEdgePgBatcher::new();
     let mut row_scope = SnapshotRowScope::new(
         manifest.library_id,
         library_id,
@@ -2104,7 +1868,6 @@ where
                     route_pg_row_through_dedup(
                         &mut knowledge_dedup,
                         &mut pg_batcher,
-                        KnowledgeDocumentSource::Postgres,
                         table,
                         row,
                         &mut kept,
@@ -2117,77 +1880,6 @@ where
             })
             .await
             .with_context(|| format!("parse ndjson `{path}`"))?;
-            pg_batcher.maybe_flush(&mut tx).await?;
-        // LEGACY-SHIM(old-archive-compat, remove>=0.7.0): entire `arango-edges/` branch handles v5 ArangoDB-era edge sections — safe to delete once no v5 archives remain in the field.
-        } else if let Some(rest) = path.strip_prefix("arango-edges/") {
-            // Resolve the document dedup before edges so the kept-chunk set is
-            // final: a `knowledge_bundle_chunk_edge` for a dropped chunk must
-            // be skipped, and an archive with documents but no chunk section
-            // must not leave the dedup unfinalized at edge time.
-            knowledge_dedup.finalize(&mut pg_batcher);
-            pg_batcher.flush(&mut tx).await?;
-            let (collection_ref, _file) = split_section_path(rest)
-                .with_context(|| format!("malformed arango-edges path `{path}`"))?;
-            let collection = manifest_sections.require_arango_edge_collection(collection_ref)?;
-            arango_edge_batcher.on_new_section(collection, &mut tx).await?;
-            read_ndjson_entry_and(&mut entry, &mut |mut row| {
-                match row_scope.normalize_arango_row(collection, &mut row)? {
-                    SnapshotArangoRowAction::Import
-                        if edge_targets_dropped_chunk(&knowledge_dedup, collection, &row)? =>
-                    {
-                        // `knowledge_bundle_chunk_edge` inserts a new
-                        // `knowledge_bundle_chunk` row; skip it when its chunk
-                        // endpoint was dropped by the document dedup so no
-                        // orphan bundle row survives. Every other edge kind is
-                        // an UPDATE that simply no-ops on a missing row.
-                        *skipped_arango_edge.entry(collection.to_string()).or_default() += 1;
-                    }
-                    SnapshotArangoRowAction::Import => {
-                        *counts_arango_edge.entry(collection.to_string()).or_default() += 1;
-                        arango_edge_batcher.push(collection, row);
-                    }
-                    SnapshotArangoRowAction::SkipDanglingEdge => {
-                        *skipped_arango_edge.entry(collection.to_string()).or_default() += 1;
-                    }
-                }
-                Ok(())
-            })
-            .await?;
-            arango_edge_batcher.maybe_flush(&mut tx).await?;
-        // LEGACY-SHIM(old-archive-compat, remove>=0.7.0): entire `arango/` branch handles v5 ArangoDB-era doc collection sections — safe to delete once no v5 archives remain in the field.
-        } else if let Some(rest) = path.strip_prefix("arango/") {
-            let (collection_ref, _file) = split_section_path(rest)
-                .with_context(|| format!("malformed arango path `{path}`"))?;
-            let collection = manifest_sections.require_arango_doc_collection(collection_ref)?;
-            read_ndjson_entry_and(&mut entry, &mut |mut row| {
-                row_scope.normalize_arango_row(collection, &mut row)?;
-                let table = pg_table_for_arango_doc_row(collection, &row)?;
-                let pg_row = normalize_arango_doc_for_pg(collection, row)?;
-                let mut kept = true;
-                if is_chunk_vector_relation_name(&table) {
-                    route_pg_vector_row_through_dedup(
-                        &mut knowledge_dedup,
-                        &mut pg_batcher,
-                        &table,
-                        pg_row,
-                        &mut kept,
-                    )?;
-                } else {
-                    route_pg_row_through_dedup(
-                        &mut knowledge_dedup,
-                        &mut pg_batcher,
-                        KnowledgeDocumentSource::Arango,
-                        &table,
-                        pg_row,
-                        &mut kept,
-                    )?;
-                }
-                if kept {
-                    *counts_arango_doc.entry(collection.to_string()).or_default() += 1;
-                }
-                Ok(())
-            })
-            .await?;
             pg_batcher.maybe_flush(&mut tx).await?;
         } else if let Some(blob_suffix) = path.strip_prefix("blobs/") {
             if !manifest.has_blobs {
@@ -2215,32 +1907,14 @@ where
     // the lazy finalize on the first descendant never fired), then drain
     // every batcher and commit the Postgres transaction.
     knowledge_dedup.finalize(&mut pg_batcher);
-    // Record the kept `knowledge_document` count under the section the rows
-    // arrived through, so the import report reflects what was committed after
-    // the keep-rule dropped stale duplicates.
-    if let Some(source) = knowledge_dedup.document_source() {
-        let kept = knowledge_dedup.kept_document_count();
-        match source {
-            KnowledgeDocumentSource::Postgres => {
-                *counts_pg.entry("knowledge_document".to_string()).or_default() += kept;
-            }
-            KnowledgeDocumentSource::Arango => {
-                *counts_arango_doc.entry(KNOWLEDGE_DOCUMENT_COLLECTION.to_string()).or_default() +=
-                    kept;
-            }
-        }
+    // Record the kept `knowledge_document` count so the import report reflects
+    // what was committed after the keep-rule dropped stale duplicates.
+    if knowledge_dedup.saw_document_rows() {
+        *counts_pg.entry("knowledge_document".to_string()).or_default() +=
+            knowledge_dedup.kept_document_count();
     }
     pg_batcher.flush(&mut tx).await?;
-    arango_edge_batcher.flush(&mut tx).await?;
     tx.commit().await.context("commit snapshot tx")?;
-    for (collection, skipped) in &skipped_arango_edge {
-        tracing::warn!(
-            %library_id,
-            collection = %collection,
-            skipped,
-            "snapshot import skipped dangling arango edges",
-        );
-    }
     // R1: in a mass/workspace import the shared snapshot tables grow with every
     // library, so a per-library ANALYZE re-scans the whole table each time
     // (O(n²)). Defer to a single end-of-import ANALYZE run by the workspace
@@ -2257,10 +1931,44 @@ where
     }
 
     report.postgres_rows_by_table = counts_pg.into_iter().collect();
-    report.arango_docs_by_collection = counts_arango_doc.into_iter().collect();
-    report.arango_edges_by_collection = counts_arango_edge.into_iter().collect();
-    report.skipped_arango_edges_by_collection = skipped_arango_edge.into_iter().collect();
     Ok(report)
+    }
+    .await;
+
+    match import_result {
+        Ok(report) => {
+            if let Some(stashed) = stashed_storage.as_ref()
+                && let Err(error) = state.content_storage.purge_stashed_directory(stashed).await
+            {
+                tracing::warn!(
+                    %library_id,
+                    error = %error,
+                    "snapshot restore succeeded but failed to purge stashed blob directory",
+                );
+            }
+            Ok(report)
+        }
+        Err(error) => {
+            if let Some(stashed) = stashed_storage.as_ref()
+                && let Err(restore_error) = state
+                    .content_storage
+                    .restore_stashed_directory_replacing_current(stashed)
+                    .await
+            {
+                tracing::error!(
+                    %library_id,
+                    restore_error = %restore_error,
+                    primary_error = format!("{error:#}"),
+                    "snapshot restore failed and blob stash rollback also failed",
+                );
+            }
+            Err(error)
+        }
+    }
+    }
+    .await;
+
+    restore_result
 }
 
 async fn analyze_imported_postgres_tables(
@@ -2338,114 +2046,6 @@ where
     Ok(())
 }
 
-// LEGACY-SHIM(old-archive-compat, remove>=0.7.0): maps v5 ArangoDB collection names to their PostgreSQL restore targets — safe to delete once no v5 archives remain in the field.
-fn pg_table_for_arango_doc_row(
-    collection: &str,
-    row: &serde_json::Value,
-) -> anyhow::Result<String> {
-    let table = match collection {
-        KNOWLEDGE_DOCUMENT_COLLECTION => "knowledge_document".to_string(),
-        KNOWLEDGE_REVISION_COLLECTION => "knowledge_revision".to_string(),
-        KNOWLEDGE_STRUCTURED_REVISION_COLLECTION => "knowledge_structured_revision".to_string(),
-        KNOWLEDGE_STRUCTURED_BLOCK_COLLECTION => "knowledge_structured_block".to_string(),
-        KNOWLEDGE_CHUNK_COLLECTION => "knowledge_chunk".to_string(),
-        KNOWLEDGE_TECHNICAL_FACT_COLLECTION => "knowledge_technical_fact".to_string(),
-        KNOWLEDGE_ENTITY_COLLECTION => "knowledge_entity".to_string(),
-        KNOWLEDGE_RELATION_COLLECTION => "knowledge_relation".to_string(),
-        KNOWLEDGE_EVIDENCE_COLLECTION => "knowledge_evidence".to_string(),
-        KNOWLEDGE_CONTEXT_BUNDLE_COLLECTION => "knowledge_context_bundle".to_string(),
-        KNOWLEDGE_CHUNK_VECTOR_COLLECTION => {
-            let dim = required_i64_field(collection, row, "dimensions")?;
-            format!("{PER_DIM_CHUNK_VECTOR_PREFIX}{dim}")
-        }
-        KNOWLEDGE_ENTITY_VECTOR_COLLECTION => {
-            let dim = required_i64_field(collection, row, "dimensions")?;
-            format!("{PER_DIM_ENTITY_VECTOR_PREFIX}{dim}")
-        }
-        other if is_per_dim_vector_collection_name(other) => {
-            canonical_per_dim_vector_relation_name(other)
-                .ok_or_else(|| anyhow!("invalid per-dim vector collection `{other}`"))?
-        }
-        other => bail!("no postgres restore target for arango collection `{other}`"),
-    };
-    validate_snapshot_pg_table_name(&table)?;
-    Ok(table)
-}
-
-// LEGACY-SHIM(old-archive-compat, remove>=0.7.0): strips Arango-internal fields (`_id`, `_rev`, `_key`, `search_tsv`) and renames `vector`→`embedding` for v5 archives — safe to delete once no v5 archives remain in the field.
-fn normalize_arango_doc_for_pg(
-    collection: &str,
-    mut row: serde_json::Value,
-) -> anyhow::Result<serde_json::Value> {
-    let object =
-        row.as_object_mut().ok_or_else(|| anyhow!("snapshot {collection} row is not an object"))?;
-    if is_vector_collection_name(collection)
-        && !object.contains_key("key")
-        && let Some(key) = object.get("_key").cloned()
-    {
-        object.insert("key".to_string(), key);
-    }
-    object.remove("_id");
-    object.remove("_rev");
-    object.remove("_key");
-    object.remove("search_tsv");
-    if is_vector_collection_name(collection)
-        && !object.contains_key("embedding")
-        && let Some(vector) = object.remove("vector")
-    {
-        let literal = vector_json_to_pgvector_literal(&vector)
-            .with_context(|| format!("encode {collection} vector literal"))?;
-        object.insert("embedding".to_string(), serde_json::Value::String(literal));
-    }
-    Ok(row)
-}
-
-fn vector_json_to_pgvector_literal(value: &serde_json::Value) -> anyhow::Result<String> {
-    let values =
-        value.as_array().ok_or_else(|| anyhow!("snapshot vector field must be a JSON array"))?;
-    anyhow::ensure!(!values.is_empty(), "snapshot vector must not be empty");
-    let mut out = String::from("[");
-    for (idx, value) in values.iter().enumerate() {
-        let number = value
-            .as_f64()
-            .ok_or_else(|| anyhow!("snapshot vector element must be finite number"))?;
-        anyhow::ensure!(number.is_finite(), "snapshot vector element must be finite");
-        if idx > 0 {
-            out.push(',');
-        }
-        out.push_str(&number.to_string());
-    }
-    out.push(']');
-    Ok(out)
-}
-
-fn required_i64_field(table: &str, row: &serde_json::Value, field: &str) -> anyhow::Result<i64> {
-    match row.get(field) {
-        Some(serde_json::Value::Number(value)) => {
-            value.as_i64().ok_or_else(|| anyhow!("snapshot {table}.{field} is not an i64"))
-        }
-        Some(serde_json::Value::String(value)) => {
-            value.parse::<i64>().with_context(|| format!("parse snapshot {table}.{field}"))
-        }
-        _ => bail!("snapshot {table} row missing required integer field `{field}`"),
-    }
-}
-
-fn optional_i32_json(row: &serde_json::Value, field: &str) -> anyhow::Result<Option<i32>> {
-    match row.get(field) {
-        None | Some(serde_json::Value::Null) => Ok(None),
-        Some(serde_json::Value::Number(value)) => {
-            let value = value.as_i64().ok_or_else(|| anyhow!("field `{field}` is not an i32"))?;
-            i32::try_from(value).map(Some).context("i32 overflow")
-        }
-        Some(serde_json::Value::String(value)) if value.is_empty() => Ok(None),
-        Some(serde_json::Value::String(value)) => {
-            value.parse::<i32>().map(Some).context("parse i32")
-        }
-        Some(_) => bail!("field `{field}` must be an integer"),
-    }
-}
-
 fn optional_i64_json(row: &serde_json::Value, field: &str) -> anyhow::Result<Option<i64>> {
     match row.get(field) {
         None | Some(serde_json::Value::Null) => Ok(None),
@@ -2460,37 +2060,10 @@ fn optional_i64_json(row: &serde_json::Value, field: &str) -> anyhow::Result<Opt
     }
 }
 
-fn optional_f64_json(row: &serde_json::Value, field: &str) -> anyhow::Result<Option<f64>> {
-    match row.get(field) {
-        None | Some(serde_json::Value::Null) => Ok(None),
-        Some(serde_json::Value::Number(value)) => {
-            value.as_f64().map(Some).ok_or_else(|| anyhow!("field `{field}` is not f64"))
-        }
-        Some(serde_json::Value::String(value)) if value.is_empty() => Ok(None),
-        Some(serde_json::Value::String(value)) => {
-            value.parse::<f64>().map(Some).context("parse f64")
-        }
-        Some(_) => bail!("field `{field}` must be numeric"),
-    }
-}
-
-fn arango_endpoint_uuid(
-    collection: &str,
-    row: &serde_json::Value,
-    field: &str,
-) -> anyhow::Result<Uuid> {
-    let endpoint = required_string_field(collection, row, field)?;
-    let (_, key) = endpoint
-        .split_once('/')
-        .ok_or_else(|| anyhow!("snapshot {collection} edge has malformed {field}"))?;
-    Uuid::parse_str(key).with_context(|| format!("parse {collection}.{field} uuid"))
-}
-
 /// Buffers Postgres rows per-table and flushes them as a single
 /// `jsonb_populate_recordset` statement. Each table keeps its own
-/// pending vec so Arango sections that map to different PostgreSQL
-/// tables cannot be accidentally inserted through the most recent
-/// table's column list.
+/// pending vec so different PostgreSQL sections cannot be accidentally inserted
+/// through the most recent table's column list.
 struct PgBatcher {
     pending: BTreeMap<String, Vec<serde_json::Value>>,
 }
@@ -2599,16 +2172,15 @@ impl PgBatcher {
 /// ### Two-phase buffering
 ///
 /// Because `knowledge_chunk` rows arrive after `knowledge_revision` /
-/// `knowledge_structured_*` in the v6 export order (and in a different
-/// relative order in v5), the dedup cannot finalize correctly the moment the
-/// first document-descendant row arrives. Instead:
+/// `knowledge_structured_*` in the export order, the dedup cannot finalize
+/// correctly the moment the first document-descendant row arrives. Instead:
 ///
 /// 1. **Pre-finalize buffer** — every document-descendant row that arrives
 ///    before finalization is held in `pre_finalize_buffer`; chunk rows also
 ///    update `chunk_bearing_document_ids` before being buffered.
-/// 2. **Finalize** — called explicitly at two fixed points (start of the
-///    arango-edges section and Stage-4 final flush). By then the chunk section
-///    is always complete, so `chunk_bearing_document_ids` is authoritative.
+/// 2. **Finalize** — called explicitly before vector rows and at the final
+///    flush. By then the chunk section is complete, so
+///    `chunk_bearing_document_ids` is authoritative.
 ///    The keep-rule runs, `kept_document_ids` is frozen, and the buffered
 ///    pre-finalize rows are replayed through the cascade into `batcher`.
 /// 3. **Post-finalize** — rows that arrive after finalization are routed
@@ -2635,20 +2207,9 @@ struct KnowledgeDocumentDedup {
     /// `chunk_id`s belonging to kept documents — the cascade filter for
     /// chunk-derived tables (vectors, candidates, mentions, bundle_chunk).
     kept_chunk_ids: HashSet<Uuid>,
-    /// Which archive section `knowledge_document` rows arrived through, so the
-    /// import report can bump the matching counter with the *kept* document
-    /// count rather than the raw buffered count. `None` until the first
-    /// document row is buffered.
-    document_source: Option<KnowledgeDocumentSource>,
+    /// `true` once at least one `knowledge_document` row has been buffered.
+    saw_document_rows: bool,
     finalized: bool,
-}
-
-/// Whether `knowledge_document` rows arrived through the `postgres/` section
-/// (v6 archives) or the `arango/` section (v5 archives).
-#[derive(Clone, Copy)]
-enum KnowledgeDocumentSource {
-    Postgres,
-    Arango,
 }
 
 /// A normalized `knowledge_document` row buffered until the keep-rule runs.
@@ -2679,21 +2240,16 @@ impl KnowledgeDocumentDedup {
         self.kept_document_ids.len() as u64
     }
 
-    /// The section `knowledge_document` rows arrived through, if any have been
-    /// buffered yet.
-    fn document_source(&self) -> Option<KnowledgeDocumentSource> {
-        self.document_source
+    /// Returns `true` if any `knowledge_document` rows have been buffered.
+    fn saw_document_rows(&self) -> bool {
+        self.saw_document_rows
     }
 
     /// Buffers a normalized `knowledge_document` row (PG column shape) for the
     /// keep-rule instead of inserting it immediately.
-    fn buffer_document(
-        &mut self,
-        source: KnowledgeDocumentSource,
-        row: serde_json::Value,
-    ) -> anyhow::Result<()> {
+    fn buffer_document(&mut self, row: serde_json::Value) -> anyhow::Result<()> {
         debug_assert!(!self.finalized, "buffer_document called after finalize — ordering bug");
-        self.document_source.get_or_insert(source);
+        self.saw_document_rows = true;
         let document_id = required_uuid_field("knowledge_document", &row, "document_id")?;
         let external_key =
             required_string_field("knowledge_document", &row, "external_key")?.to_string();
@@ -2802,7 +2358,6 @@ impl KnowledgeDocumentDedup {
         // let the deferred resolver re-resolve it from the preserved
         // `parent_external_key`/structural source. The child's typed role is
         // unchanged here; it is re-derived when the resolver re-attaches.
-        // LEGACY-SHIM(old-archive-compat, remove>=0.7.0): NULLs `parent_document_id` on kept rows whose parent was dedup-dropped; arises from v5 multi-doc-per-key archives — safe to delete once no pre-parentage v5/early-v6 archives with dedup-dropped parents remain in the field.
         for mut doc in std::mem::take(&mut self.buffered) {
             if self.kept_document_ids.contains(&doc.document_id) {
                 if let Ok(Some(parent_id)) = optional_uuid_field(&doc.row, "parent_document_id")
@@ -2879,14 +2434,6 @@ impl KnowledgeDocumentDedup {
             Some(id) => Ok(self.kept_chunk_ids.contains(&id)),
         }
     }
-
-    /// `true` when `chunk_id` was kept by the cascade. Used by the v5
-    /// arango-edge path to skip `knowledge_bundle_chunk_edge` and
-    /// `knowledge_chunk_mentions_entity_edge` rows whose chunk endpoint was
-    /// dropped.
-    fn chunk_kept(&self, chunk_id: Uuid) -> bool {
-        self.kept_chunk_ids.contains(&chunk_id)
-    }
 }
 
 /// Returns the row field that identifies the owning chunk for tables in
@@ -2930,7 +2477,6 @@ const KNOWLEDGE_CHUNK_DESCENDANT_TABLES: &[&str] = &[
 fn route_pg_row_through_dedup(
     dedup: &mut KnowledgeDocumentDedup,
     batcher: &mut PgBatcher,
-    source: KnowledgeDocumentSource,
     table: &str,
     row: serde_json::Value,
     kept: &mut bool,
@@ -2944,7 +2490,7 @@ fn route_pg_row_through_dedup(
         "knowledge_document" => {
             // Buffered, not yet committed; the kept count is added to the
             // report after the keep-rule resolves in `finalize`.
-            dedup.buffer_document(source, row)?;
+            dedup.buffer_document(row)?;
             *kept = false;
         }
         "knowledge_chunk" if !dedup.is_finalized() => {
@@ -2983,40 +2529,10 @@ fn route_pg_row_through_dedup(
     Ok(())
 }
 
-/// `true` when the arango edge `collection` targets a chunk that was dropped
-/// by the document dedup, meaning inserting it would create an orphan row.
-///
-/// - `knowledge_bundle_chunk_edge` → INSERTs into `knowledge_bundle_chunk`
-///   (chunk referenced by `_to`).
-/// - `knowledge_chunk_mentions_entity_edge` → INSERTs into
-///   `knowledge_chunk_entity_mention` with `from_id` = chunk (`_from`).
-///
-/// All other v5 edge kinds are UPDATE statements that no-op on missing rows,
-/// so they are never filtered here. The guard is inert when no
-/// `knowledge_document` section was seen (`document_source().is_none()`).
-///
-/// LEGACY-SHIM(old-archive-compat, remove>=0.7.0): guards v5 arango edge inserts that reference dedup-dropped chunks — safe to delete together with the arango-edges restore branch once no v5 archives remain in the field.
-fn edge_targets_dropped_chunk(
-    dedup: &KnowledgeDocumentDedup,
-    collection: &str,
-    row: &serde_json::Value,
-) -> anyhow::Result<bool> {
-    if dedup.document_source().is_none() {
-        return Ok(false);
-    }
-    let chunk_id = match collection {
-        KNOWLEDGE_BUNDLE_CHUNK_EDGE => arango_endpoint_uuid(collection, row, "_to")?,
-        KNOWLEDGE_CHUNK_MENTIONS_ENTITY_EDGE => arango_endpoint_uuid(collection, row, "_from")?,
-        _ => return Ok(false),
-    };
-    Ok(!dedup.chunk_kept(chunk_id))
-}
-
 /// Routes a per-dim chunk-vector row (PG-shaped, keyed by `chunk_id`) through
-/// the chunk cascade. Vectors arrive in `arango/` (v5) or as runtime vector
-/// relations (v6) after `knowledge_chunk`, so the dedup is always finalized by
-/// the time they stream; finalize defensively in case an archive carries
-/// vectors but no chunks.
+/// the chunk cascade. Vector relations arrive after `knowledge_chunk`, so the
+/// dedup is always finalized by the time they stream; finalize defensively in
+/// case an archive carries vectors but no chunks.
 fn route_pg_vector_row_through_dedup(
     dedup: &mut KnowledgeDocumentDedup,
     batcher: &mut PgBatcher,
@@ -3036,317 +2552,6 @@ fn route_pg_vector_row_through_dedup(
         *kept = false;
     }
     Ok(())
-}
-
-// LEGACY-SHIM(old-archive-compat, remove>=0.7.0): batches v5 ArangoDB edge-section rows before applying them as PG UPDATE statements — safe to delete once no v5 archives remain in the field.
-struct ArangoEdgePgBatcher {
-    current_collection: Option<String>,
-    pending: Vec<serde_json::Value>,
-}
-
-impl ArangoEdgePgBatcher {
-    fn new() -> Self {
-        Self { current_collection: None, pending: Vec::new() }
-    }
-
-    fn push(&mut self, collection: &str, row: serde_json::Value) {
-        if self.current_collection.as_deref() != Some(collection) {
-            self.current_collection = Some(collection.to_string());
-        }
-        self.pending.push(row);
-    }
-
-    async fn on_new_section(
-        &mut self,
-        collection: &str,
-        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    ) -> anyhow::Result<()> {
-        if let Some(current) = self.current_collection.as_deref()
-            && current != collection
-        {
-            self.flush(tx).await?;
-        }
-        Ok(())
-    }
-
-    async fn maybe_flush(
-        &mut self,
-        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    ) -> anyhow::Result<()> {
-        while self.pending.len() >= IMPORT_EDGE_BATCH_ROWS {
-            self.flush_partial(tx, IMPORT_EDGE_BATCH_ROWS).await?;
-        }
-        Ok(())
-    }
-
-    async fn flush(
-        &mut self,
-        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    ) -> anyhow::Result<()> {
-        while !self.pending.is_empty() {
-            let take = self.pending.len().min(IMPORT_EDGE_BATCH_ROWS);
-            self.flush_partial(tx, take).await?;
-        }
-        self.current_collection = None;
-        Ok(())
-    }
-
-    async fn flush_partial(
-        &mut self,
-        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-        take: usize,
-    ) -> anyhow::Result<()> {
-        let collection = self
-            .current_collection
-            .clone()
-            .ok_or_else(|| anyhow!("edge flush called with no current collection"))?;
-        let tail = self.pending.split_off(take.min(self.pending.len()));
-        let head = std::mem::replace(&mut self.pending, tail);
-        apply_arango_edges_to_pg(tx, &collection, &head).await?;
-        Ok(())
-    }
-}
-
-// LEGACY-SHIM(old-archive-compat, remove>=0.7.0): applies v5 ArangoDB-era edge kinds as PG UPDATE statements (document_revision, revision_block, revision_chunk, etc.) — safe to delete once no v5 archives remain in the field.
-async fn apply_arango_edges_to_pg(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    collection: &str,
-    rows: &[serde_json::Value],
-) -> anyhow::Result<()> {
-    if rows.is_empty() {
-        return Ok(());
-    }
-    match collection {
-        KNOWLEDGE_DOCUMENT_REVISION_EDGE => {
-            for row in rows {
-                let document_id = arango_endpoint_uuid(collection, row, "_from")?;
-                let revision_id = arango_endpoint_uuid(collection, row, "_to")?;
-                let library_id = required_uuid_field(collection, row, "library_id")?;
-                sqlx::query(
-                    "UPDATE knowledge_revision
-                     SET document_id = $1
-                     WHERE revision_id = $2 AND library_id = $3",
-                )
-                .bind(document_id)
-                .bind(revision_id)
-                .bind(library_id)
-                .execute(&mut **tx)
-                .await?;
-            }
-        }
-        KNOWLEDGE_REVISION_BLOCK_EDGE => {
-            for row in rows {
-                let revision_id = arango_endpoint_uuid(collection, row, "_from")?;
-                let block_id = arango_endpoint_uuid(collection, row, "_to")?;
-                let library_id = required_uuid_field(collection, row, "library_id")?;
-                sqlx::query(
-                    "UPDATE knowledge_structured_block
-                     SET revision_id = $1
-                     WHERE block_id = $2 AND library_id = $3",
-                )
-                .bind(revision_id)
-                .bind(block_id)
-                .bind(library_id)
-                .execute(&mut **tx)
-                .await?;
-            }
-        }
-        KNOWLEDGE_REVISION_CHUNK_EDGE => {
-            for row in rows {
-                let revision_id = arango_endpoint_uuid(collection, row, "_from")?;
-                let chunk_id = arango_endpoint_uuid(collection, row, "_to")?;
-                let library_id = required_uuid_field(collection, row, "library_id")?;
-                sqlx::query(
-                    "UPDATE knowledge_chunk
-                     SET revision_id = $1
-                     WHERE chunk_id = $2 AND library_id = $3",
-                )
-                .bind(revision_id)
-                .bind(chunk_id)
-                .bind(library_id)
-                .execute(&mut **tx)
-                .await?;
-            }
-        }
-        KNOWLEDGE_BLOCK_CHUNK_EDGE => {
-            for row in rows {
-                let block_id = arango_endpoint_uuid(collection, row, "_from")?;
-                let chunk_id = arango_endpoint_uuid(collection, row, "_to")?;
-                let library_id = required_uuid_field(collection, row, "library_id")?;
-                sqlx::query(
-                    "UPDATE knowledge_chunk
-                     SET primary_block_id = COALESCE(primary_block_id, $1),
-                         support_block_ids = CASE
-                            WHEN $1 = ANY(support_block_ids) THEN support_block_ids
-                            ELSE array_append(support_block_ids, $1)
-                         END
-                     WHERE chunk_id = $2 AND library_id = $3",
-                )
-                .bind(block_id)
-                .bind(chunk_id)
-                .bind(library_id)
-                .execute(&mut **tx)
-                .await?;
-            }
-        }
-        KNOWLEDGE_RELATION_SUBJECT_EDGE | KNOWLEDGE_RELATION_OBJECT_EDGE => {
-            let column = if collection == KNOWLEDGE_RELATION_SUBJECT_EDGE {
-                "subject_entity_id"
-            } else {
-                "object_entity_id"
-            };
-            for row in rows {
-                let relation_id = arango_endpoint_uuid(collection, row, "_from")?;
-                let entity_id = arango_endpoint_uuid(collection, row, "_to")?;
-                let library_id = required_uuid_field(collection, row, "library_id")?;
-                sqlx::query(&format!(
-                    "UPDATE knowledge_relation
-                     SET {column} = $1, updated_at = now()
-                     WHERE relation_id = $2 AND library_id = $3"
-                ))
-                .bind(entity_id)
-                .bind(relation_id)
-                .bind(library_id)
-                .execute(&mut **tx)
-                .await?;
-            }
-        }
-        KNOWLEDGE_EVIDENCE_SOURCE_EDGE => {
-            for row in rows {
-                let evidence_id = arango_endpoint_uuid(collection, row, "_from")?;
-                let revision_id = arango_endpoint_uuid(collection, row, "_to")?;
-                let library_id = required_uuid_field(collection, row, "library_id")?;
-                sqlx::query(
-                    "UPDATE knowledge_evidence
-                     SET revision_id = $1, updated_at = now()
-                     WHERE evidence_id = $2 AND library_id = $3",
-                )
-                .bind(revision_id)
-                .bind(evidence_id)
-                .bind(library_id)
-                .execute(&mut **tx)
-                .await?;
-            }
-        }
-        KNOWLEDGE_FACT_EVIDENCE_EDGE => {
-            for row in rows {
-                let fact_id = arango_endpoint_uuid(collection, row, "_from")?;
-                let evidence_id = arango_endpoint_uuid(collection, row, "_to")?;
-                let library_id = required_uuid_field(collection, row, "library_id")?;
-                sqlx::query(
-                    "UPDATE knowledge_evidence
-                     SET fact_id = $1, updated_at = now()
-                     WHERE evidence_id = $2 AND library_id = $3",
-                )
-                .bind(fact_id)
-                .bind(evidence_id)
-                .bind(library_id)
-                .execute(&mut **tx)
-                .await?;
-            }
-        }
-        KNOWLEDGE_CHUNK_MENTIONS_ENTITY_EDGE
-        | KNOWLEDGE_EVIDENCE_SUPPORTS_ENTITY_EDGE
-        | KNOWLEDGE_EVIDENCE_SUPPORTS_RELATION_EDGE => {
-            let (table, relation_type) = match collection {
-                KNOWLEDGE_CHUNK_MENTIONS_ENTITY_EDGE => {
-                    ("knowledge_chunk_entity_mention", "mentions")
-                }
-                KNOWLEDGE_EVIDENCE_SUPPORTS_ENTITY_EDGE => {
-                    ("knowledge_evidence_entity_support", "supports_entity")
-                }
-                _ => ("knowledge_evidence_relation_support", "supports_relation"),
-            };
-            let mut translated = Vec::with_capacity(rows.len());
-            for row in rows {
-                translated.push(serde_json::json!({
-                    "from_id": arango_endpoint_uuid(collection, row, "_from")?,
-                    "to_id": arango_endpoint_uuid(collection, row, "_to")?,
-                    "relation_type": relation_type,
-                    "support": 1_i64,
-                    "library_id": required_uuid_field(collection, row, "library_id")?,
-                    "rank": edge_i32(row, "rank")?,
-                    "score": edge_f64(row, "score")?,
-                    "inclusion_reason": edge_string(row, "inclusion_reason"),
-                    "created_at": edge_timestamp(row, "created_at"),
-                    "updated_at": edge_timestamp(row, "updated_at"),
-                }));
-            }
-            insert_pg_rows_bulk(tx, table, translated).await?;
-        }
-        KNOWLEDGE_BUNDLE_CHUNK_EDGE
-        | KNOWLEDGE_BUNDLE_ENTITY_EDGE
-        | KNOWLEDGE_BUNDLE_RELATION_EDGE
-        | KNOWLEDGE_BUNDLE_EVIDENCE_EDGE => {
-            let (table, id_field) = match collection {
-                KNOWLEDGE_BUNDLE_CHUNK_EDGE => ("knowledge_bundle_chunk", "chunk_id"),
-                KNOWLEDGE_BUNDLE_ENTITY_EDGE => ("knowledge_bundle_entity", "entity_id"),
-                KNOWLEDGE_BUNDLE_RELATION_EDGE => ("knowledge_bundle_relation", "relation_id"),
-                _ => ("knowledge_bundle_evidence", "evidence_id"),
-            };
-            let mut translated = Vec::with_capacity(rows.len());
-            for row in rows {
-                let mut value = serde_json::json!({
-                    "bundle_id": arango_endpoint_uuid(collection, row, "_from")?,
-                    "library_id": required_uuid_field(collection, row, "library_id")?,
-                    "rank": edge_i32(row, "rank")?.unwrap_or(0),
-                    "score": edge_f64(row, "score")?.unwrap_or(0.0),
-                    "inclusion_reason": edge_string(row, "inclusion_reason"),
-                    "created_at": edge_timestamp(row, "created_at"),
-                });
-                let object = value
-                    .as_object_mut()
-                    .ok_or_else(|| anyhow!("translated bundle edge row is not an object"))?;
-                object.insert(
-                    id_field.to_string(),
-                    serde_json::Value::String(
-                        arango_endpoint_uuid(collection, row, "_to")?.to_string(),
-                    ),
-                );
-                translated.push(value);
-            }
-            insert_pg_rows_bulk(tx, table, translated).await?;
-        }
-        other => bail!("no postgres edge restore mapping for `{other}`"),
-    }
-    Ok(())
-}
-
-fn edge_payload_value<'a>(
-    row: &'a serde_json::Value,
-    field: &str,
-) -> Option<&'a serde_json::Value> {
-    row.get(field).or_else(|| {
-        row.get("payload").and_then(|payload| {
-            payload.get(field).or_else(|| {
-                if field == "inclusion_reason" { payload.get("inclusionReason") } else { None }
-            })
-        })
-    })
-}
-
-fn edge_i32(row: &serde_json::Value, field: &str) -> anyhow::Result<Option<i32>> {
-    let Some(value) = edge_payload_value(row, field) else {
-        return Ok(None);
-    };
-    optional_i32_json(&serde_json::json!({ field: value }), field)
-}
-
-fn edge_f64(row: &serde_json::Value, field: &str) -> anyhow::Result<Option<f64>> {
-    let Some(value) = edge_payload_value(row, field) else {
-        return Ok(None);
-    };
-    optional_f64_json(&serde_json::json!({ field: value }), field)
-}
-
-fn edge_string(row: &serde_json::Value, field: &str) -> Option<String> {
-    edge_payload_value(row, field).and_then(serde_json::Value::as_str).map(str::to_string)
-}
-
-fn edge_timestamp(row: &serde_json::Value, field: &str) -> serde_json::Value {
-    row.get(field)
-        .cloned()
-        .unwrap_or_else(|| serde_json::Value::String(chrono::Utc::now().to_rfc3339()))
 }
 
 async fn bounded_read_until<R>(
@@ -3397,23 +2602,28 @@ async fn prepare_replace_library_footprint(
     state: &AppState,
     library_id: Uuid,
     existing_workspace_id: Option<Uuid>,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<Option<StashedContentDirectory>> {
+    if state.settings.knowledge_plane_backend != "postgres" {
+        bail!(
+            "unsupported knowledge_plane_backend `{}` for snapshot restore",
+            state.settings.knowledge_plane_backend
+        );
+    }
+
     // Blob storage is keyed by the existing library workspace. Capture
     // it before the restore writes replacement blobs under the same
     // library identity.
-    if let Some(workspace_id) = existing_workspace_id {
-        let _ = state
+    let stashed_storage = if let Some(workspace_id) = existing_workspace_id {
+        state
             .content_storage
             .stash_library_storage(workspace_id, library_id)
             .await
-            .context("stash library blobs before restore")?;
-    }
-
-    if state.settings.knowledge_plane_backend == "postgres" {
-        Ok(())
+            .context("stash library blobs before restore")?
     } else {
-        clear_library_arango_footprint(state, library_id).await
-    }
+        None
+    };
+
+    Ok(stashed_storage)
 }
 
 async fn clear_library_postgres_footprint(
@@ -3494,6 +2704,91 @@ async fn clear_pg_vector_relations_for_library(
     Ok(())
 }
 
+struct LockedTargetLibrary {
+    workspace_id: Uuid,
+    slug: String,
+}
+
+async fn lock_catalog_library_for_restore(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    library_id: Uuid,
+) -> anyhow::Result<LockedTargetLibrary> {
+    let locked: Option<(Uuid, String)> = sqlx::query_as(
+        "SELECT workspace_id, slug
+         FROM catalog_library
+         WHERE id = $1
+         FOR UPDATE",
+    )
+    .bind(library_id)
+    .fetch_optional(&mut **tx)
+    .await
+    .context("lock catalog_library before snapshot restore")?;
+    let Some((workspace_id, slug)) = locked else {
+        bail!(
+            "target library {library_id} does not exist; create/select a library before restoring a snapshot"
+        );
+    };
+    Ok(LockedTargetLibrary { workspace_id, slug })
+}
+
+async fn tx_library_has_restore_footprint(
+    _state: &AppState,
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    library_id: Uuid,
+) -> anyhow::Result<bool> {
+    postgres_library_has_restore_footprint(tx, library_id).await
+}
+
+async fn postgres_library_has_restore_footprint(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    library_id: Uuid,
+) -> anyhow::Result<bool> {
+    let mut clauses = Vec::new();
+    for table in POSTGRES_CONTENT_TABLES
+        .iter()
+        .chain(POSTGRES_RUNTIME_GRAPH_TABLES.iter())
+        .chain(POSTGRES_KNOWLEDGE_TABLES.iter())
+        .copied()
+    {
+        if let Some(clause) = postgres_restore_footprint_clause(table)? {
+            clauses.push(clause);
+        }
+    }
+    if clauses.is_empty() {
+        return Ok(false);
+    }
+    let sql = format!("SELECT {}", clauses.join(" OR "));
+    let has_footprint = sqlx::query_scalar::<_, bool>(&sql)
+        .bind(library_id)
+        .fetch_one(&mut **tx)
+        .await
+        .context("check target library snapshot restore footprint")?;
+    Ok(has_footprint)
+}
+
+fn postgres_restore_footprint_clause(table: &str) -> anyhow::Result<Option<String>> {
+    let clause = match table {
+        "content_chunk" => "EXISTS (SELECT 1 FROM content_chunk c \
+             JOIN content_revision r ON r.id = c.revision_id \
+             WHERE r.library_id = $1)"
+            .to_string(),
+        "content_mutation_item" => "EXISTS (SELECT 1 FROM content_mutation_item i \
+             JOIN content_mutation m ON m.id = i.mutation_id \
+             WHERE m.library_id = $1)"
+            .to_string(),
+        "content_document_head" => "EXISTS (SELECT 1 FROM content_document_head h \
+             JOIN content_document d ON d.id = h.document_id \
+             WHERE d.library_id = $1)"
+            .to_string(),
+        direct => {
+            let direct = require_known_snapshot_pg_table(direct)?;
+            let table = quote_pg_identifier(direct)?;
+            format!("EXISTS (SELECT 1 FROM {table} WHERE library_id = $1)")
+        }
+    };
+    Ok(Some(clause))
+}
+
 /// Lazy-ensure every per-dim vector shard declared by a snapshot manifest
 /// so the import path can stream rows back in without first running a
 /// fresh ingest to materialize the collections. ANN + persistent index
@@ -3505,230 +2800,30 @@ async fn ensure_manifest_vector_shards(
     state: &AppState,
     manifest: &SnapshotManifest,
 ) -> anyhow::Result<()> {
-    if manifest.vector_shards.is_empty() {
-        return Ok(());
-    }
-
-    match state.settings.knowledge_plane_backend.as_str() {
-        "postgres" => {
-            let search_store = &state.arango_search_store;
-            let mut ensured = HashSet::new();
-            for shard in &manifest.vector_shards {
-                let relation_name = canonical_per_dim_vector_relation_name(&shard.name)
-                    .ok_or_else(|| {
-                        anyhow!(
-                            "snapshot manifest vector_shards entry `{}` is not a canonical per-dim shard name",
-                            shard.name
-                        )
-                    })?;
-                if !ensured.insert(relation_name.clone()) {
-                    continue;
-                }
-                if is_per_dim_chunk_vector_collection_name(&shard.name) {
-                    search_store.ensure_chunk_vector_shard(shard.dim).await.with_context(|| {
-                        format!("ensure per-dim chunk vector shard {relation_name} for restore")
-                    })?;
-                } else {
-                    search_store.ensure_entity_vector_shard(shard.dim).await.with_context(
-                        || {
-                            format!(
-                                "ensure per-dim entity vector shard {relation_name} for restore"
-                            )
-                        },
-                    )?;
-                }
-            }
-        }
-        "arango" => {
-            let arango = state.arango_client.as_ref();
-            let params = crate::infra::arangodb::search_store::VectorIndexParams {
-                n_lists: state.settings.arangodb_vector_index_n_lists,
-                default_n_probe: state.settings.arangodb_vector_index_default_n_probe,
-                training_iterations: state.settings.arangodb_vector_index_training_iterations,
-            };
-            let mut ensured = HashSet::new();
-            for shard in &manifest.vector_shards {
-                let relation_name = canonical_per_dim_vector_relation_name(&shard.name)
-                    .ok_or_else(|| {
-                        anyhow!(
-                            "snapshot manifest vector_shards entry `{}` is not a canonical per-dim shard name",
-                            shard.name
-                        )
-                    })?;
-                if !ensured.insert(relation_name.clone()) {
-                    continue;
-                }
-                if is_per_dim_chunk_vector_collection_name(&shard.name) {
-                    arango
-                        .ensure_chunk_vector_collection_for_dim(
-                            shard.dim,
-                            params.n_lists,
-                            params.default_n_probe,
-                            params.training_iterations,
-                        )
-                        .await
-                        .with_context(|| {
-                            format!("ensure per-dim chunk vector shard {relation_name} for restore")
-                        })?;
-                } else {
-                    arango
-                        .ensure_entity_vector_collection_for_dim(
-                            shard.dim,
-                            params.n_lists,
-                            params.default_n_probe,
-                            params.training_iterations,
-                        )
-                        .await
-                        .with_context(|| {
-                            format!(
-                                "ensure per-dim entity vector shard {relation_name} for restore"
-                            )
-                        })?;
-                }
-            }
-        }
-        backend => bail!("unsupported knowledge_plane_backend `{backend}`"),
-    }
-
-    Ok(())
-}
-
-/// Wipes every ArangoDB row that carries this `library_id` — knowledge
-/// vertex collections, every per-dim vector shard, and every edge
-/// collection (filtered both by `edge.library_id` and by the vertex
-/// each edge points at). Idempotent: a second run on an already-clean
-/// library is a no-op.
-///
-/// Used by:
-///   - snapshot restore in `OverwriteMode::Replace` (clears the target
-///     library before re-inserting from the archive)
-///   - `CatalogService::delete_library` (cascades the Postgres delete
-///     into Arango so the snapshot story is whole-library-atomic from
-///     the operator's point of view)
-pub async fn clear_library_arango_footprint(
-    state: &AppState,
-    library_id: Uuid,
-) -> anyhow::Result<()> {
-    let arango = state.arango_client.as_ref();
-    for edge_collection in ARANGO_EDGE_COLLECTIONS {
-        clear_arango_rows_by_library(arango, edge_collection, library_id)
-            .await
-            .with_context(|| format!("clear arango edge {edge_collection}"))?;
-        for vertex_collection in ARANGO_DOC_COLLECTIONS {
-            clear_arango_edges_by_vertex_library(
-                arango,
-                edge_collection,
-                vertex_collection,
-                library_id,
+    let search_store = &state.search_store;
+    let mut ensured = HashSet::new();
+    for shard in &manifest.vector_shards {
+        let relation_name = canonical_per_dim_vector_relation_name(&shard.name).ok_or_else(|| {
+            anyhow!(
+                "snapshot manifest vector_shards entry `{}` is not a canonical per-dim shard name",
+                shard.name
             )
-            .await
-            .with_context(|| {
-                format!("clear arango edge {edge_collection} endpoint {vertex_collection}")
+        })?;
+        if !ensured.insert(relation_name.clone()) {
+            continue;
+        }
+        if is_per_dim_chunk_vector_collection_name(&shard.name) {
+            search_store.ensure_chunk_vector_shard(shard.dim).await.with_context(|| {
+                format!("ensure per-dim chunk vector shard {relation_name} for restore")
+            })?;
+        } else {
+            search_store.ensure_entity_vector_shard(shard.dim).await.with_context(|| {
+                format!("ensure per-dim entity vector shard {relation_name} for restore")
             })?;
         }
     }
-    for collection in ARANGO_DOC_COLLECTIONS {
-        clear_arango_rows_by_library(arango, collection, library_id)
-            .await
-            .with_context(|| format!("clear arango doc {collection}"))?;
-    }
-    // Per-dim vector shards are not in the static list — discover them
-    // at runtime so a replace-mode restore wipes this library's vectors
-    // out of every shard, not just the legacy single-dim collection.
-    // Vector shards have no edges pointing at them, so the inner edge
-    // sweep above does not need per-dim awareness.
-    let per_dim_chunk_shards = arango
-        .list_per_dim_chunk_vector_collections()
-        .await
-        .context("list per-dim chunk vector shards for replace-mode clear")?;
-    let per_dim_entity_shards = arango
-        .list_per_dim_entity_vector_collections()
-        .await
-        .context("list per-dim entity vector shards for replace-mode clear")?;
-    for collection in per_dim_chunk_shards.iter().chain(per_dim_entity_shards.iter()) {
-        clear_arango_rows_by_library(arango, collection, library_id)
-            .await
-            .with_context(|| format!("clear arango per-dim shard {collection}"))?;
-    }
     Ok(())
 }
-
-async fn clear_arango_rows_by_library(
-    arango: &ArangoClient,
-    collection: &str,
-    library_id: Uuid,
-) -> anyhow::Result<()> {
-    loop {
-        let cursor = arango
-            .query_json_bulk(
-                "FOR row IN @@collection
-                    FILTER row.library_id == @library_id
-                    LIMIT @limit
-                    REMOVE row IN @@collection
-                    RETURN OLD._key",
-                serde_json::json!({
-                    "@collection": collection,
-                    "library_id": library_id.to_string(),
-                    "limit": ARANGO_CLEAR_BATCH_ROWS,
-                }),
-            )
-            .await?;
-        if arango_cursor_result_len(&cursor)? < ARANGO_CLEAR_BATCH_ROWS {
-            break;
-        }
-    }
-    Ok(())
-}
-
-async fn clear_arango_edges_by_vertex_library(
-    arango: &ArangoClient,
-    edge_collection: &str,
-    vertex_collection: &str,
-    library_id: Uuid,
-) -> anyhow::Result<()> {
-    loop {
-        let cursor = arango
-            .query_json_bulk(
-                "FOR vertex IN @@vertex_collection
-                    FILTER vertex.library_id == @library_id
-                    FOR edge IN @@edge_collection
-                        FILTER edge._from == vertex._id OR edge._to == vertex._id
-                        LIMIT @limit
-                        REMOVE edge IN @@edge_collection
-                        RETURN OLD._key",
-                serde_json::json!({
-                    "@edge_collection": edge_collection,
-                    "@vertex_collection": vertex_collection,
-                    "library_id": library_id.to_string(),
-                    "limit": ARANGO_CLEAR_BATCH_ROWS,
-                }),
-            )
-            .await?;
-        if arango_cursor_result_len(&cursor)? < ARANGO_CLEAR_BATCH_ROWS {
-            break;
-        }
-    }
-    Ok(())
-}
-
-fn arango_cursor_result_len(cursor: &serde_json::Value) -> anyhow::Result<usize> {
-    Ok(cursor
-        .get("result")
-        .and_then(serde_json::Value::as_array)
-        .ok_or_else(|| anyhow!("ArangoDB cursor response is missing result"))?
-        .len())
-}
-
-async fn load_library_workspace(pool: &PgPool, library_id: Uuid) -> anyhow::Result<Option<Uuid>> {
-    let row: Option<Uuid> =
-        sqlx::query_scalar("SELECT workspace_id FROM catalog_library WHERE id = $1")
-            .bind(library_id)
-            .fetch_optional(pool)
-            .await
-            .context("load catalog_library workspace for clear")?;
-    Ok(row)
-}
-
 /// Recursively strips characters that PostgreSQL `text` and `jsonb` cannot
 /// store from every `String` node in `value`.
 ///
@@ -3796,8 +2891,6 @@ async fn insert_pg_rows_bulk(
     for row in &mut rows {
         sanitize_json_for_postgres(row);
     }
-    // LEGACY-SHIM(old-archive-compat, remove>=0.7.0): call site for pre-parentage document_role backfill — remove together with the function once no pre-0.5.0-parentage archives are restored.
-    backfill_missing_document_role(table, &mut rows);
     if is_runtime_vector_relation_name(table) {
         insert_pg_vector_rows_bulk(tx, table, rows).await?;
         return Ok(());
@@ -3806,7 +2899,8 @@ async fn insert_pg_rows_bulk(
     let count = rows.len();
     let payload = serde_json::Value::Array(rows);
     if table == "catalog_library" {
-        delete_catalog_library_rows_before_insert(tx, &payload).await?;
+        update_catalog_library_rows_from_snapshot(tx, &payload, count).await?;
+        return Ok(());
     }
     let on_conflict = pg_insert_conflict_clause(table);
     let sql = if let Some(columns) = snapshot_pg_insert_columns(table) {
@@ -3827,37 +2921,6 @@ async fn insert_pg_rows_bulk(
         .await
         .with_context(|| format!("bulk insert {count} rows into {table}"))?;
     Ok(())
-}
-
-/// Legacy library snapshots exported before document parentage existed carry no
-/// `document_role` key on `content_document` / `knowledge_document` rows. The
-/// column is `NOT NULL DEFAULT 'primary'`, but a bulk insert reconstructs the
-/// row from JSONB and supplies an explicit `NULL` for the absent key, which
-/// bypasses the column default and violates the not-null constraint. Inject the
-/// default for those tables so pre-parentage archives still restore cleanly; a
-/// later `backfill-document-parents` pass reclassifies the imported documents.
-/// The nullable parentage columns (`parent_document_id`, `parent_external_key`)
-///
-/// LEGACY-SHIM(old-archive-compat, remove>=0.7.0): injects `document_role='primary'` for pre-parentage archives (pre-0.5.0) that lack the column — safe to remove once no pre-parentage archives remain in the field.
-/// need no injection — a missing key correctly imports as `NULL`.
-fn backfill_missing_document_role(table: &str, rows: &mut [serde_json::Value]) {
-    if table != "content_document" && table != "knowledge_document" {
-        return;
-    }
-    for row in rows.iter_mut() {
-        let Some(object) = row.as_object_mut() else {
-            continue;
-        };
-        let missing = object.get("document_role").is_none_or(serde_json::Value::is_null);
-        if missing {
-            object.insert(
-                "document_role".to_string(),
-                serde_json::Value::String(
-                    crate::domains::content::DOCUMENT_ROLE_PRIMARY.to_string(),
-                ),
-            );
-        }
-    }
 }
 
 fn snapshot_pg_insert_columns(table: &str) -> Option<&'static str> {
@@ -4057,22 +3120,66 @@ fn pg_insert_conflict_clause(table: &str) -> &'static str {
     }
 }
 
-async fn delete_catalog_library_rows_before_insert(
+async fn update_catalog_library_rows_from_snapshot(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     payload: &serde_json::Value,
+    count: usize,
 ) -> anyhow::Result<()> {
-    sqlx::query(
-        "DELETE FROM catalog_library
-         WHERE id IN (
-             SELECT row.id
-             FROM jsonb_to_recordset($1) AS row(id uuid)
-         )",
-    )
-    .bind(payload)
-    .execute(&mut **tx)
-    .await
-    .context("replace catalog_library row before snapshot insert")?;
+    let result = sqlx::query(catalog_library_snapshot_update_sql())
+        .bind(payload)
+        .execute(&mut **tx)
+        .await
+        .context("update catalog_library row from snapshot")?;
+    if result.rows_affected() != count as u64 {
+        bail!(
+            "catalog_library snapshot expected to update {count} target rows but updated {}",
+            result.rows_affected()
+        );
+    }
     Ok(())
+}
+
+fn catalog_library_snapshot_update_sql() -> &'static str {
+    "UPDATE catalog_library AS target
+         SET workspace_id = row.workspace_id,
+             slug = row.slug,
+             display_name = COALESCE(row.display_name, target.display_name),
+             description = row.description,
+             lifecycle_state = COALESCE(row.lifecycle_state, target.lifecycle_state),
+             source_truth_version = COALESCE(row.source_truth_version, target.source_truth_version),
+             extraction_prompt = row.extraction_prompt,
+             ai_summary = row.ai_summary,
+             created_by_principal_id = row.created_by_principal_id,
+             created_at = COALESCE(row.created_at, target.created_at),
+             updated_at = COALESCE(row.updated_at, target.updated_at),
+             web_ingest_policy = COALESCE(row.web_ingest_policy, target.web_ingest_policy),
+             chunking_template = COALESCE(row.chunking_template, target.chunking_template),
+             recognition_policy = COALESCE(row.recognition_policy, target.recognition_policy),
+             include_document_hint_in_mcp_answers = COALESCE(
+                 row.include_document_hint_in_mcp_answers,
+                 target.include_document_hint_in_mcp_answers
+             ),
+             retrieval_config = COALESCE(row.retrieval_config, target.retrieval_config)
+         FROM jsonb_to_recordset($1) AS row(
+             id uuid,
+             workspace_id uuid,
+             slug text,
+             display_name text,
+             description text,
+             lifecycle_state catalog_library_lifecycle_state,
+             source_truth_version bigint,
+             extraction_prompt text,
+             ai_summary text,
+             created_by_principal_id uuid,
+             created_at timestamptz,
+             updated_at timestamptz,
+             web_ingest_policy jsonb,
+             chunking_template text,
+             recognition_policy jsonb,
+             include_document_hint_in_mcp_answers boolean,
+             retrieval_config jsonb
+         )
+         WHERE target.id = row.id"
 }
 
 /// Writes a batch of per-dim vector rows into the shared `knowledge_*_vector_d*`
@@ -4542,9 +3649,6 @@ pub struct WorkspaceLibraryImportReport {
     /// the source slug collided with a sibling library).
     pub slug: String,
     pub postgres_rows_by_table: Vec<(String, u64)>,
-    pub arango_docs_by_collection: Vec<(String, u64)>,
-    pub arango_edges_by_collection: Vec<(String, u64)>,
-    pub skipped_arango_edges_by_collection: Vec<(String, u64)>,
     pub blobs_restored: u64,
 }
 
@@ -4957,9 +4061,6 @@ where
             library_id: created.id,
             slug: created.slug,
             postgres_rows_by_table: library_report.postgres_rows_by_table,
-            arango_docs_by_collection: library_report.arango_docs_by_collection,
-            arango_edges_by_collection: library_report.arango_edges_by_collection,
-            skipped_arango_edges_by_collection: library_report.skipped_arango_edges_by_collection,
             blobs_restored: library_report.blobs_restored,
         });
         report.libraries_restored += 1;
@@ -5049,38 +4150,7 @@ async fn create_target_library(
 mod tests {
     use super::*;
 
-    #[test]
-    fn backfill_missing_document_role_defaults_legacy_rows() {
-        // Legacy archive row: no document_role key.
-        let mut rows = vec![
-            serde_json::json!({"id": "a", "external_key": "k1"}),
-            // Explicit null also counts as missing.
-            serde_json::json!({"id": "b", "external_key": "k2", "document_role": null}),
-            // Already-typed row is left untouched.
-            serde_json::json!({"id": "c", "external_key": "k3", "document_role": "attached_context"}),
-        ];
-        backfill_missing_document_role("content_document", &mut rows);
-        assert_eq!(rows[0]["document_role"], serde_json::json!("primary"));
-        assert_eq!(rows[1]["document_role"], serde_json::json!("primary"));
-        assert_eq!(rows[2]["document_role"], serde_json::json!("attached_context"));
-
-        // knowledge_document mirror is covered too.
-        let mut mirror = vec![serde_json::json!({"document_id": "a"})];
-        backfill_missing_document_role("knowledge_document", &mut mirror);
-        assert_eq!(mirror[0]["document_role"], serde_json::json!("primary"));
-
-        // Unrelated tables are never touched.
-        let mut other = vec![serde_json::json!({"chunk_id": "x"})];
-        backfill_missing_document_role("knowledge_chunk", &mut other);
-        assert!(other[0].get("document_role").is_none());
-    }
-
-    fn manifest_with_sections(
-        postgres_tables: Vec<&str>,
-        arango_doc_collections: Vec<&str>,
-        arango_edge_collections: Vec<&str>,
-        has_blobs: bool,
-    ) -> SnapshotManifest {
+    fn manifest_with_sections(postgres_tables: Vec<&str>, has_blobs: bool) -> SnapshotManifest {
         SnapshotManifest {
             schema_version: SNAPSHOT_SCHEMA_VERSION,
             library_id: Uuid::now_v7(),
@@ -5093,14 +4163,6 @@ mod tests {
                 vec![IncludeKind::LibraryData]
             },
             postgres_tables: postgres_tables.into_iter().map(str::to_string).collect(),
-            arango_doc_collections: arango_doc_collections
-                .into_iter()
-                .map(str::to_string)
-                .collect(),
-            arango_edge_collections: arango_edge_collections
-                .into_iter()
-                .map(str::to_string)
-                .collect(),
             has_blobs,
             vector_shards: Vec::new(),
         }
@@ -5164,79 +4226,35 @@ mod tests {
             parse_per_dim_vector_collection_dim("knowledge_entity_vector_d3072"),
             Some(3072)
         );
-        assert_eq!(
-            parse_per_dim_vector_collection_dim(
-                "knowledge_chunk_vector_d3072_l019ded0008207ad29224ca3d0c82d57c"
-            ),
-            Some(3072)
-        );
-        assert_eq!(
-            parse_per_dim_vector_collection_dim(
-                "knowledge_entity_vector_d3072_l019ded0008207ad29224ca3d0c82d57c"
-            ),
-            Some(3072)
-        );
-        assert!(is_per_dim_vector_collection_name("knowledge_chunk_vector_d1"));
+        assert_eq!(parse_per_dim_vector_collection_dim("knowledge_chunk_vector_d1"), Some(1));
         assert!(is_per_dim_chunk_vector_collection_name("knowledge_chunk_vector_d1024"));
-        assert!(is_per_dim_chunk_vector_collection_name(
-            "knowledge_chunk_vector_d3072_l019ded0008207ad29224ca3d0c82d57c"
-        ));
         assert!(!is_per_dim_chunk_vector_collection_name("knowledge_entity_vector_d1024"));
-        assert!(!is_runtime_vector_relation_name(
-            "knowledge_chunk_vector_d3072_l019ded0008207ad29224ca3d0c82d57c"
-        ));
-        // Negative cases — legacy names, missing digits, alpha suffixes,
-        // wrong prefix.
+        assert!(is_runtime_vector_relation_name("knowledge_chunk_vector_d3072"));
+        // Negative cases — legacy names, missing digits, alpha/library suffixes,
+        // and wrong prefixes.
         assert_eq!(parse_per_dim_vector_collection_dim("knowledge_chunk_vector"), None);
         assert_eq!(parse_per_dim_vector_collection_dim("knowledge_chunk_vector_d"), None);
         assert_eq!(parse_per_dim_vector_collection_dim("knowledge_chunk_vector_d1024x"), None);
         assert_eq!(parse_per_dim_vector_collection_dim("knowledge_chunk_vector_d1024_l"), None);
+        assert_eq!(
+            parse_per_dim_vector_collection_dim(
+                "knowledge_chunk_vector_d3072_l019ded0008207ad29224ca3d0c82d57c"
+            ),
+            None
+        );
         assert_eq!(parse_per_dim_vector_collection_dim("knowledge_chunk_vector_d1024_lABC"), None);
         assert_eq!(parse_per_dim_vector_collection_dim("other_collection_d1024"), None);
     }
 
     #[test]
-    fn arango_vector_collection_restore_target_collapses_per_library_shards() {
-        let row = serde_json::json!({ "dimensions": 3072 });
-        assert_eq!(
-            pg_table_for_arango_doc_row(
-                "knowledge_chunk_vector_d3072_l019ded0008207ad29224ca3d0c82d57c",
-                &row
-            )
-            .unwrap(),
-            "knowledge_chunk_vector_d3072"
-        );
-        assert_eq!(
-            pg_table_for_arango_doc_row(
-                "knowledge_entity_vector_d3072_l019ded0008207ad29224ca3d0c82d57c",
-                &row
-            )
-            .unwrap(),
-            "knowledge_entity_vector_d3072"
-        );
-        assert_eq!(
-            pg_table_for_arango_doc_row("knowledge_chunk_vector_d3072", &row).unwrap(),
-            "knowledge_chunk_vector_d3072"
-        );
-        assert!(
-            pg_table_for_arango_doc_row("knowledge_chunk_vector", &serde_json::json!({})).is_err()
-        );
-        assert!(pg_table_for_arango_doc_row("knowledge_chunk_vector_d3072x", &row).is_err());
-    }
-
-    #[test]
     fn snapshot_manifest_sections_accept_per_dim_vector_shards() {
-        let mut manifest = manifest_with_sections(
-            vec!["catalog_library"],
-            vec![KNOWLEDGE_DOCUMENT_COLLECTION, "knowledge_chunk_vector_d1024"],
-            vec![KNOWLEDGE_DOCUMENT_REVISION_EDGE],
-            false,
-        );
+        let mut manifest =
+            manifest_with_sections(vec!["catalog_library", "knowledge_chunk_vector_d1024"], false);
         manifest.vector_shards =
             vec![VectorShardEntry { name: "knowledge_chunk_vector_d1024".to_string(), dim: 1024 }];
         let sections = SnapshotManifestSections::from_manifest(&manifest).unwrap();
         assert_eq!(
-            sections.require_arango_doc_collection("knowledge_chunk_vector_d1024").unwrap(),
+            sections.require_postgres_table("knowledge_chunk_vector_d1024").unwrap(),
             "knowledge_chunk_vector_d1024"
         );
     }
@@ -5245,8 +4263,6 @@ mod tests {
     fn snapshot_manifest_sections_accept_declared_canonical_names() {
         let manifest = manifest_with_sections(
             vec!["catalog_library", "content_document", "runtime_graph_node"],
-            vec![KNOWLEDGE_DOCUMENT_COLLECTION],
-            vec![KNOWLEDGE_DOCUMENT_REVISION_EDGE],
             true,
         );
 
@@ -5254,48 +4270,24 @@ mod tests {
 
         assert_eq!(sections.require_postgres_table("catalog_library").unwrap(), "catalog_library");
         assert_eq!(
-            sections.require_arango_doc_collection(KNOWLEDGE_DOCUMENT_COLLECTION).unwrap(),
-            KNOWLEDGE_DOCUMENT_COLLECTION
+            sections.require_postgres_table("content_document").unwrap(),
+            "content_document"
         );
         assert_eq!(
-            sections.require_arango_edge_collection(KNOWLEDGE_DOCUMENT_REVISION_EDGE).unwrap(),
-            KNOWLEDGE_DOCUMENT_REVISION_EDGE
-        );
-    }
-
-    #[test]
-    fn library_data_snapshot_scope_includes_vector_material() {
-        assert!(
-            ARANGO_DOC_COLLECTIONS.contains(&KNOWLEDGE_CHUNK_VECTOR_COLLECTION),
-            "library snapshots must preserve chunk vectors when revisions are restored as vector-ready"
-        );
-        assert!(
-            ARANGO_DOC_COLLECTIONS.contains(&KNOWLEDGE_ENTITY_VECTOR_COLLECTION),
-            "library snapshots must preserve entity vectors when graph/search state is restored"
+            sections.require_postgres_table("runtime_graph_node").unwrap(),
+            "runtime_graph_node"
         );
     }
 
     #[test]
     fn snapshot_manifest_sections_reject_unknown_or_undeclared_names() {
-        let manifest = manifest_with_sections(
-            vec!["catalog_library", "pg_catalog_authid"],
-            vec![KNOWLEDGE_DOCUMENT_COLLECTION],
-            vec![KNOWLEDGE_DOCUMENT_REVISION_EDGE],
-            false,
-        );
+        let manifest = manifest_with_sections(vec!["catalog_library", "pg_catalog_authid"], false);
         assert!(SnapshotManifestSections::from_manifest(&manifest).is_err());
 
-        let manifest = manifest_with_sections(
-            vec!["catalog_library"],
-            vec![KNOWLEDGE_DOCUMENT_COLLECTION],
-            vec![KNOWLEDGE_DOCUMENT_REVISION_EDGE],
-            false,
-        );
+        let manifest = manifest_with_sections(vec!["catalog_library"], false);
         let sections = SnapshotManifestSections::from_manifest(&manifest).unwrap();
         assert!(sections.require_postgres_table("content_document").is_err());
         assert!(sections.require_postgres_table("ai_provider_credential").is_err());
-        assert!(sections.require_arango_doc_collection(KNOWLEDGE_CHUNK_COLLECTION).is_err());
-        assert!(sections.require_arango_edge_collection(KNOWLEDGE_REVISION_CHUNK_EDGE).is_err());
     }
 
     #[test]
@@ -5310,12 +4302,7 @@ mod tests {
 
     #[test]
     fn snapshot_manifest_rejects_inconsistent_blob_declaration() {
-        let mut manifest = manifest_with_sections(
-            vec!["catalog_library"],
-            vec![KNOWLEDGE_DOCUMENT_COLLECTION],
-            vec![KNOWLEDGE_DOCUMENT_REVISION_EDGE],
-            true,
-        );
+        let mut manifest = manifest_with_sections(vec!["catalog_library"], true);
         manifest.include_kinds = vec![IncludeKind::LibraryData];
 
         assert!(SnapshotManifestSections::from_manifest(&manifest).is_err());
@@ -5325,6 +4312,76 @@ mod tests {
     fn catalog_library_import_does_not_carry_parallel_update_column_list() {
         assert_eq!(pg_insert_conflict_clause("catalog_workspace"), " ON CONFLICT DO NOTHING");
         assert_eq!(pg_insert_conflict_clause("catalog_library"), "");
+    }
+
+    #[test]
+    fn restore_library_data_plan_allows_reject_into_empty_target() {
+        assert_eq!(
+            plan_restore_library_data(
+                &[IncludeKind::LibraryData],
+                OverwriteMode::Reject,
+                TargetRestoreFootprint::Empty,
+            ),
+            RestoreLibraryDataAction::ImportIntoEmptyTarget
+        );
+        assert_eq!(
+            plan_restore_library_data(
+                &[IncludeKind::LibraryData],
+                OverwriteMode::Reject,
+                TargetRestoreFootprint::Populated,
+            ),
+            RestoreLibraryDataAction::RejectPopulatedTarget
+        );
+        assert_eq!(
+            plan_restore_library_data(
+                &[IncludeKind::LibraryData],
+                OverwriteMode::Replace,
+                TargetRestoreFootprint::Populated,
+            ),
+            RestoreLibraryDataAction::ReplaceTarget
+        );
+        assert_eq!(
+            plan_restore_library_data(
+                &[IncludeKind::AiConfig],
+                OverwriteMode::Replace,
+                TargetRestoreFootprint::Populated,
+            ),
+            RestoreLibraryDataAction::Skip
+        );
+    }
+
+    #[test]
+    fn restore_footprint_clauses_follow_canonical_snapshot_tables() {
+        let content_document = postgres_restore_footprint_clause("content_document")
+            .unwrap()
+            .expect("content_document carries direct library scope");
+        assert!(content_document.contains("\"content_document\""));
+        assert!(content_document.contains("library_id = $1"));
+
+        let content_chunk = postgres_restore_footprint_clause("content_chunk")
+            .unwrap()
+            .expect("content_chunk is scoped through content_revision");
+        assert!(content_chunk.contains("JOIN content_revision"));
+        assert!(content_chunk.contains("r.library_id = $1"));
+
+        let vector_manifest =
+            postgres_restore_footprint_clause("knowledge_vector_relation_manifest")
+                .unwrap()
+                .expect("vector manifest rows make the target non-empty");
+        assert!(vector_manifest.contains("\"knowledge_vector_relation_manifest\""));
+    }
+
+    #[test]
+    fn catalog_library_snapshot_update_preserves_missing_default_columns() {
+        let sql = catalog_library_snapshot_update_sql();
+        assert!(sql.contains(
+            "retrieval_config = COALESCE(row.retrieval_config, target.retrieval_config)"
+        ));
+        assert!(sql.contains(
+            "web_ingest_policy = COALESCE(row.web_ingest_policy, target.web_ingest_policy)"
+        ));
+        assert!(sql.contains("retrieval_config jsonb"));
+        assert!(sql.contains("FROM jsonb_to_recordset($1)"));
     }
 
     #[test]
@@ -5409,137 +4466,6 @@ mod tests {
     }
 
     #[test]
-    fn snapshot_row_scope_rewrites_arango_library_and_workspace_fields() {
-        let source_workspace_id = Uuid::now_v7();
-        let source_library_id = Uuid::now_v7();
-        let target_workspace_id = Uuid::now_v7();
-        let target_library_id = Uuid::now_v7();
-        let source_storage_ref =
-            format!("content/{source_workspace_id}/{source_library_id}/source.bin");
-        let target_storage_ref =
-            format!("content/{target_workspace_id}/{target_library_id}/source.bin");
-        let mut scope =
-            SnapshotRowScope::new(source_library_id, target_library_id, target_workspace_id, None);
-
-        let mut row = serde_json::json!({
-            "_key": "doc-1",
-            "library_id": source_library_id,
-            "workspace_id": source_workspace_id,
-        });
-        assert_eq!(
-            scope.normalize_arango_row(KNOWLEDGE_DOCUMENT_COLLECTION, &mut row).unwrap(),
-            SnapshotArangoRowAction::Import
-        );
-
-        assert_eq!(
-            required_uuid_field(KNOWLEDGE_DOCUMENT_COLLECTION, &row, "library_id").unwrap(),
-            target_library_id
-        );
-        assert_eq!(
-            required_uuid_field(KNOWLEDGE_DOCUMENT_COLLECTION, &row, "workspace_id").unwrap(),
-            target_workspace_id
-        );
-        assert!(scope.arango_document_ids.contains("knowledge_document/doc-1"));
-
-        let mut revision = serde_json::json!({
-            "_key": "rev-1",
-            "library_id": source_library_id,
-            "workspace_id": source_workspace_id,
-            "storage_ref": source_storage_ref,
-        });
-        assert_eq!(
-            scope.normalize_arango_row(KNOWLEDGE_REVISION_COLLECTION, &mut revision).unwrap(),
-            SnapshotArangoRowAction::Import
-        );
-        assert_eq!(string_field(&revision, "storage_ref"), Some(target_storage_ref.as_str()));
-
-        let mut edge = serde_json::json!({
-            "_from": "knowledge_document/doc-1",
-            "_to": "knowledge_revision/rev-1",
-            "library_id": source_library_id,
-        });
-        assert_eq!(
-            scope.normalize_arango_row(KNOWLEDGE_DOCUMENT_REVISION_EDGE, &mut edge).unwrap(),
-            SnapshotArangoRowAction::Import
-        );
-        assert_eq!(
-            required_uuid_field(KNOWLEDGE_DOCUMENT_REVISION_EDGE, &edge, "library_id").unwrap(),
-            target_library_id
-        );
-
-        let mut dangling_edge = serde_json::json!({
-            "_from": "knowledge_document/doc-1",
-            "_to": "knowledge_revision/missing",
-            "library_id": source_library_id,
-        });
-        assert_eq!(
-            scope
-                .normalize_arango_row(KNOWLEDGE_DOCUMENT_REVISION_EDGE, &mut dangling_edge)
-                .unwrap(),
-            SnapshotArangoRowAction::SkipDanglingEdge
-        );
-
-        let mut chunk = serde_json::json!({
-            "_key": "chunk-1",
-            "library_id": source_library_id,
-            "workspace_id": source_workspace_id,
-        });
-        assert_eq!(
-            scope.normalize_arango_row(KNOWLEDGE_CHUNK_COLLECTION, &mut chunk).unwrap(),
-            SnapshotArangoRowAction::Import
-        );
-
-        let mut chunk_vector = serde_json::json!({
-            "_key": "chunk-vector-1",
-            "library_id": source_library_id,
-            "workspace_id": source_workspace_id,
-        });
-        assert_eq!(
-            scope
-                .normalize_arango_row(KNOWLEDGE_CHUNK_VECTOR_COLLECTION, &mut chunk_vector)
-                .unwrap(),
-            SnapshotArangoRowAction::Import
-        );
-        assert_eq!(
-            required_uuid_field(KNOWLEDGE_CHUNK_VECTOR_COLLECTION, &chunk_vector, "library_id")
-                .unwrap(),
-            target_library_id
-        );
-
-        let mut missing_bundle_edge = serde_json::json!({
-            "_from": "knowledge_context_bundle/bundle-1",
-            "_to": "knowledge_chunk/chunk-1",
-            "library_id": source_library_id,
-        });
-        assert_eq!(
-            scope
-                .normalize_arango_row(KNOWLEDGE_BUNDLE_CHUNK_EDGE, &mut missing_bundle_edge)
-                .unwrap(),
-            SnapshotArangoRowAction::SkipDanglingEdge
-        );
-
-        let mut bundle = serde_json::json!({
-            "_key": "bundle-1",
-            "library_id": source_library_id,
-            "workspace_id": source_workspace_id,
-        });
-        assert_eq!(
-            scope.normalize_arango_row(KNOWLEDGE_CONTEXT_BUNDLE_COLLECTION, &mut bundle).unwrap(),
-            SnapshotArangoRowAction::Import
-        );
-
-        let mut bundle_edge = serde_json::json!({
-            "_from": "knowledge_context_bundle/bundle-1",
-            "_to": "knowledge_chunk/chunk-1",
-            "library_id": source_library_id,
-        });
-        assert_eq!(
-            scope.normalize_arango_row(KNOWLEDGE_BUNDLE_CHUNK_EDGE, &mut bundle_edge).unwrap(),
-            SnapshotArangoRowAction::Import
-        );
-    }
-
-    #[test]
     fn snapshot_row_scope_normalizes_ai_config_rows() {
         let source_workspace_id = Uuid::now_v7();
         let source_library_id = Uuid::now_v7();
@@ -5609,7 +4535,7 @@ mod tests {
     }
 
     #[test]
-    fn pg_batcher_keeps_different_arango_targets_in_separate_buffers() {
+    fn pg_batcher_keeps_different_postgres_targets_in_separate_buffers() {
         let document_id = Uuid::now_v7();
         let block_id = Uuid::now_v7();
         let mut batcher = PgBatcher::new();
@@ -5652,15 +4578,8 @@ mod tests {
         row: serde_json::Value,
     ) {
         let mut kept = true;
-        route_pg_row_through_dedup(
-            dedup,
-            batcher,
-            KnowledgeDocumentSource::Arango,
-            table,
-            row,
-            &mut kept,
-        )
-        .expect("route restore row");
+        route_pg_row_through_dedup(dedup, batcher, table, row, &mut kept)
+            .expect("route restore row");
     }
 
     /// Collects the `uuid`-typed `field` of every pending row in `table`.
@@ -5956,56 +4875,6 @@ mod tests {
             "mention for dropped chunk is dropped via from_id cascade"
         );
         assert!(kept_mentions.contains(&mention_kept_id));
-
-        // 6. v5 bundle-chunk and chunk-mentions-entity edges for dropped chunks
-        //    are skipped; edges for kept chunks survive.
-        let bundle_dropped = serde_json::json!({
-            "_from": format!("knowledge_context_bundle/{}", Uuid::now_v7()),
-            "_to": format!("knowledge_chunk/{chunk_a_nonhead}"),
-            "library_id": Uuid::now_v7(),
-        });
-        let bundle_kept = serde_json::json!({
-            "_from": format!("knowledge_context_bundle/{}", Uuid::now_v7()),
-            "_to": format!("knowledge_chunk/{chunk_a_head_1}"),
-            "library_id": Uuid::now_v7(),
-        });
-        assert!(
-            edge_targets_dropped_chunk(&dedup, KNOWLEDGE_BUNDLE_CHUNK_EDGE, &bundle_dropped)
-                .unwrap(),
-            "bundle-chunk edge for a dropped chunk is skipped",
-        );
-        assert!(
-            !edge_targets_dropped_chunk(&dedup, KNOWLEDGE_BUNDLE_CHUNK_EDGE, &bundle_kept).unwrap(),
-            "bundle-chunk edge for a kept chunk survives",
-        );
-        let mention_edge_dropped = serde_json::json!({
-            "_from": format!("knowledge_chunk/{chunk_a_nonhead}"),
-            "_to": format!("knowledge_entity/{entity_id}"),
-            "library_id": Uuid::now_v7(),
-        });
-        let mention_edge_kept = serde_json::json!({
-            "_from": format!("knowledge_chunk/{chunk_a_head_1}"),
-            "_to": format!("knowledge_entity/{entity_id}"),
-            "library_id": Uuid::now_v7(),
-        });
-        assert!(
-            edge_targets_dropped_chunk(
-                &dedup,
-                KNOWLEDGE_CHUNK_MENTIONS_ENTITY_EDGE,
-                &mention_edge_dropped
-            )
-            .unwrap(),
-            "chunk-mentions-entity edge for a dropped chunk is skipped",
-        );
-        assert!(
-            !edge_targets_dropped_chunk(
-                &dedup,
-                KNOWLEDGE_CHUNK_MENTIONS_ENTITY_EDGE,
-                &mention_edge_kept
-            )
-            .unwrap(),
-            "chunk-mentions-entity edge for a kept chunk survives",
-        );
     }
 
     /// An archive that already carries one document per external key (v6 /
@@ -6039,15 +4908,6 @@ mod tests {
 
         assert_eq!(pending_uuids(&batcher, "knowledge_document", "document_id").len(), 2);
         assert_eq!(pending_uuids(&batcher, "knowledge_chunk", "chunk_id").len(), 2);
-        let bundle_edge = serde_json::json!({
-            "_from": format!("knowledge_context_bundle/{}", Uuid::now_v7()),
-            "_to": format!("knowledge_chunk/{chunk_1}"),
-            "library_id": Uuid::now_v7(),
-        });
-        assert!(
-            !edge_targets_dropped_chunk(&dedup, KNOWLEDGE_BUNDLE_CHUNK_EDGE, &bundle_edge).unwrap(),
-            "no chunk is dropped when there are no duplicates",
-        );
     }
 
     /// Blocker regression: an empty new head (head=true, active, 0 chunks) must
@@ -6176,61 +5036,6 @@ mod tests {
         let kept_mention_tos = pending_uuids(&batcher, "knowledge_chunk_entity_mention", "to_id");
         assert_eq!(kept_mention_tos.len(), 1, "mention via from_id survives for kept chunk");
         assert!(kept_mention_tos.contains(&entity_id));
-
-        // v5 edge: chunk_mentions_entity_edge for chunk of the OLD (kept) doc
-        // must NOT be skipped.
-        let mention_edge_old = serde_json::json!({
-            "_from": format!("knowledge_chunk/{chunk_old_1}"),
-            "_to": format!("knowledge_entity/{entity_id}"),
-            "library_id": Uuid::now_v7(),
-        });
-        assert!(
-            !edge_targets_dropped_chunk(
-                &dedup,
-                KNOWLEDGE_CHUNK_MENTIONS_ENTITY_EDGE,
-                &mention_edge_old
-            )
-            .unwrap(),
-            "edge for kept (chunk-bearing) doc's chunk must not be skipped",
-        );
-    }
-
-    #[test]
-    fn normalize_arango_vector_row_preserves_pg_key_and_encodes_embedding() {
-        let vector_id = Uuid::now_v7();
-        let chunk_id = Uuid::now_v7();
-        let revision_id = Uuid::now_v7();
-        let workspace_id = Uuid::now_v7();
-        let library_id = Uuid::now_v7();
-        let row = serde_json::json!({
-            "_id": "knowledge_chunk_vector_d3_l0123456789abcdef/vector-key-1",
-            "_key": "vector-key-1",
-            "_rev": "rev",
-            "vector_id": vector_id,
-            "workspace_id": workspace_id,
-            "library_id": library_id,
-            "chunk_id": chunk_id,
-            "revision_id": revision_id,
-            "embedding_model_key": "model-a",
-            "vector_kind": "chunk_embedding",
-            "dimensions": 3,
-            "vector": [0.25, -1.5, 2.0],
-            "freshness_generation": 1,
-        });
-
-        // pragma: allowlist secret -- synthetic per-library shard name (hex library id), not a secret
-        let normalized =
-            normalize_arango_doc_for_pg("knowledge_chunk_vector_d3_l0123456789abcdef", row) // pragma: allowlist secret
-                .unwrap();
-
-        assert_eq!(normalized.get("_id"), None);
-        assert_eq!(normalized.get("_key"), None);
-        assert_eq!(normalized.get("key").and_then(serde_json::Value::as_str), Some("vector-key-1"));
-        assert_eq!(
-            normalized.get("embedding").and_then(serde_json::Value::as_str),
-            Some("[0.25,-1.5,2]")
-        );
-        assert_eq!(normalized.get("vector"), None);
     }
 
     /// Reads back a finalized tar.zst archive into a list of
@@ -6291,18 +5096,18 @@ mod tests {
             builder.mode(async_tar::HeaderMode::Deterministic);
             // Simulate the first stage succeeding (manifest written)
             // before the next stage fails — mirrors the real bug where
-            // postgres tables wrote OK and an arango doc stage failed.
+            // postgres tables wrote OK and a later vector stage failed.
             append_json_entry(&mut builder, "manifest.json", &serde_json::json!({"ok": true}))
                 .await
                 .unwrap();
             let inner_err: anyhow::Result<()> =
-                Err(anyhow!("simulated arango vector collection export failure"));
+                Err(anyhow!("simulated vector relation export failure"));
             let outcome =
                 finalize_archive_with_failure_sentinel(builder, library_id, inner_err).await;
             assert!(outcome.is_err(), "primary error must propagate, got {outcome:?}");
             let err_msg = format!("{:#}", outcome.unwrap_err());
             assert!(
-                err_msg.contains("arango vector collection export failure"),
+                err_msg.contains("vector relation export failure"),
                 "expected original error to surface, got `{err_msg}`",
             );
         }
@@ -6319,17 +5124,17 @@ mod tests {
         assert!(names.contains(&"manifest.json"), "earlier entries must survive, got {names:?}");
     }
 
-    /// v2 regression: an arango stage failure deep in the export (after
-    /// several `part-N` entries have already streamed for a collection)
+    /// v2 regression: a table export failure deep in the export (after
+    /// several `part-N` entries have already streamed for a relation)
     /// must still produce a syntactically valid tar+zstd. The archive
     /// must either contain the `EXPORT_FAILED.json` sentinel OR end with
     /// the canonical tar trailer; in both cases `read_tar_zst_entries`
     /// MUST decode the whole stream without "unexpected EOF". This pins
     /// the silent-truncation regression that v1 did not catch on
-    /// libraries where the failing arango doc stage produced 5+ batches
+    /// libraries where the failing vector relation stage produced 5+ batches
     /// before the cursor errored.
     #[tokio::test]
-    async fn test_archive_finalized_on_arango_failure_v2() {
+    async fn test_archive_finalized_on_vector_relation_failure_v2() {
         let mut out: Vec<u8> = Vec::new();
         let library_id = Uuid::now_v7();
         {
@@ -6337,20 +5142,17 @@ mod tests {
             let mut builder = Builder::new(zstd);
             builder.mode(async_tar::HeaderMode::Deterministic);
             // Simulate the realistic failure path: manifest + several
-            // chunk-vector parts streamed OK, then a later cursor batch
-            // failed (mirrors the prod incident on a 1.3 M-row vector
-            // shard).
+            // chunk-vector parts streamed OK, then a later cursor batch failed.
             append_json_entry(&mut builder, "manifest.json", &serde_json::json!({"ok": true}))
                 .await
                 .unwrap();
             for part in 1..=4u32 {
-                let path =
-                    format!("arango/{KNOWLEDGE_CHUNK_VECTOR_COLLECTION}/part-{part:06}.ndjson",);
+                let path = format!("postgres/knowledge_chunk_vector_d3/part-{part:06}.ndjson");
                 let payload = format!("{{\"row\":{part}}}\n");
                 append_raw_entry(&mut builder, &path, payload.as_bytes()).await.unwrap();
             }
             let inner_err: anyhow::Result<()> =
-                Err(anyhow!("simulated arango cursor failure on knowledge_chunk_vector batch 5"));
+                Err(anyhow!("simulated postgres cursor failure on vector relation batch 5"));
             let outcome =
                 finalize_archive_with_failure_sentinel(builder, library_id, inner_err).await;
             assert!(outcome.is_err(), "primary error must propagate, got {outcome:?}");
@@ -6360,12 +5162,11 @@ mod tests {
         // could not even reach the tar trailer.
         let entries = read_tar_zst_entries(&out)
             .await
-            .expect("v2 regression: archive must decode cleanly after deep arango failure");
+            .expect("v2 regression: archive must decode cleanly after deep vector failure");
         let names: Vec<&str> = entries.iter().map(|(p, _)| p.as_str()).collect();
         assert!(names.contains(&"manifest.json"), "earlier entries must survive, got {names:?}");
         for part in 1..=4u32 {
-            let expected =
-                format!("arango/{KNOWLEDGE_CHUNK_VECTOR_COLLECTION}/part-{part:06}.ndjson");
+            let expected = format!("postgres/knowledge_chunk_vector_d3/part-{part:06}.ndjson");
             assert!(
                 names.iter().any(|p| *p == expected.as_str()),
                 "expected {expected} to survive in the finalized archive, got {names:?}",

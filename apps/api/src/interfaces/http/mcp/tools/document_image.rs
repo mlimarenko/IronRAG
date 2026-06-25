@@ -225,7 +225,7 @@ async fn view_document_image_inner(
     if let Some(chunk_id) = args.chunk_id {
         let chunk = context
             .state
-            .arango_document_store
+            .document_store
             .get_chunk(chunk_id)
             .await
             .map_err(|e| ApiError::internal_with_log(e, "internal"))?

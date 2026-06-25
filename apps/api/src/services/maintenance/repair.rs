@@ -50,9 +50,9 @@ pub struct NullHeadRepairReport {
 /// revision with persisted chunks but whose head still carries
 /// `readable_revision_id == NULL` AND `active_revision_id == NULL`.
 ///
-/// Uses the canonical `promote_document_head` so both Postgres `head`
-/// and the Arango `knowledge_document` mirror are written through the
-/// same path the ingest pipeline uses on success.
+/// Uses the canonical `promote_document_head` so both Postgres `head` and the
+/// knowledge projection are written through the same path the ingest pipeline
+/// uses on success.
 ///
 /// `library_filter = None` walks every library; `Some(uuid)` restricts
 /// to one. Skipped-no-chunks documents are documents whose head is null

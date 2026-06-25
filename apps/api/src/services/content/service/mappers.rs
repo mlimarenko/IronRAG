@@ -6,7 +6,7 @@ use crate::{
         ContentMutationItem, ContentRevision, ContentRevisionReadiness, WebPageProvenance,
     },
     domains::knowledge::StructuredDocumentRevision,
-    infra::arangodb::document_store::{
+    infra::knowledge_rows::{
         KnowledgeChunkRow, KnowledgeDocumentRow, KnowledgeRevisionRow,
         KnowledgeStructuredRevisionRow,
     },
@@ -173,10 +173,9 @@ pub(super) fn map_knowledge_chunk_row(row: KnowledgeChunkRow) -> ContentChunk {
         token_count: row.token_count,
         normalized_text: row.normalized_text,
         text_checksum: checksum,
-        // KnowledgeChunkRow (Arango) does not yet carry temporal bounds.
-        // Sprint T1.3 mirrors `occurred_at` / `occurred_until` into Arango;
-        // until then this fallback path returns None and consumers fall back
-        // to the Postgres source-of-truth via list_chunks_by_revision.
+        // KnowledgeChunkRow does not yet carry temporal bounds. Until that is
+        // mirrored into this projection, consumers fall back to the Postgres
+        // source-of-truth via list_chunks_by_revision.
         occurred_at: None,
         occurred_until: None,
     }
@@ -252,9 +251,6 @@ mod tests {
         let now = Utc::now();
         let revision_id = Uuid::now_v7();
         let mapped = map_knowledge_revision_row(KnowledgeRevisionRow {
-            key: revision_id.to_string(),
-            arango_id: None,
-            arango_rev: None,
             revision_id,
             workspace_id: Uuid::now_v7(),
             library_id: Uuid::now_v7(),

@@ -1111,7 +1111,7 @@ impl ContentService {
 
         if let Some(document_id) = document_id
             && let Some(document) = state
-                .arango_document_store
+                .document_store
                 .get_document(document_id)
                 .await
                 .map_err(|e| ApiError::internal_with_log(e, "internal"))?
@@ -1138,14 +1138,14 @@ impl ContentService {
 
         if let Some(revision_id) = revision_id
             && let Some(revision) = state
-                .arango_document_store
+                .document_store
                 .get_revision(revision_id)
                 .await
                 .map_err(|e| ApiError::internal_with_log(e, "internal"))?
         {
             let readiness = derive_failed_revision_readiness(&revision, &stage_events);
             let _ = state
-                .arango_document_store
+                .document_store
                 .update_revision_readiness(
                     revision_id,
                     &readiness.text_state,

@@ -70,7 +70,6 @@ impl FromStr for ServiceRole {
 pub enum DependencyKind {
     Postgres,
     Redis,
-    ArangoDb,
     ObjectStorage,
 }
 
@@ -80,7 +79,6 @@ impl DependencyKind {
         match self {
             Self::Postgres => "postgres",
             Self::Redis => "redis",
-            Self::ArangoDb => "arangodb",
             Self::ObjectStorage => "object_storage",
         }
     }

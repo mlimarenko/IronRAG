@@ -19,7 +19,7 @@ use utoipa::{
 const API_TITLE: &str = "IronRAG API";
 const API_VERSION: &str = env!("CARGO_PKG_VERSION");
 const API_DESCRIPTION: &str = concat!(
-    "Public HTTP API for the ArangoDB-backed IronRAG service ",
+    "Public HTTP API for the IronRAG service ",
     "(`apps/api/src/interfaces/http`). Operation paths include the `/v1` ",
     "prefix. `servers.url` is the API origin without the `/v1` suffix.",
 );

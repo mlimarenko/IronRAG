@@ -17,7 +17,7 @@ use crate::{
         },
         knowledge::{KnowledgeLibraryGeneration, StructuredDocumentRevision},
     },
-    infra::arangodb::document_store::KnowledgeRevisionRow,
+    infra::knowledge_rows::KnowledgeRevisionRow,
     infra::repositories::{self, content_repository, ops_repository},
     interfaces::http::router_support::ApiError,
 };
@@ -525,9 +525,9 @@ impl OpsService {
 
 /// Fast O(1) library readiness snapshot used by the dashboard and warnings
 /// surfaces. Replaces the previous O(N) `list_documents` + N+1 prefetch
-/// storm that ran per-document Arango + Postgres fan-outs — on a 5k-doc
+/// storm that ran per-document knowledge-store + Postgres fan-outs — on a 5k-doc
 /// library the old path took 7+ seconds and gated the query execution
-/// context. This path is two Postgres reads plus one bounded Arango aggregate
+/// context. This path is two Postgres reads plus one bounded knowledge aggregate
 /// for vector-inventory drift; it stays off the query-turn hot path.
 pub struct LibraryCoverageFast {
     /// Canonical per-library metrics row produced by
@@ -561,7 +561,7 @@ pub async fn load_library_coverage_fast(
         },
         async {
             state
-                .arango_document_store
+                .document_store
                 .count_vector_ready_revisions_missing_chunk_vectors(library_id)
                 .await
                 .map_err(|e| ApiError::internal_with_log(e, "internal"))
@@ -632,7 +632,7 @@ fn build_library_warnings_from_aggregate(
     // One "rebuilding" bucket keyed on in-flight document count (the
     // canonical `processing + queued` split from the metrics row).
     // See `map_library_facts_from_aggregate` for why this is the
-    // canonical signal here — no per-doc Arango revision reads, no
+    // canonical signal here — no per-doc knowledge revision reads, no
     // drift vs the dashboard counts.
     let in_flight = coverage.metrics.processing + coverage.metrics.queued;
     if in_flight > 0 || coverage.vector_inventory_mismatch_count > 0 {

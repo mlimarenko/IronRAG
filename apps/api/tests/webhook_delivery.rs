@@ -107,14 +107,10 @@ impl WebhookDeliveryFixture {
             .await
             .context("apply migrations for webhook_delivery test")?;
 
-        let arango_client = Arc::new(
-            ironrag_backend::infra::arangodb::client::ArangoClient::from_settings(&settings)
-                .context("build arango client stub for webhook_delivery")?,
-        );
         let redis = redis::Client::open(settings.redis_url.clone())
             .context("create redis client for webhook_delivery test")?;
         let persistence = Persistence::for_tests(postgres, redis);
-        let state = Arc::new(AppState::from_dependencies(settings, persistence, arango_client)?);
+        let state = Arc::new(AppState::from_dependencies(settings, persistence)?);
 
         let workspace = state
             .canonical_services

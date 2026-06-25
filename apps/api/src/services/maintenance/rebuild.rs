@@ -13,9 +13,9 @@ use crate::{
     services::graph::error::GraphServiceError,
 };
 
-/// Reconcile the instance-wide ArangoDB vector index dimensions with a
-/// source library's active vector binding and rebuild all library
-/// vector material that must share those indexes.
+/// Reconcile per-dim vector relation dimensions with a source library's active
+/// vector binding and rebuild all library vector material that must share those
+/// indexes.
 ///
 /// Wraps the canonical `search.rebuild_vector_plane_for_library` so the
 /// CLI surface mirrors the in-process service call.
@@ -26,9 +26,7 @@ pub async fn vector_plane(state: &AppState, source_library_id: Uuid) -> anyhow::
         .rebuild_vector_plane_for_library(state, source_library_id)
         .await
         .with_context(|| {
-            format!(
-                "failed to rebuild Arango vector plane from library binding {source_library_id}",
-            )
+            format!("failed to rebuild vector plane from library binding {source_library_id}",)
         })?;
     info!(
         library_id = %source_library_id,
@@ -38,7 +36,7 @@ pub async fn vector_plane(state: &AppState, source_library_id: Uuid) -> anyhow::
         libraries_rebuilt = outcome.libraries_rebuilt,
         chunk_embeddings_rebuilt = outcome.chunk_embeddings_rebuilt,
         graph_node_embeddings_rebuilt = outcome.graph_node_embeddings_rebuilt,
-        "Arango vector-plane rebuild completed",
+        "vector-plane rebuild completed",
     );
     Ok(())
 }
@@ -104,7 +102,7 @@ pub async fn runtime_graph(state: &AppState, library_filter: Option<Uuid>) -> an
 }
 
 /// Re-embed every entity node in `library_id` into the per-dim
-/// `knowledge_entity_vector_d*` Arango collections.
+/// `knowledge_entity_vector_d*` PostgreSQL relations.
 ///
 /// Fails loudly if no active `EmbedChunk` binding is configured for the
 /// library (binding=embed_chunk, reason=not_configured).  The underlying

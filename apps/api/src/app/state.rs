@@ -11,11 +11,6 @@ use crate::{
     app::config::{RuntimeHookBehavior, Settings, UiBootstrapAdmin, UiBootstrapAiSetup},
     domains::agent_runtime::{RuntimeDecisionTargetKind, RuntimeTaskKind},
     infra::{
-        arangodb::{
-            client::ArangoClient, context_store::ArangoContextStore,
-            document_store::ArangoDocumentStore, graph_store::ArangoGraphStore,
-            search_store::ArangoSearchStore,
-        },
         knowledge_plane::{ContextStoreRef, DocumentStoreRef, GraphStoreRef, SearchStoreRef},
         persistence::Persistence,
         postgres::{
@@ -76,15 +71,6 @@ pub struct UiSessionCookieConfig {
 #[derive(Clone)]
 pub struct GraphRuntimeSettings {
     pub backend_name: String,
-}
-
-#[derive(Clone)]
-pub struct ArangoRuntimeSettings {
-    pub url: String,
-    pub database: String,
-    pub bootstrap_collections: bool,
-    pub bootstrap_views: bool,
-    pub bootstrap_graph: bool,
 }
 
 #[derive(Clone)]
@@ -232,17 +218,15 @@ pub struct AppState {
     pub content_storage: ContentStorageService,
     pub deployment_diagnostics: DeploymentDiagnosticsService,
     pub worker_runtime: WorkerRuntimeState,
-    pub arango_client: Arc<ArangoClient>,
     pub ui_runtime: UiRuntimeSettings,
     pub ui_bootstrap_admin: Option<UiBootstrapAdmin>,
     pub ui_bootstrap_ai_setup: Option<UiBootstrapAiSetup>,
     pub ui_session_cookie: UiSessionCookieConfig,
-    pub arango_runtime: ArangoRuntimeSettings,
     pub graph_runtime: GraphRuntimeSettings,
-    pub arango_document_store: DocumentStoreRef,
-    pub arango_graph_store: GraphStoreRef,
-    pub arango_search_store: SearchStoreRef,
-    pub arango_context_store: ContextStoreRef,
+    pub document_store: DocumentStoreRef,
+    pub graph_store: GraphStoreRef,
+    pub search_store: SearchStoreRef,
+    pub context_store: ContextStoreRef,
     pub retrieval_intelligence: RetrievalIntelligenceSettings,
     pub agent_runtime_settings: AgentRuntimeSettings,
     pub retrieval_intelligence_services: RetrievalIntelligenceServices,
@@ -269,11 +253,7 @@ pub struct AppState {
 }
 
 impl AppState {
-    pub fn from_dependencies(
-        settings: Settings,
-        persistence: Persistence,
-        arango_client: Arc<ArangoClient>,
-    ) -> anyhow::Result<Self> {
+    pub fn from_dependencies(settings: Settings, persistence: Persistence) -> anyhow::Result<Self> {
         let bootstrap_settings = settings.bootstrap_settings();
         let public_origin_settings = settings.public_origin_settings();
         let content_storage = ContentStorageService::from_settings(&settings)?;
@@ -291,44 +271,15 @@ impl AppState {
             ttl_hours: settings.ui_session_ttl_hours,
             secure: public_origin_settings.session_cookie_secure,
         };
-        let graph_runtime =
-            GraphRuntimeSettings { backend_name: settings.knowledge_plane_backend.clone() };
-        let arango_runtime = ArangoRuntimeSettings {
-            url: settings.arangodb_url.clone(),
-            database: settings.arangodb_database.clone(),
-            bootstrap_collections: settings.arangodb_bootstrap_collections,
-            bootstrap_views: settings.arangodb_bootstrap_views,
-            bootstrap_graph: settings.arangodb_bootstrap_graph,
-        };
-        let (
-            arango_document_store,
-            arango_graph_store,
-            arango_search_store,
-            arango_context_store,
-        ): (DocumentStoreRef, GraphStoreRef, SearchStoreRef, ContextStoreRef) =
-            match settings.knowledge_plane_backend.as_str() {
-                "arango" => (
-                    Arc::new(ArangoDocumentStore::new(Arc::clone(&arango_client))),
-                    Arc::new(ArangoGraphStore::new(Arc::clone(&arango_client))),
-                    Arc::new(ArangoSearchStore::new(
-                        Arc::clone(&arango_client),
-                        crate::infra::arangodb::search_store::VectorIndexParams {
-                            n_lists: settings.arangodb_vector_index_n_lists,
-                            default_n_probe: settings.arangodb_vector_index_default_n_probe,
-                            training_iterations: settings
-                                .arangodb_vector_index_training_iterations,
-                        },
-                    )),
-                    Arc::new(ArangoContextStore::new(Arc::clone(&arango_client))),
-                ),
-                "postgres" => (
-                    Arc::new(PgDocumentStore { pool: persistence.postgres.clone() }),
-                    Arc::new(PgGraphStore { pool: persistence.postgres.clone() }),
-                    Arc::new(PgSearchStore { pool: persistence.postgres.clone() }),
-                    Arc::new(PgContextStore { pool: persistence.postgres.clone() }),
-                ),
-                backend => anyhow::bail!("unsupported knowledge_plane_backend `{backend}`"),
-            };
+        let graph_runtime = GraphRuntimeSettings { backend_name: "postgres".to_string() };
+        let document_store: DocumentStoreRef =
+            Arc::new(PgDocumentStore { pool: persistence.postgres.clone() });
+        let graph_store: GraphStoreRef =
+            Arc::new(PgGraphStore { pool: persistence.postgres.clone() });
+        let search_store: SearchStoreRef =
+            Arc::new(PgSearchStore { pool: persistence.postgres.clone() });
+        let context_store: ContextStoreRef =
+            Arc::new(PgContextStore { pool: persistence.postgres.clone() });
         let retrieval_intelligence = RetrievalIntelligenceSettings {
             query_intent_cache_ttl_hours: settings.query_intent_cache_ttl_hours,
             query_intent_cache_max_entries_per_library: settings
@@ -483,19 +434,17 @@ impl AppState {
             content_storage,
             deployment_diagnostics,
             worker_runtime,
-            arango_client,
             settings,
             persistence,
             ui_runtime,
             ui_bootstrap_admin,
             ui_bootstrap_ai_setup,
             ui_session_cookie,
-            arango_runtime,
             graph_runtime,
-            arango_document_store,
-            arango_graph_store,
-            arango_search_store,
-            arango_context_store,
+            document_store,
+            graph_store,
+            search_store,
+            context_store,
             retrieval_intelligence,
             agent_runtime_settings,
             retrieval_intelligence_services,
@@ -519,8 +468,7 @@ impl AppState {
     /// Returns any initialization error from persistence setup.
     pub async fn new(settings: Settings) -> anyhow::Result<Self> {
         let persistence = Persistence::connect(&settings).await?;
-        let arango_client = Arc::new(ArangoClient::from_settings(&settings)?);
-        Self::from_dependencies(settings, persistence, arango_client)
+        Self::from_dependencies(settings, persistence)
     }
 }
 

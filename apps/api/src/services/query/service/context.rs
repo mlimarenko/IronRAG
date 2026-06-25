@@ -6,24 +6,20 @@ use serde_json::json;
 use std::time::Instant;
 use uuid::Uuid;
 
+use super::{
+    ExecutionPreparedReferenceContext, PreparedSegmentRevisionInfo, RankedBundleReference,
+    merge_ranked_reference, runtime_mode_label, saturating_rank, top_ranked_ids,
+};
 use crate::{
     app::state::AppState,
     domains::query::RuntimeQueryMode,
     infra::{
-        arangodb::{
-            collections::{
-                KNOWLEDGE_CHUNK_COLLECTION, KNOWLEDGE_CONTEXT_BUNDLE_COLLECTION,
-                KNOWLEDGE_ENTITY_COLLECTION, KNOWLEDGE_EVIDENCE_COLLECTION,
-                KNOWLEDGE_RELATION_COLLECTION,
-            },
-            context_store::{
-                KnowledgeBundleChunkEdgeRow, KnowledgeBundleEntityEdgeRow,
-                KnowledgeBundleEvidenceEdgeRow, KnowledgeBundleRelationEdgeRow,
-                KnowledgeContextBundleReferenceSetRow, KnowledgeContextBundleRow,
-                KnowledgeRetrievalTraceRow,
-            },
-            document_store::{KnowledgeLibraryGenerationRow, KnowledgeTechnicalFactRow},
-            graph_store::{KnowledgeEvidenceRow, KnowledgeGraphTraversalRow},
+        knowledge_rows::{
+            KnowledgeBundleChunkEdgeRow, KnowledgeBundleEntityEdgeRow,
+            KnowledgeBundleEvidenceEdgeRow, KnowledgeBundleRelationEdgeRow,
+            KnowledgeContextBundleReferenceSetRow, KnowledgeContextBundleRow, KnowledgeEvidenceRow,
+            KnowledgeGraphTraversalRow, KnowledgeLibraryGenerationRow, KnowledgeRetrievalTraceRow,
+            KnowledgeTechnicalFactRow,
         },
         repositories::{catalog_repository, query_repository},
     },
@@ -33,11 +29,6 @@ use crate::{
     services::query::execution::{
         QueryChunkReferenceSnapshot, RuntimeMatchedEntity, RuntimeMatchedRelationship,
     },
-};
-
-use super::{
-    ExecutionPreparedReferenceContext, PreparedSegmentRevisionInfo, RankedBundleReference,
-    merge_ranked_reference, runtime_mode_label, saturating_rank, top_ranked_ids,
 };
 
 const CONTEXT_BUNDLE_GRAPH_SEED_LIMIT: usize = 4;
@@ -129,17 +120,16 @@ pub(crate) async fn assemble_context_bundle(
         .min(super::MAX_DETAIL_GRAPH_EDGE_REFERENCES);
     let entity_seed_ids = top_ranked_ids(&entity_refs, graph_seed_limit);
     let mut entity_neighborhood_rows = 0usize;
-    // Parallel entity-neighborhood fan-out. Each seed entity issues a
-    // single Arango traversal; they're fully independent, so running
-    // them sequentially (the previous pattern) wasted wall-clock on N
-    // × ~80 ms round-trips. `join_all` pins the batch at
-    // max(per-entity latency). The absorb loop below serialises the
-    // HashMap merge; that's intentional to keep rank indices stable.
+    // Parallel entity-neighborhood fan-out. Each seed entity issues a single
+    // graph traversal; they're fully independent, so running them sequentially
+    // wastes wall-clock on N round-trips. `join_all` pins the batch at
+    // max(per-entity latency). The absorb loop below serialises the HashMap
+    // merge; that's intentional to keep rank indices stable.
     let entity_neighborhood_futures = entity_seed_ids.iter().map(|entity_id| {
         let entity_id = *entity_id;
         async move {
             let neighborhood = state
-                .arango_graph_store
+                .graph_store
                 .list_entity_neighborhood(
                     entity_id,
                     conversation.library_id,
@@ -174,20 +164,20 @@ pub(crate) async fn assemble_context_bundle(
     let mut relation_traversal_rows = 0usize;
     let mut relation_evidence_rows = 0usize;
     // Parallel relation fan-out. For each seed relation we issue two
-    // independent Arango calls — `expand_relation_centric` and
-    // `list_relation_evidence_lookup` — in parallel, and the outer
-    // `join_all` collapses every seed into one max-latency batch
-    // rather than paying 2 × N round-trips serially.
+    // independent graph-store calls — `expand_relation_centric` and
+    // `list_relation_evidence_lookup` — in parallel, and the outer `join_all`
+    // collapses every seed into one max-latency batch rather than paying 2 × N
+    // round-trips serially.
     let relation_futures = relation_seed_ids.iter().map(|relation_id| {
         let relation_id = *relation_id;
         async move {
-            let expand_future = state.arango_graph_store.expand_relation_centric(
+            let expand_future = state.graph_store.expand_relation_centric(
                 relation_id,
                 conversation.library_id,
                 CONTEXT_BUNDLE_GRAPH_TRAVERSAL_DEPTH,
                 graph_traversal_limit,
             );
-            let evidence_future = state.arango_graph_store.list_relation_evidence_lookup(
+            let evidence_future = state.graph_store.list_relation_evidence_lookup(
                 relation_id,
                 conversation.library_id,
                 candidate_limit,
@@ -239,7 +229,7 @@ pub(crate) async fn assemble_context_bundle(
     }
 
     let evidence_rows = state
-        .arango_graph_store
+        .graph_store
         .list_evidence_by_ids(&top_ranked_ids(&evidence_refs, candidate_limit * 4))
         .await
         .context("failed to load evidence rows while assembling query context bundle")?;
@@ -256,7 +246,7 @@ pub(crate) async fn assemble_context_bundle(
     }
 
     let mut fact_rows = state
-        .arango_document_store
+        .document_store
         .list_technical_facts_by_ids(&top_ranked_ids(&fact_refs, candidate_limit * 3))
         .await
         .context("failed to load technical facts while assembling query context bundle")?;
@@ -282,7 +272,7 @@ pub(crate) async fn assemble_context_bundle(
         Vec::new()
     } else {
         state
-            .arango_document_store
+            .document_store
             .list_chunks_by_ids(&top_ranked_ids(&chunk_refs, candidate_limit * 3))
             .await
             .context("failed to load chunk rows while assembling query context bundle")?
@@ -292,7 +282,7 @@ pub(crate) async fn assemble_context_bundle(
         Vec::new()
     } else {
         state
-            .arango_document_store
+            .document_store
             .list_technical_facts_by_chunk_ids(
                 &selected_chunk_rows.iter().map(|row| row.chunk_id).collect::<Vec<_>>(),
             )
@@ -301,9 +291,6 @@ pub(crate) async fn assemble_context_bundle(
     };
     let provisional_bundle = KnowledgeContextBundleReferenceSetRow {
         bundle: KnowledgeContextBundleRow {
-            key: bundle_id.to_string(),
-            arango_id: None,
-            arango_rev: None,
             bundle_id,
             workspace_id: conversation.workspace_id,
             library_id: conversation.library_id,
@@ -323,8 +310,7 @@ pub(crate) async fn assemble_context_bundle(
         },
         chunk_references: chunk_edges
             .iter()
-            .map(|edge| crate::infra::arangodb::context_store::KnowledgeBundleChunkReferenceRow {
-                key: edge.key.clone(),
+            .map(|edge| crate::infra::knowledge_rows::KnowledgeBundleChunkReferenceRow {
                 bundle_id: edge.bundle_id,
                 chunk_id: edge.chunk_id,
                 rank: edge.rank,
@@ -335,8 +321,7 @@ pub(crate) async fn assemble_context_bundle(
             .collect(),
         entity_references: entity_edges
             .iter()
-            .map(|edge| crate::infra::arangodb::context_store::KnowledgeBundleEntityReferenceRow {
-                key: edge.key.clone(),
+            .map(|edge| crate::infra::knowledge_rows::KnowledgeBundleEntityReferenceRow {
                 bundle_id: edge.bundle_id,
                 entity_id: edge.entity_id,
                 rank: edge.rank,
@@ -347,30 +332,24 @@ pub(crate) async fn assemble_context_bundle(
             .collect(),
         relation_references: relation_edges
             .iter()
-            .map(|edge| {
-                crate::infra::arangodb::context_store::KnowledgeBundleRelationReferenceRow {
-                    key: edge.key.clone(),
-                    bundle_id: edge.bundle_id,
-                    relation_id: edge.relation_id,
-                    rank: edge.rank,
-                    score: edge.score,
-                    inclusion_reason: edge.inclusion_reason.clone(),
-                    created_at: edge.created_at,
-                }
+            .map(|edge| crate::infra::knowledge_rows::KnowledgeBundleRelationReferenceRow {
+                bundle_id: edge.bundle_id,
+                relation_id: edge.relation_id,
+                rank: edge.rank,
+                score: edge.score,
+                inclusion_reason: edge.inclusion_reason.clone(),
+                created_at: edge.created_at,
             })
             .collect(),
         evidence_references: evidence_edges
             .iter()
-            .map(|edge| {
-                crate::infra::arangodb::context_store::KnowledgeBundleEvidenceReferenceRow {
-                    key: edge.key.clone(),
-                    bundle_id: edge.bundle_id,
-                    evidence_id: edge.evidence_id,
-                    rank: edge.rank,
-                    score: edge.score,
-                    inclusion_reason: edge.inclusion_reason.clone(),
-                    created_at: edge.created_at,
-                }
+            .map(|edge| crate::infra::knowledge_rows::KnowledgeBundleEvidenceReferenceRow {
+                bundle_id: edge.bundle_id,
+                evidence_id: edge.evidence_id,
+                rank: edge.rank,
+                score: edge.score,
+                inclusion_reason: edge.inclusion_reason.clone(),
+                created_at: edge.created_at,
             })
             .collect(),
     };
@@ -431,9 +410,6 @@ pub(crate) async fn assemble_context_bundle(
     });
 
     let bundle_row = KnowledgeContextBundleRow {
-        key: bundle_id.to_string(),
-        arango_id: None,
-        arango_rev: None,
         bundle_id,
         workspace_id: conversation.workspace_id,
         library_id: conversation.library_id,
@@ -452,36 +428,33 @@ pub(crate) async fn assemble_context_bundle(
         updated_at: now,
     };
     state
-        .arango_context_store
+        .context_store
         .upsert_bundle(&bundle_row)
         .await
         .context("failed to upsert knowledge context bundle document")?;
     state
-        .arango_context_store
+        .context_store
         .replace_bundle_chunk_edges(bundle_id, conversation.library_id, &chunk_edges)
         .await
         .context("failed to replace bundle chunk edges")?;
     state
-        .arango_context_store
+        .context_store
         .replace_bundle_entity_edges(bundle_id, conversation.library_id, &entity_edges)
         .await
         .context("failed to replace bundle entity edges")?;
     state
-        .arango_context_store
+        .context_store
         .replace_bundle_relation_edges(bundle_id, conversation.library_id, &relation_edges)
         .await
         .context("failed to replace bundle relation edges")?;
     state
-        .arango_context_store
+        .context_store
         .replace_bundle_evidence_edges(bundle_id, conversation.library_id, &evidence_edges)
         .await
         .context("failed to replace bundle evidence edges")?;
 
     if include_debug {
         let trace = KnowledgeRetrievalTraceRow {
-            key: bundle_id.to_string(),
-            arango_id: None,
-            arango_rev: None,
             trace_id: bundle_id,
             workspace_id: conversation.workspace_id,
             library_id: conversation.library_id,
@@ -499,7 +472,7 @@ pub(crate) async fn assemble_context_bundle(
             updated_at: now,
         };
         state
-            .arango_context_store
+            .context_store
             .upsert_trace(&trace)
             .await
             .context("failed to upsert knowledge retrieval trace")?;
@@ -601,14 +574,14 @@ fn absorb_traversal_row(
     let rank = traversal_rank(row.path_length);
     let score = row.edge_score.unwrap_or_else(|| traversal_score(row.path_length));
     match row.vertex_kind.as_str() {
-        KNOWLEDGE_CHUNK_COLLECTION => {}
-        KNOWLEDGE_ENTITY_COLLECTION => {
+        "knowledge_chunk" => {}
+        "knowledge_entity" => {
             merge_ranked_reference(entity_refs, row.vertex_id, rank, score, reason);
         }
-        KNOWLEDGE_RELATION_COLLECTION => {
+        "knowledge_relation" => {
             merge_ranked_reference(relation_refs, row.vertex_id, rank, score, reason);
         }
-        KNOWLEDGE_EVIDENCE_COLLECTION => {
+        "knowledge_evidence" => {
             merge_ranked_reference(evidence_refs, row.vertex_id, rank, score, reason);
         }
         _ => {}
@@ -645,11 +618,6 @@ fn build_chunk_bundle_edges(
     items
         .into_iter()
         .map(|(chunk_id, reference)| KnowledgeBundleChunkEdgeRow {
-            key: format!("{bundle_id}:{chunk_id}"),
-            arango_id: None,
-            arango_rev: None,
-            from: format!("{KNOWLEDGE_CONTEXT_BUNDLE_COLLECTION}/{bundle_id}"),
-            to: format!("{KNOWLEDGE_CHUNK_COLLECTION}/{chunk_id}"),
             bundle_id,
             chunk_id,
             rank: reference.rank,
@@ -676,11 +644,6 @@ fn build_entity_bundle_edges(
     items
         .into_iter()
         .map(|(entity_id, reference)| KnowledgeBundleEntityEdgeRow {
-            key: format!("{bundle_id}:{entity_id}"),
-            arango_id: None,
-            arango_rev: None,
-            from: format!("{KNOWLEDGE_CONTEXT_BUNDLE_COLLECTION}/{bundle_id}"),
-            to: format!("{KNOWLEDGE_ENTITY_COLLECTION}/{entity_id}"),
             bundle_id,
             entity_id,
             rank: reference.rank,
@@ -707,11 +670,6 @@ fn build_relation_bundle_edges(
     items
         .into_iter()
         .map(|(relation_id, reference)| KnowledgeBundleRelationEdgeRow {
-            key: format!("{bundle_id}:{relation_id}"),
-            arango_id: None,
-            arango_rev: None,
-            from: format!("{KNOWLEDGE_CONTEXT_BUNDLE_COLLECTION}/{bundle_id}"),
-            to: format!("{KNOWLEDGE_RELATION_COLLECTION}/{relation_id}"),
             bundle_id,
             relation_id,
             rank: reference.rank,
@@ -738,11 +696,6 @@ fn build_evidence_bundle_edges(
     items
         .into_iter()
         .map(|(evidence_id, reference)| KnowledgeBundleEvidenceEdgeRow {
-            key: format!("{bundle_id}:{evidence_id}"),
-            arango_id: None,
-            arango_rev: None,
-            from: format!("{KNOWLEDGE_CONTEXT_BUNDLE_COLLECTION}/{bundle_id}"),
-            to: format!("{KNOWLEDGE_EVIDENCE_COLLECTION}/{evidence_id}"),
             bundle_id,
             evidence_id,
             rank: reference.rank,
@@ -890,7 +843,7 @@ pub(crate) fn derive_block_rank_refs(
     bundle: &KnowledgeContextBundleReferenceSetRow,
     evidence_rows: &[KnowledgeEvidenceRow],
     technical_fact_rows: &[KnowledgeTechnicalFactRow],
-    chunk_rows: &[crate::infra::arangodb::document_store::KnowledgeChunkRow],
+    chunk_rows: &[crate::infra::knowledge_rows::KnowledgeChunkRow],
 ) -> HashMap<Uuid, RankedBundleReference> {
     let mut block_refs = HashMap::<Uuid, RankedBundleReference>::new();
     let evidence_by_id = evidence_rows
@@ -966,7 +919,7 @@ pub(crate) async fn load_execution_prepared_reference_context(
     execution_id: Uuid,
 ) -> Result<ExecutionPreparedReferenceContext, ApiError> {
     let bundle_refs = state
-        .arango_context_store
+        .context_store
         .get_bundle_reference_set_by_query_execution(execution_id)
         .await
         .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
@@ -975,14 +928,14 @@ pub(crate) async fn load_execution_prepared_reference_context(
     };
 
     let chunk_rows = state
-        .arango_document_store
+        .document_store
         .list_chunks_by_ids(
             &bundle.chunk_references.iter().map(|reference| reference.chunk_id).collect::<Vec<_>>(),
         )
         .await
         .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
     let evidence_rows = state
-        .arango_graph_store
+        .graph_store
         .list_evidence_by_ids(
             &bundle
                 .evidence_references
@@ -997,7 +950,7 @@ pub(crate) async fn load_execution_prepared_reference_context(
         Vec::new()
     } else {
         state
-            .arango_document_store
+            .document_store
             .list_technical_facts_by_chunk_ids(
                 &chunk_rows.iter().map(|row| row.chunk_id).collect::<Vec<_>>(),
             )
@@ -1011,16 +964,15 @@ pub(crate) async fn load_execution_prepared_reference_context(
     );
     // Post-answer reference hydration: the generated answer body is
     // already accepted and streamed before we reach this block, so an
-    // intermittent Arango connection drop (memory-cap throttle, cursor
-    // reset) must not turn a succeeded turn into a 500. Fail-soft to an
-    // empty vec and log so references degrade but the answer still
-    // reaches the user.
+    // intermittent knowledge-store error must not turn a succeeded turn into a
+    // 500. Fail-soft to an empty vec and log so references degrade but the
+    // answer still reaches the user.
     let technical_fact_rows =
         if fact_rank_refs.is_empty() && bundle.bundle.selected_fact_ids.is_empty() {
             Vec::new()
         } else {
             let ids = selected_fact_ids_for_detail(bundle, &fact_rank_refs);
-            match state.arango_document_store.list_technical_facts_by_ids(&ids).await {
+            match state.document_store.list_technical_facts_by_ids(&ids).await {
                 Ok(rows) => rows,
                 Err(error) => {
                     tracing::warn!(
@@ -1038,7 +990,7 @@ pub(crate) async fn load_execution_prepared_reference_context(
         Vec::new()
     } else {
         let ids: Vec<Uuid> = block_rank_refs.keys().copied().collect();
-        match state.arango_document_store.list_structured_blocks_by_ids(&ids).await {
+        match state.document_store.list_structured_blocks_by_ids(&ids).await {
             Ok(rows) => rows,
             Err(error) => {
                 tracing::warn!(
@@ -1082,7 +1034,7 @@ fn assistant_document_references_from_diagnostics(
 
 async fn load_prepared_segment_revision_info(
     state: &AppState,
-    blocks: &[crate::infra::arangodb::document_store::KnowledgeStructuredBlockRow],
+    blocks: &[crate::infra::knowledge_rows::KnowledgeStructuredBlockRow],
 ) -> HashMap<Uuid, PreparedSegmentRevisionInfo> {
     if blocks.is_empty() {
         return HashMap::new();
@@ -1102,7 +1054,7 @@ async fn load_prepared_segment_revision_info(
         .collect::<Vec<_>>();
 
     let doc_titles: HashMap<Uuid, Option<String>> = state
-        .arango_document_store
+        .document_store
         .list_documents_by_ids(&document_ids)
         .await
         .unwrap_or_default()
@@ -1129,7 +1081,7 @@ async fn load_prepared_segment_revision_info(
     }
 
     state
-        .arango_document_store
+        .document_store
         .list_revisions_by_ids(&revision_ids)
         .await
         .unwrap_or_default()

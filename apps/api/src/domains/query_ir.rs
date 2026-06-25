@@ -11,7 +11,7 @@
 //!    pick exactly one, the type system refuses anything else. These are the
 //!    axes that actually change pipeline routing, so they must be typed.
 //!
-//! 2. **Open-ended classifications are plain strings backed by an Arango
+//! 2. **Open-ended classifications are plain strings backed by a knowledge
 //!    ontology.** `target_types`, `comparison.dimension`, `document_focus.hint`
 //!    are free-form tags. Adding a new kind of question (say "kafka topic"
 //!    instead of "endpoint") is an ontology record, not a code change. The
@@ -160,7 +160,7 @@ pub enum LiteralKind {
     /// Numeric-looking code (`71`, `500`, port number `8080`).
     NumericCode,
     /// Any other verbatim literal the user quoted (backticked string,
-    /// inline SQL / AQL snippet, config line).
+    /// inline SQL snippet, config line).
     Other,
 }
 
@@ -477,8 +477,8 @@ pub struct QueryIR {
     /// Open-ended ontology tags (e.g. `"endpoint"`, `"port"`, `"config_key"`,
     /// `"procedure"`, `"protocol"`, `"error_code"`, `"env_var"`, `"metric"`,
     /// `"table_row"`, `"document"`, `"concept"`). Built-in tags are canonical
-    /// singular snake_case strings; new tags are added as ontology rows in
-    /// Arango, never as Rust enum variants.
+    /// singular snake_case strings; new tags are added as ontology rows, never
+    /// as Rust enum variants.
     #[serde(default)]
     pub target_types: Vec<String>,
 

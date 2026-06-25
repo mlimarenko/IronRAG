@@ -9,7 +9,7 @@ use crate::services::query::text_match::{
 };
 use crate::{
     domains::query_ir::{EntityRole, LiteralKind, QueryAct, QueryIR, QueryLanguage, QueryScope},
-    infra::arangodb::document_store::{
+    infra::knowledge_rows::{
         KnowledgeDocumentRow, KnowledgeStructuredBlockRow, KnowledgeTechnicalFactRow,
     },
     services::query::i18n::{self},

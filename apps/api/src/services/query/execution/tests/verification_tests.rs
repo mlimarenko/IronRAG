@@ -126,9 +126,6 @@ fn verify_answer_accepts_method_path_literal_when_method_and_path_are_grounded()
         &CanonicalAnswerEvidence {
             bundle: None,
             chunk_rows: vec![KnowledgeChunkRow {
-                key: Uuid::now_v7().to_string(),
-                arango_id: None,
-                arango_rev: None,
                 chunk_id: Uuid::now_v7(),
                 workspace_id: Uuid::now_v7(),
                 library_id: Uuid::now_v7(),
@@ -844,9 +841,6 @@ fn selected_fact_ids_for_canonical_evidence_stays_bounded() {
     let selected_fact_id = Uuid::now_v7();
     let evidence_fact_id = Uuid::now_v7();
     let evidence_rows = vec![KnowledgeEvidenceRow {
-        key: Uuid::now_v7().to_string(),
-        arango_id: None,
-        arango_rev: None,
         evidence_id: Uuid::now_v7(),
         workspace_id: Uuid::now_v7(),
         library_id: Uuid::now_v7(),

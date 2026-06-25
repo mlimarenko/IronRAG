@@ -291,8 +291,9 @@ Body: raw .tar.zst архив
 
 Импорт читает manifest из архива. `overwrite=replace` очищает существующие
 данные перед вставкой. PostgreSQL строки вставляются batch'ами по 1000 через
-`jsonb_populate_recordset`. Restore path принимает текущие v6 PostgreSQL
-archives и v5 archives из 0.4.x.
+`jsonb_populate_recordset`. Новые экспорты используют snapshot schema v7.
+Restore path принимает PostgreSQL-only v6 и v7 archives; legacy v5 archives
+из 0.4.x больше не поддерживаются.
 
 ## 9. Жесткие инварианты
 

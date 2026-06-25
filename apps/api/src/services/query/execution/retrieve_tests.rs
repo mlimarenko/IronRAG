@@ -32,7 +32,7 @@ use crate::domains::query_ir::{
     QueryIR, QueryLanguage, QueryScope, SourceSliceDirection, SourceSliceFilter, SourceSliceSpec,
 };
 use crate::infra::{
-    arangodb::document_store::{KnowledgeChunkRow, KnowledgeDocumentRow},
+    knowledge_rows::{KnowledgeChunkRow, KnowledgeDocumentRow},
     repositories::{RuntimeGraphEvidenceRow, RuntimeGraphQueryNodeRow},
 };
 use crate::services::knowledge::runtime_read::ActiveRuntimeGraphProjection;
@@ -288,9 +288,6 @@ fn ordinary_content_rows_remain_answer_driving_search_hits() {
 #[test]
 fn table_row_answer_context_uses_semantic_row_text() {
     let chunk = KnowledgeChunkRow {
-        key: Uuid::now_v7().to_string(),
-        arango_id: None,
-        arango_rev: None,
         chunk_id: Uuid::now_v7(),
         workspace_id: Uuid::now_v7(),
         library_id: Uuid::now_v7(),
@@ -325,9 +322,6 @@ fn table_row_answer_context_uses_semantic_row_text() {
 #[test]
 fn metadata_summary_answer_context_uses_normalized_text_when_content_is_empty() {
     let chunk = KnowledgeChunkRow {
-        key: Uuid::now_v7().to_string(),
-        arango_id: None,
-        arango_rev: None,
         chunk_id: Uuid::now_v7(),
         workspace_id: Uuid::now_v7(),
         library_id: Uuid::now_v7(),
@@ -362,9 +356,6 @@ fn metadata_summary_answer_context_uses_normalized_text_when_content_is_empty() 
 #[test]
 fn source_unit_answer_context_prefers_full_record_over_window_excerpt() {
     let chunk = KnowledgeChunkRow {
-        key: Uuid::now_v7().to_string(),
-        arango_id: None,
-        arango_rev: None,
         chunk_id: Uuid::now_v7(),
         workspace_id: Uuid::now_v7(),
         library_id: Uuid::now_v7(),
@@ -400,9 +391,6 @@ fn source_unit_answer_context_prefers_full_record_over_window_excerpt() {
 #[test]
 fn non_table_chunk_answer_context_preserves_raw_content_text() {
     let chunk = KnowledgeChunkRow {
-        key: Uuid::now_v7().to_string(),
-        arango_id: None,
-        arango_rev: None,
         chunk_id: Uuid::now_v7(),
         workspace_id: Uuid::now_v7(),
         library_id: Uuid::now_v7(),
@@ -751,9 +739,6 @@ fn map_chunk_hit_drops_orphan_documents_without_heads() {
     let stale_revision_id = Uuid::now_v7();
     let document_index = HashMap::from([(document.document_id, document.clone())]);
     let chunk = KnowledgeChunkRow {
-        key: Uuid::now_v7().to_string(),
-        arango_id: None,
-        arango_rev: None,
         chunk_id: Uuid::now_v7(),
         workspace_id: document.workspace_id,
         library_id: document.library_id,
@@ -798,9 +783,6 @@ fn map_chunk_hit_drops_orphan_raptor_chunks_without_heads() {
     let stale_revision_id = Uuid::now_v7();
     let document_index = HashMap::from([(document.document_id, document.clone())]);
     let chunk = KnowledgeChunkRow {
-        key: Uuid::now_v7().to_string(),
-        arango_id: None,
-        arango_rev: None,
         chunk_id: Uuid::now_v7(),
         workspace_id: document.workspace_id,
         library_id: document.library_id,
@@ -2595,9 +2577,6 @@ fn query_ir_focus_search_results_fail_when_all_subqueries_fail() {
 fn sample_document_row(file_name: &str, title: &str) -> KnowledgeDocumentRow {
     let document_id = Uuid::now_v7();
     KnowledgeDocumentRow {
-        key: document_id.to_string(),
-        arango_id: None,
-        arango_rev: None,
         document_id,
         workspace_id: Uuid::now_v7(),
         library_id: Uuid::now_v7(),
@@ -2625,9 +2604,6 @@ fn knowledge_chunk_row(
     text: &str,
 ) -> KnowledgeChunkRow {
     KnowledgeChunkRow {
-        key: Uuid::now_v7().to_string(),
-        arango_id: None,
-        arango_rev: None,
         chunk_id: Uuid::now_v7(),
         workspace_id: document.workspace_id,
         library_id: document.library_id,

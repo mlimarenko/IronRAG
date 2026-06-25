@@ -20,7 +20,7 @@ pub(super) struct PendingChunkInsert {
     /// Earliest record timestamp aggregated into this chunk (JSONL ingest
     /// only; None for non-temporal sources). Computed via the canonical
     /// `record_jsonl::extract_chunk_temporal_bounds` helper at construction
-    /// time so a single source feeds Postgres + Arango writers downstream.
+    /// time so a single source feeds downstream persistence writers.
     pub(super) occurred_at: Option<DateTime<Utc>>,
     /// Latest record timestamp aggregated into this chunk. Equals
     /// `occurred_at` for single-record chunks; None when `occurred_at` is

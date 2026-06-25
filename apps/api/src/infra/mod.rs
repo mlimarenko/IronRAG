@@ -1,5 +1,5 @@
-pub mod arangodb;
 pub mod knowledge_plane;
+pub mod knowledge_rows;
 pub mod persistence;
 pub mod postgres;
 // Canonical domain repositories now live under `infra::repositories::{catalog_repository, ...}`.

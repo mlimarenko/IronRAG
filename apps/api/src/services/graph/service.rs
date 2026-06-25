@@ -16,7 +16,7 @@ use crate::{
     app::state::AppState,
     domains::content::revision_text_state_is_readable,
     infra::{
-        arangodb::graph_store::{
+        knowledge_rows::{
             GraphViewData, GraphViewEdgeWrite, GraphViewNodeWrite, sanitize_graph_view_writes,
         },
         repositories,
@@ -35,13 +35,11 @@ use canonicalization::{
     MaterializedExtractCandidates, ReconciledEntityCandidate, ReconciledRelationCandidate,
     apply_entity_key_aliases_to_relation_candidate, build_entity_candidate_key_index,
     build_materialized_extract_candidates, build_prefixed_entity_key_aliases,
-    build_relation_entity_key_index, canonical_chunk_mentions_entity_edge_key,
-    canonical_document_revision_edge_key, canonical_edge_relation_key,
-    canonical_entity_candidate_id, canonical_entity_id, canonical_evidence_id,
-    canonical_relation_assertion_from_keys, canonical_relation_candidate_id, canonical_relation_id,
-    canonical_revision_chunk_edge_key, placeholder_entity_parts_from_key,
-    reconcile_entity_candidate_row, reconcile_relation_candidate_row,
-    relation_candidate_keys_are_materializable, select_canonical_entity_label,
+    build_relation_entity_key_index, canonical_entity_candidate_id, canonical_entity_id,
+    canonical_evidence_id, canonical_relation_assertion_from_keys, canonical_relation_candidate_id,
+    canonical_relation_id, placeholder_entity_parts_from_key, reconcile_entity_candidate_row,
+    reconcile_relation_candidate_row, relation_candidate_keys_are_materializable,
+    select_canonical_entity_label,
 };
 #[cfg(test)]
 use canonicalization::{canonical_entity_normalization_key, canonical_relation_assertion};
@@ -50,7 +48,7 @@ use evidence::resolve_entity_evidence_support;
 use evidence::{normalize_evidence_literal, relation_fields_are_semantically_empty};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ArangoGraphRebuildTarget {
+pub enum GraphRebuildTarget {
     Text,
     Vector,
     Graph,
@@ -59,8 +57,8 @@ pub enum ArangoGraphRebuildTarget {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct ArangoGraphRebuildOutcome {
-    pub target: Option<ArangoGraphRebuildTarget>,
+pub struct GraphRebuildOutcome {
+    pub target: Option<GraphRebuildTarget>,
     pub scanned_entity_candidates: usize,
     pub scanned_relation_candidates: usize,
     pub upserted_entities: usize,
@@ -80,7 +78,7 @@ pub struct ArangoGraphRebuildOutcome {
     pub graph_node_embeddings_rebuilt: usize,
 }
 
-impl ArangoGraphRebuildOutcome {
+impl GraphRebuildOutcome {
     #[must_use]
     pub const fn has_materialized_graph(&self) -> bool {
         self.upserted_entities > 0 || self.upserted_relations > 0 || self.upserted_evidence > 0
@@ -166,59 +164,58 @@ impl GraphService {
         .await
     }
 
-    pub async fn merge_arango_graph_candidates(
+    pub async fn merge_graph_candidates(
         &self,
         state: &AppState,
         revision_id: Uuid,
         chunk_id: Uuid,
         candidates: &GraphExtractionCandidateSet,
-    ) -> Result<ArangoGraphRebuildOutcome, GraphServiceError> {
+    ) -> Result<GraphRebuildOutcome, GraphServiceError> {
         let revision = state
-            .arango_document_store
+            .document_store
             .get_revision(revision_id)
             .await
-            .context("failed to load knowledge revision for arango graph merge")?
+            .context("failed to load knowledge revision for knowledge graph merge")?
             .ok_or_else(|| anyhow::anyhow!("knowledge_revision {revision_id} not found"))?;
 
         self.materialize_current_candidate_batch(state, &revision, chunk_id, candidates, true)
             .await
             .with_context(|| {
                 format!(
-                    "failed to materialize arango graph candidates for revision {}",
+                    "failed to materialize knowledge graph candidates for revision {}",
                     revision_id
                 )
             })?;
 
-        let mut outcome = self
-            .build_and_refresh_arango_graph_from_candidates(state, revision.library_id, None)
-            .await?;
-        outcome.target = Some(ArangoGraphRebuildTarget::Graph);
+        let mut outcome =
+            self.build_and_refresh_graph_from_candidates(state, revision.library_id, None).await?;
+        outcome.target = Some(GraphRebuildTarget::Graph);
         Ok(outcome)
     }
 
-    pub async fn invalidate_arango_revision_graph_artifacts(
+    pub async fn invalidate_revision_graph_artifacts(
         &self,
         state: &AppState,
         revision_id: Uuid,
         superseded_by_revision_id: Option<Uuid>,
-    ) -> Result<ArangoGraphRebuildOutcome, GraphServiceError> {
+    ) -> Result<GraphRebuildOutcome, GraphServiceError> {
         let revision = state
-            .arango_document_store
+            .document_store
             .get_revision(revision_id)
             .await
-            .context("failed to load knowledge revision for arango graph invalidation")?
+            .context("failed to load knowledge revision for knowledge graph invalidation")?
             .ok_or_else(|| anyhow::anyhow!("knowledge_revision {revision_id} not found"))?;
 
         let stale_evidence = state
-            .arango_graph_store
+            .graph_store
             .list_evidence_by_revision(revision_id)
             .await
-            .context("failed to load arango evidence rows for invalidation")?;
+            .context("failed to load knowledge evidence rows for invalidation")?;
         let mut marked_stale = 0usize;
         for evidence in stale_evidence {
             let _ = state
-                .arango_graph_store
-                .upsert_evidence(&crate::infra::arangodb::graph_store::NewKnowledgeEvidence {
+                .graph_store
+                .upsert_evidence(&crate::infra::knowledge_rows::NewKnowledgeEvidence {
                     evidence_id: evidence.evidence_id,
                     workspace_id: evidence.workspace_id,
                     library_id: evidence.library_id,
@@ -240,12 +237,12 @@ impl GraphService {
                     updated_at: Some(Utc::now()),
                 })
                 .await
-                .context("failed to supersede stale arango evidence")?;
+                .context("failed to supersede stale knowledge evidence")?;
             marked_stale += 1;
         }
 
         let _ = state
-            .arango_document_store
+            .document_store
             .update_revision_readiness(
                 revision_id,
                 &revision.text_state,
@@ -260,55 +257,55 @@ impl GraphService {
             .context("failed to mark knowledge revision as superseded")?;
 
         let _ = state
-            .arango_graph_store
+            .graph_store
             .delete_entity_candidates_by_revision(revision_id)
             .await
             .context("failed to delete stale entity candidates")?;
         let _ = state
-            .arango_graph_store
+            .graph_store
             .delete_relation_candidates_by_revision(revision_id)
             .await
             .context("failed to delete stale relation candidates")?;
 
         let mut outcome =
-            self.reconcile_arango_library_candidates(state, revision.library_id, None).await?;
+            self.reconcile_library_candidates(state, revision.library_id, None).await?;
         outcome.stale_evidence_marked += marked_stale;
-        outcome.target = Some(ArangoGraphRebuildTarget::Evidence);
+        outcome.target = Some(GraphRebuildTarget::Evidence);
         Ok(outcome)
     }
 
-    pub async fn rebuild_arango_library_text(
+    pub async fn rebuild_library_text(
         &self,
         state: &AppState,
         library_id: Uuid,
-    ) -> Result<ArangoGraphRebuildOutcome, GraphServiceError> {
+    ) -> Result<GraphRebuildOutcome, GraphServiceError> {
         let library = state
             .canonical_services
             .catalog
             .get_library(state, library_id)
             .await
-            .context("failed to load library for arango text rebuild")?;
+            .context("failed to load library for knowledge text rebuild")?;
         let documents = state
-            .arango_document_store
+            .document_store
             .list_documents_by_library(library.workspace_id, library_id, false)
             .await
-            .context("failed to list documents for arango text rebuild")?;
+            .context("failed to list documents for knowledge text rebuild")?;
         let mut reconciled_revisions = 0usize;
         for document in documents {
             let revisions = state
-                .arango_document_store
+                .document_store
                 .list_revisions_by_document(document.document_id)
                 .await
-                .context("failed to list revisions for arango text rebuild")?;
+                .context("failed to list revisions for knowledge text rebuild")?;
             for revision in revisions {
                 if revision_text_state_is_readable(&revision.text_state) {
                     continue;
                 }
                 let chunks = state
-                    .arango_document_store
+                    .document_store
                     .list_chunks_by_revision(revision.revision_id)
                     .await
-                    .context("failed to list chunks for arango text rebuild")?;
+                    .context("failed to list chunks for knowledge text rebuild")?;
                 if chunks.is_empty() {
                     continue;
                 }
@@ -324,80 +321,78 @@ impl GraphService {
                         Some(Utc::now()),
                     )
                     .await
-                    .context("failed to reconcile arango text readiness")?;
+                    .context("failed to reconcile knowledge text readiness")?;
                 reconciled_revisions += 1;
             }
         }
 
-        Ok(ArangoGraphRebuildOutcome {
-            target: Some(ArangoGraphRebuildTarget::Text),
+        Ok(GraphRebuildOutcome {
+            target: Some(GraphRebuildTarget::Text),
             text_reconciled_revisions: reconciled_revisions,
             ..Default::default()
         })
     }
 
-    pub async fn rebuild_arango_library_vector(
+    pub async fn rebuild_library_vector(
         &self,
         state: &AppState,
         library_id: Uuid,
-    ) -> Result<ArangoGraphRebuildOutcome, GraphServiceError> {
+    ) -> Result<GraphRebuildOutcome, GraphServiceError> {
         let vector_rebuild = state
             .canonical_services
             .search
             .rebuild_vector_plane_for_library(state, library_id)
             .await?;
-        Ok(ArangoGraphRebuildOutcome {
-            target: Some(ArangoGraphRebuildTarget::Vector),
+        Ok(GraphRebuildOutcome {
+            target: Some(GraphRebuildTarget::Vector),
             chunk_embeddings_rebuilt: vector_rebuild.chunk_embeddings_rebuilt,
             graph_node_embeddings_rebuilt: vector_rebuild.graph_node_embeddings_rebuilt,
             ..Default::default()
         })
     }
 
-    pub async fn reconcile_arango_library_graph(
+    pub async fn reconcile_library_graph(
         &self,
         state: &AppState,
         library_id: Uuid,
-    ) -> Result<ArangoGraphRebuildOutcome, GraphServiceError> {
+    ) -> Result<GraphRebuildOutcome, GraphServiceError> {
         self.with_runtime_graph_lock(state, library_id, async {
-            let mut outcome = self
-                .build_and_refresh_arango_graph_from_candidates(state, library_id, None)
-                .await?;
-            outcome.target = Some(ArangoGraphRebuildTarget::Graph);
-            Ok(outcome)
-        })
-        .await
-        .map_err(Into::into)
-    }
-
-    pub async fn rebuild_arango_library_evidence(
-        &self,
-        state: &AppState,
-        library_id: Uuid,
-    ) -> Result<ArangoGraphRebuildOutcome, GraphServiceError> {
-        self.with_runtime_graph_lock(state, library_id, async {
-            self.refresh_arango_library_candidate_materialization(state, library_id).await?;
             let mut outcome =
-                self.reconcile_arango_library_candidates(state, library_id, None).await?;
-            outcome.target = Some(ArangoGraphRebuildTarget::Evidence);
+                self.build_and_refresh_graph_from_candidates(state, library_id, None).await?;
+            outcome.target = Some(GraphRebuildTarget::Graph);
             Ok(outcome)
         })
         .await
         .map_err(Into::into)
     }
 
-    pub async fn rebuild_arango_library(
+    pub async fn rebuild_library_evidence(
         &self,
         state: &AppState,
         library_id: Uuid,
-    ) -> Result<ArangoGraphRebuildOutcome, GraphServiceError> {
+    ) -> Result<GraphRebuildOutcome, GraphServiceError> {
         self.with_runtime_graph_lock(state, library_id, async {
-            let text = self.rebuild_arango_library_text(state, library_id).await?;
-            self.refresh_arango_library_candidate_materialization(state, library_id).await?;
-            let graph = self.reconcile_arango_library_candidates(state, library_id, None).await?;
-            let vector = self.rebuild_arango_library_vector(state, library_id).await?;
-            let mut outcome = ArangoGraphRebuildOutcome {
-                target: Some(ArangoGraphRebuildTarget::Library),
+            self.refresh_library_candidate_materialization(state, library_id).await?;
+            let mut outcome = self.reconcile_library_candidates(state, library_id, None).await?;
+            outcome.target = Some(GraphRebuildTarget::Evidence);
+            Ok(outcome)
+        })
+        .await
+        .map_err(Into::into)
+    }
+
+    pub async fn rebuild_library_graph_artifacts(
+        &self,
+        state: &AppState,
+        library_id: Uuid,
+    ) -> Result<GraphRebuildOutcome, GraphServiceError> {
+        self.with_runtime_graph_lock(state, library_id, async {
+            let text = self.rebuild_library_text(state, library_id).await?;
+            self.refresh_library_candidate_materialization(state, library_id).await?;
+            let graph = self.reconcile_library_candidates(state, library_id, None).await?;
+            let vector = self.rebuild_library_vector(state, library_id).await?;
+            let mut outcome = GraphRebuildOutcome {
+                target: Some(GraphRebuildTarget::Library),
                 ..Default::default()
             };
             outcome.text_reconciled_revisions = text.text_reconciled_revisions;
@@ -556,7 +551,7 @@ impl GraphService {
 }
 
 #[derive(Debug, Clone)]
-struct ArangoRevisionContext {
+struct GraphRevisionContext {
     revision_id: Uuid,
     document_id: Uuid,
     workspace_id: Uuid,
@@ -564,8 +559,8 @@ struct ArangoRevisionContext {
     revision_number: i64,
 }
 
-impl From<crate::infra::arangodb::document_store::KnowledgeRevisionRow> for ArangoRevisionContext {
-    fn from(row: crate::infra::arangodb::document_store::KnowledgeRevisionRow) -> Self {
+impl From<crate::infra::knowledge_rows::KnowledgeRevisionRow> for GraphRevisionContext {
+    fn from(row: crate::infra::knowledge_rows::KnowledgeRevisionRow) -> Self {
         Self {
             revision_id: row.revision_id,
             document_id: row.document_id,

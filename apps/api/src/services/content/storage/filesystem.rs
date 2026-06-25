@@ -72,6 +72,21 @@ impl FilesystemContentStorageProvider {
             return Ok(());
         }
 
+        self.write(storage_key, file_bytes).await
+    }
+
+    pub async fn write(
+        &self,
+        storage_key: &str,
+        file_bytes: &[u8],
+    ) -> Result<(), ContentServiceError> {
+        let target_path = self.resolve_storage_path(storage_key)?;
+        if let Some(parent) = target_path.parent() {
+            fs::create_dir_all(parent).await.with_context(|| {
+                format!("failed to create content storage directory {}", parent.display())
+            })?;
+        }
+
         let temp_path = target_path.with_extension(format!("tmp-{}", Uuid::now_v7()));
         fs::write(&temp_path, file_bytes)
             .await
@@ -132,10 +147,37 @@ impl FilesystemContentStorageProvider {
         &self,
         stashed_directory: &StashedContentDirectory,
     ) -> Result<(), ContentServiceError> {
+        self.restore_stashed_directory_inner(stashed_directory, false).await
+    }
+
+    pub async fn restore_stashed_directory_replacing_current(
+        &self,
+        stashed_directory: &StashedContentDirectory,
+    ) -> Result<(), ContentServiceError> {
+        self.restore_stashed_directory_inner(stashed_directory, true).await
+    }
+
+    async fn restore_stashed_directory_inner(
+        &self,
+        stashed_directory: &StashedContentDirectory,
+        replace_current: bool,
+    ) -> Result<(), ContentServiceError> {
         if let Some(parent) = stashed_directory.original_path.parent() {
             fs::create_dir_all(parent)
                 .await
                 .with_context(|| format!("failed to create {}", parent.display()))?;
+        }
+        if replace_current
+            && fs::try_exists(&stashed_directory.original_path).await.with_context(|| {
+                format!("failed to inspect {}", stashed_directory.original_path.display())
+            })?
+        {
+            fs::remove_dir_all(&stashed_directory.original_path).await.with_context(|| {
+                format!(
+                    "failed to remove replacement content directory {} before stash restore",
+                    stashed_directory.original_path.display()
+                )
+            })?;
         }
         fs::rename(&stashed_directory.stashed_path, &stashed_directory.original_path)
             .await

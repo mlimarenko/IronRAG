@@ -26,7 +26,7 @@ use uuid::Uuid;
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct TurnSpan {
-    /// Operator-facing label, e.g. `arango.cursor`, `retrieve.vector`.
+    /// Operator-facing label, e.g. `db.cursor`, `retrieve.vector`.
     pub name: String,
     /// Coarse category for grouping/colour: `db` | `lane` | `stage` | `llm`.
     pub kind: String,
@@ -147,12 +147,12 @@ mod tests {
     #[tokio::test]
     async fn captures_spans_recorded_within_scope() {
         let (_out, spans) = capture_turn_spans(async {
-            record_span("arango.cursor", "db", 12, Some("knowledge_chunk".into()), Some(24));
+            record_span("db.cursor", "db", 12, Some("knowledge_chunk".into()), Some(24));
             record_span("retrieve.vector", "lane", 30, None, None);
         })
         .await;
         assert_eq!(spans.len(), 2);
-        assert_eq!(spans[0].name, "arango.cursor");
+        assert_eq!(spans[0].name, "db.cursor");
         assert_eq!(spans[0].kind, "db");
         assert_eq!(spans[0].rows, Some(24));
         assert_eq!(spans[1].name, "retrieve.vector");
@@ -205,7 +205,7 @@ mod tests {
         stash_execution_spans(
             execution_id,
             vec![TurnSpan {
-                name: "arango.knowledge_chunk".into(),
+                name: "db.knowledge_chunk".into(),
                 kind: "db".into(),
                 duration_ms: 5,
                 started_offset_ms: 0,
@@ -215,7 +215,7 @@ mod tests {
         );
         let taken = take_execution_spans(execution_id);
         assert_eq!(taken.len(), 1);
-        assert_eq!(taken[0].name, "arango.knowledge_chunk");
+        assert_eq!(taken[0].name, "db.knowledge_chunk");
         // The store removes the entry on take, so a second take is empty.
         assert!(take_execution_spans(execution_id).is_empty());
     }

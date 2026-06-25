@@ -1,56 +1,39 @@
 //! Knowledge-plane storage ports (trait surfaces).
 //!
-//! These traits are the swappable boundary between the query/ingest services
-//! and the concrete knowledge-plane backend. Today the only adapter is the
-//! ArangoDB implementation in [`crate::infra::arangodb`]; the 0.5.0
-//! ArangoDB→PostgreSQL migration (design doc
-//! `docs/plan/2026-06-02-arango-to-postgres-knowledge-plane.md`, §14.4) adds a
-//! PostgreSQL adapter behind these same traits. A single adapter is selected at
-//! boot (write-freeze cutover model, §14.2) — there is **no dual-write
-//! wrapper**, so the trait only needs to be swappable, not composable.
+//! These traits are the boundary between query/ingest services and the concrete
+//! PostgreSQL knowledge-plane adapter. The traits stay as domain ports so the
+//! services do not depend on table layout details, but runtime backend selection
+//! has been removed: PostgreSQL is the single implementation.
 //!
 //! ## Surface split
 //!
-//! The ~107 public methods of the four Arango stores map onto four traits, one
-//! per store: [`DocumentStore`], [`SearchStore`], [`GraphStore`],
-//! [`ContextStore`]. Infrastructure-construction surface that is **not** part of
-//! the storage contract is intentionally left off the traits and stays on the
-//! concrete Arango structs: `new(...)`, `client()` (the raw `reqwest`-over-REST
-//! handle), `SearchStore::vector_index_params()` (Arango IVF tuning), and the
-//! `GraphStore` view-sanitizer / ping helpers. A PG adapter has no `ArangoClient`
-//! and no IVF params, so exposing them on the port would leak the Arango
-//! implementation.
+//! Storage responsibilities are split by domain: [`DocumentStore`],
+//! [`SearchStore`], [`GraphStore`], and [`ContextStore`]. Infrastructure
+//! construction details stay outside these traits; callers receive trait objects
+//! and use only domain-level operations.
 //!
 //! ## Leaky contracts (design §14.4)
 //!
 //! Three observable behaviors are part of the contract and are pinned in the
-//! relevant method doc-comments below, because the PG adapter must reproduce
-//! them even though its implementation is structurally different:
+//! relevant method doc-comments below:
 //!
 //! 1. **Input-rank ordering.** Membership reads that take an ordered id slice and
-//!    rank their output by the *input* position (Arango `POSITION(arr, x, true)`;
-//!    PG `unnest(...) WITH ORDINALITY`) must return rows ordered by the rank of
+//!    rank their output by the *input* position (`unnest(...) WITH ORDINALITY`)
+//!    must return rows ordered by the rank of
 //!    the input id, not by storage order. See
 //!    [`DocumentStore::list_source_profile_chunks_by_revisions`].
 //! 2. **Write-count returns.** Methods returning a mutation count return the
-//!    number of rows actually written/removed (Arango `writesExecuted`; PG
-//!    `cmd_tuples`/`RETURNING`), not a request count. See the `delete_*`/`u64`
+//!    number of rows actually written/removed (`cmd_tuples`/`RETURNING`), not a request count. See the `delete_*`/`u64`
 //!    methods on [`SearchStore`], [`GraphStore`], and [`ContextStore`].
 //! 3. **Vector write-routing is hidden.** Callers never name a per-`(library,
 //!    dim)` shard. [`SearchStore::upsert_chunk_vectors_bulk`] (and its singular
-//!    sibling) own the routing: Arango ensures the per-dim shard collection, PG
-//!    routes to the typed-by-dim table. The two are structurally different impls
-//!    of one method — conformance asserts *observable* behavior, not the routing
-//!    mechanism.
+//!    sibling) own the routing to typed-by-dim tables.
 //!
 //! ## Canonical edge direction
 //!
 //! `evidence_source_edge` is written EVIDENCE→REVISION by
-//! [`GraphStore::upsert_evidence_source_edge`] (the `_from`=evidence,
-//! `_to`=revision orientation in the Arango impl). The bootstrap comment that
-//! declares it EVIDENCE→CHUNK is stale; the canonical direction is
-//! **EVIDENCE→REVISION** and the PG adapter must enforce it with an FK. This is a
-//! documentation pin only — runtime behavior is unchanged by this refactor.
+//! [`GraphStore::upsert_evidence_source_edge`]. The canonical direction is
+//! **EVIDENCE→REVISION** and the PostgreSQL adapter enforces it with an FK.
 
 use std::sync::Arc;
 
@@ -58,33 +41,22 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
-use crate::infra::arangodb::{
-    context_store::{
-        KnowledgeBundleChunkEdgeRow, KnowledgeBundleEntityEdgeRow, KnowledgeBundleEvidenceEdgeRow,
-        KnowledgeBundleRelationEdgeRow, KnowledgeContextBundleReferenceSetRow,
-        KnowledgeContextBundleRow, KnowledgeRetrievalTraceRow,
-    },
-    document_store::{
-        KnowledgeChunkRow, KnowledgeChunkSupportReferenceRow, KnowledgeDocumentRow,
-        KnowledgeRevisionRow, KnowledgeStructuredBlockRow, KnowledgeStructuredRevisionRow,
-        KnowledgeTechnicalFactRow, LibraryGenerationSignals, StructuredRevisionCounts,
-    },
-    graph_store::{
-        GraphViewData, GraphViewEdgeWrite, GraphViewNodeWrite, GraphViewWriteError,
-        KnowledgeEntityCandidateRow, KnowledgeEntityRow, KnowledgeEvidenceRow,
-        KnowledgeGraphTraversalRow, KnowledgeRelationCandidateRow,
-        KnowledgeRelationEvidenceLookupRow, KnowledgeRelationRow, KnowledgeRelationTopologyRow,
-        NewKnowledgeEntity, NewKnowledgeEntityCandidate, NewKnowledgeEvidence,
-        NewKnowledgeRelation, NewKnowledgeRelationCandidate,
-    },
-    search_store::{
-        KnowledgeChunkSearchRow, KnowledgeChunkVectorRow, KnowledgeChunkVectorSearchRow,
-        KnowledgeEntitySearchRow, KnowledgeEntityVectorRow, KnowledgeEntityVectorSearchRow,
-        KnowledgeRelationSearchRow, KnowledgeStructuredBlockSearchRow,
-        KnowledgeTechnicalFactSearchRow,
-    },
+use crate::infra::knowledge_rows::{
+    GraphViewData, GraphViewEdgeWrite, GraphViewNodeWrite, GraphViewWriteError,
+    KnowledgeBundleChunkEdgeRow, KnowledgeBundleEntityEdgeRow, KnowledgeBundleEvidenceEdgeRow,
+    KnowledgeBundleRelationEdgeRow, KnowledgeChunkRow, KnowledgeChunkSearchRow,
+    KnowledgeChunkSupportReferenceRow, KnowledgeChunkVectorRow, KnowledgeChunkVectorSearchRow,
+    KnowledgeContextBundleReferenceSetRow, KnowledgeContextBundleRow, KnowledgeDocumentRow,
+    KnowledgeEntityCandidateRow, KnowledgeEntityRow, KnowledgeEntitySearchRow,
+    KnowledgeEntityVectorRow, KnowledgeEntityVectorSearchRow, KnowledgeEvidenceRow,
+    KnowledgeGraphTraversalRow, KnowledgeRelationCandidateRow, KnowledgeRelationEvidenceLookupRow,
+    KnowledgeRelationRow, KnowledgeRelationSearchRow, KnowledgeRelationTopologyRow,
+    KnowledgeRetrievalTraceRow, KnowledgeRevisionRow, KnowledgeStructuredBlockRow,
+    KnowledgeStructuredBlockSearchRow, KnowledgeStructuredRevisionRow, KnowledgeTechnicalFactRow,
+    KnowledgeTechnicalFactSearchRow, LibraryGenerationSignals, NewKnowledgeEntity,
+    NewKnowledgeEntityCandidate, NewKnowledgeEvidence, NewKnowledgeRelation,
+    NewKnowledgeRelationCandidate, StructuredRevisionCounts,
 };
-
 /// Shared handle for a [`DocumentStore`] adapter.
 pub type DocumentStoreRef = Arc<dyn DocumentStore>;
 /// Shared handle for a [`SearchStore`] adapter.
@@ -204,9 +176,8 @@ pub trait DocumentStore: Send + Sync {
         library_id: Uuid,
     ) -> anyhow::Result<Vec<KnowledgeChunkRow>>;
     /// Source-profile chunks for the given revisions, ordered by the **input
-    /// rank** of `revision_ids` then `chunk_index` (leaky contract §14.4(a):
-    /// Arango `POSITION(@revision_ids, revision_id, true)` ⇒ PG
-    /// `unnest(...) WITH ORDINALITY`). The PG adapter MUST preserve input-rank
+    /// rank** of `revision_ids` then `chunk_index` (`unnest(...) WITH
+    /// ORDINALITY`). The adapter MUST preserve input-rank
     /// ordering, not storage order.
     async fn list_source_profile_chunks_by_revisions(
         &self,
@@ -402,8 +373,7 @@ pub trait SearchStore: Send + Sync {
         embedding_model_key: &str,
         freshness_generation: i64,
     ) -> anyhow::Result<Option<KnowledgeChunkVectorRow>>;
-    /// Returns the number of vector rows removed (leaky contract §14.4(b):
-    /// Arango `writesExecuted` ⇒ PG `cmd_tuples`).
+    /// Returns the number of vector rows removed.
     async fn delete_chunk_vectors_by_revision(&self, revision_id: Uuid) -> anyhow::Result<u64>;
     /// Returns the number of vector rows removed (§14.4(b)).
     async fn delete_chunk_vectors_by_library(&self, library_id: Uuid) -> anyhow::Result<u64>;
@@ -470,8 +440,7 @@ pub trait SearchStore: Send + Sync {
     /// Config-aware variant of [`search_chunks`] that allows the caller to
     /// supply the Postgres FTS text-search config name sourced from the
     /// library's [`RetrievalConfig`].  The default implementation delegates
-    /// to `search_chunks` so that implementations that do not use Postgres
-    /// FTS (e.g. the Arango backend, or mocks) satisfy the trait for free.
+    /// to `search_chunks` so that test doubles satisfy the trait for free.
     /// `PgSearchStore` overrides this to use `text_search_config` in the
     /// lexical SQL instead of the hardcoded `'simple'` default.
     ///

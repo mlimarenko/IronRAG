@@ -109,9 +109,9 @@ enum AuditCommand {
         #[arg(long)]
         json: bool,
     },
-    /// Scan every ArangoDB `knowledge_*` collection for rows whose
-    /// `library_id` does not match a live PostgreSQL `catalog_library`
-    /// row. Read-only — destructive purge is `gc orphan-libraries`.
+    /// Scan every knowledge-plane table for rows whose `library_id` does not
+    /// match a live PostgreSQL `catalog_library` row. Read-only — destructive
+    /// purge is `gc orphan-libraries`.
     OrphanLibraries {
         /// Emit JSON instead of a human-readable summary.
         #[arg(long)]
@@ -129,7 +129,7 @@ enum GcCommand {
         /// Restrict to one library. Default: every library.
         #[arg(long)]
         library: Option<Uuid>,
-        /// Count what would be removed without issuing destructive AQL.
+        /// Count what would be removed without issuing destructive deletes.
         #[arg(long)]
         dry_run: bool,
         /// Also sweep documents whose head is null (failed ingest).
@@ -154,9 +154,9 @@ enum GcCommand {
         #[arg(long)]
         json: bool,
     },
-    /// Wipe every ArangoDB row whose `library_id` no longer matches a
-    /// live PostgreSQL `catalog_library` row. Destructive — requires
-    /// `--yes` to confirm.
+    /// Wipe every knowledge-plane row whose `library_id` no longer matches a
+    /// live PostgreSQL `catalog_library` row. Destructive — requires `--yes` to
+    /// confirm.
     OrphanLibraries {
         /// Confirm destructive run. Without `--yes` the command refuses
         /// to issue any deletes; pair with the `audit orphan-libraries`
@@ -213,23 +213,6 @@ enum RepairCommand {
 
 #[derive(Subcommand)]
 enum MigrateCommand {
-    /// Move rows from the legacy single-dim `knowledge_chunk_vector` /
-    /// `knowledge_entity_vector` collections into per-dim shards
-    /// (`knowledge_*_vector_d<dim>`). Idempotent.
-    VectorPerDim {
-        /// Emit JSON instead of a human-readable summary.
-        #[arg(long)]
-        json: bool,
-    },
-    /// Move chunk-vector rows from the shared per-dim shards
-    /// (`knowledge_chunk_vector_d{dim}`) into the per-(library, dim) shards
-    /// (`knowledge_chunk_vector_d{dim}_l{library}`), grouped by library.
-    /// Entity vectors are left on the shared per-dim shard. Idempotent.
-    ChunkVectorPerLibrary {
-        /// Emit JSON instead of a human-readable summary.
-        #[arg(long)]
-        json: bool,
-    },
     /// Backfill `occurred_at` / `occurred_until` on chunks whose
     /// `normalized_text` carries a canonical JSONL temporal header but
     /// whose columns are still NULL. Re-runs after partial completion
@@ -249,9 +232,9 @@ enum MigrateCommand {
 
 #[derive(Subcommand)]
 enum RebuildCommand {
-    /// Reconcile the instance-wide ArangoDB vector index dimensions
-    /// with the source library's active vector binding and rebuild all
-    /// library vector material that must share those indexes.
+    /// Reconcile per-dim vector relation dimensions with the source library's
+    /// active vector binding and rebuild all library vector material that must
+    /// share those indexes.
     VectorPlane {
         /// Library whose active vector binding determines the target
         /// vector dimensions.
@@ -267,7 +250,7 @@ enum RebuildCommand {
         library: Option<Uuid>,
     },
     /// Re-embed every entity node in the library into the per-dim
-    /// `knowledge_entity_vector_d*` Arango collections.
+    /// `knowledge_entity_vector_d*` PostgreSQL relations.
     /// Fails loudly if no active EmbedChunk binding is configured.
     /// Idempotent — safe to re-run after partial completion.
     EntityEmbeddings {
@@ -825,41 +808,17 @@ async fn run_retention(pool: &PgPool, command: RetentionCommand) -> Result<()> {
 
 async fn run_migrate(state: &AppState, command: MigrateCommand) -> Result<()> {
     match command {
-        MigrateCommand::VectorPerDim { json } => {
-            let report = migrate::vector_per_dim(state).await?;
-            if json {
-                println!("{}", serde_json::to_string_pretty(&report)?);
-            } else {
-                println!(
-                    "migrate.vector-per-dim  chunk_rows_moved={}  entity_rows_moved={}",
-                    report.chunk_rows_moved, report.entity_rows_moved,
-                );
-            }
-        }
-        MigrateCommand::ChunkVectorPerLibrary { json } => {
-            let report = migrate::chunk_vector_per_library(state).await?;
-            if json {
-                println!("{}", serde_json::to_string_pretty(&report)?);
-            } else {
-                println!(
-                    "migrate.chunk-vector-per-library  rows_moved={}  shards_drained={}",
-                    report.rows_moved, report.shards_drained,
-                );
-            }
-        }
         MigrateCommand::ChunkTemporalBounds { library, dry_run, json } => {
             let report = migrate::chunk_temporal_bounds(state, library, dry_run).await?;
             if json {
                 println!("{}", serde_json::to_string_pretty(&report)?);
             } else {
                 println!(
-                    "migrate.chunk-temporal-bounds  scanned={}  parsed={}  updated_pg={}  updated_arango={}  skipped_no_header={}  failed_arango_mirror={}  dry_run={}",
+                    "migrate.chunk-temporal-bounds  scanned={}  parsed={}  updated_pg={}  skipped_no_header={}  dry_run={}",
                     report.scanned,
                     report.parsed,
                     report.updated_pg,
-                    report.updated_arango,
                     report.skipped_no_header,
-                    report.failed_arango_mirror,
                     dry_run,
                 );
             }

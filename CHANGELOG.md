@@ -2,6 +2,40 @@
 
 ## Unreleased
 
+## 0.5.3 — 2026-06-26
+
+### Changed
+
+- **The knowledge plane is PostgreSQL-only.** The backend no longer ships the
+  removed ArangoDB client, bootstrap, document/search/graph stores, dependency
+  mode, or contract tests. Configuration now accepts only the canonical
+  PostgreSQL knowledge-plane backend, and operational diagnostics report any
+  non-canonical backend value as unsupported.
+
+- **Snapshot archives are PostgreSQL-only.** The snapshot schema is bumped to
+  v7, new exports no longer declare legacy Arango archive sections, and restore
+  no longer accepts v5 `arango/` or `arango-edges/` archive payloads. v6
+  PostgreSQL archives remain the minimum supported restore format.
+
+- **Frontend container builds now target Node 26.** The web Dockerfile and
+  package metadata are aligned on the Node 26 runtime used for release builds,
+  while the lockfile records the same engine contract.
+
+- **Release metadata is aligned for 0.5.3.** The Rust workspace package
+  version, generated OpenAPI `info.version`, Helm chart, and README image-tag
+  example now point at 0.5.3.
+
+### Fixed
+
+- **Library restore is stricter about archive boundaries and object payloads.**
+  Restore now validates snapshot object paths before opening them, keeps
+  per-document restore state isolated, and avoids carrying stale revision or
+  storage metadata across documents.
+
+- **Public configuration examples no longer mention the removed ArangoDB
+  dependency.** `.env.example` and MCP parity notes now describe the current
+  PostgreSQL/Redis-only local contract.
+
 ## 0.5.2 — 2026-06-25
 
 ### Changed

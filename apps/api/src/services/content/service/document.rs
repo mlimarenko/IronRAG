@@ -13,7 +13,7 @@ use crate::{
     },
     domains::knowledge::{PreparedSegmentDetail, PreparedSegmentListItem, TypedTechnicalFact},
     domains::ops::{ASYNC_OP_STATUS_FAILED, MUTATION_KIND_DELETE},
-    infra::arangodb::document_store::{KnowledgeDocumentRow, KnowledgeRevisionRow},
+    infra::knowledge_rows::{KnowledgeDocumentRow, KnowledgeRevisionRow},
     infra::repositories::{
         self, catalog_repository,
         content_repository::{self, ContentDocumentListRow, DocumentListSortColumn},
@@ -124,7 +124,7 @@ impl ContentService {
                 .map_err(|e| ApiError::internal_with_log(e, "internal"))?
                 .ok_or_else(|| ApiError::resource_not_found("library", library_id))?;
         let documents = state
-            .arango_document_store
+            .document_store
             .list_documents_by_library(library.workspace_id, library_id, include_deleted)
             .await
             .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
@@ -194,8 +194,8 @@ impl ContentService {
     ///      joins `content_document_head`, `content_revision`,
     ///      `content_mutation`, `ingest_job`, and the latest `ingest_attempt`
     ///      in one round-trip.
-    ///   2. Makes a single ArangoDB batch call (`list_documents_by_ids`) to
-    ///      fetch the per-document `knowledge_document.file_name` fallback
+    ///   2. Makes a single knowledge-store batch call (`list_documents_by_ids`)
+    ///      to fetch the per-document `knowledge_document.file_name` fallback
     ///      and the effective `knowledge_revision` readiness states
     ///      (text_state / graph_state / …) needed to derive the canonical
     ///      readiness bucket.
@@ -250,16 +250,16 @@ impl ContentService {
         .await
         .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
 
-        // Fetch per-document knowledge rows (file_name) + effective
-        // revisions (readiness) in two Arango round-trips. For small pages
-        // (<=200) the payload is trivial.
+        // Fetch per-document knowledge rows (file_name) plus effective
+        // revisions (readiness). For small pages (<=200) the payload is
+        // trivial.
         let document_ids: Vec<Uuid> = page.rows.iter().map(|row| row.id).collect();
         let knowledge_documents_by_id: HashMap<Uuid, KnowledgeDocumentRow> =
             if document_ids.is_empty() {
                 HashMap::new()
             } else {
                 state
-                    .arango_document_store
+                    .document_store
                     .list_documents_by_ids(&document_ids)
                     .await
                     .map_err(|e| ApiError::internal_with_log(e, "internal"))?
@@ -279,7 +279,7 @@ impl ContentService {
             HashMap::new()
         } else {
             state
-                .arango_document_store
+                .document_store
                 .list_revisions_by_ids(&revision_ids)
                 .await
                 .map_err(|e| ApiError::internal_with_log(e, "internal"))?
@@ -319,11 +319,11 @@ impl ContentService {
         state: &AppState,
         document_id: Uuid,
     ) -> Result<ContentDocumentSummary, ApiError> {
-        // Phase 1: arango document fetch and PG head row fetch are
+        // Phase 1: knowledge document fetch and PG head row fetch are
         // independent — start them in parallel. They each cost
         // 30-100 ms; running serially was ~150 ms of dead wall time on
         // every inspector poll.
-        let row_fut = state.arango_document_store.get_document(document_id);
+        let row_fut = state.document_store.get_document(document_id);
         let head_fut =
             content_repository::get_document_head(&state.persistence.postgres, document_id);
         let (row_res, head_res) = tokio::join!(row_fut, head_fut);
@@ -383,7 +383,7 @@ impl ContentService {
         .ok_or_else(|| ApiError::resource_not_found("revision", revision_id))?;
 
         state
-            .arango_document_store
+            .document_store
             .update_revision_document_hint(revision_id, updated_revision.document_hint.as_deref())
             .await
             .map_err(|e| ApiError::internal_with_log(e, "internal"))?
@@ -424,11 +424,9 @@ impl ContentService {
         // `readable_revision_id` columns are FKs into `content_revision`
         // and are updated atomically by `promote_document_head` from
         // within the same ingest transaction that creates the revision.
-        // The Arango `knowledge_document` projection of the same pointers
-        // can drift after a crashed ingest (head was promoted in Arango
-        // but the PG revision row was rolled back, or vice versa), and
-        // reading pointers from there leaks orphan revision ids into
-        // `admit_mutation`, which then writes them into
+        // A derived `knowledge_document` projection of the same pointers can
+        // drift after a crashed ingest, and reading pointers from there leaks
+        // orphan revision ids into `admit_mutation`, which then writes them into
         // `content_mutation_item.base_revision_id` and trips the FK. All
         // callers downstream of this helper (including retry /
         // resolve_reprocess_revision) stay safe as long as we read PG.
@@ -455,7 +453,7 @@ impl ContentService {
         document_id: Uuid,
     ) -> Result<Vec<ContentRevision>, ApiError> {
         let rows = state
-            .arango_document_store
+            .document_store
             .list_revisions_by_document(document_id)
             .await
             .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
@@ -468,7 +466,7 @@ impl ContentService {
         revision_id: Uuid,
     ) -> Result<Vec<ContentChunk>, ApiError> {
         let rows = state
-            .arango_document_store
+            .document_store
             .list_chunks_by_revision(revision_id)
             .await
             .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
@@ -477,9 +475,8 @@ impl ContentService {
 
     /// Canonical paginated read for the inspector's prepared-segments
     /// tab. Returns `(page_items, total_across_all_pages)`. Pagination
-    /// is pushed into AQL (`LIMIT offset, limit`) so only the
-    /// requested window materializes full block rows (loading all blocks
-    /// costs ~1.2 s and a multi-MB Arango payload on PDF docs). The
+    /// is pushed into storage pagination so only the requested window
+    /// materializes full block rows. The
     /// accompanying chunk read is projected to `(chunk_id,
     /// support_block_ids)` only; we never need the chunk text here.
     pub async fn list_prepared_segments_page(
@@ -489,13 +486,13 @@ impl ContentService {
         offset: usize,
         limit: usize,
     ) -> Result<(Vec<PreparedSegmentDetail>, usize), ApiError> {
-        let page_fut = state.arango_document_store.list_structured_blocks_page_by_revision(
+        let page_fut = state.document_store.list_structured_blocks_page_by_revision(
             revision_id,
             offset,
             limit,
         );
         let chunks_fut =
-            state.arango_document_store.list_chunk_support_references_by_revision(revision_id);
+            state.document_store.list_chunk_support_references_by_revision(revision_id);
         let (page_res, chunks_res) = tokio::join!(page_fut, chunks_fut);
         let (block_rows, total) =
             page_res.map_err(|e| ApiError::internal_with_log(e, "internal"))?;
@@ -553,10 +550,10 @@ impl ContentService {
         latest_job: Option<ContentDocumentPipelineJob>,
     ) -> Result<ContentDocumentSummary, ApiError> {
         // Fan out the four revision-keyed reads concurrently:
-        //   - Arango `get_revision(active)`
-        //   - Arango `get_revision(readable)` (if distinct)
-        //   - Arango `get_structured_revision_counts(effective)`
-        //   - PG    `get_web_discovered_page_by_result_revision_id(active)`
+        //   - `get_revision(active)`
+        //   - `get_revision(readable)` (if distinct)
+        //   - `get_structured_revision_counts(effective)`
+        //   - `get_web_discovered_page_by_result_revision_id(active)`
         // They're all independent of each other; doing them serially
         // costs ~4 × round-trip latency per inspector poll. The
         // effective readiness revision id is `readable || active`, known
@@ -567,21 +564,21 @@ impl ContentService {
         let effective_readiness_revision_id = readable_revision_id.or(active_revision_id);
         let active_fut = async {
             match active_revision_id {
-                Some(id) => state.arango_document_store.get_revision(id).await,
+                Some(id) => state.document_store.get_revision(id).await,
                 None => Ok(None),
             }
         };
         let readable_fut = async {
             match readable_revision_id {
                 Some(id) if Some(id) != active_revision_id => {
-                    state.arango_document_store.get_revision(id).await
+                    state.document_store.get_revision(id).await
                 }
                 _ => Ok(None),
             }
         };
         let counts_fut = async {
             match effective_readiness_revision_id {
-                Some(id) => state.arango_document_store.get_structured_revision_counts(id).await,
+                Some(id) => state.document_store.get_structured_revision_counts(id).await,
                 None => Ok(None),
             }
         };
@@ -623,10 +620,7 @@ impl ContentService {
             .map_err(|e| ApiError::internal_with_log(e, "internal"))?
             .and_then(|counts| {
                 effective_readiness_row.as_ref().map(|readiness| {
-                    crate::infra::arangodb::document_store::KnowledgeStructuredRevisionRow {
-                        key: readiness.revision_id.to_string(),
-                        arango_id: None,
-                        arango_rev: None,
+                    crate::infra::knowledge_rows::KnowledgeStructuredRevisionRow {
                         revision_id: readiness.revision_id,
                         workspace_id: readiness.workspace_id,
                         library_id: readiness.library_id,
@@ -730,7 +724,7 @@ impl ContentService {
             .into_iter()
             .collect::<Vec<_>>();
         let revisions_by_id = state
-            .arango_document_store
+            .document_store
             .list_revisions_by_ids(&revision_ids)
             .await
             .map_err(|e| ApiError::internal_with_log(e, "internal"))?
@@ -748,7 +742,7 @@ impl ContentService {
             .into_iter()
             .collect::<Vec<_>>();
         let structured_revisions_by_revision_id = state
-            .arango_document_store
+            .document_store
             .list_structured_revisions_by_revision_ids(&effective_revision_ids)
             .await
             .map_err(|e| ApiError::internal_with_log(e, "internal"))?
@@ -998,7 +992,7 @@ impl ContentService {
                 latest_revision_no,
                 deleted_at: document.deleted_at,
             },
-            "knowledge document sync failed after document delete committed; Postgres delete is committed and the Arango mirror may be stale until retry",
+            "knowledge document sync failed after document delete committed; Postgres delete is committed and the knowledge projection may be stale until retry",
         )
         .await?;
         if let Err(error) = self.converge_document_technical_facts(state, document_id, None).await {
@@ -1165,10 +1159,10 @@ impl ContentService {
     /// Resolves the revision that retry should re-run against.
     ///
     /// Canonical source of truth is Postgres `content_revision`, NOT the
-    /// Arango knowledge projection. The retry ultimately writes a
+    /// derived knowledge projection. The retry ultimately writes a
     /// `content_mutation_item` row whose `base_revision_id` FK points into
     /// `content_revision`; if we pick a revision that only exists in
-    /// Arango (projection drift after a crashed ingest) the admit fails
+    /// the knowledge projection (projection drift after a crashed ingest) the admit fails
     /// with a raw FK violation and the document stays stuck.
     ///
     /// Selects the latest revision by `(revision_number desc, created_at
@@ -1442,13 +1436,13 @@ impl ContentService {
                 continue;
             }
             if let Err(error) =
-                state.arango_document_store.delete_technical_facts_by_revision(revision.id).await
+                state.document_store.delete_technical_facts_by_revision(revision.id).await
             {
                 tracing::warn!(
                     %document_id,
                     revision_id = %revision.id,
                     ?error,
-                    "failed to delete ArangoDB technical facts for document revision"
+                    "failed to delete technical facts for document revision"
                 );
             }
         }
@@ -1481,9 +1475,9 @@ impl ContentService {
         .await
         .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
 
-        // Clean up ArangoDB artifacts for all revisions of the deleted document.
+        // Clean up knowledge-plane artifacts for all revisions of the deleted document.
         let revisions = state
-            .arango_document_store
+            .document_store
             .list_revisions_by_document(document_id)
             .await
             .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
@@ -1498,11 +1492,11 @@ impl ContentService {
                     %document_id,
                     revision_id = %revision.revision_id,
                     ?e,
-                    "failed to delete ArangoDB chunks and vectors for deleted document"
+                    "failed to delete chunks and vectors for deleted document"
                 );
             }
             if let Err(e) = state
-                .arango_document_store
+                .document_store
                 .delete_structured_blocks_by_revision(revision.revision_id)
                 .await
             {
@@ -1510,31 +1504,27 @@ impl ContentService {
                     %document_id,
                     revision_id = %revision.revision_id,
                     ?e,
-                    "failed to delete ArangoDB blocks for deleted document"
+                    "failed to delete structured blocks for deleted document"
                 );
             }
-            if let Err(e) = state
-                .arango_graph_store
-                .delete_entity_candidates_by_revision(revision.revision_id)
-                .await
+            if let Err(e) =
+                state.graph_store.delete_entity_candidates_by_revision(revision.revision_id).await
             {
                 tracing::warn!(
                     %document_id,
                     revision_id = %revision.revision_id,
                     ?e,
-                    "failed to delete ArangoDB entity candidates for deleted document"
+                    "failed to delete entity candidates for deleted document"
                 );
             }
-            if let Err(e) = state
-                .arango_graph_store
-                .delete_relation_candidates_by_revision(revision.revision_id)
-                .await
+            if let Err(e) =
+                state.graph_store.delete_relation_candidates_by_revision(revision.revision_id).await
             {
                 tracing::warn!(
                     %document_id,
                     revision_id = %revision.revision_id,
                     ?e,
-                    "failed to delete ArangoDB relation candidates for deleted document"
+                    "failed to delete relation candidates for deleted document"
                 );
             }
         }
@@ -1659,14 +1649,14 @@ impl ContentService {
         .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
         if !deleted_edge_keys.is_empty() {
             let _ = state
-                .arango_graph_store
+                .graph_store
                 .delete_relations_by_canonical_keys(library_id, &deleted_edge_keys)
                 .await
                 .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
         }
         if !deleted_node_keys.is_empty() {
             let _ = state
-                .arango_graph_store
+                .graph_store
                 .delete_entities_by_canonical_keys(library_id, &deleted_node_keys)
                 .await
                 .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
@@ -1761,7 +1751,7 @@ pub struct ContentDocumentListPageResult {
 }
 
 /// Derives a `ContentDocumentListEntry` from the joined Postgres row and the
-/// (optional) ArangoDB knowledge-document + effective-revision rows for the
+/// (optional) knowledge-document + effective-revision rows for the
 /// same document. This is the single canonical place where document list
 /// status / readiness enums are computed — both the list handler and the
 /// library summary aggregator go through it so there is no drift between
@@ -1981,7 +1971,7 @@ mod tests {
         domains::content::{
             ContentDocument, ContentDocumentPipelineState, ContentDocumentSummary, ContentRevision,
         },
-        infra::arangodb::document_store::KnowledgeRevisionRow,
+        infra::knowledge_rows::KnowledgeRevisionRow,
         infra::repositories::content_repository::ContentDocumentListRow,
     };
     use chrono::Utc;
@@ -2038,9 +2028,6 @@ mod tests {
         let now = Utc::now();
         let revision_id = Uuid::now_v7();
         KnowledgeRevisionRow {
-            key: revision_id.to_string(),
-            arango_id: None,
-            arango_rev: None,
             revision_id,
             workspace_id: Uuid::now_v7(),
             library_id: Uuid::now_v7(),

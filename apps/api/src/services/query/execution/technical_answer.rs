@@ -3,7 +3,7 @@ use std::{collections::BTreeSet, sync::LazyLock};
 use uuid::Uuid;
 
 use crate::domains::query_ir::{QueryAct, QueryIR, QueryScope};
-use crate::infra::arangodb::document_store::KnowledgeStructuredBlockRow;
+use crate::infra::knowledge_rows::KnowledgeStructuredBlockRow;
 
 use super::question_intent::{
     QuestionIntent, canonical_target_type_tag, classify_question_or_ir_intents, has_question_intent,

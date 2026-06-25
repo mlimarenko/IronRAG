@@ -124,11 +124,8 @@ impl KnowledgeService {
     ) -> Result<KnowledgeDocument, ApiError> {
         let now = chrono::Utc::now();
         let row = state
-            .arango_document_store
-            .upsert_document(&crate::infra::arangodb::document_store::KnowledgeDocumentRow {
-                key: command.document_id.to_string(),
-                arango_id: None,
-                arango_rev: None,
+            .document_store
+            .upsert_document(&crate::infra::knowledge_rows::KnowledgeDocumentRow {
                 document_id: command.document_id,
                 workspace_id: command.workspace_id,
                 library_id: command.library_id,
@@ -161,11 +158,8 @@ impl KnowledgeService {
         command: CreateKnowledgeRevisionCommand,
     ) -> Result<KnowledgeRevision, ApiError> {
         let row = state
-            .arango_document_store
-            .upsert_revision(&crate::infra::arangodb::document_store::KnowledgeRevisionRow {
-                key: command.revision_id.to_string(),
-                arango_id: None,
-                arango_rev: None,
+            .document_store
+            .upsert_revision(&crate::infra::knowledge_rows::KnowledgeRevisionRow {
                 revision_id: command.revision_id,
                 workspace_id: command.workspace_id,
                 library_id: command.library_id,
@@ -195,7 +189,7 @@ impl KnowledgeService {
             .await
             .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
         state
-            .arango_graph_store
+            .graph_store
             .upsert_document_revision_edge(
                 command.document_id,
                 command.revision_id,
@@ -219,14 +213,14 @@ impl KnowledgeService {
         .map_err(|e| ApiError::internal_with_log(e, "internal"))?
         .ok_or_else(|| ApiError::resource_not_found("document", command.document_id))?;
         let existing_projection = state
-            .arango_document_store
+            .document_store
             .get_document(command.document_id)
             .await
             .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
         let title_source_revision_id = command.readable_revision_id.or(command.active_revision_id);
         let title_source_revision = match title_source_revision_id {
             Some(revision_id) => state
-                .arango_document_store
+                .document_store
                 .get_revision(revision_id)
                 .await
                 .map_err(|e| ApiError::internal_with_log(e, "internal"))?,
@@ -255,11 +249,8 @@ impl KnowledgeService {
         )
         .to_string();
         let row = state
-            .arango_document_store
-            .upsert_document(&crate::infra::arangodb::document_store::KnowledgeDocumentRow {
-                key: command.document_id.to_string(),
-                arango_id: existing_projection.as_ref().and_then(|row| row.arango_id.clone()),
-                arango_rev: existing_projection.as_ref().and_then(|row| row.arango_rev.clone()),
+            .document_store
+            .upsert_document(&crate::infra::knowledge_rows::KnowledgeDocumentRow {
                 document_id: command.document_id,
                 workspace_id: content_document.workspace_id,
                 library_id: content_document.library_id,
@@ -299,13 +290,13 @@ impl KnowledgeService {
         text_readable_at: Option<chrono::DateTime<chrono::Utc>>,
     ) -> Result<KnowledgeRevision, ApiError> {
         let current = state
-            .arango_document_store
+            .document_store
             .get_revision(revision_id)
             .await
             .map_err(|e| ApiError::internal_with_log(e, "internal"))?
             .ok_or_else(|| ApiError::resource_not_found("knowledge_revision", revision_id))?;
         let row = state
-            .arango_document_store
+            .document_store
             .update_revision_text_content(
                 revision_id,
                 normalized_text.or(current.normalized_text.as_deref()),
@@ -353,7 +344,7 @@ impl KnowledgeService {
         storage_ref: Option<&str>,
     ) -> Result<KnowledgeRevision, ApiError> {
         let row = state
-            .arango_document_store
+            .document_store
             .update_revision_storage_ref(revision_id, storage_ref)
             .await
             .map_err(|e| ApiError::internal_with_log(e, "internal"))?
@@ -367,11 +358,8 @@ impl KnowledgeService {
         command: CreateKnowledgeChunkCommand,
     ) -> Result<KnowledgeChunk, ApiError> {
         let row = state
-            .arango_document_store
-            .upsert_chunk(&crate::infra::arangodb::document_store::KnowledgeChunkRow {
-                key: command.chunk_id.to_string(),
-                arango_id: None,
-                arango_rev: None,
+            .document_store
+            .upsert_chunk(&crate::infra::knowledge_rows::KnowledgeChunkRow {
                 chunk_id: command.chunk_id,
                 workspace_id: command.workspace_id,
                 library_id: command.library_id,
@@ -400,7 +388,7 @@ impl KnowledgeService {
             .await
             .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
         state
-            .arango_graph_store
+            .graph_store
             .upsert_revision_chunk_edge(command.revision_id, command.chunk_id, command.library_id)
             .await
             .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
@@ -418,10 +406,7 @@ impl KnowledgeService {
 
         let rows = commands
             .iter()
-            .map(|command| crate::infra::arangodb::document_store::KnowledgeChunkRow {
-                key: command.chunk_id.to_string(),
-                arango_id: None,
-                arango_rev: None,
+            .map(|command| crate::infra::knowledge_rows::KnowledgeChunkRow {
                 chunk_id: command.chunk_id,
                 workspace_id: command.workspace_id,
                 library_id: command.library_id,
@@ -450,7 +435,7 @@ impl KnowledgeService {
             .collect::<Vec<_>>();
 
         let inserted = state
-            .arango_document_store
+            .document_store
             .insert_chunks(&rows)
             .await
             .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
@@ -465,7 +450,7 @@ impl KnowledgeService {
         }
         for (revision_id, (library_id, chunk_ids)) in chunk_ids_by_revision {
             state
-                .arango_graph_store
+                .graph_store
                 .insert_revision_chunk_edges(revision_id, &chunk_ids, library_id)
                 .await
                 .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
@@ -480,7 +465,7 @@ impl KnowledgeService {
         revision_id: Uuid,
     ) -> Result<Vec<KnowledgeChunk>, ApiError> {
         let rows = state
-            .arango_document_store
+            .document_store
             .list_chunks_by_revision(revision_id)
             .await
             .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
@@ -493,7 +478,7 @@ impl KnowledgeService {
         revision_id: Uuid,
     ) -> Result<Option<StructuredDocumentRevision>, ApiError> {
         let row = state
-            .arango_document_store
+            .document_store
             .get_structured_revision(revision_id)
             .await
             .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
@@ -506,7 +491,7 @@ impl KnowledgeService {
         document_id: Uuid,
     ) -> Result<Vec<StructuredDocumentRevision>, ApiError> {
         let rows = state
-            .arango_document_store
+            .document_store
             .list_structured_revisions_by_document(document_id)
             .await
             .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
@@ -519,7 +504,7 @@ impl KnowledgeService {
         revision_id: Uuid,
     ) -> Result<Vec<StructuredBlock>, ApiError> {
         let rows = state
-            .arango_document_store
+            .document_store
             .list_structured_blocks_by_revision(revision_id)
             .await
             .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
@@ -532,7 +517,7 @@ impl KnowledgeService {
         revision_id: Uuid,
     ) -> Result<Vec<TypedTechnicalFact>, ApiError> {
         let rows = state
-            .arango_document_store
+            .document_store
             .list_technical_facts_by_revision(revision_id)
             .await
             .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
@@ -548,7 +533,7 @@ impl KnowledgeService {
             return Ok(Vec::new());
         }
         let rows = state
-            .arango_document_store
+            .document_store
             .list_technical_facts_by_ids(fact_ids)
             .await
             .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
@@ -561,17 +546,17 @@ impl KnowledgeService {
         revision_id: Uuid,
     ) -> Result<Vec<KnowledgeChunk>, ApiError> {
         let _ = state
-            .arango_graph_store
+            .graph_store
             .delete_revision_chunk_edges(revision_id)
             .await
             .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
         let _ = state
-            .arango_search_store
+            .search_store
             .delete_chunk_vectors_by_revision(revision_id)
             .await
             .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
         let rows = state
-            .arango_document_store
+            .document_store
             .delete_chunks_by_revision(revision_id)
             .await
             .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
@@ -681,8 +666,8 @@ impl KnowledgeService {
                 .map_or(0, |snapshot| i64::from(snapshot.edge_count)),
             graph_ready_document_count,
             graph_sparse_document_count,
-            // typed_fact count is a refinement that lives in ArangoDB's
-            // structured revision rows; without enumerating documents we
+            // typed_fact count is a refinement that lives in structured
+            // revision rows; without enumerating documents we
             // cannot derive it cheaply. Report 0 rather than N round-trips —
             // clients that need the exact figure should hit the dedicated
             // library coverage endpoint.
@@ -698,14 +683,13 @@ impl KnowledgeService {
         &self,
         state: &AppState,
         library_id: Uuid,
-    ) -> Result<Vec<crate::infra::arangodb::document_store::KnowledgeLibraryGenerationRow>, ApiError>
-    {
+    ) -> Result<Vec<crate::infra::knowledge_rows::KnowledgeLibraryGenerationRow>, ApiError> {
         // Canonical one-shot aggregate — the previous implementation
-        // iterated every document + fetched its revision list one
-        // document at a time, producing ~5k sequential Arango round-trips
-        // on a 5k-doc library and dominating dashboard latency. The
-        // aggregate returns the three readable revision numbers and a
-        // `latest_created_at` field in a single AQL call.
+        // iterated every document + fetched its revision list one document at a
+        // time, producing thousands of sequential knowledge-store round-trips
+        // on large libraries and dominating dashboard latency. The aggregate
+        // returns the three readable revision numbers and a `latest_created_at`
+        // field in one store call.
         let library = state.canonical_services.catalog.get_library(state, library_id).await?;
         let signals = aggregate_library_generation_signals_cached(state, library_id).await?;
 
@@ -726,10 +710,7 @@ impl KnowledgeService {
             signals.active_graph_generation,
             degraded_state,
         );
-        Ok(vec![crate::infra::arangodb::document_store::KnowledgeLibraryGenerationRow {
-            key: library_id.to_string(),
-            arango_id: None,
-            arango_rev: None,
+        Ok(vec![crate::infra::knowledge_rows::KnowledgeLibraryGenerationRow {
             generation_id,
             workspace_id: library.workspace_id,
             library_id,
@@ -742,9 +723,7 @@ impl KnowledgeService {
     }
 }
 
-fn map_document_row(
-    row: crate::infra::arangodb::document_store::KnowledgeDocumentRow,
-) -> KnowledgeDocument {
+fn map_document_row(row: crate::infra::knowledge_rows::KnowledgeDocumentRow) -> KnowledgeDocument {
     KnowledgeDocument {
         id: row.document_id,
         workspace_id: row.workspace_id,
@@ -759,9 +738,7 @@ fn map_document_row(
     }
 }
 
-fn map_revision_row(
-    row: crate::infra::arangodb::document_store::KnowledgeRevisionRow,
-) -> KnowledgeRevision {
+fn map_revision_row(row: crate::infra::knowledge_rows::KnowledgeRevisionRow) -> KnowledgeRevision {
     KnowledgeRevision {
         id: row.revision_id,
         document_id: row.document_id,
@@ -785,7 +762,7 @@ fn map_revision_row(
     }
 }
 
-fn map_chunk_row(row: crate::infra::arangodb::document_store::KnowledgeChunkRow) -> KnowledgeChunk {
+fn map_chunk_row(row: crate::infra::knowledge_rows::KnowledgeChunkRow) -> KnowledgeChunk {
     KnowledgeChunk {
         id: row.chunk_id,
         revision_id: row.revision_id,
@@ -796,7 +773,7 @@ fn map_chunk_row(row: crate::infra::arangodb::document_store::KnowledgeChunkRow)
 }
 
 fn map_structured_revision_row(
-    row: crate::infra::arangodb::document_store::KnowledgeStructuredRevisionRow,
+    row: crate::infra::knowledge_rows::KnowledgeStructuredRevisionRow,
 ) -> Result<StructuredDocumentRevision, ApiError> {
     let outline = serde_json::from_value(row.outline_json)
         .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
@@ -818,7 +795,7 @@ fn map_structured_revision_row(
 }
 
 pub(crate) fn map_structured_block_row(
-    row: crate::infra::arangodb::document_store::KnowledgeStructuredBlockRow,
+    row: crate::infra::knowledge_rows::KnowledgeStructuredBlockRow,
 ) -> Result<StructuredBlock, ApiError> {
     let block_kind =
         row.block_kind.parse().map_err(|e| ApiError::internal_with_log(e, "internal"))?;
@@ -850,7 +827,7 @@ pub(crate) fn map_structured_block_row(
 }
 
 fn map_typed_technical_fact_row(
-    row: crate::infra::arangodb::document_store::KnowledgeTechnicalFactRow,
+    row: crate::infra::knowledge_rows::KnowledgeTechnicalFactRow,
 ) -> Result<TypedTechnicalFact, ApiError> {
     let fact_kind = row
         .fact_kind
@@ -880,7 +857,7 @@ fn map_typed_technical_fact_row(
 }
 
 fn map_library_generation_row(
-    row: crate::infra::arangodb::document_store::KnowledgeLibraryGenerationRow,
+    row: crate::infra::knowledge_rows::KnowledgeLibraryGenerationRow,
 ) -> KnowledgeLibraryGeneration {
     let generation_state = if row.active_graph_generation > 0 {
         "graph_ready"
@@ -923,37 +900,32 @@ fn derive_library_generation_id(
 const LIBRARY_GENERATION_SIGNALS_CACHE_TTL_SECONDS: u64 = 30;
 
 fn library_generation_signals_cache_key(library_id: Uuid) -> String {
-    // Bumped v1→v2 when the underlying AQL stopped reading the legacy
-    // `knowledge_chunk_vector` collection (always empty after the per-dim
-    // migration, so v1 always cached `has_ready_vector=false`) and
-    // started deriving `vector_ready_max` from
-    // `knowledge_revision.vector_state == "ready"`. The bump invalidates
-    // the stale v1 entries on first read after deploy.
+    // Bumped v1→v2 when generation signals stopped reading the retired
+    // single-dim vector relation and started deriving `vector_ready_max` from
+    // `knowledge_revision.vector_state == "ready"`. The bump invalidates the
+    // stale v1 entries on first read after deploy.
     format!("lib_generation_signals:v2:{library_id}")
 }
 
-/// Redis-cached wrapper around `ArangoDocumentStore::aggregate_library_generation_signals`.
+/// Redis-cached wrapper around `DocumentStore::aggregate_library_generation_signals`.
 ///
-/// The AQL aggregate spans every `knowledge_revision` row in the library
-/// and, under concurrent ingest, is the call that surfaces as
-/// `failed to aggregate library generation signals: error sending
-/// request for url ... /_api/cursor` when Arango saturates. The hot
-/// callers — dashboard polling every 2.5 s, knowledge summary, and the
-/// library_summary branch of assistant turns — all tolerate a 30 s
-/// staleness window on the generation fingerprint (it tracks revision
-/// completion, not per-turn state), so a short TTL swaps a 200–2000 ms
-/// Arango cursor for a 1–5 ms Redis GET without changing the contract.
+/// The aggregate spans every `knowledge_revision` row in the library and can be
+/// expensive under concurrent ingest. The hot callers — dashboard polling every
+/// 2.5 s, knowledge summary, and the library_summary branch of assistant turns —
+/// all tolerate a 30 s staleness window on the generation fingerprint (it tracks
+/// revision completion, not per-turn state), so a short TTL swaps the aggregate
+/// read for a 1–5 ms Redis GET without changing the contract.
 async fn aggregate_library_generation_signals_cached(
     state: &AppState,
     library_id: Uuid,
-) -> Result<crate::infra::arangodb::document_store::LibraryGenerationSignals, ApiError> {
+) -> Result<crate::infra::knowledge_rows::LibraryGenerationSignals, ApiError> {
     use redis::AsyncCommands;
     let cache_key = library_generation_signals_cache_key(library_id);
 
     if let Ok(mut conn) = state.persistence.redis.get_multiplexed_async_connection().await {
         if let Ok(Some(bytes)) = conn.get::<_, Option<Vec<u8>>>(&cache_key).await {
             if let Ok(signals) = serde_json::from_slice::<
-                crate::infra::arangodb::document_store::LibraryGenerationSignals,
+                crate::infra::knowledge_rows::LibraryGenerationSignals,
             >(&bytes)
             {
                 return Ok(signals);
@@ -962,7 +934,7 @@ async fn aggregate_library_generation_signals_cached(
     }
 
     let signals = state
-        .arango_document_store
+        .document_store
         .aggregate_library_generation_signals(library_id)
         .await
         .map_err(|e| ApiError::internal_with_log(e, "internal"))?;

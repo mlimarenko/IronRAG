@@ -1,4 +1,4 @@
-use crate::infra::arangodb::document_store::KnowledgeChunkRow;
+use crate::infra::knowledge_rows::KnowledgeChunkRow;
 
 use super::RuntimeMatchedChunk;
 

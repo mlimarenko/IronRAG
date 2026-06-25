@@ -5,16 +5,12 @@ use sqlx::{FromRow, PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
 use crate::infra::{
-    arangodb::collections::{
-        KNOWLEDGE_CHUNK_COLLECTION, KNOWLEDGE_CONTEXT_BUNDLE_COLLECTION,
-        KNOWLEDGE_ENTITY_COLLECTION, KNOWLEDGE_EVIDENCE_COLLECTION, KNOWLEDGE_RELATION_COLLECTION,
-    },
-    arangodb::context_store::{
+    knowledge_plane::ContextStore,
+    knowledge_rows::{
         KnowledgeBundleChunkEdgeRow, KnowledgeBundleEntityEdgeRow, KnowledgeBundleEvidenceEdgeRow,
         KnowledgeBundleRelationEdgeRow, KnowledgeContextBundleReferenceSetRow,
         KnowledgeContextBundleRow, KnowledgeRetrievalTraceRow,
     },
-    knowledge_plane::ContextStore,
 };
 
 #[derive(Clone)]
@@ -45,9 +41,6 @@ struct PgBundleRow {
 impl From<PgBundleRow> for KnowledgeContextBundleRow {
     fn from(row: PgBundleRow) -> Self {
         Self {
-            key: row.bundle_id.to_string(),
-            arango_id: None,
-            arango_rev: None,
             bundle_id: row.bundle_id,
             workspace_id: row.workspace_id,
             library_id: row.library_id,
@@ -88,9 +81,6 @@ struct PgTraceRow {
 impl From<PgTraceRow> for KnowledgeRetrievalTraceRow {
     fn from(row: PgTraceRow) -> Self {
         Self {
-            key: row.trace_id.to_string(),
-            arango_id: None,
-            arango_rev: None,
             trace_id: row.trace_id,
             workspace_id: row.workspace_id,
             library_id: row.library_id,
@@ -120,13 +110,7 @@ struct PgChunkEdgeRow {
 
 impl From<PgChunkEdgeRow> for KnowledgeBundleChunkEdgeRow {
     fn from(row: PgChunkEdgeRow) -> Self {
-        let key = format!("{}:{}", row.bundle_id, row.chunk_id);
         Self {
-            key,
-            arango_id: None,
-            arango_rev: None,
-            from: arango_doc_id(KNOWLEDGE_CONTEXT_BUNDLE_COLLECTION, row.bundle_id),
-            to: arango_doc_id(KNOWLEDGE_CHUNK_COLLECTION, row.chunk_id),
             bundle_id: row.bundle_id,
             chunk_id: row.chunk_id,
             rank: row.rank,
@@ -149,13 +133,7 @@ struct PgEntityEdgeRow {
 
 impl From<PgEntityEdgeRow> for KnowledgeBundleEntityEdgeRow {
     fn from(row: PgEntityEdgeRow) -> Self {
-        let key = format!("{}:{}", row.bundle_id, row.entity_id);
         Self {
-            key,
-            arango_id: None,
-            arango_rev: None,
-            from: arango_doc_id(KNOWLEDGE_CONTEXT_BUNDLE_COLLECTION, row.bundle_id),
-            to: arango_doc_id(KNOWLEDGE_ENTITY_COLLECTION, row.entity_id),
             bundle_id: row.bundle_id,
             entity_id: row.entity_id,
             rank: row.rank,
@@ -178,13 +156,7 @@ struct PgRelationEdgeRow {
 
 impl From<PgRelationEdgeRow> for KnowledgeBundleRelationEdgeRow {
     fn from(row: PgRelationEdgeRow) -> Self {
-        let key = format!("{}:{}", row.bundle_id, row.relation_id);
         Self {
-            key,
-            arango_id: None,
-            arango_rev: None,
-            from: arango_doc_id(KNOWLEDGE_CONTEXT_BUNDLE_COLLECTION, row.bundle_id),
-            to: arango_doc_id(KNOWLEDGE_RELATION_COLLECTION, row.relation_id),
             bundle_id: row.bundle_id,
             relation_id: row.relation_id,
             rank: row.rank,
@@ -207,13 +179,7 @@ struct PgEvidenceEdgeRow {
 
 impl From<PgEvidenceEdgeRow> for KnowledgeBundleEvidenceEdgeRow {
     fn from(row: PgEvidenceEdgeRow) -> Self {
-        let key = format!("{}:{}", row.bundle_id, row.evidence_id);
         Self {
-            key,
-            arango_id: None,
-            arango_rev: None,
-            from: arango_doc_id(KNOWLEDGE_CONTEXT_BUNDLE_COLLECTION, row.bundle_id),
-            to: arango_doc_id(KNOWLEDGE_EVIDENCE_COLLECTION, row.evidence_id),
             bundle_id: row.bundle_id,
             evidence_id: row.evidence_id,
             rank: row.rank,
@@ -282,10 +248,6 @@ impl TryFrom<PgReferenceSetRow> for KnowledgeContextBundleReferenceSetRow {
                 .context("failed to decode bundle evidence references")?,
         })
     }
-}
-
-fn arango_doc_id(collection: &str, id: Uuid) -> String {
-    format!("{collection}/{id}")
 }
 
 fn map_rows<T, U>(rows: Vec<T>) -> Vec<U>
@@ -935,7 +897,6 @@ impl ContextStore for PgContextStore {
              left join lateral (
                 select jsonb_agg(
                     jsonb_build_object(
-                        '_key', concat(edge.bundle_id::text, ':', edge.chunk_id::text),
                         'bundle_id', edge.bundle_id,
                         'chunk_id', edge.chunk_id,
                         'rank', edge.rank,
@@ -951,7 +912,6 @@ impl ContextStore for PgContextStore {
              left join lateral (
                 select jsonb_agg(
                     jsonb_build_object(
-                        '_key', concat(edge.bundle_id::text, ':', edge.entity_id::text),
                         'bundle_id', edge.bundle_id,
                         'entity_id', edge.entity_id,
                         'rank', edge.rank,
@@ -967,7 +927,6 @@ impl ContextStore for PgContextStore {
              left join lateral (
                 select jsonb_agg(
                     jsonb_build_object(
-                        '_key', concat(edge.bundle_id::text, ':', edge.relation_id::text),
                         'bundle_id', edge.bundle_id,
                         'relation_id', edge.relation_id,
                         'rank', edge.rank,
@@ -983,7 +942,6 @@ impl ContextStore for PgContextStore {
              left join lateral (
                 select jsonb_agg(
                     jsonb_build_object(
-                        '_key', concat(edge.bundle_id::text, ':', edge.evidence_id::text),
                         'bundle_id', edge.bundle_id,
                         'evidence_id', edge.evidence_id,
                         'rank', edge.rank,
@@ -1024,7 +982,6 @@ impl ContextStore for PgContextStore {
              left join lateral (
                 select jsonb_agg(
                     jsonb_build_object(
-                        '_key', concat(edge.bundle_id::text, ':', edge.chunk_id::text),
                         'bundle_id', edge.bundle_id,
                         'chunk_id', edge.chunk_id,
                         'rank', edge.rank,
@@ -1040,7 +997,6 @@ impl ContextStore for PgContextStore {
              left join lateral (
                 select jsonb_agg(
                     jsonb_build_object(
-                        '_key', concat(edge.bundle_id::text, ':', edge.entity_id::text),
                         'bundle_id', edge.bundle_id,
                         'entity_id', edge.entity_id,
                         'rank', edge.rank,
@@ -1056,7 +1012,6 @@ impl ContextStore for PgContextStore {
              left join lateral (
                 select jsonb_agg(
                     jsonb_build_object(
-                        '_key', concat(edge.bundle_id::text, ':', edge.relation_id::text),
                         'bundle_id', edge.bundle_id,
                         'relation_id', edge.relation_id,
                         'rank', edge.rank,
@@ -1072,7 +1027,6 @@ impl ContextStore for PgContextStore {
              left join lateral (
                 select jsonb_agg(
                     jsonb_build_object(
-                        '_key', concat(edge.bundle_id::text, ':', edge.evidence_id::text),
                         'bundle_id', edge.bundle_id,
                         'evidence_id', edge.evidence_id,
                         'rank', edge.rank,
@@ -1113,7 +1067,6 @@ impl ContextStore for PgContextStore {
              left join lateral (
                 select jsonb_agg(
                     jsonb_build_object(
-                        '_key', concat(edge.bundle_id::text, ':', edge.chunk_id::text),
                         'bundle_id', edge.bundle_id,
                         'chunk_id', edge.chunk_id,
                         'rank', edge.rank,
@@ -1129,7 +1082,6 @@ impl ContextStore for PgContextStore {
              left join lateral (
                 select jsonb_agg(
                     jsonb_build_object(
-                        '_key', concat(edge.bundle_id::text, ':', edge.entity_id::text),
                         'bundle_id', edge.bundle_id,
                         'entity_id', edge.entity_id,
                         'rank', edge.rank,
@@ -1145,7 +1097,6 @@ impl ContextStore for PgContextStore {
              left join lateral (
                 select jsonb_agg(
                     jsonb_build_object(
-                        '_key', concat(edge.bundle_id::text, ':', edge.relation_id::text),
                         'bundle_id', edge.bundle_id,
                         'relation_id', edge.relation_id,
                         'rank', edge.rank,
@@ -1161,7 +1112,6 @@ impl ContextStore for PgContextStore {
              left join lateral (
                 select jsonb_agg(
                     jsonb_build_object(
-                        '_key', concat(edge.bundle_id::text, ':', edge.evidence_id::text),
                         'bundle_id', edge.bundle_id,
                         'evidence_id', edge.evidence_id,
                         'rank', edge.rank,

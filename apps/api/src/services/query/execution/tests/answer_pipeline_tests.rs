@@ -143,8 +143,8 @@ fn assemble_bounded_context_interleaves_graph_and_document_support() {
             from_node_id: Uuid::now_v7(),
             from_label: "IronRAG".to_string(),
             to_node_id: Uuid::now_v7(),
-            to_label: "Arango".to_string(),
-            summary: Some("IronRAG stores graph triples in Arango.".to_string()),
+            to_label: "PostgreSQL".to_string(),
+            summary: Some("IronRAG stores graph triples in PostgreSQL.".to_string()),
             support_count: 2,
             score: Some(0.7),
         }],
@@ -168,7 +168,7 @@ fn assemble_bounded_context_interleaves_graph_and_document_support() {
     assert!(context.contains("[graph-node] IronRAG (entity)"));
     assert!(
         context.contains(
-            "[graph-edge evidence] evidence: IronRAG stores graph triples in Arango. | relation_hint: IronRAG --uses--> Arango | support_count: 2"
+            "[graph-edge evidence] evidence: IronRAG stores graph triples in PostgreSQL. | relation_hint: IronRAG --uses--> PostgreSQL | support_count: 2"
         )
     );
     let document_index = context.find("[document]").unwrap_or_default();

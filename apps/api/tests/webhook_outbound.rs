@@ -6,8 +6,6 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use std::sync::Arc;
-
 use anyhow::{Context, Result};
 use axum::{
     Router,
@@ -38,7 +36,7 @@ use ironrag_backend::{
 };
 
 // ============================================================================
-// Temp database (Postgres only — outbound tests don't need ArangoDB)
+// Temp database (Postgres only — outbound tests don't need external services)
 // ============================================================================
 
 struct TempDatabase {
@@ -120,16 +118,10 @@ impl WebhookOutboundFixture {
             .await
             .context("failed to apply migrations for webhook_outbound test")?;
 
-        // Outbound tests don't need ArangoDB — use a stub arango client
-        let arango_client = Arc::new(
-            ironrag_backend::infra::arangodb::client::ArangoClient::from_settings(&settings)
-                .context("failed to build arango client stub for webhook_outbound")?,
-        );
-
         let redis = redis::Client::open(settings.redis_url.clone())
             .context("failed to create redis client for webhook_outbound test")?;
         let persistence = Persistence::for_tests(postgres, redis);
-        let state = AppState::from_dependencies(settings, persistence, arango_client)?;
+        let state = AppState::from_dependencies(settings, persistence)?;
 
         let workspace = state
             .canonical_services

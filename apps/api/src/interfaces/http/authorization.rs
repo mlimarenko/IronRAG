@@ -578,7 +578,7 @@ pub async fn load_content_document_and_authorize(
     accepted_permissions: &[&str],
 ) -> Result<AuthorizedContentDocument, ApiError> {
     let document = state
-        .arango_document_store
+        .document_store
         .get_document(document_id)
         .await
         .map_err(|e| ApiError::internal_with_log(e, "internal"))?

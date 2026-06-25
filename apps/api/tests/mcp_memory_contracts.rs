@@ -451,7 +451,7 @@ impl McpDiscoveryContractFixture {
 }
 
 #[tokio::test]
-#[ignore = "requires local postgres, redis, and arango services"]
+#[ignore = "requires local postgres and redis services"]
 async fn no_access_discovery_returns_explicit_zero_counts_and_empty_arrays() -> anyhow::Result<()> {
     let settings =
         Settings::from_env().context("failed to load settings for mcp discovery contracts test")?;
@@ -487,7 +487,7 @@ async fn no_access_discovery_returns_explicit_zero_counts_and_empty_arrays() -> 
 }
 
 #[tokio::test]
-#[ignore = "requires local postgres, redis, and arango services"]
+#[ignore = "requires local postgres and redis services"]
 async fn initialized_notifications_are_accepted_without_jsonrpc_error_bodies() -> anyhow::Result<()>
 {
     let settings = Settings::from_env()
@@ -511,7 +511,7 @@ async fn initialized_notifications_are_accepted_without_jsonrpc_error_bodies() -
 }
 
 #[tokio::test]
-#[ignore = "requires local postgres, redis, and arango services"]
+#[ignore = "requires local postgres and redis services"]
 async fn resource_discovery_methods_are_not_supported() -> anyhow::Result<()> {
     let settings =
         Settings::from_env().context("failed to load settings for mcp resource contracts test")?;
@@ -545,7 +545,7 @@ async fn resource_discovery_methods_are_not_supported() -> anyhow::Result<()> {
 }
 
 #[tokio::test]
-#[ignore = "requires local postgres, redis, and arango services"]
+#[ignore = "requires local postgres and redis services"]
 async fn create_tools_allow_omitting_slug_and_advertise_optional_slug_inputs() -> anyhow::Result<()>
 {
     let settings = Settings::from_env()
@@ -648,7 +648,7 @@ async fn create_tools_allow_omitting_slug_and_advertise_optional_slug_inputs() -
 }
 
 #[tokio::test]
-#[ignore = "requires local postgres, redis, and arango services"]
+#[ignore = "requires local postgres and redis services"]
 async fn web_ingest_tools_advertise_recursive_defaults_and_page_listing_contracts()
 -> anyhow::Result<()> {
     let settings =

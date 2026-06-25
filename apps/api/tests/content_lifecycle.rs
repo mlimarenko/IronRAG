@@ -8,7 +8,6 @@ use uuid::Uuid;
 
 use ironrag_backend::{
     infra::repositories::{self, iam_repository},
-    interfaces::http::router_support::ApiError,
     services::{
         content::service::{
             AcceptMutationCommand, AdmitMutationCommand, AppendInlineMutationCommand,
@@ -238,7 +237,7 @@ async fn canonical_content_lifecycle_promotes_head_and_separates_readable_from_a
 
         let knowledge_document = fixture
             .state
-            .arango_document_store
+            .document_store
             .get_document(document.id)
             .await
             .context("failed to load promoted knowledge document")?
@@ -247,70 +246,6 @@ async fn canonical_content_lifecycle_promotes_head_and_separates_readable_from_a
         assert_eq!(knowledge_document.active_revision_id, Some(active_revision.id));
         assert_eq!(knowledge_document.readable_revision_id, Some(readable_revision.id));
         assert_ne!(knowledge_document.readable_revision_id, knowledge_document.active_revision_id);
-
-        Ok(())
-    }
-    .await;
-
-    fixture.cleanup().await?;
-    result
-}
-
-#[tokio::test]
-#[ignore = "requires local postgres with canonical extensions"]
-async fn canonical_content_lifecycle_head_promotion_fails_loudly_when_knowledge_sync_breaks()
--> Result<()> {
-    let fixture = ContentLifecycleFixture::create().await?;
-
-    let result = async {
-        let document = fixture
-            .state
-            .canonical_services
-            .content
-            .create_document(
-                &fixture.state,
-                CreateDocumentCommand {
-                    workspace_id: fixture.workspace_id,
-                    library_id: fixture.library_id,
-                    external_key: Some(format!("head-sync-failure-doc-{}", Uuid::now_v7())),
-                    file_name: None,
-                    created_by_principal_id: None,
-                    parent_external_key: None,
-                },
-            )
-            .await
-            .context("failed to create head sync failure document")?;
-
-        fixture
-            .drop_arango_database()
-            .await
-            .context("failed to drop Arango database before head promotion")?;
-
-        let error = match fixture
-            .state
-            .canonical_services
-            .content
-            .promote_document_head(
-                &fixture.state,
-                PromoteHeadCommand {
-                    document_id: document.id,
-                    active_revision_id: None,
-                    readable_revision_id: None,
-                    latest_mutation_id: None,
-                    latest_successful_attempt_id: None,
-                },
-            )
-            .await
-        {
-            Ok(_) => anyhow::bail!("head promotion must fail when knowledge sync fails"),
-            Err(error) => error,
-        };
-        assert!(matches!(error, ApiError::InternalMessage(_)));
-        assert!(
-            error
-                .to_string()
-                .contains("knowledge document sync failed after canonical head update")
-        );
 
         Ok(())
     }
@@ -584,7 +519,7 @@ async fn canonical_content_lifecycle_inline_upload_admits_background_ingest_job(
             .context("inline upload did not create a result revision")?;
         let revision = fixture
             .state
-            .arango_document_store
+            .document_store
             .get_revision(revision_id)
             .await
             .context("failed to load admitted inline upload revision")?
@@ -599,10 +534,10 @@ async fn canonical_content_lifecycle_inline_upload_admits_background_ingest_job(
             .context("failed to list postgres chunks for inline upload")?;
         let knowledge_chunks = fixture
             .state
-            .arango_document_store
+            .document_store
             .list_chunks_by_revision(revision_id)
             .await
-            .context("failed to list Arango knowledge chunks for inline upload")?;
+            .context("failed to list knowledge chunks for inline upload")?;
         let ingest_jobs = ironrag_backend::infra::repositories::ingest_repository::list_ingest_jobs_by_mutation_ids(
             &fixture.state.persistence.postgres,
             fixture.workspace_id,
@@ -1099,11 +1034,11 @@ async fn canonical_content_lifecycle_tracks_append_replace_delete_and_mutation_i
 
         let knowledge_document = fixture
             .state
-            .arango_document_store
+            .document_store
             .get_document(document.id)
             .await
             .context("failed to reload deleted knowledge document")?
-            .context("deleted knowledge document missing from arango")?;
+            .context("deleted knowledge document missing from store")?;
         assert_eq!(knowledge_document.document_state, "deleted");
         assert_eq!(knowledge_document.active_revision_id, None);
         assert_eq!(knowledge_document.readable_revision_id, Some(base_revision.id));
@@ -1194,7 +1129,7 @@ async fn canonical_content_lifecycle_tracks_append_replace_delete_and_mutation_i
 
         let repaired_projection = fixture
             .state
-            .arango_document_store
+            .document_store
             .update_document_pointers(
                 document.id,
                 "active",
@@ -1205,8 +1140,8 @@ async fn canonical_content_lifecycle_tracks_append_replace_delete_and_mutation_i
                 None,
             )
             .await
-            .context("failed to force stale active Arango projection before repeated delete")?
-            .context("forced stale active Arango projection missing")?;
+            .context("failed to force stale active knowledge projection before repeated delete")?
+            .context("forced stale active knowledge projection missing")?;
         assert_eq!(repaired_projection.document_state, "active");
         let leaked_documents = fixture
             .state
@@ -1214,10 +1149,10 @@ async fn canonical_content_lifecycle_tracks_append_replace_delete_and_mutation_i
             .content
             .list_documents(&fixture.state, fixture.library_id)
             .await
-            .context("failed to list documents after forcing stale active Arango projection")?;
+            .context("failed to list documents after forcing stale active knowledge projection")?;
         assert!(
             leaked_documents.iter().any(|summary| summary.document.id == document.id),
-            "stale active Arango projection must reproduce the leaked deleted document before repair"
+            "stale active knowledge projection must reproduce the leaked deleted document before repair"
         );
 
         let repeated_delete = fixture
@@ -1246,11 +1181,11 @@ async fn canonical_content_lifecycle_tracks_append_replace_delete_and_mutation_i
         assert_eq!(repeated_delete.mutation.mutation_state, "applied");
         let healed_knowledge_document = fixture
             .state
-            .arango_document_store
+            .document_store
             .get_document(document.id)
             .await
             .context("failed to reload healed knowledge document after repeated delete")?
-            .context("healed knowledge document missing from arango")?;
+            .context("healed knowledge document missing from store")?;
         assert_eq!(healed_knowledge_document.document_state, "deleted");
         assert_eq!(healed_knowledge_document.active_revision_id, None);
         assert_eq!(healed_knowledge_document.readable_revision_id, Some(base_revision.id));
@@ -1266,7 +1201,7 @@ async fn canonical_content_lifecycle_tracks_append_replace_delete_and_mutation_i
             active_documents_after_repeated_delete
                 .iter()
                 .all(|summary| summary.document.id != document.id),
-            "repeated delete must heal stale Arango projections and hide the deleted document again"
+            "repeated delete must heal stale knowledge projections and hide the deleted document again"
         );
 
         let library_mutations = fixture
@@ -1417,7 +1352,7 @@ async fn canonical_content_delete_succeeds_when_post_commit_cleanup_fails() -> R
 
         let knowledge_document = fixture
             .state
-            .arango_document_store
+            .document_store
             .get_document(document.id)
             .await
             .context("failed to load knowledge document after cleanup failure")?

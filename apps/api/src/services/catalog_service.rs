@@ -20,7 +20,6 @@ use crate::{
     interfaces::http::router_support::{
         ApiError, map_library_create_error, map_workspace_create_error,
     },
-    services::content::service::snapshot::clear_library_arango_footprint,
     services::ops::service::{CreateAsyncOperationCommand, UpdateAsyncOperationCommand},
     shared::slugs::slugify,
     shared::web::ingest::{WebIngestPolicy, validate_web_ingest_policy},
@@ -257,17 +256,6 @@ impl CatalogService {
         workspace_id: Uuid,
     ) -> Result<CatalogWorkspace, ApiError> {
         let workspace = self.get_workspace(state, workspace_id).await?;
-        // Capture the library set BEFORE the PG cascade drops the
-        // catalog_library rows — once they are gone we have no way of
-        // discovering which libraries used to belong to this workspace,
-        // and the per-library Arango footprint must still be wiped.
-        let libraries_before_delete: Vec<Uuid> =
-            catalog_repository::list_libraries(&state.persistence.postgres, Some(workspace.id))
-                .await
-                .map_err(|e| ApiError::internal_with_log(e, "internal"))?
-                .into_iter()
-                .map(|row| row.id)
-                .collect();
         let stashed_directory =
             state.content_storage.stash_workspace_storage(workspace.id).await.map_err(
                 |storage_error| {
@@ -299,30 +287,6 @@ impl CatalogService {
         if rows_affected == 0 {
             restore_stashed_directory(state, stashed_directory.as_ref()).await;
             return Err(ApiError::resource_not_found("workspace", workspace.id));
-        }
-
-        // The PG `delete_workspace` cascade only touches PG rows. Every
-        // library that lived under this workspace also owns Arango data
-        // (knowledge_document / knowledge_chunk / per-dim vector shards
-        // plus edges) which has no FK back to PG. Without an explicit
-        // sweep these rows become orphans the next sync delete will
-        // never see — exactly the leak that left 13k orphan documents
-        // on prod before this fix. Fire a sweep per library that lived
-        // under the workspace; failures are loud-logged but do not
-        // resurrect the workspace row.
-        if state.settings.knowledge_plane_backend == "arango" {
-            for orphan_library_id in libraries_before_delete {
-                if let Err(arango_error) =
-                    clear_library_arango_footprint(state, orphan_library_id).await
-                {
-                    error!(
-                        workspace_id = %workspace.id,
-                        library_id = %orphan_library_id,
-                        error = ?arango_error,
-                        "failed to cascade workspace delete into arango library footprint"
-                    );
-                }
-            }
         }
 
         purge_stashed_directory(state, stashed_directory.as_ref()).await;
@@ -696,24 +660,6 @@ impl CatalogService {
         if rows_affected == 0 {
             restore_stashed_directory(state, stashed_directory.as_ref()).await;
             return Err(ApiError::resource_not_found("library", library.id));
-        }
-
-        // The PG cascade only removes Postgres rows. Knowledge vertex
-        // collections, every per-dim vector shard, and the edge
-        // collections in Arango have no FK back to PG, so without this
-        // explicit sweep they become orphans the next sync delete will
-        // never see again. Run the same canonical sweep snapshot-
-        // restore-replace uses; failures are loud-logged but do not
-        // resurrect the PG row.
-        if state.settings.knowledge_plane_backend == "arango" {
-            if let Err(arango_error) = clear_library_arango_footprint(state, library.id).await {
-                error!(
-                    workspace_id = %library.workspace_id,
-                    library_id = %library.id,
-                    error = ?arango_error,
-                    "failed to cascade library delete into arango library footprint"
-                );
-            }
         }
 
         purge_stashed_directory(state, stashed_directory.as_ref()).await;

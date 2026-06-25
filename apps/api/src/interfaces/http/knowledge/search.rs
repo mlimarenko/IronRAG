@@ -9,19 +9,19 @@ use serde::{Deserialize, Serialize};
 use tracing::warn;
 use uuid::Uuid;
 
+use super::{
+    KnowledgeDocumentProvenanceSummary, KnowledgeGraphEvidenceSummary,
+    KnowledgeTechnicalFactProvenanceSummary, load_chunks_by_ids, summarize_graph_evidence,
+    summarize_typed_technical_facts,
+};
 use crate::{
     app::state::AppState,
     domains::ai::AiBindingPurpose,
-    infra::arangodb::{
-        document_store::{
-            KnowledgeChunkRow, KnowledgeDocumentRow, KnowledgeLibraryGenerationRow,
-            KnowledgeRevisionRow,
-        },
-        graph_store::KnowledgeEvidenceRow,
-        search_store::{
-            KnowledgeChunkSearchRow, KnowledgeChunkVectorSearchRow, KnowledgeEntitySearchRow,
-            KnowledgeEntityVectorSearchRow, KnowledgeRelationSearchRow,
-        },
+    infra::knowledge_rows::{
+        KnowledgeChunkRow, KnowledgeChunkSearchRow, KnowledgeChunkVectorSearchRow,
+        KnowledgeDocumentRow, KnowledgeEntitySearchRow, KnowledgeEntityVectorSearchRow,
+        KnowledgeEvidenceRow, KnowledgeLibraryGenerationRow, KnowledgeRelationSearchRow,
+        KnowledgeRevisionRow,
     },
     integrations::llm::EmbeddingRequest,
     interfaces::http::{
@@ -34,12 +34,6 @@ use crate::{
         extraction::text_render::repair_technical_layout_noise,
         text_tokens::normalized_alnum_token_sequence_by,
     },
-};
-
-use super::{
-    KnowledgeDocumentProvenanceSummary, KnowledgeGraphEvidenceSummary,
-    KnowledgeTechnicalFactProvenanceSummary, load_chunks_by_ids, summarize_graph_evidence,
-    summarize_typed_technical_facts,
 };
 
 const DEFAULT_SEARCH_LIMIT: usize = 10;
@@ -606,7 +600,7 @@ async fn search_documents_impl(
         let library_dim = library_vector_index_dimensions(&state, library_id)
             .await
             .map_err(|error| ApiError::internal_with_log(error, "internal"))?;
-        let vector_chunk_future = state.arango_search_store.search_chunk_vectors_by_similarity(
+        let vector_chunk_future = state.search_store.search_chunk_vectors_by_similarity(
             library_dim,
             library_id,
             &embedding_model_key,
@@ -616,7 +610,7 @@ async fn search_documents_impl(
             None,
             None,
         );
-        let vector_entity_future = state.arango_search_store.search_entity_vectors_by_similarity(
+        let vector_entity_future = state.search_store.search_entity_vectors_by_similarity(
             library_dim,
             library_id,
             &embedding_model_key,
@@ -908,7 +902,7 @@ async fn search_expanded_lexical_chunks(
         let state = state.clone();
         async move {
             state
-                .arango_search_store
+                .search_store
                 .search_chunks(library_id, &search_query, internal_candidate_limit, None, None)
                 .await
                 .map_err(|e| ApiError::internal_with_log(e, "internal"))
@@ -958,7 +952,7 @@ async fn load_evidence_samples_by_chunk_ids(
         let state = state.clone();
         async move {
             let evidence_rows = state
-                .arango_graph_store
+                .graph_store
                 .list_evidence_by_chunk(chunk_id)
                 .await
                 .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
@@ -1265,7 +1259,7 @@ async fn backfill_document_chunk_hits(
     backfill_terms.extend(document_search_anchor_phrases(query_text));
     candidates.extend(
         state
-            .arango_document_store
+            .document_store
             .list_chunks_by_revision_matching_terms(
                 accumulator.revision.revision_id,
                 &backfill_terms,
@@ -1447,7 +1441,7 @@ async fn load_revisions_by_ids(
         return Ok(Vec::new());
     }
     state
-        .arango_document_store
+        .document_store
         .list_revisions_by_ids(revision_ids)
         .await
         .map_err(|e| ApiError::internal_with_log(e, "internal"))
@@ -1461,7 +1455,7 @@ async fn load_documents_by_ids(
         return Ok(Vec::new());
     }
     state
-        .arango_document_store
+        .document_store
         .list_documents_by_ids(document_ids)
         .await
         .map_err(|e| ApiError::internal_with_log(e, "internal"))
@@ -1474,7 +1468,7 @@ async fn search_entities_by_library(
     limit: usize,
 ) -> Result<Vec<KnowledgeEntitySearchRow>, ApiError> {
     state
-        .arango_search_store
+        .search_store
         .search_entities(library_id, query_text, limit.max(1))
         .await
         .map_err(|e| ApiError::internal_with_log(e, "internal"))
@@ -1487,7 +1481,7 @@ async fn search_relations_by_library(
     limit: usize,
 ) -> Result<Vec<KnowledgeRelationSearchRow>, ApiError> {
     state
-        .arango_search_store
+        .search_store
         .search_relations(library_id, query_text, limit.max(1))
         .await
         .map_err(|e| ApiError::internal_with_log(e, "internal"))
@@ -1765,9 +1759,6 @@ mod tests {
     fn document_row(file_name: &str) -> KnowledgeDocumentRow {
         let document_id = Uuid::now_v7();
         KnowledgeDocumentRow {
-            key: document_id.to_string(),
-            arango_id: None,
-            arango_rev: None,
             document_id,
             workspace_id: Uuid::now_v7(),
             library_id: Uuid::now_v7(),

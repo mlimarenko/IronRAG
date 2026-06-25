@@ -1,8 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::{
-    domains::runtime_graph::RuntimeGraphArtifactFilterReason,
-    infra::arangodb::graph_store::GraphViewData,
+    domains::runtime_graph::RuntimeGraphArtifactFilterReason, infra::knowledge_rows::GraphViewData,
 };
 
 const EXPLICIT_SELF_LOOP_RELATION_TYPES: &[&str] =
@@ -147,9 +146,7 @@ impl GraphQualityGuardService {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::infra::arangodb::graph_store::{
-        GraphViewData, GraphViewEdgeWrite, GraphViewNodeWrite,
-    };
+    use crate::infra::knowledge_rows::{GraphViewData, GraphViewEdgeWrite, GraphViewNodeWrite};
     use uuid::Uuid;
 
     #[test]

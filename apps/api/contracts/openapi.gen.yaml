@@ -1,11 +1,11 @@
 openapi: 3.1.0
 info:
   title: IronRAG API
-  description: Public HTTP API for the ArangoDB-backed IronRAG service (`apps/api/src/interfaces/http`). Operation paths include the `/v1` prefix. `servers.url` is the API origin without the `/v1` suffix.
+  description: Public HTTP API for the IronRAG service (`apps/api/src/interfaces/http`). Operation paths include the `/v1` prefix. `servers.url` is the API origin without the `/v1` suffix.
   license:
     name: MIT
     identifier: MIT
-  version: 0.5.2
+  version: 0.5.3
 servers:
 - url: /
   description: Same origin (paths include /v1)
@@ -8291,15 +8291,12 @@ components:
     KnowledgeBundleChunkReferenceRow:
       type: object
       required:
-      - _key
       - bundle_id
       - chunk_id
       - rank
       - score
       - created_at
       properties:
-        _key:
-          type: string
         bundle_id:
           type: string
           format: uuid
@@ -8322,15 +8319,12 @@ components:
     KnowledgeBundleEntityReferenceRow:
       type: object
       required:
-      - _key
       - bundle_id
       - entity_id
       - rank
       - score
       - created_at
       properties:
-        _key:
-          type: string
         bundle_id:
           type: string
           format: uuid
@@ -8353,15 +8347,12 @@ components:
     KnowledgeBundleEvidenceReferenceRow:
       type: object
       required:
-      - _key
       - bundle_id
       - evidence_id
       - rank
       - score
       - created_at
       properties:
-        _key:
-          type: string
         bundle_id:
           type: string
           format: uuid
@@ -8384,15 +8375,12 @@ components:
     KnowledgeBundleRelationReferenceRow:
       type: object
       required:
-      - _key
       - bundle_id
       - relation_id
       - rank
       - score
       - created_at
       properties:
-        _key:
-          type: string
         bundle_id:
           type: string
           format: uuid
@@ -8415,7 +8403,6 @@ components:
     KnowledgeChunkRow:
       type: object
       required:
-      - _key
       - chunk_id
       - workspace_id
       - library_id
@@ -8428,16 +8415,6 @@ components:
       - heading_trail
       - chunk_state
       properties:
-        _id:
-          type:
-          - string
-          - 'null'
-        _key:
-          type: string
-        _rev:
-          type:
-          - string
-          - 'null'
         chunk_id:
           type: string
           format: uuid
@@ -8476,7 +8453,7 @@ components:
           description: |-
             Earliest record timestamp aggregated into this chunk (JSONL ingest
             only; None for non-temporal sources). Mirrored from
-            `content_chunk.occurred_at` so AQL FILTER can hard-bound by time.
+            `content_chunk.occurred_at` so search can hard-bound by time.
         occurred_until:
           type:
           - string
@@ -8658,7 +8635,6 @@ components:
     KnowledgeContextBundleRow:
       type: object
       required:
-      - _key
       - bundle_id
       - workspace_id
       - library_id
@@ -8673,16 +8649,6 @@ components:
       - created_at
       - updated_at
       properties:
-        _id:
-          type:
-          - string
-          - 'null'
-        _key:
-          type: string
-        _rev:
-          type:
-          - string
-          - 'null'
         assembly_diagnostics: {}
         bundle_id:
           type: string
@@ -8773,7 +8739,6 @@ components:
     KnowledgeDocumentRow:
       type: object
       required:
-      - _key
       - document_id
       - workspace_id
       - library_id
@@ -8782,16 +8747,6 @@ components:
       - created_at
       - updated_at
       properties:
-        _id:
-          type:
-          - string
-          - 'null'
-        _key:
-          type: string
-        _rev:
-          type:
-          - string
-          - 'null'
         active_revision_id:
           type:
           - string
@@ -8952,7 +8907,6 @@ components:
     KnowledgeEntityMentionEdgeRow:
       type: object
       required:
-      - key
       - entityId
       - chunkId
       - createdAt
@@ -8970,8 +8924,6 @@ components:
           type:
           - string
           - 'null'
-        key:
-          type: string
         rank:
           type:
           - integer
@@ -9049,7 +9001,6 @@ components:
     KnowledgeEvidenceRow:
       type: object
       required:
-      - _key
       - evidence_id
       - workspace_id
       - library_id
@@ -9061,16 +9012,6 @@ components:
       - created_at
       - updated_at
       properties:
-        _id:
-          type:
-          - string
-          - 'null'
-        _key:
-          type: string
-        _rev:
-          type:
-          - string
-          - 'null'
         block_id:
           type:
           - string
@@ -9137,7 +9078,6 @@ components:
     KnowledgeEvidenceSupportEntityEdgeRow:
       type: object
       required:
-      - key
       - evidenceId
       - entityId
       - createdAt
@@ -9155,8 +9095,6 @@ components:
           type:
           - string
           - 'null'
-        key:
-          type: string
         rank:
           type:
           - integer
@@ -9170,7 +9108,6 @@ components:
     KnowledgeEvidenceSupportRelationEdgeRow:
       type: object
       required:
-      - key
       - evidenceId
       - relationId
       - createdAt
@@ -9185,8 +9122,6 @@ components:
           type:
           - string
           - 'null'
-        key:
-          type: string
         rank:
           type:
           - integer
@@ -9386,7 +9321,6 @@ components:
     KnowledgeRetrievalTraceRow:
       type: object
       required:
-      - _key
       - trace_id
       - workspace_id
       - library_id
@@ -9400,16 +9334,6 @@ components:
       - created_at
       - updated_at
       properties:
-        _id:
-          type:
-          - string
-          - 'null'
-        _key:
-          type: string
-        _rev:
-          type:
-          - string
-          - 'null'
         bundle_id:
           type: string
           format: uuid
@@ -9444,7 +9368,6 @@ components:
     KnowledgeRevisionRow:
       type: object
       required:
-      - _key
       - revision_id
       - workspace_id
       - library_id
@@ -9460,16 +9383,6 @@ components:
       - graph_state
       - created_at
       properties:
-        _id:
-          type:
-          - string
-          - 'null'
-        _key:
-          type: string
-        _rev:
-          type:
-          - string
-          - 'null'
         byte_size:
           type: integer
           format: int64
@@ -9873,7 +9786,7 @@ components:
             $ref: '#/components/schemas/TurnSpan'
           description: |-
             Fine-grained timed sub-operations recorded during this execution
-            (individual DB/Arango queries, retrieval lanes, …) so the inspector can
+            (individual DB queries, retrieval lanes, …) so the inspector can
             surface where time went and operators can catch heavy sections. Empty
             on records written before span capture existed.
         totalIterations:
@@ -11166,7 +11079,6 @@ components:
     RuntimeKnowledgeEntityRow:
       type: object
       required:
-      - key
       - entityId
       - workspaceId
       - libraryId
@@ -11207,8 +11119,6 @@ components:
         freshnessGeneration:
           type: integer
           format: int64
-        key:
-          type: string
         libraryId:
           type: string
           format: uuid
@@ -11228,7 +11138,6 @@ components:
     RuntimeKnowledgeEvidenceRow:
       type: object
       required:
-      - key
       - evidenceId
       - workspaceId
       - libraryId
@@ -11270,8 +11179,6 @@ components:
         freshnessGeneration:
           type: integer
           format: int64
-        key:
-          type: string
         libraryId:
           type: string
           format: uuid
@@ -11299,7 +11206,6 @@ components:
     RuntimeKnowledgeRelationRow:
       type: object
       required:
-      - key
       - relationId
       - workspaceId
       - libraryId
@@ -11327,8 +11233,6 @@ components:
         freshnessGeneration:
           type: integer
           format: int64
-        key:
-          type: string
         libraryId:
           type: string
           format: uuid
@@ -12175,7 +12079,7 @@ components:
           description: 'Coarse category for grouping/colour: `db` | `lane` | `stage` | `llm`.'
         name:
           type: string
-          description: Operator-facing label, e.g. `arango.cursor`, `retrieve.vector`.
+          description: Operator-facing label, e.g. `db.cursor`, `retrieve.vector`.
         rows:
           type:
           - integer
@@ -13046,27 +12950,8 @@ components:
       - libraryId
       - slug
       - postgresRowsByTable
-      - arangoDocsByStore
-      - arangoEdgesByStore
-      - skippedArangoEdgesByStore
       - blobsRestored
       properties:
-        arangoDocsByStore:
-          type: object
-          additionalProperties:
-            type: integer
-            format: int64
-            minimum: 0
-          propertyNames:
-            type: string
-        arangoEdgesByStore:
-          type: object
-          additionalProperties:
-            type: integer
-            format: int64
-            minimum: 0
-          propertyNames:
-            type: string
         blobsRestored:
           type: integer
           format: int64
@@ -13075,14 +12960,6 @@ components:
           type: string
           format: uuid
         postgresRowsByTable:
-          type: object
-          additionalProperties:
-            type: integer
-            format: int64
-            minimum: 0
-          propertyNames:
-            type: string
-        skippedArangoEdgesByStore:
           type: object
           additionalProperties:
             type: integer

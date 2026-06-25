@@ -8,7 +8,7 @@ use crate::{
     app::state::AppState,
     domains::{content::revision_text_state_is_readable, knowledge::TypedTechnicalFact},
     infra::{
-        arangodb::graph_store::{
+        knowledge_rows::{
             KnowledgeEntityCandidateRow, KnowledgeRelationCandidateRow, NewKnowledgeEntity,
             NewKnowledgeEntityCandidate, NewKnowledgeRelation, NewKnowledgeRelationCandidate,
         },
@@ -20,7 +20,7 @@ use crate::{
 };
 
 use super::{
-    ArangoGraphRebuildOutcome, ArangoRevisionContext, GraphService, MaterializedExtractCandidates,
+    GraphRebuildOutcome, GraphRevisionContext, GraphService, MaterializedExtractCandidates,
     ReconciledEntityCandidate, ReconciledRelationCandidate,
     apply_entity_key_aliases_to_relation_candidate, build_entity_candidate_key_index,
     build_materialized_extract_candidates, build_prefixed_entity_key_aliases,
@@ -32,23 +32,23 @@ use super::{
 };
 
 impl GraphService {
-    pub(super) async fn reconcile_arango_library_candidates(
+    pub(super) async fn reconcile_library_candidates(
         &self,
         state: &AppState,
         library_id: Uuid,
         alias_overrides: Option<&BTreeMap<String, BTreeSet<String>>>,
-    ) -> Result<ArangoGraphRebuildOutcome> {
+    ) -> Result<GraphRebuildOutcome> {
         let entity_candidates = state
-            .arango_graph_store
+            .graph_store
             .list_entity_candidates_by_library(library_id)
             .await
-            .context("failed to load arango entity candidates")?;
+            .context("failed to load knowledge entity candidates")?;
         let relation_candidates = state
-            .arango_graph_store
+            .graph_store
             .list_relation_candidates_by_library(library_id)
             .await
-            .context("failed to load arango relation candidates")?;
-        self.reconcile_arango_candidates(
+            .context("failed to load knowledge relation candidates")?;
+        self.reconcile_candidates(
             state,
             library_id,
             entity_candidates,
@@ -58,25 +58,25 @@ impl GraphService {
         .await
     }
 
-    async fn reconcile_arango_candidates(
+    async fn reconcile_candidates(
         &self,
         state: &AppState,
         library_id: Uuid,
         entity_candidates: Vec<KnowledgeEntityCandidateRow>,
         relation_candidates: Vec<KnowledgeRelationCandidateRow>,
         alias_overrides: Option<&BTreeMap<String, BTreeSet<String>>>,
-    ) -> Result<ArangoGraphRebuildOutcome> {
+    ) -> Result<GraphRebuildOutcome> {
         #[derive(Debug)]
         struct EntityReconcileGroup {
             normalization_key: String,
-            revision_context: ArangoRevisionContext,
+            revision_context: GraphRevisionContext,
             candidates: Vec<KnowledgeEntityCandidateRow>,
             entity_id: Uuid,
         }
 
         #[derive(Debug)]
         struct RelationReconcileGroup {
-            revision_context: ArangoRevisionContext,
+            revision_context: GraphRevisionContext,
             candidates: Vec<ReconciledRelationCandidate>,
             relation_id: Uuid,
         }
@@ -115,7 +115,7 @@ impl GraphService {
             })
             .collect::<Vec<_>>();
 
-        let mut revision_contexts = BTreeMap::<Uuid, ArangoRevisionContext>::new();
+        let mut revision_contexts = BTreeMap::<Uuid, GraphRevisionContext>::new();
         for revision_id in entity_candidates
             .iter()
             .map(|candidate| candidate.row.revision_id)
@@ -123,12 +123,12 @@ impl GraphService {
             .collect::<BTreeSet<_>>()
         {
             if let Some(revision) = state
-                .arango_document_store
+                .document_store
                 .get_revision(revision_id)
                 .await
-                .context("failed to load revision for arango graph reconciliation")?
+                .context("failed to load revision for knowledge graph reconciliation")?
             {
-                revision_contexts.insert(revision_id, ArangoRevisionContext::from(revision));
+                revision_contexts.insert(revision_id, GraphRevisionContext::from(revision));
             }
         }
 
@@ -141,7 +141,7 @@ impl GraphService {
                 .await
                 .with_context(|| {
                     format!(
-                        "failed to load typed technical facts for arango graph reconciliation revision {revision_id}"
+                        "failed to load typed technical facts for knowledge graph reconciliation revision {revision_id}"
                     )
                 })?;
             typed_facts_by_revision.insert(revision_id, typed_facts);
@@ -166,18 +166,18 @@ impl GraphService {
             }
         }
         let mut chunk_rows_by_id =
-            BTreeMap::<Uuid, crate::infra::arangodb::document_store::KnowledgeChunkRow>::new();
+            BTreeMap::<Uuid, crate::infra::knowledge_rows::KnowledgeChunkRow>::new();
         for chunk_id in chunk_ids {
             if let Some(chunk) =
-                state.arango_document_store.get_chunk(chunk_id).await.with_context(|| {
-                    format!("failed to load chunk {chunk_id} for arango graph reconciliation")
+                state.document_store.get_chunk(chunk_id).await.with_context(|| {
+                    format!("failed to load chunk {chunk_id} for knowledge graph reconciliation")
                 })?
             {
                 chunk_rows_by_id.insert(chunk_id, chunk);
             }
         }
 
-        let mut outcome = ArangoGraphRebuildOutcome {
+        let mut outcome = GraphRebuildOutcome {
             scanned_entity_candidates: entity_candidates.len(),
             scanned_relation_candidates: filtered_relation_candidates.len(),
             ..Default::default()
@@ -368,8 +368,8 @@ impl GraphService {
         }
 
         entity_requests.extend(placeholder_entity_requests.into_values());
-        self.reset_arango_library_materialization(state, library_id).await?;
-        let entity_rows = state.arango_graph_store.upsert_entities(&entity_requests).await?;
+        self.reset_library_materialization(state, library_id).await?;
+        let entity_rows = state.graph_store.upsert_entities(&entity_requests).await?;
         let entity_by_id =
             entity_rows.into_iter().map(|row| (row.entity_id, row)).collect::<BTreeMap<_, _>>();
 
@@ -404,7 +404,7 @@ impl GraphService {
             }
         }
 
-        let relation_rows = state.arango_graph_store.upsert_relations(&relation_requests).await?;
+        let relation_rows = state.graph_store.upsert_relations(&relation_requests).await?;
         let relation_by_id =
             relation_rows.into_iter().map(|row| (row.relation_id, row)).collect::<BTreeMap<_, _>>();
 
@@ -454,18 +454,17 @@ impl GraphService {
     pub(super) async fn materialize_current_candidate_batch(
         &self,
         state: &AppState,
-        revision: &crate::infra::arangodb::document_store::KnowledgeRevisionRow,
+        revision: &crate::infra::knowledge_rows::KnowledgeRevisionRow,
         chunk_id: Uuid,
         candidates: &GraphExtractionCandidateSet,
         mark_existing_only: bool,
     ) -> Result<()> {
-        let revision_context = ArangoRevisionContext::from(revision.clone());
+        let revision_context = GraphRevisionContext::from(revision.clone());
         let entity_key_index = build_relation_entity_key_index(candidates);
         let entity_alias_overrides = self.build_alias_overrides(candidates, &entity_key_index);
-        let chunk_row =
-            state.arango_document_store.get_chunk(chunk_id).await.with_context(|| {
-                format!("failed to load chunk {chunk_id} for graph materialization")
-            })?;
+        let chunk_row = state.document_store.get_chunk(chunk_id).await.with_context(|| {
+            format!("failed to load chunk {chunk_id} for graph materialization")
+        })?;
         let revision_facts = state
             .canonical_services
             .knowledge
@@ -484,10 +483,10 @@ impl GraphService {
             let candidate =
                 self.build_entity_candidate_row(revision, chunk_id, entity, &entity_key_index);
             let candidate_row = state
-                .arango_graph_store
+                .graph_store
                 .upsert_entity_candidate(&candidate)
                 .await
-                .context("failed to upsert arango entity candidate")?;
+                .context("failed to upsert knowledge entity candidate")?;
             if !mark_existing_only {
                 let entity_row = self
                     .upsert_canonical_entity(
@@ -540,10 +539,10 @@ impl GraphService {
             let candidate =
                 self.build_relation_candidate_row(revision, chunk_id, relation, &entity_key_index);
             let candidate_row = state
-                .arango_graph_store
+                .graph_store
                 .upsert_relation_candidate(&candidate)
                 .await
-                .context("failed to upsert arango relation candidate")?;
+                .context("failed to upsert knowledge relation candidate")?;
             if !mark_existing_only {
                 let relation_row = self
                     .upsert_canonical_relation(
@@ -611,7 +610,7 @@ impl GraphService {
 
     fn build_entity_candidate_row(
         &self,
-        revision: &crate::infra::arangodb::document_store::KnowledgeRevisionRow,
+        revision: &crate::infra::knowledge_rows::KnowledgeRevisionRow,
         chunk_id: Uuid,
         entity: &GraphEntityCandidate,
         entity_key_index: &crate::services::graph::identity::GraphLabelNodeTypeIndex,
@@ -650,7 +649,7 @@ impl GraphService {
 
     fn build_relation_candidate_row(
         &self,
-        revision: &crate::infra::arangodb::document_store::KnowledgeRevisionRow,
+        revision: &crate::infra::knowledge_rows::KnowledgeRevisionRow,
         chunk_id: Uuid,
         relation: &GraphRelationCandidate,
         entity_key_index: &crate::services::graph::identity::GraphLabelNodeTypeIndex,
@@ -693,16 +692,16 @@ impl GraphService {
         }
     }
 
-    pub(super) async fn build_and_refresh_arango_graph_from_candidates(
+    pub(super) async fn build_and_refresh_graph_from_candidates(
         &self,
         state: &AppState,
         library_id: Uuid,
         alias_overrides: Option<&BTreeMap<String, BTreeSet<String>>>,
-    ) -> Result<ArangoGraphRebuildOutcome> {
-        self.reconcile_arango_library_candidates(state, library_id, alias_overrides).await
+    ) -> Result<GraphRebuildOutcome> {
+        self.reconcile_library_candidates(state, library_id, alias_overrides).await
     }
 
-    pub(super) async fn refresh_arango_library_candidate_materialization(
+    pub(super) async fn refresh_library_candidate_materialization(
         &self,
         state: &AppState,
         library_id: Uuid,
@@ -712,12 +711,12 @@ impl GraphService {
             .catalog
             .get_library(state, library_id)
             .await
-            .context("failed to load library for arango candidate rebuild")?;
+            .context("failed to load library for knowledge candidate rebuild")?;
         let documents = state
-            .arango_document_store
+            .document_store
             .list_documents_by_library(library.workspace_id, library_id, false)
             .await
-            .context("failed to list documents for arango candidate rebuild")?;
+            .context("failed to list documents for knowledge candidate rebuild")?;
         let revision_ids = documents
             .iter()
             .filter(|document| document.deleted_at.is_none())
@@ -729,8 +728,8 @@ impl GraphService {
         let mut relation_candidates = Vec::<NewKnowledgeRelationCandidate>::new();
         for revision_id in revision_ids {
             let Some(revision) =
-                state.arango_document_store.get_revision(revision_id).await.with_context(|| {
-                    format!("failed to load arango revision {revision_id} for candidate rebuild")
+                state.document_store.get_revision(revision_id).await.with_context(|| {
+                    format!("failed to load knowledge revision {revision_id} for candidate rebuild")
                 })?
             else {
                 continue;
@@ -748,31 +747,32 @@ impl GraphService {
         }
 
         state
-            .arango_graph_store
+            .graph_store
             .delete_entity_candidates_by_library(library_id)
             .await
-            .context("failed to clear stale arango entity candidates before rebuild")?;
+            .context("failed to clear stale knowledge entity candidates before rebuild")?;
         state
-            .arango_graph_store
+            .graph_store
             .delete_relation_candidates_by_library(library_id)
             .await
-            .context("failed to clear stale arango relation candidates before rebuild")?;
+            .context("failed to clear stale knowledge relation candidates before rebuild")?;
 
         for batch in entity_candidates.chunks(256) {
-            state.arango_graph_store.upsert_entity_candidates(batch).await.with_context(|| {
-                format!("failed to persist {} arango entity candidates during rebuild", batch.len())
+            state.graph_store.upsert_entity_candidates(batch).await.with_context(|| {
+                format!(
+                    "failed to persist {} knowledge entity candidates during rebuild",
+                    batch.len()
+                )
             })?;
         }
 
         for batch in relation_candidates.chunks(256) {
-            state.arango_graph_store.upsert_relation_candidates(batch).await.with_context(
-                || {
-                    format!(
-                        "failed to persist {} arango relation candidates during rebuild",
-                        batch.len()
-                    )
-                },
-            )?;
+            state.graph_store.upsert_relation_candidates(batch).await.with_context(|| {
+                format!(
+                    "failed to persist {} knowledge relation candidates during rebuild",
+                    batch.len()
+                )
+            })?;
         }
 
         Ok(())
@@ -781,7 +781,7 @@ impl GraphService {
     async fn load_revision_materialized_extract_candidates(
         &self,
         state: &AppState,
-        revision: &crate::infra::arangodb::document_store::KnowledgeRevisionRow,
+        revision: &crate::infra::knowledge_rows::KnowledgeRevisionRow,
     ) -> Result<MaterializedExtractCandidates> {
         let chunk_results =
             repositories::extract_repository::list_ready_extract_chunk_results_by_revision(
@@ -802,7 +802,7 @@ impl GraphService {
     async fn collect_revision_materialized_extract_candidates(
         &self,
         state: &AppState,
-        revision: &crate::infra::arangodb::document_store::KnowledgeRevisionRow,
+        revision: &crate::infra::knowledge_rows::KnowledgeRevisionRow,
         chunk_results: &[repositories::extract_repository::ExtractChunkResultRow],
     ) -> Result<MaterializedExtractCandidates> {
         let mut materialized = MaterializedExtractCandidates::default();
@@ -843,18 +843,18 @@ impl GraphService {
         Ok(materialized)
     }
 
-    async fn reset_arango_library_materialization(
+    async fn reset_library_materialization(
         &self,
         state: &AppState,
         library_id: Uuid,
     ) -> Result<()> {
         state
-            .arango_graph_store
+            .graph_store
             .reset_library_materialized_graph(library_id)
             .await
-            .context("failed to reset arango graph materialization")?;
+            .context("failed to reset knowledge graph materialization")?;
         state
-            .arango_search_store
+            .search_store
             .delete_entity_vectors_by_library(library_id)
             .await
             .context("failed to delete stale entity vectors for graph reset")?;

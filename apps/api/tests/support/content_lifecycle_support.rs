@@ -1,18 +1,10 @@
-use std::{sync::Arc, time::Duration};
-
 use anyhow::{Context, Result};
 use sqlx::{PgPool, postgres::PgPoolOptions};
 use uuid::Uuid;
 
 use ironrag_backend::{
     app::{config::Settings, state::AppState},
-    infra::{
-        arangodb::{
-            bootstrap::{ArangoBootstrapOptions, bootstrap_knowledge_plane},
-            client::ArangoClient,
-        },
-        persistence::Persistence,
-    },
+    infra::persistence::Persistence,
     services::{
         catalog_service::{CreateLibraryCommand, CreateWorkspaceCommand},
         content::service::CreateRevisionCommand,
@@ -69,73 +61,9 @@ impl TempDatabase {
     }
 }
 
-struct TempArangoDatabase {
-    base_url: String,
-    username: String,
-    password: String,
-    name: String,
-    http: reqwest::Client,
-}
-
-impl TempArangoDatabase {
-    async fn create(settings: &Settings) -> Result<Self> {
-        let base_url = settings.arangodb_url.trim().trim_end_matches('/').to_string();
-        let name = format!("content_lifecycle_{}", Uuid::now_v7().simple());
-        let http = reqwest::Client::builder()
-            .timeout(Duration::from_secs(settings.arangodb_request_timeout_seconds.max(1)))
-            .build()
-            .context("failed to build ArangoDB admin http client")?;
-        let response = http
-            .post(format!("{base_url}/_api/database"))
-            .basic_auth(&settings.arangodb_username, Some(&settings.arangodb_password))
-            .json(&serde_json::json!({ "name": name }))
-            .send()
-            .await
-            .context("failed to create temp ArangoDB database for content_lifecycle")?;
-        if !response.status().is_success() {
-            return Err(anyhow::anyhow!(
-                "failed to create temp ArangoDB database {}: status {}",
-                name,
-                response.status()
-            ));
-        }
-
-        Ok(Self {
-            base_url,
-            username: settings.arangodb_username.clone(),
-            password: settings.arangodb_password.clone(),
-            name,
-            http,
-        })
-    }
-
-    async fn drop(self) -> Result<()> {
-        self.drop_runtime_database().await
-    }
-
-    async fn drop_runtime_database(&self) -> Result<()> {
-        let response = self
-            .http
-            .delete(format!("{}/_api/database/{}", self.base_url, self.name))
-            .basic_auth(&self.username, Some(&self.password))
-            .send()
-            .await
-            .context("failed to drop temp ArangoDB database for content_lifecycle")?;
-        if response.status() != reqwest::StatusCode::NOT_FOUND && !response.status().is_success() {
-            return Err(anyhow::anyhow!(
-                "failed to drop temp ArangoDB database {}: status {}",
-                self.name,
-                response.status()
-            ));
-        }
-        Ok(())
-    }
-}
-
 pub struct ContentLifecycleFixture {
     pub state: AppState,
     temp_database: TempDatabase,
-    temp_arango: TempArangoDatabase,
     pub workspace_id: Uuid,
     pub library_id: Uuid,
 }
@@ -145,9 +73,7 @@ impl ContentLifecycleFixture {
         let mut settings =
             Settings::from_env().context("failed to load settings for content lifecycle test")?;
         let temp_database = TempDatabase::create(&settings.database_url).await?;
-        let temp_arango = TempArangoDatabase::create(&settings).await?;
         settings.database_url = temp_database.database_url.clone();
-        settings.arangodb_database = temp_arango.name.clone();
         let postgres = PgPoolOptions::new()
             .max_connections(4)
             .connect(&settings.database_url)
@@ -159,30 +85,10 @@ impl ContentLifecycleFixture {
             .await
             .context("failed to apply canonical migrations for content lifecycle test")?;
 
-        let arango_client = Arc::new(
-            ArangoClient::from_settings(&settings).context("failed to build Arango client")?,
-        );
-        arango_client.ping().await.context("failed to ping temp ArangoDB for content lifecycle")?;
-        bootstrap_knowledge_plane(
-            &arango_client,
-            &ArangoBootstrapOptions {
-                collections: true,
-                views: false,
-                graph: true,
-                vector_indexes: false,
-                vector_dimensions: 3072,
-                vector_index_n_lists: 100,
-                vector_index_default_n_probe: 8,
-                vector_index_training_iterations: 25,
-            },
-        )
-        .await
-        .context("failed to bootstrap Arango knowledge plane for content lifecycle")?;
-
         let redis = redis::Client::open(settings.redis_url.clone())
             .context("failed to create redis client for content lifecycle test state")?;
         let persistence = Persistence::for_tests(postgres, redis);
-        let state = AppState::from_dependencies(settings, persistence, arango_client)?;
+        let state = AppState::from_dependencies(settings, persistence)?;
         let workspace = state
             .canonical_services
             .catalog
@@ -212,24 +118,12 @@ impl ContentLifecycleFixture {
             .await
             .context("failed to create content lifecycle library")?;
 
-        Ok(Self {
-            state,
-            temp_database,
-            temp_arango,
-            workspace_id: workspace.id,
-            library_id: library.id,
-        })
+        Ok(Self { state, temp_database, workspace_id: workspace.id, library_id: library.id })
     }
 
     pub async fn cleanup(self) -> Result<()> {
         self.state.persistence.postgres.close().await;
-        self.temp_arango.drop().await?;
         self.temp_database.drop().await
-    }
-
-    #[allow(dead_code)]
-    pub async fn drop_arango_database(&self) -> Result<()> {
-        self.temp_arango.drop_runtime_database().await
     }
 }
 

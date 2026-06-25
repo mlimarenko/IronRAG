@@ -178,7 +178,7 @@ impl IamService {
             crate::domains::agent_runtime::RuntimeExecutionOwnerKind::StructuredPreparation
             | crate::domains::agent_runtime::RuntimeExecutionOwnerKind::TechnicalFactExtraction => {
                 let revision = state
-                    .arango_document_store
+                    .document_store
                     .get_revision(runtime_execution.owner_id)
                     .await
                     .map_err(|e| ApiError::internal_with_log(e, "internal"))?

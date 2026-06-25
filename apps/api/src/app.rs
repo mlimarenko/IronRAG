@@ -4,24 +4,15 @@ pub mod shutdown;
 pub mod state;
 
 use axum::Router;
-use std::{net::SocketAddr, time::Duration};
+use std::net::SocketAddr;
 use tracing::{info, warn};
 
 use crate::{
     domains::deployment::ServiceRole,
-    infra::{
-        arangodb::bootstrap::{ArangoBootstrapOptions, bootstrap_knowledge_plane},
-        persistence::{
-            run_postgres_migrations, validate_arango_bootstrap_state,
-            validate_canonical_bootstrap_state,
-        },
-    },
+    infra::persistence::{run_postgres_migrations, validate_canonical_bootstrap_state},
     interfaces::http::{self, middleware::apply_canonical_middleware},
     services::content::storage::types::ContentStorageProbeStatus,
 };
-
-const STARTUP_ARANGO_READY_MAX_ATTEMPTS: usize = 10;
-const STARTUP_ARANGO_READY_RETRY_DELAY: Duration = Duration::from_secs(3);
 
 /// Boots the HTTP server and serves the `IronRAG` API.
 ///
@@ -102,9 +93,6 @@ async fn run_http_api(
     graph_backend: &str,
     shutdown: shutdown::ShutdownSignal,
 ) -> anyhow::Result<()> {
-    if state.settings.knowledge_plane_backend == "arango" {
-        spawn_boot_arango_healthcheck(state.clone(), shutdown.subscribe());
-    }
     if state.settings.runtime_graph_projection_prewarm_enabled {
         spawn_runtime_graph_projection_prewarm(
             state.clone(),
@@ -118,8 +106,6 @@ async fn run_http_api(
         service_role = %config.service_role,
         environment = %config.environment,
         graph_backend,
-        arangodb_url = %state.arango_runtime.url,
-        arangodb_database = %state.arango_runtime.database,
         knowledge_backend = %state.graph_runtime.backend_name,
         query_intent_cache_ttl_hours = state.retrieval_intelligence.query_intent_cache_ttl_hours,
         rerank_enabled = state.retrieval_intelligence.rerank_enabled,
@@ -205,9 +191,6 @@ async fn run_startup_authority(
 
     run_postgres_migrations(&state.persistence.postgres).await?;
     validate_canonical_bootstrap_state(&state.persistence.postgres, &state.settings).await?;
-    if state.settings.knowledge_plane_backend == "arango" {
-        run_startup_arango_bootstrap(state).await?;
-    }
     let storage_probe = state.content_storage.prepare_startup().await?;
     if !matches!(storage_probe.status, ContentStorageProbeStatus::Ok) {
         anyhow::bail!(
@@ -220,53 +203,6 @@ async fn run_startup_authority(
     run_startup_bootstraps(state, bootstrap_settings, destructive_bootstrap).await?;
     info!("startup authority completed");
     Ok(())
-}
-
-async fn run_startup_arango_bootstrap(state: &state::AppState) -> anyhow::Result<()> {
-    let bootstrap_options = ArangoBootstrapOptions {
-        collections: state.settings.arangodb_bootstrap_collections,
-        views: state.settings.arangodb_bootstrap_views,
-        graph: state.settings.arangodb_bootstrap_graph,
-        vector_indexes: state.settings.arangodb_bootstrap_vector_indexes,
-        vector_dimensions: state.settings.arangodb_vector_dimensions,
-        vector_index_n_lists: state.settings.arangodb_vector_index_n_lists,
-        vector_index_default_n_probe: state.settings.arangodb_vector_index_default_n_probe,
-        vector_index_training_iterations: state.settings.arangodb_vector_index_training_iterations,
-    };
-
-    for attempt in 1..=STARTUP_ARANGO_READY_MAX_ATTEMPTS {
-        let startup_result = async {
-            state.arango_client.ensure_database().await?;
-            if bootstrap_options.any_enabled() {
-                bootstrap_knowledge_plane(&state.arango_client, &bootstrap_options).await?;
-            }
-            validate_arango_bootstrap_state(&state.arango_client, &state.settings).await?;
-            Ok::<(), anyhow::Error>(())
-        }
-        .await;
-
-        match startup_result {
-            Ok(()) => return Ok(()),
-            Err(error) if attempt < STARTUP_ARANGO_READY_MAX_ATTEMPTS => {
-                warn!(
-                    attempt,
-                    max_attempts = STARTUP_ARANGO_READY_MAX_ATTEMPTS,
-                    retry_delay_seconds = STARTUP_ARANGO_READY_RETRY_DELAY.as_secs(),
-                    error = %error,
-                    "startup authority is waiting for ArangoDB bootstrap readiness",
-                );
-                tokio::time::sleep(STARTUP_ARANGO_READY_RETRY_DELAY).await;
-            }
-            Err(error) => {
-                return Err(error.context(format!(
-                    "ArangoDB bootstrap did not become ready after {} attempts",
-                    STARTUP_ARANGO_READY_MAX_ATTEMPTS
-                )));
-            }
-        }
-    }
-
-    unreachable!("ArangoDB startup retry loop must return or fail")
 }
 
 async fn run_startup_bootstraps(
@@ -311,42 +247,6 @@ fn spawn_signal_listener(shutdown: shutdown::ShutdownSignal) -> tokio::task::Joi
             warn!(signal = signal_name, "shutdown signal received");
         }
     })
-}
-
-/// Detached healthcheck that pings ArangoDB every 30 s. The query path
-/// hits Arango for context bundle assembly and graph topology; if
-/// Arango saturates, we start seeing `error sending request for url
-/// (http://arangodb:8529/_db/ironrag/_api/cursor)` buried inside the
-/// turn handler with no early warning. The periodic ping surfaces
-/// saturation in `ironrag-backend` logs ahead of the user-visible
-/// timeout so operators have a chance to react.
-fn spawn_boot_arango_healthcheck(
-    state: state::AppState,
-    mut shutdown_rx: tokio::sync::broadcast::Receiver<()>,
-) {
-    tokio::spawn(async move {
-        loop {
-            let started_at = std::time::Instant::now();
-            let result = state.arango_client.ping().await;
-            let elapsed_ms = started_at.elapsed().as_millis() as u64;
-            match result {
-                Ok(()) => {
-                    if elapsed_ms > 1000 {
-                        warn!(elapsed_ms, "arango ping slow");
-                    } else {
-                        tracing::debug!(elapsed_ms, "arango ping ok");
-                    }
-                }
-                Err(error) => {
-                    warn!(elapsed_ms, error = format!("{error:#}"), "arango ping failed",);
-                }
-            }
-            tokio::select! {
-                _ = tokio::time::sleep(std::time::Duration::from_secs(30)) => {},
-                _ = shutdown_rx.recv() => return,
-            }
-        }
-    });
 }
 
 /// Detached opt-in task that pre-loads the in-memory runtime graph

@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use uuid::Uuid;
 
 use crate::{
-    infra::arangodb::document_store::{KnowledgeRevisionRow, KnowledgeStructuredRevisionRow},
+    infra::knowledge_rows::{KnowledgeRevisionRow, KnowledgeStructuredRevisionRow},
     infra::repositories::ingest_repository,
 };
 

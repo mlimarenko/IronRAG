@@ -18,9 +18,7 @@ use uuid::Uuid;
 use crate::{
     app::state::AppState,
     domains::knowledge::TypedTechnicalFact,
-    infra::arangodb::document_store::{
-        KnowledgeChunkRow, KnowledgeDocumentRow, KnowledgeRevisionRow,
-    },
+    infra::knowledge_rows::{KnowledgeChunkRow, KnowledgeDocumentRow, KnowledgeRevisionRow},
     infra::repositories::{self, ingest_repository},
     interfaces::http::router_support::ApiError,
     services::{
@@ -316,6 +314,12 @@ impl ContentService {
             .filter(|value| !value.is_empty())
             .map(ToString::to_string)
             .unwrap_or_else(|| file_name.clone());
+        let storage_lock = repositories::content_repository::acquire_content_library_storage_lock(
+            &state.persistence.postgres,
+            command.library_id,
+        )
+        .await
+        .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
         let storage_key = self
             .persist_inline_file_source(
                 state,
@@ -326,40 +330,43 @@ impl ContentService {
                 &command.file_bytes,
             )
             .await?;
-        self.admit_document(
-            state,
-            AdmitDocumentCommand {
-                workspace_id: command.workspace_id,
-                library_id: command.library_id,
-                external_key: command.external_key,
-                file_name: Some(file_name.clone()),
-                idempotency_key: command.idempotency_key,
-                created_by_principal_id: command.requested_by_principal_id,
-                request_surface: command.request_surface.clone(),
-                source_identity: command.source_identity.clone(),
-                revision: Some(RevisionAdmissionMetadata {
-                    content_source_kind: "upload".to_string(),
-                    checksum: format!("sha256:{file_checksum}"),
-                    mime_type: infer_inline_mime_type(
-                        command.mime_type.as_deref(),
-                        Some(&file_name),
-                        "upload",
-                    ),
-                    byte_size: i64::try_from(command.file_bytes.len()).unwrap_or(i64::MAX),
-                    title: Some(title),
-                    language_code: None,
-                    source_uri: Some(source_uri_for_inline_payload(
-                        "upload",
-                        command.source_identity.as_deref(),
-                        Some(&file_name),
-                    )),
-                    document_hint: command.document_hint,
-                    storage_key: Some(storage_key),
-                }),
-                parent_external_key: command.parent_external_key,
-            },
-        )
-        .await
+        let admission = self
+            .admit_document(
+                state,
+                AdmitDocumentCommand {
+                    workspace_id: command.workspace_id,
+                    library_id: command.library_id,
+                    external_key: command.external_key,
+                    file_name: Some(file_name.clone()),
+                    idempotency_key: command.idempotency_key,
+                    created_by_principal_id: command.requested_by_principal_id,
+                    request_surface: command.request_surface.clone(),
+                    source_identity: command.source_identity.clone(),
+                    revision: Some(RevisionAdmissionMetadata {
+                        content_source_kind: "upload".to_string(),
+                        checksum: format!("sha256:{file_checksum}"),
+                        mime_type: infer_inline_mime_type(
+                            command.mime_type.as_deref(),
+                            Some(&file_name),
+                            "upload",
+                        ),
+                        byte_size: i64::try_from(command.file_bytes.len()).unwrap_or(i64::MAX),
+                        title: Some(title),
+                        language_code: None,
+                        source_uri: Some(source_uri_for_inline_payload(
+                            "upload",
+                            command.source_identity.as_deref(),
+                            Some(&file_name),
+                        )),
+                        document_hint: command.document_hint,
+                        storage_key: Some(storage_key),
+                    }),
+                    parent_external_key: command.parent_external_key,
+                },
+            )
+            .await?;
+        storage_lock.commit().await.map_err(|e| ApiError::internal_with_log(e, "internal"))?;
+        Ok(admission)
     }
 
     pub async fn materialize_web_capture(
@@ -548,6 +555,12 @@ impl ContentService {
         let storage_file_name = source_file_name
             .clone()
             .unwrap_or_else(|| format!("document-{}.txt", command.document_id));
+        let storage_lock = repositories::content_repository::acquire_content_library_storage_lock(
+            &state.persistence.postgres,
+            command.library_id,
+        )
+        .await
+        .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
         let storage_key = self
             .persist_inline_file_source(
                 state,
@@ -589,6 +602,7 @@ impl ContentService {
                 },
             )
             .await?;
+        storage_lock.commit().await.map_err(|e| ApiError::internal_with_log(e, "internal"))?;
         self.materialize_inline_text_mutation(
             state,
             &admission,
@@ -634,6 +648,12 @@ impl ContentService {
         }
 
         self.ensure_document_accepts_new_mutation(state, command.document_id, "edit").await?;
+        let storage_lock = repositories::content_repository::acquire_content_library_storage_lock(
+            &state.persistence.postgres,
+            command.library_id,
+        )
+        .await
+        .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
         let storage_key = self
             .persist_inline_file_source(
                 state,
@@ -645,32 +665,35 @@ impl ContentService {
             )
             .await?;
         let source_uri = source_uri_for_inline_payload("edit", None, Some(&file_name));
-        self.admit_mutation(
-            state,
-            AdmitMutationCommand {
-                workspace_id: command.workspace_id,
-                library_id: command.library_id,
-                document_id: command.document_id,
-                operation_kind: "edit".to_string(),
-                idempotency_key: command.idempotency_key,
-                requested_by_principal_id: command.requested_by_principal_id,
-                request_surface: command.request_surface,
-                source_identity,
-                revision: Some(RevisionAdmissionMetadata {
-                    content_source_kind: "edit".to_string(),
-                    checksum: format!("sha256:{file_checksum}"),
-                    mime_type: "text/markdown".to_string(),
-                    byte_size: i64::try_from(markdown.len()).unwrap_or(i64::MAX),
-                    title: document_context.title,
-                    language_code: document_context.language_code,
-                    source_uri: Some(source_uri),
-                    document_hint: None,
-                    storage_key: Some(storage_key),
-                }),
-                parent_async_operation_id: None,
-            },
-        )
-        .await
+        let admission = self
+            .admit_mutation(
+                state,
+                AdmitMutationCommand {
+                    workspace_id: command.workspace_id,
+                    library_id: command.library_id,
+                    document_id: command.document_id,
+                    operation_kind: "edit".to_string(),
+                    idempotency_key: command.idempotency_key,
+                    requested_by_principal_id: command.requested_by_principal_id,
+                    request_surface: command.request_surface,
+                    source_identity,
+                    revision: Some(RevisionAdmissionMetadata {
+                        content_source_kind: "edit".to_string(),
+                        checksum: format!("sha256:{file_checksum}"),
+                        mime_type: "text/markdown".to_string(),
+                        byte_size: i64::try_from(markdown.len()).unwrap_or(i64::MAX),
+                        title: document_context.title,
+                        language_code: document_context.language_code,
+                        source_uri: Some(source_uri),
+                        document_hint: None,
+                        storage_key: Some(storage_key),
+                    }),
+                    parent_async_operation_id: None,
+                },
+            )
+            .await?;
+        storage_lock.commit().await.map_err(|e| ApiError::internal_with_log(e, "internal"))?;
+        Ok(admission)
     }
 
     pub async fn replace_inline_mutation(
@@ -705,12 +728,18 @@ impl ContentService {
         let head = self.get_document_head(state, command.document_id).await?;
         let base_revision = match head.as_ref().and_then(|row| row.latest_revision_id()) {
             Some(revision_id) => state
-                .arango_document_store
+                .document_store
                 .get_revision(revision_id)
                 .await
                 .map_err(|e| ApiError::internal_with_log(e, "internal"))?,
             None => None,
         };
+        let storage_lock = repositories::content_repository::acquire_content_library_storage_lock(
+            &state.persistence.postgres,
+            command.library_id,
+        )
+        .await
+        .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
         let storage_key = self
             .persist_inline_file_source(
                 state,
@@ -721,46 +750,49 @@ impl ContentService {
                 &command.file_bytes,
             )
             .await?;
-        self.admit_mutation(
-            state,
-            AdmitMutationCommand {
-                workspace_id: command.workspace_id,
-                library_id: command.library_id,
-                document_id: command.document_id,
-                operation_kind: "replace".to_string(),
-                idempotency_key: command.idempotency_key,
-                requested_by_principal_id: command.requested_by_principal_id,
-                request_surface: command.request_surface,
-                source_identity,
-                revision: Some(RevisionAdmissionMetadata {
-                    content_source_kind: "replace".to_string(),
-                    checksum: format!("sha256:{file_checksum}"),
-                    mime_type: infer_inline_mime_type(
-                        command.mime_type.as_deref(),
-                        Some(&command.file_name),
-                        "replace",
-                    ),
-                    byte_size: i64::try_from(command.file_bytes.len()).unwrap_or(i64::MAX),
-                    title: Some(
-                        base_revision
-                            .as_ref()
-                            .and_then(|row| row.title.clone())
-                            .filter(|value| !value.trim().is_empty())
-                            .unwrap_or_else(|| command.file_name.clone()),
-                    ),
-                    language_code: None,
-                    source_uri: Some(source_uri_for_inline_payload(
-                        "replace",
-                        command.source_identity.as_deref(),
-                        Some(&command.file_name),
-                    )),
-                    document_hint: command.document_hint,
-                    storage_key: Some(storage_key),
-                }),
-                parent_async_operation_id: None,
-            },
-        )
-        .await
+        let admission = self
+            .admit_mutation(
+                state,
+                AdmitMutationCommand {
+                    workspace_id: command.workspace_id,
+                    library_id: command.library_id,
+                    document_id: command.document_id,
+                    operation_kind: "replace".to_string(),
+                    idempotency_key: command.idempotency_key,
+                    requested_by_principal_id: command.requested_by_principal_id,
+                    request_surface: command.request_surface,
+                    source_identity,
+                    revision: Some(RevisionAdmissionMetadata {
+                        content_source_kind: "replace".to_string(),
+                        checksum: format!("sha256:{file_checksum}"),
+                        mime_type: infer_inline_mime_type(
+                            command.mime_type.as_deref(),
+                            Some(&command.file_name),
+                            "replace",
+                        ),
+                        byte_size: i64::try_from(command.file_bytes.len()).unwrap_or(i64::MAX),
+                        title: Some(
+                            base_revision
+                                .as_ref()
+                                .and_then(|row| row.title.clone())
+                                .filter(|value| !value.trim().is_empty())
+                                .unwrap_or_else(|| command.file_name.clone()),
+                        ),
+                        language_code: None,
+                        source_uri: Some(source_uri_for_inline_payload(
+                            "replace",
+                            command.source_identity.as_deref(),
+                            Some(&command.file_name),
+                        )),
+                        document_hint: command.document_hint,
+                        storage_key: Some(storage_key),
+                    }),
+                    parent_async_operation_id: None,
+                },
+            )
+            .await?;
+        storage_lock.commit().await.map_err(|e| ApiError::internal_with_log(e, "internal"))?;
+        Ok(admission)
     }
 
     async fn materialize_inline_text_mutation(
@@ -1537,7 +1569,7 @@ impl ContentService {
         };
 
         let revision = state
-            .arango_document_store
+            .document_store
             .get_revision(context.revision_id)
             .await
             .map_err(|e| ApiError::internal_with_log(e, "internal"))?
@@ -1546,7 +1578,7 @@ impl ContentService {
             })?;
         let now = Utc::now();
         state
-            .arango_document_store
+            .document_store
             .update_revision_readiness(
                 revision.revision_id,
                 &revision.text_state,
@@ -1573,13 +1605,10 @@ mod tests {
     use uuid::Uuid;
 
     use super::{GraphExtractionChunkPolicy, build_graph_chunk_content};
-    use crate::infra::arangodb::document_store::KnowledgeChunkRow;
+    use crate::infra::knowledge_rows::KnowledgeChunkRow;
 
     fn make_chunk(chunk_kind: &str, normalized_text: &str) -> KnowledgeChunkRow {
         KnowledgeChunkRow {
-            key: Uuid::nil().to_string(),
-            arango_id: None,
-            arango_rev: None,
             chunk_id: Uuid::now_v7(),
             workspace_id: Uuid::now_v7(),
             library_id: Uuid::now_v7(),

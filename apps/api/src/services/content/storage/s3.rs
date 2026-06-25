@@ -89,6 +89,14 @@ impl S3ContentStorageProvider {
         if self.has(storage_key).await? {
             return Ok(());
         }
+        self.write(storage_key, file_bytes).await
+    }
+
+    pub async fn write(
+        &self,
+        storage_key: &str,
+        file_bytes: &[u8],
+    ) -> Result<(), ContentServiceError> {
         self.client
             .put_object()
             .bucket(&self.bucket)
@@ -195,6 +203,28 @@ impl S3ContentStorageProvider {
         &self,
         stashed_directory: &StashedContentDirectory,
     ) -> Result<(), ContentServiceError> {
+        self.restore_stashed_directory_inner(stashed_directory, false).await
+    }
+
+    pub async fn restore_stashed_directory_replacing_current(
+        &self,
+        stashed_directory: &StashedContentDirectory,
+    ) -> Result<(), ContentServiceError> {
+        self.restore_stashed_directory_inner(stashed_directory, true).await
+    }
+
+    async fn restore_stashed_directory_inner(
+        &self,
+        stashed_directory: &StashedContentDirectory,
+        replace_current: bool,
+    ) -> Result<(), ContentServiceError> {
+        let original_prefix = stashed_directory.original_path.to_string_lossy().to_string();
+        if replace_current {
+            let current_objects = self.list_prefixed_objects(&original_prefix).await?;
+            if !current_objects.is_empty() {
+                self.delete_objects(&current_objects).await?;
+            }
+        }
         let stashed_prefix = stashed_directory.stashed_path.to_string_lossy().to_string();
         let objects = self.list_prefixed_objects(&stashed_prefix).await?;
         for source_key in &objects {

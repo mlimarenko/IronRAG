@@ -30,7 +30,7 @@ use crate::{
         QueryGraphEdgeReference, QueryGraphNodeReference, QueryRuntimeStageSummary, QueryTurn,
         QueryTurnKind, QueryVerificationState, RuntimeQueryMode, TechnicalFactReference,
     },
-    infra::arangodb::context_store::KnowledgeContextBundleReferenceSetRow,
+    infra::knowledge_rows::KnowledgeContextBundleReferenceSetRow,
 };
 
 pub(crate) const MAX_LIBRARY_CONVERSATIONS: usize = 5;
@@ -74,13 +74,12 @@ pub(crate) struct PreparedSegmentRevisionInfo {
 #[derive(Debug, Clone, Default)]
 pub(crate) struct ExecutionPreparedReferenceContext {
     pub(crate) bundle_refs: Option<KnowledgeContextBundleReferenceSetRow>,
-    pub(crate) chunk_rows: Vec<crate::infra::arangodb::document_store::KnowledgeChunkRow>,
+    pub(crate) chunk_rows: Vec<crate::infra::knowledge_rows::KnowledgeChunkRow>,
     pub(crate) fact_rank_refs: HashMap<Uuid, RankedBundleReference>,
-    pub(crate) technical_fact_rows:
-        Vec<crate::infra::arangodb::document_store::KnowledgeTechnicalFactRow>,
+    pub(crate) technical_fact_rows: Vec<crate::infra::knowledge_rows::KnowledgeTechnicalFactRow>,
     pub(crate) block_rank_refs: HashMap<Uuid, RankedBundleReference>,
     pub(crate) structured_block_rows:
-        Vec<crate::infra::arangodb::document_store::KnowledgeStructuredBlockRow>,
+        Vec<crate::infra::knowledge_rows::KnowledgeStructuredBlockRow>,
     pub(crate) segment_revision_info: HashMap<Uuid, PreparedSegmentRevisionInfo>,
     pub(crate) assistant_document_references:
         Vec<crate::services::query::assistant_grounding::AssistantGroundingDocumentReference>,

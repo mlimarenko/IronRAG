@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 use anyhow::{Context, Result};
 use chrono::Utc;
 use ironrag_contracts::documents::DocumentReadiness;
@@ -18,11 +16,7 @@ use ironrag_backend::{
         knowledge::StructuredDocumentRevision,
     },
     infra::{
-        arangodb::{
-            bootstrap::{ArangoBootstrapOptions, bootstrap_knowledge_plane},
-            client::ArangoClient,
-            document_store::KnowledgeRevisionRow,
-        },
+        knowledge_rows::KnowledgeRevisionRow,
         persistence::Persistence,
         repositories::{ingest_repository, query_repository, runtime_repository},
     },
@@ -84,71 +78,9 @@ impl TempPostgresDatabase {
     }
 }
 
-struct TempArangoDatabase {
-    base_url: String,
-    username: String,
-    password: String,
-    name: String,
-    http: reqwest::Client,
-}
-
-impl TempArangoDatabase {
-    async fn create(settings: &Settings) -> Result<Self> {
-        let base_url = settings.arangodb_url.trim().trim_end_matches('/').to_string();
-        let name = format!("ops_state_{}", Uuid::now_v7().simple());
-        let http = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(
-                settings.arangodb_request_timeout_seconds.max(1),
-            ))
-            .build()
-            .context("failed to build ArangoDB admin http client")?;
-        let response = http
-            .post(format!("{base_url}/_api/database"))
-            .basic_auth(&settings.arangodb_username, Some(&settings.arangodb_password))
-            .json(&serde_json::json!({ "name": name }))
-            .send()
-            .await
-            .context("failed to create temp ArangoDB database for ops_state")?;
-        if !response.status().is_success() {
-            return Err(anyhow::anyhow!(
-                "failed to create temp ArangoDB database {}: status {}",
-                name,
-                response.status()
-            ));
-        }
-
-        Ok(Self {
-            base_url,
-            username: settings.arangodb_username.clone(),
-            password: settings.arangodb_password.clone(),
-            name,
-            http,
-        })
-    }
-
-    async fn drop(self) -> Result<()> {
-        let response = self
-            .http
-            .delete(format!("{}/_api/database/{}", self.base_url, self.name))
-            .basic_auth(&self.username, Some(&self.password))
-            .send()
-            .await
-            .context("failed to drop temp ArangoDB database for ops_state")?;
-        if response.status() != reqwest::StatusCode::NOT_FOUND && !response.status().is_success() {
-            return Err(anyhow::anyhow!(
-                "failed to drop temp ArangoDB database {}: status {}",
-                self.name,
-                response.status()
-            ));
-        }
-        Ok(())
-    }
-}
-
 struct OpsStateFixture {
     state: AppState,
     temp_postgres: TempPostgresDatabase,
-    temp_arango: TempArangoDatabase,
     workspace_id: Uuid,
     library_id: Uuid,
     document_id: Uuid,
@@ -160,9 +92,7 @@ impl OpsStateFixture {
     async fn create() -> Result<Self> {
         let mut settings = Settings::from_env().context("failed to load settings for ops_state")?;
         let temp_postgres = TempPostgresDatabase::create(&settings.database_url).await?;
-        let temp_arango = TempArangoDatabase::create(&settings).await?;
         settings.database_url = temp_postgres.database_url.clone();
-        settings.arangodb_database = temp_arango.name.clone();
 
         let postgres = PgPoolOptions::new()
             .max_connections(4)
@@ -174,33 +104,9 @@ impl OpsStateFixture {
             .await
             .context("failed to apply canonical baseline migrations for ops_state")?;
 
-        let arango_client = Arc::new(
-            ArangoClient::from_settings(&settings).context("failed to build Arango client")?,
-        );
-        arango_client.ping().await.context("failed to ping temp ArangoDB for ops_state")?;
-        bootstrap_knowledge_plane(
-            &arango_client,
-            &ArangoBootstrapOptions {
-                collections: true,
-                views: false,
-                graph: true,
-                vector_indexes: false,
-                vector_dimensions: 3072,
-                vector_index_n_lists: 100,
-                vector_index_default_n_probe: 8,
-                vector_index_training_iterations: 25,
-            },
-        )
-        .await
-        .context("failed to bootstrap Arango knowledge plane for ops_state")?;
-
         let redis = redis::Client::open(settings.redis_url.clone())
             .context("failed to create redis client for ops_state")?;
-        let state = AppState::from_dependencies(
-            settings,
-            Persistence::for_tests(postgres, redis),
-            Arc::clone(&arango_client),
-        )?;
+        let state = AppState::from_dependencies(settings, Persistence::for_tests(postgres, redis))?;
 
         let suffix = Uuid::now_v7().simple().to_string();
         let workspace = state
@@ -392,7 +298,6 @@ impl OpsStateFixture {
         Ok(Self {
             state,
             temp_postgres,
-            temp_arango,
             workspace_id: workspace.id,
             library_id: library.id,
             document_id,
@@ -526,7 +431,7 @@ impl OpsStateFixture {
     async fn resolve_warning_sources(&self, execution_id: Uuid) -> Result<()> {
         let revisions = self
             .state
-            .arango_document_store
+            .document_store
             .list_revisions_by_document(self.document_id)
             .await
             .context("failed to load ops_state revisions for resolution")?;
@@ -536,7 +441,7 @@ impl OpsStateFixture {
             .cloned()
             .context("ops_state revision missing during resolution")?;
         self.state
-            .arango_document_store
+            .document_store
             .update_revision_readiness(
                 revision.revision_id,
                 "ready",
@@ -652,7 +557,6 @@ impl OpsStateFixture {
 
     async fn cleanup(self) -> Result<()> {
         self.state.persistence.postgres.close().await;
-        self.temp_arango.drop().await?;
         self.temp_postgres.drop().await
     }
 }
@@ -687,8 +591,9 @@ async fn terminate_database_connections(postgres: &PgPool, database_name: &str) 
 }
 
 #[tokio::test]
-#[ignore = "requires local postgres, ArangoDB, and redis services"]
-async fn canonical_ops_library_state_uses_postgres_workload_and_arango_generations() -> Result<()> {
+#[ignore = "requires local postgres and redis services"]
+async fn canonical_ops_library_state_uses_postgres_workload_and_knowledge_generations() -> Result<()>
+{
     let fixture = OpsStateFixture::create().await?;
 
     let result = async {
@@ -722,7 +627,7 @@ async fn canonical_ops_library_state_uses_postgres_workload_and_arango_generatio
 }
 
 #[tokio::test]
-#[ignore = "requires local postgres, ArangoDB, and redis services"]
+#[ignore = "requires local postgres and redis services"]
 async fn canonical_ops_warnings_cover_stale_and_failed_rebuild_signals() -> Result<()> {
     let fixture = OpsStateFixture::create().await?;
 
@@ -787,9 +692,6 @@ fn sample_revision_row(
 ) -> KnowledgeRevisionRow {
     let now = Utc::now();
     KnowledgeRevisionRow {
-        key: Uuid::now_v7().to_string(),
-        arango_id: None,
-        arango_rev: None,
         revision_id: Uuid::now_v7(),
         workspace_id: Uuid::now_v7(),
         library_id: Uuid::now_v7(),

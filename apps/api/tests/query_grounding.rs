@@ -1,8 +1,5 @@
-use std::{sync::Arc, time::Duration};
-
 use anyhow::{Context, Result, anyhow};
 use chrono::Utc;
-use reqwest::{Client, StatusCode};
 use serde_json::json;
 use sqlx::{PgPool, postgres::PgPoolOptions};
 use uuid::Uuid;
@@ -19,34 +16,25 @@ use ironrag_backend::{
         audit::AuditEventSubject,
         ops::{OpsAsyncOperation, OpsAsyncOperationStatus},
     },
-    infra::arangodb::{
-        bootstrap::{ArangoBootstrapOptions, bootstrap_knowledge_plane},
-        client::ArangoClient,
-        context_store::{
-            ArangoContextStore, KnowledgeBundleChunkEdgeRow, KnowledgeBundleChunkReferenceRow,
+    infra::repositories::{self, query_repository, runtime_repository},
+    infra::{
+        knowledge_plane::{ContextStore, DocumentStore, GraphStore},
+        knowledge_rows::{
+            KnowledgeBundleChunkEdgeRow, KnowledgeBundleChunkReferenceRow,
             KnowledgeBundleEntityEdgeRow, KnowledgeBundleEntityReferenceRow,
             KnowledgeBundleEvidenceEdgeRow, KnowledgeBundleEvidenceReferenceRow,
-            KnowledgeBundleRelationEdgeRow, KnowledgeBundleRelationReferenceRow,
-            KnowledgeContextBundleReferenceSetRow, KnowledgeContextBundleRow,
-            KnowledgeRetrievalTraceRow,
+            KnowledgeBundleRelationEdgeRow, KnowledgeBundleRelationReferenceRow, KnowledgeChunkRow,
+            KnowledgeContextBundleReferenceSetRow, KnowledgeContextBundleRow, KnowledgeDocumentRow,
+            KnowledgeRetrievalTraceRow, KnowledgeRevisionRow, KnowledgeStructuredBlockRow,
+            KnowledgeStructuredRevisionRow, KnowledgeTechnicalFactRow, NewKnowledgeEntity,
         },
-        document_store::{
-            ArangoDocumentStore, KnowledgeChunkRow, KnowledgeDocumentRow, KnowledgeRevisionRow,
-            KnowledgeStructuredBlockRow, KnowledgeStructuredRevisionRow, KnowledgeTechnicalFactRow,
+        postgres::{
+            pg_context_store::PgContextStore, pg_document_store::PgDocumentStore,
+            pg_graph_store::PgGraphStore,
         },
-        graph_store::{ArangoGraphStore, NewKnowledgeEntity},
     },
-    infra::repositories::{self, query_repository, runtime_repository},
     services::query::service::QueryService,
 };
-
-struct TempArangoDatabase {
-    base_url: String,
-    username: String,
-    password: String,
-    name: String,
-    http: Client,
-}
 
 struct TempPostgresDatabase {
     name: String,
@@ -94,100 +82,41 @@ impl TempPostgresDatabase {
     }
 }
 
-impl TempArangoDatabase {
-    async fn create(settings: &Settings) -> Result<Self> {
-        let base_url = settings.arangodb_url.trim().trim_end_matches('/').to_string();
-        let name = format!("query_grounding_{}", Uuid::now_v7().simple());
-        let http = Client::builder()
-            .timeout(Duration::from_secs(settings.arangodb_request_timeout_seconds.max(1)))
-            .build()
-            .context("failed to build ArangoDB admin http client")?;
-        let response = http
-            .post(format!("{base_url}/_api/database"))
-            .basic_auth(&settings.arangodb_username, Some(&settings.arangodb_password))
-            .json(&json!({ "name": name }))
-            .send()
-            .await
-            .context("failed to create temp ArangoDB database")?;
-        if !response.status().is_success() {
-            return Err(anyhow!(
-                "failed to create temp ArangoDB database {}: status {}",
-                name,
-                response.status()
-            ));
-        }
-
-        Ok(Self {
-            base_url,
-            username: settings.arangodb_username.clone(),
-            password: settings.arangodb_password.clone(),
-            name,
-            http,
-        })
-    }
-
-    async fn drop(self) -> Result<()> {
-        let response = self
-            .http
-            .delete(format!("{}/_api/database/{}", self.base_url, self.name))
-            .basic_auth(&self.username, Some(&self.password))
-            .send()
-            .await
-            .context("failed to drop temp ArangoDB database")?;
-        if response.status() != StatusCode::NOT_FOUND && !response.status().is_success() {
-            return Err(anyhow!(
-                "failed to drop temp ArangoDB database {}: status {}",
-                self.name,
-                response.status()
-            ));
-        }
-        Ok(())
-    }
-}
-
 struct QueryGroundingFixture {
-    temp_database: TempArangoDatabase,
-    document_store: ArangoDocumentStore,
-    context_store: ArangoContextStore,
-    graph_store: ArangoGraphStore,
+    temp_database: TempPostgresDatabase,
+    postgres: PgPool,
+    document_store: PgDocumentStore,
+    context_store: PgContextStore,
+    graph_store: PgGraphStore,
 }
 
 impl QueryGroundingFixture {
     async fn create() -> Result<Self> {
         let mut settings =
             Settings::from_env().context("failed to load settings for query grounding tests")?;
-        let temp_database = TempArangoDatabase::create(&settings).await?;
-        settings.arangodb_database = temp_database.name.clone();
-
-        let client = Arc::new(
-            ArangoClient::from_settings(&settings).context("failed to build Arango client")?,
-        );
-        client.ping().await.context("failed to ping temp ArangoDB database")?;
-        bootstrap_knowledge_plane(
-            &client,
-            &ArangoBootstrapOptions {
-                collections: true,
-                views: false,
-                graph: true,
-                vector_indexes: false,
-                vector_dimensions: 3072,
-                vector_index_n_lists: 100,
-                vector_index_default_n_probe: 8,
-                vector_index_training_iterations: 25,
-            },
-        )
-        .await
-        .context("failed to bootstrap temp Arango knowledge plane")?;
+        let temp_database = TempPostgresDatabase::create(&settings.database_url).await?;
+        settings.database_url = temp_database.database_url.clone();
+        let postgres = PgPoolOptions::new()
+            .max_connections(4)
+            .connect(&settings.database_url)
+            .await
+            .context("failed to connect query grounding postgres")?;
+        sqlx::migrate!("./migrations")
+            .run(&postgres)
+            .await
+            .context("failed to apply query grounding migrations")?;
 
         Ok(Self {
             temp_database,
-            document_store: ArangoDocumentStore::new(Arc::clone(&client)),
-            context_store: ArangoContextStore::new(Arc::clone(&client)),
-            graph_store: ArangoGraphStore::new(Arc::clone(&client)),
+            postgres: postgres.clone(),
+            document_store: PgDocumentStore { pool: postgres.clone() },
+            context_store: PgContextStore { pool: postgres.clone() },
+            graph_store: PgGraphStore { pool: postgres.clone() },
         })
     }
 
     async fn cleanup(self) -> Result<()> {
+        self.postgres.close().await;
         self.temp_database.drop().await
     }
 
@@ -204,9 +133,6 @@ impl QueryGroundingFixture {
 
         self.document_store
             .upsert_document(&KnowledgeDocumentRow {
-                key: document_id.to_string(),
-                arango_id: None,
-                arango_rev: None,
                 document_id,
                 workspace_id,
                 library_id,
@@ -230,9 +156,6 @@ impl QueryGroundingFixture {
 
         self.document_store
             .upsert_revision(&KnowledgeRevisionRow {
-                key: revision_id.to_string(),
-                arango_id: None,
-                arango_rev: None,
                 revision_id,
                 workspace_id,
                 library_id,
@@ -264,9 +187,6 @@ impl QueryGroundingFixture {
 
         self.document_store
             .upsert_chunk(&KnowledgeChunkRow {
-                key: chunk_id.to_string(),
-                arango_id: None,
-                arango_rev: None,
                 chunk_id,
                 workspace_id,
                 library_id,
@@ -303,7 +223,6 @@ impl QueryGroundingFixture {
 
 struct QueryGroundingAppFixture {
     temp_postgres: TempPostgresDatabase,
-    temp_arango: TempArangoDatabase,
     state: AppState,
     workspace_id: Uuid,
     library_id: Uuid,
@@ -316,8 +235,6 @@ impl QueryGroundingAppFixture {
             Settings::from_env().context("failed to load settings for query grounding app test")?;
         let temp_postgres = TempPostgresDatabase::create(&settings.database_url).await?;
         settings.database_url = temp_postgres.database_url.clone();
-        let temp_arango = TempArangoDatabase::create(&settings).await?;
-        settings.arangodb_database = temp_arango.name.clone();
 
         let postgres = PgPoolOptions::new()
             .max_connections(4)
@@ -331,21 +248,6 @@ impl QueryGroundingAppFixture {
         postgres.close().await;
 
         let state = AppState::new(settings.clone()).await?;
-        bootstrap_knowledge_plane(
-            state.arango_client.as_ref(),
-            &ArangoBootstrapOptions {
-                collections: true,
-                views: false,
-                graph: true,
-                vector_indexes: false,
-                vector_dimensions: 3072,
-                vector_index_n_lists: 100,
-                vector_index_default_n_probe: 8,
-                vector_index_training_iterations: 25,
-            },
-        )
-        .await
-        .context("failed to bootstrap query grounding knowledge plane")?;
 
         let suffix = Uuid::now_v7().simple().to_string();
         let workspace = repositories::catalog_repository::create_workspace(
@@ -383,7 +285,6 @@ impl QueryGroundingAppFixture {
 
         Ok(Self {
             temp_postgres,
-            temp_arango,
             state,
             workspace_id: workspace.id,
             library_id: library.id,
@@ -393,8 +294,7 @@ impl QueryGroundingAppFixture {
 
     async fn cleanup(self) -> Result<()> {
         self.state.persistence.postgres.close().await;
-        self.temp_postgres.drop().await?;
-        self.temp_arango.drop().await
+        self.temp_postgres.drop().await
     }
 
     async fn create_execution_detail(
@@ -471,7 +371,7 @@ impl QueryGroundingAppFixture {
             "status": "ready"
         });
         self.state
-            .arango_context_store
+            .context_store
             .upsert_bundle(&bundle)
             .await
             .context("failed to persist grounding verification bundle")?;
@@ -565,11 +465,8 @@ impl QueryGroundingAppFixture {
 
         for (document_id, active_revision_id) in document_revision_ids {
             self.state
-                .arango_document_store
+                .document_store
                 .upsert_document(&KnowledgeDocumentRow {
-                    key: document_id.to_string(),
-                    arango_id: None,
-                    arango_rev: None,
                     document_id,
                     workspace_id: self.workspace_id,
                     library_id: self.library_id,
@@ -605,11 +502,8 @@ impl QueryGroundingAppFixture {
                 .collect::<Vec<_>>();
 
             self.state
-                .arango_document_store
+                .document_store
                 .upsert_revision(&KnowledgeRevisionRow {
-                    key: revision_id.to_string(),
-                    arango_id: None,
-                    arango_rev: None,
                     revision_id: *revision_id,
                     workspace_id: self.workspace_id,
                     library_id: self.library_id,
@@ -639,11 +533,8 @@ impl QueryGroundingAppFixture {
                 .await
                 .context("failed to seed grounding detail revision")?;
             self.state
-                .arango_document_store
+                .document_store
                 .upsert_structured_revision(&KnowledgeStructuredRevisionRow {
-                    key: revision_id.to_string(),
-                    arango_id: None,
-                    arango_rev: None,
                     revision_id: *revision_id,
                     workspace_id: self.workspace_id,
                     library_id: self.library_id,
@@ -664,12 +555,12 @@ impl QueryGroundingAppFixture {
                 .await
                 .context("failed to seed structured revision for grounding detail")?;
             self.state
-                .arango_document_store
+                .document_store
                 .replace_structured_blocks(*revision_id, &revision_blocks)
                 .await
                 .context("failed to seed structured blocks for grounding detail")?;
             self.state
-                .arango_document_store
+                .document_store
                 .replace_technical_facts(*revision_id, &revision_facts)
                 .await
                 .context("failed to seed technical facts for grounding detail")?;
@@ -696,7 +587,7 @@ impl QueryGroundingAppFixture {
             "grounding_kind": "hybrid"
         });
         self.state
-            .arango_context_store
+            .context_store
             .upsert_bundle(&bundle)
             .await
             .context("failed to persist grounding canonical evidence bundle")?;
@@ -707,7 +598,7 @@ impl QueryGroundingAppFixture {
                 .map(|chunk_id| sample_chunk_edge(bundle_id, chunk_id))
                 .collect::<Vec<_>>();
             self.state
-                .arango_context_store
+                .context_store
                 .replace_bundle_chunk_edges(bundle_id, self.library_id, &chunk_edges)
                 .await
                 .context("failed to persist grounding chunk edges")?;
@@ -718,7 +609,7 @@ impl QueryGroundingAppFixture {
                 .map(|entity_id| sample_entity_edge(bundle_id, entity_id))
                 .collect::<Vec<_>>();
             self.state
-                .arango_context_store
+                .context_store
                 .replace_bundle_entity_edges(bundle_id, self.library_id, &entity_edges)
                 .await
                 .context("failed to persist grounding entity edges")?;
@@ -729,7 +620,7 @@ impl QueryGroundingAppFixture {
                 .map(|relation_id| sample_relation_edge(bundle_id, relation_id))
                 .collect::<Vec<_>>();
             self.state
-                .arango_context_store
+                .context_store
                 .replace_bundle_relation_edges(bundle_id, self.library_id, &relation_edges)
                 .await
                 .context("failed to persist grounding relation edges")?;
@@ -822,9 +713,6 @@ fn sample_context_bundle(
 ) -> KnowledgeContextBundleRow {
     let now = Utc::now();
     KnowledgeContextBundleRow {
-        key: canonical_context_bundle_id(execution.id).to_string(),
-        arango_id: None,
-        arango_rev: None,
         bundle_id: canonical_context_bundle_id(execution.id),
         workspace_id,
         library_id,
@@ -891,9 +779,6 @@ fn sample_trace(
 ) -> KnowledgeRetrievalTraceRow {
     let now = Utc::now();
     KnowledgeRetrievalTraceRow {
-        key: Uuid::now_v7().to_string(),
-        arango_id: None,
-        arango_rev: None,
         trace_id: Uuid::now_v7(),
         workspace_id,
         library_id,
@@ -983,11 +868,6 @@ fn sample_audit_subject(
 
 fn sample_chunk_edge(bundle_id: Uuid, chunk_id: Uuid) -> KnowledgeBundleChunkEdgeRow {
     KnowledgeBundleChunkEdgeRow {
-        key: format!("{bundle_id}:{chunk_id}"),
-        arango_id: None,
-        arango_rev: None,
-        from: String::new(),
-        to: String::new(),
         bundle_id,
         chunk_id,
         rank: 1,
@@ -999,11 +879,6 @@ fn sample_chunk_edge(bundle_id: Uuid, chunk_id: Uuid) -> KnowledgeBundleChunkEdg
 
 fn sample_entity_edge(bundle_id: Uuid, entity_id: Uuid) -> KnowledgeBundleEntityEdgeRow {
     KnowledgeBundleEntityEdgeRow {
-        key: format!("{bundle_id}:{entity_id}"),
-        arango_id: None,
-        arango_rev: None,
-        from: String::new(),
-        to: String::new(),
         bundle_id,
         entity_id,
         rank: 1,
@@ -1015,11 +890,6 @@ fn sample_entity_edge(bundle_id: Uuid, entity_id: Uuid) -> KnowledgeBundleEntity
 
 fn sample_relation_edge(bundle_id: Uuid, relation_id: Uuid) -> KnowledgeBundleRelationEdgeRow {
     KnowledgeBundleRelationEdgeRow {
-        key: format!("{bundle_id}:{relation_id}"),
-        arango_id: None,
-        arango_rev: None,
-        from: String::new(),
-        to: String::new(),
         bundle_id,
         relation_id,
         rank: 1,
@@ -1031,11 +901,6 @@ fn sample_relation_edge(bundle_id: Uuid, relation_id: Uuid) -> KnowledgeBundleRe
 
 fn sample_evidence_edge(bundle_id: Uuid, evidence_id: Uuid) -> KnowledgeBundleEvidenceEdgeRow {
     KnowledgeBundleEvidenceEdgeRow {
-        key: format!("{bundle_id}:{evidence_id}"),
-        arango_id: None,
-        arango_rev: None,
-        from: String::new(),
-        to: String::new(),
         bundle_id,
         evidence_id,
         rank: 1,
@@ -1047,7 +912,6 @@ fn sample_evidence_edge(bundle_id: Uuid, evidence_id: Uuid) -> KnowledgeBundleEv
 
 fn sample_chunk_reference(bundle_id: Uuid, chunk_id: Uuid) -> KnowledgeBundleChunkReferenceRow {
     KnowledgeBundleChunkReferenceRow {
-        key: format!("{bundle_id}:{chunk_id}"),
         bundle_id,
         chunk_id,
         rank: 1,
@@ -1059,7 +923,6 @@ fn sample_chunk_reference(bundle_id: Uuid, chunk_id: Uuid) -> KnowledgeBundleChu
 
 fn sample_entity_reference(bundle_id: Uuid, entity_id: Uuid) -> KnowledgeBundleEntityReferenceRow {
     KnowledgeBundleEntityReferenceRow {
-        key: format!("{bundle_id}:{entity_id}"),
         bundle_id,
         entity_id,
         rank: 1,
@@ -1074,7 +937,6 @@ fn sample_relation_reference(
     relation_id: Uuid,
 ) -> KnowledgeBundleRelationReferenceRow {
     KnowledgeBundleRelationReferenceRow {
-        key: format!("{bundle_id}:{relation_id}"),
         bundle_id,
         relation_id,
         rank: 1,
@@ -1089,7 +951,6 @@ fn sample_evidence_reference(
     evidence_id: Uuid,
 ) -> KnowledgeBundleEvidenceReferenceRow {
     KnowledgeBundleEvidenceReferenceRow {
-        key: format!("{bundle_id}:{evidence_id}"),
         bundle_id,
         evidence_id,
         rank: 1,
@@ -1113,9 +974,6 @@ fn sample_structured_block_row(
     let now = Utc::now();
     let block_id = Uuid::now_v7();
     KnowledgeStructuredBlockRow {
-        key: block_id.to_string(),
-        arango_id: None,
-        arango_rev: None,
         block_id,
         workspace_id,
         library_id,
@@ -1152,9 +1010,6 @@ fn sample_technical_fact_row(
     let now = Utc::now();
     let fact_id = Uuid::now_v7();
     KnowledgeTechnicalFactRow {
-        key: fact_id.to_string(),
-        arango_id: None,
-        arango_rev: None,
         fact_id,
         workspace_id,
         library_id,
@@ -1216,22 +1071,15 @@ fn typed_bundle_reference_rows_cover_all_grounding_kinds() {
 
     assert_eq!(chunk_edge.bundle_id, bundle_id);
     assert_eq!(chunk_edge.chunk_id, chunk_id);
-    assert_eq!(chunk_edge.key, format!("{bundle_id}:{chunk_id}"));
     assert_eq!(entity_edge.bundle_id, bundle_id);
     assert_eq!(entity_edge.entity_id, entity_id);
-    assert_eq!(entity_edge.key, format!("{bundle_id}:{entity_id}"));
     assert_eq!(relation_edge.bundle_id, bundle_id);
     assert_eq!(relation_edge.relation_id, relation_id);
-    assert_eq!(relation_edge.key, format!("{bundle_id}:{relation_id}"));
     assert_eq!(evidence_edge.bundle_id, bundle_id);
     assert_eq!(evidence_edge.evidence_id, evidence_id);
-    assert_eq!(evidence_edge.key, format!("{bundle_id}:{evidence_id}"));
 
     let reference_set = KnowledgeContextBundleReferenceSetRow {
         bundle: KnowledgeContextBundleRow {
-            key: bundle_id.to_string(),
-            arango_id: None,
-            arango_rev: None,
             bundle_id,
             workspace_id: Uuid::now_v7(),
             library_id: Uuid::now_v7(),
@@ -1460,7 +1308,7 @@ fn failure_cancellation_and_retry_scaffold_preserve_execution_bundle_linkage() {
 }
 
 #[tokio::test]
-#[ignore = "requires local ArangoDB service with database create/drop access"]
+#[ignore = "requires local postgres service with database create/drop access"]
 async fn context_bundle_roundtrip_by_query_execution_persists_trace_and_chunk_references()
 -> Result<()> {
     let fixture = QueryGroundingFixture::create().await?;
@@ -1639,7 +1487,7 @@ async fn context_bundle_roundtrip_by_query_execution_persists_trace_and_chunk_re
 }
 
 #[tokio::test]
-#[ignore = "requires local ArangoDB service with database create/drop access"]
+#[ignore = "requires local postgres service with database create/drop access"]
 async fn entity_neighborhood_filters_out_context_bundle_vertices() -> Result<()> {
     let fixture = QueryGroundingFixture::create().await?;
     let result = async {
@@ -1711,7 +1559,7 @@ async fn entity_neighborhood_filters_out_context_bundle_vertices() -> Result<()>
 }
 
 #[tokio::test]
-#[ignore = "requires local postgres, redis, and arango services"]
+#[ignore = "requires local postgres and redis services"]
 async fn execution_detail_maps_canonical_verification_states_for_grounding_regressions()
 -> Result<()> {
     let fixture = QueryGroundingAppFixture::create().await?;
@@ -1794,7 +1642,7 @@ async fn execution_detail_maps_canonical_verification_states_for_grounding_regre
 }
 
 #[tokio::test]
-#[ignore = "requires local postgres, redis, and arango services"]
+#[ignore = "requires local postgres and redis services"]
 async fn execution_detail_surfaces_noisy_layout_segments_and_technical_facts() -> Result<()> {
     let fixture = QueryGroundingAppFixture::create().await?;
     let result = async {
@@ -1889,7 +1737,7 @@ async fn execution_detail_surfaces_noisy_layout_segments_and_technical_facts() -
 }
 
 #[tokio::test]
-#[ignore = "requires local postgres, redis, and arango services"]
+#[ignore = "requires local postgres and redis services"]
 async fn execution_detail_surfaces_multihop_graph_and_multi_document_fact_support() -> Result<()> {
     let fixture = QueryGroundingAppFixture::create().await?;
     let result = async {

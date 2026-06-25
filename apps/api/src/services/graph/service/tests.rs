@@ -1,9 +1,9 @@
 use super::*;
 use crate::{
     domains::{knowledge::TypedTechnicalFact, runtime_graph::RuntimeNodeType},
-    infra::arangodb::{
-        document_store::KnowledgeChunkRow,
-        graph_store::{GraphViewData, KnowledgeEntityCandidateRow, KnowledgeRelationCandidateRow},
+    infra::knowledge_rows::{
+        GraphViewData, KnowledgeChunkRow, KnowledgeEntityCandidateRow,
+        KnowledgeRelationCandidateRow,
     },
     services::graph::extract::{GraphEntityCandidate, GraphRelationCandidate},
     shared::extraction::technical_facts::{
@@ -69,18 +69,16 @@ fn relation_fields_are_semantically_empty_rejects_blank_members() {
 
 #[test]
 fn rebuild_outcome_requires_materialized_entities_relations_or_evidence() {
-    assert!(!ArangoGraphRebuildOutcome::default().has_materialized_graph());
+    assert!(!GraphRebuildOutcome::default().has_materialized_graph());
     assert!(
-        ArangoGraphRebuildOutcome { upserted_entities: 1, ..Default::default() }
+        GraphRebuildOutcome { upserted_entities: 1, ..Default::default() }.has_materialized_graph()
+    );
+    assert!(
+        GraphRebuildOutcome { upserted_relations: 1, ..Default::default() }
             .has_materialized_graph()
     );
     assert!(
-        ArangoGraphRebuildOutcome { upserted_relations: 1, ..Default::default() }
-            .has_materialized_graph()
-    );
-    assert!(
-        ArangoGraphRebuildOutcome { upserted_evidence: 1, ..Default::default() }
-            .has_materialized_graph()
+        GraphRebuildOutcome { upserted_evidence: 1, ..Default::default() }.has_materialized_graph()
     );
 }
 
@@ -108,9 +106,6 @@ fn reconcile_entity_candidate_row_recanonicalizes_legacy_unicode_key() {
     let mut entity_key_index = crate::services::graph::identity::GraphLabelNodeTypeIndex::new();
     entity_key_index.insert("Acme Print House", RuntimeNodeType::Entity);
     let row = KnowledgeEntityCandidateRow {
-        key: Uuid::now_v7().to_string(),
-        arango_id: None,
-        arango_rev: None,
         candidate_id: Uuid::now_v7(),
         workspace_id: Uuid::now_v7(),
         library_id: Uuid::now_v7(),
@@ -137,9 +132,6 @@ fn reconcile_entity_candidate_row_recanonicalizes_legacy_unicode_key() {
 fn reconcile_relation_candidate_row_uses_labels_to_rebuild_keys() {
     let entity_key_index = crate::services::graph::identity::GraphLabelNodeTypeIndex::new();
     let row = KnowledgeRelationCandidateRow {
-        key: Uuid::now_v7().to_string(),
-        arango_id: None,
-        arango_rev: None,
         candidate_id: Uuid::now_v7(),
         workspace_id: Uuid::now_v7(),
         library_id: Uuid::now_v7(),
@@ -173,9 +165,6 @@ fn reconcile_relation_candidate_row_uses_labels_to_rebuild_keys() {
 fn reconcile_relation_candidate_row_rejects_missing_identity_without_labels() {
     let entity_key_index = crate::services::graph::identity::GraphLabelNodeTypeIndex::new();
     let row = KnowledgeRelationCandidateRow {
-        key: Uuid::now_v7().to_string(),
-        arango_id: None,
-        arango_rev: None,
         candidate_id: Uuid::now_v7(),
         workspace_id: Uuid::now_v7(),
         library_id: Uuid::now_v7(),
@@ -203,9 +192,6 @@ fn reconcile_entity_candidate_row_prefers_entity_for_label_type_collisions() {
     entity_key_index.insert("Register", RuntimeNodeType::Concept);
     entity_key_index.insert("Register", RuntimeNodeType::Entity);
     let row = KnowledgeEntityCandidateRow {
-        key: Uuid::now_v7().to_string(),
-        arango_id: None,
-        arango_rev: None,
         candidate_id: Uuid::now_v7(),
         workspace_id: Uuid::now_v7(),
         library_id: Uuid::now_v7(),
@@ -234,9 +220,6 @@ fn build_prefixed_entity_key_aliases_collapses_unbranded_product_keys() {
     let branded = ReconciledEntityCandidate {
         normalization_key: "entity:acme_operations_console".to_string(),
         row: KnowledgeEntityCandidateRow {
-            key: Uuid::now_v7().to_string(),
-            arango_id: None,
-            arango_rev: None,
             candidate_id: Uuid::now_v7(),
             workspace_id: Uuid::now_v7(),
             library_id: Uuid::now_v7(),
@@ -256,9 +239,6 @@ fn build_prefixed_entity_key_aliases_collapses_unbranded_product_keys() {
     let unbranded = ReconciledEntityCandidate {
         normalization_key: "entity:operations_console".to_string(),
         row: KnowledgeEntityCandidateRow {
-            key: Uuid::now_v7().to_string(),
-            arango_id: None,
-            arango_rev: None,
             candidate_id: Uuid::now_v7(),
             workspace_id: Uuid::now_v7(),
             library_id: Uuid::now_v7(),
@@ -288,9 +268,6 @@ fn build_prefixed_entity_key_aliases_collapses_unbranded_product_keys() {
 fn apply_entity_key_aliases_to_relation_candidate_rebuilds_assertion() {
     let mut candidate = ReconciledRelationCandidate {
         row: KnowledgeRelationCandidateRow {
-            key: Uuid::now_v7().to_string(),
-            arango_id: None,
-            arango_rev: None,
             candidate_id: Uuid::now_v7(),
             workspace_id: Uuid::now_v7(),
             library_id: Uuid::now_v7(),
@@ -335,10 +312,7 @@ fn build_materialized_extract_candidates_recanonicalizes_unicode_node_rows() {
     let library_id = Uuid::now_v7();
     let revision_id = Uuid::now_v7();
     let chunk_id = Uuid::now_v7();
-    let revision = crate::infra::arangodb::document_store::KnowledgeRevisionRow {
-        key: revision_id.to_string(),
-        arango_id: None,
-        arango_rev: None,
+    let revision = crate::infra::knowledge_rows::KnowledgeRevisionRow {
         revision_id,
         workspace_id,
         library_id,
@@ -398,10 +372,7 @@ fn build_materialized_extract_candidates_derives_relation_labels_from_nodes() {
     let library_id = Uuid::now_v7();
     let revision_id = Uuid::now_v7();
     let chunk_id = Uuid::now_v7();
-    let revision = crate::infra::arangodb::document_store::KnowledgeRevisionRow {
-        key: revision_id.to_string(),
-        arango_id: None,
-        arango_rev: None,
+    let revision = crate::infra::knowledge_rows::KnowledgeRevisionRow {
         revision_id,
         workspace_id,
         library_id,
@@ -523,9 +494,6 @@ fn resolve_entity_evidence_support_prefers_matching_fact_support() {
     let chunk_id = Uuid::now_v7();
     let fact_id = Uuid::now_v7();
     let chunk = KnowledgeChunkRow {
-        key: chunk_id.to_string(),
-        arango_id: None,
-        arango_rev: None,
         chunk_id,
         workspace_id: Uuid::now_v7(),
         library_id: Uuid::now_v7(),

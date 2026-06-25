@@ -6,7 +6,7 @@ use crate::domains::query_ir::{
     EntityMention, EntityRole, QueryAct, QueryIR, QueryLanguage, QueryScope, SourceSliceDirection,
     SourceSliceFilter, SourceSliceSpec,
 };
-use crate::infra::arangodb::document_store::KnowledgeDocumentRow;
+use crate::infra::knowledge_rows::KnowledgeDocumentRow;
 use crate::services::query::effective_query::{
     EFFECTIVE_QUERY_QUESTION_PREFIX, EFFECTIVE_QUERY_SCOPE_PREFIX,
 };
@@ -1044,9 +1044,6 @@ fn render_table_summary_chunk_section_derives_from_table_rows() {
 #[test]
 fn build_missing_explicit_document_answer_reports_absent_file_reference() {
     let document = KnowledgeDocumentRow {
-        key: "organizations-100.csv".to_string(),
-        arango_id: None,
-        arango_rev: None,
         document_id: Uuid::now_v7(),
         workspace_id: Uuid::now_v7(),
         library_id: Uuid::now_v7(),

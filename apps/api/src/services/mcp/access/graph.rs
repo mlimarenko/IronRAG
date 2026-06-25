@@ -218,7 +218,7 @@ pub async fn get_graph_topology(
     );
 
     let mut documents = state
-        .arango_document_store
+        .document_store
         .list_documents_by_ids(&selected.visible_document_ids)
         .await
         .map_err(|error| ApiError::internal_with_log(error, "internal"))?;

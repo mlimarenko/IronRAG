@@ -2,20 +2,17 @@ use std::collections::BTreeSet;
 
 use anyhow::{Context, Result};
 use chrono::Utc;
-use serde_json::json;
 use uuid::Uuid;
 
 use crate::{
     app::state::AppState,
-    infra::arangodb::graph_store::{
+    infra::knowledge_rows::{
         KnowledgeEntityRow, KnowledgeRelationRow, NewKnowledgeEntity, NewKnowledgeRelation,
     },
 };
 
 use super::{
-    ArangoRevisionContext, GraphService, canonical_chunk_mentions_entity_edge_key,
-    canonical_document_revision_edge_key, canonical_edge_relation_key, canonical_entity_id,
-    canonical_revision_chunk_edge_key, placeholder_entity_parts_from_key,
+    GraphRevisionContext, GraphService, canonical_entity_id, placeholder_entity_parts_from_key,
 };
 
 impl GraphService {
@@ -34,7 +31,7 @@ impl GraphService {
     ) -> Result<KnowledgeEntityRow> {
         let entity_id = canonical_entity_id(library_id, normalization_key);
         let existing = state
-            .arango_graph_store
+            .graph_store
             .get_entity_by_id(entity_id)
             .await
             .context("failed to load canonical entity before upsert")?;
@@ -75,7 +72,7 @@ impl GraphService {
         };
         let mut last_err = None;
         for attempt in 0..3 {
-            match state.arango_graph_store.upsert_entity(&entity).await {
+            match state.graph_store.upsert_entity(&entity).await {
                 Ok(row) => return Ok(row),
                 Err(e) => {
                     let msg = format!("{e:#}");
@@ -85,14 +82,14 @@ impl GraphService {
                         last_err = Some(e);
                         continue;
                     }
-                    return Err(e).context("failed to upsert canonical arango entity");
+                    return Err(e).context("failed to upsert canonical knowledge entity");
                 }
             }
         }
         Err(last_err.ok_or_else(|| {
-            anyhow::anyhow!("canonical arango entity upsert exhausted retries without an error")
+            anyhow::anyhow!("canonical knowledge entity upsert exhausted retries without an error")
         })?)
-        .context("failed to upsert canonical arango entity after retries")
+        .context("failed to upsert canonical knowledge entity after retries")
     }
 
     pub(super) async fn upsert_placeholder_entity_for_key(
@@ -142,7 +139,7 @@ impl GraphService {
     ) -> Result<KnowledgeRelationRow> {
         let relation_id = super::canonical_relation_id(library_id, normalized_assertion);
         let existing = state
-            .arango_graph_store
+            .graph_store
             .get_relation_by_id(relation_id)
             .await
             .context("failed to load canonical relation before upsert")?;
@@ -173,7 +170,7 @@ impl GraphService {
         };
         let mut last_err = None;
         for attempt in 0..3 {
-            match state.arango_graph_store.upsert_relation(&relation).await {
+            match state.graph_store.upsert_relation(&relation).await {
                 Ok(row) => return Ok(row),
                 Err(e) => {
                     let msg = format!("{e:#}");
@@ -183,14 +180,16 @@ impl GraphService {
                         last_err = Some(e);
                         continue;
                     }
-                    return Err(e).context("failed to upsert canonical arango relation");
+                    return Err(e).context("failed to upsert canonical knowledge relation");
                 }
             }
         }
         Err(last_err.ok_or_else(|| {
-            anyhow::anyhow!("canonical arango relation upsert exhausted retries without an error")
+            anyhow::anyhow!(
+                "canonical knowledge relation upsert exhausted retries without an error"
+            )
         })?)
-        .context("failed to upsert canonical arango relation after retries")
+        .context("failed to upsert canonical knowledge relation after retries")
     }
 
     pub(super) async fn upsert_relation_edges(
@@ -200,69 +199,53 @@ impl GraphService {
         subject: &KnowledgeEntityRow,
         object: &KnowledgeEntityRow,
     ) -> Result<()> {
-        self.upsert_arango_edge(
-            state,
-            "knowledge_relation_subject_edge",
-            canonical_edge_relation_key(relation.relation_id, subject.entity_id, "subject"),
-            "knowledge_relation",
-            relation.relation_id,
-            "knowledge_entity",
-            subject.entity_id,
-            relation.library_id,
-            json!({}),
-        )
-        .await?;
-        self.upsert_arango_edge(
-            state,
-            "knowledge_relation_object_edge",
-            canonical_edge_relation_key(relation.relation_id, object.entity_id, "object"),
-            "knowledge_relation",
-            relation.relation_id,
-            "knowledge_entity",
-            object.entity_id,
-            relation.library_id,
-            json!({}),
-        )
-        .await
+        state
+            .graph_store
+            .upsert_relation_subject_edge(
+                relation.relation_id,
+                subject.entity_id,
+                relation.library_id,
+            )
+            .await
+            .context("failed to upsert relation-subject edge")?;
+        state
+            .graph_store
+            .upsert_relation_object_edge(
+                relation.relation_id,
+                object.entity_id,
+                relation.library_id,
+            )
+            .await
+            .context("failed to upsert relation-object edge")
     }
 
     pub(super) async fn upsert_revision_edges(
         &self,
         state: &AppState,
-        revision: &ArangoRevisionContext,
+        revision: &GraphRevisionContext,
     ) -> Result<()> {
-        self.upsert_arango_edge(
-            state,
-            "knowledge_document_revision_edge",
-            canonical_document_revision_edge_key(revision.document_id, revision.revision_id),
-            "knowledge_document",
-            revision.document_id,
-            "knowledge_revision",
-            revision.revision_id,
-            revision.library_id,
-            json!({}),
-        )
-        .await
+        state
+            .graph_store
+            .upsert_document_revision_edge(
+                revision.document_id,
+                revision.revision_id,
+                revision.library_id,
+            )
+            .await
+            .context("failed to upsert document-revision edge")
     }
 
     pub(super) async fn upsert_chunk_edge(
         &self,
         state: &AppState,
-        revision: &ArangoRevisionContext,
+        revision: &GraphRevisionContext,
         chunk_id: Uuid,
     ) -> Result<()> {
-        self.upsert_arango_edge(
-            state,
-            "knowledge_revision_chunk_edge",
-            canonical_revision_chunk_edge_key(revision.revision_id, chunk_id),
-            "knowledge_revision",
-            revision.revision_id,
-            "knowledge_chunk",
-            chunk_id,
-            revision.library_id,
-            json!({}),
-        )
-        .await
+        state
+            .graph_store
+            .upsert_revision_chunk_edge(revision.revision_id, chunk_id, revision.library_id)
+            .await
+            .context("failed to upsert revision-chunk edge")
     }
 
     pub(super) async fn upsert_chunk_mentions_entity_edge(
@@ -273,86 +256,17 @@ impl GraphService {
         score: Option<f64>,
         library_id: Uuid,
     ) -> Result<()> {
-        self.upsert_arango_edge(
-            state,
-            "knowledge_chunk_mentions_entity_edge",
-            canonical_chunk_mentions_entity_edge_key(chunk_id, entity_id),
-            "knowledge_chunk",
-            chunk_id,
-            "knowledge_entity",
-            entity_id,
-            library_id,
-            json!({
-                "rank": 1,
-                "score": score,
-                "inclusionReason": "graph_extract_entity_candidate",
-            }),
-        )
-        .await
-    }
-
-    async fn upsert_arango_edge(
-        &self,
-        state: &AppState,
-        collection: &str,
-        key: String,
-        from_collection: &str,
-        from_id: Uuid,
-        to_collection: &str,
-        to_id: Uuid,
-        library_id: Uuid,
-        extra_fields: serde_json::Value,
-    ) -> Result<()> {
-        let client = &state.arango_client;
-        let query = "UPSERT { _key: @key }
-                     INSERT {
-                        _key: @key,
-                        _from: @from,
-                        _to: @to,
-                        library_id: @library_id,
-                        created_at: @created_at,
-                        updated_at: @updated_at,
-                        payload: @payload
-                     }
-                     UPDATE {
-                        _from: @from,
-                        _to: @to,
-                        library_id: @library_id,
-                        updated_at: @updated_at,
-                        payload: @payload
-                     }
-                     IN @@collection
-                     RETURN NEW";
-        let bind_vars = json!({
-            "@collection": collection,
-            "key": key,
-            "from": format!("{from_collection}/{from_id}"),
-            "to": format!("{to_collection}/{to_id}"),
-            "library_id": library_id.to_string(),
-            "created_at": Utc::now(),
-            "updated_at": Utc::now(),
-            "payload": extra_fields,
-        });
-        let mut last_err = None;
-        for attempt in 0..3u32 {
-            match client.query_json(query, bind_vars.clone()).await {
-                Ok(_) => return Ok(()),
-                Err(e) => {
-                    let msg = format!("{e:#}");
-                    if msg.contains("409") && msg.contains("write-write conflict") && attempt < 2 {
-                        let backoff = std::time::Duration::from_millis(50 * (1 << attempt));
-                        tokio::time::sleep(backoff).await;
-                        last_err = Some(e);
-                        continue;
-                    }
-                    return Err(e)
-                        .with_context(|| format!("failed to upsert arango edge in {collection}"));
-                }
-            }
-        }
-        Err(last_err.ok_or_else(|| {
-            anyhow::anyhow!("arango edge upsert exhausted retries without an error")
-        })?)
-        .with_context(|| format!("failed to upsert arango edge in {collection} after retries"))
+        state
+            .graph_store
+            .upsert_chunk_mentions_entity_edge(
+                chunk_id,
+                entity_id,
+                Some(1),
+                score,
+                Some("graph_extract_entity_candidate".to_string()),
+                library_id,
+            )
+            .await
+            .context("failed to upsert chunk-mentions-entity edge")
     }
 }

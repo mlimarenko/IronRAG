@@ -11,7 +11,7 @@ same live tool through the in-process MCP dispatcher. The integration test
 therefore calls the shared pure serializer,
 `grounded_answer_contract_payload`, with deterministic synthetic assistant
 execution details. That keeps the contract in `cargo test` without a database,
-ArangoDB, Redis, or an external LLM key.
+Redis, or an external LLM key.
 
 The snapshots cover:
 

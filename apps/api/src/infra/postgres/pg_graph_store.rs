@@ -7,39 +7,38 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::infra::{
-    arangodb::{
-        collections::{
-            KNOWLEDGE_CHUNK_COLLECTION, KNOWLEDGE_DOCUMENT_COLLECTION, KNOWLEDGE_ENTITY_COLLECTION,
-            KNOWLEDGE_EVIDENCE_COLLECTION, KNOWLEDGE_RELATION_COLLECTION,
-        },
-        graph_store::{
-            GraphViewData, GraphViewEdgeWrite, GraphViewNodeWrite, GraphViewWriteError,
-            KnowledgeEntityCandidateRow, KnowledgeEntityRow, KnowledgeEvidenceRow,
-            KnowledgeGraphTraversalRow, KnowledgeRelationCandidateRow,
-            KnowledgeRelationEvidenceLookupRow, KnowledgeRelationRow, KnowledgeRelationTopologyRow,
-            NewKnowledgeEntity, NewKnowledgeEntityCandidate, NewKnowledgeEvidence,
-            NewKnowledgeRelation, NewKnowledgeRelationCandidate,
-        },
-    },
     knowledge_plane::GraphStore,
+    knowledge_rows::{
+        GraphViewData, GraphViewEdgeWrite, GraphViewNodeWrite, GraphViewWriteError,
+        KnowledgeEntityCandidateRow, KnowledgeEntityRow, KnowledgeEvidenceRow,
+        KnowledgeGraphTraversalRow, KnowledgeRelationCandidateRow,
+        KnowledgeRelationEvidenceLookupRow, KnowledgeRelationRow, KnowledgeRelationTopologyRow,
+        NewKnowledgeEntity, NewKnowledgeEntityCandidate, NewKnowledgeEvidence,
+        NewKnowledgeRelation, NewKnowledgeRelationCandidate,
+    },
 };
 
-const ENTITY_CANDIDATE_ROW_SQL: &str = "select candidate_id::text as \"_key\",
-    candidate_id, workspace_id, library_id, revision_id, chunk_id, candidate_label,
+const KNOWLEDGE_CHUNK_COLLECTION: &str = "knowledge_chunk";
+const KNOWLEDGE_DOCUMENT_COLLECTION: &str = "knowledge_document";
+const KNOWLEDGE_ENTITY_COLLECTION: &str = "knowledge_entity";
+const KNOWLEDGE_EVIDENCE_COLLECTION: &str = "knowledge_evidence";
+const KNOWLEDGE_RELATION_COLLECTION: &str = "knowledge_relation";
+const ENTITY_CANDIDATE_ROW_SQL: &str = "select candidate_id, workspace_id,
+    library_id, revision_id, chunk_id, candidate_label,
     candidate_type, candidate_sub_type, normalization_key, confidence, extraction_method,
     candidate_state, created_at, updated_at";
-const RELATION_CANDIDATE_ROW_SQL: &str = "select candidate_id::text as \"_key\",
-    candidate_id, workspace_id, library_id, revision_id, chunk_id, subject_label,
+const RELATION_CANDIDATE_ROW_SQL: &str = "select candidate_id, workspace_id,
+    library_id, revision_id, chunk_id, subject_label,
     subject_candidate_key, predicate, object_label, object_candidate_key, normalized_assertion,
     confidence, extraction_method, candidate_state, created_at, updated_at";
-const ENTITY_ROW_SQL: &str = "select entity_id::text as \"_key\", entity_id, workspace_id,
-    library_id, canonical_label, aliases, entity_type, entity_sub_type, summary, confidence,
+const ENTITY_ROW_SQL: &str = "select entity_id, workspace_id, library_id,
+    canonical_label, aliases, entity_type, entity_sub_type, summary, confidence,
     support_count, freshness_generation, entity_state, created_at, updated_at";
-const RELATION_ROW_SQL: &str = "select relation_id::text as \"_key\", relation_id, workspace_id,
-    library_id, predicate, normalized_assertion, confidence, support_count, contradiction_state,
+const RELATION_ROW_SQL: &str = "select relation_id, workspace_id, library_id,
+    predicate, normalized_assertion, confidence, support_count, contradiction_state,
     freshness_generation, relation_state, created_at, updated_at";
-const EVIDENCE_ROW_SQL: &str = "select evidence_id::text as \"_key\", evidence_id, workspace_id,
-    library_id, document_id, revision_id, chunk_id, block_id, fact_id, span_start, span_end,
+const EVIDENCE_ROW_SQL: &str = "select evidence_id, workspace_id, library_id,
+    document_id, revision_id, chunk_id, block_id, fact_id, span_start, span_end,
     quote_text, literal_spans_json, evidence_kind, extraction_method, confidence,
     evidence_state, freshness_generation, created_at, updated_at";
 
@@ -1442,14 +1441,14 @@ impl GraphStore for PgGraphStore {
         }
         let rows = sqlx::query_scalar::<_, serde_json::Value>(
             "select to_jsonb(row) from (
-                select evidence_id::text as \"_key\", evidence_id, workspace_id, library_id,
+                select evidence_id, workspace_id, library_id,
                     document_id, revision_id, chunk_id, block_id, fact_id, span_start, span_end,
                     quote_text, literal_spans_json, evidence_kind, extraction_method, confidence,
                     evidence_state, freshness_generation, created_at, updated_at
                 from knowledge_evidence
                 where evidence_id = any($1)
                 union all
-                select evidence.id::text as \"_key\", evidence.id as evidence_id,
+                select evidence.id as evidence_id,
                     library.workspace_id, evidence.library_id, evidence.document_id,
                     evidence.revision_id, evidence.chunk_id, null::uuid as block_id,
                     null::uuid as fact_id, null::integer as span_start, null::integer as span_end,
@@ -1479,14 +1478,14 @@ impl GraphStore for PgGraphStore {
     ) -> anyhow::Result<Vec<KnowledgeEvidenceRow>> {
         let rows = sqlx::query_scalar::<_, serde_json::Value>(
             "select to_jsonb(row) from (
-                select evidence_id::text as \"_key\", evidence_id, workspace_id, library_id,
+                select evidence_id, workspace_id, library_id,
                     document_id, revision_id, chunk_id, block_id, fact_id, span_start, span_end,
                     quote_text, literal_spans_json, evidence_kind, extraction_method, confidence,
                     evidence_state, freshness_generation, created_at, updated_at
                 from knowledge_evidence
                 where revision_id = $1
                 union all
-                select evidence.id::text as \"_key\", evidence.id as evidence_id,
+                select evidence.id as evidence_id,
                     library.workspace_id, evidence.library_id, evidence.document_id,
                     evidence.revision_id, evidence.chunk_id, null::uuid as block_id,
                     null::uuid as fact_id, null::integer as span_start, null::integer as span_end,
@@ -1516,14 +1515,14 @@ impl GraphStore for PgGraphStore {
     ) -> anyhow::Result<Vec<KnowledgeEvidenceRow>> {
         let rows = sqlx::query_scalar::<_, serde_json::Value>(
             "select to_jsonb(row) from (
-                select evidence_id::text as \"_key\", evidence_id, workspace_id, library_id,
+                select evidence_id, workspace_id, library_id,
                     document_id, revision_id, chunk_id, block_id, fact_id, span_start, span_end,
                     quote_text, literal_spans_json, evidence_kind, extraction_method, confidence,
                     evidence_state, freshness_generation, created_at, updated_at
                 from knowledge_evidence
                 where chunk_id = $1
                 union all
-                select evidence.id::text as \"_key\", evidence.id as evidence_id,
+                select evidence.id as evidence_id,
                     library.workspace_id, evidence.library_id, evidence.document_id,
                     evidence.revision_id, evidence.chunk_id, null::uuid as block_id,
                     null::uuid as fact_id, null::integer as span_start, null::integer as span_end,
@@ -1554,7 +1553,6 @@ impl GraphStore for PgGraphStore {
         let projection_version = self.active_projection_version(library_id).await?;
         let rows = sqlx::query_scalar::<_, serde_json::Value>(
             "select jsonb_build_object(
-                '_key', edge.id::text,
                 'relation_id', edge.id,
                 'workspace_id', library.workspace_id,
                 'library_id', edge.library_id,
@@ -1593,7 +1591,6 @@ impl GraphStore for PgGraphStore {
     ) -> anyhow::Result<Option<KnowledgeRelationTopologyRow>> {
         let row = sqlx::query_scalar::<_, serde_json::Value>(
             "select jsonb_build_object(
-                '_key', edge.id::text,
                 'relation_id', edge.id,
                 'workspace_id', library.workspace_id,
                 'library_id', edge.library_id,
@@ -1649,13 +1646,12 @@ impl GraphStore for PgGraphStore {
         library_id: Uuid,
         limit: usize,
     ) -> anyhow::Result<Vec<KnowledgeRelationEvidenceLookupRow>> {
-        // runtime_graph_evidence collapses the Arango support edge and does not
-        // persist that edge's created_at. Rank, evidence created_at, and id are
-        // the closest deterministic ordering available in the PG runtime model.
+        // runtime_graph_evidence does not persist the source edge's created_at.
+        // Rank, evidence created_at, and id are the closest deterministic
+        // ordering available in the PG runtime model.
         let rows = sqlx::query_scalar::<_, serde_json::Value>(
             "select jsonb_build_object(
                 'relation', jsonb_build_object(
-                    '_key', edge.id::text,
                     'relation_id', edge.id,
                     'workspace_id', library.workspace_id,
                     'library_id', edge.library_id,
@@ -1670,7 +1666,6 @@ impl GraphStore for PgGraphStore {
                     'updated_at', edge.updated_at
                 ),
                 'evidence', jsonb_build_object(
-                    '_key', evidence.id::text,
                     'evidence_id', evidence.id,
                     'workspace_id', library.workspace_id,
                     'library_id', evidence.library_id,
@@ -1719,7 +1714,7 @@ impl GraphStore for PgGraphStore {
                 where document_id = document.id
             ) latest_revision on document.id is not null
             left join lateral (
-                select document.id::text as \"_key\", document.id as document_id,
+                select document.id as document_id,
                     document.workspace_id, document.library_id, document.external_key,
                     null::text as file_name, null::text as title,
                     document.document_state::text as document_state,
@@ -1732,7 +1727,7 @@ impl GraphStore for PgGraphStore {
               on revision.id = evidence.revision_id
              and revision.library_id = evidence.library_id
             left join lateral (
-                select revision.id::text as \"_key\", revision.id as revision_id,
+                select revision.id as revision_id,
                     revision.workspace_id, revision.library_id, revision.document_id,
                     revision.revision_number::bigint as revision_number,
                     'active'::text as revision_state,
@@ -1757,7 +1752,7 @@ impl GraphStore for PgGraphStore {
             left join content_revision chunk_revision
               on chunk_revision.id = chunk.revision_id
             left join lateral (
-                select chunk.id::text as \"_key\", chunk.id as chunk_id,
+                select chunk.id as chunk_id,
                     chunk_revision.workspace_id, chunk_revision.library_id,
                     chunk_revision.document_id, chunk.revision_id, chunk.chunk_index,
                     null::text as chunk_kind,

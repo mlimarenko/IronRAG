@@ -197,7 +197,7 @@ impl McpReadFixture {
 }
 
 #[tokio::test]
-#[ignore = "requires local postgres, redis, and arango services"]
+#[ignore = "requires local postgres and redis services"]
 async fn full_document_reads_return_complete_content_and_stable_revision_identity()
 -> anyhow::Result<()> {
     let settings = Settings::from_env().context("failed to load settings for full read test")?;
@@ -240,7 +240,7 @@ async fn full_document_reads_return_complete_content_and_stable_revision_identit
 }
 
 #[tokio::test]
-#[ignore = "requires local postgres, redis, and arango services"]
+#[ignore = "requires local postgres and redis services"]
 async fn excerpt_reads_respect_requested_window_and_offsets() -> anyhow::Result<()> {
     let settings = Settings::from_env().context("failed to load settings for excerpt read test")?;
     let fixture = McpReadFixture::create(settings).await?;
@@ -283,7 +283,7 @@ async fn excerpt_reads_respect_requested_window_and_offsets() -> anyhow::Result<
 }
 
 #[tokio::test]
-#[ignore = "requires local postgres, redis, and arango services"]
+#[ignore = "requires local postgres and redis services"]
 async fn continuation_reads_reconstruct_large_documents_without_gaps_or_duplicates()
 -> anyhow::Result<()> {
     let settings =
@@ -348,7 +348,7 @@ async fn continuation_reads_reconstruct_large_documents_without_gaps_or_duplicat
 }
 
 #[tokio::test]
-#[ignore = "requires local postgres, redis, and arango services"]
+#[ignore = "requires local postgres and redis services"]
 async fn invalid_continuation_tokens_return_explicit_mcp_error_kind() -> anyhow::Result<()> {
     let settings =
         Settings::from_env().context("failed to load settings for invalid continuation test")?;
@@ -379,7 +379,7 @@ async fn invalid_continuation_tokens_return_explicit_mcp_error_kind() -> anyhow:
 }
 
 #[tokio::test]
-#[ignore = "requires local postgres, redis, and arango services"]
+#[ignore = "requires local postgres and redis services"]
 async fn unreadable_documents_return_honest_processing_failed_and_unavailable_reasons()
 -> anyhow::Result<()> {
     let settings =
@@ -462,7 +462,7 @@ async fn unreadable_documents_return_honest_processing_failed_and_unavailable_re
 }
 
 #[tokio::test]
-#[ignore = "requires local postgres, redis, and arango services"]
+#[ignore = "requires local postgres and redis services"]
 async fn processing_documents_with_extracted_text_are_readable_before_terminal_ready_status()
 -> anyhow::Result<()> {
     let settings =
@@ -505,7 +505,7 @@ async fn processing_documents_with_extracted_text_are_readable_before_terminal_r
 }
 
 #[tokio::test]
-#[ignore = "requires local postgres, redis, and arango services"]
+#[ignore = "requires local postgres and redis services"]
 async fn failed_documents_with_extracted_text_remain_readable_for_memory_reads()
 -> anyhow::Result<()> {
     let settings =
@@ -548,7 +548,7 @@ async fn failed_documents_with_extracted_text_remain_readable_for_memory_reads()
 }
 
 #[tokio::test]
-#[ignore = "requires local postgres, redis, and arango services"]
+#[ignore = "requires local postgres and redis services"]
 async fn web_ingest_documents_are_readable_through_mcp_read_document() -> anyhow::Result<()> {
     let settings =
         Settings::from_env().context("failed to load settings for web-ingest read test")?;

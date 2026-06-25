@@ -7,12 +7,9 @@ use crate::domains::query_ir::{
     ComparisonSpec, DocumentHint, EntityMention, EntityRole, LiteralKind, LiteralSpan, QueryAct,
     QueryIR, QueryLanguage, QueryScope, TemporalConstraint,
 };
-use crate::infra::arangodb::{
-    document_store::{
-        KnowledgeChunkRow, KnowledgeDocumentRow, KnowledgeLibraryGenerationRow,
-        KnowledgeStructuredBlockRow, KnowledgeTechnicalFactRow,
-    },
-    graph_store::KnowledgeEvidenceRow,
+use crate::infra::knowledge_rows::{
+    KnowledgeChunkRow, KnowledgeDocumentRow, KnowledgeEvidenceRow, KnowledgeLibraryGenerationRow,
+    KnowledgeStructuredBlockRow, KnowledgeTechnicalFactRow,
 };
 use crate::services::query::execution::technical_literals::{
     detect_technical_literal_intent_from_query_ir, extract_config_section_literals,
@@ -108,9 +105,6 @@ fn query_ir_with_scope_literals_and_target_types<const L: usize, const T: usize>
 
 fn sample_document_row_for_preflight(document_id: Uuid, file_name: &str) -> KnowledgeDocumentRow {
     KnowledgeDocumentRow {
-        key: document_id.to_string(),
-        arango_id: None,
-        arango_rev: None,
         document_id,
         workspace_id: Uuid::now_v7(),
         library_id: Uuid::now_v7(),

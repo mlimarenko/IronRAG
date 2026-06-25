@@ -257,7 +257,7 @@ impl McpSearchFixture {
 }
 
 #[tokio::test]
-#[ignore = "requires local postgres, redis, and arango services"]
+#[ignore = "requires local postgres and redis services"]
 async fn authorized_search_spans_multiple_libraries_and_returns_stable_scope_ids()
 -> anyhow::Result<()> {
     let settings = Settings::from_env().context("failed to load settings for mcp search test")?;
@@ -341,7 +341,7 @@ async fn authorized_search_spans_multiple_libraries_and_returns_stable_scope_ids
 }
 
 #[tokio::test]
-#[ignore = "requires local postgres, redis, and arango services"]
+#[ignore = "requires local postgres and redis services"]
 async fn empty_search_results_return_explicit_no_match_payload() -> anyhow::Result<()> {
     let settings = Settings::from_env().context("failed to load settings for empty search test")?;
     let fixture = McpSearchFixture::create(settings).await?;
@@ -379,7 +379,7 @@ async fn empty_search_results_return_explicit_no_match_payload() -> anyhow::Resu
 }
 
 #[tokio::test]
-#[ignore = "requires local postgres, redis, and arango services"]
+#[ignore = "requires local postgres and redis services"]
 async fn processing_and_failed_documents_surface_honest_readability_metadata_in_hits()
 -> anyhow::Result<()> {
     let settings = Settings::from_env().context("failed to load settings for search state test")?;
@@ -455,7 +455,7 @@ async fn processing_and_failed_documents_surface_honest_readability_metadata_in_
 }
 
 #[tokio::test]
-#[ignore = "requires local postgres, redis, and arango services"]
+#[ignore = "requires local postgres and redis services"]
 async fn processing_documents_with_extracted_text_surface_as_readable_hits() -> anyhow::Result<()> {
     let settings = Settings::from_env().context("failed to load settings for search state test")?;
     let fixture = McpSearchFixture::create(settings).await?;
@@ -510,7 +510,7 @@ async fn processing_documents_with_extracted_text_surface_as_readable_hits() -> 
 }
 
 #[tokio::test]
-#[ignore = "requires local postgres, redis, and arango services"]
+#[ignore = "requires local postgres and redis services"]
 async fn extracted_text_matches_are_searchable_without_chunk_rows_and_after_graph_failure()
 -> anyhow::Result<()> {
     let settings =
@@ -592,7 +592,7 @@ async fn extracted_text_matches_are_searchable_without_chunk_rows_and_after_grap
 }
 
 #[tokio::test]
-#[ignore = "requires local postgres, redis, and arango services"]
+#[ignore = "requires local postgres and redis services"]
 async fn inaccessible_library_filters_reject_search_instead_of_returning_partial_results()
 -> anyhow::Result<()> {
     let settings = Settings::from_env().context("failed to load settings for search auth test")?;
@@ -628,7 +628,7 @@ async fn inaccessible_library_filters_reject_search_instead_of_returning_partial
 }
 
 #[tokio::test]
-#[ignore = "requires local postgres, redis, and arango services"]
+#[ignore = "requires local postgres and redis services"]
 async fn search_documents_degrades_to_lexical_hits_when_vector_path_is_unavailable()
 -> anyhow::Result<()> {
     let settings =
@@ -678,7 +678,7 @@ async fn search_documents_degrades_to_lexical_hits_when_vector_path_is_unavailab
 }
 
 #[tokio::test]
-#[ignore = "requires local postgres, redis, and arango"]
+#[ignore = "requires local postgres and redis"]
 async fn search_documents_returns_structured_content_with_stable_envelope() -> anyhow::Result<()> {
     let settings = Settings::from_env().context("failed to load settings for mcp search test")?;
     let fixture = McpSearchFixture::create(settings).await?;

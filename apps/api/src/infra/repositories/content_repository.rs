@@ -1434,6 +1434,26 @@ pub async fn acquire_content_document_lock(
     Ok(transaction)
 }
 
+pub async fn acquire_content_library_storage_lock(
+    postgres: &PgPool,
+    library_id: Uuid,
+) -> Result<Transaction<'static, Postgres>, sqlx::Error> {
+    let mut transaction = postgres.begin().await?;
+    acquire_content_library_storage_lock_in_tx(&mut transaction, library_id).await?;
+    Ok(transaction)
+}
+
+pub async fn acquire_content_library_storage_lock_in_tx(
+    transaction: &mut Transaction<'_, Postgres>,
+    library_id: Uuid,
+) -> Result<(), sqlx::Error> {
+    sqlx::query("select pg_advisory_xact_lock(hashtextextended($1::text, 0))")
+        .bind(format!("content.library.storage:{library_id}"))
+        .execute(&mut **transaction)
+        .await?;
+    Ok(())
+}
+
 pub async fn release_content_mutation_lock(
     transaction: Transaction<'static, Postgres>,
     _mutation_id: Uuid,
@@ -1608,8 +1628,8 @@ pub async fn update_mutation_item(
 /// One row of the paginated document-list query. Joins the minimum set of
 /// tables required to render the document list card server-side (status,
 /// readiness, file_name fallback, source access) without any per-document
-/// round-trips. Readiness signals that live exclusively in ArangoDB
-/// (`knowledge_revision.text_state` etc.) are merged in by the caller.
+/// round-trips. Knowledge-plane readiness signals (`knowledge_revision.text_state`
+/// etc.) are merged in by the caller.
 #[derive(Debug, Clone, FromRow)]
 pub struct ContentDocumentListRow {
     pub id: Uuid,
@@ -1806,7 +1826,7 @@ pub async fn list_document_page_rows(
     // buckets the frontend filter surface exposes are:
     //   canceled / failed / processing / queued / ready
     // The graph_ready vs readable vs graph_sparse split is NOT part of this
-    // derivation — that requires the ArangoDB revision state which isn't in
+    // derivation — that requires the knowledge revision state which isn't in
     // the CTE. `ready` here means "readable revision exists and no terminal
     // failure signal" — the inspector panel surfaces the finer split.
     // Same LATERAL protection as `aggregate_document_list_status_counts`:
@@ -2175,7 +2195,7 @@ pub async fn search_document_metadata_rows(
                 when cardinality($4::text[]) > 0
                     and lower(d.external_key) like any($4) then 1280::double precision
                 -- Partial metadata matches are calibrated against the
-                -- Arango lexical lane that merges with these rows via
+                -- lexical knowledge lane that merges with these rows via
                 -- max(score): title_soft_raw is about 50, while useful
                 -- body BM25 hits commonly land in the low hundreds. A
                 -- single title token should not flood the result set, but

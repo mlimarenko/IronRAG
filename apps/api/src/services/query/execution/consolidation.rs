@@ -859,9 +859,9 @@ fn winner_anchor_windows(winner: &DocumentAggregate, budget: usize) -> Vec<(i32,
 }
 
 fn push_winner_row_by_index(
-    selected: &mut Vec<crate::infra::arangodb::document_store::KnowledgeChunkRow>,
+    selected: &mut Vec<crate::infra::knowledge_rows::KnowledgeChunkRow>,
     selected_indices: &mut BTreeSet<i32>,
-    rows_by_index: &BTreeMap<i32, crate::infra::arangodb::document_store::KnowledgeChunkRow>,
+    rows_by_index: &BTreeMap<i32, crate::infra::knowledge_rows::KnowledgeChunkRow>,
     chunk_index: i32,
     budget: usize,
 ) {
@@ -878,14 +878,13 @@ fn push_winner_row_by_index(
 fn select_winner_rows(
     winner: &DocumentAggregate,
     budget: usize,
-    fetched_rows: Vec<crate::infra::arangodb::document_store::KnowledgeChunkRow>,
-) -> Vec<crate::infra::arangodb::document_store::KnowledgeChunkRow> {
+    fetched_rows: Vec<crate::infra::knowledge_rows::KnowledgeChunkRow>,
+) -> Vec<crate::infra::knowledge_rows::KnowledgeChunkRow> {
     if budget == 0 || winner.ranked_content_anchors.is_empty() {
         return Vec::new();
     }
 
-    let mut rows_by_index =
-        BTreeMap::<i32, crate::infra::arangodb::document_store::KnowledgeChunkRow>::new();
+    let mut rows_by_index = BTreeMap::<i32, crate::infra::knowledge_rows::KnowledgeChunkRow>::new();
     for row in fetched_rows {
         if row.revision_id != winner.revision_id || is_source_profile_chunk_row(&row) {
             continue;
@@ -950,8 +949,8 @@ fn select_winner_rows(
 
 /// Pure decision stage — picks a winner document (or not) given the
 /// current reranked bundle and the compiled IR. Split from the
-/// orchestrator so unit tests can cover the decision without building
-/// an AppState / Arango stub.
+/// orchestrator so unit tests can cover the decision without building an
+/// `AppState`.
 ///
 /// Returns `Some((winner, reason, budget))` iff consolidation should
 /// proceed; otherwise `None`. `budget` is the number of top_k slots
@@ -1100,7 +1099,7 @@ pub(crate) fn apply_winner_chunks(
     focus_reason: FocusReason,
     budget: usize,
     top_k: usize,
-    fetched_rows: Vec<crate::infra::arangodb::document_store::KnowledgeChunkRow>,
+    fetched_rows: Vec<crate::infra::knowledge_rows::KnowledgeChunkRow>,
 ) -> ConsolidationDiagnostics {
     let (winner_label, winner_score_seed) = bundle
         .chunks
@@ -1186,8 +1185,8 @@ pub(crate) fn apply_winner_chunks(
 ///   `[winner_chunks_by_anchor_priority..., tangential_chunks...]`
 ///   truncated to the allocated winner budget + remaining slots
 ///   for top-scored tangentials.
-/// - Winner chunks are materialized from Arango via
-///   `list_chunks_by_revision_windows`; if that call fails, the bundle
+/// - Winner chunks are materialized via `list_chunks_by_revision_windows`; if
+///   that call fails, the bundle
 ///   is left untouched and `FocusReason::None` is returned (we'd
 ///   rather ship the original than panic the whole answer).
 pub(crate) async fn focused_document_consolidation(
@@ -1208,7 +1207,7 @@ pub(crate) async fn focused_document_consolidation(
     };
 
     let fetched = match state
-        .arango_document_store
+        .document_store
         .list_chunks_by_revision_windows(winner.revision_id, &windows)
         .await
     {
@@ -1245,7 +1244,7 @@ pub(crate) async fn focused_document_consolidation(
     diagnostics
 }
 
-fn chunk_source_text(chunk: &crate::infra::arangodb::document_store::KnowledgeChunkRow) -> String {
+fn chunk_source_text(chunk: &crate::infra::knowledge_rows::KnowledgeChunkRow) -> String {
     use crate::shared::extraction::text_render::repair_technical_layout_noise;
     if chunk.chunk_kind.as_deref() == Some("table_row") {
         return repair_technical_layout_noise(&chunk.normalized_text);
@@ -1290,7 +1289,7 @@ mod tests {
     use crate::domains::query_ir::{
         DocumentHint, EntityMention, EntityRole, QueryAct, QueryIR, QueryLanguage, QueryScope,
     };
-    use crate::infra::arangodb::document_store::KnowledgeChunkRow;
+    use crate::infra::knowledge_rows::KnowledgeChunkRow;
 
     const DEFAULT_TEST_QUESTION: &str = "Which focused document contains the requested evidence?";
 
@@ -1330,9 +1329,6 @@ mod tests {
         content: &str,
     ) -> KnowledgeChunkRow {
         KnowledgeChunkRow {
-            key: Uuid::now_v7().to_string(),
-            arango_id: None,
-            arango_rev: None,
             chunk_id: Uuid::now_v7(),
             workspace_id: Uuid::now_v7(),
             library_id: Uuid::now_v7(),

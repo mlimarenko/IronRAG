@@ -10,7 +10,7 @@ use crate::{
     domains::query::{GroupedReferenceKind, RuntimeQueryMode},
     domains::query_ir::{QueryAct, QueryIR, SourceSliceDirection},
     infra::{
-        arangodb::document_store::{KnowledgeDocumentRow, KnowledgeRevisionRow},
+        knowledge_rows::{KnowledgeDocumentRow, KnowledgeRevisionRow},
         repositories::catalog_repository,
     },
     services::content::document_hint::resolve_document_hint,
@@ -1117,8 +1117,8 @@ pub(crate) async fn load_query_execution_library_context(
     // bounded queries: one Postgres aggregate for the summary counts,
     // one `runtime_graph_snapshot` point lookup, and one keyset page
     // (limit 12) for the recent-documents section fed into the prompt.
-    // The previous implementation enumerated every document + 6 Arango
-    // prefetches per call, which on a 5k-doc library burned ~180 s per
+    // The previous implementation enumerated every document plus multiple
+    // per-document prefetches per call, which on a 5k-doc library burned ~180 s per
     // query turn before the outer timeout cut it off.
     let metrics =
         crate::infra::repositories::content_repository::aggregate_library_document_metrics(
@@ -1438,7 +1438,7 @@ async fn load_retrieved_document_hint(
     document: &KnowledgeDocumentRow,
 ) -> Option<String> {
     let revision_id = document.readable_revision_id.or(document.active_revision_id)?;
-    let revision = state.arango_document_store.get_revision(revision_id).await.ok()??;
+    let revision = state.document_store.get_revision(revision_id).await.ok()??;
     resolve_retrieved_document_hint(state, document, Some(&revision)).await
 }
 
@@ -1455,13 +1455,13 @@ async fn load_retrieved_document_preview_and_hint(
     // ingest run is still processing but has not landed yet.
     let revision_id = document.readable_revision_id.or(document.active_revision_id)?;
 
-    let revision_future = state.arango_document_store.get_revision(revision_id);
+    let revision_future = state.document_store.get_revision(revision_id);
     // The preview only consumes the first few reading-order chunks, so
     // fetch a small head window instead of scanning the whole revision
     // (a large document can hold thousands of chunks). Extra headroom
     // covers empty/profile chunks dropped during normalization below.
     let chunks_future = state
-        .arango_document_store
+        .document_store
         .list_head_chunks_by_revision(revision_id, RETRIEVED_DOCUMENT_BRIEF_SOURCE_CHUNKS * 4);
     let (revision_result, chunks_result) =
         futures::future::join(revision_future, chunks_future).await;
@@ -1493,7 +1493,7 @@ async fn load_retrieved_document_preview_and_hint(
 async fn resolve_retrieved_document_hint(
     state: &AppState,
     document: &KnowledgeDocumentRow,
-    arango_revision: Option<&KnowledgeRevisionRow>,
+    knowledge_revision: Option<&KnowledgeRevisionRow>,
 ) -> Option<String> {
     let library_setting =
         catalog_repository::get_library_by_id(&state.persistence.postgres, document.library_id)
@@ -1506,10 +1506,10 @@ async fn resolve_retrieved_document_hint(
     let document_title = document
         .title
         .as_deref()
-        .or_else(|| arango_revision.and_then(|revision| revision.title.as_deref()))
+        .or_else(|| knowledge_revision.and_then(|revision| revision.title.as_deref()))
         .or(Some(document.external_key.as_str()));
 
-    let resolved = arango_revision.and_then(|revision| {
+    let resolved = knowledge_revision.and_then(|revision| {
         resolve_document_hint(
             &revision.revision_kind,
             revision.source_uri.as_deref(),

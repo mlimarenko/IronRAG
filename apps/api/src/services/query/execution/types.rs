@@ -7,7 +7,7 @@ use crate::{
         provider_profiles::{EffectiveProviderProfile, ProviderModelSelection},
         query::{QueryVerificationState, QueryVerificationWarning, RuntimeQueryMode},
     },
-    infra::arangodb::document_store::{
+    infra::knowledge_rows::{
         KnowledgeChunkRow, KnowledgeDocumentRow, KnowledgeStructuredBlockRow,
         KnowledgeTechnicalFactRow,
     },
@@ -318,7 +318,7 @@ pub(crate) struct RuntimeAnswerVerification {
 
 #[derive(Debug, Clone)]
 pub(crate) struct CanonicalAnswerEvidence {
-    pub(crate) bundle: Option<crate::infra::arangodb::context_store::KnowledgeContextBundleRow>,
+    pub(crate) bundle: Option<crate::infra::knowledge_rows::KnowledgeContextBundleRow>,
     pub(crate) chunk_rows: Vec<KnowledgeChunkRow>,
     pub(crate) structured_blocks: Vec<KnowledgeStructuredBlockRow>,
     pub(crate) technical_facts: Vec<KnowledgeTechnicalFactRow>,
@@ -531,9 +531,6 @@ pub(crate) fn sample_chunk_row(
     revision_id: Uuid,
 ) -> KnowledgeChunkRow {
     KnowledgeChunkRow {
-        key: chunk_id.to_string(),
-        arango_id: None,
-        arango_rev: None,
         chunk_id,
         workspace_id: Uuid::now_v7(),
         library_id: Uuid::now_v7(),
@@ -571,9 +568,6 @@ pub(crate) fn sample_structured_block_row(
 ) -> KnowledgeStructuredBlockRow {
     let now = chrono::Utc::now();
     KnowledgeStructuredBlockRow {
-        key: block_id.to_string(),
-        arango_id: None,
-        arango_rev: None,
         block_id,
         workspace_id: Uuid::now_v7(),
         library_id: Uuid::now_v7(),
@@ -604,9 +598,6 @@ pub(crate) fn sample_technical_fact_row(
 ) -> KnowledgeTechnicalFactRow {
     let now = chrono::Utc::now();
     KnowledgeTechnicalFactRow {
-        key: fact_id.to_string(),
-        arango_id: None,
-        arango_rev: None,
         fact_id,
         workspace_id: Uuid::now_v7(),
         library_id: Uuid::now_v7(),

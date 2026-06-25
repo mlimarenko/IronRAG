@@ -9,21 +9,8 @@ fn sample_settings() -> Settings {
         database_max_connections: 20,
         api_replicas: 1,
         worker_replicas: 1,
-        knowledge_plane_backend: "arango".into(),
+        knowledge_plane_backend: "postgres".into(),
         redis_url: "redis://127.0.0.1:6379".into(),
-        arangodb_url: "http://127.0.0.1:8529".into(),
-        arangodb_database: "ironrag".into(),
-        arangodb_username: "root".into(),
-        arangodb_password: "ironrag-dev".into(),
-        arangodb_request_timeout_seconds: 15,
-        arangodb_bootstrap_collections: true,
-        arangodb_bootstrap_views: true,
-        arangodb_bootstrap_graph: true,
-        arangodb_bootstrap_vector_indexes: true,
-        arangodb_vector_dimensions: 3072,
-        arangodb_vector_index_n_lists: 100,
-        arangodb_vector_index_default_n_probe: 8,
-        arangodb_vector_index_training_iterations: 25,
         service_name: "ironrag-backend".into(),
         environment: "local".into(),
         log_filter: "info".into(),
@@ -55,7 +42,6 @@ fn sample_settings() -> Settings {
         startup_authority_mode: "not_required".into(),
         dependency_postgres_mode: "external".into(),
         dependency_redis_mode: "external".into(),
-        dependency_arangodb_mode: "external".into(),
         dependency_object_storage_mode: "disabled".into(),
         content_storage_provider: "filesystem".into(),
         content_storage_topology: "single_node".into(),
@@ -150,7 +136,6 @@ fn settings_from_env_entries(entries: &[(&str, &str)]) -> Settings {
     validate_knowledge_plane_backend(&settings).expect("knowledge backend should validate");
     validate_database_settings(&settings).expect("database settings should validate");
     validate_service_name(&settings).expect("service name should validate");
-    validate_arangodb_settings(&settings).expect("arangodb settings should validate");
     validate_ingestion_settings(&settings).expect("ingestion settings should validate");
     validate_recognition_settings(&settings).expect("recognition settings should validate");
     validate_runtime_agent_settings(&settings).expect("runtime settings should validate");
@@ -171,11 +156,9 @@ fn from_env_has_sane_local_defaults() {
     assert_eq!(settings.database_max_connections, 20);
     assert_eq!(settings.api_replicas, 1);
     assert_eq!(settings.worker_replicas, 1);
-    assert_eq!(settings.knowledge_plane_backend, "arango");
+    assert_eq!(settings.knowledge_plane_backend, "postgres");
     assert_eq!(settings.ingestion_graph_extract_parallelism_per_doc, 16);
     assert_eq!(settings.redis_url, "redis://127.0.0.1:6379");
-    assert_eq!(settings.arangodb_url, "http://127.0.0.1:8529");
-    assert_eq!(settings.arangodb_database, "ironrag");
     assert_eq!(settings.log_filter, "info");
     assert_eq!(settings.ingestion_max_parallel_jobs_global, 64);
     assert_eq!(settings.ingestion_max_parallel_jobs_per_workspace, 16);
@@ -540,20 +523,6 @@ fn public_origin_settings_leave_local_http_session_cookies_non_secure() {
     let origins = settings.public_origin_settings();
 
     assert!(!origins.session_cookie_secure);
-}
-
-#[test]
-fn arango_settings_expose_bootstrap_toggles() {
-    let settings = sample_settings();
-    let arango = settings.arango_settings();
-
-    assert_eq!(arango.url, "http://127.0.0.1:8529");
-    assert_eq!(arango.database, "ironrag");
-    assert!(arango.bootstrap_collections);
-    assert!(arango.bootstrap_views);
-    assert!(arango.bootstrap_graph);
-    assert!(arango.bootstrap_vector_indexes);
-    assert_eq!(arango.vector_dimensions, 3072);
 }
 
 #[test]

@@ -7,7 +7,7 @@ use uuid::Uuid;
 use crate::{
     app::state::AppState,
     domains::query_ir::{QueryAct, QueryIR, QueryScope, SourceSliceDirection},
-    infra::arangodb::document_store::{KnowledgeChunkRow, KnowledgeDocumentRow},
+    infra::knowledge_rows::{KnowledgeChunkRow, KnowledgeDocumentRow},
     shared::extraction::table_summary::is_table_summary_text,
 };
 
@@ -57,7 +57,7 @@ pub(crate) async fn load_table_rows_for_documents(
             continue;
         };
         let rows = state
-            .arango_document_store
+            .document_store
             .list_chunks_by_revision(revision_id)
             .await
             .with_context(|| format!("failed to load table rows for document {document_id}"))?;
@@ -150,7 +150,7 @@ pub(crate) async fn load_table_section_sibling_chunks(
         .map(|(rank, chunk)| (chunk.chunk_id, (chunk.score.unwrap_or_default(), rank)))
         .collect::<HashMap<_, _>>();
     let anchor_rows = state
-        .arango_document_store
+        .document_store
         .list_chunks_by_ids(&anchor_chunk_ids)
         .await
         .context("failed to hydrate table section anchor chunks")?;
@@ -160,7 +160,7 @@ pub(crate) async fn load_table_section_sibling_chunks(
     }
 
     let sibling_rows = state
-        .arango_document_store
+        .document_store
         .list_chunks_by_revisions_windows(&windows)
         .await
         .context("failed to load table section sibling chunks")?;
@@ -304,9 +304,9 @@ pub(crate) async fn load_table_summary_chunks_for_documents(
             continue;
         };
         let revision_chunks =
-            state.arango_document_store.list_chunks_by_revision(revision_id).await.with_context(
-                || format!("failed to load table summaries for document {document_id}"),
-            )?;
+            state.document_store.list_chunks_by_revision(revision_id).await.with_context(|| {
+                format!("failed to load table summaries for document {document_id}")
+            })?;
         let synthetic_base_score = 0.01_f32;
         chunks.extend(
             revision_chunks
@@ -358,7 +358,7 @@ pub(crate) fn merge_canonical_table_aggregation_chunks(
 mod tests {
     use super::*;
     use crate::domains::query_ir::QueryLanguage;
-    use crate::infra::arangodb::document_store::KnowledgeChunkRow;
+    use crate::infra::knowledge_rows::KnowledgeChunkRow;
 
     fn table_row(
         chunk_id: Uuid,
@@ -368,9 +368,6 @@ mod tests {
         kind: &str,
     ) -> KnowledgeChunkRow {
         KnowledgeChunkRow {
-            key: chunk_id.to_string(),
-            arango_id: None,
-            arango_rev: None,
             chunk_id,
             workspace_id: Uuid::now_v7(),
             library_id: Uuid::now_v7(),

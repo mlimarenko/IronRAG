@@ -9,7 +9,7 @@ use crate::services::graph::extract::{GraphEntityCandidate, GraphRelationCandida
 use crate::{
     domains::runtime_graph::RuntimeNodeType,
     infra::{
-        arangodb::graph_store::{
+        knowledge_rows::{
             KnowledgeEntityCandidateRow, KnowledgeRelationCandidateRow,
             NewKnowledgeEntityCandidate, NewKnowledgeRelationCandidate,
         },
@@ -150,7 +150,7 @@ fn runtime_node_type_from_candidate_type(candidate_type: &str) -> RuntimeNodeTyp
 
 #[must_use]
 pub(super) fn build_materialized_extract_candidates(
-    revision: &crate::infra::arangodb::document_store::KnowledgeRevisionRow,
+    revision: &crate::infra::knowledge_rows::KnowledgeRevisionRow,
     chunk_result: &repositories::extract_repository::ExtractChunkResultRow,
     node_candidates: &[repositories::extract_repository::ExtractNodeCandidateRow],
     edge_candidates: &[repositories::extract_repository::ExtractEdgeCandidateRow],
@@ -387,7 +387,7 @@ pub(super) fn canonical_entity_candidate_id(
     node_type: &RuntimeNodeType,
 ) -> Uuid {
     stable_uuid(&format!(
-        "arango-entity-candidate:{library_id}:{revision_id}:{chunk_id}:{normalization_key}:{label}:{}",
+        "knowledge-entity-candidate:{library_id}:{revision_id}:{chunk_id}:{normalization_key}:{label}:{}",
         crate::services::graph::identity::runtime_node_type_slug(node_type)
     ))
 }
@@ -403,18 +403,18 @@ pub(super) fn canonical_relation_candidate_id(
     relation_type: &str,
 ) -> Uuid {
     stable_uuid(&format!(
-        "arango-relation-candidate:{library_id}:{revision_id}:{chunk_id}:{normalized_assertion}:{source_label}:{target_label}:{relation_type}"
+        "knowledge-relation-candidate:{library_id}:{revision_id}:{chunk_id}:{normalized_assertion}:{source_label}:{target_label}:{relation_type}"
     ))
 }
 
 #[must_use]
 pub(super) fn canonical_entity_id(library_id: Uuid, normalization_key: &str) -> Uuid {
-    stable_uuid(&format!("arango-entity:{library_id}:{normalization_key}"))
+    stable_uuid(&format!("knowledge-entity:{library_id}:{normalization_key}"))
 }
 
 #[must_use]
 pub(super) fn canonical_relation_id(library_id: Uuid, normalized_assertion: &str) -> Uuid {
-    stable_uuid(&format!("arango-relation:{library_id}:{normalized_assertion}"))
+    stable_uuid(&format!("knowledge-relation:{library_id}:{normalized_assertion}"))
 }
 
 #[must_use]
@@ -426,7 +426,7 @@ pub(super) fn canonical_evidence_id(
     canonical_key: &str,
 ) -> Uuid {
     stable_uuid(&format!(
-        "arango-evidence:{library_id}:{revision_id}:{}:{support_kind}:{canonical_key}",
+        "knowledge-evidence:{library_id}:{revision_id}:{}:{support_kind}:{canonical_key}",
         chunk_id.map(|value| value.to_string()).unwrap_or_else(|| "none".to_string())
     ))
 }
@@ -439,28 +439,4 @@ fn stable_uuid(seed: &str) -> Uuid {
     bytes[6] = (bytes[6] & 0x0f) | 0x50;
     bytes[8] = (bytes[8] & 0x3f) | 0x80;
     Uuid::from_bytes(bytes)
-}
-
-#[must_use]
-pub(super) fn canonical_document_revision_edge_key(document_id: Uuid, revision_id: Uuid) -> String {
-    format!("document:{document_id}:revision:{revision_id}")
-}
-
-#[must_use]
-pub(super) fn canonical_revision_chunk_edge_key(revision_id: Uuid, chunk_id: Uuid) -> String {
-    format!("revision:{revision_id}:chunk:{chunk_id}")
-}
-
-#[must_use]
-pub(super) fn canonical_edge_relation_key(
-    relation_id: Uuid,
-    entity_id: Uuid,
-    edge_kind: &str,
-) -> String {
-    format!("relation:{relation_id}:{edge_kind}:{entity_id}")
-}
-
-#[must_use]
-pub(super) fn canonical_chunk_mentions_entity_edge_key(chunk_id: Uuid, entity_id: Uuid) -> String {
-    format!("chunk:{chunk_id}:mentions:{entity_id}")
 }

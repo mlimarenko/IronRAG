@@ -10,14 +10,11 @@ use crate::{
         query::{QueryTurnKind, QueryVerificationState},
     },
     infra::{
-        arangodb::{
-            context_store::{
-                KnowledgeBundleChunkReferenceRow, KnowledgeBundleEntityReferenceRow,
-                KnowledgeBundleRelationReferenceRow, KnowledgeContextBundleReferenceSetRow,
-                KnowledgeContextBundleRow,
-            },
-            document_store::{KnowledgeChunkRow, KnowledgeStructuredBlockRow},
-            graph_store::KnowledgeEvidenceRow,
+        knowledge_rows::{
+            KnowledgeBundleChunkReferenceRow, KnowledgeBundleEntityReferenceRow,
+            KnowledgeBundleRelationReferenceRow, KnowledgeChunkRow,
+            KnowledgeContextBundleReferenceSetRow, KnowledgeContextBundleRow, KnowledgeEvidenceRow,
+            KnowledgeStructuredBlockRow,
         },
         repositories::query_repository,
     },
@@ -154,9 +151,6 @@ fn derive_fact_rank_refs_merges_evidence_and_selected_fact_ids() {
     let evidence_id = Uuid::now_v7();
     let bundle = KnowledgeContextBundleReferenceSetRow {
         bundle: KnowledgeContextBundleRow {
-            key: bundle_id.to_string(),
-            arango_id: None,
-            arango_rev: None,
             bundle_id,
             workspace_id: Uuid::now_v7(),
             library_id: Uuid::now_v7(),
@@ -178,8 +172,7 @@ fn derive_fact_rank_refs_merges_evidence_and_selected_fact_ids() {
         entity_references: Vec::new(),
         relation_references: Vec::new(),
         evidence_references: vec![
-            crate::infra::arangodb::context_store::KnowledgeBundleEvidenceReferenceRow {
-                key: format!("{bundle_id}:{evidence_id}"),
+            crate::infra::knowledge_rows::KnowledgeBundleEvidenceReferenceRow {
                 bundle_id,
                 evidence_id,
                 rank: 2,
@@ -190,9 +183,6 @@ fn derive_fact_rank_refs_merges_evidence_and_selected_fact_ids() {
         ],
     };
     let evidence_rows = vec![KnowledgeEvidenceRow {
-        key: evidence_id.to_string(),
-        arango_id: None,
-        arango_rev: None,
         evidence_id,
         workspace_id: bundle.bundle.workspace_id,
         library_id: bundle.bundle.library_id,
@@ -227,9 +217,6 @@ fn selected_fact_ids_for_detail_stays_bounded_to_canonical_limit() {
     let selected_fact_id = Uuid::now_v7();
     let bundle = KnowledgeContextBundleReferenceSetRow {
         bundle: KnowledgeContextBundleRow {
-            key: bundle_id.to_string(),
-            arango_id: None,
-            arango_rev: None,
             bundle_id,
             workspace_id: Uuid::now_v7(),
             library_id: Uuid::now_v7(),
@@ -277,9 +264,6 @@ fn graph_references_for_detail_stay_bounded_and_ranked() {
     let total = MAX_DETAIL_GRAPH_NODE_REFERENCES + 8;
     let bundle = KnowledgeContextBundleReferenceSetRow {
         bundle: KnowledgeContextBundleRow {
-            key: bundle_id.to_string(),
-            arango_id: None,
-            arango_rev: None,
             bundle_id,
             workspace_id: Uuid::now_v7(),
             library_id: Uuid::now_v7(),
@@ -303,7 +287,6 @@ fn graph_references_for_detail_stay_bounded_and_ranked() {
                 let rank = i32::try_from(total - index).expect("synthetic rank fits i32");
                 let entity_id = Uuid::now_v7();
                 KnowledgeBundleEntityReferenceRow {
-                    key: format!("{bundle_id}:{entity_id}"),
                     bundle_id,
                     entity_id,
                     rank,
@@ -319,7 +302,6 @@ fn graph_references_for_detail_stay_bounded_and_ranked() {
                 let rank = i32::try_from(total - index).expect("synthetic rank fits i32");
                 let relation_id = Uuid::now_v7();
                 KnowledgeBundleRelationReferenceRow {
-                    key: format!("{bundle_id}:{relation_id}"),
                     bundle_id,
                     relation_id,
                     rank,
@@ -356,9 +338,6 @@ fn build_prepared_segment_references_prioritizes_query_matching_headings_and_lim
     let control_revision_id = Uuid::now_v7();
     let bundle = KnowledgeContextBundleReferenceSetRow {
         bundle: KnowledgeContextBundleRow {
-            key: bundle_id.to_string(),
-            arango_id: None,
-            arango_rev: None,
             bundle_id,
             workspace_id: Uuid::now_v7(),
             library_id: Uuid::now_v7(),
@@ -386,9 +365,6 @@ fn build_prepared_segment_references_prioritizes_query_matching_headings_and_lim
     for ordinal in 0..12_i32 {
         let block_id = Uuid::now_v7();
         blocks.push(KnowledgeStructuredBlockRow {
-            key: block_id.to_string(),
-            arango_id: None,
-            arango_rev: None,
             block_id,
             workspace_id: Uuid::now_v7(),
             library_id: Uuid::now_v7(),
@@ -420,9 +396,6 @@ fn build_prepared_segment_references_prioritizes_query_matching_headings_and_lim
     }
     let control_heading_id = Uuid::now_v7();
     blocks.push(KnowledgeStructuredBlockRow {
-        key: control_heading_id.to_string(),
-        arango_id: None,
-        arango_rev: None,
         block_id: control_heading_id,
         workspace_id: Uuid::now_v7(),
         library_id: Uuid::now_v7(),
@@ -1849,7 +1822,6 @@ fn prior_grounded_answer_replay_selection_preserves_newest_first_order() {
 
 fn test_chunk_reference(chunk_id: Uuid, rank: i32, score: f64) -> KnowledgeBundleChunkReferenceRow {
     KnowledgeBundleChunkReferenceRow {
-        key: format!("chunk-ref-{chunk_id}"),
         bundle_id: Uuid::now_v7(),
         chunk_id,
         rank,
@@ -1897,9 +1869,6 @@ fn test_chunk_row(
     heading_trail: &[&str],
 ) -> KnowledgeChunkRow {
     KnowledgeChunkRow {
-        key: format!("chunk-{chunk_id}"),
-        arango_id: None,
-        arango_rev: None,
         chunk_id,
         workspace_id: Uuid::now_v7(),
         library_id,

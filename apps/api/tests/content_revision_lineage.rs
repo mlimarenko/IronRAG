@@ -40,11 +40,11 @@ async fn canonical_content_lifecycle_preserves_logical_document_identity_and_rev
 
         let knowledge_document = fixture
             .state
-            .arango_document_store
+            .document_store
             .get_document(document.id)
             .await
             .context("failed to load knowledge document shell for content lifecycle")?
-            .context("knowledge document shell missing from arango")?;
+            .context("knowledge document shell missing from store")?;
         assert_eq!(knowledge_document.external_key, external_key);
         assert_eq!(knowledge_document.document_state, "active");
 
@@ -120,7 +120,7 @@ async fn canonical_content_lifecycle_preserves_logical_document_identity_and_rev
 
         let knowledge_revisions = fixture
             .state
-            .arango_document_store
+            .document_store
             .list_revisions_by_document(document.id)
             .await
             .context("failed to list knowledge revisions for content lifecycle")?;

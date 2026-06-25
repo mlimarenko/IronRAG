@@ -10,8 +10,6 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use std::sync::Arc;
-
 use anyhow::{Context, Result};
 use axum::{
     Router,
@@ -112,13 +110,9 @@ impl InboundFixture {
             PgPoolOptions::new().max_connections(4).connect(&settings.database_url).await?;
         sqlx::migrate!("./migrations").run(&postgres).await?;
 
-        let arango_client = Arc::new(
-            ironrag_backend::infra::arangodb::client::ArangoClient::from_settings(&settings)
-                .context("arango client for inbound stub test")?,
-        );
         let redis = redis::Client::open(settings.redis_url.clone()).context("redis client")?;
         let persistence = Persistence::for_tests(postgres, redis);
-        let state = AppState::from_dependencies(settings, persistence, arango_client)?;
+        let state = AppState::from_dependencies(settings, persistence)?;
 
         let ws = state
             .canonical_services

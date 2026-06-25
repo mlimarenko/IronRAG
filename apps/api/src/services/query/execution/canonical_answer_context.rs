@@ -6,7 +6,7 @@ use uuid::Uuid;
 use crate::{
     app::state::AppState,
     domains::query_ir::{QueryAct, QueryIR, QueryScope},
-    infra::arangodb::document_store::{KnowledgeChunkRow, KnowledgeDocumentRow},
+    infra::knowledge_rows::{KnowledgeChunkRow, KnowledgeDocumentRow},
     services::query::effective_query::structured_current_question_segment,
     services::query::text_match::{near_token_match, normalized_alnum_tokens},
     shared::extraction::text_render::repair_technical_layout_noise,
@@ -81,7 +81,7 @@ pub(crate) async fn load_direct_targeted_table_answer(
         .unwrap_or_else(|| document.external_key.clone());
     let row_limit = row_count.unwrap_or(16);
     let initial_rows = state
-        .arango_document_store
+        .document_store
         .list_structured_blocks_by_revision(revision_id)
         .await
         .context("failed to load structured blocks for direct initial row answer")?
@@ -201,7 +201,7 @@ pub(crate) async fn load_canonical_answer_chunks(
     }
 
     let Some(bundle_refs) = state
-        .arango_context_store
+        .context_store
         .get_bundle_reference_set_by_query_execution(execution_id)
         .await
         .with_context(|| {
@@ -253,7 +253,7 @@ pub(crate) async fn load_canonical_answer_chunks(
     }
     let plan_keywords = crate::services::query::planner::extract_keywords(question);
     let rows = state
-        .arango_document_store
+        .document_store
         .list_chunks_by_ids(&chunk_ids)
         .await
         .context("failed to load canonical answer chunks")?;
@@ -435,14 +435,12 @@ async fn augment_with_source_coverage_chunks(
             continue;
         };
         let rows =
-            state.arango_document_store.list_chunks_by_revision(revision_id).await.with_context(
-                || {
-                    format!(
-                        "failed to load source coverage chunks for document {} revision {}",
-                        document_id, revision_id
-                    )
-                },
-            )?;
+            state.document_store.list_chunks_by_revision(revision_id).await.with_context(|| {
+                format!(
+                    "failed to load source coverage chunks for document {} revision {}",
+                    document_id, revision_id
+                )
+            })?;
         for row in select_source_coverage_chunk_rows(
             rows,
             SOURCE_COVERAGE_CHUNKS_PER_DOCUMENT,
@@ -714,7 +712,7 @@ pub(crate) async fn load_canonical_answer_evidence(
     execution_id: Uuid,
 ) -> anyhow::Result<CanonicalAnswerEvidence> {
     let Some(bundle_refs) = state
-        .arango_context_store
+        .context_store
         .get_bundle_reference_set_by_query_execution(execution_id)
         .await
         .with_context(|| {
@@ -732,7 +730,7 @@ pub(crate) async fn load_canonical_answer_evidence(
     let chunk_ids =
         bundle_refs.chunk_references.iter().map(|reference| reference.chunk_id).collect::<Vec<_>>();
     let evidence_rows = state
-        .arango_graph_store
+        .graph_store
         .list_evidence_by_ids(
             &bundle_refs
                 .evidence_references
@@ -743,12 +741,12 @@ pub(crate) async fn load_canonical_answer_evidence(
         .await
         .context("failed to load evidence rows for canonical answer context")?;
     let chunk_rows = state
-        .arango_document_store
+        .document_store
         .list_chunks_by_ids(&chunk_ids)
         .await
         .context("failed to load chunks for canonical answer context")?;
     let chunk_supported_facts =
-        state.arango_document_store.list_technical_facts_by_chunk_ids(&chunk_ids).await.context(
+        state.document_store.list_technical_facts_by_chunk_ids(&chunk_ids).await.context(
             "failed to load chunk-supported technical facts for canonical answer context",
         )?;
     let mut fact_ids = selected_fact_ids_for_canonical_evidence(
@@ -765,7 +763,7 @@ pub(crate) async fn load_canonical_answer_evidence(
         }
     }
     let mut technical_facts = state
-        .arango_document_store
+        .document_store
         .list_technical_facts_by_ids(&fact_ids)
         .await
         .context("failed to load technical facts for canonical answer context")?;
@@ -795,7 +793,7 @@ pub(crate) async fn load_canonical_answer_evidence(
         }
     }
     let structured_blocks = state
-        .arango_document_store
+        .document_store
         .list_structured_blocks_by_ids(&block_ids)
         .await
         .context("failed to load structured blocks for canonical answer context")?;
@@ -809,8 +807,8 @@ pub(crate) async fn load_canonical_answer_evidence(
 
 pub(crate) fn selected_fact_ids_for_canonical_evidence(
     selected_fact_ids: &[Uuid],
-    evidence_rows: &[crate::infra::arangodb::graph_store::KnowledgeEvidenceRow],
-    chunk_supported_facts: &[crate::infra::arangodb::document_store::KnowledgeTechnicalFactRow],
+    evidence_rows: &[crate::infra::knowledge_rows::KnowledgeEvidenceRow],
+    chunk_supported_facts: &[crate::infra::knowledge_rows::KnowledgeTechnicalFactRow],
 ) -> Vec<Uuid> {
     let mut fact_ids = selected_fact_ids.to_vec();
     for evidence in evidence_rows {
@@ -1291,7 +1289,7 @@ async fn load_image_revision_ids(
         return Ok(HashSet::new());
     }
     let revisions = state
-        .arango_document_store
+        .document_store
         .list_structured_revisions_by_revision_ids(&revision_ids)
         .await
         .context("failed to load structured revisions for image deprioritization")?;
@@ -1332,9 +1330,6 @@ mod source_coverage_tests {
     fn chunk_row(chunk_index: i32, text: &str) -> KnowledgeChunkRow {
         let chunk_id = Uuid::now_v7();
         KnowledgeChunkRow {
-            key: chunk_id.to_string(),
-            arango_id: None,
-            arango_rev: None,
             chunk_id,
             workspace_id: Uuid::now_v7(),
             library_id: Uuid::now_v7(),

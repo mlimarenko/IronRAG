@@ -298,7 +298,7 @@ async fn build_readiness_response(
 
     if let Some(revision_id) = knowledge_revision_id {
         let revision = state
-            .arango_document_store
+            .document_store
             .get_revision(revision_id)
             .await
             .map_err(|e| ApiError::internal_with_log(e, "internal"))?

@@ -9,7 +9,7 @@ use uuid::Uuid;
 use crate::{
     app::state::AppState,
     domains::ai::AiBindingPurpose,
-    infra::{arangodb::search_store::KNOWLEDGE_CHUNK_VECTOR_KIND, repositories::ai_repository},
+    infra::{knowledge_rows::KNOWLEDGE_CHUNK_VECTOR_KIND, repositories::ai_repository},
     integrations::llm::EmbeddingRequest,
 };
 
@@ -85,7 +85,7 @@ pub async fn library_vector_index_dimensions(
         dim
     } else if let Some(dim) = select_persisted_chunk_vector_dimension(
         &state
-            .arango_search_store
+            .search_store
             .list_chunk_vector_dimensions(
                 library_id,
                 &binding.model_catalog_id.to_string(),

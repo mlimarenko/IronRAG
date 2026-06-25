@@ -13,9 +13,9 @@ use crate::{
         TechnicalFactReference,
     },
     infra::{
-        arangodb::{
-            context_store::KnowledgeContextBundleReferenceSetRow,
-            document_store::{KnowledgeStructuredBlockRow, KnowledgeTechnicalFactRow},
+        knowledge_rows::{
+            KnowledgeContextBundleReferenceSetRow, KnowledgeStructuredBlockRow,
+            KnowledgeTechnicalFactRow,
         },
         repositories::{self as graph_repo, query_repository, runtime_repository},
     },

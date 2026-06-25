@@ -11,9 +11,7 @@ use crate::{
     },
     domains::query_ir::literal_text_is_identifier_shaped,
     infra::{
-        arangodb::{
-            context_store::KnowledgeBundleChunkReferenceRow, document_store::KnowledgeChunkRow,
-        },
+        knowledge_rows::{KnowledgeBundleChunkReferenceRow, KnowledgeChunkRow},
         repositories::query_repository,
     },
     integrations::llm::ChatMessage,
@@ -320,7 +318,7 @@ pub(crate) async fn load_prior_grounded_answer_context_messages(
             break;
         }
         let bundle = match state
-            .arango_context_store
+            .context_store
             .get_bundle_reference_set_by_query_execution(execution.id)
             .await
         {
@@ -347,7 +345,7 @@ pub(crate) async fn load_prior_grounded_answer_context_messages(
         }
         let chunk_ids =
             candidate_refs.iter().map(|reference| reference.chunk_id).collect::<Vec<_>>();
-        let chunk_rows = match state.arango_document_store.list_chunks_by_ids(&chunk_ids).await {
+        let chunk_rows = match state.document_store.list_chunks_by_ids(&chunk_ids).await {
             Ok(rows) => rows,
             Err(error) => {
                 tracing::warn!(

@@ -7,7 +7,7 @@ use super::answer_kind::AnswerKind;
 use crate::{
     app::state::AppState,
     domains::query_ir::{QueryAct, QueryIR, QueryScope, literal_text_is_identifier_shaped},
-    infra::arangodb::document_store::{KnowledgeDocumentRow, KnowledgeStructuredBlockRow},
+    infra::knowledge_rows::{KnowledgeDocumentRow, KnowledgeStructuredBlockRow},
     services::query::{
         effective_query::{current_question_segment, structured_current_question_segment},
         planner::QueryIntentProfile,
@@ -1614,7 +1614,7 @@ async fn augment_setup_preflight_structured_blocks(
     };
 
     let revision_blocks = state
-        .arango_document_store
+        .document_store
         .list_structured_blocks_by_revision(revision_id)
         .await
         .context("failed to load focused setup structured blocks for canonical preflight")?;

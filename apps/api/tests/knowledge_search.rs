@@ -11,7 +11,6 @@ use axum::{
 };
 use chrono::Utc;
 use http_body_util::BodyExt;
-use reqwest::{Client, StatusCode as ReqwestStatusCode};
 use serde_json::{Value, json};
 use sqlx::{PgPool, postgres::PgPoolOptions};
 use tokio::time::{Instant, sleep};
@@ -20,25 +19,19 @@ use uuid::Uuid;
 
 use ironrag_backend::{
     app::{config::Settings, state::AppState},
-    infra::arangodb::{
-        bootstrap::{ArangoBootstrapOptions, bootstrap_knowledge_plane},
-        client::ArangoClient,
-        collections::{
-            KNOWLEDGE_CHUNK_COLLECTION, KNOWLEDGE_CHUNK_VECTOR_COLLECTION,
-            KNOWLEDGE_ENTITY_VECTOR_COLLECTION, KNOWLEDGE_SEARCH_VIEW,
-            chunk_vector_collection_for_dim, entity_vector_collection_for_dim,
+    infra::repositories::{self, ai_repository, iam_repository},
+    infra::{
+        knowledge_plane::{DocumentStore, GraphStore, SearchStore},
+        knowledge_rows::{
+            KNOWLEDGE_CHUNK_VECTOR_KIND, KnowledgeChunkRow, KnowledgeChunkVectorRow,
+            KnowledgeDocumentRow, KnowledgeEntityVectorRow, KnowledgeRevisionRow,
+            KnowledgeTechnicalFactRow, NewKnowledgeEntity, NewKnowledgeEvidence,
         },
-        document_store::{
-            ArangoDocumentStore, KnowledgeChunkRow, KnowledgeDocumentRow, KnowledgeRevisionRow,
-            KnowledgeTechnicalFactRow,
-        },
-        graph_store::{ArangoGraphStore, NewKnowledgeEntity, NewKnowledgeEvidence},
-        search_store::{
-            ArangoSearchStore, KNOWLEDGE_CHUNK_VECTOR_KIND, KnowledgeChunkVectorRow,
-            KnowledgeEntityVectorRow,
+        postgres::{
+            pg_document_store::PgDocumentStore, pg_graph_store::PgGraphStore,
+            pg_search_store::PgSearchStore,
         },
     },
-    infra::repositories::{self, ai_repository, iam_repository},
     integrations::llm::{EmbeddingRequest, EmbeddingResponse, LlmGateway},
     interfaces::http::{auth::hash_token, authorization::PERMISSION_LIBRARY_READ, router},
     services::query::search::SearchService,
@@ -47,183 +40,42 @@ use ironrag_backend::{
 const SEARCH_WAIT_TIMEOUT: Duration = Duration::from_secs(15);
 const SEARCH_POLL_INTERVAL: Duration = Duration::from_millis(250);
 
-struct TempArangoDatabase {
-    base_url: String,
-    username: String,
-    password: String,
-    name: String,
-    http: Client,
-}
-
-impl TempArangoDatabase {
-    async fn create(settings: &Settings) -> Result<Self> {
-        let base_url = settings.arangodb_url.trim().trim_end_matches('/').to_string();
-        let name = format!("knowledge_search_{}", Uuid::now_v7().simple());
-        let http = Client::builder()
-            .timeout(Duration::from_secs(settings.arangodb_request_timeout_seconds.max(1)))
-            .build()
-            .context("failed to build ArangoDB admin http client")?;
-        let response = http
-            .post(format!("{base_url}/_api/database"))
-            .basic_auth(&settings.arangodb_username, Some(&settings.arangodb_password))
-            .json(&serde_json::json!({ "name": name }))
-            .send()
-            .await
-            .context("failed to create temp ArangoDB database")?;
-        if !response.status().is_success() {
-            return Err(anyhow!(
-                "failed to create temp ArangoDB database {}: status {}",
-                name,
-                response.status()
-            ));
-        }
-
-        Ok(Self {
-            base_url,
-            username: settings.arangodb_username.clone(),
-            password: settings.arangodb_password.clone(),
-            name,
-            http,
-        })
-    }
-
-    async fn drop(self) -> Result<()> {
-        let response = self
-            .http
-            .delete(format!("{}/_api/database/{}", self.base_url, self.name))
-            .basic_auth(&self.username, Some(&self.password))
-            .send()
-            .await
-            .context("failed to drop temp ArangoDB database")?;
-        if response.status() != ReqwestStatusCode::NOT_FOUND && !response.status().is_success() {
-            return Err(anyhow!(
-                "failed to drop temp ArangoDB database {}: status {}",
-                self.name,
-                response.status()
-            ));
-        }
-        Ok(())
-    }
-
-    async fn has_collection(&self, collection_name: &str) -> Result<bool> {
-        let response = self
-            .http
-            .get(format!("{}/_db/{}/_api/collection/{}", self.base_url, self.name, collection_name))
-            .basic_auth(&self.username, Some(&self.password))
-            .send()
-            .await
-            .with_context(|| format!("failed to query collection {collection_name}"))?;
-        if response.status() == ReqwestStatusCode::NOT_FOUND {
-            return Ok(false);
-        }
-        if !response.status().is_success() {
-            return Err(anyhow!(
-                "failed to query collection {}: status {}",
-                collection_name,
-                response.status()
-            ));
-        }
-        Ok(true)
-    }
-
-    async fn drop_collection(&self, collection_name: &str) -> Result<()> {
-        let response = self
-            .http
-            .delete(format!(
-                "{}/_db/{}/_api/collection/{}",
-                self.base_url, self.name, collection_name
-            ))
-            .basic_auth(&self.username, Some(&self.password))
-            .send()
-            .await
-            .with_context(|| format!("failed to drop collection {collection_name}"))?;
-        if response.status() != ReqwestStatusCode::NOT_FOUND && !response.status().is_success() {
-            return Err(anyhow!(
-                "failed to drop collection {}: status {}",
-                collection_name,
-                response.status()
-            ));
-        }
-        Ok(())
-    }
-}
-
 struct KnowledgeSearchFixture {
-    temp_database: TempArangoDatabase,
-    settings: Settings,
-    client: Arc<ArangoClient>,
-    document_store: ArangoDocumentStore,
-    graph_store: ArangoGraphStore,
-    search_store: ArangoSearchStore,
+    temp_database: TempPostgresDatabase,
+    postgres: PgPool,
+    document_store: PgDocumentStore,
+    graph_store: PgGraphStore,
+    search_store: PgSearchStore,
 }
 
 impl KnowledgeSearchFixture {
     async fn create() -> Result<Self> {
         let mut settings =
             Settings::from_env().context("failed to load settings for knowledge search tests")?;
-        let temp_database = TempArangoDatabase::create(&settings).await?;
-        settings.arangodb_database = temp_database.name.clone();
-        let client = Arc::new(
-            ArangoClient::from_settings(&settings).context("failed to build Arango client")?,
-        );
-        client.ping().await.context("failed to ping temp ArangoDB database")?;
-        bootstrap_knowledge_plane(
-            &client,
-            &ArangoBootstrapOptions {
-                collections: true,
-                views: true,
-                graph: true,
-                vector_indexes: false,
-                vector_dimensions: 3072,
-                vector_index_n_lists: 100,
-                vector_index_default_n_probe: 8,
-                vector_index_training_iterations: 25,
-            },
-        )
-        .await
-        .context("failed to bootstrap temp Arango knowledge plane")?;
+        let temp_database = TempPostgresDatabase::create(&settings.database_url).await?;
+        settings.database_url = temp_database.database_url.clone();
+        let postgres = PgPoolOptions::new()
+            .max_connections(4)
+            .connect(&settings.database_url)
+            .await
+            .context("failed to connect knowledge search postgres")?;
+        sqlx::migrate!("./migrations")
+            .run(&postgres)
+            .await
+            .context("failed to apply knowledge search migrations")?;
 
         Ok(Self {
-            document_store: ArangoDocumentStore::new(Arc::clone(&client)),
-            graph_store: ArangoGraphStore::new(Arc::clone(&client)),
-            search_store: ArangoSearchStore::new(
-                Arc::clone(&client),
-                ironrag_backend::infra::arangodb::search_store::VectorIndexParams {
-                    n_lists: 100,
-                    default_n_probe: 8,
-                    training_iterations: 25,
-                },
-            ),
             temp_database,
-            settings,
-            client,
+            postgres: postgres.clone(),
+            document_store: PgDocumentStore { pool: postgres.clone() },
+            graph_store: PgGraphStore { pool: postgres.clone() },
+            search_store: PgSearchStore { pool: postgres.clone() },
         })
     }
 
     async fn cleanup(self) -> Result<()> {
+        self.postgres.close().await;
         self.temp_database.drop().await
-    }
-
-    async fn fetch_view_properties(&self, view_name: &str) -> Result<Value> {
-        let response = Client::new()
-            .get(self.client.database_api_url(&format!("_api/view/{view_name}/properties")))
-            .basic_auth(&self.settings.arangodb_username, Some(&self.settings.arangodb_password))
-            .send()
-            .await
-            .with_context(|| {
-                format!("failed to fetch ArangoSearch view properties for {view_name}")
-            })?;
-        if !response.status().is_success() {
-            return Err(anyhow!(
-                "failed to fetch ArangoSearch view properties for {}: status {}",
-                view_name,
-                response.status()
-            ));
-        }
-        response
-            .json::<Value>()
-            .await
-            .with_context(|| format!("failed to decode view properties for {view_name}"))
     }
 
     async fn wait_for_chunk_hits(
@@ -349,7 +201,6 @@ impl LlmGateway for FakeEmbeddingGateway {
 
 struct KnowledgeSearchHttpFixture {
     temp_postgres: TempPostgresDatabase,
-    temp_arango: TempArangoDatabase,
     state: AppState,
     token: String,
     workspace_id: Uuid,
@@ -368,8 +219,6 @@ impl KnowledgeSearchHttpFixture {
             .context("failed to load settings for knowledge search http test")?;
         let temp_postgres = TempPostgresDatabase::create(&settings.database_url).await?;
         settings.database_url = temp_postgres.database_url.clone();
-        let temp_arango = TempArangoDatabase::create(&settings).await?;
-        settings.arangodb_database = temp_arango.name.clone();
 
         let postgres = PgPoolOptions::new()
             .max_connections(4)
@@ -384,21 +233,6 @@ impl KnowledgeSearchHttpFixture {
 
         let mut state = AppState::new(settings.clone()).await?;
         state.llm_gateway = Arc::new(FakeEmbeddingGateway { embedding: vec![0.9, 0.8, 0.7] });
-        bootstrap_knowledge_plane(
-            state.arango_client.as_ref(),
-            &ArangoBootstrapOptions {
-                collections: true,
-                views: true,
-                graph: true,
-                vector_indexes: false,
-                vector_dimensions: 3072,
-                vector_index_n_lists: 100,
-                vector_index_default_n_probe: 8,
-                vector_index_training_iterations: 25,
-            },
-        )
-        .await
-        .context("failed to bootstrap knowledge search arango plane")?;
 
         let suffix = Uuid::now_v7().simple().to_string();
         let workspace = repositories::catalog_repository::create_workspace(
@@ -490,11 +324,8 @@ impl KnowledgeSearchHttpFixture {
         let now = Utc::now();
 
         state
-            .arango_document_store
+            .document_store
             .upsert_document(&KnowledgeDocumentRow {
-                key: document_id.to_string(),
-                arango_id: None,
-                arango_rev: None,
                 document_id,
                 workspace_id: workspace.id,
                 library_id: library.id,
@@ -516,11 +347,8 @@ impl KnowledgeSearchHttpFixture {
             .await
             .context("failed to insert knowledge search document")?;
         state
-            .arango_document_store
+            .document_store
             .upsert_revision(&KnowledgeRevisionRow {
-                key: revision_id.to_string(),
-                arango_id: None,
-                arango_rev: None,
                 revision_id,
                 workspace_id: workspace.id,
                 library_id: library.id,
@@ -550,11 +378,8 @@ impl KnowledgeSearchHttpFixture {
             .await
             .context("failed to insert knowledge search revision")?;
         state
-            .arango_document_store
+            .document_store
             .upsert_chunk(&KnowledgeChunkRow {
-                key: chunk_id.to_string(),
-                arango_id: None,
-                arango_rev: None,
                 chunk_id,
                 workspace_id: workspace.id,
                 library_id: library.id,
@@ -585,13 +410,10 @@ impl KnowledgeSearchHttpFixture {
             .await
             .context("failed to insert knowledge search chunk")?;
         state
-            .arango_document_store
+            .document_store
             .replace_technical_facts(
                 revision_id,
                 &[KnowledgeTechnicalFactRow {
-                    key: fact_id.to_string(),
-                    arango_id: None,
-                    arango_rev: None,
                     fact_id,
                     workspace_id: workspace.id,
                     library_id: library.id,
@@ -617,88 +439,62 @@ impl KnowledgeSearchHttpFixture {
             )
             .await
             .context("failed to insert knowledge search technical fact")?;
-        let entity_doc = json!({
-            "_key": entity_id.to_string(),
-            "entity_id": entity_id,
-            "workspace_id": workspace.id,
-            "library_id": library.id,
-            "canonical_label": "Orion Signal",
-            "aliases": ["Signal Orion"],
-            "entity_type": "concept",
-            "summary": "Orion entity summary",
-            "confidence": 0.95,
-            "support_count": 3,
-            "freshness_generation": 1,
-            "entity_state": "active",
-            "created_at": now,
-            "updated_at": now,
-        });
-        let _: Value = state
-            .arango_client
-            .query_json(
-                "UPSERT { _key: @key }
-                 INSERT @doc
-                 UPDATE @doc
-                 IN @@collection
-                 RETURN NEW",
-                json!({
-                    "@collection": "knowledge_entity",
-                    "key": entity_id.to_string(),
-                    "doc": entity_doc,
-                }),
-            )
+        state
+            .graph_store
+            .upsert_entity(&NewKnowledgeEntity {
+                entity_id,
+                workspace_id: workspace.id,
+                library_id: library.id,
+                canonical_label: "Orion Signal".to_string(),
+                aliases: vec!["Signal Orion".to_string()],
+                entity_type: "concept".to_string(),
+                entity_sub_type: None,
+                summary: Some("Orion entity summary".to_string()),
+                confidence: Some(0.95),
+                support_count: 3,
+                freshness_generation: 1,
+                entity_state: "active".to_string(),
+                created_at: Some(now),
+                updated_at: Some(now),
+            })
             .await
             .context("failed to insert knowledge search entity")?;
-
-        let relation_doc = json!({
-            "_key": relation_id.to_string(),
-            "relation_id": relation_id,
-            "workspace_id": workspace.id,
-            "library_id": library.id,
-            "predicate": "Orion relation",
-            "canonical_label": "Orion relation",
-            "summary": "Orion relation summary",
-            "normalized_assertion": "orion relation",
-            "confidence": 0.9,
-            "support_count": 2,
-            "contradiction_state": "none",
-            "freshness_generation": 1,
-            "relation_state": "active",
-            "created_at": now,
-            "updated_at": now,
-        });
-        let _: Value = state
-            .arango_client
-            .query_json(
-                "UPSERT { _key: @key }
-                 INSERT @doc
-                 UPDATE @doc
-                 IN @@collection
-                 RETURN NEW",
-                json!({
-                    "@collection": "knowledge_relation",
-                    "key": relation_id.to_string(),
-                    "doc": relation_doc,
-                }),
+        state
+            .graph_store
+            .upsert_relation_with_endpoints(
+                &ironrag_backend::infra::knowledge_rows::NewKnowledgeRelation {
+                    relation_id,
+                    workspace_id: workspace.id,
+                    library_id: library.id,
+                    predicate: "Orion relation".to_string(),
+                    normalized_assertion: "orion relation".to_string(),
+                    confidence: Some(0.9),
+                    support_count: 2,
+                    contradiction_state: "none".to_string(),
+                    freshness_generation: 1,
+                    relation_state: "active".to_string(),
+                    created_at: Some(now),
+                    updated_at: Some(now),
+                },
+                Some(entity_id),
+                Some(entity_id),
+                library.id,
             )
             .await
             .context("failed to insert knowledge search relation")?;
         state
-            .arango_graph_store
+            .graph_store
             .upsert_relation_subject_edge(relation_id, entity_id, library.id)
             .await
             .context("failed to link knowledge search relation subject")?;
         state
-            .arango_graph_store
+            .graph_store
             .upsert_relation_object_edge(relation_id, entity_id, library.id)
             .await
             .context("failed to link knowledge search relation object")?;
         state
-            .arango_search_store
+            .search_store
             .upsert_chunk_vector(&KnowledgeChunkVectorRow {
-                key: format!("{}:{}:1", chunk_id, model_catalog.id),
-                arango_id: None,
-                arango_rev: None,
                 vector_id: Uuid::now_v7(),
                 workspace_id: workspace.id,
                 library_id: library.id,
@@ -716,11 +512,8 @@ impl KnowledgeSearchHttpFixture {
             .await
             .context("failed to insert knowledge search chunk vector")?;
         state
-            .arango_search_store
+            .search_store
             .upsert_entity_vector(&KnowledgeEntityVectorRow {
-                key: format!("{}:{}:1", entity_id, model_catalog.id),
-                arango_id: None,
-                arango_rev: None,
                 vector_id: Uuid::now_v7(),
                 workspace_id: workspace.id,
                 library_id: library.id,
@@ -735,7 +528,7 @@ impl KnowledgeSearchHttpFixture {
             .await
             .context("failed to insert knowledge search entity vector")?;
         state
-            .arango_graph_store
+            .graph_store
             .upsert_evidence_with_edges(
                 &NewKnowledgeEvidence {
                     evidence_id,
@@ -769,7 +562,6 @@ impl KnowledgeSearchHttpFixture {
 
         Ok(Self {
             temp_postgres,
-            temp_arango,
             state,
             token,
             workspace_id: workspace.id,
@@ -789,8 +581,7 @@ impl KnowledgeSearchHttpFixture {
 
     async fn cleanup(self) -> Result<()> {
         self.state.persistence.postgres.close().await;
-        self.temp_postgres.drop().await?;
-        self.temp_arango.drop().await
+        self.temp_postgres.drop().await
     }
 
     async fn search_document_hit(&self, query: &str) -> Result<Value> {
@@ -923,7 +714,7 @@ async fn terminate_database_connections(admin_pool: &PgPool, database_name: &str
 }
 
 #[tokio::test]
-#[ignore = "requires local ArangoDB service with database create/drop access"]
+#[ignore = "requires local postgres service with database create/drop access"]
 async fn library_generation_signals_count_canonical_chunk_embedding_vectors() -> Result<()> {
     let fixture = KnowledgeSearchFixture::create().await?;
     let result = async {
@@ -938,9 +729,6 @@ async fn library_generation_signals_count_canonical_chunk_embedding_vectors() ->
         fixture
             .document_store
             .upsert_revision(&KnowledgeRevisionRow {
-                key: revision_id.to_string(),
-                arango_id: None,
-                arango_rev: None,
                 revision_id,
                 workspace_id,
                 library_id,
@@ -973,9 +761,6 @@ async fn library_generation_signals_count_canonical_chunk_embedding_vectors() ->
         fixture
             .search_store
             .upsert_chunk_vector(&KnowledgeChunkVectorRow {
-                key: format!("{chunk_id}:{model_catalog_id}:2"),
-                arango_id: None,
-                arango_rev: None,
                 vector_id: Uuid::now_v7(),
                 workspace_id,
                 library_id,
@@ -1009,7 +794,7 @@ async fn library_generation_signals_count_canonical_chunk_embedding_vectors() ->
 }
 
 #[tokio::test]
-#[ignore = "requires local ArangoDB service with database create/drop access"]
+#[ignore = "requires local postgres service with database create/drop access"]
 async fn vector_ready_revisions_missing_chunk_vectors_are_counted() -> Result<()> {
     let fixture = KnowledgeSearchFixture::create().await?;
     let result = async {
@@ -1032,9 +817,6 @@ async fn vector_ready_revisions_missing_chunk_vectors_are_counted() -> Result<()
         fixture
             .document_store
             .upsert_revision(&KnowledgeRevisionRow {
-                key: revision_id.to_string(),
-                arango_id: None,
-                arango_rev: None,
                 revision_id,
                 workspace_id,
                 library_id,
@@ -1066,9 +848,6 @@ async fn vector_ready_revisions_missing_chunk_vectors_are_counted() -> Result<()
         fixture
             .document_store
             .upsert_chunk(&KnowledgeChunkRow {
-                key: chunk_id.to_string(),
-                arango_id: None,
-                arango_rev: None,
                 chunk_id,
                 workspace_id,
                 library_id,
@@ -1099,9 +878,6 @@ async fn vector_ready_revisions_missing_chunk_vectors_are_counted() -> Result<()
         fixture
             .document_store
             .upsert_revision(&KnowledgeRevisionRow {
-                key: no_chunk_revision_id.to_string(),
-                arango_id: None,
-                arango_rev: None,
                 revision_id: no_chunk_revision_id,
                 workspace_id,
                 library_id,
@@ -1133,9 +909,6 @@ async fn vector_ready_revisions_missing_chunk_vectors_are_counted() -> Result<()
         fixture
             .document_store
             .upsert_revision(&KnowledgeRevisionRow {
-                key: pending_revision_id.to_string(),
-                arango_id: None,
-                arango_rev: None,
                 revision_id: pending_revision_id,
                 workspace_id,
                 library_id,
@@ -1167,9 +940,6 @@ async fn vector_ready_revisions_missing_chunk_vectors_are_counted() -> Result<()
         fixture
             .document_store
             .upsert_chunk(&KnowledgeChunkRow {
-                key: pending_chunk_id.to_string(),
-                arango_id: None,
-                arango_rev: None,
                 chunk_id: pending_chunk_id,
                 workspace_id,
                 library_id,
@@ -1200,9 +970,6 @@ async fn vector_ready_revisions_missing_chunk_vectors_are_counted() -> Result<()
         fixture
             .document_store
             .upsert_revision(&KnowledgeRevisionRow {
-                key: superseded_revision_id.to_string(),
-                arango_id: None,
-                arango_rev: None,
                 revision_id: superseded_revision_id,
                 workspace_id,
                 library_id,
@@ -1234,9 +1001,6 @@ async fn vector_ready_revisions_missing_chunk_vectors_are_counted() -> Result<()
         fixture
             .document_store
             .upsert_chunk(&KnowledgeChunkRow {
-                key: superseded_chunk_id.to_string(),
-                arango_id: None,
-                arango_rev: None,
                 chunk_id: superseded_chunk_id,
                 workspace_id,
                 library_id,
@@ -1267,9 +1031,6 @@ async fn vector_ready_revisions_missing_chunk_vectors_are_counted() -> Result<()
         fixture
             .document_store
             .upsert_revision(&KnowledgeRevisionRow {
-                key: other_revision_id.to_string(),
-                arango_id: None,
-                arango_rev: None,
                 revision_id: other_revision_id,
                 workspace_id,
                 library_id: other_library_id,
@@ -1301,9 +1062,6 @@ async fn vector_ready_revisions_missing_chunk_vectors_are_counted() -> Result<()
         fixture
             .document_store
             .upsert_chunk(&KnowledgeChunkRow {
-                key: other_chunk_id.to_string(),
-                arango_id: None,
-                arango_rev: None,
                 chunk_id: other_chunk_id,
                 workspace_id,
                 library_id: other_library_id,
@@ -1342,9 +1100,6 @@ async fn vector_ready_revisions_missing_chunk_vectors_are_counted() -> Result<()
         fixture
             .search_store
             .upsert_chunk_vector(&KnowledgeChunkVectorRow {
-                key: format!("{chunk_id}:{model_catalog_id}:1"),
-                arango_id: None,
-                arango_rev: None,
                 vector_id: Uuid::now_v7(),
                 workspace_id,
                 library_id,
@@ -1376,8 +1131,8 @@ async fn vector_ready_revisions_missing_chunk_vectors_are_counted() -> Result<()
 }
 
 #[tokio::test]
-#[ignore = "requires local ArangoDB service with database create/drop access"]
-async fn lexical_chunk_search_view_bootstraps_and_stays_library_scoped() -> Result<()> {
+#[ignore = "requires local postgres service with canonical extensions"]
+async fn lexical_chunk_search_stays_library_scoped() -> Result<()> {
     let fixture = KnowledgeSearchFixture::create().await?;
     let result = async {
         let workspace_id = Uuid::now_v7();
@@ -1391,19 +1146,9 @@ async fn lexical_chunk_search_view_bootstraps_and_stays_library_scoped() -> Resu
         let distractor_chunk_id = Uuid::now_v7();
         let now = Utc::now();
 
-        let view_properties = fixture.fetch_view_properties(KNOWLEDGE_SEARCH_VIEW).await?;
-        let links = view_properties
-            .get("links")
-            .and_then(Value::as_object)
-            .ok_or_else(|| anyhow!("knowledge search view is missing links object"))?;
-        assert!(links.contains_key(KNOWLEDGE_CHUNK_COLLECTION));
-
         fixture
             .document_store
             .upsert_document(&KnowledgeDocumentRow {
-                key: target_document_id.to_string(),
-                arango_id: None,
-                arango_rev: None,
                 document_id: target_document_id,
                 workspace_id,
                 library_id: target_library_id,
@@ -1427,9 +1172,6 @@ async fn lexical_chunk_search_view_bootstraps_and_stays_library_scoped() -> Resu
         fixture
             .document_store
             .upsert_revision(&KnowledgeRevisionRow {
-                key: target_revision_id.to_string(),
-                arango_id: None,
-                arango_rev: None,
                 revision_id: target_revision_id,
                 workspace_id,
                 library_id: target_library_id,
@@ -1461,9 +1203,6 @@ async fn lexical_chunk_search_view_bootstraps_and_stays_library_scoped() -> Resu
         fixture
             .document_store
             .upsert_chunk(&KnowledgeChunkRow {
-                key: target_chunk_id.to_string(),
-                arango_id: None,
-                arango_rev: None,
                 chunk_id: target_chunk_id,
                 workspace_id,
                 library_id: target_library_id,
@@ -1497,9 +1236,6 @@ async fn lexical_chunk_search_view_bootstraps_and_stays_library_scoped() -> Resu
         fixture
             .document_store
             .upsert_document(&KnowledgeDocumentRow {
-                key: distractor_document_id.to_string(),
-                arango_id: None,
-                arango_rev: None,
                 document_id: distractor_document_id,
                 workspace_id,
                 library_id: distractor_library_id,
@@ -1523,9 +1259,6 @@ async fn lexical_chunk_search_view_bootstraps_and_stays_library_scoped() -> Resu
         fixture
             .document_store
             .upsert_revision(&KnowledgeRevisionRow {
-                key: distractor_revision_id.to_string(),
-                arango_id: None,
-                arango_rev: None,
                 revision_id: distractor_revision_id,
                 workspace_id,
                 library_id: distractor_library_id,
@@ -1557,9 +1290,6 @@ async fn lexical_chunk_search_view_bootstraps_and_stays_library_scoped() -> Resu
         fixture
             .document_store
             .upsert_chunk(&KnowledgeChunkRow {
-                key: distractor_chunk_id.to_string(),
-                arango_id: None,
-                arango_rev: None,
                 chunk_id: distractor_chunk_id,
                 workspace_id,
                 library_id: distractor_library_id,
@@ -1614,7 +1344,7 @@ async fn lexical_chunk_search_view_bootstraps_and_stays_library_scoped() -> Resu
 }
 
 #[tokio::test]
-#[ignore = "requires local ArangoDB service with database create/drop access"]
+#[ignore = "requires local postgres service with database create/drop access"]
 async fn chunk_and_entity_vectors_roundtrip_with_generation_order() -> Result<()> {
     let fixture = KnowledgeSearchFixture::create().await?;
     let result = async {
@@ -1630,9 +1360,6 @@ async fn chunk_and_entity_vectors_roundtrip_with_generation_order() -> Result<()
         fixture
             .document_store
             .upsert_document(&KnowledgeDocumentRow {
-                key: document_id.to_string(),
-                arango_id: None,
-                arango_rev: None,
                 document_id,
                 workspace_id,
                 library_id,
@@ -1656,9 +1383,6 @@ async fn chunk_and_entity_vectors_roundtrip_with_generation_order() -> Result<()
         fixture
             .document_store
             .upsert_revision(&KnowledgeRevisionRow {
-                key: revision_id.to_string(),
-                arango_id: None,
-                arango_rev: None,
                 revision_id,
                 workspace_id,
                 library_id,
@@ -1690,9 +1414,6 @@ async fn chunk_and_entity_vectors_roundtrip_with_generation_order() -> Result<()
         fixture
             .document_store
             .upsert_chunk(&KnowledgeChunkRow {
-                key: chunk_id.to_string(),
-                arango_id: None,
-                arango_rev: None,
                 chunk_id,
                 workspace_id,
                 library_id,
@@ -1746,9 +1467,6 @@ async fn chunk_and_entity_vectors_roundtrip_with_generation_order() -> Result<()
         fixture
             .search_store
             .upsert_chunk_vector(&KnowledgeChunkVectorRow {
-                key: format!("{chunk_id}:{model_catalog_id}:1"),
-                arango_id: None,
-                arango_rev: None,
                 vector_id: Uuid::now_v7(),
                 workspace_id,
                 library_id,
@@ -1768,9 +1486,6 @@ async fn chunk_and_entity_vectors_roundtrip_with_generation_order() -> Result<()
         fixture
             .search_store
             .upsert_chunk_vector(&KnowledgeChunkVectorRow {
-                key: format!("{chunk_id}:{model_catalog_id}:2"),
-                arango_id: None,
-                arango_rev: None,
                 vector_id: Uuid::now_v7(),
                 workspace_id,
                 library_id,
@@ -1791,9 +1506,6 @@ async fn chunk_and_entity_vectors_roundtrip_with_generation_order() -> Result<()
         fixture
             .search_store
             .upsert_entity_vector(&KnowledgeEntityVectorRow {
-                key: format!("{entity_id}:{model_catalog_id}:1"),
-                arango_id: None,
-                arango_rev: None,
                 vector_id: Uuid::now_v7(),
                 workspace_id,
                 library_id,
@@ -1810,9 +1522,6 @@ async fn chunk_and_entity_vectors_roundtrip_with_generation_order() -> Result<()
         fixture
             .search_store
             .upsert_entity_vector(&KnowledgeEntityVectorRow {
-                key: format!("{entity_id}:{model_catalog_id}:2"),
-                arango_id: None,
-                arango_rev: None,
                 vector_id: Uuid::now_v7(),
                 workspace_id,
                 library_id,
@@ -1868,7 +1577,7 @@ async fn chunk_and_entity_vectors_roundtrip_with_generation_order() -> Result<()
 }
 
 #[tokio::test]
-#[ignore = "requires local ArangoDB service with database create/drop access"]
+#[ignore = "requires local postgres service with database create/drop access"]
 async fn revision_replacement_updates_readiness_and_chunk_search_surface() -> Result<()> {
     let fixture = KnowledgeSearchFixture::create().await?;
     let result = async {
@@ -1884,9 +1593,6 @@ async fn revision_replacement_updates_readiness_and_chunk_search_surface() -> Re
         fixture
             .document_store
             .upsert_document(&KnowledgeDocumentRow {
-                key: document_id.to_string(),
-                arango_id: None,
-                arango_rev: None,
                 document_id,
                 workspace_id,
                 library_id,
@@ -1910,9 +1616,6 @@ async fn revision_replacement_updates_readiness_and_chunk_search_surface() -> Re
         fixture
             .document_store
             .upsert_revision(&KnowledgeRevisionRow {
-                key: revision_one_id.to_string(),
-                arango_id: None,
-                arango_rev: None,
                 revision_id: revision_one_id,
                 workspace_id,
                 library_id,
@@ -1944,9 +1647,6 @@ async fn revision_replacement_updates_readiness_and_chunk_search_surface() -> Re
         fixture
             .document_store
             .upsert_chunk(&KnowledgeChunkRow {
-                key: chunk_one_id.to_string(),
-                arango_id: None,
-                arango_rev: None,
                 chunk_id: chunk_one_id,
                 workspace_id,
                 library_id,
@@ -1984,9 +1684,6 @@ async fn revision_replacement_updates_readiness_and_chunk_search_surface() -> Re
         fixture
             .document_store
             .upsert_revision(&KnowledgeRevisionRow {
-                key: revision_two_id.to_string(),
-                arango_id: None,
-                arango_rev: None,
                 revision_id: revision_two_id,
                 workspace_id,
                 library_id,
@@ -2038,9 +1735,6 @@ async fn revision_replacement_updates_readiness_and_chunk_search_surface() -> Re
         fixture
             .document_store
             .upsert_chunk(&KnowledgeChunkRow {
-                key: chunk_two_id.to_string(),
-                arango_id: None,
-                arango_rev: None,
                 chunk_id: chunk_two_id,
                 workspace_id,
                 library_id,
@@ -2128,7 +1822,7 @@ async fn revision_replacement_updates_readiness_and_chunk_search_surface() -> Re
 }
 
 #[tokio::test]
-#[ignore = "requires local postgres, redis, and arango services"]
+#[ignore = "requires local postgres and redis services"]
 async fn search_documents_endpoint_returns_hybrid_knowledge_payload() -> Result<()> {
     let fixture = KnowledgeSearchHttpFixture::create().await?;
 
@@ -2194,55 +1888,7 @@ async fn search_documents_endpoint_returns_hybrid_knowledge_payload() -> Result<
 }
 
 #[tokio::test]
-#[ignore = "requires local postgres, redis, and arango services"]
-async fn search_documents_endpoint_falls_back_to_lexical_when_vector_collections_fail() -> Result<()>
-{
-    let fixture = KnowledgeSearchHttpFixture::create().await?;
-
-    let result = async {
-        // Per-library vector dim refactor: the fixture seeds dim-3
-        // vectors, so ANN now reads from
-        // `chunk_vector_collection_for_dim(3)` /
-        // `entity_vector_collection_for_dim(3)`. Drop both the per-dim
-        // shards and the legacy collection so the vector lane fails
-        // and the search service falls back to lexical-only — same
-        // intent the original test had before the per-dim split.
-        for collection in
-            [KNOWLEDGE_CHUNK_VECTOR_COLLECTION.to_string(), chunk_vector_collection_for_dim(3)]
-        {
-            fixture.temp_arango.drop_collection(&collection).await.with_context(|| {
-                format!("failed to remove chunk vector collection {collection}")
-            })?;
-        }
-        for collection in
-            [KNOWLEDGE_ENTITY_VECTOR_COLLECTION.to_string(), entity_vector_collection_for_dim(3)]
-        {
-            fixture.temp_arango.drop_collection(&collection).await.with_context(|| {
-                format!("failed to remove entity vector collection {collection}")
-            })?;
-        }
-
-        let body = fixture.search_document_hit("orion").await?;
-        let document_hits =
-            body["documentHits"].as_array().context("documentHits must be an array")?;
-        assert_eq!(document_hits.len(), 1);
-        assert_eq!(document_hits[0]["document"]["documentId"], json!(fixture.document_id));
-        assert_eq!(document_hits[0]["chunkHits"].as_array().map_or(0, Vec::len), 1);
-        assert_eq!(document_hits[0]["technicalFactSummary"]["typedFactCount"], json!(1));
-        assert_eq!(document_hits[0]["technicalFactSamples"].as_array().map_or(0, Vec::len), 1);
-        assert_eq!(document_hits[0]["vectorChunkHits"].as_array().map_or(0, Vec::len), 0);
-        assert_eq!(body["vectorChunkHits"].as_array().map_or(0, Vec::len), 0);
-        assert_eq!(body["vectorEntityHits"].as_array().map_or(0, Vec::len), 0);
-        Ok(())
-    }
-    .await;
-
-    fixture.cleanup().await?;
-    result
-}
-
-#[tokio::test]
-#[ignore = "requires local postgres, redis, and arango services"]
+#[ignore = "requires local postgres and redis services"]
 async fn lexical_chunk_search_ignores_non_chunk_documents_in_shared_search_view() -> Result<()> {
     let fixture = KnowledgeSearchHttpFixture::create().await?;
 
@@ -2251,7 +1897,7 @@ async fn lexical_chunk_search_ignores_non_chunk_documents_in_shared_search_view(
         loop {
             let hits = fixture
                 .state
-                .arango_search_store
+                .search_store
                 .search_chunks(fixture.library_id, "/orion/status", 8, None, None)
                 .await
                 .context("failed to run lexical chunk search against shared search view")?;
@@ -2276,7 +1922,7 @@ async fn lexical_chunk_search_ignores_non_chunk_documents_in_shared_search_view(
 }
 
 #[tokio::test]
-#[ignore = "requires local postgres, redis, and arango services"]
+#[ignore = "requires local postgres and redis services"]
 async fn search_query_evidence_ranks_typed_facts_for_url_endpoint_method_and_parameter_questions()
 -> Result<()> {
     let fixture = KnowledgeSearchHttpFixture::create().await?;
@@ -2290,14 +1936,11 @@ async fn search_query_evidence_ranks_typed_facts_for_url_endpoint_method_and_par
 
         fixture
             .state
-            .arango_document_store
+            .document_store
             .replace_technical_facts(
                 fixture.revision_id,
                 &[
                     KnowledgeTechnicalFactRow {
-                        key: fixture.fact_id.to_string(),
-                        arango_id: None,
-                        arango_rev: None,
                         fact_id: fixture.fact_id,
                         workspace_id: fixture.workspace_id,
                         library_id: fixture.library_id,
@@ -2318,9 +1961,6 @@ async fn search_query_evidence_ranks_typed_facts_for_url_endpoint_method_and_par
                         updated_at: now,
                     },
                     KnowledgeTechnicalFactRow {
-                        key: url_fact_id.to_string(),
-                        arango_id: None,
-                        arango_rev: None,
                         fact_id: url_fact_id,
                         workspace_id: fixture.workspace_id,
                         library_id: fixture.library_id,
@@ -2344,9 +1984,6 @@ async fn search_query_evidence_ranks_typed_facts_for_url_endpoint_method_and_par
                         updated_at: now,
                     },
                     KnowledgeTechnicalFactRow {
-                        key: method_fact_id.to_string(),
-                        arango_id: None,
-                        arango_rev: None,
                         fact_id: method_fact_id,
                         workspace_id: fixture.workspace_id,
                         library_id: fixture.library_id,
@@ -2367,9 +2004,6 @@ async fn search_query_evidence_ranks_typed_facts_for_url_endpoint_method_and_par
                         updated_at: now,
                     },
                     KnowledgeTechnicalFactRow {
-                        key: parameter_fact_id.to_string(),
-                        arango_id: None,
-                        arango_rev: None,
                         fact_id: parameter_fact_id,
                         workspace_id: fixture.workspace_id,
                         library_id: fixture.library_id,
@@ -2390,9 +2024,6 @@ async fn search_query_evidence_ranks_typed_facts_for_url_endpoint_method_and_par
                         updated_at: now,
                     },
                     KnowledgeTechnicalFactRow {
-                        key: distractor_parameter_fact_id.to_string(),
-                        arango_id: None,
-                        arango_rev: None,
                         fact_id: distractor_parameter_fact_id,
                         workspace_id: fixture.workspace_id,
                         library_id: fixture.library_id,
@@ -2465,17 +2096,14 @@ async fn search_query_evidence_ranks_typed_facts_for_url_endpoint_method_and_par
     result
 }
 
-/// Per-library vector dim refactor: two libraries on different embed
-/// dims must coexist in Arango without dropping each other's vectors.
-/// Each library writes into its own per-dim shard
-/// (`knowledge_chunk_vector_d<dim>`) and ANN search against one dim
-/// only touches that shard.
+/// Two libraries on different embed dims must coexist without cross-library
+/// or cross-dimension ANN leakage.
 ///
 /// We go through the low-level `upsert_chunk_vector` API instead of
 /// mocking the embed-binding pipeline end-to-end, so the test stays
 /// small and focuses on the storage-layer isolation invariant.
 #[tokio::test]
-#[ignore = "requires local ArangoDB service with database create/drop access"]
+#[ignore = "requires local postgres service with canonical extensions"]
 async fn test_two_libraries_different_dims_isolated() -> Result<()> {
     let fixture = KnowledgeSearchFixture::create().await?;
     let result = async {
@@ -2494,9 +2122,6 @@ async fn test_two_libraries_different_dims_isolated() -> Result<()> {
         fixture
             .search_store
             .upsert_chunk_vector(&KnowledgeChunkVectorRow {
-                key: format!("{chunk_a_id}:{model_a_key}:1"),
-                arango_id: None,
-                arango_rev: None,
                 vector_id: Uuid::now_v7(),
                 workspace_id,
                 library_id: library_a_id,
@@ -2514,14 +2139,11 @@ async fn test_two_libraries_different_dims_isolated() -> Result<()> {
             .await
             .context("failed to upsert library A chunk vector")?;
 
-        // Library B writes a dim-4 vector — same Arango database, but
-        // different per-dim shard, so the two writes cannot collide.
+        // Library B writes a dim-4 vector; it must not collide with library A's
+        // dim-3 vector.
         fixture
             .search_store
             .upsert_chunk_vector(&KnowledgeChunkVectorRow {
-                key: format!("{chunk_b_id}:{model_b_key}:1"),
-                arango_id: None,
-                arango_rev: None,
                 vector_id: Uuid::now_v7(),
                 workspace_id,
                 library_id: library_b_id,
@@ -2539,20 +2161,8 @@ async fn test_two_libraries_different_dims_isolated() -> Result<()> {
             .await
             .context("failed to upsert library B chunk vector")?;
 
-        // Both per-dim shards must exist after the writes.
-        let chunk_shard_3 = chunk_vector_collection_for_dim(3);
-        let chunk_shard_4 = chunk_vector_collection_for_dim(4);
-        assert!(
-            fixture.temp_database.has_collection(&chunk_shard_3).await?,
-            "per-dim chunk vector shard {chunk_shard_3} must be lazy-created on first dim-3 write"
-        );
-        assert!(
-            fixture.temp_database.has_collection(&chunk_shard_4).await?,
-            "per-dim chunk vector shard {chunk_shard_4} must be lazy-created on first dim-4 write"
-        );
-
         // ANN against dim-3 must return library A's chunk and nothing
-        // else: library B's vector lives in a different shard.
+        // else: library B's vector has a different library and dimension.
         let hits_a = fixture
             .search_store
             .search_chunk_vectors_by_similarity(

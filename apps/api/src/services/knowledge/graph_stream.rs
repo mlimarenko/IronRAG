@@ -227,8 +227,8 @@ async fn run_prewarm_once(state: &AppState, library_id: Uuid) {
 
 /// Builds the full compact NDJSON graph topology for one library and
 /// returns it as a single in-memory buffer. Fast path: Redis cache hit
-/// returns the stored bytes verbatim. Slow path: loads from
-/// Postgres + Arango, renders, and backfills Redis.
+/// returns the stored bytes verbatim. Slow path: loads from PostgreSQL-backed
+/// stores, renders, and backfills Redis.
 ///
 /// The handler wraps the returned `Vec<u8>` in a regular
 /// `Body::from(bytes)` response. We deliberately do NOT use
@@ -488,8 +488,8 @@ async fn build_compact_topology(
 
     // `document` nodes carry their original content_document.id inside
     // metadata_json.document_id — that is the UUID the frontend uses to
-    // navigate to the documents page, so we fetch the Arango title/file
-    // payloads keyed by that id.
+    // navigate to the documents page, so we fetch the knowledge-plane
+    // title/file payloads keyed by that id.
     let document_node_ids: HashSet<Uuid> =
         node_rows.iter().filter(|row| row.node_type == "document").map(|row| row.id).collect();
 
@@ -514,14 +514,12 @@ async fn build_compact_topology(
         .collect();
 
     let documents = state
-        .arango_document_store
+        .document_store
         .list_documents_by_ids(&document_ids)
         .await
-        .context("load arango knowledge_document rows for topology stream")?;
-    let document_by_uuid: HashMap<
-        Uuid,
-        &crate::infra::arangodb::document_store::KnowledgeDocumentRow,
-    > = documents.iter().map(|doc| (doc.document_id, doc)).collect();
+        .context("load knowledge_document rows for topology stream")?;
+    let document_by_uuid: HashMap<Uuid, &crate::infra::knowledge_rows::KnowledgeDocumentRow> =
+        documents.iter().map(|doc| (doc.document_id, doc)).collect();
 
     let mut id_map: HashMap<Uuid, u32> = HashMap::with_capacity(node_rows.len() + documents.len());
     let mut next_num: u32 = 1;
@@ -597,13 +595,13 @@ async fn build_compact_topology(
         });
     }
 
-    // Fill in any document rows that were not yet enriched by Arango (the
-    // projection holds the runtime_graph_node for them, but the Arango
-    // knowledge_document row may be missing after a failed import — we
-    // still want the graph to render the document node). We already
-    // allocated ids for every Arango-backed document above; now cover the
-    // ones present only as runtime_graph_node `document` rows so they
-    // also get a numeric slot the edges and doc_links can reference.
+    // Fill in any document rows that were not yet enriched by the knowledge
+    // store (the projection holds the runtime_graph_node for them, but the
+    // knowledge_document row may be missing after a failed import — we still
+    // want the graph to render the document node). We already allocated ids for
+    // every knowledge-backed document above; now cover the ones present only as
+    // runtime_graph_node `document` rows so they also get a numeric slot the
+    // edges and doc_links can reference.
     for row in &node_rows {
         if row.node_type != "document" {
             continue;

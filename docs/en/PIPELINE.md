@@ -284,7 +284,7 @@ Content-Type: application/zstd
 Body: raw .tar.zst archive
 ```
 
-The import reads the manifest from the archive to determine what was exported. `overwrite=replace` clears the existing library footprint before inserting. PostgreSQL rows are bulk-inserted via `jsonb_populate_recordset` (1000 rows per statement). The restore path accepts current v6 PostgreSQL archives and v5 archives from 0.4.x.
+The import reads the manifest from the archive to determine what was exported. `overwrite=replace` clears the existing library footprint before inserting. PostgreSQL rows are bulk-inserted via `jsonb_populate_recordset` (1000 rows per statement). New exports use snapshot schema v7. The restore path accepts PostgreSQL-only v6 and v7 archives; legacy v5 archives from 0.4.x are no longer supported.
 
 ## 9. Hard invariants
 

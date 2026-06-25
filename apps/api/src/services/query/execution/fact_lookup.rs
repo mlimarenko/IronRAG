@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use uuid::Uuid;
 
 use crate::{
-    infra::arangodb::document_store::KnowledgeTechnicalFactRow,
+    infra::knowledge_rows::KnowledgeTechnicalFactRow,
     shared::extraction::technical_facts::TechnicalFactKind,
 };
 

@@ -1,7 +1,5 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use std::sync::Arc;
-
 use anyhow::{Context, Result};
 use axum::{
     Router,
@@ -19,7 +17,6 @@ use uuid::Uuid;
 use ironrag_backend::{
     app::{config::Settings, state::AppState},
     infra::{
-        arangodb::client::ArangoClient,
         persistence::Persistence,
         repositories::{
             ai_repository, audit_repository, billing_repository, catalog_repository,
@@ -542,8 +539,7 @@ fn build_test_state(settings: Settings, postgres: PgPool) -> Result<AppState> {
     let redis = redis::Client::open(settings.redis_url.clone())
         .context("failed to create redis client for audit events state")?;
     let persistence = Persistence::for_tests(postgres, redis);
-    let arango_client = Arc::new(ArangoClient::from_settings(&settings)?);
-    AppState::from_dependencies(settings, persistence, arango_client)
+    AppState::from_dependencies(settings, persistence)
 }
 
 fn replace_database_name(database_url: &str, new_database: &str) -> Result<String> {
@@ -612,7 +608,7 @@ async fn latest_audit_event_for_action(
 }
 
 #[tokio::test]
-#[ignore = "requires local postgres, redis, and arango services"]
+#[ignore = "requires local postgres and redis services"]
 async fn token_mint_with_library_ids_creates_library_grants() -> Result<()> {
     let fixture = AuditEventsFixture::create().await?;
 
@@ -676,7 +672,7 @@ async fn token_mint_with_library_ids_creates_library_grants() -> Result<()> {
 }
 
 #[tokio::test]
-#[ignore = "requires local postgres, redis, and arango services"]
+#[ignore = "requires local postgres and redis services"]
 async fn token_mint_with_library_ids_rejects_cross_workspace_library_ids() -> Result<()> {
     let fixture = AuditEventsFixture::create().await?;
 
@@ -738,7 +734,7 @@ async fn token_mint_with_library_ids_rejects_cross_workspace_library_ids() -> Re
 }
 
 #[tokio::test]
-#[ignore = "requires local postgres, redis, and arango services"]
+#[ignore = "requires local postgres and redis services"]
 async fn token_mint_with_library_ids_requires_permissions() -> Result<()> {
     let fixture = AuditEventsFixture::create().await?;
 
@@ -781,7 +777,7 @@ async fn token_mint_with_library_ids_requires_permissions() -> Result<()> {
 }
 
 #[tokio::test]
-#[ignore = "requires local postgres, redis, and arango services"]
+#[ignore = "requires local postgres and redis services"]
 async fn token_mint_with_library_ids_rejects_invalid_permissions() -> Result<()> {
     let fixture = AuditEventsFixture::create().await?;
 
@@ -825,7 +821,7 @@ async fn token_mint_with_library_ids_rejects_invalid_permissions() -> Result<()>
 }
 
 #[tokio::test]
-#[ignore = "requires local postgres, redis, and arango services"]
+#[ignore = "requires local postgres and redis services"]
 async fn token_mint_and_revoke_append_audit_events_with_api_token_subjects() -> Result<()> {
     let fixture = AuditEventsFixture::create().await?;
 
@@ -885,7 +881,7 @@ async fn token_mint_and_revoke_append_audit_events_with_api_token_subjects() -> 
 }
 
 #[tokio::test]
-#[ignore = "requires local postgres, redis, and arango services"]
+#[ignore = "requires local postgres and redis services"]
 async fn governance_actions_and_denials_append_expected_audit_subjects() -> Result<()> {
     let fixture = AuditEventsFixture::create().await?;
 
@@ -1045,7 +1041,7 @@ async fn governance_actions_and_denials_append_expected_audit_subjects() -> Resu
 }
 
 #[tokio::test]
-#[ignore = "requires local postgres, redis, and arango services"]
+#[ignore = "requires local postgres and redis services"]
 async fn audit_events_surface_assistant_models_cost_and_runtime_subjects() -> Result<()> {
     let fixture = AuditEventsFixture::create().await?;
 
@@ -1111,7 +1107,7 @@ async fn audit_events_surface_assistant_models_cost_and_runtime_subjects() -> Re
 }
 
 #[tokio::test]
-#[ignore = "requires local postgres, redis, and arango services"]
+#[ignore = "requires local postgres and redis services"]
 async fn audit_events_hide_assistant_costs_without_usage_read() -> Result<()> {
     let fixture = AuditEventsFixture::create().await?;
 
@@ -1158,7 +1154,7 @@ async fn audit_events_hide_assistant_costs_without_usage_read() -> Result<()> {
 }
 
 #[tokio::test]
-#[ignore = "requires local postgres, redis, and arango services"]
+#[ignore = "requires local postgres and redis services"]
 async fn canonical_audit_subjects_surface_query_and_knowledge_ids_through_http() -> Result<()> {
     let fixture = AuditEventsFixture::create().await?;
 
@@ -1277,7 +1273,7 @@ async fn canonical_audit_subjects_surface_query_and_knowledge_ids_through_http()
 }
 
 #[tokio::test]
-#[ignore = "requires local postgres, redis, and arango services"]
+#[ignore = "requires local postgres and redis services"]
 async fn canonical_agent_memory_audit_subjects_surface_knowledge_and_async_operation_ids()
 -> Result<()> {
     let fixture = AuditEventsFixture::create().await?;

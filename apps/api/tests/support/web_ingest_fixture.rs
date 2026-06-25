@@ -1,4 +1,4 @@
-use std::{sync::Arc, time::Duration};
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use sqlx::{PgPool, postgres::PgPoolOptions};
@@ -8,13 +8,7 @@ use uuid::Uuid;
 use ironrag_backend::{
     app::{config::Settings, state::AppState},
     domains::{content::ContentDocumentSummary, ingest::WebIngestRun},
-    infra::{
-        arangodb::{
-            bootstrap::{ArangoBootstrapOptions, bootstrap_knowledge_plane},
-            client::ArangoClient,
-        },
-        persistence::Persistence,
-    },
+    infra::persistence::Persistence,
     services::{
         catalog_service::{CreateLibraryCommand, CreateWorkspaceCommand},
         ingest::web::CreateWebIngestRunCommand,
@@ -72,69 +66,9 @@ impl TempDatabase {
     }
 }
 
-struct TempArangoDatabase {
-    base_url: String,
-    username: String,
-    password: String,
-    name: String,
-    http: reqwest::Client,
-}
-
-impl TempArangoDatabase {
-    async fn create(settings: &Settings, prefix: &str) -> Result<Self> {
-        let base_url = settings.arangodb_url.trim().trim_end_matches('/').to_string();
-        let name = format!("{prefix}_{}", Uuid::now_v7().simple());
-        let http = reqwest::Client::builder()
-            .timeout(Duration::from_secs(settings.arangodb_request_timeout_seconds.max(1)))
-            .build()
-            .with_context(|| format!("failed to build ArangoDB client for {prefix}"))?;
-        let response = http
-            .post(format!("{base_url}/_api/database"))
-            .basic_auth(&settings.arangodb_username, Some(&settings.arangodb_password))
-            .json(&serde_json::json!({ "name": name }))
-            .send()
-            .await
-            .with_context(|| format!("failed to create temp Arango database for {prefix}"))?;
-        if !response.status().is_success() {
-            return Err(anyhow::anyhow!(
-                "failed to create temp Arango database {}: status {}",
-                name,
-                response.status()
-            ));
-        }
-
-        Ok(Self {
-            base_url,
-            username: settings.arangodb_username.clone(),
-            password: settings.arangodb_password.clone(),
-            name,
-            http,
-        })
-    }
-
-    async fn drop(self) -> Result<()> {
-        let response = self
-            .http
-            .delete(format!("{}/_api/database/{}", self.base_url, self.name))
-            .basic_auth(&self.username, Some(&self.password))
-            .send()
-            .await
-            .context("failed to drop temp Arango database")?;
-        if response.status() != reqwest::StatusCode::NOT_FOUND && !response.status().is_success() {
-            return Err(anyhow::anyhow!(
-                "failed to drop temp Arango database {}: status {}",
-                self.name,
-                response.status()
-            ));
-        }
-        Ok(())
-    }
-}
-
 pub struct WebIngestFixture {
     pub state: AppState,
     temp_database: TempDatabase,
-    temp_arango: TempArangoDatabase,
     pub workspace_id: Uuid,
     pub library_id: Uuid,
 }
@@ -143,9 +77,7 @@ impl WebIngestFixture {
     pub async fn create(prefix: &str) -> Result<Self> {
         let mut settings = Settings::from_env().context("failed to load settings for fixture")?;
         let temp_database = TempDatabase::create(&settings.database_url, prefix).await?;
-        let temp_arango = TempArangoDatabase::create(&settings, prefix).await?;
         settings.database_url = temp_database.database_url.clone();
-        settings.arangodb_database = temp_arango.name.clone();
 
         let postgres = PgPoolOptions::new()
             .max_connections(4)
@@ -157,30 +89,10 @@ impl WebIngestFixture {
             .await
             .context("failed to apply 0001_init.sql")?;
 
-        let arango_client = Arc::new(
-            ArangoClient::from_settings(&settings).context("failed to build Arango client")?,
-        );
-        arango_client.ping().await.context("failed to ping ArangoDB")?;
-        bootstrap_knowledge_plane(
-            &arango_client,
-            &ArangoBootstrapOptions {
-                collections: true,
-                views: false,
-                graph: true,
-                vector_indexes: false,
-                vector_dimensions: 3072,
-                vector_index_n_lists: 100,
-                vector_index_default_n_probe: 8,
-                vector_index_training_iterations: 25,
-            },
-        )
-        .await
-        .context("failed to bootstrap Arango knowledge plane")?;
-
         let redis = redis::Client::open(settings.redis_url.clone())
             .context("failed to build redis client")?;
         let persistence = Persistence::for_tests(postgres, redis);
-        let state = AppState::from_dependencies(settings, persistence, arango_client)?;
+        let state = AppState::from_dependencies(settings, persistence)?;
         let workspace = state
             .canonical_services
             .catalog
@@ -210,13 +122,7 @@ impl WebIngestFixture {
             .await
             .context("failed to create library")?;
 
-        Ok(Self {
-            state,
-            temp_database,
-            temp_arango,
-            workspace_id: workspace.id,
-            library_id: library.id,
-        })
+        Ok(Self { state, temp_database, workspace_id: workspace.id, library_id: library.id })
     }
 
     #[allow(dead_code)]
@@ -372,7 +278,6 @@ impl WebIngestFixture {
 
     pub async fn cleanup(self) -> Result<()> {
         self.state.persistence.postgres.close().await;
-        self.temp_arango.drop().await?;
         self.temp_database.drop().await
     }
 }

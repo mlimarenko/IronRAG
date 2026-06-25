@@ -70,7 +70,7 @@ async fn retrieve_entity_hit_lanes_with_relevance(
             "runtime entity search",
         )?;
         let entity_vector_result = state
-            .arango_search_store
+            .search_store
             .search_entity_vectors_by_similarity(
                 library_dim,
                 library_id,
@@ -82,7 +82,7 @@ async fn retrieve_entity_hit_lanes_with_relevance(
             .await;
         let raw_hits = match entity_vector_result {
             Ok(hits) => hits,
-            Err(ref err) if is_arango_collection_not_found(err) => {
+            Err(ref err) if is_vector_relation_not_found(err) => {
                 tracing::info!(
                     library_id = %library_id,
                     "entity vector search: empty layer, returning no graph evidence"
@@ -1526,13 +1526,13 @@ pub(crate) fn entities_from_relationships(
     entities
 }
 
-/// Returns `true` when an ArangoDB error indicates the target collection or
-/// view does not exist (errorNum 1203). This is a valid no-data state for
-/// libraries whose entity layer has not been extracted yet; callers should
-/// treat it as an empty result rather than a fatal infrastructure failure.
-fn is_arango_collection_not_found(err: &anyhow::Error) -> bool {
+/// Returns `true` when PostgreSQL reports the target vector relation does not
+/// exist. This is a valid no-data state for libraries whose entity layer has not
+/// been extracted yet; callers should treat it as an empty result rather than a
+/// fatal infrastructure failure.
+fn is_vector_relation_not_found(err: &anyhow::Error) -> bool {
     let msg = format!("{err:#}");
-    msg.contains("1203")
+    msg.contains("42P01") || msg.contains("does not exist")
 }
 
 #[cfg(test)]

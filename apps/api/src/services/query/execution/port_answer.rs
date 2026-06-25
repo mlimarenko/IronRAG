@@ -27,7 +27,7 @@ use super::technical_literals::{
 };
 
 fn fact_kind_matches(
-    fact: &crate::infra::arangodb::document_store::KnowledgeTechnicalFactRow,
+    fact: &crate::infra::knowledge_rows::KnowledgeTechnicalFactRow,
     kind: TechnicalFactKind,
 ) -> bool {
     fact.fact_kind.parse::<TechnicalFactKind>().ok() == Some(kind)

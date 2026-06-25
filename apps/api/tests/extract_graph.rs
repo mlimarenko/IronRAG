@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 use anyhow::{Context, Result};
 use chrono::Utc;
 use sqlx::{PgPool, postgres::PgPoolOptions};
@@ -7,13 +5,7 @@ use uuid::Uuid;
 
 use ironrag_backend::{
     app::{config::Settings, state::AppState},
-    infra::{
-        arangodb::{
-            bootstrap::{ArangoBootstrapOptions, bootstrap_knowledge_plane},
-            client::ArangoClient,
-        },
-        repositories::{ai_repository, catalog_repository, content_repository},
-    },
+    infra::repositories::{ai_repository, catalog_repository, content_repository},
     services::{
         ingest::extract::{
             CheckpointResumeCursorCommand, ExtractService, MaterializeChunkResultCommand,
@@ -345,27 +337,7 @@ async fn build_test_state(settings: Settings, postgres: PgPool) -> Result<AppSta
     let redis = redis::Client::open(settings.redis_url.clone())
         .context("failed to create redis client for extract_graph test state")?;
     let persistence = ironrag_backend::infra::persistence::Persistence::for_tests(postgres, redis);
-    let arango_client = Arc::new(
-        ArangoClient::from_settings(&settings)
-            .context("failed to build Arango client for extract_graph test state")?,
-    );
-    bootstrap_knowledge_plane(
-        &arango_client,
-        &ArangoBootstrapOptions {
-            collections: true,
-            views: true,
-            graph: true,
-            vector_indexes: false,
-            vector_dimensions: 3072,
-            vector_index_n_lists: 100,
-            vector_index_default_n_probe: 8,
-            vector_index_training_iterations: 25,
-        },
-    )
-    .await
-    .context("failed to bootstrap Arango knowledge plane for extract_graph test state")?;
-
-    AppState::from_dependencies(settings, persistence, arango_client)
+    AppState::from_dependencies(settings, persistence)
 }
 
 fn replace_database_name(database_url: &str, new_database: &str) -> Result<String> {
@@ -533,7 +505,7 @@ async fn chunk_and_graph_embeddings_rebuild_and_select_active_indexes() -> Resul
 
         let chunk_rows = fixture
             .state
-            .arango_search_store
+            .search_store
             .list_chunk_vectors_by_chunk(fixture.chunk_id)
             .await
             .context("failed to list canonical chunk vectors")?;
@@ -547,7 +519,7 @@ async fn chunk_and_graph_embeddings_rebuild_and_select_active_indexes() -> Resul
 
         let node_rows = fixture
             .state
-            .arango_search_store
+            .search_store
             .list_entity_vectors_by_entity(fixture.node_id)
             .await
             .context("failed to list canonical entity vectors")?;

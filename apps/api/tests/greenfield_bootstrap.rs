@@ -23,7 +23,6 @@ use ironrag_backend::{
         state::AppState,
     },
     infra::{
-        arangodb::client::ArangoClient,
         persistence::{Persistence, canonical_ai_catalog_seeded, canonical_baseline_present},
         repositories::{self, catalog_repository},
     },
@@ -174,8 +173,6 @@ fn build_test_state(
     let redis = redis::Client::open(settings.redis_url.clone())
         .context("failed to create redis client for bootstrap test state")?;
     let persistence = Persistence::for_tests(postgres, redis);
-    let arango_client = Arc::new(ArangoClient::from_settings(&settings)?);
-
     let mut state = AppState::from_dependencies(
         Settings {
             ui_bootstrap_admin_login: bootstrap_settings
@@ -197,7 +194,6 @@ fn build_test_state(
             ..settings
         },
         persistence,
-        arango_client,
     )?;
     state.llm_gateway = Arc::new(FakeBootstrapGateway);
     state.ui_bootstrap_ai_setup = ui_bootstrap_ai_setup;

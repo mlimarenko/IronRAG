@@ -1,4 +1,4 @@
-FROM node:24-alpine AS builder
+FROM node:26-alpine AS builder
 WORKDIR /app
 ARG APP_VERSION
 # Browser traces default to the maintainers' collector (performance only, no

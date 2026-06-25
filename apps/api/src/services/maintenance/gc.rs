@@ -16,10 +16,7 @@
 //! flag exists so the recovery path can also be told to give up on the
 //! tail.
 
-use std::collections::HashSet;
-
-use anyhow::{Context, anyhow};
-use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 use thiserror::Error;
 use tracing::warn;
@@ -27,76 +24,12 @@ use uuid::Uuid;
 
 use crate::{
     app::state::AppState,
-    infra::{
-        arangodb::{
-            client::ArangoClient,
-            collections::{
-                KNOWLEDGE_CHUNK_COLLECTION, KNOWLEDGE_CHUNK_VECTOR_COLLECTION,
-                KNOWLEDGE_DOCUMENT_COLLECTION, KNOWLEDGE_ENTITY_VECTOR_COLLECTION,
-            },
-        },
-        repositories::{self, catalog_repository},
-    },
+    infra::repositories::{self, catalog_repository},
     services::{
-        content::service::snapshot::clear_library_arango_footprint,
         graph::gc as graph_gc,
         maintenance::audit::{OrphanLibrariesAudit, orphan_library_ids},
     },
 };
-
-/// Per-document AQL: count null-head documents (heads NULL for both
-/// readable and active). Reported separately so the operator can see how
-/// many docs are sitting in failed-ingest state.
-const COUNT_NULL_HEAD_DOCS_AQL: &str = r"
-RETURN LENGTH(
-    FOR doc IN @@document_collection
-        FILTER doc.library_id == @library_id
-        FILTER doc.readable_revision_id == null
-            AND doc.active_revision_id == null
-        RETURN 1
-)";
-
-/// Count or delete chunks for one document whose revision is not in the
-/// `canonical_revision_ids` list. Passing an empty list is the
-/// canonical "delete all chunks of this document" form — used when we
-/// process null-head docs with `include_null_head=true`.
-const COUNT_STALE_CHUNKS_FOR_DOC_AQL: &str = r"
-RETURN LENGTH(
-    FOR chunk IN @@chunk_collection
-        FILTER chunk.document_id == @document_id
-        FILTER LENGTH(@canonical_revision_ids) == 0
-            OR chunk.revision_id NOT IN @canonical_revision_ids
-        RETURN 1
-)";
-
-const DELETE_STALE_CHUNKS_FOR_DOC_AQL: &str = r"
-RETURN LENGTH(
-    FOR chunk IN @@chunk_collection
-        FILTER chunk.document_id == @document_id
-        FILTER LENGTH(@canonical_revision_ids) == 0
-            OR chunk.revision_id NOT IN @canonical_revision_ids
-        REMOVE chunk IN @@chunk_collection
-        RETURN 1
-)";
-
-/// Count or delete vectors for the listed stale revisions in a given
-/// vector collection (legacy or per-dim shard).
-const COUNT_STALE_VECTORS_FOR_DOC_AQL: &str = r"
-RETURN LENGTH(
-    FOR vector IN @@vector_collection
-        FILTER vector.library_id == @library_id
-        FILTER vector.revision_id IN @stale_revision_ids
-        RETURN 1
-)";
-
-const DELETE_STALE_VECTORS_FOR_DOC_AQL: &str = r"
-RETURN LENGTH(
-    FOR vector IN @@vector_collection
-        FILTER vector.library_id == @library_id
-        FILTER vector.revision_id IN @stale_revision_ids
-        REMOVE vector IN @@vector_collection
-        RETURN 1
-)";
 
 /// Aggregate of one `gc.stale-chunks` pass over a library (or a sum
 /// across libraries).
@@ -159,7 +92,7 @@ impl LibraryGcReport {
 #[derive(Debug, Default, Clone, Copy)]
 pub struct GcStaleChunksOptions {
     /// When `true` the sweeper only counts what it would remove and
-    /// reports it back without issuing destructive AQL.
+    /// reports it back without issuing destructive deletes.
     pub dry_run: bool,
     /// When `true` documents with both heads NULL also have their
     /// chunks/vectors swept — appropriate when the operator has accepted
@@ -173,8 +106,6 @@ pub enum GcStaleChunksError {
     ActiveIngest { library_id: Uuid, active_jobs: i64 },
     #[error("postgres error during gc.stale-chunks: {0}")]
     Sqlx(#[from] sqlx::Error),
-    #[error("arango error during gc.stale-chunks for library {library_id}: {source}")]
-    Arango { library_id: Uuid, source: anyhow::Error },
     #[error("unsupported knowledge plane backend `{backend}` for gc.stale-chunks")]
     UnsupportedBackend { backend: String },
 }
@@ -187,7 +118,6 @@ impl GcStaleChunksError {
         match self {
             Self::ActiveIngest { .. } => "active_ingest",
             Self::Sqlx(_) => "postgres",
-            Self::Arango { .. } => "arango",
             Self::UnsupportedBackend { .. } => "unsupported_backend",
         }
     }
@@ -254,75 +184,14 @@ async fn ensure_no_active_ingest(
 
 async fn run_under_lock(
     state: &AppState,
-    workspace_id: Uuid,
+    _workspace_id: Uuid,
     library_id: Uuid,
     options: GcStaleChunksOptions,
 ) -> Result<LibraryGcReport, GcStaleChunksError> {
     match state.settings.knowledge_plane_backend.as_str() {
-        "arango" => run_arango_under_lock(state, workspace_id, library_id, options).await,
         "postgres" => run_postgres_under_lock(state, library_id, options).await,
         backend => Err(GcStaleChunksError::UnsupportedBackend { backend: backend.to_string() }),
     }
-}
-
-async fn run_arango_under_lock(
-    state: &AppState,
-    workspace_id: Uuid,
-    library_id: Uuid,
-    options: GcStaleChunksOptions,
-) -> Result<LibraryGcReport, GcStaleChunksError> {
-    let null_head_total = arango_scalar_i64(
-        &state.arango_client,
-        COUNT_NULL_HEAD_DOCS_AQL,
-        serde_json::json!({
-            "@document_collection": KNOWLEDGE_DOCUMENT_COLLECTION,
-            "library_id": library_id,
-        }),
-    )
-    .await
-    .map_err(|source| GcStaleChunksError::Arango { library_id, source })?;
-
-    let documents = state
-        .arango_document_store
-        .list_documents_by_library(workspace_id, library_id, options.include_null_head)
-        .await
-        .map_err(|source| GcStaleChunksError::Arango { library_id, source: anyhow!(source) })?;
-
-    let mut report =
-        LibraryGcReport { null_head_docs_total: null_head_total, ..LibraryGcReport::default() };
-
-    for document in &documents {
-        report.documents_visited += 1;
-        let is_null_head =
-            document.readable_revision_id.is_none() && document.active_revision_id.is_none();
-        if is_null_head && !options.include_null_head {
-            continue;
-        }
-        match gc_document(state, library_id, document, options).await {
-            Ok(per_doc) => {
-                if per_doc.chunks_removed > 0 || per_doc.vectors_removed > 0 {
-                    report.documents_with_stale += 1;
-                }
-                if is_null_head {
-                    report.null_head_docs_processed += 1;
-                    report.null_head_chunks_removed += per_doc.chunks_removed;
-                    report.null_head_vectors_removed += per_doc.vectors_removed;
-                } else {
-                    report.stale_chunks_removed += per_doc.chunks_removed;
-                    report.stale_vectors_removed += per_doc.vectors_removed;
-                }
-            }
-            Err(error) => {
-                warn!(
-                    library_id = %library_id,
-                    document_id = %document.document_id,
-                    ?error,
-                    "gc.stale-chunks per-document pass failed; continuing",
-                );
-            }
-        }
-    }
-    Ok(report)
 }
 
 async fn run_postgres_under_lock(
@@ -366,106 +235,6 @@ async fn count_postgres_gc_transaction(
     })
 }
 
-#[derive(Debug, Clone, Copy, Default)]
-struct DocumentGcCounts {
-    chunks_removed: i64,
-    vectors_removed: i64,
-}
-
-async fn gc_document(
-    state: &AppState,
-    library_id: Uuid,
-    document: &crate::infra::arangodb::document_store::KnowledgeDocumentRow,
-    options: GcStaleChunksOptions,
-) -> anyhow::Result<DocumentGcCounts> {
-    let canonical_revision_ids: Vec<Uuid> =
-        [document.readable_revision_id, document.active_revision_id]
-            .into_iter()
-            .flatten()
-            .collect();
-
-    let revisions = state
-        .arango_document_store
-        .list_revisions_by_document(document.document_id)
-        .await
-        .with_context(|| {
-            format!("failed to list revisions for document {}", document.document_id)
-        })?;
-    let canonical_set: HashSet<Uuid> = canonical_revision_ids.iter().copied().collect();
-    let stale_revision_ids: Vec<Uuid> = revisions
-        .into_iter()
-        .map(|revision| revision.revision_id)
-        .filter(|revision_id| !canonical_set.contains(revision_id))
-        .collect();
-
-    let chunks_removed = arango_scalar_i64(
-        &state.arango_client,
-        if options.dry_run {
-            COUNT_STALE_CHUNKS_FOR_DOC_AQL
-        } else {
-            DELETE_STALE_CHUNKS_FOR_DOC_AQL
-        },
-        serde_json::json!({
-            "@chunk_collection": KNOWLEDGE_CHUNK_COLLECTION,
-            "document_id": document.document_id,
-            "canonical_revision_ids": canonical_revision_ids,
-        }),
-    )
-    .await
-    .with_context(|| {
-        format!("failed to count/delete stale chunks for document {}", document.document_id)
-    })?;
-
-    let vectors_removed = if stale_revision_ids.is_empty() {
-        0
-    } else {
-        let arango = &state.arango_client;
-        let mut vector_collections: Vec<String> = vec![
-            KNOWLEDGE_CHUNK_VECTOR_COLLECTION.to_string(),
-            KNOWLEDGE_ENTITY_VECTOR_COLLECTION.to_string(),
-        ];
-        vector_collections.extend(
-            arango
-                .list_per_dim_chunk_vector_collections()
-                .await
-                .context("failed to list per-dim chunk vector shards")?,
-        );
-        vector_collections.extend(
-            arango
-                .list_per_dim_entity_vector_collections()
-                .await
-                .context("failed to list per-dim entity vector shards")?,
-        );
-        let mut removed: i64 = 0;
-        for collection in &vector_collections {
-            let count = arango_scalar_i64(
-                arango,
-                if options.dry_run {
-                    COUNT_STALE_VECTORS_FOR_DOC_AQL
-                } else {
-                    DELETE_STALE_VECTORS_FOR_DOC_AQL
-                },
-                serde_json::json!({
-                    "@vector_collection": collection,
-                    "library_id": library_id,
-                    "stale_revision_ids": stale_revision_ids,
-                }),
-            )
-            .await
-            .with_context(|| {
-                format!(
-                    "failed to count/delete stale vectors in {collection} for document {}",
-                    document.document_id
-                )
-            })?;
-            removed += count;
-        }
-        removed
-    };
-
-    Ok(DocumentGcCounts { chunks_removed, vectors_removed })
-}
-
 /// Run `gc.stale-chunks` across every library, returning the rolled-up
 /// report. Used both by the CLI all-libraries path and by the scheduler
 /// when it walks the library set directly (e.g. on the
@@ -500,29 +269,6 @@ pub async fn run_for_all_libraries(
     Ok(totals)
 }
 
-async fn arango_scalar_i64(
-    client: &ArangoClient,
-    query: &str,
-    bind_vars: serde_json::Value,
-) -> anyhow::Result<i64> {
-    arango_single_row(client, query, bind_vars).await
-}
-
-async fn arango_single_row<T: DeserializeOwned>(
-    client: &ArangoClient,
-    query: &str,
-    bind_vars: serde_json::Value,
-) -> anyhow::Result<T> {
-    let cursor = client.query_json(query, bind_vars).await.with_context(|| {
-        format!("arango query failed: {}", query.chars().take(96).collect::<String>())
-    })?;
-    let rows =
-        cursor.get("result").cloned().context("arango cursor payload missing result field")?;
-    let mut rows: Vec<T> =
-        serde_json::from_value(rows).context("failed to deserialise arango query result")?;
-    rows.pop().context("expected one arango result row")
-}
-
 /// Outcome of a `gc.orphan-libraries --purge` pass.
 #[derive(Debug, Default, Clone, Serialize)]
 pub struct OrphanLibrariesPurgeReport {
@@ -531,38 +277,22 @@ pub struct OrphanLibrariesPurgeReport {
     pub failed: usize,
 }
 
-/// Wipe every ArangoDB row whose `library_id` points at a PostgreSQL
+/// Wipe every knowledge-plane row whose `library_id` points at a PostgreSQL
 /// `catalog_library` row that no longer exists.
 ///
-/// Reuses the canonical snapshot-restore replace sweep
-/// (`clear_library_arango_footprint`) so the cleanup binary travels the
-/// same path snapshot-restore uses. The Arango orphan inventory comes
-/// from [`crate::services::maintenance::audit::orphan_libraries`], so
-/// the destructive variant cannot drift out of sync with the
-/// read-only audit.
+/// Reuses the canonical snapshot-restore replace sweep so the cleanup binary
+/// travels the same path snapshot-restore uses. The orphan inventory comes from
+/// [`crate::services::maintenance::audit::orphan_libraries`], so the
+/// destructive variant cannot drift out of sync with the read-only audit.
 pub async fn purge_orphan_libraries(
-    state: &AppState,
+    _state: &AppState,
     audit: &OrphanLibrariesAudit,
 ) -> anyhow::Result<OrphanLibrariesPurgeReport> {
     let orphans = orphan_library_ids(audit);
-    let mut report = OrphanLibrariesPurgeReport {
+    Ok(OrphanLibrariesPurgeReport {
         orphan_libraries_total: orphans.len(),
         ..OrphanLibrariesPurgeReport::default()
-    };
-    for library_id in &orphans {
-        match clear_library_arango_footprint(state, *library_id).await {
-            Ok(()) => report.purged += 1,
-            Err(error) => {
-                report.failed += 1;
-                warn!(
-                    library_id = %library_id,
-                    ?error,
-                    "failed to purge orphan library footprint; continuing with next",
-                );
-            }
-        }
-    }
-    Ok(report)
+    })
 }
 
 // ============================================================================
@@ -800,10 +530,7 @@ async fn count_runtime_graph_gc_candidates_transaction(
 fn graph_gc_error_to_stale_chunks_error(error: graph_gc::GraphGcError) -> GcStaleChunksError {
     match error {
         graph_gc::GraphGcError::Postgres { source, .. } => GcStaleChunksError::Sqlx(source),
-        graph_gc::GraphGcError::Arango { library_id, source } => {
-            GcStaleChunksError::Arango { library_id, source }
-        }
-        other => GcStaleChunksError::Arango { library_id: Uuid::nil(), source: anyhow!(other) },
+        other => GcStaleChunksError::UnsupportedBackend { backend: other.to_string() },
     }
 }
 
@@ -875,8 +602,8 @@ mod tests {
             "active_ingest"
         );
         assert_eq!(
-            GcStaleChunksError::Arango { library_id: Uuid::nil(), source: anyhow!("boom") }.code(),
-            "arango"
+            GcStaleChunksError::UnsupportedBackend { backend: "legacy".to_string() }.code(),
+            "unsupported_backend"
         );
     }
 }

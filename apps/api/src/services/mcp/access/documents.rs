@@ -34,9 +34,8 @@ use super::{
     catalog::{describe_libraries, load_library_by_catalog_ref, load_visible_library_contexts},
     fusion::SearchLane,
     types::{
-        ArangoChunkMentionReferenceRow, ArangoRelationSupportReferenceRow, McpDocumentAccumulator,
-        McpRevisionGroundingReferences, McpSearchEmbeddingContext, ResolvedDocumentState,
-        VisibleLibraryContext,
+        McpDocumentAccumulator, McpRevisionGroundingReferences, McpSearchEmbeddingContext,
+        ResolvedDocumentState, VisibleLibraryContext,
     },
 };
 
@@ -88,7 +87,7 @@ pub async fn search_documents(
                 .await
                 .map_err(|error| ApiError::internal_with_log(error, "internal"))?;
             match state
-                .arango_search_store
+                .search_store
                 .search_chunk_vectors_by_similarity(
                     library_dim,
                     library.library.id,
@@ -139,8 +138,8 @@ pub async fn search_documents(
             .into_iter()
             .collect::<Vec<_>>();
         let (document_rows, revision_rows) = tokio::try_join!(
-            state.arango_document_store.list_documents_by_ids(&chunk_document_ids),
-            state.arango_document_store.list_revisions_by_ids(&chunk_revision_ids),
+            state.document_store.list_documents_by_ids(&chunk_document_ids),
+            state.document_store.list_revisions_by_ids(&chunk_revision_ids),
         )
         .map_err(|error| ApiError::internal_with_log(error, "internal"))?;
         let document_map = document_rows
@@ -444,16 +443,16 @@ async fn search_chunks_with_query_variants(
     library_id: Uuid,
     query: &str,
     limit: usize,
-) -> Result<Vec<crate::infra::arangodb::search_store::KnowledgeChunkSearchRow>, ApiError> {
+) -> Result<Vec<crate::infra::knowledge_rows::KnowledgeChunkSearchRow>, ApiError> {
     let variants = chunk_search_query_variants(query);
     let mut rows_by_chunk = std::collections::HashMap::<
         Uuid,
-        crate::infra::arangodb::search_store::KnowledgeChunkSearchRow,
+        crate::infra::knowledge_rows::KnowledgeChunkSearchRow,
     >::new();
 
     for (variant_index, variant) in variants.iter().enumerate() {
         let mut rows = state
-            .arango_search_store
+            .search_store
             .search_chunks(library_id, variant, limit, None, None)
             .await
             .map_err(|error| ApiError::internal_with_log(error, "internal"))?;
@@ -693,7 +692,7 @@ pub(crate) async fn resolve_document_state(
     document_id: Uuid,
 ) -> Result<ResolvedDocumentState, ApiError> {
     let knowledge_document = state
-        .arango_document_store
+        .document_store
         .get_document(document_id)
         .await
         .map_err(|error| ApiError::internal_with_log(error, "internal"))?
@@ -711,7 +710,7 @@ pub(crate) async fn resolve_document_state(
     let readiness_summary = content_summary.readiness_summary.ok_or(ApiError::Internal)?;
     let readable_revision = match latest_revision_id {
         Some(revision_id) => state
-            .arango_document_store
+            .document_store
             .get_revision(revision_id)
             .await
             .map_err(|error| ApiError::internal_with_log(error, "internal"))?,
@@ -758,7 +757,7 @@ pub(crate) async fn resolve_document_state(
                     || revision.mime_type.trim().to_ascii_lowercase().starts_with("image/")) =>
         {
             let chunks = state
-                .arango_document_store
+                .document_store
                 .list_chunks_by_revision(revision.revision_id)
                 .await
                 .map_err(|error| ApiError::internal_with_log(error, "internal"))?;
@@ -1032,12 +1031,12 @@ pub(crate) async fn resolve_search_embedding_context(
 pub(crate) async fn load_knowledge_chunks_by_ids(
     state: &AppState,
     chunk_ids: &[Uuid],
-) -> Result<Vec<crate::infra::arangodb::document_store::KnowledgeChunkRow>, ApiError> {
+) -> Result<Vec<crate::infra::knowledge_rows::KnowledgeChunkRow>, ApiError> {
     if chunk_ids.is_empty() {
         return Ok(Vec::new());
     }
     state
-        .arango_document_store
+        .document_store
         .list_chunks_by_ids(chunk_ids)
         .await
         .map_err(|error| ApiError::internal_with_log(error, "internal"))
@@ -1050,7 +1049,7 @@ pub(crate) async fn collect_revision_grounding_references(
     limit: usize,
 ) -> Result<McpRevisionGroundingReferences, ApiError> {
     let technical_facts = state
-        .arango_document_store
+        .document_store
         .list_technical_facts_by_revision(revision_id)
         .await
         .map_err(|error| ApiError::internal_with_log(error, "internal"))?;
@@ -1086,7 +1085,7 @@ pub(crate) async fn collect_revision_grounding_references(
         })
         .collect::<Vec<_>>();
     let evidence_rows = state
-        .arango_graph_store
+        .graph_store
         .list_evidence_by_revision(revision_id)
         .await
         .map_err(|error| ApiError::internal_with_log(error, "internal"))?;
@@ -1112,162 +1111,65 @@ pub(crate) async fn collect_revision_grounding_references(
     let entity_references = if chunk_ids.is_empty() {
         Vec::new()
     } else {
-        match state.settings.knowledge_plane_backend.as_str() {
-            "arango" => {
-                let cursor = state
-                    .arango_client
-                    .query_json(
-                        "FOR edge IN @@collection
-                         FILTER edge.chunk_id IN @chunk_ids
-                         COLLECT entity_id = edge.entity_id
-                         AGGREGATE rank = MIN(edge.rank), score = MAX(edge.score)
-                         LET reason = FIRST(
-                            FOR item IN @@collection
-                            FILTER item.entity_id == entity_id AND item.chunk_id IN @chunk_ids
-                            SORT item.rank ASC, item.created_at ASC, item._key ASC
-                            LIMIT 1
-                            RETURN item.inclusionReason
-                         )
-                         SORT rank ASC, score DESC, entity_id ASC
-                         LIMIT @limit
-                         RETURN {
-                            entity_id,
-                            rank,
-                            score,
-                            inclusion_reason: reason
-                         }",
-                        serde_json::json!({
-                            "@collection": crate::infra::arangodb::collections::KNOWLEDGE_CHUNK_MENTIONS_ENTITY_EDGE,
-                            "chunk_ids": chunk_ids,
-                            "limit": limit.max(1),
-                        }),
-                    )
-                    .await
-                    .map_err(|error| ApiError::internal_with_log(error, "internal"))?;
-                let result = cursor.get("result").cloned().ok_or(ApiError::Internal)?;
-                let rows: Vec<ArangoChunkMentionReferenceRow> = serde_json::from_value(result)
-                    .map_err(|error| ApiError::internal_with_log(error, "internal"))?;
-                rows.into_iter()
-                    .map(|row| McpEntityReference {
-                        entity_id: row.entity_id,
-                        rank: row.rank,
-                        score: row.score,
-                        inclusion_reason: row.inclusion_reason,
-                    })
-                    .collect()
-            }
-            "postgres" => {
-                let rows = sqlx::query_as::<_, PgEntityReferenceRow>(
-                    "select to_id as entity_id,
-                            min(rank) as rank,
-                            max(score) as score,
-                            (array_agg(
-                                inclusion_reason
-                                order by rank asc nulls last,
-                                         created_at asc nulls last,
-                                         from_id asc,
-                                         to_id asc,
-                                         relation_type asc
-                            ))[1] as inclusion_reason
-                     from knowledge_chunk_entity_mention
-                     where from_id = any($1::uuid[])
-                     group by to_id
-                     order by min(rank) asc nulls last,
-                              max(score) desc nulls last,
-                              to_id asc
-                     limit $2",
-                )
-                .bind(chunk_ids)
-                .bind(limit.max(1) as i64)
-                .fetch_all(&state.persistence.postgres)
-                .await
-                .map_err(|error| ApiError::internal_with_log(error, "internal"))?;
+        let rows = sqlx::query_as::<_, PgEntityReferenceRow>(
+            "select to_id as entity_id,
+                    min(rank) as rank,
+                    max(score) as score,
+                    (array_agg(
+                        inclusion_reason
+                        order by rank asc nulls last,
+                                 created_at asc nulls last,
+                                 from_id asc,
+                                 to_id asc,
+                                 relation_type asc
+                    ))[1] as inclusion_reason
+             from knowledge_chunk_entity_mention
+             where from_id = any($1::uuid[])
+             group by to_id
+             order by min(rank) asc nulls last,
+                      max(score) desc nulls last,
+                      to_id asc
+             limit $2",
+        )
+        .bind(chunk_ids)
+        .bind(limit.max(1) as i64)
+        .fetch_all(&state.persistence.postgres)
+        .await
+        .map_err(|error| ApiError::internal_with_log(error, "internal"))?;
 
-                rows.into_iter().map(PgEntityReferenceRow::into_mcp).collect()
-            }
-            _ => return Err(ApiError::Internal),
-        }
+        rows.into_iter().map(PgEntityReferenceRow::into_mcp).collect()
     };
 
     let relation_references = if evidence_ids.is_empty() {
         Vec::new()
     } else {
-        match state.settings.knowledge_plane_backend.as_str() {
-            "arango" => {
-                let cursor = state
-                    .arango_client
-                    .query_json(
-                        "FOR edge IN @@collection
-                         FILTER edge.evidence_id IN @evidence_ids
-                         COLLECT relation_id = edge.relation_id
-                         AGGREGATE rank = MIN(edge.rank), score = MAX(edge.score)
-                         LET reason = FIRST(
-                            FOR item IN @@collection
-                            FILTER item.relation_id == relation_id AND item.evidence_id IN @evidence_ids
-                            SORT item.rank ASC, item.created_at ASC, item._key ASC
-                            LIMIT 1
-                            RETURN item.inclusionReason
-                         )
-                         SORT rank ASC, score DESC, relation_id ASC
-                         LIMIT @limit
-                         RETURN {
-                            relation_id,
-                            rank,
-                            score,
-                            inclusion_reason: reason
-                         }",
-                        serde_json::json!({
-                            "@collection": crate::infra::arangodb::collections::KNOWLEDGE_EVIDENCE_SUPPORTS_RELATION_EDGE,
-                            "evidence_ids": evidence_ids,
-                            "limit": limit.max(1),
-                        }),
-                    )
-                    .await
-                    .map_err(|error| ApiError::internal_with_log(error, "internal"))?;
-                let result = cursor.get("result").cloned().ok_or(ApiError::Internal)?;
-                let rows: Vec<ArangoRelationSupportReferenceRow> =
-                    serde_json::from_value(result)
-                        .map_err(|error| ApiError::internal_with_log(error, "internal"))?;
-                rows.into_iter()
-                    .map(|row| McpRelationReference {
-                        relation_id: row.relation_id,
-                        rank: row.rank,
-                        score: row.score,
-                        inclusion_reason: row.inclusion_reason,
-                    })
-                    .collect()
-            }
-            "postgres" => {
-                let rows = sqlx::query_as::<_, PgRelationReferenceRow>(
-                    "select to_id as relation_id,
-                            min(rank) as rank,
-                            max(score) as score,
-                            (array_agg(
-                                inclusion_reason
-                                order by rank asc nulls last,
-                                         created_at asc nulls last,
-                                         from_id asc,
-                                         to_id asc,
-                                         relation_type asc
-                            ))[1] as inclusion_reason
-                     from knowledge_evidence_relation_support
-                     where from_id = any($1::uuid[])
-                     group by to_id
-                     order by min(rank) asc nulls last,
-                              max(score) desc nulls last,
-                              to_id asc
-                     limit $2",
-                )
-                .bind(&evidence_ids)
-                .bind(limit.max(1) as i64)
-                .fetch_all(&state.persistence.postgres)
-                .await
-                .map_err(|error| ApiError::internal_with_log(error, "internal"))?;
+        let rows = sqlx::query_as::<_, PgRelationReferenceRow>(
+            "select to_id as relation_id,
+                    min(rank) as rank,
+                    max(score) as score,
+                    (array_agg(
+                        inclusion_reason
+                        order by rank asc nulls last,
+                                 created_at asc nulls last,
+                                 from_id asc,
+                                 to_id asc,
+                                 relation_type asc
+                    ))[1] as inclusion_reason
+             from knowledge_evidence_relation_support
+             where from_id = any($1::uuid[])
+             group by to_id
+             order by min(rank) asc nulls last,
+                      max(score) desc nulls last,
+                      to_id asc
+             limit $2",
+        )
+        .bind(&evidence_ids)
+        .bind(limit.max(1) as i64)
+        .fetch_all(&state.persistence.postgres)
+        .await
+        .map_err(|error| ApiError::internal_with_log(error, "internal"))?;
 
-                rows.into_iter().map(PgRelationReferenceRow::into_mcp).collect()
-            }
-            _ => return Err(ApiError::Internal),
-        }
+        rows.into_iter().map(PgRelationReferenceRow::into_mcp).collect()
     };
 
     Ok(McpRevisionGroundingReferences {
@@ -1365,7 +1267,7 @@ fn fact_supports_requested_chunks(support_chunk_ids: &[Uuid], chunk_ids: &[Uuid]
 }
 
 fn technical_fact_support_score(
-    fact: &crate::infra::arangodb::document_store::KnowledgeTechnicalFactRow,
+    fact: &crate::infra::knowledge_rows::KnowledgeTechnicalFactRow,
     chunk_ids: &[Uuid],
 ) -> (bool, usize, usize) {
     (

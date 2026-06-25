@@ -1,6 +1,5 @@
 use std::collections::HashMap;
 
-use serde::Deserialize;
 use uuid::Uuid;
 
 use crate::{
@@ -56,22 +55,6 @@ pub(crate) struct McpRevisionGroundingReferences {
     pub(crate) entity_references: Vec<McpEntityReference>,
     pub(crate) relation_references: Vec<McpRelationReference>,
     pub(crate) evidence_references: Vec<McpEvidenceReference>,
-}
-
-#[derive(Debug, Clone, Deserialize, utoipa::ToSchema)]
-pub(crate) struct ArangoChunkMentionReferenceRow {
-    pub(crate) entity_id: Uuid,
-    pub(crate) rank: i32,
-    pub(crate) score: f64,
-    pub(crate) inclusion_reason: Option<String>,
-}
-
-#[derive(Debug, Clone, Deserialize, utoipa::ToSchema)]
-pub(crate) struct ArangoRelationSupportReferenceRow {
-    pub(crate) relation_id: Uuid,
-    pub(crate) rank: i32,
-    pub(crate) score: f64,
-    pub(crate) inclusion_reason: Option<String>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -132,8 +115,8 @@ impl McpDocumentAccumulator {
     }
 
     pub(crate) fn from_knowledge(
-        document: &crate::infra::arangodb::document_store::KnowledgeDocumentRow,
-        revision: &crate::infra::arangodb::document_store::KnowledgeRevisionRow,
+        document: &crate::infra::knowledge_rows::KnowledgeDocumentRow,
+        revision: &crate::infra::knowledge_rows::KnowledgeRevisionRow,
     ) -> Self {
         let document_title = revision
             .title
