@@ -538,8 +538,8 @@ fn settings_config_builder()
         .set_default("content_storage_root", "/var/lib/ironrag/content-storage")?
         .set_default("content_storage_s3_region", "us-east-1")?
         .set_default("content_storage_s3_force_path_style", true)?
-        .set_default("ingestion_max_parallel_jobs_global", 64)?
-        .set_default("ingestion_max_parallel_jobs_per_workspace", 16)?
+        .set_default("ingestion_max_parallel_jobs_global", 16)?
+        .set_default("ingestion_max_parallel_jobs_per_workspace", 8)?
         .set_default("ingestion_max_parallel_jobs_per_library", 4)?
         .set_default("ingestion_memory_soft_limit_mib", 0)?
         .set_default("ingestion_worker_lease_seconds", 300)?

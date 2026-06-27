@@ -4,11 +4,12 @@ use super::{
     BootstrapAiCredentialSource, BootstrapAiPresetInput, bootstrap_bundle_is_self_contained,
     bootstrap_preset_inputs_cover_required_purposes, canonicalize_provider_base_url,
     discovered_provider_model_signature_for_capability, is_loopback_base_url,
-    merge_provider_runtime_profile, parse_allowed_binding_purposes,
-    provider_credential_base_url_for_create, provider_credential_base_url_for_update,
-    resolve_bootstrap_provider_preset_bundle, resolve_bootstrap_provider_preset_descriptors,
-    resolve_configured_bootstrap_preset_inputs, runtime_provider_base_url,
-    validate_bootstrap_preset_inputs_cover_required_purposes, validate_model_binding_purpose,
+    is_provider_credential_validation_error, merge_provider_runtime_profile,
+    parse_allowed_binding_purposes, provider_credential_base_url_for_create,
+    provider_credential_base_url_for_update, resolve_bootstrap_provider_preset_bundle,
+    resolve_bootstrap_provider_preset_descriptors, resolve_configured_bootstrap_preset_inputs,
+    runtime_provider_base_url, validate_bootstrap_preset_inputs_cover_required_purposes,
+    validate_model_binding_purpose,
 };
 use crate::app::config::UiBootstrapAiBindingDefault;
 use crate::domains::ai::{AiBindingPurpose, ModelCatalogEntry, ProviderCatalogEntry};
@@ -1566,4 +1567,36 @@ fn vector_index_counterpart_purpose_maps_embed_and_retrieve_pairs() {
 fn vector_index_counterpart_purpose_is_none_for_non_vector_bindings() {
     assert_eq!(super::vector_index_counterpart_purpose(AiBindingPurpose::ExtractGraph), None);
     assert_eq!(super::vector_index_counterpart_purpose(AiBindingPurpose::QueryCompile), None);
+}
+
+#[test]
+fn env_provider_credential_bootstrap_skips_only_provider_validation_errors() {
+    for message in [
+        "provider credential validation failed for Provider Alpha: upstream provider request failed; response details were redacted",
+        "provider credential validation failed for Provider Alpha at /models: status=401 Unauthorized",
+    ] {
+        assert!(
+            is_provider_credential_validation_error(&ApiError::BadRequest(message.to_string())),
+            "{message}"
+        );
+    }
+
+    for message in [
+        "provider provider-alpha requires a baseUrl",
+        "provider provider-alpha does not expose a chat model for credential validation",
+        "AI catalog payload violated schema constraints",
+    ] {
+        assert!(
+            !is_provider_credential_validation_error(&ApiError::BadRequest(message.to_string())),
+            "{message}"
+        );
+    }
+
+    assert!(!is_provider_credential_validation_error(&ApiError::Internal));
+    assert!(!is_provider_credential_validation_error(&ApiError::Conflict(
+        "duplicate credential label".to_string()
+    )));
+    assert!(!is_provider_credential_validation_error(&ApiError::NotFound(
+        "provider_catalog missing".to_string()
+    )));
 }

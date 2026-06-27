@@ -204,11 +204,14 @@ IRONRAG_DB_MEMORY_LIMIT=6144M \
   docker compose up -d
 ```
 
-The default Compose stack keeps ingest conservative on small swapless hosts:
-`IRONRAG_INGESTION_MAX_PARALLEL_JOBS_GLOBAL=4`,
-`IRONRAG_INGESTION_MAX_PARALLEL_JOBS_PER_WORKSPACE=2`, and
-`IRONRAG_INGESTION_MAX_PARALLEL_JOBS_PER_LIBRARY=1`. Raise those only together
-with worker memory, database connection budget, and provider concurrency.
+The default queue caps allow up to 16 leased ingest jobs globally, 8 per
+workspace, and 4 per library:
+`IRONRAG_INGESTION_MAX_PARALLEL_JOBS_GLOBAL=16`,
+`IRONRAG_INGESTION_MAX_PARALLEL_JOBS_PER_WORKSPACE=8`, and
+`IRONRAG_INGESTION_MAX_PARALLEL_JOBS_PER_LIBRARY=4`. The worker still applies a
+local cap from its memory cgroup and database pool, so raise worker replicas,
+worker memory, database connection budget, and provider concurrency together
+when you want the deployment to actually fill the global queue.
 
 Helm (Kubernetes):
 
@@ -222,7 +225,7 @@ helm upgrade --install ironrag charts/ironrag \
 By default the chart deploys the API, worker, and web images with the
 `v<appVersion>` image tag derived from `Chart.appVersion`. Override
 `api.image.tag`, `worker.image.tag`, and `web.image.tag` only when pinning
-a different published image, for example `--set web.image.tag=v0.5.4`.
+a different published image, for example `--set web.image.tag=v0.5.5`.
 
 Bundled dependencies (same pins as Docker Compose): `pgvector/pgvector:pg18`
 for PostgreSQL and `redis:8.8` for Redis. Override via

@@ -54,8 +54,8 @@ use provider_validation::{
     is_loopback_base_url,
 };
 use provider_validation::{
-    provider_credential_base_url_for_create, provider_credential_base_url_for_update,
-    runtime_provider_base_url, validate_provider_access,
+    is_provider_credential_validation_error, provider_credential_base_url_for_create,
+    provider_credential_base_url_for_update, runtime_provider_base_url, validate_provider_access,
 };
 use shared::{
     binding_purpose_key, canonical_runtime_preset_name, map_ai_delete_error, map_ai_write_error,
@@ -874,6 +874,7 @@ impl AiCatalogService {
             )
             .await?;
         let mut created = 0usize;
+        let mut skipped = 0usize;
         for secret in &configured_ai.provider_secrets {
             let Some(provider) = providers.iter().find(|p| p.provider_kind == secret.provider_kind)
             else {
@@ -893,11 +894,29 @@ impl AiCatalogService {
                 base_url: None,
                 created_by_principal_id: None,
             };
-            self.create_provider_credential(state, command).await?;
-            created += 1;
+            match self.create_provider_credential(state, command).await {
+                Ok(_) => created += 1,
+                Err(error) if is_provider_credential_validation_error(&error) => {
+                    skipped += 1;
+                    tracing::warn!(
+                        stage = "bootstrap",
+                        provider_kind = %secret.provider_kind,
+                        error = %error,
+                        "skipped env-keyed provider credential",
+                    );
+                }
+                Err(error) => return Err(error),
+            }
         }
         if created > 0 {
             tracing::info!(stage = "bootstrap", created, "ensured env-keyed provider credentials",);
+        }
+        if skipped > 0 {
+            tracing::warn!(
+                stage = "bootstrap",
+                skipped,
+                "some env-keyed provider credentials could not be validated",
+            );
         }
         Ok(created)
     }

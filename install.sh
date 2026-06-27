@@ -63,6 +63,9 @@ REPOSITORY="${IRONRAG_GITHUB_REPOSITORY:-mlimarenko/IronRAG}"
 DEFAULT_PORT="${IRONRAG_DEFAULT_PORT:-19000}"
 OFFICIAL_BACKEND_IMAGE="pipingspace/ironrag-backend"
 OFFICIAL_FRONTEND_IMAGE="pipingspace/ironrag-frontend"
+DEFAULT_INGESTION_MAX_PARALLEL_JOBS_GLOBAL=16
+DEFAULT_INGESTION_MAX_PARALLEL_JOBS_PER_WORKSPACE=8
+DEFAULT_INGESTION_MAX_PARALLEL_JOBS_PER_LIBRARY=4
 
 # Provider key env vars the wizard can prompt for and must never clobber.
 PROVIDER_KEYS=(
@@ -291,18 +294,48 @@ download() {
 }
 
 resolve_release_tag() {
-  local api_url="https://api.github.com/repos/${REPOSITORY}/releases/latest"
-  local tmp_file
-  tmp_file="$(mktemp)"
-  trap 'rm -f "$tmp_file"' RETURN
-  download "$api_url" "$tmp_file"
-  local tag
-  tag="$(sed -n 's/.*"tag_name":[[:space:]]*"\([^"]*\)".*/\1/p' "$tmp_file" | head -n 1)"
-  if [ -z "$tag" ]; then
-    err "failed to resolve latest release tag from ${api_url}"
+  local release_api_url="https://api.github.com/repos/${REPOSITORY}/releases/latest"
+  local tags_api_url="https://api.github.com/repos/${REPOSITORY}/tags?per_page=100"
+  local release_file tags_file release_tag tag_tag selected_tag
+  release_file="$(mktemp)"
+  tags_file="$(mktemp)"
+  trap 'rm -f "$release_file" "$tags_file"' RETURN
+
+  release_tag=""
+  if download "$release_api_url" "$release_file"; then
+    release_tag="$(extract_latest_release_tag_from_file "$release_file")"
+  else
+    warn "failed to query latest GitHub release from ${release_api_url}"
+  fi
+
+  tag_tag=""
+  if download "$tags_api_url" "$tags_file"; then
+    tag_tag="$(extract_latest_semver_tag_from_file "$tags_file")"
+  else
+    warn "failed to query GitHub tags from ${tags_api_url}"
+  fi
+
+  selected_tag="$(printf '%s\n%s\n' "$release_tag" "$tag_tag" | awk 'NF' | sort -V | tail -n 1)"
+  if [ -z "$selected_tag" ]; then
+    err "failed to resolve latest release tag from ${release_api_url} or ${tags_api_url}"
     exit 1
   fi
-  printf '%s\n' "$tag"
+  if [ -n "$release_tag" ] && [ -n "$tag_tag" ] && [ "$selected_tag" != "$release_tag" ]; then
+    warn "latest GitHub release is ${release_tag}, but latest stable tag is ${tag_tag}; using ${selected_tag}."
+  fi
+  printf '%s\n' "$selected_tag"
+}
+
+extract_latest_release_tag_from_file() {
+  sed -n 's/.*"tag_name":[[:space:]]*"\([^"]*\)".*/\1/p' "$1" | head -n 1
+}
+
+extract_latest_semver_tag_from_file() {
+  sed -n 's/.*"name":[[:space:]]*"\([^"]*\)".*/\1/p' "$1" \
+    | grep -E '^v?[0-9]+\.[0-9]+\.[0-9]+$' \
+    | sort -V \
+    | tail -n 1 \
+    || true
 }
 
 # Hex secret, length in bytes (output is 2*n hex chars).
@@ -556,6 +589,16 @@ write_resource_plan() {
   env_file_set IRONRAG_DATABASE_MAX_CONNECTIONS "$REC_DATABASE_MAX_CONNECTIONS" "$file"
   env_file_set IRONRAG_INGESTION_EMBEDDING_PARALLELISM "$REC_EMBED_PARALLELISM" "$file"
   env_file_set IRONRAG_INGESTION_GRAPH_EXTRACT_PARALLELISM_PER_DOC "$REC_GRAPH_PARALLELISM" "$file"
+}
+
+write_ingestion_queue_defaults() {
+  local file="$1"
+  env_value_nonempty "IRONRAG_INGESTION_MAX_PARALLEL_JOBS_GLOBAL" "$file" \
+    || env_file_set "IRONRAG_INGESTION_MAX_PARALLEL_JOBS_GLOBAL" "$DEFAULT_INGESTION_MAX_PARALLEL_JOBS_GLOBAL" "$file"
+  env_value_nonempty "IRONRAG_INGESTION_MAX_PARALLEL_JOBS_PER_WORKSPACE" "$file" \
+    || env_file_set "IRONRAG_INGESTION_MAX_PARALLEL_JOBS_PER_WORKSPACE" "$DEFAULT_INGESTION_MAX_PARALLEL_JOBS_PER_WORKSPACE" "$file"
+  env_value_nonempty "IRONRAG_INGESTION_MAX_PARALLEL_JOBS_PER_LIBRARY" "$file" \
+    || env_file_set "IRONRAG_INGESTION_MAX_PARALLEL_JOBS_PER_LIBRARY" "$DEFAULT_INGESTION_MAX_PARALLEL_JOBS_PER_LIBRARY" "$file"
 }
 
 sync_frontend_origin_to_port() {
@@ -1091,6 +1134,7 @@ run_main() {
   else
     info "Resource caps already pinned in .env — kept as-is (use --recompute-resources to refresh)."
   fi
+  write_ingestion_queue_defaults "$env_file"
 
   # ── Assert provider/machine secrets survived (the operator's #1 concern). ──
   for k in "${PROVIDER_KEYS[@]}" "${SECRET_KEYS[@]}"; do

@@ -2,6 +2,28 @@
 
 ## Unreleased
 
+## 0.5.5 — 2026-06-27
+
+### Changed
+
+- **Default ingest queue caps are raised for remote stacks.** The runtime,
+  Compose stack, Helm chart, installer, and examples now default to 16 leased
+  ingest jobs globally, 8 per workspace, and 4 per library. Capacity docs now
+  explain how those deployment-wide caps interact with worker memory, worker
+  replicas, database pool headroom, and provider concurrency.
+
+- **Release metadata is aligned for 0.5.5.** The Rust workspace package
+  version, generated OpenAPI `info.version`, Helm chart, and README image-tag
+  example now point at 0.5.5.
+
+### Fixed
+
+- **Startup tolerates operator-side provider credential validation failures.**
+  Env-keyed provider bootstrap now skips only provider validation errors with a
+  sanitized warning, while still failing fast on internal, storage, or catalog
+  errors. A stale, expired, or policy-blocked external API key can no longer
+  prevent the database, API, worker, and frontend from starting.
+
 ## 0.5.4 — 2026-06-27
 
 ### Added

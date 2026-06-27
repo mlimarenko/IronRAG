@@ -594,6 +594,15 @@ pub(super) fn sanitize_upstream_error(_message: &str) -> String {
     "upstream provider request failed; response details were redacted".to_string()
 }
 
+pub(super) fn is_provider_credential_validation_error(error: &ApiError) -> bool {
+    match error {
+        ApiError::BadRequest(message) => {
+            message.starts_with("provider credential validation failed for ")
+        }
+        _ => false,
+    }
+}
+
 pub(super) fn is_loopback_base_url(value: &str) -> bool {
     Url::parse(value)
         .ok()

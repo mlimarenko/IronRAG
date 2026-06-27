@@ -58,8 +58,8 @@ fn sample_settings() -> Settings {
         web_ingest_max_redirects: 10,
         web_ingest_user_agent: "IronRAG-WebIngest/0.1".into(),
         web_ingest_crawl_concurrency: 4,
-        ingestion_max_parallel_jobs_global: 64,
-        ingestion_max_parallel_jobs_per_workspace: 16,
+        ingestion_max_parallel_jobs_global: 16,
+        ingestion_max_parallel_jobs_per_workspace: 8,
         ingestion_max_parallel_jobs_per_library: 4,
         ingestion_memory_soft_limit_mib: 0,
         ingestion_worker_lease_seconds: 300,
@@ -160,8 +160,8 @@ fn from_env_has_sane_local_defaults() {
     assert_eq!(settings.ingestion_graph_extract_parallelism_per_doc, 16);
     assert_eq!(settings.redis_url, "redis://127.0.0.1:6379");
     assert_eq!(settings.log_filter, "info");
-    assert_eq!(settings.ingestion_max_parallel_jobs_global, 64);
-    assert_eq!(settings.ingestion_max_parallel_jobs_per_workspace, 16);
+    assert_eq!(settings.ingestion_max_parallel_jobs_global, 16);
+    assert_eq!(settings.ingestion_max_parallel_jobs_per_workspace, 8);
     assert_eq!(settings.ingestion_max_parallel_jobs_per_library, 4);
     assert_eq!(settings.ingestion_memory_soft_limit_mib, 0);
     assert_eq!(settings.runtime_agent_max_turns, 4);

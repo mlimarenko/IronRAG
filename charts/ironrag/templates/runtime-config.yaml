@@ -10,6 +10,9 @@ data:
   IRONRAG_DATABASE_MAX_CONNECTIONS: {{ .Values.app.databaseMaxConnections | quote }}
   IRONRAG_API_REPLICAS: {{ add (int .Values.api.replicaCount) 1 | quote }}
   IRONRAG_WORKER_REPLICAS: {{ .Values.worker.replicaCount | quote }}
+  IRONRAG_INGESTION_MAX_PARALLEL_JOBS_GLOBAL: {{ .Values.app.ingestionMaxParallelJobsGlobal | quote }}
+  IRONRAG_INGESTION_MAX_PARALLEL_JOBS_PER_WORKSPACE: {{ .Values.app.ingestionMaxParallelJobsPerWorkspace | quote }}
+  IRONRAG_INGESTION_MAX_PARALLEL_JOBS_PER_LIBRARY: {{ .Values.app.ingestionMaxParallelJobsPerLibrary | quote }}
   IRONRAG_KNOWLEDGE_PLANE_BACKEND: {{ .Values.app.knowledgePlaneBackend | quote }}
   IRONRAG_QUERY_ANSWER_SOURCE_LINKS_ENABLED: {{ .Values.app.queryAnswerSourceLinksEnabled | quote }}
   IRONRAG_LOG_FILTER: {{ .Values.app.logFilter | quote }}
