@@ -5,7 +5,7 @@ info:
   license:
     name: MIT
     identifier: MIT
-  version: 0.5.3
+  version: 0.5.4
 servers:
 - url: /
   description: Same origin (paths include /v1)
@@ -10747,6 +10747,7 @@ components:
       enum:
       - json_schema
       - json_object
+      - prompt_only_json_object
       - unsupported
     ProviderTokenLimitParameter:
       type: string

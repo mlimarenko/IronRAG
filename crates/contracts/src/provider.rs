@@ -19,6 +19,7 @@ pub enum ProviderTokenLimitParameter {
 pub enum ProviderStructuredOutputMode {
     JsonSchema,
     JsonObject,
+    PromptOnlyJsonObject,
     Unsupported,
 }
 

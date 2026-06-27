@@ -64,6 +64,10 @@ stringData:
   IRONRAG_OPENAI_API_KEY: {{ .Values.app.providerSecrets.openaiApiKey | quote }}
   IRONRAG_DEEPSEEK_API_KEY: {{ .Values.app.providerSecrets.deepseekApiKey | quote }}
   IRONRAG_QWEN_API_KEY: {{ .Values.app.providerSecrets.qwenApiKey | quote }}
+  IRONRAG_GPTUNNEL_API_KEY: {{ .Values.app.providerSecrets.gptunnelApiKey | quote }}
+  IRONRAG_OPENROUTER_API_KEY: {{ .Values.app.providerSecrets.openrouterApiKey | quote }}
+  IRONRAG_ROUTERAI_API_KEY: {{ .Values.app.providerSecrets.routeraiApiKey | quote }}
+  IRONRAG_MINIMAX_API_KEY: {{ .Values.app.providerSecrets.minimaxApiKey | quote }}
   IRONRAG_CONTENT_STORAGE_S3_ACCESS_KEY_ID: {{ .Values.storage.s3.accessKeyId | quote }}
   IRONRAG_CONTENT_STORAGE_S3_SECRET_ACCESS_KEY: {{ .Values.storage.s3.secretAccessKey | quote }}
   IRONRAG_CONTENT_STORAGE_S3_SESSION_TOKEN: {{ .Values.storage.s3.sessionToken | quote }}

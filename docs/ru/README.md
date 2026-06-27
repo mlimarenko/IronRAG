@@ -133,10 +133,10 @@ refinements. Если IR для turn недостаточно надёжен, le
 
 Binding выбирает пару `(provider_credential, model_preset)` для каждой
 purpose-цели пайплайна (`extract_text`, `extract_graph`,
-`embed_chunk`, `query_compile`, `query_retrieve`, `query_answer`,
-`vision`). Каталог содержит семь профилей провайдеров — OpenAI,
-DeepSeek, Qwen / DashScope-intl, GPTunnel, OpenRouter, RouterAI и
-Ollama — каждый описан в `ai_provider_catalog` через capability-флаги,
+`embed_chunk`, `query_compile`, `query_retrieve`, `query_answer`, `agent`,
+`vision`). Каталог содержит восемь профилей провайдеров — OpenAI,
+DeepSeek, Qwen / DashScope-intl, GPTunnel, OpenRouter, RouterAI,
+MiniMax и Ollama — каждый описан в `ai_provider_catalog` через capability-флаги,
 runtime-paths, конфигурацию model-discovery и список bootstrap-пресетов.
 
 Запись binding'ов поддерживает два инварианта runtime:

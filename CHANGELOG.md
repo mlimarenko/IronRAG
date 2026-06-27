@@ -2,6 +2,50 @@
 
 ## Unreleased
 
+## 0.5.4 — 2026-06-27
+
+### Added
+
+- **MiniMax is now a first-class AI provider.** The provider catalog seeds
+  MiniMax credentials, runtime metadata, bootstrap presets, model discovery,
+  model rows for the currently published chat and multimodal models, and USD
+  price rows including context-range pricing where the provider publishes it.
+  The same `IRONRAG_MINIMAX_API_KEY` secret supports regular API keys and
+  Token Plan subscription keys through the OpenAI-compatible MiniMax endpoint.
+
+- **Prompt-only structured-output providers are supported generically.** The
+  provider runtime can now omit unsupported `response_format` request fields
+  while still injecting the required JSON schema into the system prompt. This is
+  exposed through the public provider profile contract as
+  `prompt_only_json_object` and is not tied to a single corpus or domain.
+
+### Changed
+
+- **Provider bootstrap preserves preset-specific extra parameters.** Catalog
+  metadata can now carry per-purpose `extraParametersJson` into instance
+  presets, allowing provider-required request options to survive first-run
+  bootstrap and credential auto-registration.
+
+- **Public configuration surfaces include all shipped provider keys.** Docker
+  Compose, Helm values/templates, installer prompts, `.env.example`, API docs,
+  generated OpenAPI contracts, and the README provider matrix now include the
+  MiniMax key and the router-provider secrets consistently.
+
+- **Release metadata is aligned for 0.5.4.** The Rust workspace package
+  version, generated OpenAPI `info.version`, Helm chart, and README image-tag
+  example now point at 0.5.4.
+
+### Fixed
+
+- **Provider E2E now fails when answer generation silently falls back.** The
+  multi-provider smoke test records query provider calls and requires the
+  selected provider to perform the answer-producing call, covering both
+  `query_answer` and agent-tool answer lanes.
+
+- **AI binding readiness now reports the number of missing bindings.** The UI
+  no longer shows a vague missing-binding badge when exact missing counts are
+  available.
+
 ## 0.5.3 — 2026-06-26
 
 ### Changed

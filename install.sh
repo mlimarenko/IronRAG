@@ -72,6 +72,7 @@ PROVIDER_KEYS=(
   IRONRAG_GPTUNNEL_API_KEY
   IRONRAG_OPENROUTER_API_KEY
   IRONRAG_ROUTERAI_API_KEY
+  IRONRAG_MINIMAX_API_KEY
 )
 # Human labels for the provider keys (same order).
 PROVIDER_LABELS=(
@@ -81,6 +82,7 @@ PROVIDER_LABELS=(
   "GPTunnel"
   "OpenRouter"
   "RouterAI"
+  "MiniMax"
 )
 # Machine secrets that are minted once and must survive every re-run.
 SECRET_KEYS=(
@@ -736,6 +738,7 @@ Environment variables (answer every prompt without a TTY):
   IRONRAG_GPTUNNEL_API_KEY       Provider API key (secret; env only).
   IRONRAG_OPENROUTER_API_KEY     Provider API key (secret; env only).
   IRONRAG_ROUTERAI_API_KEY       Provider API key (secret; env only).
+  IRONRAG_MINIMAX_API_KEY        Provider API key or Token Plan key (secret; env only).
   IRONRAG_NONINTERACTIVE=1       Same as --non-interactive.
   IRONRAG_RESET_VOLUMES=1        Same as --reset-volumes.
   IRONRAG_RECOMPUTE_RESOURCES=1  Same as --recompute-resources.

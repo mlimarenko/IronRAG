@@ -235,6 +235,7 @@ pub struct BootstrapAiPresetDescriptor {
     pub temperature: Option<f64>,
     pub top_p: Option<f64>,
     pub max_output_tokens_override: Option<i32>,
+    pub extra_parameters_json: serde_json::Value,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -766,7 +767,7 @@ impl AiCatalogService {
                 temperature: preset.temperature,
                 top_p: preset.top_p,
                 max_output_tokens_override: preset.max_output_tokens_override,
-                extra_parameters_json: json!({}),
+                extra_parameters_json: preset.extra_parameters_json,
             })
             .collect();
         self.apply_bootstrap_ai_setup(
@@ -820,7 +821,7 @@ impl AiCatalogService {
                     temperature: descriptor.temperature,
                     top_p: descriptor.top_p,
                     max_output_tokens_override: descriptor.max_output_tokens_override,
-                    extra_parameters_json: serde_json::json!({}),
+                    extra_parameters_json: descriptor.extra_parameters_json,
                 };
                 let preset_count_before = presets.len();
                 let _ =

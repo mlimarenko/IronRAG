@@ -1293,8 +1293,8 @@
     "pricingOverrideDescription": "Pricing overrides are stored for the current workspace and replace the system catalog price.",
     "deletePricingOverrideTitle": "Delete pricing override",
     "deletePricingOverrideDescription": "Delete the pricing override for {{model}}? The system catalog price will be used again.",
-    "bindingsMissing": "binding missing",
-    "bindingsMissingPlural": "bindings missing",
+    "bindingsMissing_one": "{{count}} binding missing",
+    "bindingsMissing_other": "{{count}} bindings missing",
     "opsStatusLabels": {
       "healthy": "Healthy",
       "processing": "Processing",

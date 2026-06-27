@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """Generate idempotent ai_model_catalog + ai_model_preset + ai_price_catalog
-SQL for OpenAI / DeepSeek / Qwen / OpenRouter / RouterAI / Ollama cloud.
+SQL for OpenAI / DeepSeek / Qwen / GPTunnel / OpenRouter / RouterAI /
+MiniMax / Ollama cloud.
 
 Usage:
     IRONRAG_<PROVIDER>_API_KEY=... python3 all-providers-seed-gen.py PROVIDER
-where PROVIDER ∈ {openai, deepseek, qwen, openrouter, ollama-cloud}.
+where PROVIDER ∈ {openai, deepseek, qwen, gptunnel, openrouter, routerai,
+minimax, ollama-cloud}.
 
 Catalog + preset rows are auto-discovered from /models (or fallback list
 if no key / endpoint). Pricing is from a hand-curated table keyed on a
@@ -28,8 +30,12 @@ from pathlib import Path
 
 import requests
 
+REPO_ROOT = Path(__file__).resolve().parents[3]
 NS_DNS = uuid.NAMESPACE_DNS
 EFFECTIVE_FROM = "2026-05-09T00:00:00Z"
+EFFECTIVE_FROM_BY_PROVIDER = {
+    "minimax": "2026-06-26T00:00:00Z",
+}
 
 PROVIDER_CATALOG_IDS = {
     "openai":       "00000000-0000-0000-0000-000000000101",
@@ -37,7 +43,9 @@ PROVIDER_CATALOG_IDS = {
     "qwen":         "00000000-0000-0000-0000-000000000103",
     "ollama":       "00000000-0000-0000-0000-000000000104",
     "openrouter":   "00000000-0000-0000-0000-000000000105",
+    "gptunnel":     "00000000-0000-0000-0000-000000000106",
     "routerai":     "00000000-0000-0000-0000-000000000107",
+    "minimax":      "00000000-0000-0000-0000-000000000108",
 }
 ENDPOINTS = {
     "openai":     "https://api.openai.com/v1/models",
@@ -46,15 +54,24 @@ ENDPOINTS = {
     "openrouter": "https://openrouter.ai/api/v1/models",
     "routerai":   "https://routerai.ru/api/v1/models",
     "gptunnel":   "https://gptunnel.ru/v1/models",
+    "minimax":    "https://api.minimax.io/v1/models",
     "ollama":     "https://ollama.com/api/models",
 }
 ROLE_TITLE = {
+    "extract_text": "Extract Text",
     "embed_chunk": "Embed Chunk",
     "query_retrieve": "Query Retrieve",
     "query_compile": "Query Compile",
     "query_answer": "Query Answer",
     "extract_graph": "Extract Graph",
     "vision": "Vision",
+}
+DISPLAY_NAMES = {
+    "gptunnel": "GPTunneL",
+    "minimax": "MiniMax",
+    "openai": "OpenAI",
+    "openrouter": "OpenRouter",
+    "routerai": "RouterAI",
 }
 
 # ────────────────────────────────────────────────────────────────────
@@ -161,7 +178,29 @@ PRICES_USD: dict[str, list[tuple[str, tuple[float, float | None, float | None]]]
         ("text-embedding-async-v*", (0.05, None, None)),
     ],
     "openrouter": [],   # no API key, no public price feed reachable here
+    "minimax": [
+        ("MiniMax-M2.7-highspeed", (0.60, 2.40, 0.06)),
+        ("MiniMax-M2.7",           (0.30, 1.20, 0.06)),
+        ("MiniMax-M2.5-highspeed", (0.60, 2.40, 0.03)),
+        ("MiniMax-M2.5",           (0.30, 1.20, 0.03)),
+        ("MiniMax-M2.1-highspeed", (0.60, 2.40, 0.03)),
+        ("MiniMax-M2.1",           (0.30, 1.20, 0.03)),
+        ("MiniMax-M2",             (0.30, 1.20, 0.03)),
+    ],
     "ollama": [],       # local-only by default; cloud subset handled separately
+}
+
+RANGE_PRICES_USD: dict[str, dict[str, list[tuple[str, int | None, int | None, float]]]] = {
+    "minimax": {
+        "MiniMax-M3": [
+            ("per_1m_input_tokens", None, 512_000, 0.30),
+            ("per_1m_input_tokens", 512_001, None, 0.60),
+            ("per_1m_output_tokens", None, 512_000, 1.20),
+            ("per_1m_output_tokens", 512_001, None, 2.40),
+            ("per_1m_cached_input_tokens", None, 512_000, 0.06),
+            ("per_1m_cached_input_tokens", 512_001, None, 0.12),
+        ],
+    },
 }
 
 
@@ -212,6 +251,15 @@ def classify(model_id: str) -> tuple[str, str, list[str]]:
     cannot.
     """
     low = model_id.lower()
+
+    if low == "minimax-m3" or low.endswith("/minimax-m3"):
+        return (
+            "chat",
+            "multimodal",
+            ["extract_text", "extract_graph", "query_compile", "query_answer", "vision", "agent"],
+        )
+    if low.startswith("minimax-m2") or "/minimax-m2" in low:
+        return ("chat", "text", ["query_answer"])
 
     # Embeddings.
     if (
@@ -274,7 +322,7 @@ def classify(model_id: str) -> tuple[str, str, list[str]]:
         "qwen3.6-vl", "qwen3.7-vl",
         "vl-", "-vl-", "-vl:",
         "pixtral", "mistral-medium", "mistral-large",
-        "molmo", "kimi-vl", "internvl", "minimax-m", "yi-vision",
+        "molmo", "kimi-vl", "internvl", "yi-vision",
         "llama-3.2-vision", "llama-3.3-vision", "llama-vision",
         "llama4", "step-3", "phi-vision", "phi-4-vision", "lfm-vision",
     )
@@ -331,6 +379,27 @@ def find_price(provider: str, model_name: str) -> tuple[float, float | None, flo
     return None
 
 
+def find_range_prices(
+    provider: str,
+    model_name: str,
+) -> list[tuple[str, int | None, int | None, Decimal]]:
+    rows = RANGE_PRICES_USD.get(provider, {}).get(model_name, [])
+    return [
+        (unit, min_tokens, max_tokens, Decimal(str(unit_price)))
+        for unit, min_tokens, max_tokens, unit_price in rows
+    ]
+
+
+def extra_parameters_for_preset(provider: str, model_name: str) -> str:
+    if provider == "minimax" and model_name == "MiniMax-M3":
+        return json.dumps({"thinking": {"type": "disabled"}}, separators=(",", ":"))
+    return "{}"
+
+
+def display_name_for_provider(provider: str) -> str:
+    return DISPLAY_NAMES.get(provider, provider.title())
+
+
 def emit(provider: str, models: list[dict]) -> str:
     catalog_id = PROVIDER_CATALOG_IDS[provider]
     catalog_rows: list[str] = []
@@ -354,17 +423,32 @@ def emit(provider: str, models: list[dict]) -> str:
             f"'{sql_escape(metadata)}'::jsonb)"
         )
         for role in roles:
-            preset_name = f"{provider.title()} {ROLE_TITLE.get(role, role.title())} · {model_id}"
+            title = ROLE_TITLE.get(role)
+            if title is None:
+                continue
+            preset_name = f"{display_name_for_provider(provider)} {title} · {model_id}"
             if capability == "embedding":
                 temperature = "NULL"
                 top_p = "NULL"
             else:
                 temperature = "0.3"
                 top_p = "0.9"
+            extra_parameters = extra_parameters_for_preset(provider, model_id)
             preset_rows.append(
                 f"        ('{sql_escape(model_id)}', '{sql_escape(preset_name)}', "
-                f"{temperature}, {top_p})"
+                f"{temperature}, {top_p}, '{sql_escape(extra_parameters)}'::jsonb)"
             )
+        range_prices = find_range_prices(provider, model_id)
+        for unit, min_tokens, max_tokens, val in range_prices:
+            min_sql = "NULL" if min_tokens is None else str(min_tokens)
+            max_sql = "NULL" if max_tokens is None else str(max_tokens)
+            pid = stable_uuid("ironrag", provider, "price", model_id, unit, min_sql, max_sql)
+            price_rows.append(
+                f"        ('{pid}'::uuid, '{sql_escape(model_id)}', "
+                f"'{unit}'::billing_unit, {min_sql}, {max_sql}, {val:f}, 'USD')"
+            )
+        if range_prices:
+            continue
         # Live per-token pricing (openrouter / routerai expose pricing.prompt+completion)
         # takes precedence over the static USD glob table; fall back to the static
         # table only when the live feed is silent.
@@ -390,7 +474,7 @@ def emit(provider: str, models: list[dict]) -> str:
             pid = stable_uuid("ironrag", provider, "price", model_id, unit)
             price_rows.append(
                 f"        ('{pid}'::uuid, '{sql_escape(model_id)}', "
-                f"'{unit}'::billing_unit, {val:f}, 'USD')"
+                f"'{unit}'::billing_unit, NULL, NULL, {val:f}, 'USD')"
             )
 
     lines: list[str] = [
@@ -418,11 +502,11 @@ def emit(provider: str, models: list[dict]) -> str:
             ")",
             "SELECT",
             "    'instance'::ai_scope_kind, NULL, NULL,",
-            "    m.id, p.preset_name, p.temperature, p.top_p, '{}'::jsonb",
+            "    m.id, p.preset_name, p.temperature, p.top_p, p.extra_parameters_json",
             "FROM ai_model_catalog m",
             "JOIN (VALUES",
             ",\n".join(preset_rows),
-            ") AS p(model_name, preset_name, temperature, top_p)",
+            ") AS p(model_name, preset_name, temperature, top_p, extra_parameters_json)",
             "    ON p.model_name = m.model_name",
             f"WHERE m.provider_catalog_id = '{catalog_id}'::uuid",
             "ON CONFLICT DO NOTHING;",
@@ -437,12 +521,13 @@ def emit(provider: str, models: list[dict]) -> str:
             ")",
             "SELECT",
             "    p.price_id, m.id, p.billing_unit, 'default',",
-            "    NULL, NULL, p.unit_price, p.currency_code,",
-            f"    '{EFFECTIVE_FROM}'::timestamptz, 'system'::ai_price_catalog_scope, NULL",
+            "    p.request_input_tokens_min, p.request_input_tokens_max,",
+            "    p.unit_price, p.currency_code,",
+            f"    '{EFFECTIVE_FROM_BY_PROVIDER.get(provider, EFFECTIVE_FROM)}'::timestamptz, 'system'::ai_price_catalog_scope, NULL",
             "FROM ai_model_catalog m",
             "JOIN (VALUES",
             ",\n".join(price_rows),
-            ") AS p(price_id, model_name, billing_unit, unit_price, currency_code)",
+            ") AS p(price_id, model_name, billing_unit, request_input_tokens_min, request_input_tokens_max, unit_price, currency_code)",
             "    ON p.model_name = m.model_name",
             f"WHERE m.provider_catalog_id = '{catalog_id}'::uuid",
             "ON CONFLICT DO NOTHING;",
@@ -457,7 +542,7 @@ def load_api_key(provider: str) -> str | None:
     val = os.environ.get(env_name)
     if val:
         return val
-    env_path = Path("/home/leader/sources/gitlab.piping.space/general/tools/ironrag/.env")
+    env_path = REPO_ROOT / ".env"
     if env_path.exists():
         for line in env_path.read_text().splitlines():
             if line.startswith(f"{env_name}="):

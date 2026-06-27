@@ -891,6 +891,7 @@ fn provider_response_format(
         ProviderStructuredOutputMode::JsonObject => {
             Ok(Some(serde_json::json!({ "type": "json_object" })))
         }
+        ProviderStructuredOutputMode::PromptOnlyJsonObject => Ok(None),
         ProviderStructuredOutputMode::Unsupported => {
             Err(anyhow!("provider {provider_kind} does not support required structured output"))
         }
@@ -906,7 +907,11 @@ fn provider_system_prompt(
     let Some(requested_response_format) = requested_response_format else {
         return Ok(requested_system_prompt.map(ToOwned::to_owned));
     };
-    if mode != ProviderStructuredOutputMode::JsonObject {
+    if !matches!(
+        mode,
+        ProviderStructuredOutputMode::JsonObject
+            | ProviderStructuredOutputMode::PromptOnlyJsonObject
+    ) {
         return Ok(requested_system_prompt.map(ToOwned::to_owned));
     }
 
@@ -1822,6 +1827,125 @@ mod tests {
         assert!(system_prompt.contains("\"target_entities\""));
         assert!(system_prompt.contains("\"label\""));
         assert!(system_prompt.contains("\"role\""));
+    }
+
+    #[test]
+    fn prompt_only_json_object_runtime_omits_response_format() {
+        let requested = serde_json::json!({
+            "type": "json_schema",
+            "json_schema": {
+                "name": "query_ir",
+                "strict": true,
+                "schema": {"type": "object"}
+            }
+        });
+        let lowered = provider_response_format(
+            "provider-alpha",
+            Some(&requested),
+            ProviderStructuredOutputMode::PromptOnlyJsonObject,
+        )
+        .expect("prompt-only providers should accept structured output by prompt contract");
+
+        assert!(lowered.is_none());
+    }
+
+    #[test]
+    fn prompt_only_json_object_runtime_injects_schema_into_system_prompt() {
+        let requested = serde_json::json!({
+            "type": "json_schema",
+            "json_schema": {
+                "name": "query_ir",
+                "strict": true,
+                "schema": {
+                    "type": "object",
+                    "properties": {
+                        "target_entities": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "label": {"type": "string"}
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        });
+        let system_prompt = provider_system_prompt(
+            "provider-alpha",
+            Some("Base compiler prompt"),
+            Some(&requested),
+            ProviderStructuredOutputMode::PromptOnlyJsonObject,
+        )
+        .expect("prompt-only prompt should be built")
+        .expect("prompt should remain present");
+
+        assert!(system_prompt.starts_with("Base compiler prompt\n\n"));
+        assert!(system_prompt.contains("JSON Schema:"));
+        assert!(system_prompt.contains("\"target_entities\""));
+        assert!(system_prompt.contains("\"label\""));
+    }
+
+    #[test]
+    fn prompt_only_json_object_request_body_has_no_response_format() {
+        let requested = serde_json::json!({
+            "type": "json_schema",
+            "json_schema": {
+                "name": "graph_extraction",
+                "strict": true,
+                "schema": {"type": "object"}
+            }
+        });
+        let response_format = provider_response_format(
+            "provider-alpha",
+            Some(&requested),
+            ProviderStructuredOutputMode::PromptOnlyJsonObject,
+        )
+        .expect("prompt-only response format should resolve");
+        let system_prompt = provider_system_prompt(
+            "provider-alpha",
+            Some("Base prompt"),
+            Some(&requested),
+            ProviderStructuredOutputMode::PromptOnlyJsonObject,
+        )
+        .expect("prompt-only system prompt should resolve");
+        let body = OpenAiCompatibleRequest {
+            provider_kind: "provider-alpha",
+            api_key: Some("test"),
+            base_url: "https://example.invalid/v1",
+            auth_scheme: ProviderAuthScheme::Bearer,
+            chat_path: "/chat/completions".to_string(),
+            model_name: "provider-model",
+            messages: vec![OpenAiCompatibleMessage {
+                role: "user".to_string(),
+                content: OpenAiCompatibleMessageContent::Text("hello".to_string()),
+            }],
+            system_prompt: system_prompt.as_deref(),
+            temperature: None,
+            top_p: None,
+            max_output_tokens: None,
+            token_limit_parameter: ProviderTokenLimitParameter::MaxCompletionTokens,
+            response_format: response_format.as_ref(),
+            extra_parameters_json: &serde_json::json!({}),
+            stream: false,
+        }
+        .body()
+        .expect("request body should serialize");
+        let value: serde_json::Value =
+            serde_json::from_slice(&body).expect("serialized body should stay valid json");
+
+        assert!(value.get("response_format").is_none());
+        assert_eq!(
+            value
+                .get("messages")
+                .and_then(serde_json::Value::as_array)
+                .and_then(|items| items.first())
+                .and_then(|item| item.get("content"))
+                .and_then(serde_json::Value::as_str)
+                .map(|text| text.contains("JSON Schema:")),
+            Some(true),
+        );
     }
 
     #[test]

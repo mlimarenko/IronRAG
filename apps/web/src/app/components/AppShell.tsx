@@ -354,7 +354,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
       title={t('shell.configureInSettings')}
     >
       <AlertTriangle className="h-3 w-3" />
-      <span>{missingPurposes.length > 1 ? t('admin.bindingsMissingPlural') : t('admin.bindingsMissing')}</span>
+      <span>{t('admin.bindingsMissing', { count: missingPurposes.length })}</span>
     </button>
   );
 

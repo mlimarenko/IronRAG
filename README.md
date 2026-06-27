@@ -20,7 +20,7 @@
 
 - **Typed knowledge graph.** Documents are decomposed into entities, typed relationships, and chunk-level evidence references. Retrieval combines vector, lexical, graph-traversal, and technical-fact lanes; the answer pipeline returns citations to the underlying chunks.
 - **Native MCP server.** 23 tools across documents, graph, web ingest, and grounded `ask`. Connect it to MCP-compatible agents and clients such as Claude Desktop, Claude Code, Cursor, Codex, VS Code with Continue / Cline / Roo, Zed, OpenClaw, Hermes, Lobe-style chat agents, or a custom HTTP MCP client. Tools are scoped per IAM token.
-- **Provider-agnostic AI runtime.** Seven LLM providers ship in the catalog — OpenAI, DeepSeek, Qwen (DashScope-intl), GPTunnel, OpenRouter, RouterAI, Ollama. Each pipeline purpose (`extract_text`, `extract_graph`, `embed_chunk`, `query_compile`, `query_retrieve`, `query_answer`, `agent`, `vision`) is bound independently, with a vector rebuild utility for dimension-changing embedding switches.
+- **Provider-agnostic AI runtime.** Eight LLM providers ship in the catalog — OpenAI, DeepSeek, Qwen (DashScope-intl), GPTunnel, OpenRouter, RouterAI, MiniMax, Ollama. Each pipeline purpose (`extract_text`, `extract_graph`, `embed_chunk`, `query_compile`, `query_retrieve`, `query_answer`, `agent`, `vision`) is bound independently, with a vector rebuild utility for dimension-changing embedding switches.
 - **USD cost catalog.** Every binding stores prices in USD. Per-call billing rows are written for every LLM request and rolled up per document and per query in the UI.
 - **Multi-tenant IAM.** Principals, scoped tokens (system / workspace / library), and permission groups gate every API surface. Audit log captures resource access.
 - **Self-hosted runtime.** The Docker Compose stack includes PostgreSQL with pgvector, Redis, backend, worker, and frontend services. Helm chart available for Kubernetes.
@@ -104,6 +104,7 @@ IRONRAG_QWEN_API_KEY=sk-...
 IRONRAG_GPTUNNEL_API_KEY=...
 IRONRAG_OPENROUTER_API_KEY=<openrouter-api-key>
 IRONRAG_ROUTERAI_API_KEY=...
+IRONRAG_MINIMAX_API_KEY=...
 ```
 
 
@@ -115,6 +116,7 @@ IRONRAG_ROUTERAI_API_KEY=...
 | **GPTunnel**              | ✅    | ✅      | ✅         | Router provider: many upstream model families behind one key         |
 | **OpenRouter**            | ✅    | ✅      | ✅         | Router provider: many upstream model families behind one key         |
 | **RouterAI**              | ✅    | ✅      | ✅         | Router provider: many upstream model families behind one key         |
+| **MiniMax**               | ✅    | ✅      | —         | Direct API or Token Plan subscription key                            |
 | **Ollama**                | ✅    | ✅      | ✅         | Fully local, air-gapped, GPU optional                                |
 
 
@@ -139,7 +141,7 @@ Recognition note: the default raster-image engine is `vision`, so image OCR runs
 | ------------------------ | --------------------------------------------------------------- |
 | Backend                  | Rust 1.96, axum 0.8, tokio 1.52, SQLx 0.8, tower 0.5          |
 | Frontend                 | React 19.2, Vite 8.0, TypeScript 6.0, Tailwind 4.3, shadcn/ui |
-| Frontend build/runtime   | Node 24 (build), Nginx 1.30 (static serving)                    |
+| Frontend build/runtime   | Node 26 (build), Nginx 1.30 (static serving)                    |
 | Graph rendering          | Sigma.js 3 + Graphology 0.26 (WebGL, Web Worker layout)       |
 | Database                 | PostgreSQL 18 (pgvector image)                                  |
 | Knowledge-plane search   | pgvector, PostgreSQL full-text search, `pg_trgm`                |
@@ -220,7 +222,7 @@ helm upgrade --install ironrag charts/ironrag \
 By default the chart deploys the API, worker, and web images with the
 `v<appVersion>` image tag derived from `Chart.appVersion`. Override
 `api.image.tag`, `worker.image.tag`, and `web.image.tag` only when pinning
-a different published image, for example `--set web.image.tag=v0.5.3`.
+a different published image, for example `--set web.image.tag=v0.5.4`.
 
 Bundled dependencies (same pins as Docker Compose): `pgvector/pgvector:pg18`
 for PostgreSQL and `redis:8.8` for Redis. Override via

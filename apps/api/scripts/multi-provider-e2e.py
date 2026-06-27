@@ -9,7 +9,10 @@ Usage:
     IRONRAG_ADMIN_PASSWORD=... \
     python3 multi-provider-e2e.py PROVIDER
 
-PROVIDER ∈ {openai, deepseek, qwen, gptunnel, openrouter, routerai}.
+The admin login/password may also be supplied through the
+IRONRAG_UI_BOOTSTRAP_ADMIN_* variables written by the local install flow.
+
+PROVIDER ∈ {openai, deepseek, qwen, gptunnel, openrouter, routerai, minimax}.
 
 Embed fallback: if the chosen provider exposes no embedding catalog
 row, the embed_chunk + query_retrieve bindings are wired through the
@@ -17,6 +20,8 @@ gptunnel text-embedding-3-large model. Providers with native 3072-dim
 embedding presets must use their own embedding lane.
 
 Writes /tmp/multi-provider-e2e-<provider>.json with the full report.
+The smoke is provider-strict for query answering: fallback text can keep
+the product usable, but it is not counted as a successful provider e2e.
 """
 
 from __future__ import annotations
@@ -30,9 +35,17 @@ from pathlib import Path
 
 import requests
 
+REPO_ROOT = Path(__file__).resolve().parents[3]
 BASE = os.environ.get("IRONRAG_BASE_URL", "http://127.0.0.1:19000/v1")
-ADMIN_LOGIN = os.environ.get("IRONRAG_ADMIN_LOGIN", "admin")
-ADMIN_PASSWORD = os.environ.get("IRONRAG_ADMIN_PASSWORD")
+ADMIN_LOGIN = (
+    os.environ.get("IRONRAG_ADMIN_LOGIN")
+    or os.environ.get("IRONRAG_UI_BOOTSTRAP_ADMIN_LOGIN")
+    or "admin"
+)
+ADMIN_PASSWORD = (
+    os.environ.get("IRONRAG_ADMIN_PASSWORD")
+    or os.environ.get("IRONRAG_UI_BOOTSTRAP_ADMIN_PASSWORD")
+)
 
 ALPHA_RELAY_TEXT = (
     "Alpha Relay runbook.\n"
@@ -86,6 +99,21 @@ PROVIDER_PROFILES: dict[str, dict[str, list[str]]] = {
         "vision":    ["openai/gpt-4o", "anthropic/claude-3.5-sonnet"],
         "embedding": ["openai/text-embedding-3-large"],
     },
+    "minimax": {
+        "chat":      ["MiniMax-M3"],
+        "answer":    [
+            "MiniMax-M3",
+            "MiniMax-M2.7",
+            "MiniMax-M2.7-highspeed",
+            "MiniMax-M2.5",
+            "MiniMax-M2.5-highspeed",
+            "MiniMax-M2.1",
+            "MiniMax-M2.1-highspeed",
+            "MiniMax-M2",
+        ],
+        "vision":    ["MiniMax-M3"],
+        "embedding": [],
+    },
 }
 
 EMBED_FALLBACK_PROVIDER = "gptunnel"
@@ -130,7 +158,7 @@ def load_api_key(provider: str) -> str | None:
     val = os.environ.get(env_name)
     if val:
         return val
-    p = Path("/home/leader/sources/gitlab.piping.space/general/tools/ironrag/.env")
+    p = REPO_ROOT / ".env"
     if p.exists():
         for line in p.read_text().splitlines():
             if line.startswith(f"{env_name}="):
@@ -138,10 +166,13 @@ def load_api_key(provider: str) -> str | None:
     return None
 
 
-def find_provider_catalog_id(s: requests.Session, provider: str) -> str:
+def list_providers(s: requests.Session) -> list[dict]:
     pr = s.get(f"{BASE}/ai/providers")
-    items = pr.json() if isinstance(pr.json(), list) else pr.json().get("items", [])
-    for p in items:
+    return pr.json() if isinstance(pr.json(), list) else pr.json().get("items", [])
+
+
+def find_provider_catalog_id(providers: list[dict], provider: str) -> str:
+    for p in providers:
         if p.get("providerKind") == provider:
             return p["id"]
     fail(f"provider not in catalog: {provider}")
@@ -299,6 +330,41 @@ def run_query(s: requests.Session, workspace_id: str, library_id: str) -> dict:
     return r.json()
 
 
+def list_query_provider_calls(
+    s: requests.Session,
+    execution_id: str,
+    providers: list[dict],
+    catalog: list[dict],
+) -> list[dict]:
+    r = s.get(f"{BASE}/billing/executions/query_execution/{execution_id}/provider-calls")
+    if r.status_code != 200:
+        fail(f"list query provider calls status={r.status_code}", r.text[:500])
+    provider_by_id = {item["id"]: item for item in providers}
+    model_by_id = {item["id"]: item for item in catalog}
+    calls = r.json()
+    for call in calls:
+        provider = provider_by_id.get(call.get("providerCatalogId"), {})
+        model = model_by_id.get(call.get("modelCatalogId"), {})
+        call["providerKind"] = provider.get("providerKind")
+        call["modelName"] = model.get("modelName")
+    return calls
+
+
+ANSWER_PRODUCING_CALL_KINDS = {"query_answer", "query_agent"}
+
+
+def provider_answer_call_present(
+    provider_catalog_id: str,
+    provider_calls: list[dict],
+) -> bool:
+    return any(
+        call.get("providerCatalogId") == provider_catalog_id
+        and call.get("callKind") in ANSWER_PRODUCING_CALL_KINDS
+        and call.get("callState") == "completed"
+        for call in provider_calls
+    )
+
+
 def verify(answer: dict) -> bool:
     text = json.dumps(answer)
     missing = [t for t in REQUIRED_TERMS if t not in text]
@@ -320,7 +386,8 @@ def main() -> int:
     s.headers.update({"Content-Type": "application/json"})
 
     login(s)
-    pcid = find_provider_catalog_id(s, provider)
+    providers = list_providers(s)
+    pcid = find_provider_catalog_id(providers, provider)
     workspace_id = create_workspace(s, provider)
     library_id = create_library(s, workspace_id)
     credential_id = create_credential(s, provider, workspace_id, pcid)
@@ -332,6 +399,7 @@ def main() -> int:
         "extract_graph": profile["chat"],
         "query_compile": profile["chat"],
         "query_answer":  profile["answer"],
+        "agent":         profile["answer"],
         "embed_chunk":     profile["embedding"],
         "query_retrieve":  profile["embedding"],
         "vision":          profile["vision"],
@@ -349,7 +417,10 @@ def main() -> int:
             if purpose not in FALLBACK_PURPOSES:
                 fail(f"no preset for {provider}/{purpose}", candidates)
             if fallback_credential_id is None:
-                fallback_provider_catalog_id = find_provider_catalog_id(s, EMBED_FALLBACK_PROVIDER)
+                fallback_provider_catalog_id = find_provider_catalog_id(
+                    providers,
+                    EMBED_FALLBACK_PROVIDER,
+                )
                 fallback_credential_id = create_credential(
                     s, EMBED_FALLBACK_PROVIDER, workspace_id, fallback_provider_catalog_id,
                 )
@@ -369,6 +440,13 @@ def main() -> int:
     print(f"  documentId={document_id}", flush=True)
     wait_ingest(s, library_id)
     answer = run_query(s, workspace_id, library_id)
+    execution_id = (answer.get("responseTurn") or {}).get("executionId")
+    provider_calls = (
+        list_query_provider_calls(s, execution_id, providers, catalog)
+        if execution_id
+        else []
+    )
+    provider_answer_ok = provider_answer_call_present(pcid, provider_calls)
     passed = verify(answer)
     out = {
         "provider": provider,
@@ -379,18 +457,36 @@ def main() -> int:
         "bindings": bindings,
         "answerExcerpt": (answer.get("responseTurn") or {}).get("contentText"),
         "verificationState": answer.get("verificationState"),
-        "executionId": (answer.get("responseTurn") or {}).get("executionId"),
-        "passed": passed,
+        "executionId": execution_id,
+        "providerCalls": [
+            {
+                "providerKind": call.get("providerKind"),
+                "modelName": call.get("modelName"),
+                "callKind": call.get("callKind"),
+                "callState": call.get("callState"),
+            }
+            for call in provider_calls
+        ],
+        "providerAnswerCallPresent": provider_answer_ok,
+        "passed": passed and provider_answer_ok,
     }
     out_path = Path(f"/tmp/multi-provider-e2e-{provider}.json")
     out_path.write_text(json.dumps(out, indent=2, default=str))
-    if passed:
+    if passed and provider_answer_ok:
         print(f"\nPASS [{provider}] — {out_path}", flush=True)
         return 0
-    else:
-        print(f"\nFAIL-VERIFY [{provider}] — required terms missing", flush=True)
-        print(f"  excerpt: {out['answerExcerpt']}", flush=True)
+    if not provider_answer_ok:
+        print(
+            f"\nFAIL-DEGRADED [{provider}] — query answer used fallback provider/runtime",
+            flush=True,
+        )
+        print(f"  provider calls: {out['providerCalls']}", flush=True)
+        print(f"  report: {out_path}", flush=True)
         return 1
+
+    print(f"\nFAIL-VERIFY [{provider}] — required terms missing", flush=True)
+    print(f"  excerpt: {out['answerExcerpt']}", flush=True)
+    return 1
 
 
 if __name__ == "__main__":

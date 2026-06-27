@@ -107,6 +107,10 @@ app:
     openaiApiKey: ""
     deepseekApiKey: ""
     qwenApiKey: ""
+    gptunnelApiKey: ""
+    openrouterApiKey: ""
+    routeraiApiKey: ""
+    minimaxApiKey: ""
   runtimePolicy:
     rejectTaskKinds: ""
     rejectTargetKinds: ""

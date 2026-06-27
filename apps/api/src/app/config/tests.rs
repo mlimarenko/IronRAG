@@ -408,6 +408,7 @@ fn bootstrap_provider_secret_envs_include_router_providers_without_aliases() {
             ("openrouter", "IRONRAG_OPENROUTER_API_KEY"),
             ("gptunnel", "IRONRAG_GPTUNNEL_API_KEY"),
             ("routerai", "IRONRAG_ROUTERAI_API_KEY"),
+            ("minimax", "IRONRAG_MINIMAX_API_KEY"),
         ]
     );
 }

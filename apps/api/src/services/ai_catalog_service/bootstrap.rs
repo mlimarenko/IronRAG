@@ -162,6 +162,7 @@ pub(super) struct BootstrapProviderPresetProfile {
     pub(super) temperature: Option<f64>,
     pub(super) top_p: Option<f64>,
     pub(super) max_output_tokens_override: Option<i32>,
+    pub(super) extra_parameters_json: serde_json::Value,
 }
 
 #[derive(Debug, Deserialize)]
@@ -179,6 +180,12 @@ struct BootstrapProviderPresetMetadata {
     temperature: Option<f64>,
     top_p: Option<f64>,
     max_output_tokens_override: Option<i32>,
+    #[serde(default = "empty_bootstrap_extra_parameters")]
+    extra_parameters_json: serde_json::Value,
+}
+
+fn empty_bootstrap_extra_parameters() -> serde_json::Value {
+    json!({})
 }
 
 fn bootstrap_provider_metadata(
@@ -218,6 +225,7 @@ fn bootstrap_provider_preset_profile(
                     .or((!is_embedding).then_some(DEFAULT_BOOTSTRAP_TEMPERATURE)),
                 top_p: preset.top_p.or((!is_embedding).then_some(DEFAULT_BOOTSTRAP_TOP_P)),
                 max_output_tokens_override: preset.max_output_tokens_override,
+                extra_parameters_json: preset.extra_parameters_json,
             })
         })
         .collect::<Result<Vec<_>, ApiError>>()?;
@@ -236,6 +244,7 @@ fn bootstrap_provider_preset_profile(
             temperature: answer.temperature,
             top_p: answer.top_p,
             max_output_tokens_override: answer.max_output_tokens_override,
+            extra_parameters_json: answer.extra_parameters_json.clone(),
         });
     }
 
@@ -275,6 +284,7 @@ fn bootstrap_preset_descriptors_from_profile(
                 temperature: preset_profile.temperature,
                 top_p: preset_profile.top_p,
                 max_output_tokens_override: preset_profile.max_output_tokens_override,
+                extra_parameters_json: preset_profile.extra_parameters_json,
             })
         })
         .collect()
@@ -387,7 +397,10 @@ fn build_bootstrap_preset_input(
         max_output_tokens_override: preset_profile
             .as_ref()
             .and_then(|profile| profile.max_output_tokens_override),
-        extra_parameters_json: json!({}),
+        extra_parameters_json: preset_profile
+            .as_ref()
+            .map(|profile| profile.extra_parameters_json.clone())
+            .unwrap_or_else(|| json!({})),
     }
 }
 
@@ -455,7 +468,7 @@ pub(super) fn resolve_configured_bootstrap_preset_inputs(
                             temperature: preset.temperature,
                             top_p: preset.top_p,
                             max_output_tokens_override: preset.max_output_tokens_override,
-                            extra_parameters_json: json!({}),
+                            extra_parameters_json: preset.extra_parameters_json.clone(),
                         },
                     )
                 })

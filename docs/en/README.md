@@ -133,10 +133,10 @@ back to the full extracted keyword set.
 
 Bindings select a `(provider_credential, model_preset)` pair per
 pipeline purpose (`extract_text`, `extract_graph`,
-`embed_chunk`, `query_compile`, `query_retrieve`, `query_answer`,
-`vision`). The catalog ships seven provider profiles — OpenAI,
+`embed_chunk`, `query_compile`, `query_retrieve`, `query_answer`, `agent`,
+`vision`). The catalog ships eight provider profiles — OpenAI,
 DeepSeek, Qwen / DashScope-intl, GPTunnel, OpenRouter, RouterAI,
-and Ollama — each declared in `ai_provider_catalog` with capability
+MiniMax, and Ollama — each declared in `ai_provider_catalog` with capability
 flags, runtime paths, model-discovery configuration, and a
 bootstrap-preset list.
 

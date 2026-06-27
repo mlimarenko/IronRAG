@@ -1293,8 +1293,10 @@
     "pricingOverrideDescription": "Переопределения тарифа сохраняются для текущего рабочего пространства и перекрывают системный каталог.",
     "deletePricingOverrideTitle": "Удалить переопределение тарифа",
     "deletePricingOverrideDescription": "Удалить переопределение тарифа для {{model}}? После удаления снова будет использоваться системный каталог.",
-    "bindingsMissing": "привязка отсутствует",
-    "bindingsMissingPlural": "привязок отсутствует",
+    "bindingsMissing_one": "{{count}} привязка отсутствует",
+    "bindingsMissing_few": "{{count}} привязки отсутствуют",
+    "bindingsMissing_many": "{{count}} привязок отсутствует",
+    "bindingsMissing_other": "{{count}} привязки отсутствуют",
     "opsStatusLabels": {
       "healthy": "Здорова",
       "processing": "В очереди",

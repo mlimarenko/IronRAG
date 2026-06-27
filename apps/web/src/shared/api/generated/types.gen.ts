@@ -2220,7 +2220,11 @@ export type ProviderRuntimeProfile = {
     tokenLimitParameter: ProviderTokenLimitParameter;
 };
 
-export type ProviderStructuredOutputMode = 'json_schema' | 'json_object' | 'unsupported';
+export type ProviderStructuredOutputMode =
+    | 'json_schema'
+    | 'json_object'
+    | 'prompt_only_json_object'
+    | 'unsupported';
 
 export type ProviderTokenLimitParameter = 'max_completion_tokens' | 'max_tokens';
 

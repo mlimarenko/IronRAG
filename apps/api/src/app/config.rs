@@ -19,6 +19,7 @@ const BOOTSTRAP_PROVIDER_SECRET_ENVS: &[(&str, &str)] = &[
     ("openrouter", "IRONRAG_OPENROUTER_API_KEY"),
     ("gptunnel", "IRONRAG_GPTUNNEL_API_KEY"),
     ("routerai", "IRONRAG_ROUTERAI_API_KEY"),
+    ("minimax", "IRONRAG_MINIMAX_API_KEY"),
 ];
 pub const DEFAULT_RUNTIME_DIAGNOSTIC_PAYLOAD_BUDGET_BYTES: usize = 32_768;
 pub const DEFAULT_RUNTIME_POLICY_REASON_BUDGET_CHARS: usize = 2_000;

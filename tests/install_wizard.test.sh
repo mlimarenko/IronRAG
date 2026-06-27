@@ -244,10 +244,10 @@ if command -v script >/dev/null 2>&1; then
   cp "${ROOT_DIR}/docker-compose.yml" "${IWORK}/"
   cp "${ROOT_DIR}/.env.example"      "${IWORK}/"
   printf 'IRONRAG_OPENAI_API_KEY=sk-keep-EXISTING\n' >"${IWORK}/.env"  # pragma: allowlist secret
-  # 9 prompts in order: profile, port, admin-login, then the 6 provider keys
-  # (OpenAI, DeepSeek, Qwen, GPTunnel, OpenRouter, RouterAI). Keep OpenAI
-  # (blank), set DeepSeek, skip the rest.
-  printf '\n\n\n\nds-NEW-typed\n\n\n\n\n' >"${IWORK}/answers.txt"
+  # 10 prompts in order: profile, port, admin-login, then the 7 provider keys
+  # (OpenAI, DeepSeek, Qwen, GPTunnel, OpenRouter, RouterAI, MiniMax).
+  # Keep OpenAI (blank), set DeepSeek, skip the rest.
+  printf '\n\n\n\nds-NEW-typed\n\n\n\n\n\n' >"${IWORK}/answers.txt"
   if script -qec \
        "IRONRAG_INSTALL_SKIP_DEPLOY=1 IRONRAG_INSTALL_SKIP_DOWNLOAD=1 bash ${INSTALL_SH} --interactive local ${IWORK}" \
        /dev/null <"${IWORK}/answers.txt" >"${IWORK}/session.log" 2>&1; then
@@ -314,6 +314,7 @@ for tok in \
   "IRONRAG_PORT" "IRONRAG_PROFILE" "IRONRAG_ADMIN_LOGIN" "IRONRAG_ADMIN_PASSWORD" \
   "IRONRAG_OPENAI_API_KEY" "IRONRAG_DEEPSEEK_API_KEY" "IRONRAG_QWEN_API_KEY" \
   "IRONRAG_GPTUNNEL_API_KEY" "IRONRAG_OPENROUTER_API_KEY" "IRONRAG_ROUTERAI_API_KEY" \
+  "IRONRAG_MINIMAX_API_KEY" \
   "precedence"
 do
   case "$HELP_OUT" in

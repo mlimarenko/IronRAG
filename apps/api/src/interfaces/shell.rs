@@ -195,6 +195,9 @@ fn map_contract_provider_structured_output_mode(
         ProviderStructuredOutputMode::JsonObject => {
             ContractProviderStructuredOutputMode::JsonObject
         }
+        ProviderStructuredOutputMode::PromptOnlyJsonObject => {
+            ContractProviderStructuredOutputMode::PromptOnlyJsonObject
+        }
         ProviderStructuredOutputMode::Unsupported => {
             ContractProviderStructuredOutputMode::Unsupported
         }

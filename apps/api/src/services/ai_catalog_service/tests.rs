@@ -242,6 +242,15 @@ fn bootstrap_capability_flags(provider_kind: &str) -> serde_json::Value {
                 {"purpose": "vision", "modelName": "provider-omega/chat-vision"}
             ]
         }),
+        "provider-zeta" => serde_json::json!({
+            "bootstrapPresets": [
+                {
+                    "purpose": "extract_graph",
+                    "modelName": "zeta-chat",
+                    "extraParametersJson": {"sample": {"enabled": true}}
+                }
+            ]
+        }),
         _ => serde_json::json!({}),
     }
 }
@@ -644,6 +653,37 @@ fn bootstrap_bundle_uses_expected_provider_alpha_models() {
             .find(|preset| preset.binding_purpose == AiBindingPurpose::QueryAnswer)
             .and_then(|preset| preset.temperature),
         Some(0.3)
+    );
+}
+
+#[test]
+fn bootstrap_preset_descriptors_preserve_provider_extra_parameters() {
+    let provider = sample_provider("provider-zeta");
+    let model = ModelCatalogEntry {
+        id: Uuid::now_v7(),
+        provider_catalog_id: provider.id,
+        model_name: "zeta-chat".to_string(),
+        capability_kind: "chat".to_string(),
+        modality_kind: "text".to_string(),
+        lifecycle_state: "active".to_string(),
+        metadata_json: serde_json::json!({}),
+        allowed_binding_purposes: vec![AiBindingPurpose::ExtractGraph],
+        context_window: None,
+        max_output_tokens: None,
+    };
+
+    let descriptors = resolve_bootstrap_provider_preset_descriptors(
+        &provider,
+        std::slice::from_ref(&provider),
+        &[model],
+    )
+    .expect("provider bootstrap presets should parse");
+
+    assert_eq!(descriptors.len(), 1);
+    assert_eq!(descriptors[0].binding_purpose, AiBindingPurpose::ExtractGraph);
+    assert_eq!(
+        descriptors[0].extra_parameters_json,
+        serde_json::json!({"sample": {"enabled": true}})
     );
 }
 
