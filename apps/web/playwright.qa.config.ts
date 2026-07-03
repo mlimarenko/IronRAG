@@ -1,5 +1,7 @@
 import { defineConfig, devices } from '@playwright/test';
 
+const qaBaseURL = process.env.QA_BASE_URL ?? 'http://127.0.0.1:4173';
+
 /**
  * Self-contained Playwright config for release 0.3.1 visual QA.
  * Boots its own vite dev server (which proxies `/v1` to the real
@@ -24,7 +26,7 @@ export default defineConfig({
   outputDir: 'visual-qa/.artifacts',
   globalSetup: './visual-qa/global-setup.ts',
   use: {
-    baseURL: 'http://127.0.0.1:4173',
+    baseURL: qaBaseURL,
     storageState: 'visual-qa/.storage/state.json',
     trace: 'off',
     screenshot: 'off',
@@ -53,7 +55,7 @@ export default defineConfig({
   ],
   webServer: {
     command: 'npm run dev -- --host 127.0.0.1 --port 4173 --strictPort',
-    url: 'http://127.0.0.1:4173',
+    url: qaBaseURL,
     reuseExistingServer: true,
     timeout: 120_000,
     stdout: 'ignore',

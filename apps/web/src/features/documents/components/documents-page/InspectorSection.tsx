@@ -14,13 +14,6 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/shared/components/ui/dialog";
-import {
-  Drawer,
-  DrawerContent,
-  DrawerDescription,
-  DrawerTitle,
-} from "@/shared/components/ui/drawer";
-import { useIsMobile } from "@/shared/hooks/use-mobile";
 import type { DocumentItem, Locale } from "@/shared/types";
 
 import {
@@ -80,7 +73,6 @@ export function InspectorSection({
   updateSearchParamState,
 }: InspectorSectionProps) {
   const navigate = useNavigate();
-  const isMobile = useIsMobile();
   const [deleteDocOpen, setDeleteDocOpen] = useState(false);
   const [replaceFileOpen, setReplaceFileOpen] = useState(false);
   const [replaceFile, setReplaceFile] = useState<File | null>(null);
@@ -226,27 +218,12 @@ export function InspectorSection({
           ? () => navigate(`/graph?nodeId=${encodeURIComponent(selectedDoc.id)}`)
           : undefined
       }
-      presentation={isMobile ? "drawer" : "sidebar"}
     />
   );
 
   return (
     <>
-      {isMobile ? (
-        <Drawer open={!!selectedDoc} onOpenChange={(open) => {
-          if (!open) clearSelectedDoc();
-        }}>
-          <DrawerContent className="h-[88dvh] max-h-[88dvh] rounded-t-xl p-0">
-            <DrawerTitle className="sr-only">{selectedDoc.fileName}</DrawerTitle>
-            <DrawerDescription className="sr-only">
-              {selectedDoc.failureNotice?.summary ?? selectedDoc.statusReason ?? selectedDoc.fileName}
-            </DrawerDescription>
-            {inspectorPanel}
-          </DrawerContent>
-        </Drawer>
-      ) : (
-        inspectorPanel
-      )}
+      {inspectorPanel}
       <Dialog open={deleteDocOpen} onOpenChange={setDeleteDocOpen}>
         <DialogContent>
           <DialogHeader>
@@ -280,7 +257,7 @@ export function InspectorSection({
             </DialogDescription>
           </DialogHeader>
           <div
-            className="border-2 border-dashed rounded-xl p-10 text-center transition-all duration-200 hover:border-primary/40 hover:bg-primary/5 cursor-pointer hover:shadow-soft"
+            className="rounded-lg border border-dashed border-border bg-surface-sunken/40 p-10 text-center transition-all duration-200 hover:border-primary/40 hover:bg-primary/5 cursor-pointer hover:shadow-soft"
             onClick={() => replaceFileInputRef.current?.click()}
             onDragOver={(event) => event.preventDefault()}
             onDrop={(event) => {

@@ -1,9 +1,11 @@
 import { useTranslation } from 'react-i18next';
 import { Link } from 'react-router-dom';
-import { Code2, Languages, MonitorCog, Moon, Sun, Tag } from 'lucide-react';
+import { Code2, Languages, MonitorCog, Moon, Sun, Terminal } from 'lucide-react';
 
 import { Button } from '@/shared/components/ui/button';
 import { Label } from '@/shared/components/ui/label';
+import { PageHeader } from '@/shared/components/layout/PageHeader';
+import { PageShell } from '@/shared/components/layout/PageShell';
 import {
   Select,
   SelectContent,
@@ -14,7 +16,7 @@ import {
 import { useApp } from '@/shared/contexts/app-context';
 import { usePreferences, type ThemePreference } from '@/shared/contexts/preferences-context';
 import { AVAILABLE_LOCALES } from '@/shared/types';
-import { BUILD_VERSION_LABEL } from '@/shared/lib/build-version';
+import { McpConnectGuide } from './McpTab';
 
 const THEME_OPTIONS: { value: ThemePreference; icon: typeof Sun }[] = [
   { value: 'light', icon: Sun },
@@ -33,13 +35,17 @@ export default function AdminSystemPage() {
   const { theme, setTheme } = usePreferences();
 
   return (
-    <div className="flex flex-1 min-h-0 flex-col overflow-auto p-6">
-      <div className="mb-5">
-        <h2 className="text-base font-bold tracking-tight">{t('admin.systemPage.title')}</h2>
-        <p className="text-sm text-muted-foreground">{t('admin.systemPage.subtitle')}</p>
-      </div>
-
-      <div className="max-w-2xl space-y-4">
+    <PageShell
+      header={
+        <PageHeader
+          title={t('admin.nav.system')}
+          description={t('admin.systemPage.subtitle')}
+        />
+      }
+      bodyScroll="auto"
+      bodyClassName="p-3 animate-fade-in sm:p-4"
+    >
+      <div className="w-full space-y-4">
         {/* Locale */}
         <div className="workbench-surface p-4">
           <div className="mb-3 flex items-center gap-2">
@@ -68,7 +74,7 @@ export default function AdminSystemPage() {
             <Label className="text-sm font-bold">{t('admin.systemPage.themeTitle')}</Label>
           </div>
           <p className="mb-2 text-xs text-muted-foreground">{t('admin.systemPage.themeDesc')}</p>
-          <div className="inline-flex gap-1 rounded-xl border bg-surface-sunken p-1">
+          <div className="inline-flex gap-1 rounded-md border bg-background p-0.5">
             {THEME_OPTIONS.map((option) => {
               const Icon = option.icon;
               const active = theme === option.value;
@@ -78,10 +84,10 @@ export default function AdminSystemPage() {
                   type="button"
                   onClick={() => setTheme(option.value)}
                   aria-pressed={active}
-                  className={`flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-semibold transition-colors ${
+                  className={`flex items-center gap-1.5 rounded px-3 py-1.5 text-xs font-medium transition-colors ${
                     active
-                      ? 'bg-primary text-primary-foreground shadow-sm'
-                      : 'text-muted-foreground hover:bg-accent/50'
+                      ? 'bg-muted text-foreground'
+                      : 'text-muted-foreground hover:bg-muted/70 hover:text-foreground'
                   }`}
                 >
                   <Icon className="h-3.5 w-3.5" />
@@ -107,11 +113,18 @@ export default function AdminSystemPage() {
           </Button>
         </div>
 
-        <div className="flex items-center gap-2 px-1 text-xs text-muted-foreground">
-          <Tag className="h-3.5 w-3.5" />
-          <span className="font-medium">{BUILD_VERSION_LABEL}</span>
+        {/* MCP connection — instance-level integration reference (same for every
+            library), lifted out of the dissolved per-library hub. */}
+        <div className="workbench-surface p-4">
+          <div className="mb-1 flex items-center gap-2">
+            <Terminal className="h-4 w-4 text-muted-foreground" />
+            <Label className="text-sm font-bold">{t('admin.systemPage.mcpTitle')}</Label>
+          </div>
+          <p className="mb-3 text-xs text-muted-foreground">{t('admin.systemPage.mcpDesc')}</p>
+          <McpConnectGuide t={t} />
         </div>
+
       </div>
-    </div>
+    </PageShell>
   );
 }

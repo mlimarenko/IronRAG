@@ -2,7 +2,7 @@
 
 import { type Client, formDataBodySerializer, type Options as Options2, type RequestResult, type TDataShape } from './client';
 import { client } from './client.gen';
-import type { AppendContentDocumentData, AppendContentDocumentErrors, AppendContentDocumentResponses, BatchCancelContentDocumentsData, BatchCancelContentDocumentsErrors, BatchCancelContentDocumentsResponses, BatchDeleteContentDocumentsData, BatchDeleteContentDocumentsErrors, BatchDeleteContentDocumentsResponses, BatchReprocessContentDocumentsData, BatchReprocessContentDocumentsErrors, BatchReprocessContentDocumentsResponses, CancelContentWebIngestRunData, CancelContentWebIngestRunErrors, CancelContentWebIngestRunResponses, CancelIngestQueueJobData, CancelIngestQueueJobErrors, CancelIngestQueueJobResponses, CreateAiCredentialData, CreateAiCredentialErrors, CreateAiCredentialResponses, CreateAiLibraryBindingData, CreateAiLibraryBindingErrors, CreateAiLibraryBindingResponses, CreateAiModelData, CreateAiModelErrors, CreateAiModelPresetData, CreateAiModelPresetErrors, CreateAiModelPresetResponses, CreateAiModelResponses, CreateAiPriceOverrideData, CreateAiPriceOverrideErrors, CreateAiPriceOverrideResponses, CreateAiProviderData, CreateAiProviderErrors, CreateAiProviderResponses, CreateCatalogLibraryData, CreateCatalogLibraryErrors, CreateCatalogLibraryResponses, CreateCatalogWorkspaceData, CreateCatalogWorkspaceErrors, CreateCatalogWorkspaceResponses, CreateContentDocumentData, CreateContentDocumentErrors, CreateContentDocumentResponses, CreateContentMutationData, CreateContentMutationErrors, CreateContentMutationResponses, CreateContentWebIngestRunData, CreateContentWebIngestRunErrors, CreateContentWebIngestRunResponses, CreateIamGrantData, CreateIamGrantErrors, CreateIamGrantResponses, CreateIamUserData, CreateIamUserErrors, CreateIamUserResponses, CreateQuerySessionData, CreateQuerySessionErrors, CreateQuerySessionResponses, CreateQuerySessionTurnData, CreateQuerySessionTurnErrors, CreateQuerySessionTurnResponses, CreateWebhookSubscriptionData, CreateWebhookSubscriptionErrors, CreateWebhookSubscriptionResponses, DeleteAiCredentialData, DeleteAiCredentialErrors, DeleteAiCredentialResponses, DeleteAiLibraryBindingData, DeleteAiLibraryBindingErrors, DeleteAiLibraryBindingResponses, DeleteAiModelData, DeleteAiModelErrors, DeleteAiModelPresetData, DeleteAiModelPresetErrors, DeleteAiModelPresetResponses, DeleteAiModelResponses, DeleteAiPriceOverrideData, DeleteAiPriceOverrideErrors, DeleteAiPriceOverrideResponses, DeleteAiProviderData, DeleteAiProviderErrors, DeleteAiProviderResponses, DeleteCatalogLibraryData, DeleteCatalogLibraryErrors, DeleteCatalogLibraryResponses, DeleteCatalogWorkspaceData, DeleteCatalogWorkspaceErrors, DeleteCatalogWorkspaceResponses, DeleteContentDocumentData, DeleteContentDocumentErrors, DeleteContentDocumentResponses, DeleteIamTokenData, DeleteIamTokenErrors, DeleteIamTokenResponses, DeleteWebhookSubscriptionData, DeleteWebhookSubscriptionErrors, DeleteWebhookSubscriptionResponses, EditContentDocumentData, EditContentDocumentErrors, EditContentDocumentResponses, ExportLibrarySnapshotData, ExportLibrarySnapshotErrors, ExportLibrarySnapshotResponses, ExportWorkspaceSnapshotData, ExportWorkspaceSnapshotErrors, ExportWorkspaceSnapshotResponses, GetAdminSurfaceData, GetAdminSurfaceErrors, GetAdminSurfaceResponses, GetAssistantSystemPromptData, GetAssistantSystemPromptErrors, GetAssistantSystemPromptResponses, GetAsyncOperationData, GetAsyncOperationErrors, GetAsyncOperationResponses, GetBillingExecutionCostData, GetBillingExecutionCostErrors, GetBillingExecutionCostResponses, GetBootstrapStatusData, GetBootstrapStatusResponses, GetCatalogLibraryData, GetCatalogLibraryErrors, GetCatalogLibraryResponses, GetCatalogWorkspaceData, GetCatalogWorkspaceErrors, GetCatalogWorkspaceResponses, GetContentDocumentData, GetContentDocumentErrors, GetContentDocumentHeadData, GetContentDocumentHeadErrors, GetContentDocumentHeadResponses, GetContentDocumentResponses, GetContentDocumentSourceData, GetContentDocumentSourceErrors, GetContentDocumentSourceResponses, GetContentMutationData, GetContentMutationErrors, GetContentMutationResponses, GetContentWebIngestRunData, GetContentWebIngestRunErrors, GetContentWebIngestRunResponses, GetHealthData, GetHealthResponses, GetIamMeData, GetIamMeErrors, GetIamMeResponses, GetIamSessionData, GetIamSessionErrors, GetIamSessionResponses, GetIamUserAccessData, GetIamUserAccessErrors, GetIamUserAccessResponses, GetIngestAttemptData, GetIngestAttemptErrors, GetIngestAttemptResponses, GetIngestJobData, GetIngestJobErrors, GetIngestJobResponses, GetKnowledgeContextBundleData, GetKnowledgeContextBundleErrors, GetKnowledgeContextBundleResponses, GetKnowledgeDocumentData, GetKnowledgeDocumentErrors, GetKnowledgeDocumentResponses, GetKnowledgeEntityData, GetKnowledgeEntityErrors, GetKnowledgeEntityResponses, GetKnowledgeGraphWorkbenchData, GetKnowledgeGraphWorkbenchErrors, GetKnowledgeGraphWorkbenchResponses, GetKnowledgeLibrarySummaryData, GetKnowledgeLibrarySummaryErrors, GetKnowledgeLibrarySummaryResponses, GetKnowledgeRelationData, GetKnowledgeRelationErrors, GetKnowledgeRelationResponses, GetLibraryCostSummaryData, GetLibraryCostSummaryErrors, GetLibraryCostSummaryResponses, GetLibraryDashboardData, GetLibraryDashboardErrors, GetLibraryDashboardResponses, GetLibraryStateData, GetLibraryStateErrors, GetLibraryStateResponses, GetMcpCapabilitiesData, GetMcpCapabilitiesErrors, GetMcpCapabilitiesResponses, GetMcpDiagnosticsCapabilitiesData, GetMcpDiagnosticsCapabilitiesErrors, GetMcpDiagnosticsCapabilitiesResponses, GetOpenApiContractData, GetOpenApiContractResponses, GetQueryExecutionData, GetQueryExecutionErrors, GetQueryExecutionLlmContextData, GetQueryExecutionLlmContextErrors, GetQueryExecutionLlmContextResponses, GetQueryExecutionResponses, GetQuerySessionData, GetQuerySessionErrors, GetQuerySessionResponses, GetReadinessData, GetReadinessErrors, GetReadinessResponses, GetReleaseUpdateData, GetReleaseUpdateResponses, GetRuntimeExecutionData, GetRuntimeExecutionErrors, GetRuntimeExecutionResponses, GetRuntimeExecutionTraceData, GetRuntimeExecutionTraceErrors, GetRuntimeExecutionTraceResponses, GetVersionData, GetVersionResponses, GetWebhookSubscriptionData, GetWebhookSubscriptionErrors, GetWebhookSubscriptionResponses, GetWorkspaceCostSummaryData, GetWorkspaceCostSummaryErrors, GetWorkspaceCostSummaryResponses, ImportLibrarySnapshotData, ImportLibrarySnapshotErrors, ImportLibrarySnapshotResponses, ImportWorkspaceSnapshotData, ImportWorkspaceSnapshotErrors, ImportWorkspaceSnapshotResponses, ListAiCredentialsData, ListAiCredentialsErrors, ListAiCredentialsResponses, ListAiLibraryBindingsData, ListAiLibraryBindingsErrors, ListAiLibraryBindingsResponses, ListAiModelPresetsData, ListAiModelPresetsErrors, ListAiModelPresetsResponses, ListAiModelsData, ListAiModelsErrors, ListAiModelsResponses, ListAiPricesData, ListAiPricesErrors, ListAiPricesResponses, ListAiProvidersData, ListAiProvidersErrors, ListAiProvidersResponses, ListAuditEventsData, ListAuditEventsErrors, ListAuditEventsResponses, ListBillingChargesData, ListBillingChargesErrors, ListBillingChargesResponses, ListBillingLibraryDocumentCostsData, ListBillingLibraryDocumentCostsErrors, ListBillingLibraryDocumentCostsResponses, ListBillingProviderCallsData, ListBillingProviderCallsErrors, ListBillingProviderCallsResponses, ListCatalogLibrariesData, ListCatalogLibrariesErrors, ListCatalogLibrariesResponses, ListCatalogWorkspacesData, ListCatalogWorkspacesErrors, ListCatalogWorkspacesResponses, ListChunksData, ListChunksErrors, ListChunksResponses, ListContentDocumentsData, ListContentDocumentsErrors, ListContentDocumentsResponses, ListContentMutationsData, ListContentMutationsErrors, ListContentMutationsResponses, ListContentPreparedSegmentsData, ListContentPreparedSegmentsErrors, ListContentPreparedSegmentsResponses, ListContentRevisionsData, ListContentRevisionsErrors, ListContentRevisionsResponses, ListContentTechnicalFactsData, ListContentTechnicalFactsErrors, ListContentTechnicalFactsResponses, ListContentWebIngestRunPagesData, ListContentWebIngestRunPagesErrors, ListContentWebIngestRunPagesResponses, ListContentWebIngestRunsData, ListContentWebIngestRunsErrors, ListContentWebIngestRunsResponses, ListIamGrantsData, ListIamGrantsErrors, ListIamGrantsResponses, ListIamTokensData, ListIamTokensErrors, ListIamTokensResponses, ListIamUsersData, ListIamUsersErrors, ListIamUsersResponses, ListIngestJobsData, ListIngestJobsErrors, ListIngestJobsResponses, ListIngestQueueData, ListIngestQueueErrors, ListIngestQueueResponses, ListIngestStageEventsData, ListIngestStageEventsErrors, ListIngestStageEventsResponses, ListKnowledgeContextBundlesData, ListKnowledgeContextBundlesErrors, ListKnowledgeContextBundlesResponses, ListKnowledgeDocumentsData, ListKnowledgeDocumentsErrors, ListKnowledgeDocumentsResponses, ListKnowledgeLibraryGenerationsData, ListKnowledgeLibraryGenerationsErrors, ListKnowledgeLibraryGenerationsResponses, ListQuerySessionsData, ListQuerySessionsErrors, ListQuerySessionsResponses, ListWebhookDeliveryAttemptsData, ListWebhookDeliveryAttemptsErrors, ListWebhookDeliveryAttemptsResponses, ListWebhookSubscriptionsData, ListWebhookSubscriptionsErrors, ListWebhookSubscriptionsResponses, LoginIamSessionData, LoginIamSessionErrors, LoginIamSessionResponses, LogoutIamSessionData, LogoutIamSessionErrors, LogoutIamSessionResponses, MintIamTokenData, MintIamTokenErrors, MintIamTokenResponses, MoveIngestQueueJobData, MoveIngestQueueJobErrors, MoveIngestQueueJobResponses, PatchContentDocumentMetadataData, PatchContentDocumentMetadataErrors, PatchContentDocumentMetadataResponses, PauseIngestQueueJobData, PauseIngestQueueJobErrors, PauseIngestQueueJobResponses, PostBootstrapSetupData, PostBootstrapSetupErrors, PostBootstrapSetupResponses, PostMcpDiagnosticsRequestData, PostMcpDiagnosticsRequestErrors, PostMcpDiagnosticsRequestResponses, PostMcpRequestData, PostMcpRequestErrors, PostMcpRequestResponses, ReplaceContentDocumentData, ReplaceContentDocumentErrors, ReplaceContentDocumentResponses, ReprocessContentDocumentData, ReprocessContentDocumentErrors, ReprocessContentDocumentResponses, ResolveIamSessionData, ResolveIamSessionResponses, ResumeIngestQueueJobData, ResumeIngestQueueJobErrors, ResumeIngestQueueJobResponses, RevokeIamGrantData, RevokeIamGrantErrors, RevokeIamGrantResponses, RevokeIamTokenData, RevokeIamTokenErrors, RevokeIamTokenResponses, SearchDocumentsData, SearchDocumentsErrors, SearchDocumentsResponses, SearchKnowledgeDocumentsData, SearchKnowledgeDocumentsErrors, SearchKnowledgeDocumentsResponses, SetIamUserAccessData, SetIamUserAccessErrors, SetIamUserAccessResponses, SetIamUserRoleData, SetIamUserRoleErrors, SetIamUserRoleResponses, UpdateAiCredentialData, UpdateAiCredentialErrors, UpdateAiCredentialResponses, UpdateAiLibraryBindingData, UpdateAiLibraryBindingErrors, UpdateAiLibraryBindingResponses, UpdateAiModelData, UpdateAiModelErrors, UpdateAiModelPresetData, UpdateAiModelPresetErrors, UpdateAiModelPresetResponses, UpdateAiModelResponses, UpdateAiPriceOverrideData, UpdateAiPriceOverrideErrors, UpdateAiPriceOverrideResponses, UpdateAiProviderData, UpdateAiProviderErrors, UpdateAiProviderResponses, UpdateCatalogLibraryData, UpdateCatalogLibraryErrors, UpdateCatalogLibraryRecognitionPolicyData, UpdateCatalogLibraryRecognitionPolicyErrors, UpdateCatalogLibraryRecognitionPolicyResponses, UpdateCatalogLibraryResponses, UpdateCatalogLibraryWebIngestPolicyData, UpdateCatalogLibraryWebIngestPolicyErrors, UpdateCatalogLibraryWebIngestPolicyResponses, UpdateWebhookSubscriptionData, UpdateWebhookSubscriptionErrors, UpdateWebhookSubscriptionResponses, UploadContentDocumentData, UploadContentDocumentErrors, UploadContentDocumentResponses, ValidateAiLibraryBindingData, ValidateAiLibraryBindingErrors, ValidateAiLibraryBindingResponses } from './types.gen';
+import type { AppendContentDocumentData, AppendContentDocumentErrors, AppendContentDocumentResponses, BatchCancelContentDocumentsData, BatchCancelContentDocumentsErrors, BatchCancelContentDocumentsResponses, BatchDeleteContentDocumentsData, BatchDeleteContentDocumentsErrors, BatchDeleteContentDocumentsResponses, BatchReprocessContentDocumentsData, BatchReprocessContentDocumentsErrors, BatchReprocessContentDocumentsResponses, CancelContentWebIngestRunData, CancelContentWebIngestRunErrors, CancelContentWebIngestRunResponses, CancelIngestQueueJobData, CancelIngestQueueJobErrors, CancelIngestQueueJobResponses, CreateAiAccountData, CreateAiAccountErrors, CreateAiAccountResponses, CreateAiLibraryBindingData, CreateAiLibraryBindingErrors, CreateAiLibraryBindingResponses, CreateAiModelData, CreateAiModelErrors, CreateAiModelResponses, CreateAiPriceOverrideData, CreateAiPriceOverrideErrors, CreateAiPriceOverrideResponses, CreateAiProviderData, CreateAiProviderErrors, CreateAiProviderResponses, CreateCatalogLibraryData, CreateCatalogLibraryErrors, CreateCatalogLibraryResponses, CreateCatalogWorkspaceData, CreateCatalogWorkspaceErrors, CreateCatalogWorkspaceResponses, CreateContentDocumentData, CreateContentDocumentErrors, CreateContentDocumentResponses, CreateContentMutationData, CreateContentMutationErrors, CreateContentMutationResponses, CreateContentWebIngestRunData, CreateContentWebIngestRunErrors, CreateContentWebIngestRunResponses, CreateIamGrantData, CreateIamGrantErrors, CreateIamGrantResponses, CreateIamUserData, CreateIamUserErrors, CreateIamUserResponses, CreateQuerySessionData, CreateQuerySessionErrors, CreateQuerySessionResponses, CreateQuerySessionTurnData, CreateQuerySessionTurnErrors, CreateQuerySessionTurnResponses, CreateWebhookSubscriptionData, CreateWebhookSubscriptionErrors, CreateWebhookSubscriptionResponses, DeleteAiAccountData, DeleteAiAccountErrors, DeleteAiAccountResponses, DeleteAiLibraryBindingData, DeleteAiLibraryBindingErrors, DeleteAiLibraryBindingResponses, DeleteAiModelData, DeleteAiModelErrors, DeleteAiModelResponses, DeleteAiPriceOverrideData, DeleteAiPriceOverrideErrors, DeleteAiPriceOverrideResponses, DeleteAiProviderData, DeleteAiProviderErrors, DeleteAiProviderResponses, DeleteCatalogLibraryData, DeleteCatalogLibraryErrors, DeleteCatalogLibraryResponses, DeleteCatalogWorkspaceData, DeleteCatalogWorkspaceErrors, DeleteCatalogWorkspaceResponses, DeleteContentDocumentData, DeleteContentDocumentErrors, DeleteContentDocumentResponses, DeleteIamTokenData, DeleteIamTokenErrors, DeleteIamTokenResponses, DeleteWebhookSubscriptionData, DeleteWebhookSubscriptionErrors, DeleteWebhookSubscriptionResponses, EditContentDocumentData, EditContentDocumentErrors, EditContentDocumentResponses, ExportLibrarySnapshotData, ExportLibrarySnapshotErrors, ExportLibrarySnapshotResponses, ExportWorkspaceSnapshotData, ExportWorkspaceSnapshotErrors, ExportWorkspaceSnapshotResponses, GetAdminSurfaceData, GetAdminSurfaceErrors, GetAdminSurfaceResponses, GetAssistantSystemPromptData, GetAssistantSystemPromptErrors, GetAssistantSystemPromptResponses, GetAsyncOperationData, GetAsyncOperationErrors, GetAsyncOperationResponses, GetBillingExecutionCostData, GetBillingExecutionCostErrors, GetBillingExecutionCostResponses, GetBootstrapStatusData, GetBootstrapStatusResponses, GetCatalogLibraryData, GetCatalogLibraryErrors, GetCatalogLibraryResponses, GetCatalogLibraryRetrievalConfigData, GetCatalogLibraryRetrievalConfigErrors, GetCatalogLibraryRetrievalConfigResponses, GetCatalogWorkspaceData, GetCatalogWorkspaceErrors, GetCatalogWorkspaceResponses, GetContentDocumentData, GetContentDocumentErrors, GetContentDocumentHeadData, GetContentDocumentHeadErrors, GetContentDocumentHeadResponses, GetContentDocumentResponses, GetContentDocumentSourceData, GetContentDocumentSourceErrors, GetContentDocumentSourceResponses, GetContentMutationData, GetContentMutationErrors, GetContentMutationResponses, GetContentWebIngestRunData, GetContentWebIngestRunErrors, GetContentWebIngestRunResponses, GetHealthData, GetHealthResponses, GetIamMeData, GetIamMeErrors, GetIamMeResponses, GetIamSessionData, GetIamSessionErrors, GetIamSessionResponses, GetIamUserAccessData, GetIamUserAccessErrors, GetIamUserAccessResponses, GetIngestAttemptData, GetIngestAttemptErrors, GetIngestAttemptResponses, GetIngestJobData, GetIngestJobErrors, GetIngestJobResponses, GetKnowledgeContextBundleData, GetKnowledgeContextBundleErrors, GetKnowledgeContextBundleResponses, GetKnowledgeDocumentData, GetKnowledgeDocumentErrors, GetKnowledgeDocumentResponses, GetKnowledgeEntityData, GetKnowledgeEntityErrors, GetKnowledgeEntityResponses, GetKnowledgeGraphWorkbenchData, GetKnowledgeGraphWorkbenchErrors, GetKnowledgeGraphWorkbenchResponses, GetKnowledgeLibrarySummaryData, GetKnowledgeLibrarySummaryErrors, GetKnowledgeLibrarySummaryResponses, GetKnowledgeRelationData, GetKnowledgeRelationErrors, GetKnowledgeRelationResponses, GetLibraryCostSummaryData, GetLibraryCostSummaryErrors, GetLibraryCostSummaryResponses, GetLibraryDashboardData, GetLibraryDashboardErrors, GetLibraryDashboardResponses, GetLibraryStateData, GetLibraryStateErrors, GetLibraryStateResponses, GetMcpCapabilitiesData, GetMcpCapabilitiesErrors, GetMcpCapabilitiesResponses, GetMcpDiagnosticsCapabilitiesData, GetMcpDiagnosticsCapabilitiesErrors, GetMcpDiagnosticsCapabilitiesResponses, GetOpenApiContractData, GetOpenApiContractResponses, GetQueryExecutionData, GetQueryExecutionErrors, GetQueryExecutionLlmContextData, GetQueryExecutionLlmContextErrors, GetQueryExecutionLlmContextResponses, GetQueryExecutionResponses, GetQuerySessionData, GetQuerySessionErrors, GetQuerySessionResponses, GetReadinessData, GetReadinessErrors, GetReadinessResponses, GetReleaseUpdateData, GetReleaseUpdateResponses, GetRuntimeExecutionData, GetRuntimeExecutionErrors, GetRuntimeExecutionResponses, GetRuntimeExecutionTraceData, GetRuntimeExecutionTraceErrors, GetRuntimeExecutionTraceResponses, GetVersionData, GetVersionResponses, GetWebhookSubscriptionData, GetWebhookSubscriptionErrors, GetWebhookSubscriptionResponses, GetWorkspaceCostSummaryData, GetWorkspaceCostSummaryErrors, GetWorkspaceCostSummaryResponses, ImportLibrarySnapshotData, ImportLibrarySnapshotErrors, ImportLibrarySnapshotResponses, ImportWorkspaceSnapshotData, ImportWorkspaceSnapshotErrors, ImportWorkspaceSnapshotResponses, ListAiAccountsData, ListAiAccountsErrors, ListAiAccountsResponses, ListAiLibraryBindingsData, ListAiLibraryBindingsErrors, ListAiLibraryBindingsResponses, ListAiModelsData, ListAiModelsErrors, ListAiModelsResponses, ListAiPricesData, ListAiPricesErrors, ListAiPricesResponses, ListAiProvidersData, ListAiProvidersErrors, ListAiProvidersResponses, ListAuditEventsData, ListAuditEventsErrors, ListAuditEventsResponses, ListBillingChargesData, ListBillingChargesErrors, ListBillingChargesResponses, ListBillingLibraryDocumentCostsData, ListBillingLibraryDocumentCostsErrors, ListBillingLibraryDocumentCostsResponses, ListBillingProviderCallsData, ListBillingProviderCallsErrors, ListBillingProviderCallsResponses, ListCatalogLibrariesData, ListCatalogLibrariesErrors, ListCatalogLibrariesResponses, ListCatalogWorkspacesData, ListCatalogWorkspacesErrors, ListCatalogWorkspacesResponses, ListChunksData, ListChunksErrors, ListChunksResponses, ListContentDocumentsData, ListContentDocumentsErrors, ListContentDocumentsResponses, ListContentMutationsData, ListContentMutationsErrors, ListContentMutationsResponses, ListContentPreparedSegmentsData, ListContentPreparedSegmentsErrors, ListContentPreparedSegmentsResponses, ListContentRevisionsData, ListContentRevisionsErrors, ListContentRevisionsResponses, ListContentTechnicalFactsData, ListContentTechnicalFactsErrors, ListContentTechnicalFactsResponses, ListContentWebIngestRunPagesData, ListContentWebIngestRunPagesErrors, ListContentWebIngestRunPagesResponses, ListContentWebIngestRunsData, ListContentWebIngestRunsErrors, ListContentWebIngestRunsResponses, ListIamGrantsData, ListIamGrantsErrors, ListIamGrantsResponses, ListIamTokensData, ListIamTokensErrors, ListIamTokensResponses, ListIamUsersData, ListIamUsersErrors, ListIamUsersResponses, ListIngestJobsData, ListIngestJobsErrors, ListIngestJobsResponses, ListIngestQueueData, ListIngestQueueErrors, ListIngestQueueResponses, ListIngestStageEventsData, ListIngestStageEventsErrors, ListIngestStageEventsResponses, ListKnowledgeContextBundlesData, ListKnowledgeContextBundlesErrors, ListKnowledgeContextBundlesResponses, ListKnowledgeDocumentsData, ListKnowledgeDocumentsErrors, ListKnowledgeDocumentsResponses, ListKnowledgeLibraryGenerationsData, ListKnowledgeLibraryGenerationsErrors, ListKnowledgeLibraryGenerationsResponses, ListQuerySessionsData, ListQuerySessionsErrors, ListQuerySessionsResponses, ListWebhookDeliveryAttemptsData, ListWebhookDeliveryAttemptsErrors, ListWebhookDeliveryAttemptsResponses, ListWebhookSubscriptionsData, ListWebhookSubscriptionsErrors, ListWebhookSubscriptionsResponses, LoginIamSessionData, LoginIamSessionErrors, LoginIamSessionResponses, LogoutIamSessionData, LogoutIamSessionErrors, LogoutIamSessionResponses, MintIamTokenData, MintIamTokenErrors, MintIamTokenResponses, MoveIngestQueueJobData, MoveIngestQueueJobErrors, MoveIngestQueueJobResponses, PatchContentDocumentMetadataData, PatchContentDocumentMetadataErrors, PatchContentDocumentMetadataResponses, PauseIngestQueueJobData, PauseIngestQueueJobErrors, PauseIngestQueueJobResponses, PostBootstrapSetupData, PostBootstrapSetupErrors, PostBootstrapSetupResponses, PostMcpDiagnosticsRequestData, PostMcpDiagnosticsRequestErrors, PostMcpDiagnosticsRequestResponses, PostMcpRequestData, PostMcpRequestErrors, PostMcpRequestResponses, ReplaceContentDocumentData, ReplaceContentDocumentErrors, ReplaceContentDocumentResponses, ReprocessContentDocumentData, ReprocessContentDocumentErrors, ReprocessContentDocumentResponses, ResolveIamSessionData, ResolveIamSessionResponses, ResumeIngestQueueJobData, ResumeIngestQueueJobErrors, ResumeIngestQueueJobResponses, RevokeIamGrantData, RevokeIamGrantErrors, RevokeIamGrantResponses, RevokeIamTokenData, RevokeIamTokenErrors, RevokeIamTokenResponses, SearchDocumentsData, SearchDocumentsErrors, SearchDocumentsResponses, SearchKnowledgeDocumentsData, SearchKnowledgeDocumentsErrors, SearchKnowledgeDocumentsResponses, SetIamUserAccessData, SetIamUserAccessErrors, SetIamUserAccessResponses, SetIamUserRoleData, SetIamUserRoleErrors, SetIamUserRoleResponses, UpdateAiAccountData, UpdateAiAccountErrors, UpdateAiAccountResponses, UpdateAiLibraryBindingData, UpdateAiLibraryBindingErrors, UpdateAiLibraryBindingResponses, UpdateAiModelData, UpdateAiModelErrors, UpdateAiModelResponses, UpdateAiPriceOverrideData, UpdateAiPriceOverrideErrors, UpdateAiPriceOverrideResponses, UpdateAiProviderData, UpdateAiProviderErrors, UpdateAiProviderResponses, UpdateCatalogLibraryData, UpdateCatalogLibraryErrors, UpdateCatalogLibraryRecognitionPolicyData, UpdateCatalogLibraryRecognitionPolicyErrors, UpdateCatalogLibraryRecognitionPolicyResponses, UpdateCatalogLibraryResponses, UpdateCatalogLibraryRetrievalConfigData, UpdateCatalogLibraryRetrievalConfigErrors, UpdateCatalogLibraryRetrievalConfigResponses, UpdateCatalogLibraryWebIngestPolicyData, UpdateCatalogLibraryWebIngestPolicyErrors, UpdateCatalogLibraryWebIngestPolicyResponses, UpdateWebhookSubscriptionData, UpdateWebhookSubscriptionErrors, UpdateWebhookSubscriptionResponses, UploadContentDocumentData, UploadContentDocumentErrors, UploadContentDocumentResponses, ValidateAiLibraryBindingData, ValidateAiLibraryBindingErrors, ValidateAiLibraryBindingResponses } from './types.gen';
 
 export type Options<TData extends TDataShape = TDataShape, ThrowOnError extends boolean = boolean, TResponse = unknown> = Options2<TData, ThrowOnError, TResponse> & {
     /**
@@ -35,9 +35,69 @@ export class Admin {
 
 export class Ai {
     /**
+     * List ai accounts.
+     *
+     * Manages stored AI provider accounts used by runtime bindings. Use these endpoints from the admin UI or automation when registering, rotating, or listing provider secrets without exposing secret material in responses. Call it for paginated or filtered table views. Prefer server-side filters and cursors over fetching broad result sets into the client.
+     */
+    public static listAiAccounts<ThrowOnError extends boolean = false>(options?: Options<ListAiAccountsData, ThrowOnError>): RequestResult<ListAiAccountsResponses, ListAiAccountsErrors, ThrowOnError> {
+        return (options?.client ?? client).get<ListAiAccountsResponses, ListAiAccountsErrors, ThrowOnError>({
+            security: [{ scheme: 'bearer', type: 'http' }],
+            url: '/v1/ai/accounts',
+            ...options
+        });
+    }
+    
+    /**
+     * Create ai account.
+     *
+     * Manages stored AI provider accounts used by runtime bindings. Use these endpoints from the admin UI or automation when registering, rotating, or listing provider secrets without exposing secret material in responses. Call it to create work or submit a command. Some commands complete synchronously, while ingest, mutation, and runtime work can continue asynchronously.
+     */
+    public static createAiAccount<ThrowOnError extends boolean = false>(options: Options<CreateAiAccountData, ThrowOnError>): RequestResult<CreateAiAccountResponses, CreateAiAccountErrors, ThrowOnError> {
+        return (options.client ?? client).post<CreateAiAccountResponses, CreateAiAccountErrors, ThrowOnError>({
+            security: [{ scheme: 'bearer', type: 'http' }],
+            url: '/v1/ai/accounts',
+            ...options,
+            headers: {
+                'Content-Type': 'application/json',
+                ...options.headers
+            }
+        });
+    }
+    
+    /**
+     * Delete ai account.
+     *
+     * Manages stored AI provider accounts used by runtime bindings. Use these endpoints from the admin UI or automation when registering, rotating, or listing provider secrets without exposing secret material in responses. Call it to remove or revoke a resource. Destructive operations are authorized, audited, and may return an asynchronous operation when cleanup continues in the background.
+     */
+    public static deleteAiAccount<ThrowOnError extends boolean = false>(options: Options<DeleteAiAccountData, ThrowOnError>): RequestResult<DeleteAiAccountResponses, DeleteAiAccountErrors, ThrowOnError> {
+        return (options.client ?? client).delete<DeleteAiAccountResponses, DeleteAiAccountErrors, ThrowOnError>({
+            security: [{ scheme: 'bearer', type: 'http' }],
+            url: '/v1/ai/accounts/{accountId}',
+            ...options
+        });
+    }
+    
+    /**
+     * Update ai account.
+     *
+     * Manages stored AI provider accounts used by runtime bindings. Use these endpoints from the admin UI or automation when registering, rotating, or listing provider secrets without exposing secret material in responses. Call it to replace or partially update server-owned configuration. The request body is validated before changes are persisted.
+     */
+    public static updateAiAccount<ThrowOnError extends boolean = false>(options: Options<UpdateAiAccountData, ThrowOnError>): RequestResult<UpdateAiAccountResponses, UpdateAiAccountErrors, ThrowOnError> {
+        return (options.client ?? client).put<UpdateAiAccountResponses, UpdateAiAccountErrors, ThrowOnError>({
+            security: [{ scheme: 'bearer', type: 'http' }],
+            url: '/v1/ai/accounts/{accountId}',
+            ...options,
+            headers: {
+                'Content-Type': 'application/json',
+                ...options.headers
+            }
+        });
+    }
+    
+    /**
      * List ai library bindings.
      *
-     * Manages library-level AI runtime bindings. Bindings decide which configured provider/model handles embedding, query answering, graph extraction, and other AI purposes for one library. Call it for paginated or filtered table views. Prefer server-side filters and cursors over fetching broad result sets into the client.
+     * Manages library-level AI runtime bindings. A binding assigns an account and model to a purpose (embedding, query answering, graph extraction, and other AI purposes) for one library, with tuning parameters (system prompt, temperature, top-p, output token budget) stored inline. Call it for paginated or filtered table views. Prefer server-side filters and cursors over fetching broad result sets into the client.
      */
     public static listAiLibraryBindings<ThrowOnError extends boolean = false>(options?: Options<ListAiLibraryBindingsData, ThrowOnError>): RequestResult<ListAiLibraryBindingsResponses, ListAiLibraryBindingsErrors, ThrowOnError> {
         return (options?.client ?? client).get<ListAiLibraryBindingsResponses, ListAiLibraryBindingsErrors, ThrowOnError>({
@@ -50,7 +110,7 @@ export class Ai {
     /**
      * Create ai library binding.
      *
-     * Manages library-level AI runtime bindings. Bindings decide which configured provider/model handles embedding, query answering, graph extraction, and other AI purposes for one library. Call it to create work or submit a command. Some commands complete synchronously, while ingest, mutation, and runtime work can continue asynchronously.
+     * Manages library-level AI runtime bindings. A binding assigns an account and model to a purpose (embedding, query answering, graph extraction, and other AI purposes) for one library, with tuning parameters (system prompt, temperature, top-p, output token budget) stored inline. Call it to create work or submit a command. Some commands complete synchronously, while ingest, mutation, and runtime work can continue asynchronously.
      */
     public static createAiLibraryBinding<ThrowOnError extends boolean = false>(options: Options<CreateAiLibraryBindingData, ThrowOnError>): RequestResult<CreateAiLibraryBindingResponses, CreateAiLibraryBindingErrors, ThrowOnError> {
         return (options.client ?? client).post<CreateAiLibraryBindingResponses, CreateAiLibraryBindingErrors, ThrowOnError>({
@@ -67,7 +127,7 @@ export class Ai {
     /**
      * Delete ai library binding.
      *
-     * Manages library-level AI runtime bindings. Bindings decide which configured provider/model handles embedding, query answering, graph extraction, and other AI purposes for one library. Call it to remove or revoke a resource. Destructive operations are authorized, audited, and may return an asynchronous operation when cleanup continues in the background.
+     * Manages library-level AI runtime bindings. A binding assigns an account and model to a purpose (embedding, query answering, graph extraction, and other AI purposes) for one library, with tuning parameters (system prompt, temperature, top-p, output token budget) stored inline. Call it to remove or revoke a resource. Destructive operations are authorized, audited, and may return an asynchronous operation when cleanup continues in the background.
      */
     public static deleteAiLibraryBinding<ThrowOnError extends boolean = false>(options: Options<DeleteAiLibraryBindingData, ThrowOnError>): RequestResult<DeleteAiLibraryBindingResponses, DeleteAiLibraryBindingErrors, ThrowOnError> {
         return (options.client ?? client).delete<DeleteAiLibraryBindingResponses, DeleteAiLibraryBindingErrors, ThrowOnError>({
@@ -80,7 +140,7 @@ export class Ai {
     /**
      * Update ai library binding.
      *
-     * Manages library-level AI runtime bindings. Bindings decide which configured provider/model handles embedding, query answering, graph extraction, and other AI purposes for one library. Call it to replace or partially update server-owned configuration. The request body is validated before changes are persisted.
+     * Manages library-level AI runtime bindings. A binding assigns an account and model to a purpose (embedding, query answering, graph extraction, and other AI purposes) for one library, with tuning parameters (system prompt, temperature, top-p, output token budget) stored inline. Call it to replace or partially update server-owned configuration. The request body is validated before changes are persisted.
      */
     public static updateAiLibraryBinding<ThrowOnError extends boolean = false>(options: Options<UpdateAiLibraryBindingData, ThrowOnError>): RequestResult<UpdateAiLibraryBindingResponses, UpdateAiLibraryBindingErrors, ThrowOnError> {
         return (options.client ?? client).put<UpdateAiLibraryBindingResponses, UpdateAiLibraryBindingErrors, ThrowOnError>({
@@ -97,133 +157,13 @@ export class Ai {
     /**
      * Validate ai library binding.
      *
-     * Manages library-level AI runtime bindings. Bindings decide which configured provider/model handles embedding, query answering, graph extraction, and other AI purposes for one library. Call it to create work or submit a command. Some commands complete synchronously, while ingest, mutation, and runtime work can continue asynchronously.
+     * Manages library-level AI runtime bindings. A binding assigns an account and model to a purpose (embedding, query answering, graph extraction, and other AI purposes) for one library, with tuning parameters (system prompt, temperature, top-p, output token budget) stored inline. Call it to create work or submit a command. Some commands complete synchronously, while ingest, mutation, and runtime work can continue asynchronously.
      */
     public static validateAiLibraryBinding<ThrowOnError extends boolean = false>(options: Options<ValidateAiLibraryBindingData, ThrowOnError>): RequestResult<ValidateAiLibraryBindingResponses, ValidateAiLibraryBindingErrors, ThrowOnError> {
         return (options.client ?? client).post<ValidateAiLibraryBindingResponses, ValidateAiLibraryBindingErrors, ThrowOnError>({
             security: [{ scheme: 'bearer', type: 'http' }],
             url: '/v1/ai/bindings/{bindingId}/validate',
             ...options
-        });
-    }
-    
-    /**
-     * List ai credentials.
-     *
-     * Manages stored AI provider credentials used by runtime bindings. Use these endpoints from the admin UI or automation when registering, rotating, or listing provider secrets without exposing secret material in responses. Call it for paginated or filtered table views. Prefer server-side filters and cursors over fetching broad result sets into the client.
-     */
-    public static listAiCredentials<ThrowOnError extends boolean = false>(options?: Options<ListAiCredentialsData, ThrowOnError>): RequestResult<ListAiCredentialsResponses, ListAiCredentialsErrors, ThrowOnError> {
-        return (options?.client ?? client).get<ListAiCredentialsResponses, ListAiCredentialsErrors, ThrowOnError>({
-            security: [{ scheme: 'bearer', type: 'http' }],
-            url: '/v1/ai/credentials',
-            ...options
-        });
-    }
-    
-    /**
-     * Create ai credential.
-     *
-     * Manages stored AI provider credentials used by runtime bindings. Use these endpoints from the admin UI or automation when registering, rotating, or listing provider secrets without exposing secret material in responses. Call it to create work or submit a command. Some commands complete synchronously, while ingest, mutation, and runtime work can continue asynchronously.
-     */
-    public static createAiCredential<ThrowOnError extends boolean = false>(options: Options<CreateAiCredentialData, ThrowOnError>): RequestResult<CreateAiCredentialResponses, CreateAiCredentialErrors, ThrowOnError> {
-        return (options.client ?? client).post<CreateAiCredentialResponses, CreateAiCredentialErrors, ThrowOnError>({
-            security: [{ scheme: 'bearer', type: 'http' }],
-            url: '/v1/ai/credentials',
-            ...options,
-            headers: {
-                'Content-Type': 'application/json',
-                ...options.headers
-            }
-        });
-    }
-    
-    /**
-     * Delete ai credential.
-     *
-     * Manages stored AI provider credentials used by runtime bindings. Use these endpoints from the admin UI or automation when registering, rotating, or listing provider secrets without exposing secret material in responses. Call it to remove or revoke a resource. Destructive operations are authorized, audited, and may return an asynchronous operation when cleanup continues in the background.
-     */
-    public static deleteAiCredential<ThrowOnError extends boolean = false>(options: Options<DeleteAiCredentialData, ThrowOnError>): RequestResult<DeleteAiCredentialResponses, DeleteAiCredentialErrors, ThrowOnError> {
-        return (options.client ?? client).delete<DeleteAiCredentialResponses, DeleteAiCredentialErrors, ThrowOnError>({
-            security: [{ scheme: 'bearer', type: 'http' }],
-            url: '/v1/ai/credentials/{credentialId}',
-            ...options
-        });
-    }
-    
-    /**
-     * Update ai credential.
-     *
-     * Manages stored AI provider credentials used by runtime bindings. Use these endpoints from the admin UI or automation when registering, rotating, or listing provider secrets without exposing secret material in responses. Call it to replace or partially update server-owned configuration. The request body is validated before changes are persisted.
-     */
-    public static updateAiCredential<ThrowOnError extends boolean = false>(options: Options<UpdateAiCredentialData, ThrowOnError>): RequestResult<UpdateAiCredentialResponses, UpdateAiCredentialErrors, ThrowOnError> {
-        return (options.client ?? client).put<UpdateAiCredentialResponses, UpdateAiCredentialErrors, ThrowOnError>({
-            security: [{ scheme: 'bearer', type: 'http' }],
-            url: '/v1/ai/credentials/{credentialId}',
-            ...options,
-            headers: {
-                'Content-Type': 'application/json',
-                ...options.headers
-            }
-        });
-    }
-    
-    /**
-     * List ai model presets.
-     *
-     * Manages reusable AI model presets. Presets group provider, model, capability, and tuning metadata so operators can assign consistent runtime behavior to libraries. Call it for paginated or filtered table views. Prefer server-side filters and cursors over fetching broad result sets into the client.
-     */
-    public static listAiModelPresets<ThrowOnError extends boolean = false>(options?: Options<ListAiModelPresetsData, ThrowOnError>): RequestResult<ListAiModelPresetsResponses, ListAiModelPresetsErrors, ThrowOnError> {
-        return (options?.client ?? client).get<ListAiModelPresetsResponses, ListAiModelPresetsErrors, ThrowOnError>({
-            security: [{ scheme: 'bearer', type: 'http' }],
-            url: '/v1/ai/model-presets',
-            ...options
-        });
-    }
-    
-    /**
-     * Create ai model preset.
-     *
-     * Manages reusable AI model presets. Presets group provider, model, capability, and tuning metadata so operators can assign consistent runtime behavior to libraries. Call it to create work or submit a command. Some commands complete synchronously, while ingest, mutation, and runtime work can continue asynchronously.
-     */
-    public static createAiModelPreset<ThrowOnError extends boolean = false>(options: Options<CreateAiModelPresetData, ThrowOnError>): RequestResult<CreateAiModelPresetResponses, CreateAiModelPresetErrors, ThrowOnError> {
-        return (options.client ?? client).post<CreateAiModelPresetResponses, CreateAiModelPresetErrors, ThrowOnError>({
-            security: [{ scheme: 'bearer', type: 'http' }],
-            url: '/v1/ai/model-presets',
-            ...options,
-            headers: {
-                'Content-Type': 'application/json',
-                ...options.headers
-            }
-        });
-    }
-    
-    /**
-     * Delete ai model preset.
-     *
-     * Manages reusable AI model presets. Presets group provider, model, capability, and tuning metadata so operators can assign consistent runtime behavior to libraries. Call it to remove or revoke a resource. Destructive operations are authorized, audited, and may return an asynchronous operation when cleanup continues in the background.
-     */
-    public static deleteAiModelPreset<ThrowOnError extends boolean = false>(options: Options<DeleteAiModelPresetData, ThrowOnError>): RequestResult<DeleteAiModelPresetResponses, DeleteAiModelPresetErrors, ThrowOnError> {
-        return (options.client ?? client).delete<DeleteAiModelPresetResponses, DeleteAiModelPresetErrors, ThrowOnError>({
-            security: [{ scheme: 'bearer', type: 'http' }],
-            url: '/v1/ai/model-presets/{presetId}',
-            ...options
-        });
-    }
-    
-    /**
-     * Update ai model preset.
-     *
-     * Manages reusable AI model presets. Presets group provider, model, capability, and tuning metadata so operators can assign consistent runtime behavior to libraries. Call it to replace or partially update server-owned configuration. The request body is validated before changes are persisted.
-     */
-    public static updateAiModelPreset<ThrowOnError extends boolean = false>(options: Options<UpdateAiModelPresetData, ThrowOnError>): RequestResult<UpdateAiModelPresetResponses, UpdateAiModelPresetErrors, ThrowOnError> {
-        return (options.client ?? client).put<UpdateAiModelPresetResponses, UpdateAiModelPresetErrors, ThrowOnError>({
-            security: [{ scheme: 'bearer', type: 'http' }],
-            url: '/v1/ai/model-presets/{presetId}',
-            ...options,
-            headers: {
-                'Content-Type': 'application/json',
-                ...options.headers
-            }
         });
     }
     
@@ -543,6 +483,36 @@ export class Catalog {
         return (options.client ?? client).put<UpdateCatalogLibraryRecognitionPolicyResponses, UpdateCatalogLibraryRecognitionPolicyErrors, ThrowOnError>({
             security: [{ scheme: 'bearer', type: 'http' }],
             url: '/v1/catalog/libraries/{libraryId}/recognition-policy',
+            ...options,
+            headers: {
+                'Content-Type': 'application/json',
+                ...options.headers
+            }
+        });
+    }
+    
+    /**
+     * Get catalog library retrieval config.
+     *
+     * Manages catalog libraries and their policies. Libraries own documents, knowledge graph data, assistant sessions, ingest settings, and query readiness. Call it when the caller already has the resource identifier and needs the latest authorized server view.
+     */
+    public static getCatalogLibraryRetrievalConfig<ThrowOnError extends boolean = false>(options: Options<GetCatalogLibraryRetrievalConfigData, ThrowOnError>): RequestResult<GetCatalogLibraryRetrievalConfigResponses, GetCatalogLibraryRetrievalConfigErrors, ThrowOnError> {
+        return (options.client ?? client).get<GetCatalogLibraryRetrievalConfigResponses, GetCatalogLibraryRetrievalConfigErrors, ThrowOnError>({
+            security: [{ scheme: 'bearer', type: 'http' }],
+            url: '/v1/catalog/libraries/{libraryId}/retrieval-config',
+            ...options
+        });
+    }
+    
+    /**
+     * Update catalog library retrieval config.
+     *
+     * Manages catalog libraries and their policies. Libraries own documents, knowledge graph data, assistant sessions, ingest settings, and query readiness. Call it to replace or partially update server-owned configuration. The request body is validated before changes are persisted.
+     */
+    public static updateCatalogLibraryRetrievalConfig<ThrowOnError extends boolean = false>(options: Options<UpdateCatalogLibraryRetrievalConfigData, ThrowOnError>): RequestResult<UpdateCatalogLibraryRetrievalConfigResponses, UpdateCatalogLibraryRetrievalConfigErrors, ThrowOnError> {
+        return (options.client ?? client).put<UpdateCatalogLibraryRetrievalConfigResponses, UpdateCatalogLibraryRetrievalConfigErrors, ThrowOnError>({
+            security: [{ scheme: 'bearer', type: 'http' }],
+            url: '/v1/catalog/libraries/{libraryId}/retrieval-config',
             ...options,
             headers: {
                 'Content-Type': 'application/json',

@@ -63,9 +63,6 @@ REPOSITORY="${IRONRAG_GITHUB_REPOSITORY:-mlimarenko/IronRAG}"
 DEFAULT_PORT="${IRONRAG_DEFAULT_PORT:-19000}"
 OFFICIAL_BACKEND_IMAGE="pipingspace/ironrag-backend"
 OFFICIAL_FRONTEND_IMAGE="pipingspace/ironrag-frontend"
-DEFAULT_INGESTION_MAX_PARALLEL_JOBS_GLOBAL=16
-DEFAULT_INGESTION_MAX_PARALLEL_JOBS_PER_WORKSPACE=8
-DEFAULT_INGESTION_MAX_PARALLEL_JOBS_PER_LIBRARY=4
 
 # Provider key env vars the wizard can prompt for and must never clobber.
 PROVIDER_KEYS=(
@@ -589,16 +586,6 @@ write_resource_plan() {
   env_file_set IRONRAG_DATABASE_MAX_CONNECTIONS "$REC_DATABASE_MAX_CONNECTIONS" "$file"
   env_file_set IRONRAG_INGESTION_EMBEDDING_PARALLELISM "$REC_EMBED_PARALLELISM" "$file"
   env_file_set IRONRAG_INGESTION_GRAPH_EXTRACT_PARALLELISM_PER_DOC "$REC_GRAPH_PARALLELISM" "$file"
-}
-
-write_ingestion_queue_defaults() {
-  local file="$1"
-  env_value_nonempty "IRONRAG_INGESTION_MAX_PARALLEL_JOBS_GLOBAL" "$file" \
-    || env_file_set "IRONRAG_INGESTION_MAX_PARALLEL_JOBS_GLOBAL" "$DEFAULT_INGESTION_MAX_PARALLEL_JOBS_GLOBAL" "$file"
-  env_value_nonempty "IRONRAG_INGESTION_MAX_PARALLEL_JOBS_PER_WORKSPACE" "$file" \
-    || env_file_set "IRONRAG_INGESTION_MAX_PARALLEL_JOBS_PER_WORKSPACE" "$DEFAULT_INGESTION_MAX_PARALLEL_JOBS_PER_WORKSPACE" "$file"
-  env_value_nonempty "IRONRAG_INGESTION_MAX_PARALLEL_JOBS_PER_LIBRARY" "$file" \
-    || env_file_set "IRONRAG_INGESTION_MAX_PARALLEL_JOBS_PER_LIBRARY" "$DEFAULT_INGESTION_MAX_PARALLEL_JOBS_PER_LIBRARY" "$file"
 }
 
 sync_frontend_origin_to_port() {
@@ -1134,7 +1121,6 @@ run_main() {
   else
     info "Resource caps already pinned in .env — kept as-is (use --recompute-resources to refresh)."
   fi
-  write_ingestion_queue_defaults "$env_file"
 
   # ── Assert provider/machine secrets survived (the operator's #1 concern). ──
   for k in "${PROVIDER_KEYS[@]}" "${SECRET_KEYS[@]}"; do

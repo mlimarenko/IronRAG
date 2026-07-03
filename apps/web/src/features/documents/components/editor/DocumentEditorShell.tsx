@@ -33,7 +33,7 @@ type DocumentEditorShellProps = {
   readOnly?: boolean;
   saving: boolean;
   sourceFormat?: string;
-  sourceHref?: string;
+  sourceHref?: string | undefined;
   t: TFunction;
 };
 
@@ -83,7 +83,12 @@ export function DocumentEditorShell({
 }: DocumentEditorShellProps) {
   const rawTextEditor = shouldUseRawTextEditor(markdown, sourceFormat);
   const surfaceMode = useMemo(
-    () => rawTextEditor ? 'raw_text' : resolveEditorSurfaceMode({ markdown, sourceFormat }),
+    () => rawTextEditor
+      ? 'raw_text'
+      : resolveEditorSurfaceMode({
+        markdown,
+        ...(sourceFormat !== undefined ? { sourceFormat } : {}),
+      }),
     [markdown, rawTextEditor, sourceFormat],
   );
   const [baseline, setBaseline] = useState<DirtyStateBaseline | null>(null);

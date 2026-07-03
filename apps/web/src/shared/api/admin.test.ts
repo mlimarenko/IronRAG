@@ -44,10 +44,10 @@ describe('adminApi', () => {
     };
     const getLibrary = vi
       .spyOn(Catalog, 'getCatalogLibrary')
-      .mockResolvedValueOnce({ data: baseLibrary });
+      .mockResolvedValueOnce({ data: baseLibrary, error: undefined });
     const updateLibrary = vi
       .spyOn(Catalog, 'updateCatalogLibrary')
-      .mockResolvedValueOnce({ data: updatedLibrary });
+      .mockResolvedValueOnce({ data: updatedLibrary, error: undefined });
 
     await expect(
       adminApi.updateLibraryMcpSettings('library-1', {

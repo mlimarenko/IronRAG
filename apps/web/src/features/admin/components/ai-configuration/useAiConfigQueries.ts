@@ -3,20 +3,20 @@ import { useQuery, useQueryClient } from '@tanstack/react-query';
 
 import { ADMIN_MODEL_CATALOG_QUERY_KEY, adminApi, adminModelCatalogOptions } from '@/shared/api';
 import type {
+  AIAccount,
   AIBindingAssignment,
-  AICredential,
   AIModelOption,
   AIProvider,
   AIScopeKind,
-  ModelPreset,
+  PricingRule,
 } from '@/shared/types';
 import {
+  mapAccountList,
   mapBindingList,
-  mapCredentialList,
   mapModelList,
-  mapPresetList,
   mapProviderList,
 } from '@/features/admin/model/aiAdapter';
+import { mapPricing } from '@/features/admin/model/adminAdapter';
 import {
   localScopeQuery,
   compactScopeQuery,
@@ -42,17 +42,12 @@ type BindingsData = {
 type AiScopeQuery = ReturnType<typeof compactScopeQuery>;
 
 const ADMIN_AI_PROVIDERS_QUERY_KEY = ['admin', 'ai', 'providers'] as const;
-const ADMIN_AI_CREDENTIALS_QUERY_KEY = ['admin', 'ai', 'credentials'] as const;
-const ADMIN_AI_PRESETS_QUERY_KEY = ['admin', 'ai', 'presets'] as const;
+const ADMIN_AI_ACCOUNTS_QUERY_KEY = ['admin', 'ai', 'accounts'] as const;
 export const ADMIN_AI_BINDINGS_QUERY_KEY = ['admin', 'ai', 'bindings'] as const;
 export const ADMIN_AI_PRICES_QUERY_KEY = ['admin', 'ai', 'prices'] as const;
 
-function adminAiCredentialsQueryKey(params: AiScopeQuery) {
-  return [...ADMIN_AI_CREDENTIALS_QUERY_KEY, params] as const;
-}
-
-function adminAiPresetsQueryKey(params: AiScopeQuery) {
-  return [...ADMIN_AI_PRESETS_QUERY_KEY, params] as const;
+function adminAiAccountsQueryKey(params: AiScopeQuery) {
+  return [...ADMIN_AI_ACCOUNTS_QUERY_KEY, params] as const;
 }
 
 export function adminAiBindingsQueryKey(params: AiScopeQuery) {
@@ -109,8 +104,7 @@ export function useAiConfigQueries({
   );
 
   const modelsEnabled = active;
-  const localCredentialsEnabled = active;
-  const localPresetsEnabled = active;
+  const localAccountsEnabled = active;
   const bindingsEnabled = active;
   const pricesEnabled = active;
 
@@ -128,24 +122,14 @@ export function useAiConfigQueries({
     ...adminModelCatalogOptions(visibleModelParams),
     enabled: modelsEnabled,
   });
-  const localCredentialsQuery = useQuery({
-    queryKey: adminAiCredentialsQueryKey(localQueryParams),
-    queryFn: () => adminApi.listCredentials(localQueryParams),
-    enabled: localCredentialsEnabled,
+  const localAccountsQuery = useQuery({
+    queryKey: adminAiAccountsQueryKey(localQueryParams),
+    queryFn: () => adminApi.listAccounts(localQueryParams),
+    enabled: localAccountsEnabled,
   });
-  const localPresetsQuery = useQuery({
-    queryKey: adminAiPresetsQueryKey(localQueryParams),
-    queryFn: () => adminApi.listModelPresets(localQueryParams),
-    enabled: localPresetsEnabled,
-  });
-  const visibleCredentialsQuery = useQuery({
-    queryKey: adminAiCredentialsQueryKey(visibleQueryParams),
-    queryFn: () => adminApi.listCredentials(visibleQueryParams),
-    enabled: bindingsEnabled && selectedScope !== 'instance',
-  });
-  const visiblePresetsQuery = useQuery({
-    queryKey: adminAiPresetsQueryKey(visibleQueryParams),
-    queryFn: () => adminApi.listModelPresets(visibleQueryParams),
+  const visibleAccountsQuery = useQuery({
+    queryKey: adminAiAccountsQueryKey(visibleQueryParams),
+    queryFn: () => adminApi.listAccounts(visibleQueryParams),
     enabled: bindingsEnabled && selectedScope !== 'instance',
   });
   const instanceBindingsQuery = useQuery({
@@ -172,26 +156,20 @@ export function useAiConfigQueries({
     () => mapModelList(modelsQuery.data),
     [modelsQuery.data],
   );
-  const localCredentials = useMemo<AICredential[]>(
-    () => mapCredentialList(localCredentialsQuery.data, providers),
-    [localCredentialsQuery.data, providers],
+  const prices = useMemo<PricingRule[]>(
+    () => (Array.isArray(pricesQuery.data) ? pricesQuery.data.map(entry => mapPricing(entry, providers, models)) : []),
+    [models, pricesQuery.data, providers],
   );
-  const localPresets = useMemo<ModelPreset[]>(
-    () => mapPresetList(localPresetsQuery.data, providers, models),
-    [localPresetsQuery.data, models, providers],
+  const localAccounts = useMemo<AIAccount[]>(
+    () => mapAccountList(localAccountsQuery.data, providers),
+    [localAccountsQuery.data, providers],
   );
-  const availableCredentials = useMemo<AICredential[]>(() => {
+  const availableAccounts = useMemo<AIAccount[]>(() => {
     if (selectedScope === 'instance') {
-      return localCredentials;
+      return localAccounts;
     }
-    return mapCredentialList(visibleCredentialsQuery.data, providers);
-  }, [localCredentials, providers, selectedScope, visibleCredentialsQuery.data]);
-  const availablePresets = useMemo<ModelPreset[]>(() => {
-    if (selectedScope === 'instance') {
-      return localPresets;
-    }
-    return mapPresetList(visiblePresetsQuery.data, providers, models);
-  }, [localPresets, models, providers, selectedScope, visiblePresetsQuery.data]);
+    return mapAccountList(visibleAccountsQuery.data, providers);
+  }, [localAccounts, providers, selectedScope, visibleAccountsQuery.data]);
   const instanceBindings = useMemo<AIBindingAssignment[]>(
     () => mapBindingList(instanceBindingsQuery.data),
     [instanceBindingsQuery.data],
@@ -218,8 +196,7 @@ export function useAiConfigQueries({
 
   const invalidateAll = useCallback(() => {
     void queryClient.invalidateQueries({ queryKey: ADMIN_AI_PROVIDERS_QUERY_KEY });
-    void queryClient.invalidateQueries({ queryKey: ADMIN_AI_CREDENTIALS_QUERY_KEY });
-    void queryClient.invalidateQueries({ queryKey: ADMIN_AI_PRESETS_QUERY_KEY });
+    void queryClient.invalidateQueries({ queryKey: ADMIN_AI_ACCOUNTS_QUERY_KEY });
     void queryClient.invalidateQueries({ queryKey: ADMIN_AI_BINDINGS_QUERY_KEY });
     void queryClient.invalidateQueries({ queryKey: ADMIN_AI_PRICES_QUERY_KEY });
     void queryClient.invalidateQueries({ queryKey: ADMIN_MODEL_CATALOG_QUERY_KEY });
@@ -228,10 +205,8 @@ export function useAiConfigQueries({
   const bindingsQueries = [
     providersQuery,
     modelsQuery,
-    localCredentialsQuery,
-    localPresetsQuery,
-    visibleCredentialsQuery,
-    visiblePresetsQuery,
+    localAccountsQuery,
+    visibleAccountsQuery,
     instanceBindingsQuery,
     workspaceBindingsQuery,
     libraryBindingsQuery,
@@ -245,10 +220,9 @@ export function useAiConfigQueries({
     visibleScopeParams,
     providers,
     models,
-    localCredentials,
-    localPresets,
-    availableCredentials,
-    availablePresets,
+    prices,
+    localAccounts,
+    availableAccounts,
     instanceBindings,
     workspaceBindings,
     libraryBindings,
@@ -257,34 +231,25 @@ export function useAiConfigQueries({
     priceRuleCount,
     invalidateAll,
     providersState: stateFor(
-      active && activeSection === 'providers' && queryIsLoading(providersQuery),
+      active && activeSection === 'catalog' && queryIsLoading(providersQuery),
       providersQuery.error,
       providersQuery.data === undefined ? undefined : providers,
     ),
     modelsState: stateFor(
-      active && activeSection === 'models' && (
+      active && activeSection === 'catalog' && (
         queryIsLoading(providersQuery) || queryIsLoading(modelsQuery)
       ),
       providersQuery.error ?? modelsQuery.error,
       providersQuery.data === undefined || modelsQuery.data === undefined ? undefined : models,
     ),
-    credentialsState: stateFor(
-      active && activeSection === 'credentials' && (
-        queryIsLoading(providersQuery) || queryIsLoading(localCredentialsQuery)
+    accountsState: stateFor(
+      active && activeSection === 'accounts' && (
+        queryIsLoading(providersQuery) || queryIsLoading(localAccountsQuery)
       ),
-      providersQuery.error ?? localCredentialsQuery.error,
-      providersQuery.data === undefined || localCredentialsQuery.data === undefined
+      providersQuery.error ?? localAccountsQuery.error,
+      providersQuery.data === undefined || localAccountsQuery.data === undefined
         ? undefined
-        : localCredentials,
-    ),
-    presetsState: stateFor(
-      active && activeSection === 'presets' && (
-        queryIsLoading(providersQuery) || queryIsLoading(modelsQuery) || queryIsLoading(localPresetsQuery)
-      ),
-      providersQuery.error ?? modelsQuery.error ?? localPresetsQuery.error,
-      providersQuery.data === undefined || modelsQuery.data === undefined || localPresetsQuery.data === undefined
-        ? undefined
-        : localPresets,
+        : localAccounts,
     ),
     bindingsState: stateFor<BindingsData>(
       bindingsLoading,

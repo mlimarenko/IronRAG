@@ -68,10 +68,7 @@ The worker's canonical ingest claim loop has a second memory guard: it derives
 the maximum active jobs for that process from the resolved cgroup soft memory
 limit before claiming more leases. This guard is independent from the
 deployment-wide global / workspace / library caps and protects small swapless
-hosts from stacking several memory-heavy jobs in one worker process. The default
-deployment caps are 16 jobs globally, 8 per workspace, and 4 per library; the
-effective per-process count is still the lower of those queue caps, the worker's
-database-pool slots, and its memory-derived local claim cap.
+hosts from stacking several memory-heavy jobs in one worker process.
 
 ### Table contract
 

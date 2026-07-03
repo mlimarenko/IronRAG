@@ -116,13 +116,13 @@ export function createSseClient<TData = unknown>({
       }
 
       try {
-        const requestInit: RequestInit = {
+        const requestInit = {
           redirect: 'follow',
           ...options,
           body: options.serializedBody,
           headers,
           signal,
-        };
+        } as RequestInit;
         let request = new Request(url, requestInit);
         if (onRequest) {
           request = await onRequest(url, requestInit);
@@ -205,9 +205,9 @@ export function createSseClient<TData = unknown>({
 
               onSseEvent?.({
                 data,
-                event: eventName,
-                id: lastEventId,
                 retry: retryDelay,
+                ...(eventName !== undefined ? { event: eventName } : {}),
+                ...(lastEventId !== undefined ? { id: lastEventId } : {}),
               });
 
               if (dataLines.length) {

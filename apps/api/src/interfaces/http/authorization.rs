@@ -3,7 +3,7 @@ use uuid::Uuid;
 use crate::{
     app::state::AppState,
     infra::repositories::{
-        ai_repository::{self, AiBindingAssignmentRow, AiProviderCredentialRow},
+        ai_repository::{self, AiAccountRow, AiBindingRow},
         catalog_repository::{
             self, CatalogLibraryConnectorRow, CatalogLibraryRow, CatalogWorkspaceRow,
         },
@@ -429,12 +429,11 @@ pub async fn load_provider_credential_and_authorize(
     state: &AppState,
     credential_id: Uuid,
     accepted_permissions: &[&str],
-) -> Result<AiProviderCredentialRow, ApiError> {
-    let credential =
-        ai_repository::get_provider_credential_by_id(&state.persistence.postgres, credential_id)
-            .await
-            .map_err(|e| ApiError::internal_with_log(e, "internal"))?
-            .ok_or_else(|| ApiError::resource_not_found("provider_credential", credential_id))?;
+) -> Result<AiAccountRow, ApiError> {
+    let credential = ai_repository::get_account_by_id(&state.persistence.postgres, credential_id)
+        .await
+        .map_err(|e| ApiError::internal_with_log(e, "internal"))?
+        .ok_or_else(|| ApiError::resource_not_found("provider_credential", credential_id))?;
     if let Some(workspace_id) = credential.workspace_id {
         authorize_provider_credential_permission(
             auth,
@@ -453,12 +452,11 @@ pub async fn load_library_binding_and_authorize(
     state: &AppState,
     binding_id: Uuid,
     accepted_permissions: &[&str],
-) -> Result<AiBindingAssignmentRow, ApiError> {
-    let binding =
-        ai_repository::get_binding_assignment_by_id(&state.persistence.postgres, binding_id)
-            .await
-            .map_err(|e| ApiError::internal_with_log(e, "internal"))?
-            .ok_or_else(|| ApiError::resource_not_found("library_binding", binding_id))?;
+) -> Result<AiBindingRow, ApiError> {
+    let binding = ai_repository::get_binding_by_id(&state.persistence.postgres, binding_id)
+        .await
+        .map_err(|e| ApiError::internal_with_log(e, "internal"))?
+        .ok_or_else(|| ApiError::resource_not_found("library_binding", binding_id))?;
     match (binding.workspace_id, binding.library_id) {
         (Some(workspace_id), Some(library_id)) => authorize_library_binding_permission(
             auth,

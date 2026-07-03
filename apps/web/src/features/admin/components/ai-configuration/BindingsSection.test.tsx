@@ -4,8 +4,8 @@ import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { mapBindingList } from '@/features/admin/model/aiAdapter';
-import type { AiBindingAssignmentResponse } from '@/shared/api/generated';
-import type { AICredential, AIModelOption, ModelPreset } from '@/shared/types';
+import type { AiBindingResponse } from '@/shared/api/generated';
+import type { AIAccount, AIModelOption } from '@/shared/types';
 
 import { BindingsSection } from './BindingsSection';
 import { adminAiBindingsQueryKey } from './useAiConfigQueries';
@@ -38,18 +38,18 @@ vi.mock('@/shared/api', () => ({
 
 const bindingQueryKey = adminAiBindingsQueryKey({ scopeKind: 'instance' });
 
-const credential = {
-  id: 'credential-1',
+const account = {
+  id: 'account-1',
   scopeKind: 'instance',
   providerId: 'provider-1',
   providerName: 'Provider Alpha',
   providerKind: 'alpha',
-  label: 'Fresh credential',
+  label: 'Fresh account',
   state: 'active',
   createdAt: '2026-04-10T10:00:00Z',
   updatedAt: '2026-04-10T10:00:00Z',
   ['a' + 'pi' + 'KeySummary']: 'redacted',
-} as AICredential;
+} as unknown as AIAccount;
 
 const model: AIModelOption = {
   id: 'model-1',
@@ -59,28 +59,14 @@ const model: AIModelOption = {
   modalityKind: 'text',
   allowedBindingPurposes: ['extract_graph'],
   availabilityState: 'available',
-  availableCredentialIds: ['credential-1'],
-};
-
-const preset: ModelPreset = {
-  id: 'preset-1',
-  scopeKind: 'instance',
-  providerId: 'provider-1',
-  providerName: 'Provider Alpha',
-  providerKind: 'alpha',
-  modelCatalogId: 'model-1',
-  modelName: 'alpha-chat',
-  presetName: 'Fresh preset',
-  allowedBindingPurposes: ['extract_graph'],
-  createdAt: '2026-04-10T10:00:00Z',
-  updatedAt: '2026-04-10T10:00:00Z',
+  availableAccountIds: ['account-1'],
 };
 
 function BindingsHarness({ invalidateAll }: { invalidateAll: () => void }) {
   const bindingsQuery = useQuery({
     queryKey: bindingQueryKey,
     queryFn: async () => adminApiMock.listBindings({ scopeKind: 'instance' }),
-    initialData: [] as AiBindingAssignmentResponse[],
+    initialData: [] as AiBindingResponse[],
   });
   const bindings = mapBindingList(bindingsQuery.data);
 
@@ -89,10 +75,10 @@ function BindingsHarness({ invalidateAll }: { invalidateAll: () => void }) {
       selectedScope="instance"
       scopeContext={{}}
       bindingsState={{ isLoading: false, error: null, data: { ready: true } }}
-      availableCredentials={[credential]}
-      availablePresets={[preset]}
-      localCredentials={[credential]}
-      localPresets={[preset]}
+      availableAccounts={[account]}
+      localAccounts={[account]}
+      models={[model]}
+      prices={[]}
       bindingsForScope={bindings}
       instanceBindings={bindings}
       workspaceBindings={[]}
@@ -184,8 +170,8 @@ describe('BindingsSection optimistic mutations', () => {
     });
     await flushUi();
 
-    expect(graphCard().textContent).toContain('Fresh credential');
-    expect(graphCard().textContent).toContain('Fresh preset');
+    expect(graphCard().textContent).toContain('Fresh account');
+    expect(graphCard().textContent).toContain('alpha-chat');
 
     await act(async () => {
       rejectCreate(new Error('binding unavailable'));

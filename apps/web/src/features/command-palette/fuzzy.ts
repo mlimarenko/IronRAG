@@ -37,7 +37,8 @@ export function fuzzyMatch(query: string, target: string): FuzzyResult | null {
     else score += 1;
 
     // Word-boundary bonus (start of string or after a separator).
-    if (ti === 0 || SEPARATORS.has(t[ti - 1])) score += 8;
+    const prevChar = t[ti - 1];
+    if (ti === 0 || (prevChar !== undefined && SEPARATORS.has(prevChar))) score += 8;
 
     prevMatchIdx = ti;
     qi += 1;

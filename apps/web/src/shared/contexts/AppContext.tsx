@@ -68,7 +68,10 @@ function mapSessionToState(session: SessionResolveResponse, locale: Locale) {
       workspaceId: lib.workspaceId,
       name: localizedShellName(lib.slug, lib.name, locale),
       createdAt: '',
-      includeDocumentHintInMcpAnswers: lib.includeDocumentHintInMcpAnswers ?? true,
+      // `ShellBootstrap.libraries` (LibrarySummary) does not carry the MCP
+      // document-hint flag — only the full catalog library response does.
+      // Bootstrap libraries always default to the hint enabled.
+      includeDocumentHintInMcpAnswers: true,
       ingestionReady: lib.ingestionReady,
       queryReady: libraryQueryReady(lib.ingestionReady, lib.queryReady, missingBindingPurposes),
       missingBindingPurposes,

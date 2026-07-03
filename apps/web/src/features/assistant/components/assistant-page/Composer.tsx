@@ -54,7 +54,7 @@ export function Composer({
   };
 
   return (
-    <div className="border-t bg-card p-3">
+    <div className="relative z-10 border-t bg-card p-3">
       {retryable && (
         <div
           role="alert"
@@ -71,7 +71,7 @@ export function Composer({
             onClick={onRetry}
             disabled={isExecuting}
           >
-            <RefreshCw className="h-3 w-3" aria-hidden="true" />
+            <RefreshCw className="h-3.5 w-3.5" aria-hidden="true" />
             {t('assistant.retryAction')}
           </Button>
         </div>

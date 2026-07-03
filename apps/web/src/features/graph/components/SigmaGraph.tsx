@@ -57,7 +57,13 @@ type SigmaPointerCaptorEvent = {
   x: number;
   y: number;
   preventSigmaDefault: () => void;
-  original: MouseEvent;
+  // Sigma's `MouseCoords.original` is typed `MouseEvent | TouchEvent` even
+  // though `getMouseCoords()` (the only producer of `mousemovebody` events)
+  // always constructs it from a `MouseEvent`. Match the wider upstream type
+  // here so the local handler stays assignable to sigma's `on()` signature;
+  // callers narrow with `instanceof MouseEvent` where they need
+  // mouse-only members (e.g. `clientX`/`clientY`).
+  original: MouseEvent | TouchEvent;
 };
 
 type SigmaReducerData = {
@@ -1025,7 +1031,9 @@ function SigmaGraph({ nodes, edges, selectedId, onSelect, layout, hiddenIds, onF
       if (!isCurrent() || allEdgesLayerStateRef.current !== state) return null;
       const limit = Math.min(layoutNodes.length, sourceIndex + chunkSize);
       for (let index = sourceIndex; index < limit; index += 1) {
-        const nodeIndex = state.nodeIndexById.get(layoutNodes[index].id);
+        const layoutNode = layoutNodes[index];
+        if (!layoutNode) continue;
+        const nodeIndex = state.nodeIndexById.get(layoutNode.id);
         if (nodeIndex == null) continue;
         const offset = nodeIndex * 4;
         state.positionTextureData[offset] = positions[index * 2] ?? 0;
@@ -1525,7 +1533,9 @@ function SigmaGraph({ nodes, edges, selectedId, onSelect, layout, hiddenIds, onF
             // yet here, but the bulk form is still markedly cheaper.
             const positionById = new Map<string, number>();
             for (let i = 0; i < workerNodes.length; i += 1) {
-              positionById.set(workerNodes[i].id, i);
+              const workerNode = workerNodes[i];
+              if (!workerNode) continue;
+              positionById.set(workerNode.id, i);
             }
             graph.updateEachNodeAttributes(
               (id, attr) => {
@@ -1766,8 +1776,11 @@ function SigmaGraph({ nodes, edges, selectedId, onSelect, layout, hiddenIds, onF
       preview.hidden = false;
       preview.style.visibility = 'visible';
       if (dragPreviewDotRef.current) {
-        dragPreviewDotRef.current.style.backgroundColor =
+        const dotColor =
           (graph.getNodeAttribute(node, 'color') as string | undefined) ?? GRAPH_NODE_COLORS.entity;
+        if (typeof dotColor === 'string') {
+          dragPreviewDotRef.current.style.backgroundColor = dotColor;
+        }
       }
       if (dragPreviewLabelRef.current) {
         dragPreviewLabelRef.current.textContent =
@@ -1853,7 +1866,11 @@ function SigmaGraph({ nodes, edges, selectedId, onSelect, layout, hiddenIds, onF
     sigma.getMouseCaptor().on('mousemovebody', (e: SigmaPointerCaptorEvent) => {
       if (!draggedNode) return;
       pendingDragPos = sigma.viewportToGraph(e);
-      if (useDomOnlyInteractions) {
+      // This captor only ever emits with a real `MouseEvent` (see the
+      // `SigmaPointerCaptorEvent.original` comment above); narrow via the
+      // mouse-only `clientX` member (absent on `TouchEvent`) to read
+      // `clientX`/`clientY` below.
+      if (useDomOnlyInteractions && 'clientX' in e.original) {
         moveDragPreview(e.original.clientX, e.original.clientY);
         const rect = containerRef.current?.getBoundingClientRect();
         dragOverlaySourceRef.current = {
@@ -2125,55 +2142,6 @@ function SigmaGraph({ nodes, edges, selectedId, onSelect, layout, hiddenIds, onF
       nodes.length >= ALL_EDGES_LAYER_NODE_THRESHOLD ||
       edges.length > ALL_EDGES_LAYER_EDGE_THRESHOLD;
 
-    // Snap-in the new positions and repaint in a single bounded pass.
-    //   * `updateEachNodeAttributes` mutates x/y in ONE Graphology
-    //     traversal (vs 2N individual `setNodeAttribute` calls, each of
-    //     which fires an event Sigma reacts to).
-    //   * `refresh({ skipIndexation: true })` reuses every node's program
-    //     slot — only x/y changed, no node was added/removed and draw
-    //     order is unaffected, so the full O(N) spatial reindex Sigma
-    //     would otherwise run is skipped. Camera reset reframes the new
-    //     layout in one animated paint. Hit detection is still driven by
-    //     the rendered picking buffers after repaint; forcing Sigma's
-    //     full `process()` here was the remaining 200ms+ mode-switch
-    //     hitch on dense graphs.
-    const applyPositionsInstant = (positionFor: (id: string) => { x: number; y: number } | null) => {
-      // Mutating x/y for every node and getting Sigma to repaint the new layout
-      // is a single, unavoidable O(N) reprocess — but the naive path pays it
-      // TWICE. `updateEachNodeAttributes` fires Graphology's
-      // `eachNodeAttributesUpdated`, and Sigma's listener for it runs a full
-      // `updateNode` sweep AND schedules a second full reprocess
-      // (`skipIndexation: false`, x/y being layout-impacting; grounded in
-      // sigma@3.0.3 `eachNodeAttributesUpdatedGraphUpdate`). That double pass
-      // is the layout-mode switch hitch this path avoids.
-      //
-      // So we suppress that listener (via Graphology's public EventEmitter API)
-      // while we write positions — no Sigma reaction — then restore it and run
-      // ONE explicit `sigma.refresh()`, collapsing the work to a single
-      // process() pass. The camera reframe stays explicit.
-      const EVENT = 'eachNodeAttributesUpdated';
-      const saved = graph.listeners(EVENT);
-      graph.removeAllListeners(EVENT);
-      try {
-        graph.updateEachNodeAttributes(
-          (id, attr) => {
-            const pos = positionFor(id);
-            if (pos) {
-              attr.x = pos.x;
-              attr.y = pos.y;
-            }
-            return attr;
-          },
-          { attributes: ['x', 'y'] },
-        );
-      } finally {
-        for (const listener of saved) graph.on(EVENT, listener);
-      }
-      sigma.refresh({ skipIndexation: true });
-      syncOrRebuildAllEdgesLayerPositions(graph, edges, useAllEdgesLayer);
-      void sigma.getCamera().animatedReset({ duration: 200 });
-    };
-
     const applyPositionsChunked = async (
       layoutNodes: Array<{ id: string }>,
       positions: ArrayLike<number>,
@@ -2207,7 +2175,9 @@ function SigmaGraph({ nodes, edges, selectedId, onSelect, layout, hiddenIds, onF
         try {
           const limit = Math.min(layoutNodes.length, offset + chunkSize);
           for (let sourceIndex = offset; sourceIndex < limit; sourceIndex += 1) {
-            const id = layoutNodes[sourceIndex].id;
+            const layoutNode = layoutNodes[sourceIndex];
+            if (!layoutNode) continue;
+            const id = layoutNode.id;
             chunkIds.push(id);
             graph.mergeNodeAttributes(id, {
               x: positions[sourceIndex * 2],
@@ -2549,19 +2519,25 @@ function SigmaGraph({ nodes, edges, selectedId, onSelect, layout, hiddenIds, onF
           return { ...data, hidden: true, label: '' };
         }
         if (node === selectedId) {
+          const label = data.focusLabel ?? data.displayLabel ?? data.label;
           return {
             ...data,
             size: Math.max((data.size ?? 0), 9),
-            label: data.focusLabel ?? data.displayLabel ?? data.label,
+            // Sigma's `NodeDisplayData.label` is `string | null` (never
+            // `undefined`); only override the field when we resolved a
+            // concrete value so an all-undefined fallback chain leaves the
+            // spread `data.label` untouched instead of writing `undefined`.
+            ...(label !== undefined ? { label } : {}),
             forceLabel: true,
             highlighted: true,
           };
         }
         if (neighbors.has(node)) {
+          const label = data.focusLabel ?? data.displayLabel ?? data.label;
           return {
             ...data,
             size: Math.max((data.size ?? 0), 7),
-            label: data.focusLabel ?? data.displayLabel ?? data.label,
+            ...(label !== undefined ? { label } : {}),
             forceLabel: true,
             highlighted: true,
           };
@@ -2603,19 +2579,21 @@ function SigmaGraph({ nodes, edges, selectedId, onSelect, layout, hiddenIds, onF
           return { ...data, hidden: true, label: '' };
         }
         if (node === hoveredId) {
+          const label = data.focusLabel ?? data.displayLabel ?? data.label;
           return {
             ...data,
             size: Math.max((data.size ?? 0), 11),
-            label: data.focusLabel ?? data.displayLabel ?? data.label,
+            ...(label !== undefined ? { label } : {}),
             forceLabel: true,
             highlighted: true,
           };
         }
         if (neighbors.has(node)) {
+          const label = data.focusLabel ?? data.displayLabel ?? data.label;
           return {
             ...data,
             size: Math.max((data.size ?? 0), 8),
-            label: data.focusLabel ?? data.displayLabel ?? data.label,
+            ...(label !== undefined ? { label } : {}),
             forceLabel: true,
           };
         }
@@ -2798,11 +2776,11 @@ function SigmaGraph({ nodes, edges, selectedId, onSelect, layout, hiddenIds, onF
           style={{ left: tooltipPos.x + 12, top: tooltipPos.y + 12 }}
         >
           <div className="font-semibold text-sm leading-tight mb-1 truncate">{tooltip.label}</div>
-          <div className="text-muted-foreground text-[11px] mb-1">
+          <div className="text-muted-foreground text-2xs mb-1">
             {t('graph.edgeCount', { count: tooltip.neighborCount })}
           </div>
           {tooltip.neighborLabels.length > 0 && (
-            <ul className="space-y-0.5 list-disc list-inside text-[11px] text-muted-foreground">
+            <ul className="space-y-0.5 list-disc list-inside text-2xs text-muted-foreground">
               {tooltip.neighborLabels.map((label, i) => (
                 <li key={i} className="truncate">{label}</li>
               ))}

@@ -4,21 +4,24 @@ import { useTranslation } from 'react-i18next';
 import { toast } from 'sonner';
 
 import { adminApi, adminModelCatalogOptions } from '@/shared/api';
-import type { AiBindingAssignmentResponse } from '@/shared/api/generated';
+import type { AiBindingResponse } from '@/shared/api/generated';
 import { DataState } from '@/shared/components/DataState';
 import { Badge } from '@/shared/components/ui/badge';
 import { errorMessage } from '@/shared/lib/errorMessage';
 import { shouldRefreshCredentialModels } from '@/shared/lib/ai-provider';
 import type {
+  AIAccount,
   AIBindingAssignment,
-  AICredential,
   AIModelOption,
   AIPurpose,
   AIScopeKind,
-  ModelPreset,
+  PricingRule,
 } from '@/shared/types';
 import { mapModelList } from '@/features/admin/model/aiAdapter';
 import {
+  bindingParamsRequestBody,
+  bindingParamsSchema,
+  type BindingParamsFormValues,
   OPTIONAL_PURPOSES,
   REQUIRED_RUNTIME_PURPOSE_ORDER,
   compactScopeQuery,
@@ -27,10 +30,11 @@ import {
   resolveBindingForPurpose,
   suggestBindingSelection,
   visibleScopeQuery,
+  type AccountModelLoadState,
   type AiConfigDataState,
   type AiScopeContext,
-  type CredentialModelLoadState,
 } from '@/features/admin/model/aiConfig';
+import { useTypedForm } from '@/shared/forms';
 import { BindingPurposeCard } from './BindingPurposeCard';
 import { adminAiBindingsQueryKey } from './useAiConfigQueries';
 
@@ -38,10 +42,10 @@ type BindingsSectionProps = {
   selectedScope: AIScopeKind;
   scopeContext: AiScopeContext;
   bindingsState: AiConfigDataState<{ ready: true }>;
-  availableCredentials: AICredential[];
-  availablePresets: ModelPreset[];
-  localCredentials: AICredential[];
-  localPresets: ModelPreset[];
+  availableAccounts: AIAccount[];
+  localAccounts: AIAccount[];
+  models: AIModelOption[];
+  prices: PricingRule[];
   bindingsForScope: AIBindingAssignment[];
   instanceBindings: AIBindingAssignment[];
   workspaceBindings: AIBindingAssignment[];
@@ -50,19 +54,18 @@ type BindingsSectionProps = {
 };
 
 type BindingMutationContext = {
-  previousBindings: AiBindingAssignmentResponse[] | undefined;
+  previousBindings: AiBindingResponse[] | undefined;
 };
 
 type BindingScopeQuery = ReturnType<typeof compactScopeQuery>;
 
 type BindingSaveVariables = {
   bindingId: string | null;
-  credentialId: string;
   optimisticId: string;
-  presetId: string;
   purpose: AIPurpose;
   scopeKind: AIScopeKind;
   scopeQuery: BindingScopeQuery;
+  values: BindingParamsFormValues;
 };
 
 type BindingResetVariables = {
@@ -73,29 +76,34 @@ type BindingResetVariables = {
 
 function buildOptimisticBinding({
   bindingId,
-  credentialId,
   optimisticId,
-  presetId,
   purpose,
   scopeKind,
   scopeQuery,
-}: BindingSaveVariables): AiBindingAssignmentResponse {
+  values,
+}: BindingSaveVariables): AiBindingResponse {
+  const body = bindingParamsRequestBody(values);
   return {
+    id: bindingId ?? optimisticId,
+    scopeKind,
     bindingPurpose: purpose,
     bindingState: 'active',
-    id: bindingId ?? optimisticId,
-    modelPresetId: presetId,
-    providerCredentialId: credentialId,
-    scopeKind,
+    accountId: body.accountId,
+    modelCatalogId: body.modelCatalogId,
+    systemPrompt: body.systemPrompt ?? null,
+    temperature: body.temperature ?? null,
+    topP: body.topP ?? null,
+    maxOutputTokensOverride: body.maxOutputTokensOverride ?? null,
+    extraParametersJson: body.extraParametersJson ?? null,
     ...(scopeQuery.workspaceId ? { workspaceId: scopeQuery.workspaceId } : {}),
     ...(scopeQuery.libraryId ? { libraryId: scopeQuery.libraryId } : {}),
   };
 }
 
 function applyOptimisticBinding(
-  current: AiBindingAssignmentResponse[] | undefined,
-  binding: AiBindingAssignmentResponse,
-): AiBindingAssignmentResponse[] {
+  current: AiBindingResponse[] | undefined,
+  binding: AiBindingResponse,
+): AiBindingResponse[] {
   return [
     ...(current ?? []).filter(
       (entry) =>
@@ -106,14 +114,26 @@ function applyOptimisticBinding(
   ];
 }
 
+function bindingFormValuesFromExisting(existing: AIBindingAssignment) {
+  return {
+    accountId: existing.accountId,
+    modelCatalogId: existing.modelCatalogId,
+    systemPrompt: existing.systemPrompt ?? '',
+    temperature: existing.temperature != null ? String(existing.temperature) : '',
+    topP: existing.topP != null ? String(existing.topP) : '',
+    maxOutputTokens: existing.maxOutputTokens != null ? String(existing.maxOutputTokens) : '',
+    extraParametersJson: existing.extraParams ? JSON.stringify(existing.extraParams, null, 2) : '',
+  };
+}
+
 export function BindingsSection({
   selectedScope,
   scopeContext,
   bindingsState,
-  availableCredentials,
-  availablePresets,
-  localCredentials,
-  localPresets,
+  availableAccounts,
+  localAccounts,
+  models,
+  prices,
   bindingsForScope,
   instanceBindings,
   workspaceBindings,
@@ -123,58 +143,72 @@ export function BindingsSection({
   const { t } = useTranslation();
   const queryClient = useQueryClient();
   const [editingPurpose, setEditingPurpose] = useState<AIPurpose | null>(null);
-  const [bindingCredentialId, setBindingCredentialId] = useState('');
-  const [bindingPresetId, setBindingPresetId] = useState('');
+  const bindingSchema = useMemo(() => bindingParamsSchema(t), [t]);
+  const bindingForm = useTypedForm({
+    schema: bindingSchema,
+    defaultValues: {
+      accountId: '',
+      modelCatalogId: '',
+      systemPrompt: '',
+      temperature: '',
+      topP: '',
+      maxOutputTokens: '',
+      extraParametersJson: '',
+    },
+    mode: 'onChange',
+  });
+  const { reset: resetBindingForm, setValue: setBindingValue, watch: watchBinding } = bindingForm;
+  const bindingAccountId = watchBinding('accountId');
   const localScopeParams = useMemo(
     () => compactScopeQuery(localScopeQuery(selectedScope, scopeContext).query),
     [scopeContext, selectedScope],
   );
 
-  const selectedBindingCredential = useMemo(
+  const selectedAccount = useMemo(
     () =>
-      bindingCredentialId
-        ? availableCredentials.find(entry => entry.id === bindingCredentialId) ?? null
+      bindingAccountId
+        ? availableAccounts.find(entry => entry.id === bindingAccountId) ?? null
         : null,
-    [availableCredentials, bindingCredentialId],
+    [availableAccounts, bindingAccountId],
   );
-  const selectedBindingCredentialModelsQueryParams = {
-    ...(selectedBindingCredential ? {
-      providerCatalogId: selectedBindingCredential.providerId,
-      credentialId: selectedBindingCredential.id,
+  const selectedAccountModelsQueryParams = {
+    ...(selectedAccount ? {
+      providerCatalogId: selectedAccount.providerId,
+      accountId: selectedAccount.id,
     } : {}),
     ...modelCatalogScopeQuery(visibleScopeQuery(selectedScope, scopeContext).query),
   };
-  const selectedBindingCredentialModelsQuery = useQuery({
-    ...adminModelCatalogOptions(selectedBindingCredentialModelsQueryParams),
-    enabled: Boolean(editingPurpose) && shouldRefreshCredentialModels(selectedBindingCredential?.provider),
+  const selectedAccountModelsQuery = useQuery({
+    ...adminModelCatalogOptions(selectedAccountModelsQueryParams),
+    enabled: Boolean(editingPurpose) && shouldRefreshCredentialModels(selectedAccount?.provider),
   });
-  const selectedBindingCredentialModels = useMemo<AIModelOption[] | null>(
+  const selectedAccountModels = useMemo<AIModelOption[] | null>(
     () =>
-      selectedBindingCredentialModelsQuery.data
-        ? mapModelList(selectedBindingCredentialModelsQuery.data)
+      selectedAccountModelsQuery.data
+        ? mapModelList(selectedAccountModelsQuery.data)
         : null,
-    [selectedBindingCredentialModelsQuery.data],
+    [selectedAccountModelsQuery.data],
   );
-  const modelsByCredentialId = useMemo<Record<string, AIModelOption[]>>(() => {
-    if (!selectedBindingCredential || !selectedBindingCredentialModels) {
+  const modelsByAccountId = useMemo<Record<string, AIModelOption[]>>(() => {
+    if (!selectedAccount || !selectedAccountModels) {
       return {};
     }
-    return { [selectedBindingCredential.id]: selectedBindingCredentialModels };
-  }, [selectedBindingCredential, selectedBindingCredentialModels]);
-  const selectedBindingCredentialLoadState: CredentialModelLoadState | undefined =
-    selectedBindingCredentialModelsQuery.isLoading || selectedBindingCredentialModelsQuery.isFetching
+    return { [selectedAccount.id]: selectedAccountModels };
+  }, [selectedAccount, selectedAccountModels]);
+  const selectedAccountLoadState: AccountModelLoadState | undefined =
+    selectedAccountModelsQuery.isLoading || selectedAccountModelsQuery.isFetching
       ? 'loading'
-      : selectedBindingCredentialModelsQuery.error
+      : selectedAccountModelsQuery.error
         ? 'failed'
-        : selectedBindingCredentialModels
+        : selectedAccountModels
           ? 'ready'
           : undefined;
 
   useEffect(() => {
-    if (selectedBindingCredentialModelsQuery.error) {
-      toast.error(t('admin.aiPanel.messages.credentialModelRefreshFailed'));
+    if (selectedAccountModelsQuery.error) {
+      toast.error(t('admin.aiPanel.messages.accountModelRefreshFailed'));
     }
-  }, [selectedBindingCredentialModelsQuery.error, t]);
+  }, [selectedAccountModelsQuery.error, t]);
 
   const resolveBinding = (purpose: AIPurpose) =>
     resolveBindingForPurpose({
@@ -186,21 +220,31 @@ export function BindingsSection({
     });
   const openBindingEditor = (purpose: AIPurpose) => {
     const resolved = resolveBinding(purpose);
-    const suggestion = suggestBindingSelection({
-      purpose,
-      availableCredentials,
-      availablePresets,
-      modelById,
-      preferredCredentialId: resolved.localBinding?.credentialId ?? resolved.effectiveBinding?.credentialId,
-      preferredPresetId: resolved.localBinding?.presetId ?? resolved.effectiveBinding?.presetId,
-    });
+    if (resolved.localBinding) {
+      resetBindingForm(bindingFormValuesFromExisting(resolved.localBinding));
+    } else {
+      const suggestion = suggestBindingSelection({
+        purpose,
+        availableAccounts,
+        models,
+        preferredAccountId: resolved.effectiveBinding?.accountId,
+        preferredModelCatalogId: resolved.effectiveBinding?.modelCatalogId,
+      });
+      resetBindingForm({
+        accountId: suggestion.accountId,
+        modelCatalogId: suggestion.modelCatalogId,
+        systemPrompt: '',
+        temperature: '',
+        topP: '',
+        maxOutputTokens: '',
+        extraParametersJson: '',
+      });
+    }
     setEditingPurpose(purpose);
-    setBindingCredentialId(suggestion.credentialId);
-    setBindingPresetId(suggestion.presetId);
   };
 
   const saveBindingMutation = useMutation<
-    AiBindingAssignmentResponse,
+    AiBindingResponse,
     unknown,
     BindingSaveVariables,
     BindingMutationContext
@@ -210,23 +254,21 @@ export function BindingsSection({
     mutationFn: (variables) =>
       variables.bindingId
         ? adminApi.updateBinding(variables.bindingId, {
-            providerCredentialId: variables.credentialId,
-            modelPresetId: variables.presetId,
+            ...bindingParamsRequestBody(variables.values),
             bindingState: 'active',
           })
         : adminApi.createBinding({
             ...variables.scopeQuery,
             scopeKind: variables.scopeKind,
             bindingPurpose: variables.purpose,
-            providerCredentialId: variables.credentialId,
-            modelPresetId: variables.presetId,
+            ...bindingParamsRequestBody(variables.values),
           }),
     onMutate: async (variables) => {
       const queryKey = adminAiBindingsQueryKey(variables.scopeQuery);
       await queryClient.cancelQueries({ queryKey });
       const previousBindings =
-        queryClient.getQueryData<AiBindingAssignmentResponse[]>(queryKey);
-      queryClient.setQueryData<AiBindingAssignmentResponse[]>(
+        queryClient.getQueryData<AiBindingResponse[]>(queryKey);
+      queryClient.setQueryData<AiBindingResponse[]>(
         queryKey,
         (current) =>
           applyOptimisticBinding(
@@ -235,12 +277,10 @@ export function BindingsSection({
           ),
       );
       setEditingPurpose(null);
-      setBindingCredentialId('');
-      setBindingPresetId('');
       return { previousBindings };
     },
     onSuccess: (binding, variables) => {
-      queryClient.setQueryData<AiBindingAssignmentResponse[]>(
+      queryClient.setQueryData<AiBindingResponse[]>(
         adminAiBindingsQueryKey(variables.scopeQuery),
         (current = []) =>
           current.map((entry) =>
@@ -249,17 +289,7 @@ export function BindingsSection({
               : entry,
           ),
       );
-      if (binding.embeddingDimensionChanged) {
-        toast.warning(
-          t('admin.aiPanel.messages.bindingEmbeddingDimensionChanged', {
-            previous: binding.embeddingPreviousDimensions ?? '?',
-            current: binding.embeddingNewDimensions ?? '?',
-          }),
-          { duration: 12000 },
-        );
-      } else {
-        toast.success(t('admin.aiPanel.messages.bindingSaved'));
-      }
+      toast.success(t('admin.aiPanel.messages.bindingSaved'));
     },
     onError: (err, variables, context) => {
       if (context) {
@@ -292,8 +322,8 @@ export function BindingsSection({
       const queryKey = adminAiBindingsQueryKey(variables.scopeQuery);
       await queryClient.cancelQueries({ queryKey });
       const previousBindings =
-        queryClient.getQueryData<AiBindingAssignmentResponse[]>(queryKey);
-      queryClient.setQueryData<AiBindingAssignmentResponse[]>(
+        queryClient.getQueryData<AiBindingResponse[]>(queryKey);
+      queryClient.setQueryData<AiBindingResponse[]>(
         queryKey,
         (current = []) =>
           current.filter(
@@ -303,8 +333,6 @@ export function BindingsSection({
           ),
       );
       setEditingPurpose(null);
-      setBindingCredentialId('');
-      setBindingPresetId('');
       return { previousBindings };
     },
     onSuccess: () => {
@@ -328,20 +356,18 @@ export function BindingsSection({
     },
   });
 
-  const saveBinding = async (purpose: AIPurpose) => {
+  const saveBinding = (purpose: AIPurpose) => {
     const resolved = resolveBinding(purpose);
-    if (!bindingCredentialId || !bindingPresetId) {
-      return;
-    }
-    saveBindingMutation.mutate({
-      bindingId: resolved.localBinding?.id ?? null,
-      credentialId: bindingCredentialId,
-      optimisticId: `optimistic-binding-${selectedScope}-${purpose}`,
-      presetId: bindingPresetId,
-      purpose,
-      scopeKind: selectedScope,
-      scopeQuery: localScopeParams,
-    });
+    void bindingForm.handleSubmit((values) => {
+      saveBindingMutation.mutate({
+        bindingId: resolved.localBinding?.id ?? null,
+        optimisticId: `optimistic-binding-${selectedScope}-${purpose}`,
+        purpose,
+        scopeKind: selectedScope,
+        scopeQuery: localScopeParams,
+        values,
+      });
+    })();
   };
   const resetBinding = async (purpose: AIPurpose) => {
     const resolved = resolveBinding(purpose);
@@ -358,7 +384,7 @@ export function BindingsSection({
   const showMissingInstanceNotice =
     selectedScope !== 'instance'
     && instanceBindings.length === 0
-    && localCredentials.length + localPresets.length + bindingsForScope.length > 0;
+    && localAccounts.length + bindingsForScope.length > 0;
   const configuredRequiredBindings = REQUIRED_RUNTIME_PURPOSE_ORDER.filter(purpose => resolveBinding(purpose).effectiveBinding).length;
   const configuredOptionalBindings = OPTIONAL_PURPOSES.filter(purpose => resolveBinding(purpose).effectiveBinding).length;
   const renderPurpose = (purpose: AIPurpose) => {
@@ -369,24 +395,23 @@ export function BindingsSection({
         purpose={purpose}
         selectedScope={selectedScope}
         resolved={resolved}
-        availableCredentials={availableCredentials}
-        availablePresets={availablePresets}
+        availableAccounts={availableAccounts}
+        models={models}
+        prices={prices}
         modelById={modelById}
-        modelsByCredentialId={modelsByCredentialId}
-        selectedBindingCredential={selectedBindingCredential}
-        selectedBindingCredentialLoadState={selectedBindingCredentialLoadState}
+        modelsByAccountId={modelsByAccountId}
+        selectedAccount={selectedAccount}
+        selectedAccountLoadState={selectedAccountLoadState}
         editing={editingPurpose === purpose}
-        bindingCredentialId={bindingCredentialId}
-        bindingPresetId={bindingPresetId}
+        form={bindingForm}
         bindingSaving={saveBindingMutation.isPending || resetBindingMutation.isPending}
-        onCredentialChange={value => {
-          setBindingCredentialId(value);
-          setBindingPresetId('');
+        onAccountChange={value => {
+          setBindingValue('accountId', value, { shouldDirty: true, shouldValidate: true });
+          setBindingValue('modelCatalogId', '', { shouldDirty: true, shouldValidate: true });
         }}
-        onPresetChange={setBindingPresetId}
         onOpen={() => openBindingEditor(purpose)}
         onCancel={() => setEditingPurpose(null)}
-        onSave={() => void saveBinding(purpose)}
+        onSave={() => saveBinding(purpose)}
         onReset={() => void resetBinding(purpose)}
       />
     );
@@ -414,7 +439,7 @@ export function BindingsSection({
           </p>
         )}
       </div>
-      <div className="overflow-hidden rounded-md border border-border/70 bg-card">
+      <div className="workbench-surface overflow-hidden">
         {purposes.map(renderPurpose)}
       </div>
     </section>

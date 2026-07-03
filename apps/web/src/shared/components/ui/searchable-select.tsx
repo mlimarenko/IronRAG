@@ -63,7 +63,7 @@ export function SearchableSelect({
       <DropdownMenuTrigger
         disabled={disabled}
         className={cn(
-          'flex h-10 w-full items-center justify-between gap-2 rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background transition-colors',
+          'flex h-10 w-full items-center justify-between gap-2 rounded-lg border border-input bg-background px-3 py-2 text-sm ring-offset-background transition-colors',
           'focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2',
           'disabled:cursor-not-allowed disabled:opacity-50',
           'data-[state=open]:ring-2 data-[state=open]:ring-ring',
@@ -105,7 +105,7 @@ export function SearchableSelect({
               return (
                 <DropdownMenuItem
                   key={option.value}
-                  disabled={option.disabled}
+                  {...(option.disabled !== undefined ? { disabled: option.disabled } : {})}
                   onClick={() => onValueChange(option.value)}
                   className="flex items-start gap-2"
                 >
@@ -118,7 +118,7 @@ export function SearchableSelect({
                   <div className="min-w-0 flex-1">
                     <div className="truncate text-sm font-medium">{option.label}</div>
                     {option.description && (
-                      <div className="truncate text-[11px] text-muted-foreground">
+                      <div className="truncate text-2xs text-muted-foreground">
                         {option.description}
                       </div>
                     )}

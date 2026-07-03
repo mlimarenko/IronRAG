@@ -193,7 +193,7 @@ Key findings:
 Architecture Notes
 ------------------
 The backend runs on Rust with Axum, using PostgreSQL 18 for the control plane,
-ArangoDB 3.12 for graph and vector storage, and Redis 8 for the worker queue.
+ArangoDB 3.12 for graph and vector storage, and Redis 8.8 for the worker queue.
 The frontend is React with Vite, served through nginx as an SPA.
 
 Performance Metrics

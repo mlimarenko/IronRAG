@@ -1,5 +1,7 @@
 import { useTranslation } from 'react-i18next';
 
+import { PageHeader } from '@/shared/components/layout/PageHeader';
+import { PageShell } from '@/shared/components/layout/PageShell';
 import { useApp } from '@/shared/contexts/app-context';
 import { AccessTab } from './AccessTab';
 
@@ -8,8 +10,14 @@ export default function AdminAccessPage() {
   const { t } = useTranslation();
   const { activeWorkspace } = useApp();
   return (
-    <div className="flex flex-1 min-h-0 flex-col overflow-auto p-6">
+    <PageShell
+      header={
+        <PageHeader title={t('admin.nav.access')} description={t('admin.nav.accessDesc')} />
+      }
+      bodyScroll="auto"
+      bodyClassName="p-3 animate-fade-in sm:p-4"
+    >
       <AccessTab t={t} activeWorkspaceId={activeWorkspace?.id} active />
-    </div>
+    </PageShell>
   );
 }

@@ -12,7 +12,7 @@ describe("documentsApi", () => {
   });
 
   it("patches document hints with cookie session auth", async () => {
-    const requests: Array<{ input: RequestInfo | URL; init?: RequestInit }> = [];
+    const requests: Array<{ input: RequestInfo | URL; init?: RequestInit | undefined }> = [];
     const fetchMock = vi
       .spyOn(globalThis, "fetch")
       .mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -26,6 +26,7 @@ describe("documentsApi", () => {
     expect(result).toBeNull();
     expect(requests).toHaveLength(1);
     const request = requests[0];
+    if (!request) throw new Error("expected a captured fetch request");
     expect(String(request.input)).toBe("/v1/content/documents/doc-1");
     expect(request.init?.method).toBe("PATCH");
     expect(request.init?.credentials).toBe("include");
@@ -59,7 +60,7 @@ describe("librarySnapshotApi", () => {
     const file = new NodeFile([new Uint8Array(payload)], "snapshot.tar.zst", {
       type: "application/zstd",
     }) as unknown as File;
-    const requests: Array<{ input: RequestInfo | URL; init?: RequestInit }> = [];
+    const requests: Array<{ input: RequestInfo | URL; init?: RequestInit | undefined }> = [];
     const fetchMock = vi
       .spyOn(globalThis, "fetch")
       .mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -98,6 +99,7 @@ describe("librarySnapshotApi", () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(requests).toHaveLength(1);
     const request = requests[0];
+    if (!request) throw new Error("expected a captured fetch request");
     expect(String(request.input)).toBe(
       "http://localhost/v1/content/libraries/019e37a5-6295-7022-b0ec-cdc0bcd03715/snapshot?overwrite=replace",
     );

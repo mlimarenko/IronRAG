@@ -1,6 +1,7 @@
 import { memo } from 'react';
 import type { TFunction } from 'i18next';
 import { AlertTriangle, ArrowRight, CheckCircle2, Clock, XCircle } from 'lucide-react';
+import { StatusBadge } from '@/shared/components/StatusBadge';
 import type { DashboardAttentionItem } from "../model/types";
 import { attentionClass, localizeAttention, resolveAttentionRoute } from "../model/format";
 
@@ -16,14 +17,12 @@ function AttentionPanelImpl({
   onNavigate,
 }: AttentionPanelProps) {
   return (
-    <div className="workbench-surface p-5 sm:p-6">
+    <div className="workbench-surface p-4">
       <div className="flex items-center justify-between gap-3">
         <h2 className="text-sm font-bold tracking-tight">{t('dashboard.attentionRequired')}</h2>
-        <span
-          className={`status-badge ${attention.length > 0 ? 'status-failed' : 'status-ready'}`}
-        >
+        <StatusBadge tone={attention.length > 0 ? 'failed' : 'ready'}>
           {attention.length}
-        </span>
+        </StatusBadge>
       </div>
 
       {attention.length > 0 ? (
@@ -37,11 +36,11 @@ function AttentionPanelImpl({
                 key={item.code}
                 type="button"
                 onClick={() => onNavigate(route)}
-                className="w-full rounded-xl border border-border/60 bg-background/70 p-3.5 text-left transition-colors hover:bg-accent/45 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/30"
+                className="w-full rounded-lg bg-surface-sunken p-3 text-left transition-colors hover:bg-muted/60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/25"
               >
                 <div className="flex items-start gap-3">
                   <div
-                    className={`mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-xl ${attentionClass(item.level)}`}
+                    className={`mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-md ${attentionClass(item.level)}`}
                   >
                     {item.level === 'error' ? (
                       <XCircle className="h-4 w-4" />
@@ -60,9 +59,9 @@ function AttentionPanelImpl({
                     <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
                       {content.detail}
                     </p>
-                    <div className="mt-2 inline-flex items-center gap-1.5 text-[11px] font-semibold text-primary">
+                    <div className="mt-2 inline-flex items-center gap-1.5 text-2xs font-semibold text-primary">
                       <span>{content.action}</span>
-                      <ArrowRight className="h-3 w-3" />
+                      <ArrowRight className="h-3.5 w-3.5" />
                     </div>
                   </div>
                 </div>
@@ -71,9 +70,9 @@ function AttentionPanelImpl({
           })}
         </div>
       ) : (
-        <div className="mt-4 rounded-xl border border-border/60 bg-background/70 p-4">
+        <div className="mt-4 rounded-lg bg-surface-sunken p-3">
           <div className="flex items-center gap-3">
-            <div className="flex h-9 w-9 items-center justify-center rounded-xl status-ready">
+            <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md status-ready">
               <CheckCircle2 className="h-4 w-4" />
             </div>
             <div>

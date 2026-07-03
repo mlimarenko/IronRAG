@@ -1446,7 +1446,7 @@ async fn resolve_grant_workspace_id(
                 .map(|row| row.workspace_id)
         }
         IamGrantResourceKind::ProviderCredential => {
-            ai_repository::get_provider_credential_by_id(&state.persistence.postgres, resource_id)
+            ai_repository::get_account_by_id(&state.persistence.postgres, resource_id)
                 .await
                 .map_err(|error| {
                     error!(resource_id = %resource_id, ?error, "failed to load provider credential for grant");
@@ -1456,7 +1456,7 @@ async fn resolve_grant_workspace_id(
                 .and_then(|row| row.workspace_id.ok_or_else(|| ApiError::BadRequest("provider credential is not scoped to a workspace".to_string())))
         }
         IamGrantResourceKind::LibraryBinding => {
-            ai_repository::get_binding_assignment_by_id(&state.persistence.postgres, resource_id)
+            ai_repository::get_binding_by_id(&state.persistence.postgres, resource_id)
                 .await
                 .map_err(|error| {
                     error!(resource_id = %resource_id, ?error, "failed to load library binding for grant");

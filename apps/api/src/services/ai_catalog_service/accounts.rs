@@ -2,12 +2,12 @@ use super::provider_validation::sync_provider_model_catalog;
 use super::*;
 
 impl AiCatalogService {
-    pub async fn list_provider_credentials_exact(
+    pub async fn list_accounts_exact(
         &self,
         state: &AppState,
         scope: AiScopeRef,
-    ) -> Result<Vec<ProviderCredential>, ApiError> {
-        let rows = ai_repository::list_provider_credentials_exact(
+    ) -> Result<Vec<AiAccount>, ApiError> {
+        let rows = ai_repository::list_accounts_exact(
             &state.persistence.postgres,
             scope_kind_key(scope.scope_kind),
             scope.workspace_id,
@@ -15,45 +15,42 @@ impl AiCatalogService {
         )
         .await
         .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
-        Ok(rows.into_iter().map(map_provider_credential_row).collect())
+        Ok(rows.into_iter().map(map_account_row).collect())
     }
 
-    pub async fn list_visible_provider_credentials(
+    pub async fn list_visible_accounts(
         &self,
         state: &AppState,
         workspace_id: Option<Uuid>,
         library_id: Option<Uuid>,
-    ) -> Result<Vec<ProviderCredential>, ApiError> {
-        let rows = ai_repository::list_visible_provider_credentials(
+    ) -> Result<Vec<AiAccount>, ApiError> {
+        let rows = ai_repository::list_visible_accounts(
             &state.persistence.postgres,
             workspace_id,
             library_id,
         )
         .await
         .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
-        Ok(rows.into_iter().map(map_provider_credential_row).collect())
+        Ok(rows.into_iter().map(map_account_row).collect())
     }
 
-    pub async fn get_provider_credential(
+    pub async fn get_account(
         &self,
         state: &AppState,
-        credential_id: Uuid,
-    ) -> Result<ProviderCredential, ApiError> {
-        let row = ai_repository::get_provider_credential_by_id(
-            &state.persistence.postgres,
-            credential_id,
-        )
-        .await
-        .map_err(|e| ApiError::internal_with_log(e, "internal"))?
-        .ok_or_else(|| ApiError::resource_not_found("provider_credential", credential_id))?;
-        Ok(map_provider_credential_row(row))
+        account_id: Uuid,
+    ) -> Result<AiAccount, ApiError> {
+        let row = ai_repository::get_account_by_id(&state.persistence.postgres, account_id)
+            .await
+            .map_err(|e| ApiError::internal_with_log(e, "internal"))?
+            .ok_or_else(|| ApiError::resource_not_found("provider_credential", account_id))?;
+        Ok(map_account_row(row))
     }
 
-    pub async fn create_provider_credential(
+    pub async fn create_account(
         &self,
         state: &AppState,
-        command: CreateProviderCredentialCommand,
-    ) -> Result<ProviderCredential, ApiError> {
+        command: CreateAiAccountCommand,
+    ) -> Result<AiAccount, ApiError> {
         let scope = normalize_scope_ref(
             state,
             command.scope_kind,
@@ -73,7 +70,7 @@ impl AiCatalogService {
             provider_credential_base_url_for_create(provider, command.base_url.as_deref())?;
         validate_provider_access(state, provider, &models, api_key.as_deref(), base_url.as_deref())
             .await?;
-        let row = ai_repository::create_provider_credential(
+        let row = ai_repository::create_account(
             &state.persistence.postgres,
             scope_kind_key(scope.scope_kind),
             scope.workspace_id,
@@ -86,18 +83,18 @@ impl AiCatalogService {
         )
         .await
         .map_err(map_ai_write_error)?;
-        let credential = map_provider_credential_row(row);
-        sync_provider_model_catalog_after_credential_save(state, provider, &credential).await;
-        Ok(credential)
+        let account = map_account_row(row);
+        sync_provider_model_catalog_after_account_save(state, provider, &account).await;
+        Ok(account)
     }
 
-    pub async fn update_provider_credential(
+    pub async fn update_account(
         &self,
         state: &AppState,
-        command: UpdateProviderCredentialCommand,
-    ) -> Result<ProviderCredential, ApiError> {
+        command: UpdateAiAccountCommand,
+    ) -> Result<AiAccount, ApiError> {
         let label = normalize_non_empty(&command.label, "label")?;
-        let existing = self.get_provider_credential(state, command.credential_id).await?;
+        let existing = self.get_account(state, command.account_id).await?;
         let providers = self.list_provider_catalog(state).await?;
         let models = self.list_model_catalog(state, Some(existing.provider_catalog_id)).await?;
         let provider =
@@ -113,9 +110,9 @@ impl AiCatalogService {
         let effective_api_key = api_key.as_deref().or(existing.api_key.as_deref());
         validate_provider_access(state, provider, &models, effective_api_key, base_url.as_deref())
             .await?;
-        let row = ai_repository::update_provider_credential(
+        let row = ai_repository::update_account(
             &state.persistence.postgres,
-            command.credential_id,
+            command.account_id,
             &label,
             api_key.as_deref(),
             base_url.as_deref(),
@@ -123,32 +120,25 @@ impl AiCatalogService {
         )
         .await
         .map_err(map_ai_write_error)?
-        .ok_or_else(|| {
-            ApiError::resource_not_found("provider_credential", command.credential_id)
-        })?;
-        let credential = map_provider_credential_row(row);
-        sync_provider_model_catalog_after_credential_save(state, provider, &credential).await;
-        Ok(credential)
+        .ok_or_else(|| ApiError::resource_not_found("provider_credential", command.account_id))?;
+        let account = map_account_row(row);
+        sync_provider_model_catalog_after_account_save(state, provider, &account).await;
+        Ok(account)
     }
 
-    pub async fn delete_provider_credential(
-        &self,
-        state: &AppState,
-        credential_id: Uuid,
-    ) -> Result<(), ApiError> {
-        let affected =
-            ai_repository::delete_provider_credential(&state.persistence.postgres, credential_id)
-                .await
-                .map_err(map_ai_delete_error)?;
+    pub async fn delete_account(&self, state: &AppState, account_id: Uuid) -> Result<(), ApiError> {
+        let affected = ai_repository::delete_account(&state.persistence.postgres, account_id)
+            .await
+            .map_err(map_ai_delete_error)?;
         if affected == 0 {
-            return Err(ApiError::resource_not_found("provider_credential", credential_id));
+            return Err(ApiError::resource_not_found("provider_credential", account_id));
         }
         Ok(())
     }
 }
 
-fn map_provider_credential_row(row: ai_repository::AiProviderCredentialRow) -> ProviderCredential {
-    ProviderCredential {
+fn map_account_row(row: ai_repository::AiAccountRow) -> AiAccount {
+    AiAccount {
         id: row.id,
         scope_kind: parse_scope_kind(&row.scope_kind).unwrap_or(AiScopeKind::Workspace),
         workspace_id: row.workspace_id,
@@ -163,37 +153,37 @@ fn map_provider_credential_row(row: ai_repository::AiProviderCredentialRow) -> P
     }
 }
 
-async fn sync_provider_model_catalog_after_credential_save(
+async fn sync_provider_model_catalog_after_account_save(
     state: &AppState,
     provider: &ProviderCatalogEntry,
-    credential: &ProviderCredential,
+    account: &AiAccount,
 ) {
-    if credential.credential_state != "active" {
+    if account.credential_state != "active" {
         return;
     }
 
     match sync_provider_model_catalog(
         state,
         provider,
-        credential.api_key.as_deref(),
-        credential.base_url.as_deref(),
+        account.api_key.as_deref(),
+        account.base_url.as_deref(),
     )
     .await
     {
         Ok(model_names) => {
             tracing::info!(
                 provider_kind = %provider.provider_kind,
-                credential_id = %credential.id,
+                account_id = %account.id,
                 model_count = model_names.len(),
-                "synced provider model catalog after credential save"
+                "synced provider model catalog after account save"
             );
         }
         Err(error) => {
             tracing::warn!(
                 provider_kind = %provider.provider_kind,
-                credential_id = %credential.id,
+                account_id = %account.id,
                 error = %error,
-                "failed to sync provider model catalog after credential save"
+                "failed to sync provider model catalog after account save"
             );
         }
     }

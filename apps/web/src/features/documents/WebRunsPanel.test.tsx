@@ -4,6 +4,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import i18n from "@/shared/i18n";
+import type { WebIngestRunListItem } from "@/shared/api";
 import { WebRunsPanel } from "@/features/documents/WebRunsPanel";
 
 const { documentsApiMock } = vi.hoisted(() => ({
@@ -51,18 +52,28 @@ describe("WebRunsPanel", () => {
   }
 
   async function renderPanel() {
-    const runs = Array.from({ length: 12 }, (_, index) => ({
+    const runs: WebIngestRunListItem[] = Array.from({ length: 12 }, (_, index) => ({
       runId: `run-${index + 1}`,
+      libraryId: "lib-1",
       seedUrl: `https://docs.example.com/run-${index + 1}`,
       runState: index === 0 ? "processing" : "completed",
       mode: "recursive_crawl",
       boundaryPolicy: "same_host",
       maxDepth: 3,
       maxPages: 250,
+      crawlFilter: { allowPatterns: [], blockPatterns: [] },
+      materializationFilter: { allowPatterns: [], blockPatterns: [] },
       counts: {
         discovered: 250,
         processed: index === 0 ? 120 : 250,
         failed: index === 0 ? 3 : 0,
+        blocked: 0,
+        canceled: 0,
+        duplicates: 0,
+        eligible: 0,
+        excluded: 0,
+        processing: 0,
+        queued: 0,
       },
     }));
 

@@ -40,7 +40,7 @@ type DocumentEditorToolbarProps = {
   lineWrapEnabled: boolean;
   onLineWrapChange: (enabled: boolean) => void;
   saving: boolean;
-  sourceFormat?: string;
+  sourceFormat?: string | undefined;
   statusLabel: string;
   statusTone: 'neutral' | 'accent' | 'destructive';
   surfaceMode: EditorSurfaceMode;
@@ -111,7 +111,7 @@ export function DocumentEditorToolbar({
 
       {showRibbon ? (
         <TooltipProvider delayDuration={180}>
-          <div className="flex flex-wrap items-center gap-2 rounded-2xl border border-border/70 bg-muted/25 px-3 py-2">
+          <div className="flex flex-wrap items-center gap-2 rounded-xl border border-border/70 bg-muted/25 px-3 py-2">
             {ribbonActions.primary.length > 0 ? (
               <ToolbarCluster>{ribbonActions.primary}</ToolbarCluster>
             ) : null}
@@ -154,12 +154,12 @@ export function DocumentEditorToolbar({
 }
 
 type ToolbarButtonProps = {
-  active?: boolean;
+  active?: boolean | undefined;
   disabled?: boolean;
   icon?: LucideIcon;
   label: string;
   onClick: () => void;
-  title?: string;
+  title?: string | undefined;
 };
 
 function ToolbarButton({
@@ -248,7 +248,7 @@ type ActionItemsOptions = {
   surfaceMode: EditorSurfaceMode;
   t: TFunction;
   tableActionsDisabled: boolean;
-  tableActionTitle?: string;
+  tableActionTitle?: string | undefined;
 };
 
 function actionItems({

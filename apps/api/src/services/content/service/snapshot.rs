@@ -407,15 +407,21 @@ const POSTGRES_WORKSPACE_TABLES: &[&str] = &["catalog_workspace"];
 /// FK-dependency order so a restore that re-enables FK enforcement (or a
 /// human reading the archive) sees parents before children. Provider and
 /// model catalogs and system prices are deployment-seeded with stable ids;
-/// credentials, presets and bindings are workspace/library-scoped config.
-const POSTGRES_AI_CONFIG_TABLES: &[&str] = &[
-    "ai_provider_catalog",
-    "ai_model_catalog",
-    "ai_price_catalog",
-    "ai_provider_credential",
-    "ai_model_preset",
-    "ai_binding_assignment",
-];
+/// accounts and bindings are workspace/library-scoped config (migration
+/// 0004 merged `ai_model_preset` inline into `ai_binding`, so there is no
+/// separate preset table to export any more).
+const POSTGRES_AI_CONFIG_TABLES: &[&str] =
+    &["ai_provider_catalog", "ai_model_catalog", "ai_price_catalog", "ai_account", "ai_binding"];
+
+/// Pre-0004 archive table names, accepted only on import for backward
+/// compatibility with snapshots taken before the AI-config simplification.
+/// `ai_provider_credential` → `ai_account` and `ai_binding_assignment` →
+/// `ai_binding` are 1:1 renames (identical columns); `ai_model_preset` has
+/// no canonical storage table any more — its rows are buffered and merged
+/// into the `ai_binding` row that referenced them (see
+/// `LegacyModelPreset`/`merge_legacy_binding_row`). Never written by export.
+const POSTGRES_LEGACY_AI_CONFIG_TABLES: &[&str] =
+    &["ai_provider_credential", "ai_model_preset", "ai_binding_assignment"];
 
 const POSTGRES_LIBRARY_ROOT_TABLES: &[&str] = &["catalog_library"];
 
@@ -603,6 +609,12 @@ impl SnapshotRowScope {
                 // keep their stable ids; nothing to remap.
             }
             "ai_price_catalog"
+            | "ai_account"
+            | "ai_binding"
+            // Pre-0004 archive names, accepted for backward-compatible
+            // import (see `POSTGRES_LEGACY_AI_CONFIG_TABLES`). Scope
+            // columns are identical to the renamed tables, so the same
+            // normalizer applies unchanged.
             | "ai_provider_credential"
             | "ai_model_preset"
             | "ai_binding_assignment" => {
@@ -636,8 +648,9 @@ impl SnapshotRowScope {
         Ok(())
     }
 
-    /// Normalizes an AI-config row (`ai_price_catalog`,
-    /// `ai_provider_credential`, `ai_model_preset`, `ai_binding_assignment`).
+    /// Normalizes an AI-config row (`ai_price_catalog`, `ai_account`,
+    /// `ai_binding`, or their pre-0004 archive equivalents
+    /// `ai_provider_credential` / `ai_model_preset` / `ai_binding_assignment`).
     /// `workspace_id` / `library_id` are nullable scope columns: a
     /// workspace-scoped row carries only `workspace_id`, a library-scoped row
     /// carries both, a system-scoped price carries neither. Each non-null
@@ -826,6 +839,7 @@ fn require_known_snapshot_pg_table(table: &str) -> anyhow::Result<&'static str> 
     POSTGRES_WORKSPACE_TABLES
         .iter()
         .chain(POSTGRES_AI_CONFIG_TABLES.iter())
+        .chain(POSTGRES_LEGACY_AI_CONFIG_TABLES.iter())
         .chain(POSTGRES_LIBRARY_ROOT_TABLES.iter())
         .chain(POSTGRES_CONTENT_TABLES.iter())
         .chain(POSTGRES_RUNTIME_GRAPH_TABLES.iter())
@@ -1293,12 +1307,12 @@ where
 /// Exports the portable AI configuration that makes the exported library
 /// resolvable on another stack: provider and model catalogs travel whole
 /// (referenced by FK and seeded with stable ids on every deployment); prices
-/// include the system catalog plus this workspace's overrides; credentials,
-/// presets and bindings include instance-scoped (deployment-global) rows plus
-/// the rows scoped to this workspace/library. `api_key` is always nulled out
-/// — provider secrets never leave the source stack. Bindings are filtered to
-/// those whose credential AND preset are also in the exported set so a
-/// restore never lands a dangling FK.
+/// include the system catalog plus this workspace's overrides; accounts and
+/// bindings include instance-scoped (deployment-global) rows plus the rows
+/// scoped to this workspace/library. `api_key` is always nulled out —
+/// provider secrets never leave the source stack. Bindings are filtered to
+/// those whose account is also in the exported set so a restore never lands
+/// a dangling FK.
 async fn export_pg_ai_config_scope<W>(
     builder: &mut Builder<W>,
     pool: &PgPool,
@@ -1328,7 +1342,7 @@ where
     // `{alias}` is the table alias whose scope columns are tested. Instance
     // scope always matches; workspace/library scope matches this export's
     // ($1, $2). Phrased per-alias so the binding join can require its
-    // credential and preset to be in the exported set too.
+    // account to be in the exported set too.
     let scope_pred = |alias: &str| {
         format!(
             "({alias}.scope_kind = 'instance' \
@@ -1337,24 +1351,18 @@ where
         )
     };
     let binding_query = format!(
-        "SELECT row_to_json(b)::jsonb AS row FROM ai_binding_assignment b \
-         JOIN ai_provider_credential c ON c.id = b.provider_credential_id AND {} \
-         JOIN ai_model_preset p ON p.id = b.model_preset_id AND {} \
+        "SELECT row_to_json(b)::jsonb AS row FROM ai_binding b \
+         JOIN ai_account a ON a.id = b.account_id AND {} \
          WHERE {}",
-        scope_pred("c"),
-        scope_pred("p"),
+        scope_pred("a"),
         scope_pred("b"),
     );
-    let credential_query = format!(
+    let account_query = format!(
         "SELECT (row_to_json(t)::jsonb || jsonb_build_object('api_key', NULL)) AS row \
-         FROM ai_provider_credential t WHERE {}",
+         FROM ai_account t WHERE {}",
         scope_pred("t"),
     );
-    let preset_query = format!(
-        "SELECT row_to_json(t)::jsonb AS row FROM ai_model_preset t WHERE {}",
-        scope_pred("t"),
-    );
-    let queries: [(&str, String); 6] = [
+    let queries: [(&str, String); 5] = [
         (
             "ai_provider_catalog",
             "SELECT row_to_json(t)::jsonb AS row FROM ai_provider_catalog t".to_string(),
@@ -1370,9 +1378,8 @@ where
                 OR (catalog_scope = 'workspace_override' AND workspace_id = $1)"
                 .to_string(),
         ),
-        ("ai_provider_credential", credential_query),
-        ("ai_model_preset", preset_query),
-        ("ai_binding_assignment", binding_query),
+        ("ai_account", account_query),
+        ("ai_binding", binding_query),
     ];
 
     let mut counts = Vec::<(String, u64)>::new();
@@ -1698,6 +1705,93 @@ where
         })
 }
 
+/// Maps a pre-0004 archive table name to the canonical storage table its
+/// rows land in on restore. `ai_model_preset` is deliberately absent — it
+/// has no canonical storage table any more; its rows are buffered
+/// separately (see [`LegacyModelPreset`]) and merged into the owning
+/// `ai_binding` row instead of being routed through here. Canonical table
+/// names pass through unchanged.
+fn canonical_ai_config_storage_table(table: &str) -> &str {
+    match table {
+        "ai_provider_credential" => "ai_account",
+        "ai_binding_assignment" => "ai_binding",
+        other => other,
+    }
+}
+
+/// A buffered pre-0004 `ai_model_preset` row, captured during restore so its
+/// fields can be spliced into the `ai_binding` row that references it via
+/// `model_preset_id` — the FK column migration 0004 dropped once presets
+/// were merged inline.
+struct LegacyModelPreset {
+    model_catalog_id: serde_json::Value,
+    system_prompt: serde_json::Value,
+    temperature: serde_json::Value,
+    top_p: serde_json::Value,
+    max_output_tokens_override: serde_json::Value,
+    extra_parameters_json: serde_json::Value,
+}
+
+impl LegacyModelPreset {
+    fn from_row(row: &serde_json::Value) -> anyhow::Result<(Uuid, Self)> {
+        let id = required_uuid_field("ai_model_preset", row, "id")?;
+        let field = |name: &str| row.get(name).cloned().unwrap_or(serde_json::Value::Null);
+        Ok((
+            id,
+            Self {
+                model_catalog_id: field("model_catalog_id"),
+                system_prompt: field("system_prompt"),
+                temperature: field("temperature"),
+                top_p: field("top_p"),
+                max_output_tokens_override: field("max_output_tokens_override"),
+                extra_parameters_json: field("extra_parameters_json"),
+            },
+        ))
+    }
+}
+
+/// Splices a pre-0004 `ai_binding_assignment` row into the canonical
+/// `ai_binding` shape: renames `provider_credential_id` → `account_id` and
+/// replaces `model_preset_id` with the inline fields of the preset it
+/// pointed at, looked up from `legacy_presets` (populated while streaming
+/// the archive's `ai_model_preset` section, which always precedes
+/// `ai_binding_assignment` in FK-dependency export order).
+fn merge_legacy_binding_row(
+    row: &mut serde_json::Value,
+    legacy_presets: &HashMap<Uuid, LegacyModelPreset>,
+) -> anyhow::Result<()> {
+    let object = row
+        .as_object_mut()
+        .ok_or_else(|| anyhow!("snapshot ai_binding_assignment row is not a JSON object"))?;
+    let account_id = object.remove("provider_credential_id").ok_or_else(|| {
+        anyhow!("snapshot ai_binding_assignment row missing provider_credential_id")
+    })?;
+    object.insert("account_id".to_string(), account_id);
+    let preset_id_value = object
+        .remove("model_preset_id")
+        .ok_or_else(|| anyhow!("snapshot ai_binding_assignment row missing model_preset_id"))?;
+    let preset_id =
+        preset_id_value.as_str().and_then(|value| Uuid::parse_str(value).ok()).ok_or_else(
+            || anyhow!("snapshot ai_binding_assignment row has malformed model_preset_id"),
+        )?;
+    let preset = legacy_presets.get(&preset_id).ok_or_else(|| {
+        anyhow!(
+            "snapshot ai_binding_assignment row references model_preset_id {preset_id} \
+             not present in the archive's ai_model_preset section"
+        )
+    })?;
+    object.insert("model_catalog_id".to_string(), preset.model_catalog_id.clone());
+    object.insert("system_prompt".to_string(), preset.system_prompt.clone());
+    object.insert("temperature".to_string(), preset.temperature.clone());
+    object.insert("top_p".to_string(), preset.top_p.clone());
+    object.insert(
+        "max_output_tokens_override".to_string(),
+        preset.max_output_tokens_override.clone(),
+    );
+    object.insert("extra_parameters_json".to_string(), preset.extra_parameters_json.clone());
+    Ok(())
+}
+
 async fn restore_library_archive_inner<R>(
     state: &AppState,
     library_id: Uuid,
@@ -1812,6 +1906,10 @@ where
         target_workspace_id,
         target_library_slug,
     );
+    // Pre-0004 archives carry `ai_model_preset` as a sibling section (bounded
+    // by one deployment/workspace's preset count). Buffered here and merged
+    // into `ai_binding` rows as they stream (see `merge_legacy_binding_row`).
+    let mut legacy_model_presets: HashMap<Uuid, LegacyModelPreset> = HashMap::new();
 
     while let Some(entry) = entries.next().await {
         let mut entry = entry.context("read tar entry")?;
@@ -1852,15 +1950,35 @@ where
             let (table_ref, _file) = split_section_path(rest)
                 .with_context(|| format!("malformed postgres path `{path}`"))?;
             let table = manifest_sections.require_postgres_table(table_ref)?;
-            pg_batcher.on_new_section(table, &mut tx).await?;
+
+            if table == "ai_model_preset" {
+                // Pre-0004 archive: buffer preset rows for the
+                // `ai_binding_assignment` section that follows. Never reaches
+                // the batcher — `ai_model_preset` has no storage table.
+                read_ndjson_entry_and(&mut entry, &mut |mut row| {
+                    row_scope.normalize_postgres_row(table, &mut row)?;
+                    let (id, preset) = LegacyModelPreset::from_row(&row)?;
+                    legacy_model_presets.insert(id, preset);
+                    Ok(())
+                })
+                .await
+                .with_context(|| format!("parse ndjson `{path}`"))?;
+                continue;
+            }
+
+            let storage_table = canonical_ai_config_storage_table(table);
+            pg_batcher.on_new_section(storage_table, &mut tx).await?;
             read_ndjson_entry_and(&mut entry, &mut |mut row| {
-                row_scope.normalize_postgres_row(table, &mut row)?;
+                row_scope.normalize_postgres_row(storage_table, &mut row)?;
+                if table == "ai_binding_assignment" {
+                    merge_legacy_binding_row(&mut row, &legacy_model_presets)?;
+                }
                 let mut kept = true;
-                if is_chunk_vector_relation_name(table) {
+                if is_chunk_vector_relation_name(storage_table) {
                     route_pg_vector_row_through_dedup(
                         &mut knowledge_dedup,
                         &mut pg_batcher,
-                        table,
+                        storage_table,
                         row,
                         &mut kept,
                     )?;
@@ -1868,13 +1986,13 @@ where
                     route_pg_row_through_dedup(
                         &mut knowledge_dedup,
                         &mut pg_batcher,
-                        table,
+                        storage_table,
                         row,
                         &mut kept,
                     )?;
                 }
                 if kept {
-                    *counts_pg.entry(table.to_string()).or_default() += 1;
+                    *counts_pg.entry(storage_table.to_string()).or_default() += 1;
                 }
                 Ok(())
             })
@@ -3067,18 +3185,17 @@ fn pg_insert_conflict_clause(table: &str) -> &'static str {
         // stack. The local workspace row remains the source of truth.
         "catalog_workspace" => " ON CONFLICT DO NOTHING",
         // AI-config rows are keyed by stable ids (system catalogs) or
-        // scope-partitioned natural keys (credentials/presets/bindings, each
-        // with three partial unique indexes per scope). A targetless
-        // `ON CONFLICT DO NOTHING` swallows a collision on ANY of those
-        // unique constraints, so whatever the target already holds wins —
-        // an import never clobbers a deployment's existing AI configuration,
-        // and a partial-key collision cannot abort the restore transaction.
+        // scope-partitioned natural keys (accounts/bindings, each with three
+        // partial unique indexes per scope). A targetless `ON CONFLICT DO
+        // NOTHING` swallows a collision on ANY of those unique constraints,
+        // so whatever the target already holds wins — an import never
+        // clobbers a deployment's existing AI configuration, and a
+        // partial-key collision cannot abort the restore transaction.
         "ai_provider_catalog"
         | "ai_model_catalog"
         | "ai_price_catalog"
-        | "ai_provider_credential"
-        | "ai_model_preset"
-        | "ai_binding_assignment" => " ON CONFLICT DO NOTHING",
+        | "ai_account"
+        | "ai_binding" => " ON CONFLICT DO NOTHING",
         "knowledge_document" => {
             " ON CONFLICT (document_id) DO UPDATE SET workspace_id = excluded.workspace_id, library_id = excluded.library_id, external_key = excluded.external_key, file_name = excluded.file_name, title = excluded.title, document_state = excluded.document_state, active_revision_id = excluded.active_revision_id, readable_revision_id = excluded.readable_revision_id, latest_revision_no = excluded.latest_revision_no, parent_document_id = excluded.parent_document_id, document_role = excluded.document_role, created_at = excluded.created_at, updated_at = excluded.updated_at, deleted_at = excluded.deleted_at"
         }
@@ -4532,6 +4649,125 @@ mod tests {
             "scope_kind": "library",
         });
         assert!(scope.normalize_postgres_row("ai_binding_assignment", &mut foreign).is_err());
+
+        // The canonical (post-0004) names go through the same normalizer.
+        let mut account = serde_json::json!({
+            "id": Uuid::now_v7(),
+            "workspace_id": source_workspace_id,
+            "library_id": serde_json::Value::Null,
+            "scope_kind": "workspace",
+        });
+        scope.normalize_postgres_row("ai_account", &mut account).unwrap();
+        assert_eq!(
+            required_uuid_field("ai_account", &account, "workspace_id").unwrap(),
+            target_workspace_id
+        );
+        let mut binding = serde_json::json!({
+            "id": Uuid::now_v7(),
+            "workspace_id": source_workspace_id,
+            "library_id": source_library_id,
+            "scope_kind": "library",
+        });
+        scope.normalize_postgres_row("ai_binding", &mut binding).unwrap();
+        assert_eq!(
+            required_uuid_field("ai_binding", &binding, "library_id").unwrap(),
+            target_library_id
+        );
+    }
+
+    /// Pre-0004 archives declare the old table names in `manifest.json`; a
+    /// restore must still recognize them as known snapshot tables (import
+    /// backward compatibility, migration 0004).
+    #[test]
+    fn legacy_ai_config_table_names_are_recognized_for_import() {
+        let manifest = manifest_with_sections(
+            vec![
+                "catalog_library",
+                "ai_provider_credential",
+                "ai_model_preset",
+                "ai_binding_assignment",
+            ],
+            false,
+        );
+        let sections = SnapshotManifestSections::from_manifest(&manifest).unwrap();
+        assert_eq!(
+            sections.require_postgres_table("ai_provider_credential").unwrap(),
+            "ai_provider_credential"
+        );
+        assert_eq!(sections.require_postgres_table("ai_model_preset").unwrap(), "ai_model_preset");
+        assert_eq!(
+            sections.require_postgres_table("ai_binding_assignment").unwrap(),
+            "ai_binding_assignment"
+        );
+    }
+
+    #[test]
+    fn canonical_ai_config_storage_table_renames_legacy_names_only() {
+        assert_eq!(canonical_ai_config_storage_table("ai_provider_credential"), "ai_account");
+        assert_eq!(canonical_ai_config_storage_table("ai_binding_assignment"), "ai_binding");
+        assert_eq!(canonical_ai_config_storage_table("ai_account"), "ai_account");
+        assert_eq!(canonical_ai_config_storage_table("ai_binding"), "ai_binding");
+        assert_eq!(canonical_ai_config_storage_table("ai_provider_catalog"), "ai_provider_catalog");
+    }
+
+    /// Core of the old-format import path: a pre-0004
+    /// `ai_binding_assignment` row plus its referenced `ai_model_preset`
+    /// row must merge into the exact shape a canonical `ai_binding` row
+    /// carries — `provider_credential_id` renamed to `account_id`,
+    /// `model_preset_id` replaced by the preset's inline fields.
+    #[test]
+    fn merge_legacy_binding_row_splices_preset_fields_and_renames_columns() {
+        let account_id = Uuid::now_v7();
+        let preset_id = Uuid::now_v7();
+        let model_catalog_id = Uuid::now_v7();
+
+        let mut presets = HashMap::new();
+        let preset_row = serde_json::json!({
+            "id": preset_id,
+            "model_catalog_id": model_catalog_id,
+            "system_prompt": "be terse",
+            "temperature": 0.2,
+            "top_p": 0.9,
+            "max_output_tokens_override": 4096,
+            "extra_parameters_json": {"seed": 7},
+        });
+        let (parsed_id, preset) = LegacyModelPreset::from_row(&preset_row).unwrap();
+        assert_eq!(parsed_id, preset_id);
+        presets.insert(parsed_id, preset);
+
+        let mut binding = serde_json::json!({
+            "id": Uuid::now_v7(),
+            "binding_purpose": "query_answer",
+            "provider_credential_id": account_id,
+            "model_preset_id": preset_id,
+            "binding_state": "active",
+            "scope_kind": "instance",
+        });
+        merge_legacy_binding_row(&mut binding, &presets).unwrap();
+
+        assert!(binding.get("provider_credential_id").is_none());
+        assert!(binding.get("model_preset_id").is_none());
+        assert_eq!(binding["account_id"], serde_json::json!(account_id));
+        assert_eq!(binding["model_catalog_id"], serde_json::json!(model_catalog_id));
+        assert_eq!(binding["system_prompt"], serde_json::json!("be terse"));
+        assert_eq!(binding["temperature"], serde_json::json!(0.2));
+        assert_eq!(binding["top_p"], serde_json::json!(0.9));
+        assert_eq!(binding["max_output_tokens_override"], serde_json::json!(4096));
+        assert_eq!(binding["extra_parameters_json"], serde_json::json!({"seed": 7}));
+    }
+
+    /// A binding whose `model_preset_id` was not seen in the archive's
+    /// `ai_model_preset` section (corrupt or truncated archive) must fail
+    /// loudly rather than silently drop the binding's parameters.
+    #[test]
+    fn merge_legacy_binding_row_rejects_dangling_preset_reference() {
+        let presets: HashMap<Uuid, LegacyModelPreset> = HashMap::new();
+        let mut binding = serde_json::json!({
+            "id": Uuid::now_v7(),
+            "provider_credential_id": Uuid::now_v7(),
+            "model_preset_id": Uuid::now_v7(),
+        });
+        assert!(merge_legacy_binding_row(&mut binding, &presets).is_err());
     }
 
     #[test]

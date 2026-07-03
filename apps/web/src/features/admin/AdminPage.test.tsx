@@ -310,72 +310,12 @@ describe("AdminPage routing", () => {
     expect(container.textContent).toContain("Total cost");
   });
 
-  it("renders the Library Hub at /admin/library/:id with section nav", async () => {
-    await renderAt("/admin/library/library-1");
-    expect(container.textContent).toContain("Library 1");
-    // Section switcher + Configure AI deep-link present.
-    expect(container.textContent).toContain("Configure AI");
-    expect(container.textContent).toContain("Overview");
-    expect(container.textContent).toContain("Backup");
-  });
-
-  it("keeps the Library Hub activity focused on per-library health, not the global queue", async () => {
-    await renderAt("/admin/library/library-1?section=activity");
-    expect(dashboardApiMock.getLibraryState).toHaveBeenCalled();
-    expect(adminApiMock.listIngestQueue).not.toHaveBeenCalled();
-    expect(container.textContent).not.toContain("Ingest Queue");
-  });
-
-  it("keeps the MCP source hint toggle checked after a successful save", async () => {
-    adminApiMock.updateLibraryMcpSettings.mockResolvedValue({
-      id: "library-1",
-      workspaceId: "ws-1",
-      slug: "library-1",
-      displayName: "Library 1",
-      lifecycleState: "active",
-      includeDocumentHintInMcpAnswers: true,
-      ingestionReadiness: { ready: true, missingBindingPurposes: [] },
-      recognitionPolicy: {},
-      webIngestPolicy: {},
-    });
-
-    await renderAt("/admin/library/library-1?section=mcp");
-
-    const checkbox = container.querySelector<HTMLElement>('[role="checkbox"]');
-    expect(checkbox).toBeTruthy();
-    expect(checkbox?.getAttribute("aria-checked")).toBe("false");
-
-    await act(async () => {
-      checkbox?.click();
-    });
-    await flush();
-
-    expect(adminApiMock.updateLibraryMcpSettings).toHaveBeenCalledWith("library-1", {
-      includeDocumentHintInMcpAnswers: true,
-    });
-    expect(checkbox?.getAttribute("aria-checked")).toBe("true");
-    expect(ADMIN_USER.setLibraries).toHaveBeenCalled();
-    expect(ADMIN_USER.setActiveLibrary).toHaveBeenCalledWith(
-      expect.objectContaining({ includeDocumentHintInMcpAnswers: true }),
-    );
-    expect(ADMIN_USER.refreshSession).toHaveBeenCalled();
-  });
-
-  it("enables the MCP source hint toggle from the routed library payload", async () => {
-    useAppMock.mockReturnValue({
-      ...ADMIN_USER,
-      activeLibrary: null,
-      libraries: [],
-    });
-
-    await renderAt("/admin/library/library-1?section=mcp");
-    await flush();
-
-    const checkbox = container.querySelector<HTMLElement>('[role="checkbox"]');
-    expect(checkbox).toBeTruthy();
-    expect(checkbox?.getAttribute("aria-checked")).toBe("true");
-    expect(checkbox?.hasAttribute("disabled")).toBe(false);
-    expect(checkbox?.getAttribute("data-disabled")).toBeNull();
+  it("renders the global audit log at /admin/audit", async () => {
+    await renderAt("/admin/audit");
+    // The per-library "Library Hub" route was dissolved: audit is now one global
+    // filtered journal; backup/restore/AI/MCP moved to catalog/System/inspector.
+    expect(adminApiMock.listAuditEvents).toHaveBeenCalled();
+    expect(container.textContent).toContain("Audit");
   });
 
   it("renders the AI configuration section at /admin/ai", async () => {
@@ -391,7 +331,10 @@ describe("AdminPage routing", () => {
   it("renders the global ingest queue section at /admin/queue", async () => {
     await renderAt("/admin/queue");
     expect(adminApiMock.listIngestQueue).toHaveBeenCalled();
-    expect(container.textContent).toContain("Global ingest queue");
+    // The page header carries the section title + description (the in-body
+    // duplicate blurb was removed when admin pages adopted the shared header).
+    expect(container.textContent).toContain("Queue");
+    expect(container.textContent).toContain("Document processing");
   });
 
   it("renders the users surface at /admin/users for an admin", async () => {
@@ -404,7 +347,8 @@ describe("AdminPage routing", () => {
 
   it("renders the system settings section at /admin/system", async () => {
     await renderAt("/admin/system");
-    expect(container.textContent).toContain("System settings");
+    expect(container.textContent).toContain("System");
+    expect(container.textContent).toContain("Instance defaults");
     expect(container.textContent).toContain("API");
   });
 

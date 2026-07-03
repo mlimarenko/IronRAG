@@ -6,46 +6,41 @@ import {
   resolveProviderModelDiscovery,
 } from "@/shared/lib/ai-provider";
 import type {
-  CreateCredentialRequest,
-  UpdateCredentialRequest,
+  CreateAccountRequest,
+  UpdateAccountRequest,
   CreateBindingRequest,
   UpdateBindingRequest,
   CreateProviderRequest,
   UpdateProviderRequest,
   CreateModelRequest,
   UpdateModelRequest,
-  CreateModelPresetRequest,
-  UpdateModelPresetRequest,
   CreatePriceOverrideRequest,
   UpdatePriceOverrideRequest,
 } from "@/shared/types/api-requests";
 import type {
   AdminSurface as AdminSurfaceResponse,
-  AiBindingAssignmentResponse,
+  AiAccountResponse,
+  AiBindingResponse,
   BindingValidationResponse,
   CatalogLibraryResponse,
   CatalogWorkspaceResponse,
-  CreateBindingAssignmentRequest as GeneratedCreateBindingRequest,
+  CreateAiAccountRequest as GeneratedCreateAccountRequest,
+  CreateAiBindingRequest as GeneratedCreateBindingRequest,
   CreateModelCatalogRequest as GeneratedCreateModelRequest,
-  CreateModelPresetRequest as GeneratedCreateModelPresetRequest,
   CreateProviderCatalogRequest as GeneratedCreateProviderRequest,
-  CreateProviderCredentialRequest as GeneratedCreateCredentialRequest,
   CreateWorkspacePriceOverrideRequest as GeneratedCreatePriceOverrideRequest,
   IngestQueueMoveDirection,
   IngestQueueResponse,
   ModelAvailabilityState,
   ModelCatalogEntryResponse,
-  ModelPresetResponse,
   PriceCatalogEntryResponse,
   ProviderCatalogEntryResponse,
-  ProviderCredentialResponse,
-  UpdateBindingAssignmentRequest as GeneratedUpdateBindingRequest,
+  UpdateAiAccountRequest as GeneratedUpdateAccountRequest,
+  UpdateAiBindingRequest as GeneratedUpdateBindingRequest,
   UpdateModelCatalogRequest as GeneratedUpdateModelRequest,
-  UpdateModelPresetRequest as GeneratedUpdateModelPresetRequest,
   UpdateProviderCatalogRequest as GeneratedUpdateProviderRequest,
-  UpdateProviderCredentialRequest as GeneratedUpdateCredentialRequest,
   UpdateWorkspacePriceOverrideRequest as GeneratedUpdatePriceOverrideRequest,
-  ListAiCredentialsData,
+  ListAiAccountsData,
   ListAiModelsData,
   ListAiPricesData,
   ListAuditEventsData,
@@ -69,7 +64,7 @@ import type {
 type ListAuditEventsParams = NonNullable<ListAuditEventsData["query"]>;
 type ListIngestQueueParams = NonNullable<ListIngestQueueData["query"]>;
 
-type AiScopeParams = NonNullable<ListAiCredentialsData["query"]>;
+type AiScopeParams = NonNullable<ListAiAccountsData["query"]>;
 
 export type ListModelsParams = NonNullable<ListAiModelsData["query"]>;
 type ListPricesParams = NonNullable<ListAiPricesData["query"]>;
@@ -169,9 +164,9 @@ export function parseModelCatalogResponse(
         `Model catalog entry ${id} has invalid availabilityState`,
       );
     }
-    if (!Array.isArray(model.availableCredentialIds)) {
+    if (!Array.isArray(model.availableAccountIds)) {
       throw new Error(
-        `Model catalog entry ${id} has invalid availableCredentialIds`,
+        `Model catalog entry ${id} has invalid availableAccountIds`,
       );
     }
   }
@@ -311,38 +306,38 @@ export const adminApi = {
     Ai.deleteAiModel({ path: { modelId } }).then((result) => {
       unwrap(result);
     }),
-  listCredentials: (params: AiScopeParams = {}) =>
-    Ai.listAiCredentials({ query: params }).then((result) =>
-      unwrap<ProviderCredentialResponse[]>(result),
+  listAccounts: (params: AiScopeParams = {}) =>
+    Ai.listAiAccounts({ query: params }).then((result) =>
+      unwrap<AiAccountResponse[]>(result),
     ),
-  createCredential: (data: CreateCredentialRequest) =>
-    Ai.createAiCredential({
-      body: toGeneratedRequest<GeneratedCreateCredentialRequest>(data),
-    }).then((result) => unwrap<ProviderCredentialResponse>(result)),
-  updateCredential: (credentialId: string, data: UpdateCredentialRequest) =>
-    Ai.updateAiCredential({
-      path: { credentialId },
-      body: toGeneratedRequest<GeneratedUpdateCredentialRequest>(data),
-    }).then((result) => unwrap<ProviderCredentialResponse>(result)),
-  deleteCredential: (credentialId: string) =>
-    Ai.deleteAiCredential({ path: { credentialId } }).then((result) => {
+  createAccount: (data: CreateAccountRequest) =>
+    Ai.createAiAccount({
+      body: toGeneratedRequest<GeneratedCreateAccountRequest>(data),
+    }).then((result) => unwrap<AiAccountResponse>(result)),
+  updateAccount: (accountId: string, data: UpdateAccountRequest) =>
+    Ai.updateAiAccount({
+      path: { accountId },
+      body: toGeneratedRequest<GeneratedUpdateAccountRequest>(data),
+    }).then((result) => unwrap<AiAccountResponse>(result)),
+  deleteAccount: (accountId: string) =>
+    Ai.deleteAiAccount({ path: { accountId } }).then((result) => {
       unwrap(result);
     }),
   listBindings: (
     params: Required<Pick<AiScopeParams, "scopeKind">> & AiScopeParams,
   ) =>
     Ai.listAiLibraryBindings({ query: params }).then((result) =>
-      unwrap<AiBindingAssignmentResponse[]>(result),
+      unwrap<AiBindingResponse[]>(result),
     ),
   createBinding: (data: CreateBindingRequest) =>
     Ai.createAiLibraryBinding({
       body: toGeneratedRequest<GeneratedCreateBindingRequest>(data),
-    }).then((result) => unwrap<AiBindingAssignmentResponse>(result)),
+    }).then((result) => unwrap<AiBindingResponse>(result)),
   updateBinding: (bindingId: string, data: UpdateBindingRequest) =>
     Ai.updateAiLibraryBinding({
       path: { bindingId },
       body: toGeneratedRequest<GeneratedUpdateBindingRequest>(data),
-    }).then((result) => unwrap<AiBindingAssignmentResponse>(result)),
+    }).then((result) => unwrap<AiBindingResponse>(result)),
   deleteBinding: (bindingId: string) =>
     Ai.deleteAiLibraryBinding({ path: { bindingId } }).then((result) => {
       unwrap(result);
@@ -351,23 +346,6 @@ export const adminApi = {
     Ai.validateAiLibraryBinding({ path: { bindingId } }).then((result) =>
       unwrap<BindingValidationResponse>(result),
     ),
-  listModelPresets: (params: AiScopeParams = {}) =>
-    Ai.listAiModelPresets({ query: params }).then((result) =>
-      unwrap<ModelPresetResponse[]>(result),
-    ),
-  createModelPreset: (data: CreateModelPresetRequest) =>
-    Ai.createAiModelPreset({
-      body: toGeneratedRequest<GeneratedCreateModelPresetRequest>(data),
-    }).then((result) => unwrap<ModelPresetResponse>(result)),
-  updateModelPreset: (presetId: string, data: UpdateModelPresetRequest) =>
-    Ai.updateAiModelPreset({
-      path: { presetId },
-      body: toGeneratedRequest<GeneratedUpdateModelPresetRequest>(data),
-    }).then((result) => unwrap<ModelPresetResponse>(result)),
-  deleteModelPreset: (presetId: string) =>
-    Ai.deleteAiModelPreset({ path: { presetId } }).then((result) => {
-      unwrap(result);
-    }),
   listPrices: (params: ListPricesParams = {}) =>
     Ai.listAiPrices({ query: params }).then((result) =>
       unwrap<PriceCatalogEntryResponse[]>(result),

@@ -15,19 +15,18 @@ import type {
   DocumentListSortKey as GeneratedDocumentListSortKey,
   DocumentListSortOrder as GeneratedDocumentListSortOrder,
   DocumentStatus as GeneratedDocumentStatus,
-  IncludeKind,
   ListContentDocumentsData,
   ListContentPreparedSegmentsData,
   OverwriteMode,
   PreparedSegmentDetail,
   PreparedSegmentsPageResponse,
   SnapshotImportAcceptedResponse,
-  SnapshotImportReportResponse,
   TechnicalFactsPageResponse,
   TypedTechnicalFact,
   WebDiscoveredPage,
   WebIngestRunReceipt as GeneratedWebIngestRunReceipt,
   WebIngestRunSummary,
+  WorkspaceLibraryImportReportResponse,
 } from "./generated";
 import { ASYNC_OPERATION_TERMINAL_STATES } from "./ops";
 import { ApiError, type ApiErrorBody, unwrap } from "./runtime";
@@ -108,10 +107,10 @@ type UpdateDocumentHintResponse = {
 };
 
 interface DocumentUploadOptions {
-  documentHint?: string;
-  externalKey?: string;
-  fileName?: string;
-  title?: string;
+  documentHint?: string | undefined;
+  externalKey?: string | undefined;
+  fileName?: string | undefined;
+  title?: string | undefined;
 }
 
 interface PreparedSegmentsPageParams {
@@ -340,14 +339,15 @@ export const documentsApi = {
     }).then((result): BatchReprocessAcceptedResponse => unwrap(result)),
 };
 
-export type LibrarySnapshotIncludeKind = Extract<
-  IncludeKind,
-  "library_data" | "blobs" | "workspace" | "ai_config"
->;
+export type LibrarySnapshotIncludeKind =
+  | "library_data"
+  | "blobs"
+  | "workspace"
+  | "ai_config";
 
 export type LibrarySnapshotOverwriteMode = OverwriteMode;
 
-type LibrarySnapshotImportReport = SnapshotImportReportResponse;
+type LibrarySnapshotImportReport = WorkspaceLibraryImportReportResponse;
 type LibrarySnapshotImportAccepted = SnapshotImportAcceptedResponse;
 
 export type LibrarySnapshotImportResult =

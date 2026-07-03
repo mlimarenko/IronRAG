@@ -4,6 +4,7 @@ import {
   Copy,
   ExternalLink,
   Globe,
+  ListFilter,
   Loader2,
   RotateCw,
   Search,
@@ -18,8 +19,12 @@ import {
   type WebIngestRunPageItem,
 } from "@/shared/api";
 import { Button } from "@/shared/components/ui/button";
+import { FilterSelect } from "@/shared/components/FilterSelect";
 import { Input } from "@/shared/components/ui/input";
 import { ScrollArea } from "@/shared/components/ui/scroll-area";
+import { SelectItem } from "@/shared/components/ui/select";
+import { WorkbenchEmptyState } from "@/shared/components/layout/WorkbenchEmptyState";
+import { StatusBadge, type StatusTone } from "@/shared/components/StatusBadge";
 import { cn } from "@/shared/lib/utils";
 
 const TERMINAL_RUN_STATES = new Set([
@@ -54,41 +59,41 @@ const PAGE_STATE_ORDER = [
   "canceled",
 ] as const;
 
-function runStatusClass(state: string): string {
+function runStatusTone(state: string): StatusTone {
   switch (state) {
     case "completed":
-      return "status-ready";
+      return "ready";
     case "completed_partial":
-      return "status-warning";
+      return "warning";
     case "failed":
-      return "status-failed";
+      return "failed";
     case "canceled":
-      return "status-stalled";
+      return "stalled";
     default:
-      return "status-processing";
+      return "processing";
   }
 }
 
 function pageStateDotClass(state: string | undefined): string {
   switch (state) {
     case "processed":
-      return "bg-green-500";
+      return "bg-status-ready";
     case "failed":
-      return "bg-red-500";
+      return "bg-status-failed";
     case "excluded":
-      return "bg-yellow-500";
+      return "bg-status-warning";
     case "duplicates":
-      return "bg-sky-500";
+      return "bg-status-processing";
     case "blocked":
-      return "bg-violet-500";
+      return "bg-primary";
     case "queued":
-      return "bg-slate-400";
+      return "bg-status-queued";
     case "processing":
-      return "bg-amber-500";
+      return "bg-status-warning";
     case "canceled":
-      return "bg-slate-500";
+      return "bg-status-stalled";
     default:
-      return "bg-gray-400";
+      return "bg-muted-foreground";
   }
 }
 
@@ -101,12 +106,12 @@ function humanizeRunMode(mode: string, t: TFunction): string {
 function humanizeRunState(state: string, t: TFunction): string {
   const key = `dashboard.runStateLabels.${state}`;
   const translated = t(key);
-  return translated === key ? state.replaceAll("_", " ") : translated;
+  return translated === key ? state.replace(/_/g, " ") : translated;
 }
 
 function humanizePageState(state: string, t: TFunction): string {
   const translated = t(`documents.pageStateLabels.${state}`);
-  return translated === `documents.pageStateLabels.${state}` ? state.replaceAll("_", " ") : translated;
+  return translated === `documents.pageStateLabels.${state}` ? state.replace(/_/g, " ") : translated;
 }
 
 function filterPatternCount(
@@ -285,7 +290,7 @@ function ExpandedRunPages({
           {runSummaryItems.map((item) => (
             <span
               key={item.key}
-              className="rounded-full border bg-background px-2.5 py-1 text-[11px] text-muted-foreground"
+              className="rounded-full border bg-background px-2.5 py-1 text-2xs text-muted-foreground"
             >
               {humanizePageState(item.key, t)}:{" "}
               <span className="font-semibold text-foreground">
@@ -308,43 +313,24 @@ function ExpandedRunPages({
               placeholder={t("documents.pageSearchPlaceholder")}
             />
           </div>
-          <div className="flex min-w-0 flex-wrap gap-1">
-            <button
-              type="button"
-              className={cn(
-                "cursor-pointer rounded-lg px-2.5 py-1 text-[11px] transition-colors",
-                pageStateFilter === "all"
-                  ? "bg-background font-semibold text-foreground shadow-soft"
-                  : "text-muted-foreground hover:bg-background/70 hover:text-foreground",
-              )}
-              onClick={() => {
-                setPageStateFilter("all");
-                setPageWindowIndex(0);
-              }}
-            >
-              {t("documents.all")}
-            </button>
+          <FilterSelect
+            value={pageStateFilter}
+            onValueChange={(state) => {
+              setPageStateFilter(state);
+              setPageWindowIndex(0);
+            }}
+            icon={<ListFilter />}
+            className="w-[160px]"
+          >
+            <SelectItem value="all">{t("documents.all")}</SelectItem>
             {availablePageStates.map((state) => (
-              <button
-                key={state}
-                type="button"
-                className={cn(
-                  "cursor-pointer rounded-lg px-2.5 py-1 text-[11px] transition-colors",
-                  pageStateFilter === state
-                    ? "bg-background font-semibold text-foreground shadow-soft"
-                    : "text-muted-foreground hover:bg-background/70 hover:text-foreground",
-                )}
-                onClick={() => {
-                  setPageStateFilter(state);
-                  setPageWindowIndex(0);
-                }}
-              >
+              <SelectItem key={state} value={state}>
                 {humanizePageState(state, t)}
-              </button>
+              </SelectItem>
             ))}
-          </div>
+          </FilterSelect>
           <div className="flex items-center gap-2 xl:ml-auto">
-            <span className="text-[11px] text-muted-foreground">
+            <span className="text-2xs text-muted-foreground">
               {t("documents.pageWindowSummary", {
                 from: visibleRangeStart,
                 to: visibleRangeEnd,
@@ -370,16 +356,15 @@ function ExpandedRunPages({
       </div>
 
       {filteredRunPages.length === 0 ? (
-        <div className="px-4 py-8 text-center">
-          <div className="text-sm font-semibold">
-            {t("documents.noMatchingPages")}
-          </div>
-          <div className="mt-1 text-xs text-muted-foreground">
-            {runPages.length === 0
+        <WorkbenchEmptyState
+          className="py-8"
+          title={t("documents.noMatchingPages")}
+          description={
+            runPages.length === 0
               ? t("documents.noMatchingPagesDesc")
-              : t("documents.noMatchingPagesFilteredDesc")}
-          </div>
-        </div>
+              : t("documents.noMatchingPagesFilteredDesc")
+          }
+        />
       ) : (
         <>
           <div className="space-y-2 px-4 py-3">
@@ -400,7 +385,7 @@ function ExpandedRunPages({
                     <div className="truncate text-xs font-medium" title={url}>
                       {url || "?"}
                     </div>
-                    <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-[10px] text-muted-foreground">
+                    <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-2xs text-muted-foreground">
                       <span>
                         {humanizePageState(page.candidateState ?? "unknown", t)}
                       </span>
@@ -457,7 +442,7 @@ function ExpandedRunPages({
 
           {filteredRunPages.length > PAGE_WINDOW_SIZE && (
             <div className="flex items-center justify-between border-t px-4 py-3">
-              <span className="text-[11px] text-muted-foreground">
+              <span className="text-2xs text-muted-foreground">
                 {t("documents.pageLabel", {
                   page: visiblePageWindowIndex + 1,
                   total: totalPageWindows,
@@ -544,17 +529,11 @@ export function WebRunsPanel({
 
   if (webRuns.length === 0) {
     return (
-      <div className="empty-state py-20">
-        <div className="mb-4 flex h-14 w-14 items-center justify-center rounded-2xl bg-muted">
-          <Globe className="h-7 w-7 text-muted-foreground" />
-        </div>
-        <h2 className="text-base font-bold tracking-tight">
-          {t("documents.webIngestRuns")}
-        </h2>
-        <p className="mt-2 text-sm text-muted-foreground">
-          {t("documents.noDocsDesc")}
-        </p>
-      </div>
+      <WorkbenchEmptyState
+        icon={<Globe className="h-7 w-7 text-muted-foreground" />}
+        title={t("documents.webIngestRuns")}
+        description={t("documents.noWebRunsDesc")}
+      />
     );
   }
 
@@ -562,8 +541,8 @@ export function WebRunsPanel({
     <div className="flex h-full min-h-0 flex-col">
       {activeRuns.length > 0 && (
         <div className="mx-4 mt-4 flex flex-wrap items-center gap-2">
-          <div className="flex items-center gap-2 rounded-xl border bg-card px-3 py-2 text-xs shadow-soft">
-            <Loader2 className="h-3 w-3 animate-spin text-primary" />
+          <div className="workbench-surface flex items-center gap-2 px-3 py-2 text-xs">
+            <Loader2 className="h-3.5 w-3.5 animate-spin text-primary" />
             <span className="font-semibold">
               {t("documents.webRunActiveSummary", { count: activeRuns.length })}
             </span>
@@ -577,7 +556,7 @@ export function WebRunsPanel({
           inner one and makes the outer run list look "frozen" once a
           single run is expanded. Refresh button and run-count header
           live in DocumentsPageHeader and are not duplicated here. */}
-      <div className="m-4 flex min-h-0 flex-1 flex-col overflow-hidden rounded-xl border bg-card">
+      <div className="workbench-surface m-4 flex min-h-0 flex-1 flex-col overflow-hidden">
         <ScrollArea className="min-h-0 flex-1">
           <div className="divide-y">
             {webRuns.map((run) => {
@@ -599,11 +578,9 @@ export function WebRunsPanel({
                       onClick={() => void handleToggleRun(run.runId)}
                     >
                       <div className="flex flex-wrap items-center gap-2">
-                        <span
-                          className={`status-badge ${runStatusClass(run.runState)}`}
-                        >
+                        <StatusBadge tone={runStatusTone(run.runState)}>
                           {humanizeRunState(run.runState, t)}
-                        </span>
+                        </StatusBadge>
                         <span
                           className="truncate text-sm font-semibold"
                           title={run.seedUrl}
@@ -611,7 +588,7 @@ export function WebRunsPanel({
                           {run.seedUrl}
                         </span>
                       </div>
-                      <div className="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-muted-foreground">
+                      <div className="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1 text-2xs text-muted-foreground">
                         <span>{humanizeRunMode(run.mode, t)}</span>
                         {run.mode === "recursive_crawl" && (
                           <span>

@@ -1,6 +1,7 @@
 import { useQuery } from '@tanstack/react-query';
 import type { TFunction } from 'i18next';
-import { Copy, Terminal, Code2, Brain } from 'lucide-react';
+import { Link } from 'react-router-dom';
+import { ArrowRight, Copy, Terminal, Code2, Brain, KeyRound } from 'lucide-react';
 import { Button } from '@/shared/components/ui/button';
 import { DataState } from '@/shared/components/DataState';
 import { queries } from '@/shared/api';
@@ -73,10 +74,12 @@ type McpConnectGuideProps = {
 };
 
 /**
- * Pure MCP connect guide (RM-06): server URLs, parity notice, the canonical
- * per-library system-prompt preview, and per-client config snippets. The live
- * document-hint toggle no longer lives here — it moved to the Library Hub MCP
- * section, next to the library it configures.
+ * Instance-level MCP connect guide (RM-06): server URLs, token/scope note,
+ * parity notice, the recommended system-prompt preview, and per-client config
+ * snippets. This is not per-library — a client connects with a bearer token
+ * whose scope (system / workspace / library set) governs what it can reach, so
+ * the guide lives on the System page. The per-library document-hint toggle is a
+ * separate library setting and lives in the Libraries catalog inspector.
  */
 export function McpConnectGuide({ t, libraryId }: McpConnectGuideProps) {
   const promptQuery = useQuery({
@@ -104,6 +107,22 @@ export function McpConnectGuide({ t, libraryId }: McpConnectGuideProps) {
           <code className="font-mono text-xs font-bold">{origin}/v1/mcp/capabilities</code>
         </div>
       </div>
+      <div className="workbench-surface flex items-start gap-3 p-4 text-xs leading-relaxed">
+        <div className="mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-xl bg-surface-sunken">
+          <KeyRound className="h-4 w-4 text-muted-foreground" />
+        </div>
+        <div className="min-w-0">
+          <div className="section-label mb-1.5">{t('admin.mcpScopeTitle')}</div>
+          <p className="text-muted-foreground">{t('admin.mcpScopeNote')}</p>
+          <Link
+            to="/admin/access"
+            className="mt-2 inline-flex items-center gap-1 text-xs font-semibold text-primary hover:underline"
+          >
+            {t('admin.nav.access')}
+            <ArrowRight className="h-3.5 w-3.5" />
+          </Link>
+        </div>
+      </div>
       <div className="workbench-surface p-4 text-xs leading-relaxed">
         <div className="section-label mb-1.5">{t('admin.mcpParityTitle')}</div>
         <p className="text-muted-foreground">{t('admin.mcpParityDesc')}</p>
@@ -122,12 +141,12 @@ export function McpConnectGuide({ t, libraryId }: McpConnectGuideProps) {
               if (systemPrompt) void navigator.clipboard.writeText(systemPrompt);
             }}
           >
-            <Copy className="mr-1.5 h-3 w-3" /> {t('admin.copy')}
+            <Copy className="mr-1.5 h-3.5 w-3.5" /> {t('admin.copy')}
           </Button>
         </div>
         <DataState query={{ isLoading: promptQuery.isLoading, error: promptQuery.error, data: systemPrompt ?? undefined }}>
           {(prompt) => (
-            <pre className="max-h-96 overflow-x-auto overflow-y-auto whitespace-pre-wrap rounded-xl border border-border/50 bg-surface-sunken p-4 font-mono text-xs leading-relaxed">
+            <pre className="max-h-96 overflow-x-auto overflow-y-auto whitespace-pre-wrap rounded-xl bg-surface-sunken p-4 font-mono text-xs leading-relaxed">
               {prompt}
             </pre>
           )}
@@ -146,7 +165,7 @@ export function McpConnectGuide({ t, libraryId }: McpConnectGuideProps) {
               <h3 className="text-sm font-bold">{cfg.name}</h3>
             </div>
             <div className="p-4">
-              <pre className="overflow-x-auto rounded-xl border border-border/50 bg-surface-sunken p-4 font-mono text-xs leading-relaxed">
+              <pre className="overflow-x-auto rounded-xl bg-surface-sunken p-4 font-mono text-xs leading-relaxed">
                 {cfg.config}
               </pre>
               <div className="mt-3 flex gap-2">
@@ -155,7 +174,7 @@ export function McpConnectGuide({ t, libraryId }: McpConnectGuideProps) {
                   size="sm"
                   onClick={() => void navigator.clipboard.writeText(cfg.config)}
                 >
-                  <Copy className="mr-1.5 h-3 w-3" /> {t('admin.copy')}
+                  <Copy className="mr-1.5 h-3.5 w-3.5" /> {t('admin.copy')}
                 </Button>
               </div>
             </div>

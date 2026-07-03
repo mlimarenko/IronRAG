@@ -59,7 +59,7 @@ export function DocumentEditorOverlay({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="left-1/2 top-1/2 flex h-[min(96dvh,1120px)] w-[min(98vw,1600px)] max-w-none -translate-x-1/2 -translate-y-1/2 flex-col gap-0 overflow-hidden rounded-[28px] border border-border/70 bg-background p-0 shadow-[0_32px_120px_hsl(var(--foreground)/0.18)]">
+      <DialogContent className="left-1/2 top-1/2 flex h-[min(96dvh,1120px)] w-[min(98vw,1600px)] max-w-none -translate-x-1/2 -translate-y-1/2 flex-col gap-0 overflow-hidden rounded-xl border border-border/70 bg-background p-0 shadow-[0_32px_120px_hsl(var(--foreground)/0.18)]">
         <DialogHeader className="border-b bg-background/95 px-6 py-5 text-left backdrop-blur supports-[backdrop-filter]:bg-background/90 sm:px-8 sm:py-6">
           <DialogTitle className="pr-10 text-[1.55rem] font-semibold tracking-tight">
             {title}

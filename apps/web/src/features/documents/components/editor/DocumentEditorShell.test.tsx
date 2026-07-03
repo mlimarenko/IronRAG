@@ -215,7 +215,8 @@ describe('DocumentEditorShell', () => {
     expect(container.textContent).toContain('All changes saved');
     expect(container.textContent).not.toContain('Unsaved changes');
 
-    const saveButton = Array.from(container.querySelectorAll('button')).at(-1);
+    const saveButtons = Array.from(container.querySelectorAll('button'));
+    const saveButton = saveButtons[saveButtons.length - 1];
     expect(saveButton?.getAttribute('disabled')).not.toBeNull();
   });
 
@@ -376,7 +377,7 @@ describe('DocumentEditorShell', () => {
     await flushUi();
 
     const buttons = Array.from(container.querySelectorAll('button'));
-    const saveButton = buttons.at(-1);
+    const saveButton = buttons[buttons.length - 1];
     expect(saveButton).toBeTruthy();
 
     await act(async () => {

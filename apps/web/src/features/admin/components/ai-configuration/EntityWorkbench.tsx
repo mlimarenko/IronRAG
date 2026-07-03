@@ -3,6 +3,7 @@ import { useTranslation } from 'react-i18next';
 import { ArrowDown, ArrowUp, ArrowUpDown, Search, X } from 'lucide-react';
 
 import { DataState } from '@/shared/components/DataState';
+import { WorkbenchEmptyState } from '@/shared/components/layout/WorkbenchEmptyState';
 import { Badge } from '@/shared/components/ui/badge';
 import { Button } from '@/shared/components/ui/button';
 import { Input } from '@/shared/components/ui/input';
@@ -194,7 +195,7 @@ export function EntityWorkbench<T>({
       <div className="flex flex-wrap items-center gap-3 border-b border-border/70 px-4 py-3">
         <div className="flex items-center gap-2">
           <h3 className="text-sm font-bold tracking-tight">{title}</h3>
-          <Badge variant="outline" className="font-mono text-[11px]">{count}</Badge>
+          <Badge variant="outline" className="font-mono text-2xs">{count}</Badge>
         </div>
         {matchesFilter && (
           <div className="relative ml-auto w-full max-w-[280px] sm:ml-2">
@@ -217,29 +218,56 @@ export function EntityWorkbench<T>({
         <div className="flex min-h-0 flex-1 flex-col">
           <DataState
             query={state}
-            emptyRender={(
-              <div className="m-4 rounded-md border border-dashed border-border/70 p-6 text-sm text-muted-foreground">
-                {emptyMessage}
-              </div>
-            )}
+            emptyRender={<WorkbenchEmptyState className="m-4" title={emptyMessage} />}
           >
             {() => (
               <div className="flex min-h-0 flex-1 flex-col">
                 <div className="min-h-0 flex-1 overflow-auto">
                   {filteredRows.length === 0 ? (
-                    <div className="m-4 rounded-md border border-dashed border-border/70 p-6 text-sm text-muted-foreground">
-                      {emptyMessage}
-                    </div>
+                    <WorkbenchEmptyState className="m-4" title={emptyMessage} />
                   ) : (
-                    <table className="min-w-full table-auto text-sm">
-                      <thead
-                        className="sticky top-0 z-10"
-                        style={{
-                          background:
-                            'linear-gradient(180deg, hsl(var(--card)), hsl(var(--card) / 0.95))',
-                          backdropFilter: 'blur(8px)',
-                        }}
-                      >
+                    <>
+                      <div className="space-y-3 p-3 xl:hidden">
+                        {pagedRows.map(row => {
+                          const key = rowKey(row);
+                          const selected = selectedKey === key;
+                          return (
+                            <article
+                              key={key}
+                              aria-selected={selected}
+                              className={`workbench-surface cursor-pointer p-4 transition-all ${
+                                selected ? 'border-primary/40 bg-primary/5' : ''
+                              }`}
+                              onClick={() => setSelectedKey(selected ? null : key)}
+                            >
+                              <div className="grid grid-cols-2 gap-x-3 gap-y-2 text-xs">
+                                {columns.map(col => (
+                                  <div key={col.key} className={col.align === 'right' ? 'text-right' : ''}>
+                                    <div className="section-label truncate">{col.header}</div>
+                                    <div className="mt-0.5 font-semibold">{col.cell(row)}</div>
+                                  </div>
+                                ))}
+                              </div>
+                              {rowActions && (
+                                <div
+                                  className="mt-3 flex items-center justify-end gap-1 border-t border-border/70 pt-3"
+                                  onClick={event => event.stopPropagation()}
+                                >
+                                  {rowActions(row)}
+                                </div>
+                              )}
+                            </article>
+                          );
+                        })}
+                      </div>
+                      <table className="hidden min-w-full table-fixed text-sm xl:table">
+                      <colgroup>
+                        {columns.map(col => (
+                          <col key={col.key} className={col.width ?? ''} />
+                        ))}
+                        {rowActions && <col className="w-24" />}
+                      </colgroup>
+                      <thead className="sticky top-0 z-10 bg-card">
                         <tr className="border-b text-left">
                           {columns.map(col => {
                             const sortable = Boolean(col.sortValue);
@@ -252,7 +280,7 @@ export function EntityWorkbench<T>({
                             return (
                               <th
                                 key={col.key}
-                                className={`section-label whitespace-nowrap px-4 py-2.5 ${col.width ?? ''} ${col.align === 'right' ? 'text-right' : ''}`}
+                                className={`section-label whitespace-nowrap px-4 py-3 ${col.align === 'right' ? 'text-right' : ''}`}
                               >
                                 {sortable ? (
                                   <button
@@ -264,7 +292,7 @@ export function EntityWorkbench<T>({
                                   >
                                     <span>{col.header}</span>
                                     <Icon
-                                      className={`h-3 w-3 ${
+                                      className={`h-3.5 w-3.5 ${
                                         active ? 'text-foreground' : 'text-muted-foreground/50'
                                       }`}
                                     />
@@ -276,7 +304,7 @@ export function EntityWorkbench<T>({
                             );
                           })}
                           {rowActions && (
-                            <th className="section-label w-24 whitespace-nowrap px-4 py-2.5 text-right">
+                            <th className="section-label w-24 whitespace-nowrap px-4 py-3 text-right">
                               {t('admin.actions')}
                             </th>
                           )}
@@ -299,14 +327,14 @@ export function EntityWorkbench<T>({
                               {columns.map(col => (
                                 <td
                                   key={col.key}
-                                  className={`px-4 py-2.5 align-middle ${col.align === 'right' ? 'text-right' : ''}`}
+                                  className={`px-4 py-3 align-middle ${col.align === 'right' ? 'text-right' : ''}`}
                                 >
                                   {col.cell(row)}
                                 </td>
                               ))}
                               {rowActions && (
                                 <td
-                                  className="px-4 py-2.5 text-right align-middle"
+                                  className="px-4 py-3 text-right align-middle"
                                   onClick={event => event.stopPropagation()}
                                 >
                                   <div className="inline-flex items-center gap-1">
@@ -318,7 +346,8 @@ export function EntityWorkbench<T>({
                           );
                         })}
                       </tbody>
-                    </table>
+                      </table>
+                    </>
                   )}
                 </div>
                 {filteredRows.length > 0 && (

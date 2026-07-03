@@ -2,7 +2,6 @@ import { lazy, Suspense, type ReactNode } from "react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { BrowserRouter, Route, Routes, Navigate } from "react-router-dom";
 import { Toaster as Sonner } from "@/shared/components/ui/sonner";
-import { Toaster } from "@/shared/components/ui/toaster";
 import { TooltipProvider } from "@/shared/components/ui/tooltip";
 import { FeatureErrorBoundary } from "@/shared/components/FeatureErrorBoundary";
 import { AppProvider } from "@/shared/contexts/AppContext";
@@ -24,13 +23,18 @@ const AssistantPage = lazy(() => import("@/features/assistant/AssistantPage"));
 const AdminPage = lazy(() => import("@/features/admin/AdminPage"));
 const SwaggerPage = lazy(() => import("@/features/swagger/SwaggerPage"));
 const NotFoundPage = lazy(() => import("@/app/NotFoundPage"));
-const ReactQueryDevtools =
-  import.meta.env.DEV === true
-    ? lazy(async () => {
-        const { ReactQueryDevtools } = await import("@tanstack/react-query-devtools");
-        return { default: ReactQueryDevtools };
-      })
-    : null;
+function queryDevtoolsEnabled() {
+  if (import.meta.env.DEV !== true) return false;
+  if (import.meta.env.VITE_ENABLE_QUERY_DEVTOOLS === "true") return true;
+  return new URLSearchParams(window.location.search).get("queryDevtools") === "1";
+}
+
+const ReactQueryDevtools = queryDevtoolsEnabled()
+  ? lazy(async () => {
+      const { ReactQueryDevtools } = await import("@tanstack/react-query-devtools");
+      return { default: ReactQueryDevtools };
+    })
+  : null;
 
 // Shared QueryClient. Defaults tuned for an internal back-office app:
 //   - staleTime 30s: small but non-zero so a remount inside the same screen
@@ -173,7 +177,6 @@ const App = () => (
     <TooltipProvider>
       <PreferencesProvider>
       <AppProvider>
-        <Toaster />
         <Sonner />
         <BrowserRouter>
           <Routes>

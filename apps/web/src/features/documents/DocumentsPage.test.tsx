@@ -133,7 +133,7 @@ vi.mock('@/features/documents/components/DocumentsInspectorPanel', () => ({
           {props.editorActionReadOnly ? 'View' : 'Edit'} {props.selectedDoc.fileName}
         </button>
         {props.onViewInGraph && (
-          <button onClick={() => props.onViewInGraph()}>View in Graph</button>
+          <button onClick={() => props.onViewInGraph?.()}>View in Graph</button>
         )}
       </div>
     ) : null,

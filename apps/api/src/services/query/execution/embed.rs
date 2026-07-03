@@ -51,7 +51,7 @@ pub(super) fn embedding_cache_key(
     update_framed(&mut hasher, binding.provider_catalog_id.as_bytes());
     update_framed(&mut hasher, binding.provider_kind.as_bytes());
     update_framed(&mut hasher, binding.provider_base_url.as_deref().unwrap_or("").as_bytes());
-    update_framed(&mut hasher, binding.credential_id.as_bytes());
+    update_framed(&mut hasher, binding.account_id.as_bytes());
     update_framed(&mut hasher, binding.model_catalog_id.as_bytes());
     update_framed(&mut hasher, binding.model_name.as_bytes());
     // `serde_json::Value` has no stable `Hash`; serialize to its canonical
@@ -178,7 +178,7 @@ mod tests {
             provider_kind: "provider-alpha".to_string(),
             provider_base_url: Some("https://alpha.example/v1".to_string()),
             provider_api_style: "openai_compatible".to_string(),
-            credential_id: Uuid::from_u128(5),
+            account_id: Uuid::from_u128(5),
             api_key: Some("test-key".to_string()),
             model_catalog_id: Uuid::from_u128(6),
             model_name: "embed-small".to_string(),
@@ -200,7 +200,7 @@ mod tests {
         assert_ne!(base_key, embedding_cache_key("query text", &changed_provider));
 
         let mut changed_credential = base.clone();
-        changed_credential.credential_id = Uuid::from_u128(8);
+        changed_credential.account_id = Uuid::from_u128(8);
         assert_ne!(base_key, embedding_cache_key("query text", &changed_credential));
 
         let mut changed_model = base.clone();

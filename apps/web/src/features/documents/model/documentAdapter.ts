@@ -2,6 +2,7 @@ import type { TFunction } from 'i18next';
 
 import { buildDocumentFailureNotice, humanizeDocumentStage } from '@/shared/lib/document-processing';
 import { mapSourceAccess } from '@/shared/lib/source-access';
+import type { StatusTone } from '@/shared/components/StatusBadge';
 import type { DocumentListItem } from '@/shared/api/documents';
 import type { DocumentItem, DocumentStatus } from '@/shared/types';
 
@@ -32,7 +33,8 @@ function extensionFromPathLike(value: string): string | null {
     return null;
   }
 
-  const basename = normalized.split(/[\\/]/).at(-1) ?? normalized;
+  const segments = normalized.split(/[\\/]/);
+  const basename = segments[segments.length - 1] ?? normalized;
   const dotIndex = basename.lastIndexOf('.');
   if (dotIndex <= 0 || dotIndex >= basename.length - 1) {
     return null;
@@ -51,7 +53,7 @@ function deriveExtension(fileName: string, mimeType?: string | null): string {
   }
 
   // Strip any `;charset=…` suffix the backend adds to the MIME tag.
-  const baseMime = (mimeType ?? '').split(';')[0].trim().toLowerCase();
+  const baseMime = ((mimeType ?? '').split(';')[0] ?? '').trim().toLowerCase();
   if (!/^[a-z0-9.+-]+\/[a-z0-9.+-]+$/.test(baseMime)) {
     return 'file';
   }
@@ -104,7 +106,17 @@ export function mapListItem(raw: DocumentListItem, t: TFunction): DocumentItem {
         )
       : undefined;
   const statusReason = failureNotice?.summary;
+  const stage = humanizeDocumentStage(raw.stage, t);
+  const documentHint = raw.documentHint?.trim() || undefined;
+  const sourceAccess = mapSourceAccess(raw.sourceAccess);
 
+  // Every field below is optional on `DocumentItem` without an explicit
+  // `| undefined`, so — under `exactOptionalPropertyTypes` — an
+  // undefined-valued key must be omitted rather than assigned. The
+  // conditional spreads below are behaviorally identical to a present
+  // key holding `undefined` (both read back as `undefined`); they exist
+  // purely to satisfy the exact-optional contract without widening
+  // `DocumentItem` itself.
   return {
     id: raw.id,
     fileName,
@@ -114,19 +126,20 @@ export function mapListItem(raw: DocumentListItem, t: TFunction): DocumentItem {
     cost,
     status: raw.status,
     readiness: raw.readiness,
-    stage: humanizeDocumentStage(raw.stage, t),
-    progressPercent,
-    processingStartedAt: raw.processingStartedAt,
-    processingFinishedAt: raw.processingFinishedAt,
-    failureCode,
-    failureMessage,
-    failureNotice,
-    statusReason,
+    externalKey: raw.externalKey,
+    ...(stage !== undefined ? { stage } : {}),
+    ...(progressPercent !== undefined ? { progressPercent } : {}),
+    ...(raw.processingStartedAt != null ? { processingStartedAt: raw.processingStartedAt } : {}),
+    ...(raw.processingFinishedAt != null ? { processingFinishedAt: raw.processingFinishedAt } : {}),
+    ...(failureCode !== undefined ? { failureCode } : {}),
+    ...(failureMessage !== undefined ? { failureMessage } : {}),
+    ...(failureNotice !== undefined ? { failureNotice } : {}),
+    ...(statusReason !== undefined ? { statusReason } : {}),
     canRetry: raw.retryable,
-    documentHint: raw.documentHint?.trim() || undefined,
-    sourceKind: raw.sourceKind,
-    sourceUri: raw.sourceUri,
-    sourceAccess: mapSourceAccess(raw.sourceAccess),
+    ...(documentHint !== undefined ? { documentHint } : {}),
+    ...(raw.sourceKind != null ? { sourceKind: raw.sourceKind } : {}),
+    ...(raw.sourceUri != null ? { sourceUri: raw.sourceUri } : {}),
+    ...(sourceAccess !== undefined ? { sourceAccess } : {}),
   };
 }
 
@@ -166,27 +179,39 @@ export function getDocumentProcessingDurationMs(
   return Math.max(0, finishedAtMs - startedAtMs);
 }
 
-type DocumentStatusBadge = { label: string; cls: string };
+type DocumentStatusBadge = { label: string; cls: string; tone: StatusTone };
 
 /**
  * Canonical badge styling and label lookup for every `DocumentStatus`.
  * Used by both the documents list and the inspector panel so every
- * surface agrees on how a given status is presented.
+ * surface agrees on how a given status is presented. `tone` drives the
+ * shared `<StatusBadge>` component; `cls` is kept in sync for callers that
+ * still need the raw `.status-{tone}` class name.
  */
 export function buildDocumentStatusBadgeConfig(
   t: TFunction,
 ): Record<DocumentStatus, DocumentStatusBadge> {
   return {
-    ready: { label: t('dashboard.statusLabels.ready'), cls: 'status-ready' },
+    ready: { label: t('dashboard.statusLabels.ready'), cls: 'status-ready', tone: 'ready' },
     processing: {
       label: t('dashboard.statusLabels.processing'),
       cls: 'status-processing',
+      tone: 'processing',
     },
-    queued: { label: t('dashboard.statusLabels.queued'), cls: 'status-queued' },
-    failed: { label: t('dashboard.statusLabels.failed'), cls: 'status-failed' },
+    queued: {
+      label: t('dashboard.statusLabels.queued'),
+      cls: 'status-queued',
+      tone: 'queued',
+    },
+    failed: {
+      label: t('dashboard.statusLabels.failed'),
+      cls: 'status-failed',
+      tone: 'failed',
+    },
     canceled: {
       label: t('dashboard.statusLabels.canceled'),
       cls: 'status-stalled',
+      tone: 'stalled',
     },
   };
 }

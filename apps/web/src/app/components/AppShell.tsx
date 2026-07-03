@@ -9,8 +9,9 @@ import { CommandPaletteMount } from '@/features/command-palette/CommandPaletteMo
 import { adminApi, ASYNC_OPERATION_TERMINAL_STATES, Catalog, Ops, unwrap } from '@/shared/api';
 import { ShellFooter } from '@/app/components/ShellFooter';
 import { UserMenu } from '@/app/components/UserMenu';
+import { ADMIN_SECTIONS, ADMIN_SECTION_GROUPS } from '@/features/admin/model/sections';
 import {
-  Home, FileText, Share2, MessageSquare, Settings,
+  Home, FileText, Share2, MessageSquare,
   ChevronDown, Menu, X, Plus, Trash2, AlertTriangle, Search, Building2, Library as LibraryIcon,
 } from 'lucide-react';
 import { Button } from '@/shared/components/ui/button';
@@ -62,6 +63,15 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   const navigate = useNavigate();
   const location = useLocation();
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(() => {
+    try { return localStorage.getItem('ironrag.sidebarCollapsed') === '1'; } catch { return false; }
+  });
+  const toggleSidebar = () =>
+    setSidebarCollapsed((prev) => {
+      const next = !prev;
+      try { localStorage.setItem('ironrag.sidebarCollapsed', next ? '1' : '0'); } catch { /* ignore */ }
+      return next;
+    });
 
   const [createWsOpen, setCreateWsOpen] = useState(false);
   const [createLibOpen, setCreateLibOpen] = useState(false);
@@ -229,8 +239,12 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     'w-[min(22rem,calc(100vw-2rem))] max-h-[min(32rem,calc(100vh-5rem))] overflow-hidden p-0';
   const selectorListClass = 'max-h-[min(22rem,calc(100vh-13rem))] overflow-y-auto p-1';
 
-  const renderWorkspaceMenu = (align: 'start' | 'end') => (
-    <DropdownMenuContent align={align} className={selectorContentClass}>
+  const renderWorkspaceMenu = (align: 'start' | 'end', collapsed = false) => (
+    <DropdownMenuContent
+      align={align}
+      {...(collapsed ? { side: 'right' as const } : {})}
+      className={selectorContentClass}
+    >
       <div className="border-b p-2">
         <div className="relative">
           <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
@@ -250,7 +264,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
           </div>
         ) : (
           filteredWorkspaces.map(ws => (
-            <DropdownMenuItem key={ws.id} onClick={() => setActiveWorkspace(ws)}>
+            <DropdownMenuItem key={ws.id} onClick={() => setActiveWorkspace(ws)} title={ws.name}>
               <span className="truncate">{ws.name}</span>
             </DropdownMenuItem>
           ))
@@ -274,8 +288,12 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     </DropdownMenuContent>
   );
 
-  const renderLibraryMenu = (align: 'start' | 'end') => (
-    <DropdownMenuContent align={align} className={selectorContentClass}>
+  const renderLibraryMenu = (align: 'start' | 'end', collapsed = false) => (
+    <DropdownMenuContent
+      align={align}
+      {...(collapsed ? { side: 'right' as const } : {})}
+      className={selectorContentClass}
+    >
       <div className="border-b p-2">
         <div className="relative">
           <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
@@ -295,7 +313,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
           </div>
         ) : (
           filteredLibraries.map(lib => (
-            <DropdownMenuItem key={lib.id} onClick={() => setActiveLibrary(lib)}>
+            <DropdownMenuItem key={lib.id} onClick={() => setActiveLibrary(lib)} title={lib.name}>
               <span className="truncate">{lib.name}</span>
             </DropdownMenuItem>
           ))
@@ -328,188 +346,260 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     caption: string,
     value: string,
     Icon: typeof Building2,
-  ) => (
-    <button
-      type="button"
-      className="flex items-center gap-2 rounded-lg border border-shell-border bg-shell-hover px-2.5 py-1 text-left outline-none transition-colors hover:bg-shell-active/15 focus-visible:ring-2 focus-visible:ring-shell-active/60"
-    >
-      <Icon className="h-3.5 w-3.5 shrink-0 text-shell-muted" />
-      <span className="flex min-w-0 flex-col leading-tight">
-        <span className="text-[9px] font-semibold uppercase tracking-wide text-shell-muted">
-          {caption}
+    options: { fullWidth?: boolean; collapsed?: boolean } = {},
+  ) => {
+    if (options.collapsed) {
+      return (
+        <button
+          type="button"
+          className="flex w-full items-center justify-center rounded-lg border border-shell-border bg-shell-hover px-0 py-2 outline-none transition-colors hover:bg-shell-active/15 focus-visible:ring-2 focus-visible:ring-shell-active/60"
+          title={value}
+        >
+          <Icon className="h-3.5 w-3.5 shrink-0 text-shell-muted" />
+        </button>
+      );
+    }
+    return (
+      <button
+        type="button"
+        className={`flex items-center gap-2 rounded-lg border border-shell-border bg-shell-hover text-left outline-none transition-colors hover:bg-shell-active/15 focus-visible:ring-2 focus-visible:ring-shell-active/60 ${
+          options.fullWidth ? 'w-full px-3 py-2' : 'px-2.5 py-1'
+        }`}
+      >
+        <Icon className="h-3.5 w-3.5 shrink-0 text-shell-muted" />
+        <span className="flex min-w-0 flex-1 flex-col leading-tight">
+          <span className="section-label text-shell-muted">
+            {caption}
+          </span>
+          <span
+            className={`min-w-0 truncate text-xs font-medium text-shell-foreground ${
+              options.fullWidth ? 'max-w-none' : 'max-w-[120px]'
+            }`}
+            title={value}
+          >
+            {value}
+          </span>
         </span>
-        <span className="max-w-[120px] truncate text-xs font-medium text-shell-foreground">
-          {value}
-        </span>
-      </span>
-      <ChevronDown className="h-3 w-3 shrink-0 opacity-50" />
-    </button>
-  );
+        <ChevronDown className="h-3.5 w-3.5 shrink-0 opacity-50" />
+      </button>
+    );
+  };
 
-  const aiWarningButton = (fullWidth = false) => (
+  const aiWarningButton = (fullWidth = false, collapsed = false) => (
     <button
       type="button"
       onClick={() => { void navigate('/admin/ai'); setMobileMenuOpen(false); }}
-      className={`flex items-center gap-1.5 rounded-full border border-amber-700/25 bg-amber-50 px-2.5 py-1 text-[11px] font-semibold text-amber-900 transition-colors hover:bg-amber-100 dark:border-amber-400/25 dark:bg-amber-950/40 dark:text-amber-200 dark:hover:bg-amber-950/60 ${fullWidth ? 'w-full justify-center' : ''}`}
+      className={`status-warning flex items-center gap-1.5 rounded-full px-2.5 py-1 text-2xs font-semibold transition-colors hover:bg-status-warning/15 ${fullWidth ? 'w-full justify-center' : ''} ${collapsed ? 'px-1.5' : ''}`}
       title={t('shell.configureInSettings')}
     >
-      <AlertTriangle className="h-3 w-3" />
-      <span>{t('admin.bindingsMissing', { count: missingPurposes.length })}</span>
+      <AlertTriangle className="h-3.5 w-3.5" />
+      {!collapsed && <span>{t('admin.bindingsMissing', { count: missingPurposes.length })}</span>}
     </button>
   );
 
-  return (
-    <div className="flex h-screen max-h-screen flex-col overflow-hidden bg-background">
-      {/* Top shell */}
-      <header
-        className="relative z-50 flex h-13 shrink-0 items-center gap-2 px-4"
-        style={{
-          background: 'linear-gradient(180deg, hsl(var(--shell-bg)), hsl(226 36% 7%))',
-          borderBottom: '1px solid hsl(var(--shell-border))',
-          boxShadow: '0 1px 3px hsl(226 36% 4% / 0.3)',
-        }}
-      >
-        {/* Brand */}
-        <Link
-          to="/dashboard"
-          className="group mr-3 flex items-center gap-2.5 text-sm font-bold tracking-tight text-shell-foreground"
-        >
-          <img
-            src="/favicon.svg"
-            alt=""
-            aria-hidden="true"
-            className="h-6 w-auto shrink-0 transition-transform duration-200 group-hover:scale-110"
-          />
-          <span className="hidden sm:inline">{t('common.productName')}</span>
-        </Link>
+  const visibleAdminSections = ADMIN_SECTIONS.filter((section) => can(section.capability));
+  const isAdminRoute = location.pathname.startsWith('/admin');
+  const currentAdminSegment = isAdminRoute ? (location.pathname.split('/')[2] ?? 'libraries') : null;
 
-        {/* Desktop primary nav */}
-        <nav aria-label={t('shell.primaryNav')} className="mr-auto hidden items-center gap-0.5 md:flex">
+  const sidebarLinkClass = (active: boolean, nested = false, collapsed = false) =>
+    `flex min-w-0 items-center gap-2 rounded-lg py-2 text-sm font-semibold transition-colors ${
+      collapsed ? 'justify-center px-0' : 'px-3'
+    } ${
+      nested ? (collapsed ? 'text-xs' : 'pl-9 text-xs') : ''
+    } ${
+      active
+        ? 'bg-shell-active/20 text-shell-foreground ring-1 ring-shell-active/35'
+        : 'text-shell-muted hover:bg-shell-hover hover:text-shell-foreground'
+    }`;
+
+  const renderSidebarContent = (mobile = false, collapsed = false) => (
+    <div className="flex h-full min-h-0 min-w-0 flex-col">
+      <div
+        className={`flex h-14 shrink-0 items-center gap-2.5 border-b border-shell-border ${
+          collapsed ? 'justify-center px-0' : 'px-4'
+        }`}
+      >
+        {mobile ? (
+          <Link
+            to="/dashboard"
+            onClick={() => setMobileMenuOpen(false)}
+            className="group flex min-w-0 items-center gap-2.5 text-sm font-bold tracking-tight text-shell-foreground"
+          >
+            <img
+              src="/favicon.svg"
+              alt=""
+              aria-hidden="true"
+              className="h-6 w-auto shrink-0 transition-transform duration-200 group-hover:scale-110"
+            />
+            <span className="truncate">{t('common.productName')}</span>
+          </Link>
+        ) : (
+          <button
+            type="button"
+            onClick={toggleSidebar}
+            title={collapsed ? t('shell.expandSidebar') : t('shell.collapseSidebar')}
+            aria-label={collapsed ? t('shell.expandSidebar') : t('shell.collapseSidebar')}
+            className="group flex min-w-0 items-center gap-2.5 text-sm font-bold tracking-tight text-shell-foreground"
+          >
+            <img
+              src="/favicon.svg"
+              alt=""
+              aria-hidden="true"
+              className="h-6 w-auto shrink-0 transition-transform duration-200 group-hover:scale-110"
+            />
+            {!collapsed && <span className="truncate">{t('common.productName')}</span>}
+          </button>
+        )}
+      </div>
+
+      <div className="space-y-2 border-b border-shell-border p-3">
+        {showAiWarning && aiWarningButton(true, collapsed)}
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
+            {renderScopeTrigger(
+              t('shell.workspaceScope'),
+              activeWorkspace?.name ?? t('shell.noWorkspace'),
+              Building2,
+              { fullWidth: true, collapsed },
+            )}
+          </DropdownMenuTrigger>
+          {renderWorkspaceMenu('start', collapsed)}
+        </DropdownMenu>
+
+        <DropdownMenu open={libraryMenuOpen} onOpenChange={setLibraryMenuOpen}>
+          <DropdownMenuTrigger asChild>
+            {renderScopeTrigger(
+              t('shell.libraryScope'),
+              activeLibrary?.name ?? t('shell.noLibrary'),
+              LibraryIcon,
+              { fullWidth: true, collapsed },
+            )}
+          </DropdownMenuTrigger>
+          {renderLibraryMenu('start', collapsed)}
+        </DropdownMenu>
+      </div>
+
+      <nav aria-label={t('shell.primaryNav')} className="min-h-0 flex-1 space-y-4 overflow-y-auto px-3 py-4">
+        <div className="space-y-1">
           {PRIMARY_NAV.map(item => (
             <Link
               key={item.path}
               to={item.path}
+              onClick={() => mobile && setMobileMenuOpen(false)}
               aria-current={isActive(item.path) ? 'page' : undefined}
-              className={`shell-nav-item flex items-center gap-1.5 ${isActive(item.path) ? 'active' : ''}`}
+              className={sidebarLinkClass(isActive(item.path), false, collapsed)}
+              title={collapsed ? t(`nav.${item.id}`) : undefined}
             >
-              <item.icon className="h-3.5 w-3.5" />
-              <span>{t(`nav.${item.id}`)}</span>
+              <item.icon className="h-4 w-4 shrink-0" />
+              {!collapsed && <span className="truncate">{t(`nav.${item.id}`)}</span>}
             </Link>
           ))}
-        </nav>
-
-        {/* Mobile menu toggle */}
-        <button
-          type="button"
-          className="ml-auto rounded-lg p-1.5 text-shell-foreground transition-colors hover:bg-shell-hover md:hidden"
-          onClick={() => setMobileMenuOpen(!mobileMenuOpen)}
-          aria-label={t('shell.toggleNavigation')}
-          aria-expanded={mobileMenuOpen}
-        >
-          {mobileMenuOpen ? <X className="h-5 w-5" /> : <Menu className="h-5 w-5" />}
-        </button>
-
-        {/* Right-side controls */}
-        <div className="ml-auto hidden items-center gap-1.5 md:flex">
-          {showAiWarning && aiWarningButton()}
-
-          {/* Labelled scope selectors */}
-          <DropdownMenu>
-            <DropdownMenuTrigger asChild>
-              {renderScopeTrigger(t('shell.workspaceScope'), activeWorkspace?.name ?? t('shell.noWorkspace'), Building2)}
-            </DropdownMenuTrigger>
-            {renderWorkspaceMenu('end')}
-          </DropdownMenu>
-
-          <DropdownMenu open={libraryMenuOpen} onOpenChange={setLibraryMenuOpen}>
-            <DropdownMenuTrigger asChild>
-              {renderScopeTrigger(t('shell.libraryScope'), activeLibrary?.name ?? t('shell.noLibrary'), LibraryIcon)}
-            </DropdownMenuTrigger>
-            {renderLibraryMenu('end')}
-          </DropdownMenu>
-
-          {/* Admin entry — single, role-gated to admin.access */}
-          {canAccessAdmin && (
-            <Link
-              to="/admin"
-              aria-current={isActive('/admin') ? 'page' : undefined}
-              className={`flex items-center gap-1.5 rounded-lg border px-2.5 py-1.5 text-xs font-medium transition-colors ${
-                isActive('/admin')
-                  ? 'border-shell-active/40 bg-shell-active/20 text-shell-foreground'
-                  : 'border-shell-border bg-shell-hover text-shell-foreground hover:bg-shell-active/15'
-              }`}
-            >
-              <Settings className="h-3.5 w-3.5" />
-              <span>{t('nav.admin')}</span>
-            </Link>
-          )}
-
-          <UserMenu />
         </div>
-      </header>
 
-      {/* Mobile nav drawer */}
-      {mobileMenuOpen && (
-        <div
-          className="animate-fade-in space-y-3 border-b border-shell-border p-3 md:hidden"
-          style={{ background: 'hsl(var(--shell-bg))' }}
-        >
-          {showAiWarning && aiWarningButton(true)}
-
-          <nav aria-label={t('shell.primaryNav')} className="space-y-1">
-            {PRIMARY_NAV.map(item => (
-              <Link
-                key={item.path}
-                to={item.path}
-                onClick={() => setMobileMenuOpen(false)}
-                aria-current={isActive(item.path) ? 'page' : undefined}
-                className={`shell-nav-item flex w-full items-center gap-2 ${isActive(item.path) ? 'active' : ''}`}
-              >
-                <item.icon className="h-4 w-4" />
-                <span>{t(`nav.${item.id}`)}</span>
-              </Link>
-            ))}
-            {canAccessAdmin && (
-              <Link
-                to="/admin"
-                onClick={() => setMobileMenuOpen(false)}
-                aria-current={isActive('/admin') ? 'page' : undefined}
-                className={`shell-nav-item flex w-full items-center gap-2 ${isActive('/admin') ? 'active' : ''}`}
-              >
-                <Settings className="h-4 w-4" />
-                <span>{t('nav.admin')}</span>
-              </Link>
+        {canAccessAdmin && (
+          <div className="space-y-3 border-t border-shell-border pt-4">
+            {!collapsed && (
+              <div className="px-3 section-label text-shell-muted">
+                {t('nav.admin')}
+              </div>
             )}
-          </nav>
-
-          <div className="flex flex-wrap gap-2">
-            <DropdownMenu>
-              <DropdownMenuTrigger asChild>
-                {renderScopeTrigger(t('shell.workspaceScope'), activeWorkspace?.name ?? t('shell.noWorkspace'), Building2)}
-              </DropdownMenuTrigger>
-              {renderWorkspaceMenu('start')}
-            </DropdownMenu>
-            <DropdownMenu>
-              <DropdownMenuTrigger asChild>
-                {renderScopeTrigger(t('shell.libraryScope'), activeLibrary?.name ?? t('shell.noLibrary'), LibraryIcon)}
-              </DropdownMenuTrigger>
-              {renderLibraryMenu('start')}
-            </DropdownMenu>
+            {ADMIN_SECTION_GROUPS.map((group) => {
+              const sections = visibleAdminSections.filter((section) => section.group === group);
+              if (sections.length === 0) return null;
+              return (
+                <div key={group} className="space-y-1">
+                  {!collapsed && (
+                    <div className="px-3 text-2xs font-semibold uppercase tracking-caps text-shell-muted/70">
+                      {t(`admin.nav.group.${group}`)}
+                    </div>
+                  )}
+                  {sections.map((section) => {
+                    const Icon = section.icon;
+                    const active =
+                      currentAdminSegment === section.segment ||
+                      (currentAdminSegment != null &&
+                        (section.alsoMatch?.includes(currentAdminSegment) ?? false));
+                    return (
+                      <Link
+                        key={section.segment}
+                        to={`/admin/${section.segment}`}
+                        onClick={() => mobile && setMobileMenuOpen(false)}
+                        aria-current={active ? 'page' : undefined}
+                        className={sidebarLinkClass(active, true, collapsed)}
+                        title={collapsed ? t(`admin.nav.${section.labelKey}`) : undefined}
+                      >
+                        <Icon className="h-3.5 w-3.5 shrink-0" />
+                        {!collapsed && <span className="truncate">{t(`admin.nav.${section.labelKey}`)}</span>}
+                      </Link>
+                    );
+                  })}
+                </div>
+              );
+            })}
           </div>
+        )}
+      </nav>
 
-          <div className="border-t border-shell-border pt-3">
-            <UserMenu variant="inline" onAfterAction={() => setMobileMenuOpen(false)} />
-          </div>
-        </div>
-      )}
+      <div className="shrink-0 border-t border-shell-border p-3">
+        <UserMenu variant="sidebar" onAfterAction={() => setMobileMenuOpen(false)} collapsed={collapsed} />
+      </div>
+    </div>
+  );
 
-      {/* Main content */}
-      <main className="flex min-h-0 flex-1 flex-col overflow-hidden">
-        {children}
-      </main>
+  return (
+    <div className="flex h-screen max-h-screen overflow-hidden bg-surface-sunken">
+      <aside
+        className={`hidden shrink-0 border-r border-shell-border bg-shell transition-[width] duration-200 md:flex ${
+          sidebarCollapsed ? 'w-16' : 'w-64'
+        }`}
+      >
+        {renderSidebarContent(false, sidebarCollapsed)}
+      </aside>
 
-      {/* Footer (hosts the demoted Swagger link) */}
-      <ShellFooter />
+      <div className="flex min-w-0 flex-1 flex-col overflow-hidden">
+        <header className="flex h-13 shrink-0 items-center gap-2 border-b border-border bg-background px-3 sm:px-4 md:hidden">
+          <button
+            type="button"
+            className="-ml-1 rounded-lg p-1.5 text-foreground transition-colors hover:bg-muted"
+            onClick={() => setMobileMenuOpen(true)}
+            aria-label={t('shell.toggleNavigation')}
+            aria-expanded={mobileMenuOpen}
+          >
+            <Menu className="h-5 w-5" />
+          </button>
+        </header>
+
+        {mobileMenuOpen && (
+          <>
+            <button
+              type="button"
+              className="fixed inset-0 z-40 bg-foreground/35 backdrop-blur-[1px] md:hidden"
+              aria-label={t('shell.toggleNavigation')}
+              onClick={() => setMobileMenuOpen(false)}
+            />
+            <aside
+              className="fixed inset-y-0 left-0 z-50 flex w-[min(20rem,88vw)] border-r border-shell-border bg-shell shadow-overlay md:hidden"
+            >
+              <button
+                type="button"
+                className="absolute right-2 top-2 z-10 rounded-lg p-1.5 text-shell-muted transition-colors hover:bg-shell-hover hover:text-shell-foreground"
+                aria-label={t('shell.toggleNavigation')}
+                onClick={() => setMobileMenuOpen(false)}
+              >
+                <X className="h-4 w-4" />
+              </button>
+              {renderSidebarContent(true, false)}
+            </aside>
+          </>
+        )}
+
+        <main className="flex min-h-0 flex-1 flex-col overflow-hidden">
+          {children}
+        </main>
+
+        {/* Footer (hosts the demoted Swagger link) */}
+        <ShellFooter />
+      </div>
 
       {/* Global ⌘K command palette — self-contained (owns its own open state
           + keyboard shortcut), so this mount stays a single element. */}

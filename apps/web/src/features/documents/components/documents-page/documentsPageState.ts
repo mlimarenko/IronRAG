@@ -9,9 +9,8 @@ import type {
   DocumentListSortOrder,
   DocumentListStatusFilter,
   WebIngestPattern,
-  WebIngestUrlFilter,
 } from "@/shared/api";
-import type { DocumentListStatusCounts } from "@/shared/api/generated";
+import type { DocumentListStatusCounts, WebIngestUrlFilter } from "@/shared/api/generated";
 import {
   isStorageRecord,
   parseNumberOption,
@@ -110,10 +109,10 @@ export type WebIngestPolicyDraft = {
 export type UploadQueueItem = {
   name: string;
   state: "uploading" | "done" | "error";
-  error?: string;
-  errorAction?: string;
-  errorDiagnosticCode?: string;
-  errorDiagnosticMessage?: string;
+  error?: string | undefined;
+  errorAction?: string | undefined;
+  errorDiagnosticCode?: string | undefined;
+  errorDiagnosticMessage?: string | undefined;
 };
 
 export type BulkRerunState = {
@@ -173,7 +172,7 @@ function isPageSizeOption(value: number): value is PageSizeOption {
 }
 
 function parsePageSize(
-  value: string | null,
+  value: string | null | undefined,
   fallback: PageSizeOption = DEFAULT_PAGE_SIZE,
 ): PageSizeOption {
   const parsed = Number.parseInt(value ?? "", 10);
@@ -194,7 +193,7 @@ function parseStatusBucket(value: string | null): DocumentsStatusBucket {
 }
 
 export function parseSortValue(
-  raw: string | null,
+  raw: string | null | undefined,
   fallback: SortValue = DEFAULT_SORT_VALUE,
 ): SortValue {
   return SORT_VALUES.find((value) => value === raw) ?? fallback;

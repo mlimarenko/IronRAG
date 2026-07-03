@@ -251,17 +251,15 @@ describe('AssistantPage integration', () => {
     setTextareaValue('Where is the docs page?');
     await flushUi();
 
-    const sendButton = Array.from(container.querySelectorAll('button')).find(
-      (b) => b.getAttribute('disabled') === null && b.querySelector('svg'),
-    );
+    const textarea = container.querySelector('textarea') as HTMLTextAreaElement;
+    const sendButton = textarea.parentElement?.querySelector('button');
     // The send button is the icon button at the end of the composer — fall
     // back to pressing Enter if we cannot uniquely identify it.
-    if (sendButton && !sendButton.textContent?.trim()) {
+    if (sendButton && sendButton.getAttribute('disabled') === null) {
       await act(async () => {
         sendButton.dispatchEvent(new MouseEvent('click', { bubbles: true }));
       });
     } else {
-      const textarea = container.querySelector('textarea') as HTMLTextAreaElement;
       await act(async () => {
         textarea.dispatchEvent(
           new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }),

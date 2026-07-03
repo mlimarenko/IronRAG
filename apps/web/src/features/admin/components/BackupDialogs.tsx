@@ -59,7 +59,7 @@ export function BackupExportDialog({ open, onOpenChange, libraryId, t }: BackupD
           <DialogDescription>{t('admin.snapshot.exportDesc')}</DialogDescription>
         </DialogHeader>
         <div className="space-y-3">
-          <div className="rounded-xl border p-3">
+          <div className="rounded-xl bg-surface-sunken p-3">
             <div className="text-sm font-semibold">{t('admin.snapshot.libraryDataLabel')}</div>
             <div className="text-xs text-muted-foreground mt-1">
               {t('admin.snapshot.libraryDataDesc')}
@@ -67,7 +67,7 @@ export function BackupExportDialog({ open, onOpenChange, libraryId, t }: BackupD
           </div>
           <label
             htmlFor="backup-include-blobs"
-            className="flex items-start gap-3 rounded-xl border p-3 cursor-pointer hover:bg-accent/30 transition-colors"
+            className="flex items-start gap-3 rounded-xl bg-surface-sunken p-3 cursor-pointer hover:bg-accent/30 transition-colors"
           >
             <Checkbox
               id="backup-include-blobs"
@@ -86,7 +86,7 @@ export function BackupExportDialog({ open, onOpenChange, libraryId, t }: BackupD
           </label>
           <label
             htmlFor="backup-include-workspace"
-            className="flex items-start gap-3 rounded-xl border p-3 cursor-pointer hover:bg-accent/30 transition-colors"
+            className="flex items-start gap-3 rounded-xl bg-surface-sunken p-3 cursor-pointer hover:bg-accent/30 transition-colors"
           >
             <Checkbox
               id="backup-include-workspace"
@@ -105,7 +105,7 @@ export function BackupExportDialog({ open, onOpenChange, libraryId, t }: BackupD
           </label>
           <label
             htmlFor="backup-include-ai-config"
-            className="flex items-start gap-3 rounded-xl border p-3 cursor-pointer hover:bg-accent/30 transition-colors"
+            className="flex items-start gap-3 rounded-xl bg-surface-sunken p-3 cursor-pointer hover:bg-accent/30 transition-colors"
           >
             <Checkbox
               id="backup-include-ai-config"
@@ -199,7 +199,7 @@ export function BackupImportDialog({
               type="file"
               accept=".tar.zst,.zst,application/zstd,application/x-zstd"
               onChange={(event) => setFile(event.target.files?.[0] ?? null)}
-              className="w-full text-sm file:mr-3 file:rounded-md file:border file:bg-muted file:px-3 file:py-1.5 file:text-xs file:font-medium hover:file:bg-accent"
+              className="w-full text-sm file:mr-3 file:rounded-lg file:border file:bg-muted file:px-3 file:py-1.5 file:text-xs file:font-medium hover:file:bg-accent"
             />
             {file && (
               <div className="mt-1.5 text-xs text-muted-foreground font-mono">
@@ -211,7 +211,7 @@ export function BackupImportDialog({
             <div className="section-label">{t('admin.snapshot.overwriteTitle')}</div>
             <label
               htmlFor="backup-overwrite-reject"
-              className="flex items-start gap-3 rounded-xl border p-3 cursor-pointer hover:bg-accent/30 transition-colors"
+              className="flex items-start gap-3 rounded-xl bg-surface-sunken p-3 cursor-pointer hover:bg-accent/30 transition-colors"
             >
               <input
                 type="radio"
@@ -225,7 +225,7 @@ export function BackupImportDialog({
             </label>
             <label
               htmlFor="backup-overwrite-replace"
-              className="flex items-start gap-3 rounded-xl border p-3 cursor-pointer hover:bg-accent/30 transition-colors"
+              className="flex items-start gap-3 rounded-xl bg-surface-sunken p-3 cursor-pointer hover:bg-accent/30 transition-colors"
             >
               <input
                 type="radio"
@@ -239,7 +239,7 @@ export function BackupImportDialog({
                 <div className="text-sm font-semibold">{t('admin.snapshot.overwriteReplace')}</div>
                 {overwrite === 'replace' && (
                   <div className="mt-1 flex items-start gap-1.5 text-xs text-status-warning">
-                    <AlertTriangle className="h-3 w-3 mt-0.5 shrink-0" />
+                    <AlertTriangle className="h-3.5 w-3.5 mt-0.5 shrink-0" />
                     {t('admin.snapshot.overwriteReplaceWarn')}
                   </div>
                 )}

@@ -198,9 +198,6 @@ check "pg password intact"  "$(env_get IRONRAG_POSTGRES_PASSWORD "${WORK}/.env")
 check "boot token intact"   "$(env_get IRONRAG_BOOTSTRAP_TOKEN "${WORK}/.env")"  "boot-0004"
 # Caps were absent -> filled in.
 check "caps filled on update" "$([ -n "$(env_get IRONRAG_DB_MEMORY_LIMIT "${WORK}/.env")" ] && echo yes)" "yes"
-check "queue global default filled"    "$(env_get IRONRAG_INGESTION_MAX_PARALLEL_JOBS_GLOBAL "${WORK}/.env")" "16"
-check "queue workspace default filled" "$(env_get IRONRAG_INGESTION_MAX_PARALLEL_JOBS_PER_WORKSPACE "${WORK}/.env")" "8"
-check "queue library default filled"   "$(env_get IRONRAG_INGESTION_MAX_PARALLEL_JOBS_PER_LIBRARY "${WORK}/.env")" "4"
 # No leftover backup file.
 check "no .env.bak left" "$([ -e "${WORK}/.env.bak" ] && echo present || echo gone)" "gone"
 rm -rf "$WORK"
@@ -236,16 +233,13 @@ cp "${ROOT_DIR}/.env.example"      "${WORK}/.env.example"
 {
   printf 'IRONRAG_OPENAI_API_KEY=sk-pinned-0001\n'  # pragma: allowlist secret
   printf 'IRONRAG_DB_MEMORY_LIMIT=9999M\n'
-  printf 'IRONRAG_INGESTION_MAX_PARALLEL_JOBS_GLOBAL=7\n'
 } >"${WORK}/.env"
 
 run_install "$WORK"
 check "pinned cap preserved" "$(env_get IRONRAG_DB_MEMORY_LIMIT "${WORK}/.env")" "9999M"
-check "pinned queue cap preserved" "$(env_get IRONRAG_INGESTION_MAX_PARALLEL_JOBS_GLOBAL "${WORK}/.env")" "7"
 run_install "$WORK" --recompute-resources
 recomputed="$(env_get IRONRAG_DB_MEMORY_LIMIT "${WORK}/.env")"
 if [ "$recomputed" != "9999M" ] && [ -n "$recomputed" ]; then pass; else fail "recompute should overwrite pinned cap, got [$recomputed]"; fi
-check "queue cap still operator-owned" "$(env_get IRONRAG_INGESTION_MAX_PARALLEL_JOBS_GLOBAL "${WORK}/.env")" "7"
 check "key still intact after recompute" "$(env_get IRONRAG_OPENAI_API_KEY "${WORK}/.env")" "sk-pinned-0001"
 rm -rf "$WORK"
 
@@ -258,9 +252,6 @@ check "fresh .env created" "$([ -f "${WORK}/.env" ] && echo yes)" "yes"
 check "minted pg password" "$([ -n "$(env_get IRONRAG_POSTGRES_PASSWORD "${WORK}/.env")" ] && echo yes)" "yes"
 check "minted boot token"  "$([ -n "$(env_get IRONRAG_BOOTSTRAP_TOKEN "${WORK}/.env")" ] && echo yes)" "yes"
 check "caps written fresh"  "$([ -n "$(env_get IRONRAG_DB_MEMORY_LIMIT "${WORK}/.env")" ] && echo yes)" "yes"
-check "fresh queue global"    "$(env_get IRONRAG_INGESTION_MAX_PARALLEL_JOBS_GLOBAL "${WORK}/.env")" "16"
-check "fresh queue workspace" "$(env_get IRONRAG_INGESTION_MAX_PARALLEL_JOBS_PER_WORKSPACE "${WORK}/.env")" "8"
-check "fresh queue library"   "$(env_get IRONRAG_INGESTION_MAX_PARALLEL_JOBS_PER_LIBRARY "${WORK}/.env")" "4"
 rm -rf "$WORK"
 
 echo "── integration: interactive prompts via pseudo-tty (keep vs change) ──"

@@ -1,6 +1,6 @@
 import { memo } from 'react';
 import type { LucideIcon } from 'lucide-react';
-import { toneStyle, type ToneKey } from "../model/format";
+import { toneClass, type ToneKey } from "../model/format";
 
 export type SummaryCard = {
   key: string;
@@ -19,33 +19,34 @@ type SummaryCardsProps = {
 
 function SummaryCardsImpl({ cards, onNavigate }: SummaryCardsProps) {
   return (
-    <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+    <div className="grid gap-2 sm:grid-cols-3">
       {cards.map((card) => {
         const Icon = card.icon;
-        const tone = toneStyle(card.tone);
+        const tone = toneClass(card.tone);
         return (
           <button
             key={card.key}
             type="button"
             onClick={() => onNavigate(card.actionPath)}
-            className="stat-tile w-full cursor-pointer text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/35"
+            className="flex w-full items-start gap-2 workbench-surface px-3 py-2 text-left transition-colors hover:bg-muted/60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/25 sm:items-center sm:gap-3"
           >
-            <div
-              className="w-10 h-10 rounded-xl flex items-center justify-center"
-              style={tone.container}
-            >
-              <Icon className={`h-4 w-4 ${tone.iconClass}`} />
+            <div className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-md ${tone.containerClass}`}>
+              <Icon className={`h-3.5 w-3.5 ${tone.iconClass}`} />
             </div>
-            <div className="mt-4">
-              <div className="text-[11px] font-semibold text-muted-foreground uppercase tracking-wider">
-                {card.label}
+            <div className="min-w-0 flex-1">
+              <div className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
+                <div className="text-base font-semibold tabular-nums sm:text-lg">
+                  {card.value}
+                </div>
+                <div className="text-xs font-medium leading-4 text-muted-foreground">
+                  {card.label}
+                </div>
               </div>
-              <div className="mt-1 text-3xl font-bold tracking-tight tabular-nums">
-                {card.value}
-              </div>
-              <div className="mt-2 text-xs leading-relaxed text-muted-foreground">
-                {card.detail}
-              </div>
+              {card.detail ? (
+                <div className="mt-0.5 hidden overflow-hidden text-xs leading-4 text-muted-foreground sm:block">
+                  {card.detail}
+                </div>
+              ) : null}
             </div>
           </button>
         );

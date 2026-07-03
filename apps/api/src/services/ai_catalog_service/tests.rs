@@ -1,14 +1,16 @@
-use super::bootstrap::missing_bootstrap_model_list_models;
+use super::bootstrap::{
+    align_query_retrieve_with_embed_chunk, missing_bootstrap_model_list_models,
+};
 use super::provider_validation::normalize_provider_base_url_input;
 use super::{
-    BootstrapAiCredentialSource, BootstrapAiPresetInput, bootstrap_bundle_is_self_contained,
-    bootstrap_preset_inputs_cover_required_purposes, canonicalize_provider_base_url,
-    discovered_provider_model_signature_for_capability, is_loopback_base_url,
-    is_provider_credential_validation_error, merge_provider_runtime_profile,
+    BootstrapAiBindingInput, BootstrapAiCredentialSource,
+    bootstrap_binding_inputs_cover_required_purposes, bootstrap_bundle_is_self_contained,
+    canonicalize_provider_base_url, discovered_provider_model_signature_for_capability,
+    is_loopback_base_url, is_provider_credential_validation_error, merge_provider_runtime_profile,
     parse_allowed_binding_purposes, provider_credential_base_url_for_create,
-    provider_credential_base_url_for_update, resolve_bootstrap_provider_preset_bundle,
-    resolve_bootstrap_provider_preset_descriptors, resolve_configured_bootstrap_preset_inputs,
-    runtime_provider_base_url, validate_bootstrap_preset_inputs_cover_required_purposes,
+    provider_credential_base_url_for_update, resolve_bootstrap_provider_binding_bundle,
+    resolve_bootstrap_provider_binding_descriptors, resolve_configured_bootstrap_binding_inputs,
+    runtime_provider_base_url, validate_bootstrap_binding_inputs_cover_required_purposes,
     validate_model_binding_purpose,
 };
 use crate::app::config::UiBootstrapAiBindingDefault;
@@ -324,69 +326,63 @@ fn model_discovery_embedding_path_creates_embedding_model_roles() {
 }
 
 #[test]
-fn bootstrap_preset_inputs_accept_required_purposes_without_vision() {
+fn bootstrap_binding_inputs_accept_required_purposes_without_vision() {
     let embedding_model_id = Uuid::now_v7();
     let inputs = vec![
-        BootstrapAiPresetInput {
+        BootstrapAiBindingInput {
             binding_purpose: AiBindingPurpose::ExtractGraph,
             provider_kind: "provider-alpha".to_string(),
             model_catalog_id: Uuid::now_v7(),
-            preset_name: "Provider Alpha Extract Graph · alpha-chat-mini".to_string(),
             system_prompt: None,
             temperature: Some(0.3),
             top_p: Some(0.9),
             max_output_tokens_override: None,
             extra_parameters_json: serde_json::json!({}),
         },
-        BootstrapAiPresetInput {
+        BootstrapAiBindingInput {
             binding_purpose: AiBindingPurpose::EmbedChunk,
             provider_kind: "provider-alpha".to_string(),
             model_catalog_id: embedding_model_id,
-            preset_name: "Provider Alpha Embed Chunk · alpha-embedding-large".to_string(),
             system_prompt: None,
             temperature: None,
             top_p: None,
             max_output_tokens_override: None,
             extra_parameters_json: serde_json::json!({}),
         },
-        BootstrapAiPresetInput {
+        BootstrapAiBindingInput {
             binding_purpose: AiBindingPurpose::QueryCompile,
             provider_kind: "provider-alpha".to_string(),
             model_catalog_id: Uuid::now_v7(),
-            preset_name: "Provider Alpha Query Compile · alpha-chat-plus".to_string(),
             system_prompt: None,
             temperature: Some(0.3),
             top_p: Some(0.9),
             max_output_tokens_override: None,
             extra_parameters_json: serde_json::json!({}),
         },
-        BootstrapAiPresetInput {
+        BootstrapAiBindingInput {
             binding_purpose: AiBindingPurpose::QueryRetrieve,
             provider_kind: "provider-alpha".to_string(),
             model_catalog_id: embedding_model_id,
-            preset_name: "Provider Alpha Query Retrieve · alpha-embedding-large".to_string(),
             system_prompt: None,
             temperature: None,
             top_p: None,
             max_output_tokens_override: None,
             extra_parameters_json: serde_json::json!({}),
         },
-        BootstrapAiPresetInput {
+        BootstrapAiBindingInput {
             binding_purpose: AiBindingPurpose::QueryAnswer,
             provider_kind: "provider-alpha".to_string(),
             model_catalog_id: Uuid::now_v7(),
-            preset_name: "Provider Alpha Query Answer · alpha-chat-plus".to_string(),
             system_prompt: None,
             temperature: Some(0.3),
             top_p: Some(0.9),
             max_output_tokens_override: None,
             extra_parameters_json: serde_json::json!({}),
         },
-        BootstrapAiPresetInput {
+        BootstrapAiBindingInput {
             binding_purpose: AiBindingPurpose::Agent,
             provider_kind: "provider-alpha".to_string(),
             model_catalog_id: Uuid::now_v7(),
-            preset_name: "Provider Alpha Agent · alpha-chat-plus".to_string(),
             system_prompt: None,
             temperature: Some(0.3),
             top_p: Some(0.9),
@@ -395,74 +391,68 @@ fn bootstrap_preset_inputs_accept_required_purposes_without_vision() {
         },
     ];
 
-    assert!(bootstrap_preset_inputs_cover_required_purposes(&inputs));
-    validate_bootstrap_preset_inputs_cover_required_purposes(&inputs)
+    assert!(bootstrap_binding_inputs_cover_required_purposes(&inputs));
+    validate_bootstrap_binding_inputs_cover_required_purposes(&inputs)
         .expect("vision is optional for text-only bootstrap");
 }
 
 #[test]
-fn bootstrap_preset_inputs_reject_mismatched_embedding_models() {
+fn bootstrap_binding_inputs_reject_mismatched_embedding_models() {
     let mut inputs = vec![
-        BootstrapAiPresetInput {
+        BootstrapAiBindingInput {
             binding_purpose: AiBindingPurpose::ExtractGraph,
             provider_kind: "provider-alpha".to_string(),
             model_catalog_id: Uuid::now_v7(),
-            preset_name: "Provider Alpha Extract Graph".to_string(),
             system_prompt: None,
             temperature: Some(0.3),
             top_p: Some(0.9),
             max_output_tokens_override: None,
             extra_parameters_json: serde_json::json!({}),
         },
-        BootstrapAiPresetInput {
+        BootstrapAiBindingInput {
             binding_purpose: AiBindingPurpose::EmbedChunk,
             provider_kind: "provider-alpha".to_string(),
             model_catalog_id: Uuid::now_v7(),
-            preset_name: "Provider Alpha Embed Chunk".to_string(),
             system_prompt: None,
             temperature: None,
             top_p: None,
             max_output_tokens_override: None,
             extra_parameters_json: serde_json::json!({}),
         },
-        BootstrapAiPresetInput {
+        BootstrapAiBindingInput {
             binding_purpose: AiBindingPurpose::QueryCompile,
             provider_kind: "provider-alpha".to_string(),
             model_catalog_id: Uuid::now_v7(),
-            preset_name: "Provider Alpha Query Compile".to_string(),
             system_prompt: None,
             temperature: Some(0.3),
             top_p: Some(0.9),
             max_output_tokens_override: None,
             extra_parameters_json: serde_json::json!({}),
         },
-        BootstrapAiPresetInput {
+        BootstrapAiBindingInput {
             binding_purpose: AiBindingPurpose::QueryRetrieve,
             provider_kind: "provider-alpha".to_string(),
             model_catalog_id: Uuid::now_v7(),
-            preset_name: "Provider Alpha Query Retrieve".to_string(),
             system_prompt: None,
             temperature: None,
             top_p: None,
             max_output_tokens_override: None,
             extra_parameters_json: serde_json::json!({}),
         },
-        BootstrapAiPresetInput {
+        BootstrapAiBindingInput {
             binding_purpose: AiBindingPurpose::QueryAnswer,
             provider_kind: "provider-alpha".to_string(),
             model_catalog_id: Uuid::now_v7(),
-            preset_name: "Provider Alpha Query Answer".to_string(),
             system_prompt: None,
             temperature: Some(0.3),
             top_p: Some(0.9),
             max_output_tokens_override: None,
             extra_parameters_json: serde_json::json!({}),
         },
-        BootstrapAiPresetInput {
+        BootstrapAiBindingInput {
             binding_purpose: AiBindingPurpose::Agent,
             provider_kind: "provider-alpha".to_string(),
             model_catalog_id: Uuid::now_v7(),
-            preset_name: "Provider Alpha Agent".to_string(),
             system_prompt: None,
             temperature: Some(0.3),
             top_p: Some(0.9),
@@ -472,7 +462,7 @@ fn bootstrap_preset_inputs_reject_mismatched_embedding_models() {
     ];
 
     assert!(matches!(
-        validate_bootstrap_preset_inputs_cover_required_purposes(&inputs),
+        validate_bootstrap_binding_inputs_cover_required_purposes(&inputs),
         Err(ApiError::BadRequest(_))
     ));
     let embed_model_id = inputs
@@ -486,39 +476,36 @@ fn bootstrap_preset_inputs_reject_mismatched_embedding_models() {
         .unwrap()
         .model_catalog_id = embed_model_id;
 
-    validate_bootstrap_preset_inputs_cover_required_purposes(&inputs).unwrap();
+    validate_bootstrap_binding_inputs_cover_required_purposes(&inputs).unwrap();
 }
 
 #[test]
-fn bootstrap_preset_inputs_reject_missing_required_purpose() {
+fn bootstrap_binding_inputs_reject_missing_required_purpose() {
     let inputs = vec![
-        BootstrapAiPresetInput {
+        BootstrapAiBindingInput {
             binding_purpose: AiBindingPurpose::ExtractGraph,
             provider_kind: "provider-alpha".to_string(),
             model_catalog_id: Uuid::now_v7(),
-            preset_name: "Provider Alpha Extract Graph · alpha-chat-mini".to_string(),
             system_prompt: None,
             temperature: Some(0.3),
             top_p: Some(0.9),
             max_output_tokens_override: None,
             extra_parameters_json: serde_json::json!({}),
         },
-        BootstrapAiPresetInput {
+        BootstrapAiBindingInput {
             binding_purpose: AiBindingPurpose::EmbedChunk,
             provider_kind: "provider-alpha".to_string(),
             model_catalog_id: Uuid::now_v7(),
-            preset_name: "Provider Alpha Embed Chunk · alpha-embedding-large".to_string(),
             system_prompt: None,
             temperature: None,
             top_p: None,
             max_output_tokens_override: None,
             extra_parameters_json: serde_json::json!({}),
         },
-        BootstrapAiPresetInput {
+        BootstrapAiBindingInput {
             binding_purpose: AiBindingPurpose::QueryAnswer,
             provider_kind: "provider-alpha".to_string(),
             model_catalog_id: Uuid::now_v7(),
-            preset_name: "Provider Alpha Query Answer · alpha-chat-plus".to_string(),
             system_prompt: None,
             temperature: Some(0.3),
             top_p: Some(0.9),
@@ -527,9 +514,9 @@ fn bootstrap_preset_inputs_reject_missing_required_purpose() {
         },
     ];
 
-    assert!(!bootstrap_preset_inputs_cover_required_purposes(&inputs));
+    assert!(!bootstrap_binding_inputs_cover_required_purposes(&inputs));
     assert!(matches!(
-        validate_bootstrap_preset_inputs_cover_required_purposes(&inputs),
+        validate_bootstrap_binding_inputs_cover_required_purposes(&inputs),
         Err(ApiError::BadRequest(_))
     ));
 }
@@ -596,7 +583,7 @@ fn bootstrap_bundle_uses_expected_provider_alpha_models() {
         },
     ];
 
-    let bundle = resolve_bootstrap_provider_preset_bundle(
+    let bundle = resolve_bootstrap_provider_binding_bundle(
         &provider,
         std::slice::from_ref(&provider),
         &models,
@@ -606,59 +593,59 @@ fn bootstrap_bundle_uses_expected_provider_alpha_models() {
     .expect("provider-alpha bundle should be available");
 
     assert_eq!(bundle.provider_kind, "provider-alpha");
-    assert_eq!(bundle.presets.len(), 8);
+    assert_eq!(bundle.bindings.len(), 8);
     assert_eq!(
         bundle
-            .presets
+            .bindings
             .iter()
-            .find(|preset| preset.binding_purpose == AiBindingPurpose::ExtractText)
-            .map(|preset| preset.model_name.as_str()),
+            .find(|binding| binding.binding_purpose == AiBindingPurpose::ExtractText)
+            .map(|binding| binding.model_name.as_str()),
         Some("alpha-chat-mini")
     );
     assert_eq!(
         bundle
-            .presets
+            .bindings
             .iter()
-            .find(|preset| preset.binding_purpose == AiBindingPurpose::ExtractGraph)
-            .map(|preset| preset.model_name.as_str()),
+            .find(|binding| binding.binding_purpose == AiBindingPurpose::ExtractGraph)
+            .map(|binding| binding.model_name.as_str()),
         Some("alpha-chat-mini")
     );
     assert_eq!(
         bundle
-            .presets
+            .bindings
             .iter()
-            .find(|preset| preset.binding_purpose == AiBindingPurpose::QueryCompile)
-            .map(|preset| preset.model_name.as_str()),
+            .find(|binding| binding.binding_purpose == AiBindingPurpose::QueryCompile)
+            .map(|binding| binding.model_name.as_str()),
         Some("alpha-chat-plus")
     );
     assert_eq!(
         bundle
-            .presets
+            .bindings
             .iter()
-            .find(|preset| preset.binding_purpose == AiBindingPurpose::QueryRetrieve)
-            .map(|preset| preset.model_name.as_str()),
+            .find(|binding| binding.binding_purpose == AiBindingPurpose::QueryRetrieve)
+            .map(|binding| binding.model_name.as_str()),
         Some("alpha-embedding-large")
     );
     assert_eq!(
         bundle
-            .presets
+            .bindings
             .iter()
-            .find(|preset| preset.binding_purpose == AiBindingPurpose::QueryRetrieve)
-            .and_then(|preset| preset.temperature),
+            .find(|binding| binding.binding_purpose == AiBindingPurpose::QueryRetrieve)
+            .and_then(|binding| binding.temperature),
         None
     );
     assert_eq!(
         bundle
-            .presets
+            .bindings
             .iter()
-            .find(|preset| preset.binding_purpose == AiBindingPurpose::QueryAnswer)
-            .and_then(|preset| preset.temperature),
+            .find(|binding| binding.binding_purpose == AiBindingPurpose::QueryAnswer)
+            .and_then(|binding| binding.temperature),
         Some(0.3)
     );
 }
 
 #[test]
-fn bootstrap_preset_descriptors_preserve_provider_extra_parameters() {
+fn bootstrap_binding_descriptors_preserve_provider_extra_parameters() {
     let provider = sample_provider("provider-zeta");
     let model = ModelCatalogEntry {
         id: Uuid::now_v7(),
@@ -673,12 +660,12 @@ fn bootstrap_preset_descriptors_preserve_provider_extra_parameters() {
         max_output_tokens: None,
     };
 
-    let descriptors = resolve_bootstrap_provider_preset_descriptors(
+    let descriptors = resolve_bootstrap_provider_binding_descriptors(
         &provider,
         std::slice::from_ref(&provider),
         &[model],
     )
-    .expect("provider bootstrap presets should parse");
+    .expect("provider bootstrap bindings should parse");
 
     assert_eq!(descriptors.len(), 1);
     assert_eq!(descriptors[0].binding_purpose, AiBindingPurpose::ExtractGraph);
@@ -768,7 +755,7 @@ fn bootstrap_bundle_uses_expected_provider_gamma_models() {
         },
     ];
 
-    let bundle = resolve_bootstrap_provider_preset_bundle(
+    let bundle = resolve_bootstrap_provider_binding_bundle(
         &provider,
         std::slice::from_ref(&provider),
         &models,
@@ -778,35 +765,35 @@ fn bootstrap_bundle_uses_expected_provider_gamma_models() {
     .expect("provider-gamma bundle should be available");
 
     assert_eq!(bundle.provider_kind, "provider-gamma");
-    assert_eq!(bundle.presets.len(), 8);
+    assert_eq!(bundle.bindings.len(), 8);
     assert_eq!(
         bundle
-            .presets
+            .bindings
             .iter()
-            .find(|preset| preset.binding_purpose == AiBindingPurpose::ExtractText)
-            .map(|preset| preset.model_name.as_str()),
+            .find(|binding| binding.binding_purpose == AiBindingPurpose::ExtractText)
+            .map(|binding| binding.model_name.as_str()),
         Some("provider-gamma-chat-flash")
     );
     assert_eq!(
         bundle
-            .presets
+            .bindings
             .iter()
-            .find(|preset| preset.binding_purpose == AiBindingPurpose::QueryCompile)
-            .map(|preset| preset.model_name.as_str()),
+            .find(|binding| binding.binding_purpose == AiBindingPurpose::QueryCompile)
+            .map(|binding| binding.model_name.as_str()),
         Some("gamma-chat-max")
     );
     assert_eq!(
         bundle
-            .presets
+            .bindings
             .iter()
-            .find(|preset| preset.binding_purpose == AiBindingPurpose::QueryRetrieve)
-            .map(|preset| preset.model_name.as_str()),
+            .find(|binding| binding.binding_purpose == AiBindingPurpose::QueryRetrieve)
+            .map(|binding| binding.model_name.as_str()),
         Some("gamma-embedding-large")
     );
 }
 
 #[test]
-fn bootstrap_preset_descriptors_keep_partial_provider_presets() {
+fn bootstrap_binding_descriptors_keep_partial_provider_bindings() {
     let provider = sample_provider("provider-delta");
     let models = vec![ModelCatalogEntry {
         id: Uuid::now_v7(),
@@ -826,13 +813,13 @@ fn bootstrap_preset_descriptors_keep_partial_provider_presets() {
         max_output_tokens: None,
     }];
 
-    let descriptors = resolve_bootstrap_provider_preset_descriptors(
+    let descriptors = resolve_bootstrap_provider_binding_descriptors(
         &provider,
         std::slice::from_ref(&provider),
         &models,
     )
-    .expect("provider-delta preset descriptors should resolve");
-    let bundle = resolve_bootstrap_provider_preset_bundle(
+    .expect("provider-delta binding descriptors should resolve");
+    let bundle = resolve_bootstrap_provider_binding_bundle(
         &provider,
         std::slice::from_ref(&provider),
         &models,
@@ -841,13 +828,13 @@ fn bootstrap_preset_descriptors_keep_partial_provider_presets() {
     .expect("provider-delta bundle resolution should not fail");
 
     assert_eq!(descriptors.len(), 4);
-    assert!(descriptors.iter().any(|preset| {
-        preset.binding_purpose == AiBindingPurpose::ExtractText
-            && preset.model_name == "provider-delta-chat"
+    assert!(descriptors.iter().any(|binding| {
+        binding.binding_purpose == AiBindingPurpose::ExtractText
+            && binding.model_name == "provider-delta-chat"
     }));
-    assert!(descriptors.iter().any(|preset| {
-        preset.binding_purpose == AiBindingPurpose::QueryCompile
-            && preset.model_name == "provider-delta-chat"
+    assert!(descriptors.iter().any(|binding| {
+        binding.binding_purpose == AiBindingPurpose::QueryCompile
+            && binding.model_name == "provider-delta-chat"
     }));
     assert!(bundle.is_none());
 }
@@ -1062,7 +1049,7 @@ fn bootstrap_bundle_uses_expected_provider_beta_models() {
         },
     ];
 
-    let bundle = resolve_bootstrap_provider_preset_bundle(
+    let bundle = resolve_bootstrap_provider_binding_bundle(
         &provider,
         std::slice::from_ref(&provider),
         &models,
@@ -1075,29 +1062,29 @@ fn bootstrap_bundle_uses_expected_provider_beta_models() {
     assert_eq!(bundle.default_base_url.as_deref(), Some("http://localhost:11434/v1"));
     assert!(!bundle.api_key_required);
     assert!(bundle.base_url_required);
-    assert_eq!(bundle.presets.len(), 8);
+    assert_eq!(bundle.bindings.len(), 8);
     assert_eq!(
         bundle
-            .presets
+            .bindings
             .iter()
-            .find(|preset| preset.binding_purpose == AiBindingPurpose::ExtractText)
-            .map(|preset| preset.model_name.as_str()),
+            .find(|binding| binding.binding_purpose == AiBindingPurpose::ExtractText)
+            .map(|binding| binding.model_name.as_str()),
         Some("beta-chat-small")
     );
     assert_eq!(
         bundle
-            .presets
+            .bindings
             .iter()
-            .find(|preset| preset.binding_purpose == AiBindingPurpose::ExtractGraph)
-            .map(|preset| preset.model_name.as_str()),
+            .find(|binding| binding.binding_purpose == AiBindingPurpose::ExtractGraph)
+            .map(|binding| binding.model_name.as_str()),
         Some("beta-chat-small")
     );
     assert_eq!(
         bundle
-            .presets
+            .bindings
             .iter()
-            .find(|preset| preset.binding_purpose == AiBindingPurpose::Vision)
-            .map(|preset| preset.model_name.as_str()),
+            .find(|binding| binding.binding_purpose == AiBindingPurpose::Vision)
+            .map(|binding| binding.model_name.as_str()),
         Some("beta-chat-vision")
     );
 }
@@ -1161,7 +1148,7 @@ fn bootstrap_bundle_uses_expected_provider_epsilon_models() {
         },
     ];
 
-    let bundle = resolve_bootstrap_provider_preset_bundle(
+    let bundle = resolve_bootstrap_provider_binding_bundle(
         &provider,
         std::slice::from_ref(&provider),
         &models,
@@ -1171,28 +1158,28 @@ fn bootstrap_bundle_uses_expected_provider_epsilon_models() {
     .expect("provider-epsilon bundle should be available");
 
     assert_eq!(bundle.provider_kind, "provider-epsilon");
-    assert_eq!(bundle.presets.len(), 8);
+    assert_eq!(bundle.bindings.len(), 8);
     assert!(bootstrap_bundle_is_self_contained(&bundle));
     assert_eq!(
         bundle
-            .presets
+            .bindings
             .iter()
-            .find(|preset| preset.binding_purpose == AiBindingPurpose::ExtractText)
-            .map(|preset| preset.model_name.as_str()),
+            .find(|binding| binding.binding_purpose == AiBindingPurpose::ExtractText)
+            .map(|binding| binding.model_name.as_str()),
         Some("provider-omega/chat-mini")
     );
     assert_eq!(
         bundle
-            .presets
+            .bindings
             .iter()
-            .find(|preset| preset.binding_purpose == AiBindingPurpose::EmbedChunk)
-            .map(|preset| preset.model_name.as_str()),
+            .find(|binding| binding.binding_purpose == AiBindingPurpose::EmbedChunk)
+            .map(|binding| binding.model_name.as_str()),
         Some("provider-omega/alpha-embedding-small")
     );
 }
 
 #[test]
-fn bootstrap_model_list_presets_require_provider_discovered_models() {
+fn bootstrap_model_list_bindings_require_provider_discovered_models() {
     let provider = sample_provider("provider-beta");
     let graph_model_id = Uuid::now_v7();
     let embed_model_id = Uuid::now_v7();
@@ -1225,23 +1212,21 @@ fn bootstrap_model_list_presets_require_provider_discovered_models() {
             max_output_tokens: None,
         },
     ];
-    let preset_inputs = vec![
-        BootstrapAiPresetInput {
+    let binding_inputs = vec![
+        BootstrapAiBindingInput {
             binding_purpose: AiBindingPurpose::ExtractGraph,
             provider_kind: provider.provider_kind.clone(),
             model_catalog_id: graph_model_id,
-            preset_name: "Provider Beta Extract Graph · beta-chat-small".to_string(),
             system_prompt: None,
             temperature: Some(0.3),
             top_p: Some(0.9),
             max_output_tokens_override: None,
             extra_parameters_json: serde_json::json!({}),
         },
-        BootstrapAiPresetInput {
+        BootstrapAiBindingInput {
             binding_purpose: AiBindingPurpose::EmbedChunk,
             provider_kind: provider.provider_kind.clone(),
             model_catalog_id: embed_model_id,
-            preset_name: "Provider Beta Embed Chunk · beta-embedding-small".to_string(),
             system_prompt: None,
             temperature: None,
             top_p: None,
@@ -1252,7 +1237,7 @@ fn bootstrap_model_list_presets_require_provider_discovered_models() {
 
     let missing = missing_bootstrap_model_list_models(
         &provider,
-        &preset_inputs,
+        &binding_inputs,
         &models,
         &["beta-chat-small".to_string()],
     )
@@ -1348,7 +1333,7 @@ fn detects_loopback_base_urls() {
 }
 
 #[test]
-fn configured_bootstrap_presets_inherit_provider_bundle_tuning_when_models_match() {
+fn configured_bootstrap_bindings_inherit_provider_bundle_tuning_when_models_match() {
     let provider = sample_provider("provider-alpha");
     let model = ModelCatalogEntry {
         id: Uuid::now_v7(),
@@ -1374,18 +1359,18 @@ fn configured_bootstrap_presets_inherit_provider_bundle_tuning_when_models_match
         }],
     };
 
-    let preset_inputs = resolve_configured_bootstrap_preset_inputs(
+    let binding_inputs = resolve_configured_bootstrap_binding_inputs(
         &configured,
         std::slice::from_ref(&provider),
         &[model],
     )
-    .expect("configured preset inputs should resolve");
+    .expect("configured binding inputs should resolve");
 
-    assert_eq!(preset_inputs.len(), 1);
-    assert_eq!(preset_inputs[0].provider_kind, "provider-alpha");
-    assert_eq!(preset_inputs[0].binding_purpose, AiBindingPurpose::ExtractGraph);
-    assert_eq!(preset_inputs[0].temperature, Some(0.3));
-    assert_eq!(preset_inputs[0].top_p, Some(0.9));
+    assert_eq!(binding_inputs.len(), 1);
+    assert_eq!(binding_inputs[0].provider_kind, "provider-alpha");
+    assert_eq!(binding_inputs[0].binding_purpose, AiBindingPurpose::ExtractGraph);
+    assert_eq!(binding_inputs[0].temperature, Some(0.3));
+    assert_eq!(binding_inputs[0].top_p, Some(0.9));
 }
 
 #[test]
@@ -1409,7 +1394,7 @@ fn bootstrap_bundle_omits_incomplete_provider_profiles() {
         max_output_tokens: None,
     }];
 
-    let bundle = resolve_bootstrap_provider_preset_bundle(
+    let bundle = resolve_bootstrap_provider_binding_bundle(
         &provider_delta,
         std::slice::from_ref(&provider_delta),
         &models,
@@ -1478,7 +1463,7 @@ fn provider_bootstrap_bundle_never_borrows_models_from_another_provider() {
         },
     ];
 
-    let bundle = resolve_bootstrap_provider_preset_bundle(
+    let bundle = resolve_bootstrap_provider_binding_bundle(
         &provider_delta,
         &providers,
         &models,
@@ -1537,7 +1522,7 @@ fn required_bootstrap_bundle_is_self_contained_without_vision() {
             max_output_tokens: None,
         },
     ];
-    let bundle = resolve_bootstrap_provider_preset_bundle(
+    let bundle = resolve_bootstrap_provider_binding_bundle(
         &provider,
         std::slice::from_ref(&provider),
         &models,
@@ -1546,7 +1531,7 @@ fn required_bootstrap_bundle_is_self_contained_without_vision() {
     .expect("bundle should resolve")
     .expect("bundle should be available");
 
-    assert_eq!(bundle.presets.len(), 6);
+    assert_eq!(bundle.bindings.len(), 6);
     assert!(bootstrap_bundle_is_self_contained(&bundle));
     assert_eq!(bundle.ui_hints, serde_json::json!({"accent": "neutral"}));
 }
@@ -1599,4 +1584,67 @@ fn env_provider_credential_bootstrap_skips_only_provider_validation_errors() {
     assert!(!is_provider_credential_validation_error(&ApiError::NotFound(
         "provider_catalog missing".to_string()
     )));
+}
+
+fn vector_alignment_input(
+    purpose: AiBindingPurpose,
+    provider_kind: &str,
+    model_catalog_id: Uuid,
+) -> BootstrapAiBindingInput {
+    BootstrapAiBindingInput {
+        binding_purpose: purpose,
+        provider_kind: provider_kind.to_string(),
+        model_catalog_id,
+        system_prompt: None,
+        temperature: None,
+        top_p: None,
+        max_output_tokens_override: None,
+        extra_parameters_json: serde_json::json!({}),
+    }
+}
+
+#[test]
+fn align_query_retrieve_overwrites_mismatched_fallback_selection() {
+    let embed_model_id = Uuid::now_v7();
+    let mut selections = vec![
+        vector_alignment_input(AiBindingPurpose::EmbedChunk, "provider-alpha", embed_model_id),
+        vector_alignment_input(AiBindingPurpose::QueryRetrieve, "provider-beta", Uuid::now_v7()),
+    ];
+    align_query_retrieve_with_embed_chunk(&mut selections);
+    let retrieve = selections
+        .iter()
+        .find(|input| input.binding_purpose == AiBindingPurpose::QueryRetrieve)
+        .expect("query_retrieve selection");
+    assert_eq!(retrieve.model_catalog_id, embed_model_id);
+    assert_eq!(retrieve.provider_kind, "provider-alpha");
+    assert_eq!(selections.len(), 2);
+}
+
+#[test]
+fn align_query_retrieve_inserts_missing_selection() {
+    let embed_model_id = Uuid::now_v7();
+    let mut selections = vec![vector_alignment_input(
+        AiBindingPurpose::EmbedChunk,
+        "provider-alpha",
+        embed_model_id,
+    )];
+    align_query_retrieve_with_embed_chunk(&mut selections);
+    let retrieve = selections
+        .iter()
+        .find(|input| input.binding_purpose == AiBindingPurpose::QueryRetrieve)
+        .expect("query_retrieve selection");
+    assert_eq!(retrieve.model_catalog_id, embed_model_id);
+}
+
+#[test]
+fn align_query_retrieve_leaves_selections_without_embed_chunk_untouched() {
+    let retrieve_model_id = Uuid::now_v7();
+    let mut selections = vec![vector_alignment_input(
+        AiBindingPurpose::QueryRetrieve,
+        "provider-beta",
+        retrieve_model_id,
+    )];
+    align_query_retrieve_with_embed_chunk(&mut selections);
+    assert_eq!(selections.len(), 1);
+    assert_eq!(selections[0].model_catalog_id, retrieve_model_id);
 }

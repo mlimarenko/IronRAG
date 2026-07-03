@@ -1,6 +1,7 @@
 import { useEffect, useRef } from 'react';
 import type { TFunction } from 'i18next';
 import { Brain } from 'lucide-react';
+import { WorkbenchEmptyState } from '@/shared/components/layout/WorkbenchEmptyState';
 import type { AssistantMessage } from '@/shared/types';
 import { ChatMessage } from '../ChatMessage';
 import { countDistinctSources, STARTER_PROMPT_IDS } from './assistantPageState';
@@ -23,7 +24,7 @@ export function ChatThread({
   onInspect,
 }: ChatThreadProps) {
   const messagesEndRef = useRef<HTMLDivElement>(null);
-  const lastMessage = messages.at(-1);
+  const lastMessage = messages[messages.length - 1];
   const scrollSignature = lastMessage
     ? [
         messages.length,
@@ -50,37 +51,28 @@ export function ChatThread({
   return (
     <div className="flex-1 overflow-y-auto p-4 space-y-4">
       {messages.length === 0 ? (
-        <div className="flex-1 flex flex-col items-center justify-center py-16 animate-fade-in">
-          <div
-            className="w-16 h-16 rounded-2xl flex items-center justify-center mb-5"
-            style={{
-              background:
-                'linear-gradient(135deg, hsl(var(--primary) / 0.15), hsl(var(--primary) / 0.05))',
-              boxShadow: '0 0 0 1px hsl(var(--primary) / 0.1)',
-            }}
-          >
-            <Brain className="h-8 w-8 text-primary" />
-          </div>
-          <h2 className="text-base font-bold tracking-tight">
-            {t('assistant.askQuestion')}
-          </h2>
-          <p className="text-sm text-muted-foreground mt-1.5 mb-6">
-            {t('assistant.askQuestionDesc')}
-          </p>
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 max-w-md w-full">
-            {STARTER_PROMPT_IDS.map((id) => {
-              const prompt = t(`assistant.starterPrompts.${id}`);
-              return (
-                <button
-                  key={id}
-                  className="text-left p-4 rounded-xl border hover:bg-accent/50 hover:shadow-soft transition-all duration-200 text-sm font-medium"
-                  onClick={() => onStarterPromptSelect(prompt)}
-                >
-                  {prompt}
-                </button>
-              );
-            })}
-          </div>
+        <div className="flex min-h-full flex-col items-center justify-center py-8 animate-fade-in">
+          <WorkbenchEmptyState
+            icon={<Brain className="h-7 w-7 text-primary" />}
+            title={t('assistant.askQuestion')}
+            description={t('assistant.askQuestionDesc')}
+            action={
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 max-w-md w-full">
+                {STARTER_PROMPT_IDS.map((id) => {
+                  const prompt = t(`assistant.starterPrompts.${id}`);
+                  return (
+                    <button
+                      key={id}
+                      className="rounded-lg border px-3 py-2.5 text-left text-sm font-medium transition-colors hover:bg-accent/50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/25"
+                      onClick={() => onStarterPromptSelect(prompt)}
+                    >
+                      {prompt}
+                    </button>
+                  );
+                })}
+              </div>
+            }
+          />
         </div>
       ) : (
         messages.map((message, index) => {

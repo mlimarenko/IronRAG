@@ -6,11 +6,12 @@ import {
   FileText,
   MessageSquare,
   RefreshCw,
-  Share2,
   XCircle,
 } from 'lucide-react';
 
 import { Button } from '@/shared/components/ui/button';
+import { PageHeader } from '@/shared/components/layout/PageHeader';
+import { PageShell } from '@/shared/components/layout/PageShell';
 import { useApp } from '@/shared/contexts/app-context';
 import { useLibraryMetrics } from '@/features/dashboard/hooks/useLibraryMetrics';
 
@@ -19,7 +20,6 @@ import { LibraryHealthPanel, type HealthRow } from "./components/LibraryHealthPa
 import { RecentDocumentsList } from "./components/RecentDocumentsList";
 import { AttentionPanel } from "./components/AttentionPanel";
 import { LatestIngestPanel } from "./components/LatestIngestPanel";
-import { AssistantCtaPanel } from "./components/AssistantCtaPanel";
 import { DashboardSkeleton } from "./components/DashboardSkeleton";
 import { DashboardEmptyState } from "./components/DashboardEmptyState";
 import type { RecentWebRun } from "./model/types";
@@ -40,11 +40,9 @@ function pickLatestRun(runs: RecentWebRun[]): RecentWebRun | undefined {
 
 function DashboardContent({
   activeLibraryId,
-  activeLibraryName,
   queryReady,
 }: {
   activeLibraryId: string;
-  activeLibraryName: string;
   queryReady: boolean;
 }) {
   const { t, i18n } = useTranslation();
@@ -89,10 +87,6 @@ function DashboardContent({
     // Read straight from the overview so dashboard numbers stay
     // internally consistent.
     const inFlightCount = processingCount;
-    const graphReadyPct =
-      totalDocuments > 0
-        ? Math.min(100, Math.round((graphReadyCount / totalDocuments) * 100))
-        : 0;
     const latestRun = pickLatestRun(recentWebRuns);
 
     const summaryCards: SummaryCard[] = [
@@ -107,27 +101,6 @@ function DashboardContent({
         icon: FileText,
         tone: 'neutral',
         actionPath: buildDocumentsPath(),
-      },
-      {
-        key: 'graph-coverage',
-        label: t('dashboard.graphCoverage'),
-        value: `${graphReadyPct}%`,
-        detail:
-          totalDocuments > 0
-            ? t('dashboard.graphCoverageSummary', {
-                ready: graphReadyCount,
-                total: totalDocuments,
-              })
-            : t('dashboard.noDocs'),
-        icon: Share2,
-        tone:
-          graph.status === 'ready'
-            ? 'ready'
-            : graphReadyCount > 0
-              ? 'warning'
-              : 'processing',
-        // Coverage is acted on in the Graph view, not Documents (DSH-01).
-        actionPath: '/graph',
       },
       {
         key: 'in-flight',
@@ -202,7 +175,6 @@ function DashboardContent({
       graphReadyCount,
       readyCount,
       readableWithoutGraphCount,
-      graphReadyPct,
       latestRun,
       summaryCards,
       healthRows,
@@ -213,82 +185,79 @@ function DashboardContent({
   }, [data, t]);
 
   return (
-    <div className="flex-1 flex flex-col overflow-auto ambient-bg">
-      <div className="page-header flex items-center justify-between gap-4 flex-wrap relative z-10">
-        <div>
-          <h1 className="text-lg font-bold tracking-tight">{t('dashboard.title')}</h1>
-          <p className="text-sm text-muted-foreground mt-0.5">
-            <span className="font-semibold text-foreground">{activeLibraryName}</span>
-            <span className="mx-2 text-border">·</span>
-            {t('dashboard.headerSummary', {
-              total: derived.totalDocuments,
-              coverage: derived.graphReadyPct,
-              attention: derived.attention.length,
-            })}
-          </p>
-        </div>
-        <div className="flex gap-2 flex-wrap">
-          {/* Primary CTA toward the product's main verb — only when the
-              library is actually query-ready, otherwise it's a dead button. */}
-          {queryReady && (
-            <Button size="sm" onClick={() => navigate('/assistant')}>
-              <MessageSquare className="h-3.5 w-3.5 mr-1.5" />
-              {t('dashboard.askAssistant')}
-            </Button>
-          )}
-          <Button variant="outline" size="sm" onClick={handleRefresh} disabled={refreshing}>
-            <RefreshCw className={`h-3.5 w-3.5 mr-1.5 ${refreshing ? 'animate-spin' : ''}`} />
-            {t('dashboard.refresh')}
-          </Button>
-        </div>
-      </div>
-
-      <div className="flex-1 p-6 space-y-5 animate-fade-in relative z-10">
+    <PageShell
+      header={
+        <PageHeader
+          title={t('dashboard.title')}
+          description={t('dashboard.subtitle')}
+          actions={
+            <>
+              {queryReady && (
+                <Button size="sm" onClick={() => navigate('/assistant')} className="h-8 px-3 text-xs">
+                  <MessageSquare className="h-4 w-4 mr-2" />
+                  {t('dashboard.askAssistant')}
+                </Button>
+              )}
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={handleRefresh}
+                disabled={refreshing}
+                className="h-8 px-2.5 text-xs sm:px-3"
+              >
+                <RefreshCw className={`h-3.5 w-3.5 sm:mr-1.5 ${refreshing ? 'animate-spin' : ''}`} />
+                <span className="sr-only sm:not-sr-only">{t('dashboard.refresh')}</span>
+              </Button>
+            </>
+          }
+        />
+      }
+      bodyScroll="auto"
+      bodyClassName="p-3 animate-fade-in sm:p-4"
+    >
+      <div className="w-full space-y-4">
         <SummaryCards cards={derived.summaryCards} onNavigate={navigate} />
 
-        <div className="grid items-start gap-4 xl:grid-cols-[minmax(0,1.55fr)_minmax(320px,1fr)]">
-          <div className="grid gap-4">
+        <div className="grid items-stretch gap-4 xl:grid-cols-[minmax(0,1.55fr)_minmax(320px,1fr)]">
+          <div className="flex flex-col gap-4">
             <LibraryHealthPanel
               t={t}
               locale={i18n.language}
               graph={derived.graph}
               totalDocuments={derived.totalDocuments}
               readyCount={derived.readyCount}
-              graphReadyCount={derived.graphReadyCount}
               readableWithoutGraphCount={derived.readableWithoutGraphCount}
               healthRows={derived.healthRows}
               onNavigate={navigate}
             />
-            <RecentDocumentsList
-              t={t}
-              locale={i18n.language}
-              recentDocuments={derived.recentDocuments}
-              totalDocuments={derived.totalDocuments}
-              onNavigate={navigate}
-            />
+            <div className="flex-1">
+              <RecentDocumentsList
+                t={t}
+                locale={i18n.language}
+                recentDocuments={derived.recentDocuments}
+                totalDocuments={derived.totalDocuments}
+                onNavigate={navigate}
+              />
+            </div>
           </div>
 
-          <div className="grid gap-4">
-            <AssistantCtaPanel
-              t={t}
-              libraryName={activeLibraryName}
-              queryReady={queryReady}
-              onNavigate={navigate}
-            />
+          <div className="flex flex-col gap-4">
             <AttentionPanel
               t={t}
               attention={derived.attention}
               onNavigate={navigate}
             />
-            <LatestIngestPanel
-              t={t}
-              locale={i18n.language}
-              latestRun={derived.latestRun}
-            />
+            <div className="flex-1">
+              <LatestIngestPanel
+                t={t}
+                locale={i18n.language}
+                latestRun={derived.latestRun}
+              />
+            </div>
           </div>
         </div>
       </div>
-    </div>
+    </PageShell>
   );
 }
 
@@ -303,7 +272,6 @@ export default function DashboardPage() {
     <Suspense fallback={<DashboardSkeleton />}>
       <DashboardContent
         activeLibraryId={activeLibrary.id}
-        activeLibraryName={activeLibrary.name}
         queryReady={activeLibrary.queryReady}
       />
     </Suspense>

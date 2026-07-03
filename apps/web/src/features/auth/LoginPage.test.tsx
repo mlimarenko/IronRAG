@@ -44,7 +44,7 @@ vi.mock("@/shared/api", async (importOriginal) => {
 const readyBootstrapStatus = {
   setupRequired: true,
   aiSetup: {
-    presetBundles: [
+    bindingBundles: [
       {
         providerCatalogId: "provider-alpha-bootstrap",
         providerKind: "provider_alpha",
@@ -75,7 +75,7 @@ const readyBootstrapStatus = {
           tokenLimitParameter: "max_tokens",
         },
         uiHints: {},
-        presets: [],
+        bindings: [],
       },
     ],
   },
@@ -91,12 +91,11 @@ const bootstrapBindingPurposes: BootstrapBindingPurpose[] = [
   "vision",
 ];
 
-function bootstrapPreset(bindingPurpose: BootstrapBindingPurpose, index: number) {
+function bootstrapBinding(bindingPurpose: BootstrapBindingPurpose, index: number) {
   return {
     bindingPurpose,
     modelCatalogId: `model-${index}`,
     modelName: `model-${index}`,
-    presetName: `Preset ${index}`,
     systemPrompt: null,
     temperature: null,
     topP: null,
@@ -198,13 +197,13 @@ describe("LoginPage operator-safe errors", () => {
     mocks.app.isBootstrapRequired = true;
     mocks.bootstrapQueryFn.mockResolvedValue({
       setupRequired: true,
-      aiSetup: { presetBundles: [] },
+      aiSetup: { bindingBundles: [] },
     });
     await render();
 
     await waitFor(() => {
       expect(container.textContent).toContain(
-        "No bootstrap preset bundles are available for the current provider catalog.",
+        "No bootstrap provider bundles are available for the current provider catalog.",
       );
     });
     await act(async () => {
@@ -241,10 +240,10 @@ describe("LoginPage operator-safe errors", () => {
     mocks.bootstrapQueryFn.mockResolvedValue({
       ...readyBootstrapStatus,
       aiSetup: {
-        presetBundles: [
+        bindingBundles: [
           {
-            ...readyBootstrapStatus.aiSetup.presetBundles[0],
-            presets: bootstrapBindingPurposes.map(bootstrapPreset),
+            ...readyBootstrapStatus.aiSetup.bindingBundles[0],
+            bindings: bootstrapBindingPurposes.map(bootstrapBinding),
           },
         ],
       },

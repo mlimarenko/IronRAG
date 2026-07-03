@@ -118,6 +118,7 @@ IRONRAG_MINIMAX_API_KEY=...
 | **RouterAI**              | ✅    | ✅      | ✅         | Router provider: many upstream model families behind one key         |
 | **MiniMax**               | ✅    | ✅      | —         | Direct API or Token Plan subscription key                            |
 | **Ollama**                | ✅    | ✅      | ✅         | Fully local, air-gapped, GPU optional                                |
+| **LiteLLM**               | ✅    | ✅      | ✅         | Self-hosted OpenAI-compatible gateway: add as an OpenAI-compatible account with your LiteLLM base URL; proxies any upstream model family |
 
 
 Bind any provider to any pipeline purpose under **Admin → AI → Bindings**: `extract_text`, `extract_graph`, `embed_chunk`, `query_compile`, `query_retrieve`, `query_answer`, `agent`, `vision`. The bindings are scoped to instance, workspace, or library — a workspace can override the instance default for a single purpose.
@@ -204,14 +205,11 @@ IRONRAG_DB_MEMORY_LIMIT=6144M \
   docker compose up -d
 ```
 
-The default queue caps allow up to 16 leased ingest jobs globally, 8 per
-workspace, and 4 per library:
-`IRONRAG_INGESTION_MAX_PARALLEL_JOBS_GLOBAL=16`,
-`IRONRAG_INGESTION_MAX_PARALLEL_JOBS_PER_WORKSPACE=8`, and
-`IRONRAG_INGESTION_MAX_PARALLEL_JOBS_PER_LIBRARY=4`. The worker still applies a
-local cap from its memory cgroup and database pool, so raise worker replicas,
-worker memory, database connection budget, and provider concurrency together
-when you want the deployment to actually fill the global queue.
+The default Compose stack keeps ingest conservative on small swapless hosts:
+`IRONRAG_INGESTION_MAX_PARALLEL_JOBS_GLOBAL=4`,
+`IRONRAG_INGESTION_MAX_PARALLEL_JOBS_PER_WORKSPACE=2`, and
+`IRONRAG_INGESTION_MAX_PARALLEL_JOBS_PER_LIBRARY=1`. Raise those only together
+with worker memory, database connection budget, and provider concurrency.
 
 Helm (Kubernetes):
 

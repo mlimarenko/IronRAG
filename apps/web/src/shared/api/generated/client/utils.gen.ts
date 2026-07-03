@@ -29,7 +29,7 @@ export const createQuerySerializer = <T = unknown>({
 
         if (Array.isArray(value)) {
           const serializedArray = serializeArrayParam({
-            allowReserved: options.allowReserved,
+            ...(options.allowReserved !== undefined ? { allowReserved: options.allowReserved } : {}),
             explode: true,
             name,
             style: 'form',
@@ -39,7 +39,7 @@ export const createQuerySerializer = <T = unknown>({
           if (serializedArray) search.push(serializedArray);
         } else if (typeof value === 'object') {
           const serializedObject = serializeObjectParam({
-            allowReserved: options.allowReserved,
+            ...(options.allowReserved !== undefined ? { allowReserved: options.allowReserved } : {}),
             explode: true,
             name,
             style: 'deepObject',
@@ -49,7 +49,7 @@ export const createQuerySerializer = <T = unknown>({
           if (serializedObject) search.push(serializedObject);
         } else {
           const serializedPrimitive = serializePrimitiveParam({
-            allowReserved: options.allowReserved,
+            ...(options.allowReserved !== undefined ? { allowReserved: options.allowReserved } : {}),
             name,
             value: value as string,
           });
@@ -157,13 +157,13 @@ export async function setAuthParams(
 export const buildUrl: Client['buildUrl'] = (options) =>
   getUrl({
     baseUrl: options.baseUrl as string,
-    path: options.path,
-    query: options.query,
     querySerializer:
       typeof options.querySerializer === 'function'
         ? options.querySerializer
         : createQuerySerializer(options.querySerializer),
     url: options.url,
+    ...(options.path !== undefined ? { path: options.path } : {}),
+    ...(options.query !== undefined ? { query: options.query } : {}),
   });
 
 export const mergeConfigs = (a: Config, b: Config): Config => {

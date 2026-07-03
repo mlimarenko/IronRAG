@@ -1,17 +1,5 @@
 use super::*;
 
-pub(super) fn select_runtime_preset<'a>(
-    presets: &'a [ModelPreset],
-    canonical_name: &str,
-) -> Option<&'a ModelPreset> {
-    // Exact name match is the only reliable lookup. The previous
-    // fallback to `[only] => Some(only)` returned the wrong preset
-    // when two purposes shared the same model (e.g. ExtractGraph and
-    // QueryAnswer both using `qwen3:0.6b`) — the first preset's
-    // existence would shadow the second, preventing its creation.
-    presets.iter().find(|preset| preset.preset_name == canonical_name)
-}
-
 pub(super) fn normalize_non_empty(
     value: &str,
     field_name: &'static str,
@@ -138,7 +126,7 @@ pub(super) async fn normalize_scope_ref(
 }
 
 pub(super) fn scope_ref_from_binding_row(
-    row: &ai_repository::AiBindingAssignmentRow,
+    row: &ai_repository::AiBindingRow,
 ) -> Result<AiScopeRef, ApiError> {
     Ok(AiScopeRef {
         scope_kind: parse_scope_kind(&row.scope_kind)?,
@@ -147,21 +135,11 @@ pub(super) fn scope_ref_from_binding_row(
     })
 }
 
-pub(super) fn scope_ref_from_provider_credential(
-    credential: &ProviderCredential,
-) -> Result<AiScopeRef, ApiError> {
+pub(super) fn scope_ref_from_account(account: &AiAccount) -> Result<AiScopeRef, ApiError> {
     Ok(AiScopeRef {
-        scope_kind: credential.scope_kind,
-        workspace_id: credential.workspace_id,
-        library_id: credential.library_id,
-    })
-}
-
-pub(super) fn scope_ref_from_model_preset(preset: &ModelPreset) -> Result<AiScopeRef, ApiError> {
-    Ok(AiScopeRef {
-        scope_kind: preset.scope_kind,
-        workspace_id: preset.workspace_id,
-        library_id: preset.library_id,
+        scope_kind: account.scope_kind,
+        workspace_id: account.workspace_id,
+        library_id: account.library_id,
     })
 }
 
@@ -187,35 +165,20 @@ pub(crate) fn binding_purpose_key(value: AiBindingPurpose) -> &'static str {
     value.as_str()
 }
 
-pub(crate) fn canonical_runtime_preset_name(
-    provider_display_name: &str,
-    purpose: AiBindingPurpose,
-    model_name: &str,
-) -> String {
-    let purpose_label = match purpose {
-        AiBindingPurpose::ExtractText => "Extract Text",
-        AiBindingPurpose::ExtractGraph => "Extract Graph",
-        AiBindingPurpose::EmbedChunk => "Embed Chunk",
-        AiBindingPurpose::QueryCompile => "Query Compile",
-        AiBindingPurpose::QueryRetrieve => "Query Retrieve",
-        AiBindingPurpose::QueryAnswer => "Query Answer",
-        AiBindingPurpose::Vision => "Vision",
-        AiBindingPurpose::Agent => "Agent",
-    };
-    format!("{provider_display_name} {purpose_label} · {model_name}")
-}
-
-pub(super) fn map_binding_assignment_row(
-    row: ai_repository::AiBindingAssignmentRow,
-) -> Result<AiBindingAssignment, ApiError> {
-    Ok(AiBindingAssignment {
+pub(super) fn map_binding_row(row: ai_repository::AiBindingRow) -> Result<AiBinding, ApiError> {
+    Ok(AiBinding {
         id: row.id,
         scope_kind: parse_scope_kind(&row.scope_kind)?,
         workspace_id: row.workspace_id,
         library_id: row.library_id,
         binding_purpose: parse_binding_purpose(&row.binding_purpose)?,
-        provider_credential_id: row.provider_credential_id,
-        model_preset_id: row.model_preset_id,
+        account_id: row.account_id,
+        model_catalog_id: row.model_catalog_id,
+        system_prompt: row.system_prompt,
+        temperature: row.temperature,
+        top_p: row.top_p,
+        max_output_tokens_override: row.max_output_tokens_override,
+        extra_parameters_json: row.extra_parameters_json,
         binding_state: row.binding_state,
     })
 }

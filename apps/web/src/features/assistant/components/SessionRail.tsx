@@ -3,7 +3,7 @@ import type { TFunction } from 'i18next';
 import {
   ChevronLeft,
   ChevronRight,
-  MessageSquareText,
+  MessageSquare,
   MoreHorizontal,
   Pencil,
   Plus,
@@ -18,11 +18,13 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from '@/shared/components/ui/dropdown-menu';
+import { WorkbenchEmptyState } from '@/shared/components/layout/WorkbenchEmptyState';
 import { cn } from '@/shared/lib/utils';
 import type { AssistantSession } from '@/shared/types';
 
 type SessionRailProps = {
   id?: string;
+  className?: string;
   t: TFunction;
   locale: string;
   sessions: AssistantSession[];
@@ -102,7 +104,7 @@ function SessionRow({
 
   if (editing) {
     return (
-      <div className="rounded-xl border border-primary/40 bg-card p-2 shadow-soft">
+      <div className="workbench-surface border-primary/40 p-2">
         <Input
           ref={inputRef}
           autoFocus
@@ -122,7 +124,7 @@ function SessionRow({
       className={cn(
         'group relative flex items-stretch rounded-xl transition-all duration-200',
         active
-          ? 'border border-border/50 bg-card shadow-soft'
+          ? 'workbench-surface border-border/50'
           : 'border border-transparent hover:bg-accent/50',
       )}
     >
@@ -133,7 +135,7 @@ function SessionRow({
         className="min-w-0 flex-1 rounded-xl px-3 py-2.5 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset disabled:cursor-not-allowed"
       >
         <div className={cn('truncate text-sm', active && 'font-semibold')}>{title}</div>
-        <div className="mt-0.5 flex items-center gap-1.5 text-[11px] text-muted-foreground">
+        <div className="mt-0.5 flex items-center gap-1.5 text-2xs text-muted-foreground">
           <span>{dateLabel}</span>
           {session.turnCount > 0 && (
             <>
@@ -182,6 +184,7 @@ function SessionRow({
 
 function SessionRailImpl({
   id,
+  className,
   t,
   locale,
   sessions,
@@ -232,8 +235,9 @@ function SessionRailImpl({
     <div
       id={id}
       className={cn(
-        'flex shrink-0 flex-col border-r bg-surface-sunken/30 transition-[width] duration-250',
+        'shrink-0 flex-col border-r bg-background transition-[width] duration-250',
         collapsed ? 'w-12' : 'w-64',
+        className,
       )}
     >
       <button
@@ -252,7 +256,7 @@ function SessionRailImpl({
         ) : (
           <>
             <span className="flex min-w-0 items-center gap-2">
-              <MessageSquareText className="h-4 w-4 shrink-0 text-primary" />
+              <MessageSquare className="h-4 w-4 shrink-0 text-primary" />
               <span className="truncate">{t('assistant.sessions')}</span>
             </span>
             <ChevronLeft className="h-4 w-4 text-muted-foreground" />
@@ -269,7 +273,7 @@ function SessionRailImpl({
             <Plus className="mr-1.5 h-3.5 w-3.5" /> {t('assistant.newSession')}
           </Button>
           <div className="relative">
-            <Search className="absolute left-2.5 top-1/2 h-3 w-3 -translate-y-1/2 text-muted-foreground" />
+            <Search className="absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
             <Input
               className="h-8 pl-8 text-xs"
               placeholder={t('assistant.searchSessions')}
@@ -292,23 +296,23 @@ function SessionRailImpl({
               ))}
             </div>
           ) : filteredSessions.length === 0 ? (
-            <div className="px-3 py-6 text-center">
-              <div className="text-sm font-semibold">
-                {sessionSearch.trim()
+            <WorkbenchEmptyState
+              title={
+                sessionSearch.trim()
                   ? t('assistant.noSessionsMatch')
-                  : t('assistant.noSessions')}
-              </div>
-              <div className="mt-1 text-xs leading-relaxed text-muted-foreground">
-                {sessionSearch.trim()
+                  : t('assistant.noSessions')
+              }
+              description={
+                sessionSearch.trim()
                   ? t('assistant.noSessionsMatchDesc')
-                  : t('assistant.noSessionsDesc')}
-              </div>
-            </div>
+                  : t('assistant.noSessionsDesc')
+              }
+            />
           ) : (
             <div className="space-y-3">
               {groups.map((group) => (
                 <div key={group.id} className="space-y-0.5">
-                  <div className="px-2 pb-1 pt-1 text-[10px] font-bold uppercase tracking-wider text-muted-foreground/70">
+                  <div className="px-2 pb-1 pt-1 section-label font-bold text-muted-foreground/70">
                     {t(`assistant.group${group.id}`)}
                   </div>
                   {group.sessions.map((session) => (

@@ -37,11 +37,10 @@ pub enum BootstrapCredentialSource {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
-pub struct BootstrapProviderPreset {
+pub struct BootstrapProviderBinding {
     pub binding_purpose: BootstrapBindingPurpose,
     pub model_catalog_id: Uuid,
     pub model_name: String,
-    pub preset_name: String,
     pub system_prompt: Option<String>,
     pub temperature: Option<f64>,
     pub top_p: Option<f64>,
@@ -50,7 +49,7 @@ pub struct BootstrapProviderPreset {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
-pub struct BootstrapProviderPresetBundle {
+pub struct BootstrapProviderBindingBundle {
     pub provider_catalog_id: Uuid,
     pub provider_kind: String,
     pub display_name: String,
@@ -64,13 +63,13 @@ pub struct BootstrapProviderPresetBundle {
     pub capabilities: ProviderCapabilities,
     pub runtime: ProviderRuntimeProfile,
     pub ui_hints: serde_json::Value,
-    pub presets: Vec<BootstrapProviderPreset>,
+    pub bindings: Vec<BootstrapProviderBinding>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct BootstrapAiSetup {
-    pub preset_bundles: Vec<BootstrapProviderPresetBundle>,
+    pub binding_bundles: Vec<BootstrapProviderBindingBundle>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]

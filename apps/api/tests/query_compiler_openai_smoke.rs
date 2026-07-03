@@ -57,7 +57,7 @@ fn binding_from_env() -> Option<ResolvedRuntimeBinding> {
         provider_kind: "openai".to_string(),
         provider_base_url: None,
         provider_api_style: "openai".to_string(),
-        credential_id: Uuid::now_v7(),
+        account_id: Uuid::now_v7(),
         api_key: Some(api_key),
         model_catalog_id: Uuid::now_v7(),
         model_name: env::var("IRONRAG_QUERY_COMPILE_MODEL")

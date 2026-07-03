@@ -7,6 +7,9 @@ import {
   type LucideIcon,
 } from 'lucide-react';
 import { Button } from '@/shared/components/ui/button';
+import { PageHeader } from '@/shared/components/layout/PageHeader';
+import { PageShell } from '@/shared/components/layout/PageShell';
+import { WorkbenchEmptyState } from '@/shared/components/layout/WorkbenchEmptyState';
 
 type EmptyStateProps = {
   t: TFunction;
@@ -26,34 +29,21 @@ function EmptyState({
   warning = false,
 }: EmptyStateProps) {
   return (
-    <div className="flex-1 flex flex-col">
-      <div className="page-header">
-        <h1 className="text-lg font-bold tracking-tight">{t('assistant.title')}</h1>
-      </div>
-      <div className="empty-state flex-1">
-        <div
-          className="w-14 h-14 rounded-2xl flex items-center justify-center mb-4"
-          style={
-            warning
-              ? {
-                  background: 'hsl(var(--status-warning-bg))',
-                  boxShadow:
-                    'inset 0 0 0 1px hsl(var(--status-warning-ring) / 0.3)',
-                }
-              : undefined
+    <PageShell
+      header={<PageHeader title={t('assistant.title')} />}
+      bodyClassName="empty-state"
+    >
+        <WorkbenchEmptyState
+          icon={
+            <Icon
+              className={`h-7 w-7 ${warning ? 'text-status-warning' : 'text-muted-foreground'}`}
+            />
           }
-        >
-          <Icon
-            className={`h-7 w-7 ${warning ? 'text-status-warning' : 'text-muted-foreground'}`}
-          />
-        </div>
-        <h2 className="text-base font-bold tracking-tight">{title}</h2>
-        <p className="text-sm text-muted-foreground mt-2 max-w-sm">
-          {description}
-        </p>
-        {action}
-      </div>
-    </div>
+          title={title}
+          description={description}
+          action={action}
+        />
+    </PageShell>
   );
 }
 

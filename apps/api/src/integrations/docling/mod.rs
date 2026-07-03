@@ -70,7 +70,7 @@ pub enum DoclingExtractionError {
     ProcessFailed { status: String, stderr: String },
 
     #[error(
-        "docling extraction needs at least {required_mib} MiB plus {safety_margin_mib} MiB safety margin, but the worker cgroup has only {available_mib} MiB available (limit {memory_limit_mib} MiB, current RSS {current_rss_mib} MiB)"
+        "docling extraction needs at least {required_mib} MiB plus {safety_margin_mib} MiB safety margin, but the worker cgroup has only {available_mib} MiB available (limit {memory_limit_mib} MiB, current RSS {current_rss_mib} MiB); raise IRONRAG_WORKER_MEMORY_LIMIT and recreate the worker container"
     )]
     InsufficientMemory {
         memory_limit_mib: u64,

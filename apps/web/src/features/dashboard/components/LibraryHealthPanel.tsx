@@ -1,8 +1,9 @@
 import { memo } from 'react';
 import type { TFunction } from 'i18next';
 import { Activity, Database, Share2 } from 'lucide-react';
+import { StatusBadge } from '@/shared/components/StatusBadge';
 import type { DashboardGraph } from "../model/types";
-import { formatDateTime, graphStatusClass } from "../model/format";
+import { formatDateTime, graphStatusClass, toStatusTone } from "../model/format";
 
 export type HealthRow = {
   key: string;
@@ -18,7 +19,6 @@ type LibraryHealthPanelProps = {
   graph: DashboardGraph;
   totalDocuments: number;
   readyCount: number;
-  graphReadyCount: number;
   readableWithoutGraphCount: number;
   healthRows: HealthRow[];
   onNavigate: (path: string) => void;
@@ -30,30 +30,22 @@ function LibraryHealthPanelImpl({
   graph,
   totalDocuments,
   readyCount,
-  graphReadyCount,
   readableWithoutGraphCount,
   healthRows,
   onNavigate,
 }: LibraryHealthPanelProps) {
   const emptyLabel = t('dashboard.notAvailable');
+  const visibleHealthRows = healthRows.filter((row) => row.key === 'graph-ready' || row.count > 0);
+
   return (
-    <div className="workbench-surface p-5 sm:p-6">
-      <div className="flex items-start justify-between gap-4 flex-wrap">
+    <div className="workbench-surface p-4">
+      <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
           <h2 className="text-sm font-bold tracking-tight">{t('dashboard.libraryHealth')}</h2>
           <p className="text-xs text-muted-foreground mt-1.5">
             {totalDocuments > 0
-              ? t('dashboard.graphCoverageSummary', {
-                  ready: graphReadyCount,
-                  total: totalDocuments,
-                })
+              ? t('dashboard.documentsReadySummary', { count: readyCount })
               : t('dashboard.noDocs')}
-            {totalDocuments > 0 && (
-              <>
-                <span className="mx-1.5 text-border">·</span>
-                {t('dashboard.documentsReadySummary', { count: readyCount })}
-              </>
-            )}
             {readableWithoutGraphCount > 0 && (
               <>
                 <span className="mx-1.5 text-border">·</span>
@@ -63,17 +55,17 @@ function LibraryHealthPanelImpl({
           </p>
         </div>
         <div className="flex flex-col items-start gap-2 sm:items-end">
-          <span className={`status-badge ${graphStatusClass(graph.status)}`}>
+          <StatusBadge tone={toStatusTone(graphStatusClass(graph.status))}>
             {t(`graph.statusLabels.${graph.status}`)}
-          </span>
+          </StatusBadge>
           <span className="text-xs text-muted-foreground">
             {t('dashboard.updated')}: {formatDateTime(graph.updatedAt, locale, emptyLabel)}
           </span>
         </div>
       </div>
 
-      <div className="mt-6 space-y-4">
-        {healthRows.map((row) => {
+      <div className="mt-4 space-y-3">
+        {visibleHealthRows.map((row) => {
           const ratio =
             totalDocuments > 0
               ? Math.min(100, Math.round((row.count / totalDocuments) * 100))
@@ -106,7 +98,7 @@ function LibraryHealthPanelImpl({
 
       {/* Graph stat tiles — honest affordance: these route to /graph rather
           than looking clickable while doing nothing (DSH-04). */}
-      <div className="mt-6 grid grid-cols-3 gap-3">
+      <div className="mt-4 hidden grid-cols-3 gap-2 border-t pt-3 sm:grid">
         {[
           { label: t('dashboard.nodes'), value: graph.nodeCount, icon: Share2 },
           { label: t('dashboard.edges'), value: graph.edgeCount, icon: Activity },
@@ -120,16 +112,18 @@ function LibraryHealthPanelImpl({
             key={item.label}
             type="button"
             onClick={() => onNavigate('/graph')}
-            className="group rounded-xl border border-border/60 bg-background/70 p-3.5 text-left transition-colors hover:border-primary/30 hover:bg-accent/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/30"
+            className="flex w-full items-start gap-2 rounded-lg bg-surface-sunken px-3 py-2 text-left transition-colors hover:bg-muted/60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/25"
           >
-            <div className="flex items-center gap-2 text-muted-foreground transition-colors group-hover:text-primary">
-              <item.icon className="h-3.5 w-3.5" />
-              <span className="text-[11px] font-semibold uppercase tracking-wider">
-                {item.label}
-              </span>
+            <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md bg-muted">
+              <item.icon className="h-3.5 w-3.5 text-muted-foreground" />
             </div>
-            <div className="mt-2 text-xl font-bold tracking-tight tabular-nums">
-              {item.value}
+            <div className="min-w-0 flex-1">
+              <div className="text-base font-semibold tabular-nums">
+                {item.value}
+              </div>
+              <div className="text-xs font-medium leading-4 text-muted-foreground">
+                {item.label}
+              </div>
             </div>
           </button>
         ))}

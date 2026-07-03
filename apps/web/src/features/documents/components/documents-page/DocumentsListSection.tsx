@@ -10,6 +10,7 @@ import type {
 } from "@/shared/api";
 import { Button } from "@/shared/components/ui/button";
 import { DataState } from "@/shared/components/DataState";
+import { WorkbenchEmptyState } from "@/shared/components/layout/WorkbenchEmptyState";
 import type { DocumentItem, Library, Locale } from "@/shared/types";
 
 import { BulkRerunProgressBanner } from "@/features/documents/components/BulkRerunProgressBanner";
@@ -243,7 +244,7 @@ function SelectAllMatchingBanner({
       <Button size="sm" variant="default" className="h-7 text-xs shrink-0" disabled={expanding} onClick={onSelectAll}>
         {expanding ? (
           <>
-            <Loader2 className="h-3 w-3 mr-1.5 animate-spin" />
+            <Loader2 className="h-3.5 w-3.5 mr-1.5 animate-spin" />
             {t("documents.selectAllBannerExpanding")}
           </>
         ) : (
@@ -257,9 +258,9 @@ function SelectAllMatchingBanner({
 function DropOverlay({ t }: { t: TFunction }) {
   return (
     <div className="absolute inset-0 z-10 flex items-center justify-center pointer-events-none">
-      <div className="p-8 rounded-2xl border-2 border-dashed border-primary bg-card shadow-elevated">
-        <Upload className="h-8 w-8 text-primary mx-auto mb-3" />
-        <p className="text-sm font-bold">{t("documents.dropToUpload")}</p>
+      <div className="rounded-xl border border-dashed border-primary/70 bg-card/95 px-5 py-4 shadow-lifted">
+        <Upload className="mx-auto mb-2 h-5 w-5 text-primary" />
+        <p className="text-sm font-semibold">{t("documents.dropToUpload")}</p>
       </div>
     </div>
   );
@@ -272,7 +273,7 @@ function DropOverlay({ t }: { t: TFunction }) {
  */
 function DragHintFooter({ t }: { t: TFunction }) {
   return (
-    <div className="mx-4 my-3 flex items-center justify-center gap-2 rounded-xl border border-dashed border-border/70 bg-surface-sunken/40 px-4 py-2.5 text-xs text-muted-foreground">
+    <div className="mx-4 my-3 flex items-center justify-center gap-2 rounded-lg border border-dashed border-border bg-surface-sunken/40 px-4 py-2.5 text-xs text-muted-foreground">
       <MousePointerSquareDashed className="h-3.5 w-3.5 shrink-0 text-primary/70" />
       <span>{t("documents.dragHint")}</span>
     </div>
@@ -281,12 +282,10 @@ function DragHintFooter({ t }: { t: TFunction }) {
 
 function LoadingState({ t }: { t: TFunction }) {
   return (
-    <div className="empty-state py-20">
-      <Loader2 className="h-7 w-7 animate-spin text-primary mb-4" />
-      <h2 className="text-base font-bold tracking-tight">
-        {t("documents.loadingDocs")}
-      </h2>
-    </div>
+    <WorkbenchEmptyState
+      icon={<Loader2 className="h-7 w-7 animate-spin text-primary/70" />}
+      title={t("documents.loadingDocs")}
+    />
   );
 }
 
@@ -300,19 +299,17 @@ function ErrorState({
   t: TFunction;
 }) {
   return (
-    <div className="empty-state py-20">
-      <div className="w-14 h-14 rounded-2xl bg-destructive/10 flex items-center justify-center mb-4">
-        <XCircle className="h-7 w-7 text-destructive" />
-      </div>
-      <h2 className="text-base font-bold tracking-tight">
-        {t("documents.failedToLoad")}
-      </h2>
-      <p className="text-sm text-muted-foreground mt-2">{error}</p>
-      <Button size="sm" variant="outline" className="mt-4" onClick={onRetry}>
-        <RotateCw className="h-3.5 w-3.5 mr-1.5" />
-        {t("documents.retry")}
-      </Button>
-    </div>
+    <WorkbenchEmptyState
+      icon={<XCircle className="h-7 w-7 text-destructive" />}
+      title={t("documents.failedToLoad")}
+      description={error}
+      action={
+        <Button size="sm" variant="outline" onClick={onRetry}>
+          <RotateCw className="h-3.5 w-3.5 mr-1.5" />
+          {t("documents.retry")}
+        </Button>
+      }
+    />
   );
 }
 
@@ -326,29 +323,27 @@ function EmptyState({
   t: TFunction;
 }) {
   return (
-    <div className="empty-state py-20">
-      <div className="w-14 h-14 rounded-2xl bg-muted flex items-center justify-center mb-4">
-        <FileText className="h-7 w-7 text-muted-foreground" />
-      </div>
-      <h2 className="text-base font-bold tracking-tight">
-        {searchQuery ? t("documents.noMatchingDocs") : t("documents.noDocs")}
-      </h2>
-      <p className="text-sm text-muted-foreground mt-2">
-        {searchQuery
+    <WorkbenchEmptyState
+      icon={<FileText className="h-7 w-7 text-muted-foreground" />}
+      title={searchQuery ? t("documents.noMatchingDocs") : t("documents.noDocs")}
+      description={
+        searchQuery
           ? t("documents.noMatchingDocsDesc")
-          : t("documents.noDocsDesc")}
-      </p>
-      {!searchQuery && canUpload && (
-        <div className="mt-6 flex flex-col items-center gap-2 rounded-2xl border-2 border-dashed border-border/70 bg-surface-sunken/40 px-8 py-6">
-          <Upload className="h-6 w-6 text-primary/70" />
-          <p className="text-sm font-semibold text-foreground">
-            {t("documents.dropZoneTitle")}
-          </p>
-          <p className="text-xs text-muted-foreground">
-            {t("documents.dropZoneHint")}
-          </p>
-        </div>
-      )}
-    </div>
+          : t("documents.noDocsDesc")
+      }
+      action={
+        !searchQuery && canUpload ? (
+          <div className="flex flex-col items-center gap-2">
+            <Upload className="h-6 w-6 text-primary/70" />
+            <p className="text-sm font-semibold text-foreground">
+              {t("documents.dropZoneTitle")}
+            </p>
+            <p className="text-xs text-muted-foreground">
+              {t("documents.dropZoneHint")}
+            </p>
+          </div>
+        ) : undefined
+      }
+    />
   );
 }

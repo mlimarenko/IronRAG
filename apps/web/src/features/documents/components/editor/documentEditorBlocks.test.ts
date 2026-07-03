@@ -1,30 +1,57 @@
 import { describe, expect, it } from "vitest";
 
+import type { PreparedSegmentItem } from "@/shared/api/documents";
+
 import {
   buildEditorBlocks,
   serializeSourceTextForEditor,
   serializeEditorBlocks,
 } from "./documentEditorBlocks";
 
+function prepareItem(input: {
+  segment: {
+    ordinal: number;
+    blockKind: PreparedSegmentItem["segment"]["blockKind"];
+    headingTrail?: string[];
+  };
+  text: string;
+  normalizedText?: string;
+}): PreparedSegmentItem {
+  return {
+    normalizedText: input.normalizedText ?? input.text,
+    segment: {
+      blockKind: input.segment.blockKind,
+      excerpt: input.text,
+      headingTrail: input.segment.headingTrail ?? [],
+      ordinal: input.segment.ordinal,
+      revisionId: "test-revision",
+      sectionPath: [],
+      segmentId: `segment-${input.segment.ordinal}`,
+    },
+    supportChunkIds: [],
+    text: input.text,
+  };
+}
+
 describe("documentEditorBlocks", () => {
   it("hydrates spreadsheet prepared segments into heading and table blocks", () => {
     const blocks = buildEditorBlocks(
       [
-        {
+        prepareItem({
           segment: {
             ordinal: 0,
             blockKind: "heading",
             headingTrail: ["Sheet1"],
           },
           text: "## Sheet1",
-        },
-        {
+        }),
+        prepareItem({
           segment: {
             ordinal: 1,
             blockKind: "table",
           },
           text: "| Item | Quantity |\n| --- | --- |\n| Widget | 7 |",
-        },
+        }),
       ],
       "xlsx",
     );
@@ -45,21 +72,21 @@ describe("documentEditorBlocks", () => {
   it("keeps sheet names for ods tables too", () => {
     const blocks = buildEditorBlocks(
       [
-        {
+        prepareItem({
           segment: {
             ordinal: 0,
             blockKind: "heading",
             headingTrail: ["Sheet1"],
           },
           text: "## Sheet1",
-        },
-        {
+        }),
+        prepareItem({
           segment: {
             ordinal: 1,
             blockKind: "table",
           },
           text: "| Item | Quantity |\n| --- | --- |\n| Widget | 7 |",
-        },
+        }),
       ],
       "ods",
     );
@@ -73,22 +100,22 @@ describe("documentEditorBlocks", () => {
   it("hydrates table_row segments that use semantic normalized text but raw markdown text", () => {
     const blocks = buildEditorBlocks(
       [
-        {
+        prepareItem({
           segment: {
             ordinal: 0,
             blockKind: "heading",
             headingTrail: ["people"],
           },
           text: "## people",
-        },
-        {
+        }),
+        prepareItem({
           segment: {
             ordinal: 1,
             blockKind: "table",
           },
           text: "| Name | Email |\n| --- | --- |\n| Alice | alice@example.com |",
-        },
-        {
+        }),
+        prepareItem({
           segment: {
             ordinal: 2,
             blockKind: "table_row",
@@ -96,7 +123,7 @@ describe("documentEditorBlocks", () => {
           text: "| Alice | alice@example.com |",
           normalizedText:
             "Sheet: people | Row 1 | Name: Alice | Email: alice@example.com",
-        },
+        }),
       ],
       "csv",
     );
@@ -132,34 +159,34 @@ describe("documentEditorBlocks", () => {
   it("hydrates code-like source formats into one code block", () => {
     const blocks = buildEditorBlocks(
       [
-        {
+        prepareItem({
           segment: {
             ordinal: 0,
             blockKind: "paragraph",
           },
           text: "use uuid::Uuid;",
-        },
-        {
+        }),
+        prepareItem({
           segment: {
             ordinal: 1,
             blockKind: "paragraph",
           },
           text: "pub struct Node {",
-        },
-        {
+        }),
+        prepareItem({
           segment: {
             ordinal: 2,
             blockKind: "paragraph",
           },
           text: "  pub id: Uuid,",
-        },
-        {
+        }),
+        prepareItem({
           segment: {
             ordinal: 3,
             blockKind: "paragraph",
           },
           text: "}",
-        },
+        }),
       ],
       "rs",
     );
@@ -177,42 +204,42 @@ describe("documentEditorBlocks", () => {
     const markdown = serializeEditorBlocks(
       buildEditorBlocks(
         [
-          {
+          prepareItem({
             segment: {
               ordinal: 0,
               blockKind: "heading",
               headingTrail: ["Schema"],
             },
             text: "## Schema",
-          },
-          {
+          }),
+          prepareItem({
             segment: {
               ordinal: 1,
               blockKind: "paragraph",
             },
             text: "<!-- image -->",
-          },
-          {
+          }),
+          prepareItem({
             segment: {
               ordinal: 2,
               blockKind: "quote_block",
             },
             text: "> Image OCR: garbled mixed OCR text",
-          },
-          {
+          }),
+          prepareItem({
             segment: {
               ordinal: 3,
               blockKind: "paragraph",
             },
             text: "--- Embedded image 1 (775x350) ---\nraw OCR fallback",
-          },
-          {
+          }),
+          prepareItem({
             segment: {
               ordinal: 4,
               blockKind: "paragraph",
             },
             text: "Main document text.",
-          },
+          }),
         ],
         "application/pdf",
       ),
@@ -225,13 +252,13 @@ describe("documentEditorBlocks", () => {
     const markdown = serializeEditorBlocks(
       buildEditorBlocks(
         [
-          {
+          prepareItem({
             segment: {
               ordinal: 0,
               blockKind: "quote_block",
             },
             text: "> Image OCR: readable text from the image",
-          },
+          }),
         ],
         "image/png",
       ),
@@ -244,13 +271,13 @@ describe("documentEditorBlocks", () => {
     const markdown = serializeEditorBlocks(
       buildEditorBlocks(
         [
-          {
+          prepareItem({
             segment: {
               ordinal: 0,
               blockKind: "paragraph",
             },
             text: "First paragraph\n\n\n\nSecond paragraph\n   \n\nThird paragraph",
-          },
+          }),
         ],
         "pdf",
       ),
@@ -264,20 +291,20 @@ describe("documentEditorBlocks", () => {
   it("preserves leading tabs in code-like source formats", () => {
     const blocks = buildEditorBlocks(
       [
-        {
+        prepareItem({
           segment: {
             ordinal: 0,
             blockKind: "paragraph",
           },
           text: "\tif (user == null)",
-        },
-        {
+        }),
+        prepareItem({
           segment: {
             ordinal: 1,
             blockKind: "paragraph",
           },
           text: "\t\treturn false;",
-        },
+        }),
       ],
       "cs",
     );

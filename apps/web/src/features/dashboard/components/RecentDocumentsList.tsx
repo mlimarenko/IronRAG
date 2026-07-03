@@ -1,10 +1,11 @@
 import { memo } from 'react';
 import type { TFunction } from 'i18next';
 import { FileText } from 'lucide-react';
+import { StatusBadge } from '@/shared/components/StatusBadge';
 import { humanizeDocumentFailure, humanizeDocumentStage } from '@/shared/lib/document-processing';
 import type { RecentDocument } from "../model/types";
 import { buildDocumentsPath } from "../model/types";
-import { formatRelativeTime, formatSize, readinessClass } from "../model/format";
+import { formatRelativeTime, formatSize, readinessClass, toStatusTone } from "../model/format";
 
 type RecentDocumentsListProps = {
   t: TFunction;
@@ -22,7 +23,7 @@ function buildDetailBits(doc: RecentDocument, t: TFunction): string[] {
       humanizeDocumentFailure(
         {
           stalledReason: doc.failureMessage,
-          stage: doc.stageLabel,
+          stage: doc.stageLabel ?? null,
         },
         t,
       ) ?? doc.failureMessage,
@@ -51,7 +52,7 @@ function RecentDocumentsListImpl({
   onNavigate,
 }: RecentDocumentsListProps) {
   return (
-    <div className="workbench-surface p-5 sm:p-6">
+    <div className="workbench-surface h-full p-4">
       <div>
         <h2 className="text-sm font-bold tracking-tight">{t('dashboard.recentDocs')}</h2>
         <p className="mt-1 text-xs text-muted-foreground">
@@ -72,10 +73,10 @@ function RecentDocumentsListImpl({
                 key={doc.id}
                 type="button"
                 onClick={() => onNavigate(buildDocumentsPath({ documentId: doc.id }))}
-                className="w-full rounded-xl border border-border/60 bg-background/70 p-3.5 text-left transition-colors hover:bg-accent/45 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/30"
+                className="w-full rounded-lg bg-surface-sunken p-3 text-left transition-colors hover:bg-muted/60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/25"
               >
                 <div className="flex items-start gap-3">
-                  <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-surface-sunken">
+                  <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md bg-muted">
                     <FileText className="h-4 w-4 text-muted-foreground" />
                   </div>
                   <div className="min-w-0 flex-1">
@@ -84,22 +85,20 @@ function RecentDocumentsListImpl({
                         <div className="truncate text-sm font-semibold text-foreground">
                           {doc.fileName}
                         </div>
-                        <div className="mt-1 text-[11px] text-muted-foreground">
+                        <div className="mt-1 text-2xs text-muted-foreground">
                           {formatRelativeTime(doc.uploadedAt, locale)}
                           <span className="mx-1 text-border">·</span>
                           {formatSize(doc.fileSize)}
                         </div>
                       </div>
-                      <span
-                        className={`status-badge shrink-0 text-[10px] ${readinessClass(doc.readiness)}`}
-                      >
+                      <StatusBadge tone={toStatusTone(readinessClass(doc.readiness))} className="shrink-0">
                         {t(`dashboard.readinessLabels.${doc.readiness}`)}
-                      </span>
+                      </StatusBadge>
                     </div>
 
                     {detailBits.length > 0 ? (
                       <div
-                        className={`mt-2 text-[11px] leading-relaxed ${
+                        className={`mt-2 text-2xs leading-relaxed ${
                           doc.readiness === 'failed'
                             ? 'text-status-failed'
                             : 'text-muted-foreground'
@@ -115,7 +114,7 @@ function RecentDocumentsListImpl({
           })}
         </div>
       ) : (
-        <div className="mt-4 rounded-xl border border-dashed border-border/70 bg-background/60 p-4 text-sm text-muted-foreground">
+        <div className="mt-4 rounded-lg border border-dashed border-border bg-surface-sunken/40 p-4 text-sm text-muted-foreground">
           {t('dashboard.noDocs')}
         </div>
       )}

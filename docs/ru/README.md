@@ -126,7 +126,7 @@ refinements. Если IR для turn недостаточно надёжен, le
 | Хранилище | Роль |
 |---|---|
 | **PostgreSQL** | Catalog (workspaces, libraries, documents, revisions), durable ingest units, AI catalog (providers, models, presets, prices), bindings, IAM, sessions, query executions, billing, knowledge documents, chunks, technical facts, graph data, context bundles, pgvector embeddings и PostgreSQL full-text search indexes. |
-| **Redis** | Graph topology cache, IR cache, answer-context cache, координация prewarm. |
+| **Redis** (redis:8.8) | Graph topology cache, IR cache, answer-context cache, координация prewarm. |
 | **Filesystem / S3** | Source-document блобы (конфигурируется; включённый `s4core` даёт встроенный S3-совместимый blob-store). |
 
 ## Multi-provider router

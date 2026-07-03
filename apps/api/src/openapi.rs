@@ -110,13 +110,12 @@ const API_DESCRIPTION: &str = concat!(
         crate::interfaces::http::ai::update_model,
         crate::interfaces::http::ai::delete_model,
         crate::interfaces::http::ai::list_prices,
-        crate::interfaces::http::ai::list_model_presets,
-        crate::interfaces::http::ai::list_credentials,
-        crate::interfaces::http::ai::create_credential,
-        crate::interfaces::http::ai::list_binding_assignments,
-        crate::interfaces::http::ai::create_binding_assignment,
-        crate::interfaces::http::ai::update_binding_assignment,
-        crate::interfaces::http::ai::validate_binding_assignment,
+        crate::interfaces::http::ai::list_accounts,
+        crate::interfaces::http::ai::create_account,
+        crate::interfaces::http::ai::list_bindings,
+        crate::interfaces::http::ai::create_binding,
+        crate::interfaces::http::ai::update_binding,
+        crate::interfaces::http::ai::validate_binding,
         crate::interfaces::http::iam::session::get_bootstrap_status,
         crate::interfaces::http::iam::session::setup_bootstrap_admin,
         crate::interfaces::http::iam::session::login_session,
@@ -177,15 +176,12 @@ const API_DESCRIPTION: &str = concat!(
         crate::interfaces::http::content::snapshot::import_library_snapshot,
         crate::interfaces::http::content::snapshot::export_workspace_snapshot,
         crate::interfaces::http::content::snapshot::import_workspace_snapshot,
-        crate::interfaces::http::ai::update_credential,
-        crate::interfaces::http::ai::delete_credential,
-        crate::interfaces::http::ai::create_model_preset,
-        crate::interfaces::http::ai::update_model_preset,
-        crate::interfaces::http::ai::delete_model_preset,
+        crate::interfaces::http::ai::update_account,
+        crate::interfaces::http::ai::delete_account,
         crate::interfaces::http::ai::create_price_override,
         crate::interfaces::http::ai::update_price_override,
         crate::interfaces::http::ai::delete_price_override,
-        crate::interfaces::http::ai::delete_binding_assignment,
+        crate::interfaces::http::ai::delete_binding,
         crate::interfaces::http::catalog::update_library,
         crate::interfaces::http::catalog::update_library_recognition_policy,
         crate::interfaces::http::catalog::get_library_retrieval_config,
@@ -310,14 +306,11 @@ fn operation_description(path: &str, method: &str, operation: &Operation) -> Str
 }
 
 fn operation_purpose(operation_id: &str, tag: Option<&str>) -> &'static str {
-    if operation_id.contains("AiCredential") || operation_id.contains("AiCredentials") {
-        return "Manages stored AI provider credentials used by runtime bindings. Use these endpoints from the admin UI or automation when registering, rotating, or listing provider secrets without exposing secret material in responses.";
+    if operation_id.contains("AiAccount") || operation_id.contains("AiAccounts") {
+        return "Manages stored AI provider accounts used by runtime bindings. Use these endpoints from the admin UI or automation when registering, rotating, or listing provider secrets without exposing secret material in responses.";
     }
     if operation_id.contains("AiLibraryBinding") || operation_id.contains("Binding") {
-        return "Manages library-level AI runtime bindings. Bindings decide which configured provider/model handles embedding, query answering, graph extraction, and other AI purposes for one library.";
-    }
-    if operation_id.contains("AiModelPreset") {
-        return "Manages reusable AI model presets. Presets group provider, model, capability, and tuning metadata so operators can assign consistent runtime behavior to libraries.";
+        return "Manages library-level AI runtime bindings. A binding assigns an account and model to a purpose (embedding, query answering, graph extraction, and other AI purposes) for one library, with tuning parameters (system prompt, temperature, top-p, output token budget) stored inline.";
     }
     if operation_id.contains("AiPrice") {
         return "Manages AI price catalog overrides. Billing and cost dashboards use these rows to attribute provider calls and estimate execution cost.";

@@ -65,31 +65,31 @@ export function DocumentsFiltersBar({
       key: "ready" as const,
       label: t("documents.statusReady"),
       count: statusCounts?.ready ?? null,
-      icon: <CheckCircle2 className="h-3 w-3 text-status-ready" />,
+      icon: <CheckCircle2 className="h-3.5 w-3.5 text-status-ready" />,
     },
     {
       key: "processing" as const,
       label: t("documents.statusProcessing"),
       count: statusCounts?.processing ?? null,
-      icon: <Clock className="h-3 w-3 text-status-processing" />,
+      icon: <Clock className="h-3.5 w-3.5 text-status-processing" />,
     },
     {
       key: "queued" as const,
       label: t("documents.statusQueued"),
       count: statusCounts?.queued ?? null,
-      icon: <Hourglass className="h-3 w-3 text-status-queued" />,
+      icon: <Hourglass className="h-3.5 w-3.5 text-status-queued" />,
     },
     {
       key: "failed" as const,
       label: t("documents.statusFailed"),
       count: statusCounts?.failed ?? null,
-      icon: <XCircle className="h-3 w-3 text-status-failed" />,
+      icon: <XCircle className="h-3.5 w-3.5 text-status-failed" />,
     },
     {
       key: "canceled" as const,
       label: t("documents.statusCanceled"),
       count: statusCounts?.canceled ?? null,
-      icon: <Ban className="h-3 w-3 text-status-stalled" />,
+      icon: <Ban className="h-3.5 w-3.5 text-status-stalled" />,
     },
   ];
 
@@ -109,14 +109,14 @@ export function DocumentsFiltersBar({
           }
         />
       </div>
-      <div className="flex flex-wrap gap-0.5 p-1 bg-muted rounded-xl border border-border/50">
+      <div className="flex flex-wrap gap-0.5 p-1 bg-surface-sunken rounded-lg">
         {buckets.map((bucket) => {
           const active = statusBucket === bucket.key;
           return (
             <button
               key={bucket.key}
               type="button"
-              className={`px-3 py-1.5 text-xs rounded-[9px] transition-all duration-200 font-medium flex items-center gap-1.5 ${
+              className={`px-3 py-1.5 text-xs rounded-md transition-all duration-200 font-medium flex items-center gap-1.5 ${
                 active
                   ? "bg-card shadow-soft font-semibold text-foreground"
                   : "text-muted-foreground hover:text-foreground"
@@ -130,8 +130,8 @@ export function DocumentsFiltersBar({
             >
               {bucket.icon}
               {bucket.label}
-              {bucket.count != null && bucket.count > 0 && (
-                <span className="tabular-nums text-[10px] opacity-70">
+              {active && bucket.count != null && bucket.count > 0 && (
+                <span className="tabular-nums text-2xs opacity-70">
                   {bucket.count}
                 </span>
               )}
@@ -143,22 +143,6 @@ export function DocumentsFiltersBar({
           action buttons sideways (DOC-11). The slot collapses its content but
           keeps the right-aligned action group anchored via ml-auto. */}
       <div className="ml-auto flex items-center gap-3">
-        {showCostSummary && (
-          <div className="hidden flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground lg:flex">
-            <span>
-              {t("documents.libraryCost")}:{" "}
-              <span className="font-bold tabular-nums">
-                ${libraryCost.toFixed(3)}
-              </span>
-            </span>
-            <span>
-              {t("documents.workspaceCost")}:{" "}
-              <span className="font-bold tabular-nums">
-                ${workspaceCost.toFixed(3)}
-              </span>
-            </span>
-          </div>
-        )}
         <Tooltip>
           <TooltipTrigger asChild>
             <Button
@@ -185,6 +169,22 @@ export function DocumentsFiltersBar({
           <CheckSquare className="h-3.5 w-3.5 mr-1.5" />
           {selectionMode ? t("documents.cancelSelection") : t("documents.select")}
         </Button>
+        {showCostSummary && (
+          <div className="hidden flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground lg:flex">
+            <span>
+              {t("documents.libraryCost")}:{" "}
+              <span className="font-bold tabular-nums">
+                ${libraryCost.toFixed(3)}
+              </span>
+            </span>
+            <span>
+              {t("documents.workspaceCost")}:{" "}
+              <span className="font-bold tabular-nums">
+                ${workspaceCost.toFixed(3)}
+              </span>
+            </span>
+          </div>
+        )}
       </div>
     </div>
   );

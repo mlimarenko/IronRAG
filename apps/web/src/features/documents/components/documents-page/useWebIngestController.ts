@@ -11,8 +11,8 @@ import {
   type WebBoundaryPolicy,
   type WebIngestMode,
   type WebIngestRunListItem,
-  type WebIngestUrlFilter,
 } from "@/shared/api";
+import type { WebIngestUrlFilter } from "@/shared/api/generated";
 import type { Library } from "@/shared/types";
 
 import {

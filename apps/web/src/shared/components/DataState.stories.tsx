@@ -12,14 +12,6 @@ const documents: ExampleDocument[] = [
   { id: "doc-2", title: "Release Checklist" },
 ];
 
-const meta = {
-  title: "Shared/DataState",
-  component: DataState<ExampleDocument[]>,
-} satisfies Meta<typeof DataState<ExampleDocument[]>>;
-
-export default meta;
-type Story = StoryObj<typeof meta>;
-
 const renderDocuments = (items: ExampleDocument[]) => (
   <div className="w-80 rounded-lg border bg-card p-4">
     <div className="text-sm font-semibold">Documents</div>
@@ -33,6 +25,18 @@ const renderDocuments = (items: ExampleDocument[]) => (
   </div>
 );
 
+const meta = {
+  title: "Shared/DataState",
+  component: DataState<ExampleDocument[]>,
+  args: {
+    query: { isLoading: false, error: null, data: documents },
+    children: renderDocuments,
+  },
+} satisfies Meta<typeof DataState<ExampleDocument[]>>;
+
+export default meta;
+type Story = StoryObj<typeof meta>;
+
 export const Loading: Story = {
   render: () => (
     <DataState query={{ isLoading: true, error: null, data: undefined }}>
@@ -43,7 +47,9 @@ export const Loading: Story = {
 
 export const Error: Story = {
   render: () => (
-    <DataState query={{ isLoading: false, error: new Error("Request timed out"), data: undefined }}>
+    <DataState
+      query={{ isLoading: false, error: new globalThis.Error("Request timed out"), data: undefined }}
+    >
       {renderDocuments}
     </DataState>
   ),

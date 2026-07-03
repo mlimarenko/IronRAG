@@ -126,7 +126,7 @@ back to the full extracted keyword set.
 | Store | Role |
 |---|---|
 | **PostgreSQL** | Catalog (workspaces, libraries, documents, revisions), durable ingest units, AI catalog (providers, models, presets, prices), bindings, IAM, sessions, query executions, billing, knowledge documents, chunks, technical facts, graph data, context bundles, pgvector embeddings, and PostgreSQL full-text search indexes. |
-| **Redis** | Graph topology cache, IR cache, answer-context cache, prewarm coordination. |
+| **Redis** (redis:8.8) | Graph topology cache, IR cache, answer-context cache, prewarm coordination. |
 | **Filesystem / S3** | Source-document blobs (configurable; bundled `s4core` provides a built-in S3-compatible blob store). |
 
 ## Multi-provider router

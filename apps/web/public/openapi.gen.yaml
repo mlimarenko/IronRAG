@@ -5,7 +5,7 @@ info:
   license:
     name: MIT
     identifier: MIT
-  version: 0.5.5
+  version: 0.5.6
 servers:
 - url: /
   description: Same origin (paths include /v1)

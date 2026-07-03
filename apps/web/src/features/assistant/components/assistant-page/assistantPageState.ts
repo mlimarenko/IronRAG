@@ -4,10 +4,10 @@ import type { AssistantTurnExecutionResponse } from '@/shared/api/query';
 import { mapAssistantTurnToEvidence } from '@/features/assistant/model/assistantAdapter';
 
 export const STARTER_PROMPT_IDS = [
-  'technologies',
-  'deployment',
-  'security',
-  'storage',
+  'overview',
+  'keyPoints',
+  'openQuestions',
+  'recentItems',
 ] as const;
 
 export const EMPTY_MESSAGES: AssistantMessage[] = [];
@@ -166,7 +166,7 @@ export function applyTurnResultToMessages(
         role: 'assistant',
         content: answerText,
         timestamp: answerTimestamp ?? message.timestamp,
-        durationMs,
+        ...(durationMs !== undefined ? { durationMs } : {}),
         executionId: result.responseTurn?.executionId ?? null,
         evidence,
       };

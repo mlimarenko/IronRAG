@@ -12,6 +12,7 @@ import {
 } from "lucide-react";
 
 import { Button } from "@/shared/components/ui/button";
+import { PageHeader } from "@/shared/components/layout/PageHeader";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -24,7 +25,6 @@ import { DOCUMENT_FILE_INPUT_ACCEPT } from "../model/uploadAccept";
 import type { DocumentsPageTab } from "./documents-page/documentsPageState";
 
 type DocumentsPageHeaderProps = {
-  activeLibraryName: string;
   activeTab: DocumentsPageTab;
   canUpload: boolean;
   documentsCount: number;
@@ -49,7 +49,6 @@ type DocumentsPageHeaderProps = {
 };
 
 export function DocumentsPageHeader({
-  activeLibraryName,
   activeTab,
   canUpload,
   documentsCount,
@@ -82,9 +81,10 @@ export function DocumentsPageHeader({
   }, [folderInputRef]);
 
   return (
-    <div className="page-header">
-      {!ingestionReady && (
-        <div className="mb-4 rounded-lg border border-status-warning/40 bg-status-warning/8 p-3 flex items-start gap-3">
+    <PageHeader
+      notice={
+        !ingestionReady ? (
+        <div className="flex items-start gap-3 rounded-lg border border-status-warning/40 bg-status-warning/8 p-3">
           <AlertTriangle className="mt-0.5 h-5 w-5 shrink-0 text-status-warning" />
           <div className="min-w-0 flex-1">
             <p className="text-sm font-bold text-status-warning">
@@ -99,56 +99,51 @@ export function DocumentsPageHeader({
             {t("documents.ingestionNotReadyAction")}
           </Button>
         </div>
-      )}
-      <div className="flex items-center justify-between gap-4 flex-wrap">
-        <div>
-          <h1 className="text-lg font-bold tracking-tight">
-            {t("documents.title")}
-          </h1>
-          <p className="text-sm text-muted-foreground">
-            {activeLibraryName} - {t("documents.subtitle")}
-          </p>
-        </div>
-
-        <div className="flex gap-0.5 p-1 bg-muted rounded-xl border border-border/50">
+        ) : undefined
+      }
+      title={t("documents.title")}
+      description={t("documents.subtitle")}
+      tabs={
+        <div className="flex gap-0.5 rounded-md border bg-background p-0.5">
           <button
-            className={`px-3 py-1.5 text-xs rounded-[9px] transition-all duration-200 font-medium flex items-center gap-1.5 ${
+            className={`flex items-center gap-1.5 rounded px-2.5 py-1.5 text-xs font-medium transition-colors ${
               activeTab === "documents"
-                ? "bg-primary text-primary-foreground font-semibold"
-                : "text-muted-foreground hover:text-foreground"
+                ? "bg-muted text-foreground"
+                : "text-muted-foreground hover:bg-muted/70 hover:text-foreground"
             }`}
             onClick={() => setActiveTab("documents")}
           >
             {t("documents.tabs.documents")}
             <span
-              className={`text-[10px] tabular-nums px-1.5 py-0.5 rounded-md ${activeTab === "documents" ? "bg-primary-foreground/20" : "bg-background/60"}`}
+              className={`text-2xs tabular-nums px-1.5 py-0.5 rounded-md ${activeTab === "documents" ? "bg-primary-foreground/20" : "bg-background/60"}`}
             >
               {documentsCount}
             </span>
           </button>
           <button
-            className={`px-3 py-1.5 text-xs rounded-[9px] transition-all duration-200 font-medium flex items-center gap-1.5 ${
+            className={`flex items-center gap-1.5 rounded px-2.5 py-1.5 text-xs font-medium transition-colors ${
               activeTab === "web"
-                ? "bg-primary text-primary-foreground font-semibold"
-                : "text-muted-foreground hover:text-foreground"
+                ? "bg-muted text-foreground"
+                : "text-muted-foreground hover:bg-muted/70 hover:text-foreground"
             }`}
             onClick={() => setActiveTab("web")}
           >
             {t("documents.tabs.webIngest")}
             <span
-              className={`text-[10px] tabular-nums px-1.5 py-0.5 rounded-md ${activeTab === "web" ? "bg-primary-foreground/20" : "bg-background/60"}`}
+              className={`text-2xs tabular-nums px-1.5 py-0.5 rounded-md ${activeTab === "web" ? "bg-primary-foreground/20" : "bg-background/60"}`}
             >
               {webRunsCount}
             </span>
             {hasActiveWebRun && (
               <span
-                className="h-1.5 w-1.5 rounded-full bg-emerald-500 animate-pulse"
+                className="h-1.5 w-1.5 rounded-full bg-status-ready animate-pulse"
                 aria-label={t("documents.activeWebRun")}
               />
             )}
           </button>
         </div>
-
+      }
+      actions={
         <div className="flex gap-2">
           {activeTab === "documents" && canUpload && (
             <DropdownMenu>
@@ -156,7 +151,7 @@ export function DocumentsPageHeader({
                 <Button size="sm" disabled={!ingestionReady}>
                   <Upload className="h-3.5 w-3.5 mr-1.5" />
                   {t("documents.addContent")}
-                  <ChevronDown className="h-3 w-3 ml-1.5 opacity-70" />
+                  <ChevronDown className="h-3.5 w-3.5 ml-1.5 opacity-70" />
                 </Button>
               </DropdownMenuTrigger>
               <DropdownMenuContent align="end" className="min-w-[160px]">
@@ -225,7 +220,7 @@ export function DocumentsPageHeader({
             onChange={handleFolderSelect}
           />
         </div>
-      </div>
-    </div>
+      }
+    />
   );
 }

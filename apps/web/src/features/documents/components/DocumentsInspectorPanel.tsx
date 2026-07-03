@@ -23,10 +23,11 @@ import {
   TooltipContent,
   TooltipTrigger,
 } from '@/shared/components/ui/tooltip';
+import { StatusBadge } from '@/shared/components/StatusBadge';
 import { documentsApi, type DocumentLifecycleDetail } from '@/shared/api';
 import type { DocumentItem } from '@/shared/types';
 import { compactText, truncatedTitle } from '@/shared/lib/compactText';
-import { buildDocumentFailureNotice } from '@/shared/lib/document-processing';
+import { buildDocumentFailureNotice, humanizeDocumentStage } from '@/shared/lib/document-processing';
 
 import {
   buildDocumentStatusBadgeConfig,
@@ -37,13 +38,13 @@ import {
 } from '@/features/documents/model/documentAdapter';
 
 type DocumentsInspectorPanelProps = {
-  canEdit?: boolean;
-  canDelete?: boolean;
-  documentHintEditable?: boolean;
-  editorActionDisabledReason?: string | null;
+  canEdit?: boolean | undefined;
+  canDelete?: boolean | undefined;
+  documentHintEditable?: boolean | undefined;
+  editorActionDisabledReason?: string | null | undefined;
   editorActionEnabled: boolean;
-  editorActionReadOnly?: boolean;
-  formatErrorMessage?: (error: unknown, fallback: string) => string;
+  editorActionReadOnly?: boolean | undefined;
+  formatErrorMessage?: ((error: unknown, fallback: string) => string) | undefined;
   locale: string;
   t: TFunction;
   lifecycle: DocumentLifecycleDetail | null;
@@ -53,10 +54,9 @@ type DocumentsInspectorPanelProps = {
   setReplaceFileOpen: (open: boolean) => void;
   updateSearchParamState: (updates: Record<string, string | null>) => void;
   onOpenEditor: () => void;
-  onDocumentHintUpdated?: (documentId: string, documentHint: string | null) => void;
+  onDocumentHintUpdated?: ((documentId: string, documentHint: string | null) => void) | undefined;
   onRetry: () => void;
-  onViewInGraph?: () => void;
-  presentation?: 'sidebar' | 'drawer';
+  onViewInGraph?: (() => void) | undefined;
 };
 
 const EMPTY_VALUE = '\u2014';
@@ -96,12 +96,12 @@ type InspectorActionButtonProps = {
   label: string;
   icon: ReactNode;
   onClick: () => void;
-  disabled?: boolean;
-  disabledReason?: string | null;
-  variant?: 'default' | 'outline';
-  className?: string;
-  wrapperClassName?: string;
-  tooltipAlign?: 'start' | 'center' | 'end';
+  disabled?: boolean | undefined;
+  disabledReason?: string | null | undefined;
+  variant?: 'default' | 'outline' | undefined;
+  className?: string | undefined;
+  wrapperClassName?: string | undefined;
+  tooltipAlign?: 'start' | 'center' | 'end' | undefined;
 };
 
 function InspectorActionButton({
@@ -128,7 +128,7 @@ function InspectorActionButton({
       <Button
         size="icon"
         variant={variant}
-        className={`h-8 w-8 rounded-md bg-card shadow-soft [&_svg]:size-4 ${className}`}
+        className={`h-8 w-8 rounded-md bg-card shadow-soft [&_svg]:h-4 [&_svg]:w-4 ${className}`}
         onClick={onClick}
         disabled={disabled}
         aria-label={label}
@@ -138,7 +138,7 @@ function InspectorActionButton({
       </Button>
       <span
         role="tooltip"
-        className={`pointer-events-none absolute top-full z-30 mt-1 hidden w-max max-w-64 whitespace-normal rounded-md border border-border bg-popover px-2 py-1 text-left text-[10px] font-medium leading-3 text-popover-foreground shadow-lifted group-hover:block group-focus-within:block ${tooltipAlignmentClass}`}
+        className={`pointer-events-none absolute top-full z-30 mt-1 hidden w-max max-w-64 whitespace-normal rounded-md border border-border bg-popover px-2 py-1 text-left text-2xs font-medium leading-3 text-popover-foreground shadow-lifted group-hover:block group-focus-within:block ${tooltipAlignmentClass}`}
       >
         {tooltipLabel}
       </span>
@@ -155,10 +155,6 @@ const CANONICAL_PIPELINE_STAGES = [
   'extract_graph',
   'finalizing',
 ] as const;
-
-function formatPipelineStage(stage: string): string {
-  return stage.replace(/_/g, ' ');
-}
 
 function formatPipelineDuration(elapsedMs?: number | null): string {
   if (elapsedMs == null) {
@@ -424,7 +420,6 @@ export function DocumentsInspectorPanel({
   onDocumentHintUpdated,
   onRetry,
   onViewInGraph,
-  presentation = 'sidebar',
 }: DocumentsInspectorPanelProps) {
   const isWebPage = isWebPageDocument(
     selectedDoc.sourceKind,
@@ -438,7 +433,6 @@ export function DocumentsInspectorPanel({
     documentId: selectedDoc.id,
     expanded: false,
   });
-  const [documentHintTooltipOpen, setDocumentHintTooltipOpen] = useState(false);
   const [documentHintEditState, setDocumentHintEditState] = useState<DocumentHintEditState>({
     documentId: selectedDoc.id,
     draft: documentHint,
@@ -586,10 +580,7 @@ export function DocumentsInspectorPanel({
   const focusedPipelineStage = focusedPipelineStageName
     ? (pipelineStageViews.find((stage) => stage.stage === focusedPipelineStageName) ?? null)
     : null;
-  const rootClassName =
-    presentation === 'drawer'
-      ? 'h-full overflow-y-auto bg-card'
-      : 'inspector-panel w-80 lg:w-96 shrink-0 hidden md:block overflow-y-auto animate-slide-in-right';
+  const rootClassName = 'h-full overflow-y-auto bg-card';
 
   const openSource = () => {
     const href = selectedDoc.sourceAccess?.href ?? selectedDoc.sourceUri;
@@ -717,9 +708,9 @@ export function DocumentsInspectorPanel({
         <div className={showInspectorProgress ? 'space-y-1' : undefined}>
           <div className="flex items-center justify-between gap-3">
             <div className="min-w-0">
-              <span className={`status-badge ${statusBadge.cls} whitespace-nowrap`} title={selectedDoc.statusReason}>
+              <StatusBadge tone={statusBadge.tone} className="whitespace-nowrap" title={selectedDoc.statusReason}>
                 {statusBadge.label}
-              </span>
+              </StatusBadge>
               {selectedDoc.stage &&
                 (selectedDoc.status === 'processing' || selectedDoc.status === 'queued') && (
                   <span className="ml-2 text-xs text-muted-foreground">{selectedDoc.stage}</span>
@@ -755,7 +746,7 @@ export function DocumentsInspectorPanel({
                 <div className="text-muted-foreground">{failureNotice.impact}</div>
               </div>
             </div>
-            <div className="mt-2 rounded-md border border-destructive/20 bg-destructive/10 px-2 py-1.5 text-xs">
+            <div className="mt-2 rounded-md bg-destructive/10 px-2 py-1.5 text-xs">
               <div className="font-semibold text-foreground">{t('documents.failureActionLabel')}</div>
               <div className="mt-0.5 text-muted-foreground [overflow-wrap:anywhere]">
                 {failureNotice.action}
@@ -771,7 +762,7 @@ export function DocumentsInspectorPanel({
                 )}
                 {failureNotice.diagnosticCode && (
                   <div className="flex items-start gap-1.5">
-                    <code className="min-w-0 flex-1 font-mono text-[10px] text-muted-foreground [overflow-wrap:anywhere]">
+                    <code className="min-w-0 flex-1 font-mono text-2xs text-muted-foreground [overflow-wrap:anywhere]">
                       {failureNotice.diagnosticCode}
                     </code>
                     <button
@@ -784,7 +775,7 @@ export function DocumentsInspectorPanel({
                           .then(() => toast.success(t('documents.failureCodeCopied')));
                       }}
                     >
-                      <Clipboard className="h-3 w-3" />
+                      <Clipboard className="h-3.5 w-3.5" />
                     </button>
                   </div>
                 )}
@@ -848,7 +839,7 @@ export function DocumentsInspectorPanel({
                     );
                   }}
                 >
-                  <Clipboard className="h-3 w-3" />
+                  <Clipboard className="h-3.5 w-3.5" />
                 </button>
               </div>
             </div>
@@ -977,7 +968,7 @@ export function DocumentsInspectorPanel({
                     : stage.isActive
                       ? 'bg-primary'
                       : stage.isCompleted
-                        ? 'bg-emerald-500'
+                        ? 'bg-status-ready'
                         : 'bg-muted-foreground/35';
                   const showFocusedDetails =
                     isSelected &&
@@ -993,7 +984,7 @@ export function DocumentsInspectorPanel({
                         data-testid={`pipeline-stage-tab-${stage.stage}`}
                         aria-current={stage.isActive ? 'step' : undefined}
                         aria-expanded={showFocusedDetails}
-                        className={`grid w-full grid-cols-[minmax(0,1fr)_2.8rem_minmax(4.6rem,auto)] items-center gap-2 border-l-2 px-2.5 py-1 text-left text-[11px] leading-4 transition-colors ${rowTone}`}
+                        className={`grid w-full grid-cols-[minmax(0,1fr)_2.8rem_minmax(4.6rem,auto)] items-center gap-2 border-l-2 px-2.5 py-1 text-left text-2xs leading-4 transition-colors ${rowTone}`}
                         onClick={() =>
                           setPipelineSelection({
                             documentId: selectedDoc.id,
@@ -1003,8 +994,8 @@ export function DocumentsInspectorPanel({
                       >
                         <span className="flex min-w-0 items-center gap-1.5">
                           <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${dotTone}`} />
-                          <span className="min-w-0 truncate font-semibold capitalize">
-                            {formatPipelineStage(stage.stage)}
+                          <span className="min-w-0 truncate font-semibold">
+                            {humanizeDocumentStage(stage.stage, t) ?? stage.stage}
                           </span>
                         </span>
                         <span className="text-right tabular-nums text-muted-foreground">
@@ -1027,10 +1018,10 @@ export function DocumentsInspectorPanel({
                           }`}
                         >
                           {stage.showBilling && (
-                            <div className="flex min-w-0 items-center gap-2 rounded bg-background/75 px-2 py-1 text-[11px] leading-4 ring-1 ring-border/45">
+                            <div className="flex min-w-0 items-center gap-2 rounded bg-background/75 px-2 py-1 text-2xs leading-4 ring-1 ring-border/45">
                               {stage.modelLabel != null && (
                                 <span
-                                  className="min-w-0 truncate font-mono text-[10px] text-foreground"
+                                  className="min-w-0 truncate font-mono text-2xs text-foreground"
                                   title={stage.modelLabel}
                                 >
                                   {stage.modelLabel}
@@ -1048,7 +1039,7 @@ export function DocumentsInspectorPanel({
                               {stage.details.map((item) => (
                                 <span
                                   key={item.key}
-                                  className="inline-flex min-w-0 items-center gap-1 rounded bg-background/70 px-1.5 py-0.5 text-[11px] leading-4 text-muted-foreground ring-1 ring-border/40"
+                                  className="inline-flex min-w-0 items-center gap-1 rounded bg-background/70 px-1.5 py-0.5 text-2xs leading-4 text-muted-foreground ring-1 ring-border/40"
                                 >
                                   <span>{item.label}</span>
                                   <span className="font-medium tabular-nums text-foreground [overflow-wrap:anywhere]">

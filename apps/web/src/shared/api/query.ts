@@ -140,6 +140,7 @@ function latestAssistantExecutionAfterQuestion(
 
   for (let index = conversation.messages.length - 1; index > lastQuestionIndex; index -= 1) {
     const message = conversation.messages[index];
+    if (!message) continue;
     if (message.role === "assistant" && message.executionId) {
       return message.executionId;
     }
@@ -235,7 +236,7 @@ export const queryApi = {
       (result): LlmContextDebugResponse => unwrap(result),
     ),
   getAssistantSystemPrompt: (libraryId?: string) =>
-    Query.getAssistantSystemPrompt({ query: { libraryId } }).then(
-      (result): AssistantSystemPromptResponse => unwrap(result),
-    ),
+    Query.getAssistantSystemPrompt({
+      query: libraryId !== undefined ? { libraryId } : {},
+    }).then((result): AssistantSystemPromptResponse => unwrap(result)),
 };

@@ -30,7 +30,7 @@ export function ShellFooter() {
 
   return (
     <footer
-      className="min-h-8 flex flex-wrap items-center justify-center px-4 py-1 gap-x-2 gap-y-1 shrink-0 text-[10px] sm:gap-x-4 sm:text-[11px] text-muted-foreground border-t"
+      className="min-h-8 flex flex-wrap items-center justify-center px-4 py-1 gap-x-2 gap-y-1 shrink-0 text-2xs sm:gap-x-4 text-muted-foreground border-t"
       style={{
         background: "linear-gradient(180deg, hsl(var(--background)), hsl(var(--muted) / 0.3))",
       }}
@@ -41,9 +41,9 @@ export function ShellFooter() {
           href={updateUrl}
           target="_blank"
           rel="noopener noreferrer"
-          className="inline-flex items-center gap-1 rounded-full border border-amber-500/25 bg-amber-500/8 px-2 py-0.5 font-semibold text-amber-700 transition-colors hover:bg-amber-500/14 dark:text-amber-300"
+          className="status-warning inline-flex items-center gap-1 rounded-full px-2 py-0.5 font-semibold transition-colors hover:bg-status-warning/15"
         >
-          <ArrowUpRight className="h-3 w-3" />
+          <ArrowUpRight className="h-3.5 w-3.5" />
           <span>{t("common.updateAvailableFooter", { version: updateVersion })}</span>
         </a>
       ) : null}

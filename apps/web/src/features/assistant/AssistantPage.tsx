@@ -1,10 +1,12 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useNavigate } from 'react-router-dom';
-import { Library as LibraryIcon, X } from 'lucide-react';
+import { MessageSquare, PanelLeftOpen, X } from 'lucide-react';
 import { AssistantDebugInspector } from '@/features/assistant/components/AssistantDebugInspector';
 import { EvidencePanel } from '@/features/assistant/components/EvidencePanel';
 import { SessionRail } from '@/features/assistant/components/SessionRail';
+import { DataView } from '@/shared/components/layout/DataView';
+import { PageShell } from '@/shared/components/layout/PageShell';
 import { Button } from '@/shared/components/ui/button';
 import { useApp } from '@/shared/contexts/app-context';
 import { useDeveloperMode } from '@/shared/contexts/preferences-context';
@@ -47,7 +49,7 @@ export default function AssistantPage() {
   const [evidenceMessageId, setEvidenceMessageId] = useState<string | null>(null);
   const [sessionRailCollapsed, setSessionRailCollapsed] = useLocalStorageState({
     key: 'ironrag_assistant_sessions_collapsed',
-    defaultValue: false,
+    defaultValue: true,
     parse: parseBoolean,
   });
   const [debugInspectorOpen, setDebugInspectorOpen] = useLocalStorageState({
@@ -72,6 +74,26 @@ export default function AssistantPage() {
   );
 
   const { newSession, selectSession, activeSession } = assistant;
+  const activeSessionTitle = useMemo(() => {
+    if (!activeSession) return t('assistant.newQuestionSession');
+    const session = sessions.find((candidate) => candidate.id === activeSession);
+    return session?.title || t('assistant.untitledSession');
+  }, [activeSession, sessions, t]);
+  const [evidenceOpen, setEvidenceOpen] = useState(false);
+  const [sessionsOpen, setSessionsOpen] = useState(false);
+
+  const handleNewSession = useCallback(() => {
+    newSession();
+    setSessionsOpen(false);
+  }, [newSession]);
+
+  const handleSelectSession = useCallback(
+    (sessionId: string) => {
+      selectSession(sessionId);
+      setSessionsOpen(false);
+    },
+    [selectSession],
+  );
 
   const handleDeleteSession = useCallback(
     (sessionId: string) => {
@@ -95,6 +117,7 @@ export default function AssistantPage() {
   const latestAssistantExecutionId = useMemo(() => {
     for (let i = assistant.messages.length - 1; i >= 0; i -= 1) {
       const message = assistant.messages[i];
+      if (!message) continue;
       if (message.role === 'assistant' && !message.isStreaming && message.executionId) {
         return message.executionId;
       }
@@ -106,6 +129,7 @@ export default function AssistantPage() {
     const messages = assistant.messages;
     for (let i = messages.length - 1; i >= 0; i -= 1) {
       const msg = messages[i];
+      if (!msg) continue;
       if (msg.role !== 'assistant') continue;
       // Server-authoritative wall-clock; immune to client↔server clock skew.
       if (typeof msg.durationMs === 'number' && msg.durationMs > 0) {
@@ -140,8 +164,6 @@ export default function AssistantPage() {
     }
     return assistant.latestEvidence ?? null;
   }, [assistant.latestEvidence, assistant.messages, evidenceMessageId]);
-
-  const [evidenceOpen, setEvidenceOpen] = useState(false);
 
   const handleOpenEvidence = useCallback((message: AssistantMessage) => {
     setEvidenceMessageId(message.id);
@@ -194,67 +216,145 @@ export default function AssistantPage() {
   const showEvidencePanel = evidenceOpen && evidenceForPanel != null;
 
   return (
-    <div className="flex-1 flex overflow-hidden bg-background">
-      <SessionRail
-        id={SESSION_RAIL_ID}
-        t={t}
-        locale={locale}
-        sessions={sessions}
-        activeSession={assistant.activeSession}
-        collapsed={sessionRailCollapsed}
-        disabled={assistant.isExecuting}
-        sessionSearch={assistant.sessionSearch}
-        onCollapsedChange={setSessionRailCollapsed}
-        onSessionSearchChange={assistant.setSessionSearch}
-        onNewSession={assistant.newSession}
-        onSelectSession={selectSession}
-        onRenameSession={renameSession}
-        onDeleteSession={handleDeleteSession}
-      />
-
-      <div className="min-w-0 flex-1 flex flex-col overflow-hidden">
-        <div className="flex h-12 shrink-0 items-center gap-2 border-b bg-card/60 px-4">
-          <LibraryIcon className="h-4 w-4 shrink-0 text-primary" aria-hidden="true" />
-          <span className="text-xs text-muted-foreground">{t('assistant.searchingScope')}</span>
-          <span className="min-w-0 truncate text-sm font-semibold" title={activeLibrary.name}>
-            {activeLibrary.name}
-          </span>
-        </div>
-        <ChatThread
+    <PageShell
+      bodyClassName="p-3 md:flex md:gap-3"
+    >
+      <div className={`relative z-10 hidden ${sessionRailCollapsed ? '' : 'md:flex'}`}>
+        <SessionRail
+          id={SESSION_RAIL_ID}
+          className="overflow-hidden workbench-surface"
           t={t}
-          messages={assistant.messages}
-          developerMode={showDebug}
-          onStarterPromptSelect={setInputText}
-          onOpenEvidence={handleOpenEvidence}
-          onInspect={handleInspect}
-        />
-        <Composer
-          t={t}
-          inputText={inputText}
-          isExecuting={assistant.isExecuting}
-          retryable={assistant.retryable}
-          onInputTextChange={setInputText}
-          onRetry={handleRetry}
-          onSend={handleSend}
+          locale={locale}
+          sessions={sessions}
+          activeSession={assistant.activeSession}
+          collapsed={false}
+          disabled={assistant.isExecuting}
+          sessionSearch={assistant.sessionSearch}
+          onCollapsedChange={setSessionRailCollapsed}
+          onSessionSearchChange={assistant.setSessionSearch}
+          onNewSession={handleNewSession}
+          onSelectSession={handleSelectSession}
+          onRenameSession={renameSession}
+          onDeleteSession={handleDeleteSession}
         />
       </div>
 
-      {showEvidencePanel && (
-        <>
-          {/* Mobile: slide-over backdrop. On lg+ the panel is an inline pane. */}
-          <div
-            className="fixed inset-0 z-40 bg-foreground/20 backdrop-blur-[1px] lg:hidden"
-            aria-hidden="true"
-            onClick={() => setEvidenceOpen(false)}
-          />
-          <EvidencePanel
+      <DataView
+        className="relative z-10 min-w-0 flex-1"
+        inspector={
+          showEvidencePanel ? (
+            <EvidencePanel
+              t={t}
+              evidence={evidenceForPanel}
+              className="h-full bg-card"
+              onClose={() => setEvidenceOpen(false)}
+              onOpenDocuments={() => navigate('/documents')}
+              onOpenGraph={() => navigate('/graph')}
+            />
+          ) : null
+        }
+        inspectorCloseLabel={t('assistant.close')}
+        inspectorLabel={t('assistant.evidence')}
+        inspectorOpen={showEvidencePanel}
+        showDrawerHeader={false}
+        onInspectorOpenChange={(open) => {
+          if (!open) setEvidenceOpen(false);
+        }}
+      >
+        <div className="min-w-0 flex-1 flex flex-col overflow-hidden workbench-surface">
+          <div className="flex min-h-14 shrink-0 items-center gap-3 border-b bg-card px-4 text-foreground">
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon"
+              className="-ml-2 h-8 w-8 md:hidden"
+              aria-label={t('assistant.sessions')}
+              onClick={() => setSessionsOpen(true)}
+            >
+              <PanelLeftOpen className="h-4 w-4" />
+            </Button>
+            {sessionRailCollapsed && (
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon"
+                className="-ml-2 hidden h-8 w-8 md:flex"
+                aria-label={t('assistant.expandSessions')}
+                onClick={() => setSessionRailCollapsed(false)}
+              >
+                <PanelLeftOpen className="h-4 w-4" />
+              </Button>
+            )}
+            <div className="hidden h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary sm:flex">
+              <MessageSquare className="h-5 w-5" aria-hidden="true" />
+            </div>
+            <div className="min-w-0">
+              <div className="section-label">
+                {t('assistant.currentSession')}
+              </div>
+              <div className="min-w-0 truncate text-base font-bold tracking-tight" title={activeSessionTitle}>
+                {activeSessionTitle}
+              </div>
+            </div>
+          </div>
+          <div className="min-h-0 flex-1 bg-background">
+            <ChatThread
+              t={t}
+              messages={assistant.messages}
+              developerMode={showDebug}
+              onStarterPromptSelect={setInputText}
+              onOpenEvidence={handleOpenEvidence}
+              onInspect={handleInspect}
+            />
+          </div>
+          <Composer
             t={t}
-            evidence={evidenceForPanel}
-            className="fixed inset-y-0 right-0 z-50 w-[88%] max-w-sm border-l bg-background lg:static lg:z-auto lg:w-72 lg:max-w-none xl:w-80"
-            onClose={() => setEvidenceOpen(false)}
-            onOpenDocuments={() => navigate('/documents')}
-            onOpenGraph={() => navigate('/graph')}
+            inputText={inputText}
+            isExecuting={assistant.isExecuting}
+            retryable={assistant.retryable}
+            onInputTextChange={setInputText}
+            onRetry={handleRetry}
+            onSend={handleSend}
           />
+        </div>
+      </DataView>
+
+      {sessionsOpen && (
+        <>
+          <div
+            className="fixed inset-0 z-40 bg-foreground/20 backdrop-blur-[1px] md:hidden"
+            aria-hidden="true"
+            onClick={() => setSessionsOpen(false)}
+          />
+          <div className="fixed inset-y-0 left-0 z-50 flex w-[85%] max-w-xs bg-background shadow-lg md:hidden">
+            <SessionRail
+              id={`${SESSION_RAIL_ID}-mobile`}
+              className="flex h-full w-full"
+              t={t}
+              locale={locale}
+              sessions={sessions}
+              activeSession={assistant.activeSession}
+              collapsed={false}
+              disabled={assistant.isExecuting}
+              sessionSearch={assistant.sessionSearch}
+              onCollapsedChange={() => setSessionsOpen(false)}
+              onSessionSearchChange={assistant.setSessionSearch}
+              onNewSession={handleNewSession}
+              onSelectSession={handleSelectSession}
+              onRenameSession={renameSession}
+              onDeleteSession={handleDeleteSession}
+            />
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon"
+              className="absolute right-2 top-2 h-8 w-8"
+              aria-label={t('assistant.collapseSessions')}
+              onClick={() => setSessionsOpen(false)}
+            >
+              <X className="h-4 w-4" />
+            </Button>
+          </div>
         </>
       )}
 
@@ -270,6 +370,6 @@ export default function AssistantPage() {
         onClose={handleCloseDebug}
         onWidthChange={setDebugPanelWidth}
       />
-    </div>
+    </PageShell>
   );
 }

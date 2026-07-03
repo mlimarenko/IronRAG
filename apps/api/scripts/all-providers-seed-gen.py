@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""Generate idempotent ai_model_catalog + ai_model_preset + ai_price_catalog
-SQL for OpenAI / DeepSeek / Qwen / GPTunnel / OpenRouter / RouterAI /
+"""Generate idempotent ai_model_catalog + ai_price_catalog SQL for
+OpenAI / DeepSeek / Qwen / GPTunnel / OpenRouter / RouterAI /
 MiniMax / Ollama cloud.
 
 Usage:
@@ -8,10 +8,20 @@ Usage:
 where PROVIDER ∈ {openai, deepseek, qwen, gptunnel, openrouter, routerai,
 minimax, ollama-cloud}.
 
-Catalog + preset rows are auto-discovered from /models (or fallback list
-if no key / endpoint). Pricing is from a hand-curated table keyed on a
+Catalog rows are auto-discovered from /models (or fallback list if no
+key / endpoint). Pricing is from a hand-curated table keyed on a
 fnmatch-style glob → (input_per_1m, output_per_1m, currency, optionally
 cached_input_per_1m).
+
+Binding presets are NOT generated here. Migration 0004
+(ai_config_simplification) dropped the ai_model_preset table; per-purpose
+bootstrap defaults now live as the hand-curated "bootstrapPresets" array
+inside ai_provider_catalog.capability_flags_json — one entry per binding
+purpose with camelCase keys {purpose, modelName, temperature, topP,
+maxOutputTokensOverride, extraParametersJson}, consumed by
+services/ai_catalog_service/bootstrap.rs. Picking which model backs each
+purpose is a curation decision; author that array by hand in the provider
+seed row (see migrations/0003_minimax_provider_catalog.sql for the shape).
 
 UUIDs: stable UUID5 of "ironrag-<provider>-<scope>:<key>".
 Idempotent: ON CONFLICT on the natural-key indexes.
@@ -57,23 +67,6 @@ ENDPOINTS = {
     "minimax":    "https://api.minimax.io/v1/models",
     "ollama":     "https://ollama.com/api/models",
 }
-ROLE_TITLE = {
-    "extract_text": "Extract Text",
-    "embed_chunk": "Embed Chunk",
-    "query_retrieve": "Query Retrieve",
-    "query_compile": "Query Compile",
-    "query_answer": "Query Answer",
-    "extract_graph": "Extract Graph",
-    "vision": "Vision",
-}
-DISPLAY_NAMES = {
-    "gptunnel": "GPTunneL",
-    "minimax": "MiniMax",
-    "openai": "OpenAI",
-    "openrouter": "OpenRouter",
-    "routerai": "RouterAI",
-}
-
 # ────────────────────────────────────────────────────────────────────
 # Pricing tables — USD per 1M tokens (input, output, cached_input or None).
 # Public-list prices as of 2026-06-04. Sources: provider documentation.
@@ -244,7 +237,7 @@ def classify(model_id: str) -> tuple[str, str, list[str]]:
       - moderation: moderation, omni-moderation, safety
       - reranker: -rerank, /rerank-
 
-    Strictness rationale: every preset visible under a chat-stage
+    Strictness rationale: every model visible under a chat-stage
     role (extract_graph / query_compile / query_answer) must accept
     arbitrary system+user messages and return free-form chat with
     structured-output capability. Audio/image/legacy/agent models
@@ -390,20 +383,9 @@ def find_range_prices(
     ]
 
 
-def extra_parameters_for_preset(provider: str, model_name: str) -> str:
-    if provider == "minimax" and model_name == "MiniMax-M3":
-        return json.dumps({"thinking": {"type": "disabled"}}, separators=(",", ":"))
-    return "{}"
-
-
-def display_name_for_provider(provider: str) -> str:
-    return DISPLAY_NAMES.get(provider, provider.title())
-
-
 def emit(provider: str, models: list[dict]) -> str:
     catalog_id = PROVIDER_CATALOG_IDS[provider]
     catalog_rows: list[str] = []
-    preset_rows: list[str] = []
     price_rows: list[str] = []
     for model in models:
         model_id = model["id"]
@@ -422,22 +404,6 @@ def emit(provider: str, models: list[dict]) -> str:
             f"'active'::ai_model_lifecycle_state, "
             f"'{sql_escape(metadata)}'::jsonb)"
         )
-        for role in roles:
-            title = ROLE_TITLE.get(role)
-            if title is None:
-                continue
-            preset_name = f"{display_name_for_provider(provider)} {title} · {model_id}"
-            if capability == "embedding":
-                temperature = "NULL"
-                top_p = "NULL"
-            else:
-                temperature = "0.3"
-                top_p = "0.9"
-            extra_parameters = extra_parameters_for_preset(provider, model_id)
-            preset_rows.append(
-                f"        ('{sql_escape(model_id)}', '{sql_escape(preset_name)}', "
-                f"{temperature}, {top_p}, '{sql_escape(extra_parameters)}'::jsonb)"
-            )
         range_prices = find_range_prices(provider, model_id)
         for unit, min_tokens, max_tokens, val in range_prices:
             min_sql = "NULL" if min_tokens is None else str(min_tokens)
@@ -478,7 +444,7 @@ def emit(provider: str, models: list[dict]) -> str:
             )
 
     lines: list[str] = [
-        f"-- Auto-generated {provider} catalog + preset + price seed.",
+        f"-- Auto-generated {provider} catalog + price seed.",
         f"-- Source: scripts/all-providers-seed-gen.py {provider}",
         f"-- Idempotent: ON CONFLICT on natural-key indexes.",
         "",
@@ -491,25 +457,6 @@ def emit(provider: str, models: list[dict]) -> str:
             ") VALUES",
             ",\n".join(catalog_rows),
             "ON CONFLICT (provider_catalog_id, model_name, capability_kind) DO NOTHING;",
-            "",
-        ])
-    if preset_rows:
-        lines.extend([
-            "INSERT INTO ai_model_preset (",
-            "    scope_kind, workspace_id, library_id,",
-            "    model_catalog_id, preset_name,",
-            "    temperature, top_p, extra_parameters_json",
-            ")",
-            "SELECT",
-            "    'instance'::ai_scope_kind, NULL, NULL,",
-            "    m.id, p.preset_name, p.temperature, p.top_p, p.extra_parameters_json",
-            "FROM ai_model_catalog m",
-            "JOIN (VALUES",
-            ",\n".join(preset_rows),
-            ") AS p(model_name, preset_name, temperature, top_p, extra_parameters_json)",
-            "    ON p.model_name = m.model_name",
-            f"WHERE m.provider_catalog_id = '{catalog_id}'::uuid",
-            "ON CONFLICT DO NOTHING;",
             "",
         ])
     if price_rows:

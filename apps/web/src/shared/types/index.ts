@@ -57,20 +57,21 @@ export interface DocumentItem {
   fileType: string;
   fileSize: number;
   uploadedAt: string;
-  completedAt?: string;
+  completedAt?: string | undefined;
   cost: number | null;
   status: DocumentStatus;
   readiness: DocumentReadiness;
-  stage?: string;
-  progressPercent?: number;
-  processingStartedAt?: string;
-  processingFinishedAt?: string;
-  failureCode?: string;
-  failureMessage?: string;
-  statusReason?: string;
-  failureNotice?: DocumentFailureNotice;
-  canRetry?: boolean;
-  documentHint?: string;
+  stage?: string | undefined;
+  progressPercent?: number | undefined;
+  processingStartedAt?: string | undefined;
+  processingFinishedAt?: string | undefined;
+  failureCode?: string | undefined;
+  failureMessage?: string | undefined;
+  statusReason?: string | undefined;
+  failureNotice?: DocumentFailureNotice | undefined;
+  canRetry?: boolean | undefined;
+  documentHint?: string | undefined;
+  externalKey?: string | undefined;
   sourceKind?:
     | "upload"
     | "web_page"
@@ -79,9 +80,10 @@ export interface DocumentItem {
     | "replace"
     | "connector_sync"
     | "import"
-    | string;
-  sourceUri?: string;
-  sourceAccess?: SourceAccess;
+    | string
+    | undefined;
+  sourceUri?: string | undefined;
+  sourceAccess?: SourceAccess | undefined;
 }
 
 // Graph types
@@ -358,7 +360,7 @@ export interface AIProvider {
   credentialCount: number;
 }
 
-export interface AICredential {
+export interface AIAccount {
   id: string;
   scopeKind: AIScopeKind;
   workspaceId?: string;
@@ -388,28 +390,7 @@ export interface AIModelOption {
   contextWindow?: number;
   maxOutputTokens?: number;
   availabilityState: AIModelAvailabilityState;
-  availableCredentialIds: string[];
-}
-
-export interface ModelPreset {
-  id: string;
-  scopeKind: AIScopeKind;
-  workspaceId?: string;
-  libraryId?: string;
-  providerId: string;
-  providerName: string;
-  providerKind: string;
-  modelCatalogId: string;
-  modelName: string;
-  presetName: string;
-  allowedBindingPurposes: AIPurpose[];
-  systemPrompt?: string;
-  temperature?: number;
-  topP?: number;
-  maxOutputTokens?: number;
-  extraParams?: Record<string, unknown>;
-  createdAt: string;
-  updatedAt: string;
+  availableAccountIds: string[];
 }
 
 export interface AIBindingAssignment {
@@ -418,8 +399,13 @@ export interface AIBindingAssignment {
   workspaceId?: string;
   libraryId?: string;
   purpose: AIPurpose;
-  credentialId: string;
-  presetId: string;
+  accountId: string;
+  modelCatalogId: string;
+  systemPrompt?: string;
+  temperature?: number;
+  topP?: number;
+  maxOutputTokens?: number;
+  extraParams?: Record<string, unknown>;
   state: "configured" | "inactive" | "invalid";
 }
 

@@ -120,11 +120,10 @@ export function useSessionOverrides(scopeKey: string | null): UseSessionOverride
     (sessions: AssistantSession[]): AssistantSession[] =>
       sessions
         .filter((session) => !hiddenSet.has(session.id))
-        .map((session) =>
-          overrides.titles[session.id]
-            ? { ...session, title: overrides.titles[session.id] }
-            : session,
-        ),
+        .map((session) => {
+          const title = overrides.titles[session.id];
+          return title ? { ...session, title } : session;
+        }),
     [hiddenSet, overrides.titles],
   );
 

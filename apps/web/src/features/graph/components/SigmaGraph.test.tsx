@@ -283,6 +283,7 @@ function createFakeWebGL2Context(options: { textureUploadError?: boolean } = {})
     bufferData: ReturnType<typeof vi.fn>;
     texImage2D: ReturnType<typeof vi.fn>;
     texSubImage2D: ReturnType<typeof vi.fn>;
+    drawArrays: ReturnType<typeof vi.fn>;
   };
 }
 
@@ -403,6 +404,7 @@ describe('SigmaGraph', () => {
 
     expect(sigmaInstances).toHaveLength(1);
     const sigma = sigmaInstances[0];
+    if (!sigma) throw new Error('sigma instance not created');
     const nodeReducer = sigma.settings.nodeReducer as (node: string, data: Record<string, unknown>) => Record<string, unknown>;
     const edgeReducer = sigma.settings.edgeReducer as (edge: string, data: Record<string, unknown>) => Record<string, unknown>;
 
@@ -418,6 +420,7 @@ describe('SigmaGraph', () => {
     });
 
     const hiddenEdge = sigma.graph.edges('c')[0];
+    if (!hiddenEdge) throw new Error('expected at least one hidden edge');
     expect(edgeReducer(hiddenEdge, { size: 1 })).toMatchObject({ hidden: true });
   });
 
@@ -534,6 +537,7 @@ describe('SigmaGraph', () => {
     await flushGraphEffects();
 
     const sigma = sigmaInstances[0];
+    if (!sigma) throw new Error('sigma instance not created');
     const allEdgesCanvas = container.querySelector('canvas[data-all-edges-layer="indexed"]');
     expect(allEdgesCanvas).not.toBeNull();
 
@@ -600,6 +604,7 @@ describe('SigmaGraph', () => {
     await flushGraphEffects();
 
     const sigma = sigmaInstances[0];
+    if (!sigma) throw new Error('sigma instance not created');
     const allEdgesCanvas = container.querySelector('canvas[data-all-edges-layer="indexed"]');
     expect(allEdgesCanvas).not.toBeNull();
     expect(allEdgesCanvas?.getAttribute('data-all-edges-count')).toBe(String(edges.length));
@@ -684,6 +689,7 @@ describe('SigmaGraph', () => {
     await flushGraphEffects();
 
     const sigma = sigmaInstances[0];
+    if (!sigma) throw new Error('sigma instance not created');
     expect(container.querySelector('canvas[data-all-edges-layer]')).toBeNull();
     sigma.refresh.mockClear();
 
@@ -746,7 +752,8 @@ describe('SigmaGraph', () => {
     await flushAnimationFrames(4);
 
     const sigma = sigmaInstances[0];
-    const allEdgesCanvas = container.querySelector('canvas[data-all-edges-layer="indexed"]');
+    if (!sigma) throw new Error('sigma instance not created');
+    const allEdgesCanvas = container.querySelector<HTMLCanvasElement>('canvas[data-all-edges-layer="indexed"]');
     expect(allEdgesCanvas).not.toBeNull();
     gl.drawArrays.mockClear();
 
@@ -816,7 +823,8 @@ describe('SigmaGraph', () => {
     await flushAnimationFrames(4);
 
     const sigma = sigmaInstances[0];
-    const allEdgesCanvas = container.querySelector('canvas[data-all-edges-layer="indexed"]');
+    if (!sigma) throw new Error('sigma instance not created');
+    const allEdgesCanvas = container.querySelector<HTMLCanvasElement>('canvas[data-all-edges-layer="indexed"]');
     expect(allEdgesCanvas).not.toBeNull();
     gl.drawArrays.mockClear();
 
@@ -908,7 +916,8 @@ describe('SigmaGraph', () => {
     await flushAnimationFrames(4);
 
     const initialSigma = sigmaInstances[0];
-    const allEdgesCanvas = container.querySelector('canvas[data-all-edges-layer="indexed"]');
+    if (!initialSigma) throw new Error('sigma instance not created');
+    const allEdgesCanvas = container.querySelector<HTMLCanvasElement>('canvas[data-all-edges-layer="indexed"]');
     expect(allEdgesCanvas).not.toBeNull();
 
     await act(async () => {
@@ -948,6 +957,7 @@ describe('SigmaGraph', () => {
     expect(allEdgesCanvas?.getAttribute('data-all-edges-count')).toBe(String(next.edges.length));
 
     const nextSigma = sigmaInstances[sigmaInstances.length - 1];
+    if (!nextSigma) throw new Error('sigma instance not created');
     gl.drawArrays.mockClear();
     nextSigma.emit('afterRender', {});
     await flushAnimationFrames(2);

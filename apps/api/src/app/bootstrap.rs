@@ -84,20 +84,14 @@ pub(crate) async fn apply_configured_default_catalog_ai_setup(
     state: &AppState,
     catalog: &DefaultCatalogBootstrapOutcome,
 ) -> Result<bool, ApiError> {
-    // Pre-create model presets for every known provider (OpenAI,
-    // DeepSeek, Qwen, Ollama) so they are available immediately when
-    // the operator adds a credential — no manual preset creation
-    // required.
-    state.canonical_services.ai_catalog.seed_all_provider_presets(state).await?;
-
     // Ensure every IRONRAG_<PROVIDER>_API_KEY env value has a matching
-    // instance-scope credential. Independent of binding/preset selection so
-    // newly added provider keys appear in the admin UI on the next restart
-    // even if the chosen pipeline provider doesn't cover all purposes.
-    state.canonical_services.ai_catalog.ensure_env_provider_credentials(state).await?;
+    // instance-scope account. Independent of binding selection so newly
+    // added provider keys appear in the admin UI on the next restart even
+    // if the chosen pipeline provider doesn't cover all purposes.
+    state.canonical_services.ai_catalog.ensure_env_ai_accounts(state).await?;
 
     // Best-effort: bind the canonical workspace/library to the primary
-    // bootstrap provider's preset bundle. This requires the provider to
+    // bootstrap provider's binding bundle. This requires the provider to
     // cover all five binding purposes with a self-consistent embed/retrieve
     // model pair; if it doesn't (e.g. multi-provider env where the chosen
     // primary lacks an embedding model) we log and continue so the

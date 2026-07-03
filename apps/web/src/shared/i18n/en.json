@@ -66,9 +66,9 @@
     "summaryEndpointHosted": "Hosted default",
     "summaryEndpointRequired": "Endpoint required",
     "summaryDiscovery": "Discovery",
-    "summaryPresets": "Presets",
+    "summaryBindings": "Bindings",
     "summaryUnknown": "Unknown",
-    "noBootstrapBundles": "No bootstrap preset bundles are available for the current provider catalog.",
+    "noBootstrapBundles": "No bootstrap provider bundles are available for the current provider catalog.",
     "bootstrapStatusLoading": "Loading initial AI provider setup...",
     "bootstrapBundleRequired": "Select a ready AI provider bundle before completing setup.",
     "fillAllFields": "Please fill in all fields",
@@ -81,7 +81,8 @@
     "adminNamePlaceholder": "Admin user"
   },
   "dashboard": {
-    "title": "Dashboard",
+    "title": "Overview",
+    "subtitle": "Active library status",
     "total": "Total",
     "graphCoverage": "Graph Coverage",
     "inFlight": "Active Operations",
@@ -100,6 +101,8 @@
     "selectLibrary": "Select library",
     "createLibrary": "Create library",
     "askAssistant": "Ask the Assistant",
+    "answerReady": "Answers ready",
+    "answerNotReady": "AI setup needed",
     "assistantCtaTitle": "Ask the Assistant",
     "assistantCtaReady": "Ask questions grounded in {{name}} — answers cite the exact documents and graph entities they came from.",
     "assistantCtaNotReady": "Finish configuring this library's AI bindings to start asking grounded questions.",
@@ -108,7 +111,6 @@
     "documents": "Documents",
     "graph": "Graph",
     "noDocs": "No documents yet",
-    "headerSummary": "{{total}} docs · {{coverage}}% graph coverage · attention: {{attention}}",
     "documentsReadySummary": "Readable now: {{count}}",
     "graphCoverageSummary": "Graph-ready: {{ready}} / {{total}}",
     "readableNoGraphSummary": "No graph yet: {{count}}",
@@ -355,6 +357,7 @@
     "webIngestCancelFailed": "Failed to cancel web ingest run",
     "webSource": "Web Source",
     "webIngestRuns": "Web Ingest Runs",
+    "noWebRunsDesc": "Add a link to start a web ingest run.",
     "pages": "pages",
     "loadingPages": "Loading discovered pages...",
     "refreshRunPages": "Refresh Pages",
@@ -493,6 +496,7 @@
       "unknownCode": "Processing failed: {{code}}.",
       "byCode": {
         "canonical_pipeline_failed": "Document processing failed.",
+        "docling_insufficient_memory": "The document extractor (docling) ran out of memory in the worker container.",
         "upload_extraction_failed": "The file was accepted, but text or structured content could not be extracted from it.",
         "unsupported_upload_type": "This file type is not supported for document ingestion.",
         "invalid_text_encoding": "The file looks text-based, but its text encoding could not be read.",
@@ -569,6 +573,7 @@
       "uploadGeneric": "Retry the upload. If it keeps failing, upload the file individually or replace it with a clean exported copy.",
       "byCode": {
         "canonical_pipeline_failed": "Retry processing. If the same stage fails again, inspect the pipeline stage details and provider configuration.",
+        "docling_insufficient_memory": "Raise the worker memory limit IRONRAG_WORKER_MEMORY_LIMIT (in docker-compose or helm values) and recreate the container: docker compose up -d --force-recreate worker. A single docling process needs ≥2560 MiB plus headroom.",
         "upload_extraction_failed": "Retry the upload or replace the file with a clean exported copy. If it keeps failing, use a supported source format with extractable text.",
         "unsupported_upload_type": "Upload a supported document format or convert the file before uploading.",
         "invalid_text_encoding": "Re-save the file with a standard text encoding or upload it in a format with a dedicated parser.",
@@ -658,7 +663,10 @@
   },
   "graph": {
     "title": "Knowledge Graph",
+    "subtitle": "Entities, relations, and sources",
     "searchPlaceholder": "Search nodes...",
+    "layoutControls": "Layout",
+    "viewControls": "View",
     "legend": "Legend",
     "noGraph": "Graph is empty",
     "noGraphDesc": "Upload and process documents to build the knowledge graph.",
@@ -827,6 +835,8 @@
     "retryTitle": "Request didn't go through",
     "retryAction": "Retry",
     "searchingScope": "Searching",
+    "currentSession": "Current session",
+    "newQuestionSession": "New question",
     "verdictLabel": "Verification: {{verdict}}",
     "copyAnswer": "Copy",
     "copied": "Copied",
@@ -849,10 +859,10 @@
     "noSessionsMatch": "No matching sessions",
     "noSessionsMatchDesc": "Try a different search term.",
     "starterPrompts": {
-      "technologies": "What technologies are used in the system?",
-      "deployment": "Summarize the deployment process",
-      "security": "What are the main security concerns?",
-      "storage": "How is data stored and accessed?"
+      "overview": "Summarize what this library contains",
+      "keyPoints": "What are the main facts to know here?",
+      "openQuestions": "Which questions remain unclear from the materials?",
+      "recentItems": "What matters in the latest documents?"
     },
     "debugInspectorTitle": "Debug inspector",
     "debugInspectorToggle": "Debug",
@@ -952,7 +962,6 @@
     "failedToLoadSpec": "Failed to load API spec"
   },
   "admin": {
-    "title": "Admin",
     "libraries": {
       "totalCost": "Total cost",
       "workspaces": "Workspaces",
@@ -1042,7 +1051,7 @@
       "deleteDesc_few": "Deletion is asynchronous and removes the selected libraries with their documents, graph data, assistant sessions, and ingest state.",
       "deleteDesc_many": "Deletion is asynchronous and removes the selected libraries with their documents, graph data, assistant sessions, and ingest state.",
       "deleteDesc_other": "Deletion is asynchronous and removes the selected libraries with their documents, graph data, assistant sessions, and ingest state.",
-      "openHub": "Open library hub"
+      "configureAi": "Configure AI"
     },
     "mcp": {
       "includeDocumentHint": "Include source hints in MCP answers",
@@ -1050,14 +1059,11 @@
       "updateFailed": "Failed to update MCP settings"
     },
     "operations": "Operations",
-    "ingestQueue": "Queue",
-    "pricing": "Pricing",
     "createToken": "Create Token",
     "revokeToken": "Revoke",
     "deleteToken": "Delete",
     "providers": "Providers",
-    "credentials": "Credentials",
-    "modelPresets": "Model Presets",
+    "accounts": "Accounts",
     "add": "Add",
     "status": "Status",
     "edit": "Edit",
@@ -1114,7 +1120,7 @@
       "includeWorkspaceLabel": "Workspace settings",
       "includeWorkspaceDesc": "The owning workspace row, so a restore on a clean stack recreates the workspace this library lives in.",
       "includeAiConfigLabel": "AI configuration",
-      "includeAiConfigDesc": "Provider and model catalogs, prices, model presets, credentials (without API keys) and binding assignments. Import never overwrites the target's existing AI configuration.",
+      "includeAiConfigDesc": "Provider and model catalogs, prices, AI accounts (without API keys) and binding assignments. Import never overwrites the target's existing AI configuration.",
       "overwriteTitle": "Restore mode",
       "overwriteReject": "Only if library is absent (safe)",
       "overwriteReplace": "Replace existing library",
@@ -1124,7 +1130,6 @@
       "runImport": "Restore"
     },
     "noOpsData": "No operations data available.",
-    "ingestQueueDesc": "Global ingest queue across workspaces and libraries. Inspect active jobs, reorder waiting jobs, pause or resume work, cancel stuck items, or jump to the document.",
     "queueRunning": "Running",
     "queueQueued": "Queued",
     "queuePaused": "Paused",
@@ -1187,6 +1192,9 @@
     "queueClearSelection": "Clear selection",
     "queueNoMatches": "No jobs match the filter.",
     "queueFailure": "Failure",
+    "queueFailureCode": "Diagnostic code",
+    "queueFailureExpand": "Show full failure",
+    "queueFailureCollapse": "Collapse failure",
     "queueInspectorTitle": "Job inspector",
     "queueInspectorEmpty": "Select a job to inspect current processing activity.",
     "queueInspectorScope": "Scope",
@@ -1201,6 +1209,8 @@
     "noPricingData": "No pricing data found.",
     "mcpServerUrl": "MCP Server URL",
     "capabilitiesProbe": "Capabilities Probe",
+    "mcpScopeTitle": "Access scope",
+    "mcpScopeNote": "Clients connect with a bearer token from the Access section. Which libraries an MCP client can reach is set by the token's scope — system, a workspace, or a set of libraries — not a single library.",
     "mcpSystemPromptTitle": "Recommended system prompt",
     "mcpSystemPromptDesc": "System prompt for external MCP agents such as Claude Desktop, Codex, Cursor, Continue.dev, OpenClaw, and Hermes. The in-app assistant uses the same text.",
     "mcpParityTitle": "MCP — UI parity",
@@ -1234,9 +1244,7 @@
     "provider": "Provider",
     "label": "Label",
     "apiKey": "API Key",
-    "presetName": "Preset Name",
     "model": "Model",
-    "selectModel": "Select model",
     "systemPrompt": "System Prompt",
     "temperature": "Temperature",
     "topP": "Top P",
@@ -1251,11 +1259,8 @@
     "per1mInputTokens": "Per 1M Input Tokens",
     "per1mCachedInputTokens": "Per 1M Cached Input Tokens",
     "per1mOutputTokens": "Per 1M Output Tokens",
-    "allProviders": "All Providers",
     "searchModels": "Search models...",
     "override": "Override",
-    "source": "Source",
-    "price": "Price",
     "knowledgeGeneration": "Knowledge Generation",
     "never": "Never",
     "selectProvider": "Select provider",
@@ -1286,14 +1291,16 @@
     "pricingOverrideCreated": "Pricing override created",
     "pricingOverrideUpdated": "Pricing override updated",
     "pricingOverrideDeleted": "Pricing override deleted",
-    "createPricingFailed": "Failed to create pricing override",
     "savePricingFailed": "Failed to save pricing override",
     "deletePricingFailed": "Failed to delete pricing override",
     "editPricingOverride": "Edit pricing override",
+    "pricingOverrideDialogTitle": "Price — {{model}}",
     "pricingOverrideDescription": "Pricing overrides are stored for the current workspace and replace the system catalog price.",
     "deletePricingOverrideTitle": "Delete pricing override",
     "deletePricingOverrideDescription": "Delete the pricing override for {{model}}? The system catalog price will be used again.",
     "bindingsMissing_one": "{{count}} binding missing",
+    "bindingsMissing_few": "{{count}} bindings missing",
+    "bindingsMissing_many": "{{count}} bindings missing",
     "bindingsMissing_other": "{{count}} bindings missing",
     "opsStatusLabels": {
       "healthy": "Healthy",
@@ -1323,44 +1330,26 @@
       "bundleFailures": {}
     },
     "aiPanel": {
-      "title": "AI",
       "tokenOptional": "token optional",
-      "credentialsTitle": "Credentials in this scope",
-      "credentialsDescription": "Stored locally at the selected scope.",
-      "presetsTitle": "Presets in this scope",
-      "presetsDescription": "Editable model presets stored locally at the selected scope.",
-      "presetsProviderDescription": "Showing only {{provider}} presets in the selected scope.",
+      "accountsTitle": "Accounts in this scope",
       "optionalBindingsMissingTitle": "Optional bindings not configured",
       "optionalBindingsMissingDetail": "Not configured: {{purposes}}. Images will be processed on the local CPU — this may reduce quality and throughput.",
       "readiness": {
         "readyTitle": "AI ready",
         "readyDetail": "Required bindings are configured for the selected scope.",
-        "missingCredentialsTitle": "Credentials needed",
-        "missingCredentialsDetail": "Add an active provider credential.",
-        "missingPresetsTitle": "Preset needed",
-        "missingPresetsDetail": "Create a preset that works with the active credential.",
+        "missingAccountsTitle": "Account needed",
+        "missingAccountsDetail": "Add an active AI account.",
         "missingBindingsTitle": "Missing bindings: {{count}}",
         "missingBindingsDetail": "Set up first: {{purposes}}.",
         "actions": {
           "bindings": "Review runtime bindings",
-          "credentials": "Add credential",
-          "presets": "Create preset",
-          "providers": "Review provider catalog",
-          "models": "Review visible models"
+          "accounts": "Add account"
         }
       },
       "navigation": {
         "label": "AI sections",
         "setupGroup": "Setup",
-        "catalogGroup": "Catalog",
-        "descriptions": {
-          "bindings": "Which credentials and presets run AI tasks.",
-          "credentials": "Provider tokens and endpoints.",
-          "presets": "Models and parameters for tasks.",
-          "providers": "Available providers.",
-          "models": "Models visible in the current scope.",
-          "pricing": "Model price overrides"
-        }
+        "catalogLink": "Model & pricing reference →"
       },
       "scopeCards": {
         "instanceTitle": "Instance defaults",
@@ -1382,7 +1371,7 @@
         "agent": "AI Assistant (MCP Agent)",
         "vision": "Vision"
       },
-      "credentialStateLabels": {
+      "accountStateLabels": {
         "active": "active",
         "invalid": "invalid",
         "revoked": "revoked",
@@ -1397,35 +1386,21 @@
       "apiStyleLabels": {
         "openai_compatible": "OpenAI-compatible"
       },
-      "capabilityLabels": {
-        "chat": "Chat",
-        "embedding": "Embeddings"
-      },
-      "modalityLabels": {
-        "text": "Text",
-        "multimodal": "Multimodal"
-      },
       "notices": {
-        "missingInstanceBaseline": "No instance baseline is configured yet. You are viewing the nearest scope that already has AI settings. Set instance defaults when you want one preset stack shared by every workspace and library."
+        "missingInstanceBaseline": "No instance baseline is configured yet. You are viewing the nearest scope that already has AI settings. Set instance defaults when you want one account/binding stack shared by every workspace and library."
       },
       "empty": {
         "noEffectiveBinding": "Not configured.",
-        "noLocalCredentials": "No local credentials yet.",
-        "noLocalPresets": "No local presets yet.",
-        "noProviderPresets": "{{provider}} has no presets in this scope yet.",
-        "noSelectableModels": "No selectable models are available yet. Save a reachable credential first and make sure the model is present on the configured provider.",
-        "noMatchingCredentials": "No credentials match this filter.",
-        "noMatchingPresets": "No presets match this filter."
+        "noLocalAccounts": "No local accounts yet.",
+        "noSelectableModels": "No selectable models are available yet. Save a reachable account first and make sure the model is present on the configured provider."
       },
       "fields": {
-        "credential": "Credential",
-        "provider": "Provider",
-        "modelPreset": "Model preset",
+        "account": "Account",
         "baseUrl": "Base URL",
         "baseUrlOptional": "Base URL (optional)",
-        "baseUrlRequiredHint": "Enter the provider endpoint before saving this credential.",
+        "baseUrlRequiredHint": "Enter the provider endpoint before saving this account.",
         "fixedBaseUrlHint": "This endpoint is fixed by the provider catalog.",
-        "tokenRequiredHint": "Enter the provider token before saving this credential.",
+        "tokenRequiredHint": "Enter the provider token before saving this account.",
         "tokenOptional": "Token (optional)",
         "profile": "Profile",
         "capability": "Capability",
@@ -1437,58 +1412,45 @@
         "identifier": "Identifier",
         "providerId": "Provider ID",
         "parameters": "Parameters",
+        "pricePerMillion": "Price, $/1M",
         "scope": "Scope",
         "apiStyle": "API style",
         "displayName": "Display name",
         "providerKind": "Provider type",
         "lifecycle": "State",
         "providerProfileJson": "Provider profile (JSON)",
-        "metadataJson": "Metadata (JSON)"
+        "advancedSettings": "Advanced",
+        "advancedProviderSettings": "Advanced provider settings"
       },
       "actions": {
         "editHere": "Change",
         "setDefault": "Set up",
         "createOverride": "Override",
         "resetToInherited": "Reset to inherited",
-        "addPreset": "Add preset",
         "addProvider": "Add provider",
         "disableProvider": "Disable provider",
-        "addModel": "Add model",
-        "disableModel": "Disable model"
+        "overridePrice": "Override price"
       },
       "dialogs": {
-        "addCredentialTitle": "Add credential",
-        "editCredentialTitle": "Edit credential",
-        "credentialDescription": "Credentials are stored at the currently selected scope.",
-        "addPresetTitle": "Add preset",
-        "editPresetTitle": "Edit preset",
-        "presetDescription": "Presets are stored at the currently selected scope.",
-        "deleteCredentialTitle": "Delete credential",
-        "deleteCredentialDescription": "Delete credential {{label}}? Bindings that reference it will need to be reconfigured.",
-        "deletePresetTitle": "Delete preset",
-        "deletePresetDescription": "Delete preset {{preset}}? Bindings that reference it will need to be reconfigured.",
+        "addAccountTitle": "Add account",
+        "editAccountTitle": "Edit account",
+        "accountDescription": "Accounts are stored at the currently selected scope.",
+        "deleteAccountTitle": "Delete account",
+        "deleteAccountDescription": "Delete account {{account}}? Bindings that reference it will need to be reconfigured.",
         "addProviderTitle": "Add provider",
         "editProviderTitle": "Edit provider",
         "providerDescription": "The provider catalog is shared by every workspace. Only system administrators can change it.",
         "disableProviderTitle": "Disable provider",
-        "disableProviderDescription": "Disable {{provider}}? The provider remains in the catalog, but its models stop being available for new bindings.",
-        "addModelTitle": "Add model",
-        "editModelTitle": "Edit model",
-        "modelDescription": "A model belongs to a provider and defines purposes, modality, and limits.",
-        "disableModelTitle": "Disable model",
-        "disableModelDescription": "Disable {{model}}? The model remains in the catalog, but stops being available for new bindings."
+        "disableProviderDescription": "Disable {{provider}}? The provider remains in the catalog, but its models stop being available for new bindings."
       },
       "placeholders": {
-        "selectCredential": "Select credential",
-        "selectPreset": "Select preset",
+        "selectAccount": "Select account",
         "selectProvider": "Select provider",
         "selectModel": "Select model",
-        "credentialLabel": "Primary provider credential",
-        "credentialLabelForProvider": "{{provider}} credential",
+        "accountLabel": "Primary provider account",
+        "accountLabelForProvider": "{{provider}} account",
         "keepSecret": "Leave blank to keep current secret",
         "providerToken": "Provider token",
-        "presetName": "Model preset",
-        "presetNameForModel": "{{model}} preset",
         "systemPrompt": "Optional system prompt",
         "defaultValue": "default",
         "providerDisplayName": "Provider name",
@@ -1496,44 +1458,32 @@
         "apiStyle": "API style",
         "lifecycle": "Select state",
         "baseUrl": "https://api.provider.example",
-        "modelName": "model/name",
-        "keepModelMetadata": "Leave blank to keep current metadata",
         "emptyJson": "{}",
         "priceAmount": "0.00"
       },
       "messages": {
         "invalidJson": "Enter a valid JSON object.",
-        "credentialSaved": "Credential saved.",
-        "credentialSaveFailed": "Failed to save credential.",
-        "credentialDeleted": "Credential deleted.",
-        "credentialDeleteFailed": "Failed to delete credential.",
-        "credentialValidationFailed": "IronRAG could not validate this provider from the backend. Check that the credential and provider endpoint are reachable from the backend container.",
-        "bindingModelUnavailable": "The configured model {{model}} is no longer available from this credential. Reconfigure this binding.",
-        "presetSaved": "Preset saved.",
-        "presetSaveFailed": "Failed to save preset.",
-        "presetDeleted": "Preset deleted.",
-        "presetDeleteFailed": "Failed to delete preset.",
-        "presetModelUnavailable": "The preset model {{model}} is no longer available from the visible provider credentials. Create a replacement preset and update bindings that still use it.",
-        "selectedPresetUnavailable": "This preset points to a model that is not available from the selected provider credential.",
+        "accountSaved": "Account saved.",
+        "accountSaveFailed": "Failed to save account.",
+        "accountDeleted": "Account deleted.",
+        "accountDeleteFailed": "Failed to delete account.",
+        "accountValidationFailed": "IronRAG could not validate this provider from the backend. Check that the account and provider endpoint are reachable from the backend container.",
+        "bindingModelUnavailable": "The configured model {{model}} is no longer available from this account. Reconfigure this binding.",
+        "selectedModelUnavailable": "The selected model is not available from the selected account.",
         "providerSaved": "Provider saved.",
         "providerSaveFailed": "Failed to save provider.",
         "providerDisabled": "Provider disabled.",
         "providerDisableFailed": "Failed to disable provider.",
-        "modelPurposeRequired": "Select at least one purpose.",
-        "modelSaved": "Model saved.",
-        "modelSaveFailed": "Failed to save model.",
-        "modelDisabled": "Model disabled.",
-        "modelDisableFailed": "Failed to disable model.",
-        "bindingEmbeddingDimensionChanged": "Vector dimension changed from {{previous}} to {{current}}. Vector search will be unavailable until the index is rebuilt.",
         "bindingSaved": "Binding saved.",
         "bindingSaveFailed": "Failed to save binding.",
         "bindingRollbackFailed": "Binding change was rolled back: {{error}}",
         "overrideRemoved": "Override removed.",
         "overrideRemoveFailed": "Failed to remove override.",
-        "checkingCredentialModels": "Checking reachable models for the selected provider credential...",
-        "credentialModelRefreshFailed": "Could not refresh the selected provider model list. Showing catalog availability only."
+        "checkingAccountModels": "Checking reachable models for the selected account...",
+        "accountModelRefreshFailed": "Could not refresh the selected account's model list. Showing catalog availability only."
       },
       "unavailableBadge": "unavailable",
+      "modelPricePerMillion": "{{model}} · {{price}} per 1M",
       "sections": {
         "bindingsTitle": "Runtime bindings",
         "requiredBindingsTitle": "Required bindings",
@@ -1544,8 +1494,7 @@
         "visibleModels": "Visible models"
       },
       "filters": {
-        "credentialsSearch": "Filter credentials",
-        "presetsSearch": "Filter presets",
+        "accountsSearch": "Filter accounts",
         "providersSearch": "Filter providers"
       },
       "labels": {
@@ -1556,9 +1505,7 @@
     "auditSearchPlaceholder": "Search action, message, subject, or actor...",
     "auditResultAll": "All results",
     "auditSurfaceAll": "All surfaces",
-    "auditPageSizeOption": "{{count}} per page",
     "auditSummary": "Showing {{from}}-{{to}} of {{total}}",
-    "auditPageLabel": "Page {{page}} of {{total}}",
     "previous": "Previous",
     "next": "Next",
     "auditResultLabels": {
@@ -1598,73 +1545,45 @@
       "subtitle": "Instance administration",
       "libraries": "Libraries",
       "queue": "Queue",
+      "audit": "Audit",
       "ai": "AI Configuration",
       "access": "Access",
       "users": "Users",
-      "system": "System"
-    },
-    "libraryHub": {
-      "backToCatalog": "Back to catalog",
-      "ready": "Ready",
-      "blocked": "Blocked",
-      "configureAi": "Configure AI",
-      "noLibrary": "No library selected.",
-      "sections": {
-        "overview": "Overview",
-        "activity": "Activity",
-        "backup": "Backup",
-        "mcp": "MCP"
+      "system": "System",
+      "group": {
+        "content": "Content",
+        "intelligence": "AI",
+        "governance": "Access & roles",
+        "instance": "Instance"
       },
-      "overview": {
-        "readyTitle": "This library is ready to answer questions",
-        "readyDesc": "Every required AI binding is configured for this library.",
-        "blockedTitle": "{{count}} bindings not configured",
-        "blockedTitle_one": "{{count}} binding not configured",
-        "blockedTitle_few": "{{count}} bindings not configured",
-        "blockedTitle_many": "{{count}} bindings not configured",
-        "blockedDesc": "This library cannot produce answers until its required AI bindings are configured.",
-        "hint": "Use the sections above to manage this library’s activity, backups, and MCP settings."
-      },
-      "backup": {
-        "title": "Backup & Restore",
-        "desc": "Export a full, configurable snapshot of this library or restore it from an archive.",
-        "exportDesc": "Download an archive with documents, graph, and optionally source files and AI config.",
-        "importDesc": "Restore the library from a previously exported snapshot."
-      },
-      "mcp": {
-        "title": "MCP settings",
-        "desc": "MCP settings for this library plus the client connection guide."
-      }
+      "librariesDesc": "Library catalog across all workspaces",
+      "queueDesc": "Document processing across all workspaces and libraries",
+      "auditDesc": "Action log across all workspaces and libraries",
+      "aiDesc": "AI accounts, models and working bindings",
+      "accessDesc": "API tokens and their access scope"
     },
     "aiWizard": {
       "launch": "Setup wizard",
       "title": "Set up an AI binding",
-      "description": "A guided path: credential → preset → binding for a chosen purpose and scope.",
+      "description": "A guided path: account → model → binding for a chosen purpose and scope.",
       "purposeLabel": "Purpose",
       "scopeLabel": "Scope",
-      "checklistTitle": "Steps",
-      "progress": "{{done}} of {{total}} done",
       "stepNumber": "Step {{number}}.",
-      "stepDone": "Done",
       "continue": "Continue",
-      "allDone": "All set",
+      "back": "Back",
+      "createBinding": "Create binding",
+      "useExistingAccount": "Use existing account",
+      "createNewAccount": "Create new account",
       "steps": {
-        "credential": {
-          "title": "Provider credential",
-          "desc": "Add an access key for the model provider."
+        "account": {
+          "title": "AI account"
         },
-        "preset": {
-          "title": "Model preset",
-          "desc": "Create a preset with a specific model and parameters."
-        },
-        "binding": {
-          "title": "Bind the purpose",
-          "desc": "Link the purpose to the credential and preset."
+        "model": {
+          "title": "Model and parameters"
         }
       }
     },
     "users": {
-      "title": "Users",
       "subtitle": "Manage users and roles",
       "currentUser": "Current user",
       "createUser": "Create user",
@@ -1673,7 +1592,10 @@
       "loadFailed": "Failed to load users",
       "empty": "No users yet",
       "loading": "Loading users...",
-      "total": "users",
+      "total_one": "{{count}} user",
+      "total_few": "{{count}} users",
+      "total_many": "{{count}} users",
+      "total_other": "{{count}} users",
       "role": "Role",
       "changeRole": "Change role",
       "loginLabel": "Login",
@@ -1713,13 +1635,14 @@
       }
     },
     "systemPage": {
-      "title": "System settings",
       "subtitle": "Instance defaults and developer tools",
       "languageTitle": "Default language",
       "themeTitle": "Theme",
       "themeDesc": "Interface appearance.",
       "developerTitle": "Developer tools",
       "developerDesc": "API explorer and technical reference.",
+      "mcpTitle": "MCP connection",
+      "mcpDesc": "Server URL, system prompt and client setup for external MCP agents. Identical for every library in the instance.",
       "theme": {
         "light": "Light",
         "dark": "Dark",
@@ -1776,6 +1699,8 @@
     "workspaceScope": "Workspace",
     "libraryScope": "Library",
     "primaryNav": "Primary navigation",
+    "collapseSidebar": "Collapse sidebar",
+    "expandSidebar": "Expand sidebar",
     "userMenu": "Account menu",
     "account": "Account",
     "theme": "Theme",

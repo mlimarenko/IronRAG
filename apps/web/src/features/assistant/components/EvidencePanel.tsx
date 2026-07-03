@@ -45,7 +45,7 @@ function EvidencePanelImpl({
   return (
     <div
       className={cn(
-        'inspector-panel shrink-0 overflow-y-auto animate-slide-in-right',
+        'shrink-0 overflow-y-auto',
         className,
       )}
     >
@@ -88,7 +88,7 @@ function EvidencePanelImpl({
                 },
               ].map((m) => (
                 <div key={m.label} className="p-3 bg-surface-sunken rounded-xl">
-                  <div className="text-muted-foreground text-[10px] font-bold uppercase tracking-wider">
+                  <div className="section-label font-bold">
                     {m.label}
                   </div>
                   <div className="font-bold text-base mt-1 tabular-nums">{m.value}</div>
@@ -105,10 +105,10 @@ function EvidencePanelImpl({
               {evidence.segmentRefs.map((ref, i) => (
                 <div
                   key={i}
-                  className="p-3.5 border rounded-xl text-xs bg-card shadow-soft min-w-0"
+                  className="p-3.5 workbench-surface text-xs min-w-0"
                 >
                   <div className="flex items-start gap-1.5 font-bold min-w-0">
-                    <FileText className="h-3 w-3 mt-0.5 shrink-0" />
+                    <FileText className="h-3.5 w-3.5 mt-0.5 shrink-0" />
                     <span
                       className="min-w-0 flex-1 break-words"
                       title={ref.documentTitle || ref.documentName}
@@ -121,7 +121,7 @@ function EvidencePanelImpl({
                       href={ref.sourceAccess?.href ?? ref.sourceUri ?? '#'}
                       target="_blank"
                       rel="noopener noreferrer"
-                      className="text-primary text-[10px] hover:underline truncate block mt-0.5"
+                      className="text-primary text-2xs hover:underline truncate block mt-0.5"
                       title={ref.sourceUri ?? undefined}
                     >
                       {ref.sourceAccess?.kind === 'stored_document'
@@ -149,7 +149,7 @@ function EvidencePanelImpl({
             <div className="section-label mb-2">{t('assistant.factRefs')}</div>
             <div className="space-y-2">
               {evidence.factRefs.map((ref, i) => (
-                <div key={i} className="p-3.5 border rounded-xl text-xs bg-card shadow-soft">
+                <div key={i} className="p-3.5 workbench-surface text-xs">
                   <div className="font-bold">{ref.value}</div>
                   <div className="text-muted-foreground mt-1">
                     {ref.factKind}
@@ -168,10 +168,10 @@ function EvidencePanelImpl({
               {evidence.entityRefs.map((ref, i) => (
                 <button
                   key={i}
-                  className="w-full flex items-center gap-2.5 p-3 border rounded-xl text-xs text-left hover:bg-accent/50 transition-all duration-200 bg-card shadow-soft"
+                  className="w-full flex items-center gap-2.5 p-3 workbench-surface text-xs text-left hover:bg-accent/50 transition-all duration-200"
                   onClick={onOpenGraph}
                 >
-                  <Share2 className="h-3 w-3 text-muted-foreground" />
+                  <Share2 className="h-3.5 w-3.5 text-muted-foreground" />
                   <span className="font-bold">{ref.label}</span>
                   <span className="text-muted-foreground ml-auto">{ref.type}</span>
                 </button>

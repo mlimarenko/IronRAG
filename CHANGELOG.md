@@ -2,15 +2,77 @@
 
 ## Unreleased
 
-## 0.5.5 — 2026-06-27
+## 0.5.6 — 2026-07-03
 
 ### Changed
 
-- **Default ingest queue caps are raised for remote stacks.** The runtime,
-  Compose stack, Helm chart, installer, and examples now default to 16 leased
-  ingest jobs globally, 8 per workspace, and 4 per library. Capacity docs now
-  explain how those deployment-wide caps interact with worker memory, worker
-  replicas, database pool headroom, and provider concurrency.
+- **AI configuration is simplified to accounts and inline-parameter
+  bindings.** Model presets are removed as a separate entity; their
+  parameters (system prompt, temperature, top-p, max output tokens, and
+  extra request parameters) now live inline on each per-purpose binding.
+  Provider credentials are renamed to *accounts* and the binding record is
+  renamed to match, with the REST surface moving to `/v1/ai/accounts` and
+  `/v1/ai/bindings`. The admin AI-configuration screen collapses to two
+  setup tiles — bindings and accounts — plus a read-only model and pricing
+  reference, and the guided setup becomes a two-step wizard (account, then
+  model and parameters). A single idempotent migration performs the renames
+  and backfills each preset's parameters into its binding; library snapshot
+  import still accepts pre-migration archives by splicing preset fields into
+  the restored bindings.
+
+- **The web UI is unified around one design language.** Tables, filters,
+  forms, status indicators, and empty states share a single set of
+  primitives across every page: one panel surface, one status-badge
+  vocabulary, filter controls with a leading icon, a canonical table
+  contract that degrades to cards on narrow viewports, and a shared
+  form-field family for dialogs. The admin navigation is grouped by area,
+  and a repository gate rejects raw color literals so the palette stays
+  token-driven.
+
+- **The sidebar collapses to an icon rail.** Clicking the logo toggles the
+  desktop sidebar between the full labeled rail and a compact icon-only rail
+  (the choice persists locally); collapsed entries stay fully functional and
+  reveal their labels on hover. The redundant top breadcrumb strip is
+  removed, and long workspace or library names now show their full text on
+  hover wherever they are truncated.
+
+- **Ingest concurrency defaults are lowered for baseline memory safety.** The
+  default queue caps drop from 16/8/4 to 4/2/1
+  (`IRONRAG_INGESTION_MAX_PARALLEL_JOBS_GLOBAL`, `_PER_WORKSPACE`,
+  `_PER_LIBRARY`) in `docker-compose.yml`, `.env.example`, and the README, and
+  the capacity-planning guide now derives per-worker limits from available
+  memory instead of a fixed deployment-wide ceiling. Deployments that upgrade
+  keep their ingest queue memory-safe by default on small hosts; raise the caps
+  together with worker memory, replica count, and the database connection
+  budget.
+
+- **Assistant starter prompts are domain-neutral.** The suggested opening
+  questions move from system- and deployment-specific wording to generic
+  corpus-exploration prompts (overview, key points, open questions, recent
+  items), so the assistant makes no assumption about the library's subject
+  area.
+
+### Fixed
+
+- **Out-of-memory extraction failures name the setting to change.** When the
+  worker container lacks the headroom a document extractor process needs, the
+  raw error and the document remediation hint now name
+  `IRONRAG_WORKER_MEMORY_LIMIT` and the container-recreate step instead of
+  pointing operators at the file.
+
+- **First-run binding bootstrap no longer stalls on the retrieval binding.**
+  Environment-driven bootstrap mirrors the query-retrieval binding onto the
+  chunk-embedding binding, so a fresh deployment configures a complete,
+  self-consistent set of bindings without manual intervention.
+
+- **The frontend type-check gate is real.** The `frontend-typecheck` target
+  previously resolved zero input files and always passed; it now builds the
+  project references, and the strict-type debt that surfaced has been cleared
+  without loosening the TypeScript configuration.
+
+## 0.5.5 — 2026-06-27
+
+### Changed
 
 - **Release metadata is aligned for 0.5.5.** The Rust workspace package
   version, generated OpenAPI `info.version`, Helm chart, and README image-tag

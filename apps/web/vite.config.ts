@@ -132,6 +132,12 @@ export default defineConfig({
   resolve: {
     alias: {
       "@": path.resolve(__dirname, "./src"),
+      // The ESM graphology build exposes a class method named `import(...)`.
+      // Vite's Rolldown dev prebundle preserves that method name and Chromium
+      // rejects it as a module parse error. The CJS build emits
+      // `_proto["import"]`, so dev visual QA and production builds use the
+      // same Graph API without a browser-only syntax fault.
+      graphology: path.resolve(__dirname, "node_modules/graphology/dist/graphology.cjs.js"),
     },
     dedupe: [
       "react",

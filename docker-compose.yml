@@ -106,12 +106,13 @@ x-ironrag-runtime-env: &ironrag-runtime-env
   IRONRAG_CONTENT_STORAGE_S3_SECRET_ACCESS_KEY: ${IRONRAG_CONTENT_STORAGE_S3_SECRET_ACCESS_KEY:-ironrag-dev-secret}
   IRONRAG_CONTENT_STORAGE_S3_SESSION_TOKEN: ${IRONRAG_CONTENT_STORAGE_S3_SESSION_TOKEN:-}
   IRONRAG_CONTENT_STORAGE_S3_FORCE_PATH_STYLE: ${IRONRAG_CONTENT_STORAGE_S3_FORCE_PATH_STYLE:-true}
-  # Deployment-wide queue fairness caps. The worker runtime also applies a
-  # cgroup-derived per-process claim cap, so small stacks may run below these
-  # ceilings until worker memory, worker replicas, and DB budget are raised.
-  IRONRAG_INGESTION_MAX_PARALLEL_JOBS_GLOBAL: ${IRONRAG_INGESTION_MAX_PARALLEL_JOBS_GLOBAL:-16}
-  IRONRAG_INGESTION_MAX_PARALLEL_JOBS_PER_WORKSPACE: ${IRONRAG_INGESTION_MAX_PARALLEL_JOBS_PER_WORKSPACE:-8}
-  IRONRAG_INGESTION_MAX_PARALLEL_JOBS_PER_LIBRARY: ${IRONRAG_INGESTION_MAX_PARALLEL_JOBS_PER_LIBRARY:-4}
+  # Keep the local baseline memory-safe: the worker runtime also applies a
+  # cgroup-derived per-process claim cap, while these defaults prevent several
+  # replicas from stacking graph-merge jobs on the same host. Larger deployments
+  # can raise the values together with worker memory.
+  IRONRAG_INGESTION_MAX_PARALLEL_JOBS_GLOBAL: ${IRONRAG_INGESTION_MAX_PARALLEL_JOBS_GLOBAL:-4}
+  IRONRAG_INGESTION_MAX_PARALLEL_JOBS_PER_WORKSPACE: ${IRONRAG_INGESTION_MAX_PARALLEL_JOBS_PER_WORKSPACE:-2}
+  IRONRAG_INGESTION_MAX_PARALLEL_JOBS_PER_LIBRARY: ${IRONRAG_INGESTION_MAX_PARALLEL_JOBS_PER_LIBRARY:-1}
   # Graph projection prewarm is opt-in. Large libraries can allocate enough
   # memory to OOM the API role if every active graph is loaded at startup.
   IRONRAG_RUNTIME_GRAPH_PROJECTION_PREWARM_ENABLED: ${IRONRAG_RUNTIME_GRAPH_PROJECTION_PREWARM_ENABLED:-false}

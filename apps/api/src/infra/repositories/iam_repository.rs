@@ -1268,10 +1268,10 @@ pub async fn list_resolved_grants_by_principal_ids(
          left join catalog_library_connector connector
            on grant_row.resource_kind = 'connector'
           and connector.id = grant_row.resource_id
-         left join ai_provider_credential credential
+         left join ai_account credential
            on grant_row.resource_kind = 'provider_credential'
           and credential.id = grant_row.resource_id
-         left join ai_binding_assignment binding
+         left join ai_binding binding
            on grant_row.resource_kind = 'library_binding'
           and binding.id = grant_row.resource_id
          where grant_row.principal_id = any($1)

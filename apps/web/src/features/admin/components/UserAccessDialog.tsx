@@ -1,7 +1,7 @@
 import { useMemo, useState } from 'react';
 import { useMutation, useQueries, useQuery, useQueryClient } from '@tanstack/react-query';
 import { toast } from 'sonner';
-import { ChevronDown, ChevronRight, Library, Loader2, Building2 } from 'lucide-react';
+import { ChevronDown, ChevronRight, Library, Loader2, Building2, XCircle } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
 import { adminApi } from '@/shared/api';
@@ -21,6 +21,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from '@/shared/components/ui/dialog';
+import { WorkbenchEmptyState } from '@/shared/components/layout/WorkbenchEmptyState';
 import { ScrollArea } from '@/shared/components/ui/scroll-area';
 import { Separator } from '@/shared/components/ui/separator';
 import { errorMessage } from '@/shared/lib/errorMessage';
@@ -223,17 +224,18 @@ export function UserAccessDialog({ user, open, onOpenChange }: UserAccessDialogP
         </DialogHeader>
 
         {isLoading ? (
-          <div className="flex items-center justify-center gap-2 py-10 text-sm text-muted-foreground">
-            <Loader2 className="h-4 w-4 animate-spin" /> {t('admin.users.access.loading')}
-          </div>
+          <WorkbenchEmptyState
+            icon={<Loader2 className="h-7 w-7 animate-spin text-primary/70" />}
+            title={t('admin.users.access.loading')}
+          />
         ) : loadError ? (
-          <div className="py-8 text-center text-sm text-status-failed">
-            {errorMessage(loadError, t('admin.users.access.loadFailed'))}
-          </div>
+          <WorkbenchEmptyState
+            icon={<XCircle className="h-7 w-7 text-destructive" />}
+            title={t('admin.users.access.loadFailed')}
+            description={errorMessage(loadError, t('admin.users.access.loadFailed'))}
+          />
         ) : workspaces.length === 0 ? (
-          <div className="py-10 text-center text-sm text-muted-foreground">
-            {t('admin.users.access.empty')}
-          </div>
+          <WorkbenchEmptyState title={t('admin.users.access.empty')} />
         ) : (
           <ScrollArea className="max-h-[55vh] pr-3">
             <div className="space-y-1.5">
@@ -278,7 +280,7 @@ export function UserAccessDialog({ user, open, onOpenChange }: UserAccessDialogP
                         <div className="space-y-1 bg-surface-sunken/40 py-2 pl-12 pr-3">
                           {libsLoading ? (
                             <div className="flex items-center gap-2 py-1.5 text-xs text-muted-foreground">
-                              <Loader2 className="h-3 w-3 animate-spin" />
+                              <Loader2 className="h-3.5 w-3.5 animate-spin" />
                               {t('admin.users.access.librariesLoading')}
                             </div>
                           ) : libraries.length === 0 ? (

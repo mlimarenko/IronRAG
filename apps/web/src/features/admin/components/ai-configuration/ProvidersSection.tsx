@@ -16,9 +16,10 @@ import {
   DialogTitle,
 } from '@/shared/components/ui/dialog';
 import { SelectItem } from '@/shared/components/ui/select';
+import { StatusBadge } from '@/shared/components/StatusBadge';
 import { errorMessage } from '@/shared/lib/errorMessage';
-import type { AICredential, AIModelOption, AIProvider } from '@/shared/types';
-import { badgeClass, matchesFilter, type AiConfigDataState } from '@/features/admin/model/aiConfig';
+import type { AIAccount, AIModelOption, AIProvider } from '@/shared/types';
+import { matchesFilter, type AiConfigDataState } from '@/features/admin/model/aiConfig';
 import {
   FormInputField,
   FormSelectField,
@@ -32,7 +33,7 @@ import { EntityWorkbench, InspectorField, InspectorSection } from './EntityWorkb
 type ProvidersSectionProps = {
   providersState: AiConfigDataState<AIProvider[]>;
   models: AIModelOption[];
-  credentials: AICredential[];
+  accounts: AIAccount[];
   invalidateAll: () => void;
 };
 
@@ -126,7 +127,7 @@ function iconButtonLabel(action: string, title: string) {
 export function ProvidersSection({
   providersState,
   models,
-  credentials,
+  accounts,
   invalidateAll,
 }: ProvidersSectionProps) {
   const { t } = useTranslation();
@@ -175,9 +176,9 @@ export function ProvidersSection({
     return base.map(provider => ({
       ...provider,
       modelCount: models.filter(model => model.providerCatalogId === provider.id).length,
-      credentialCount: credentials.filter(credential => credential.providerId === provider.id).length,
+      credentialCount: accounts.filter(account => account.providerId === provider.id).length,
     }));
-  }, [credentials, models, providersState.data]);
+  }, [accounts, models, providersState.data]);
 
   const resetEditor = () => {
     setEditorOpen(false);
@@ -314,7 +315,7 @@ export function ProvidersSection({
             cell: provider => (
               <div className="min-w-0">
                 <div className="truncate text-sm font-semibold">{provider.displayName}</div>
-                <div className="truncate text-[11px] text-muted-foreground">
+                <div className="truncate text-2xs text-muted-foreground">
                   {provider.kind}
                   {provider.apiStyle ? ` · ${provider.apiStyle}` : ''}
                 </div>
@@ -332,8 +333,8 @@ export function ProvidersSection({
             ),
           },
           {
-            key: 'credentials',
-            header: t('admin.credentials'),
+            key: 'accounts',
+            header: t('admin.accounts'),
             width: 'w-28',
             align: 'right',
             sortValue: provider => provider.credentialCount,
@@ -364,9 +365,9 @@ export function ProvidersSection({
           body: (
             <>
               <div>
-                <span className={`status-badge ${badgeClass(lifecycleTone(provider.lifecycleState))}`}>
+                <StatusBadge tone={lifecycleTone(provider.lifecycleState)}>
                   {t(`admin.aiPanel.lifecycleLabels.${provider.lifecycleState}`)}
-                </span>
+                </StatusBadge>
               </div>
               <InspectorSection title={t('admin.aiPanel.fields.apiStyle')}>
                 <InspectorField
@@ -379,7 +380,7 @@ export function ProvidersSection({
                   value={provider.modelCount}
                 />
                 <InspectorField
-                  label={t('admin.credentials')}
+                  label={t('admin.accounts')}
                   value={provider.credentialCount}
                 />
               </InspectorSection>
@@ -400,7 +401,7 @@ export function ProvidersSection({
               </InspectorSection>
               {provider.defaultBaseUrl && (
                 <InspectorSection title={t('admin.aiPanel.fields.baseUrl')}>
-                  <div className="rounded-md border border-border/70 bg-surface-sunken p-3 font-mono text-xs [overflow-wrap:anywhere]">
+                  <div className="rounded-md bg-surface-sunken p-3 font-mono text-xs [overflow-wrap:anywhere]">
                     {provider.defaultBaseUrl}
                   </div>
                 </InspectorSection>
@@ -489,14 +490,21 @@ export function ProvidersSection({
             registration={providerForm.register('defaultBaseUrl')}
             placeholder={t('admin.aiPanel.placeholders.baseUrl')}
           />
-          <FormTextareaField
-            formState={providerForm.formState}
-            id="admin-provider-profile"
-            label={t('admin.aiPanel.fields.providerProfileJson')}
-            name="profileJson"
-            registration={providerForm.register('profileJson')}
-            textareaClassName="min-h-[260px] font-mono text-xs"
-          />
+          <details className="space-y-3">
+            <summary className="text-sm font-semibold cursor-pointer">
+              {t('admin.aiPanel.fields.advancedProviderSettings')}
+            </summary>
+            <div className="pt-3">
+              <FormTextareaField
+                formState={providerForm.formState}
+                id="admin-provider-profile"
+                label={t('admin.aiPanel.fields.providerProfileJson')}
+                name="profileJson"
+                registration={providerForm.register('profileJson')}
+                textareaClassName="min-h-[260px] font-mono text-xs"
+              />
+            </div>
+          </details>
           <DialogFooter>
             <Button variant="outline" onClick={resetEditor}>
               {t('admin.cancel')}

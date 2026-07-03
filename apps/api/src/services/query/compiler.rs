@@ -320,7 +320,7 @@ fn query_compile_binding_fingerprint(binding: &ResolvedRuntimeBinding) -> String
     hash_field(&mut hasher, "provider_kind", &binding.provider_kind);
     hash_option_field(&mut hasher, "provider_base_url", binding.provider_base_url.as_deref());
     hash_field(&mut hasher, "provider_api_style", &binding.provider_api_style);
-    hash_field(&mut hasher, "credential_id", &binding.credential_id.to_string());
+    hash_field(&mut hasher, "account_id", &binding.account_id.to_string());
     hash_field(&mut hasher, "model_catalog_id", &binding.model_catalog_id.to_string());
     hash_field(&mut hasher, "model_name", &binding.model_name);
     hash_option_field(&mut hasher, "system_prompt", binding.system_prompt.as_deref());
@@ -1658,7 +1658,7 @@ mod tests {
             provider_kind: "openai".to_string(),
             provider_base_url: None,
             provider_api_style: "openai".to_string(),
-            credential_id: Uuid::now_v7(),
+            account_id: Uuid::now_v7(),
             api_key: Some("test-key".to_string()),
             model_catalog_id: Uuid::now_v7(),
             model_name: "gpt-5.4-nano".to_string(),

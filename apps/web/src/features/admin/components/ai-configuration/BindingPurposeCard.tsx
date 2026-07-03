@@ -1,59 +1,69 @@
 import { useTranslation } from 'react-i18next';
+import type { TFunction } from 'i18next';
 import { AlertTriangle, Brain, KeyRound, Loader2, Settings2 } from 'lucide-react';
 
 import { Button } from '@/shared/components/ui/button';
-import { Label } from '@/shared/components/ui/label';
-import { SearchableSelect } from '@/shared/components/ui/searchable-select';
-import type { AICredential, AIModelOption, AIPurpose, AIScopeKind, ModelPreset } from '@/shared/types';
+import { SelectItem } from '@/shared/components/ui/select';
+import { StatusBadge } from '@/shared/components/StatusBadge';
+import { FormInputField, FormSelectField, FormTextareaField, type TypedFormReturn } from '@/shared/forms';
+import type { AIAccount, AIModelOption, AIPurpose, AIScopeKind, PricingRule } from '@/shared/types';
 import {
-  badgeClass,
-  formatPresetLabel,
-  isModelAvailableForCredential,
+  formatModelPriceSuffix,
+  isModelAvailableForAccount,
   purposeLabel as translatedPurposeLabel,
+  resolveModelPriceSummary,
   scopeLabel as translatedScopeLabel,
+  type AccountModelLoadState,
   type BindingResolution,
-  type CredentialModelLoadState,
+  type bindingParamsSchema,
 } from '@/features/admin/model/aiConfig';
 import { shouldRefreshCredentialModels } from '@/shared/lib/ai-provider';
+
+type BindingParamsForm = TypedFormReturn<ReturnType<typeof bindingParamsSchema>>;
 
 type BindingPurposeCardProps = {
   purpose: AIPurpose;
   selectedScope: AIScopeKind;
   resolved: BindingResolution;
-  availableCredentials: AICredential[];
-  availablePresets: ModelPreset[];
+  availableAccounts: AIAccount[];
+  models: AIModelOption[];
+  prices: PricingRule[];
   modelById: Map<string, AIModelOption>;
-  modelsByCredentialId: Record<string, AIModelOption[]>;
-  selectedBindingCredential: AICredential | null;
-  selectedBindingCredentialLoadState: CredentialModelLoadState | undefined;
+  modelsByAccountId: Record<string, AIModelOption[]>;
+  selectedAccount: AIAccount | null;
+  selectedAccountLoadState: AccountModelLoadState | undefined;
   editing: boolean;
-  bindingCredentialId: string;
-  bindingPresetId: string;
+  form: BindingParamsForm;
   bindingSaving: boolean;
-  onCredentialChange: (value: string) => void;
-  onPresetChange: (value: string) => void;
+  onAccountChange: (value: string) => void;
   onOpen: () => void;
   onCancel: () => void;
   onSave: () => void;
   onReset: () => void;
 };
 
+function modelOptionLabel(model: AIModelOption, prices: PricingRule[], t: TFunction) {
+  const priceSuffix = formatModelPriceSuffix(resolveModelPriceSummary(model.id, prices));
+  return priceSuffix
+    ? t('admin.aiPanel.modelPricePerMillion', { model: model.modelName, price: priceSuffix })
+    : model.modelName;
+}
+
 export function BindingPurposeCard({
   purpose,
   selectedScope,
   resolved,
-  availableCredentials,
-  availablePresets,
+  availableAccounts,
+  models,
+  prices,
   modelById,
-  modelsByCredentialId,
-  selectedBindingCredential,
-  selectedBindingCredentialLoadState,
+  modelsByAccountId,
+  selectedAccount,
+  selectedAccountLoadState,
   editing,
-  bindingCredentialId,
-  bindingPresetId,
+  form,
   bindingSaving,
-  onCredentialChange,
-  onPresetChange,
+  onAccountChange,
   onOpen,
   onCancel,
   onSave,
@@ -62,37 +72,27 @@ export function BindingPurposeCard({
   const { t } = useTranslation();
   const purposeLabel = (value: AIPurpose) => translatedPurposeLabel(value, t);
   const scopeLabel = (value: AIScopeKind) => translatedScopeLabel(value, t);
-  const credential = availableCredentials.find(entry => entry.id === resolved.effectiveBinding?.credentialId);
-  const preset = availablePresets.find(entry => entry.id === resolved.effectiveBinding?.presetId);
-  const presetModel = preset ? modelById.get(preset.modelCatalogId) : undefined;
+  const account = availableAccounts.find(entry => entry.id === resolved.effectiveBinding?.accountId);
+  const model = resolved.effectiveBinding ? modelById.get(resolved.effectiveBinding.modelCatalogId) : undefined;
   const bindingModelUnavailable =
-    credential && preset
-      ? !isModelAvailableForCredential(presetModel, credential, modelsByCredentialId)
+    account && model
+      ? !isModelAvailableForAccount(model, account, modelsByAccountId)
       : false;
-  const selectedCredentialModels = selectedBindingCredential
-    ? modelsByCredentialId[selectedBindingCredential.id]
-    : undefined;
-  const selectedCredentialModelSet = selectedCredentialModels
-    ? new Set(selectedCredentialModels.map(entry => entry.id))
-    : null;
-  const selectedCredentialRequiresModelDiscovery =
-    shouldRefreshCredentialModels(selectedBindingCredential?.provider);
-  const selectedCredentialModelDiscoveryPending =
-    selectedCredentialRequiresModelDiscovery && selectedBindingCredentialLoadState !== 'ready';
-  const presetOptions = availablePresets
+  const selectedAccountRequiresModelDiscovery =
+    shouldRefreshCredentialModels(selectedAccount?.provider);
+  const selectedAccountModelDiscoveryPending =
+    selectedAccountRequiresModelDiscovery && selectedAccountLoadState !== 'ready';
+  const modelOptions = models
     .filter(entry => entry.allowedBindingPurposes.includes(purpose))
-    .filter(entry => !selectedBindingCredential || entry.providerId === selectedBindingCredential.providerId);
-  const selectedPreset = availablePresets.find(entry => entry.id === bindingPresetId);
-  const selectedPresetUnavailable =
-    selectedBindingCredential !== null
-    && bindingPresetId !== ''
+    .filter(entry => !selectedAccount || entry.providerCatalogId === selectedAccount.providerId);
+  const selectedModelId = form.watch('modelCatalogId');
+  const selectedModel = models.find(entry => entry.id === selectedModelId);
+  const selectedModelUnavailable =
+    selectedAccount !== null
+    && selectedModelId !== ''
     && (
-      selectedCredentialModelDiscoveryPending
-      || !isModelAvailableForCredential(
-        modelById.get(selectedPreset?.modelCatalogId ?? ''),
-        selectedBindingCredential,
-        modelsByCredentialId,
-      )
+      selectedAccountModelDiscoveryPending
+      || !isModelAvailableForAccount(selectedModel, selectedAccount, modelsByAccountId)
     );
   const showSourceBadge = resolved.sourceKind != null && resolved.sourceKind !== selectedScope;
   const actionLabel = resolved.localBinding
@@ -109,23 +109,27 @@ export function BindingPurposeCard({
             <h4 className="truncate text-sm font-semibold tracking-tight">{purposeLabel(purpose)}</h4>
           </div>
           {showSourceBadge && resolved.sourceKind && (
-            <span className={`mt-1 inline-flex status-badge text-[10px] ${badgeClass(resolved.sourceKind === 'instance' ? 'ready' : 'warning')}`}>
+            <StatusBadge tone={resolved.sourceKind === 'instance' ? 'ready' : 'warning'} className="mt-1">
               {t('admin.aiPanel.labels.inheritedFrom', { scope: scopeLabel(resolved.sourceKind) })}
-            </span>
+            </StatusBadge>
           )}
         </div>
 
-        {resolved.effectiveBinding && credential && preset ? (
+        {resolved.effectiveBinding && account && model ? (
           <div className="col-span-2 min-w-0 space-y-0.5 text-sm lg:col-span-1">
             <div className="flex items-center gap-2">
               <KeyRound className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
-              <span className="min-w-0 font-semibold [overflow-wrap:anywhere]">{credential.label}</span>
-              <span className="min-w-0 text-xs text-muted-foreground [overflow-wrap:anywhere]">· {credential.providerName}</span>
+              <span className="min-w-0 font-semibold [overflow-wrap:anywhere]">{account.label}</span>
+              <span className="min-w-0 text-xs text-muted-foreground [overflow-wrap:anywhere]">· {account.providerName}</span>
             </div>
             <div className="flex items-center gap-2">
               <Brain className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
-              <span className="min-w-0 font-semibold [overflow-wrap:anywhere]">{formatPresetLabel(preset)}</span>
-              <span className="min-w-0 text-xs text-muted-foreground [overflow-wrap:anywhere]">· {preset.modelName}</span>
+              <span className="min-w-0 font-semibold [overflow-wrap:anywhere]">{model.modelName}</span>
+              {formatModelPriceSuffix(resolveModelPriceSummary(model.id, prices)) && (
+                <span className="min-w-0 text-xs text-muted-foreground [overflow-wrap:anywhere]">
+                  · {formatModelPriceSuffix(resolveModelPriceSummary(model.id, prices))}
+                </span>
+              )}
             </div>
           </div>
         ) : (
@@ -151,70 +155,113 @@ export function BindingPurposeCard({
       {bindingModelUnavailable && (
         <div className="mt-3 flex items-center gap-2 rounded-md border border-status-warning/25 bg-status-warning/5 px-3 py-2 text-sm text-status-warning">
           <AlertTriangle className="h-4 w-4 shrink-0" />
-          {t('admin.aiPanel.messages.bindingModelUnavailable', { model: preset?.modelName ?? '' })}
+          {t('admin.aiPanel.messages.bindingModelUnavailable', { model: model?.modelName ?? '' })}
         </div>
       )}
 
       {editing && (
-        <div className="mt-3 rounded-md border border-border/70 bg-surface-sunken p-3">
+        <div className="mt-3 rounded-md bg-surface-sunken p-3 space-y-3">
           <div className="grid gap-3 xl:grid-cols-2">
-            <div>
-              <Label className="text-xs font-semibold">{t('admin.aiPanel.fields.credential')}</Label>
-              <div className="mt-2">
-                <SearchableSelect
-                  value={bindingCredentialId}
-                  onValueChange={onCredentialChange}
-                  placeholder={t('admin.aiPanel.placeholders.selectCredential')}
-                  searchPlaceholder={t('admin.aiPanel.filters.credentialsSearch')}
-                  options={availableCredentials.map(entry => ({
-                    value: entry.id,
-                    label: entry.label,
-                    description: `${entry.providerName} · ${scopeLabel(entry.scopeKind)}`,
-                    searchKeywords: `${entry.providerName} ${entry.providerKind} ${entry.scopeKind}`,
-                  }))}
-                />
-              </div>
-            </div>
-            <div>
-              <Label className="text-xs font-semibold">{t('admin.aiPanel.fields.modelPreset')}</Label>
-              <div className="mt-2">
-                <SearchableSelect
-                  value={bindingPresetId}
-                  onValueChange={onPresetChange}
-                  placeholder={t('admin.aiPanel.placeholders.selectPreset')}
-                  searchPlaceholder={t('admin.aiPanel.filters.presetsSearch')}
-                  options={presetOptions.map(entry => {
-                    const unavailable =
-                      selectedCredentialModelSet !== null
-                      && !selectedCredentialModelSet.has(entry.modelCatalogId);
-                    return {
-                      value: entry.id,
-                      label: formatPresetLabel(entry),
-                      description: unavailable
-                        ? `${entry.modelName} · ${t('admin.aiPanel.unavailableBadge')}`
-                        : entry.modelName,
-                      searchKeywords: `${entry.providerName} ${entry.modelName}`,
-                    };
-                  })}
-                />
-              </div>
-            </div>
+            <FormSelectField
+              control={form.control}
+              formState={form.formState}
+              id={`binding-${purpose}-account`}
+              label={t('admin.aiPanel.fields.account')}
+              name="accountId"
+              onValueChange={onAccountChange}
+              placeholder={t('admin.aiPanel.placeholders.selectAccount')}
+              triggerClassName="h-9 text-sm"
+            >
+              {availableAccounts.map(entry => (
+                <SelectItem key={entry.id} value={entry.id}>
+                  {entry.label} · {scopeLabel(entry.scopeKind)}
+                </SelectItem>
+              ))}
+            </FormSelectField>
+            <FormSelectField
+              control={form.control}
+              formState={form.formState}
+              id={`binding-${purpose}-model`}
+              label={t('admin.model')}
+              name="modelCatalogId"
+              placeholder={t('admin.aiPanel.placeholders.selectModel')}
+              triggerClassName="h-9 text-sm"
+            >
+              {modelOptions.map(entry => (
+                <SelectItem key={entry.id} value={entry.id}>
+                  {modelOptionLabel(entry, prices, t)}
+                </SelectItem>
+              ))}
+            </FormSelectField>
           </div>
 
-          {selectedBindingCredentialLoadState === 'loading' && (
-            <div className="mt-3 flex items-center gap-2 text-sm text-muted-foreground">
+          {selectedAccountLoadState === 'loading' && (
+            <div className="flex items-center gap-2 text-sm text-muted-foreground">
               <Loader2 className="h-4 w-4 animate-spin" />
-              {t('admin.aiPanel.messages.checkingCredentialModels')}
+              {t('admin.aiPanel.messages.checkingAccountModels')}
             </div>
           )}
-          {selectedPresetUnavailable && (
-            <div className="mt-3 flex items-center gap-2 text-sm text-status-warning">
+          {selectedModelUnavailable && (
+            <div className="flex items-center gap-2 text-sm text-status-warning">
               <AlertTriangle className="h-4 w-4" />
-              {t('admin.aiPanel.messages.selectedPresetUnavailable')}
+              {t('admin.aiPanel.messages.selectedModelUnavailable')}
             </div>
           )}
-          <div className="mt-3 flex flex-wrap gap-2">
-            <Button size="sm" disabled={!bindingCredentialId || !bindingPresetId || bindingSaving || Boolean(selectedPresetUnavailable)} onClick={onSave}>
+
+          <details className="space-y-3">
+            <summary className="cursor-pointer text-sm font-semibold">
+              {t('admin.aiPanel.fields.advancedSettings')}
+            </summary>
+            <div className="space-y-3 pt-3">
+              <FormTextareaField
+                formState={form.formState}
+                id={`binding-${purpose}-system-prompt`}
+                label={t('admin.systemPrompt')}
+                name="systemPrompt"
+                registration={form.register('systemPrompt')}
+                placeholder={t('admin.aiPanel.placeholders.systemPrompt')}
+                textareaClassName="min-h-[80px] text-sm"
+              />
+              <div className="grid gap-3 sm:grid-cols-3">
+                <FormInputField
+                  formState={form.formState}
+                  id={`binding-${purpose}-temperature`}
+                  label={t('admin.temperature')}
+                  name="temperature"
+                  registration={form.register('temperature')}
+                  placeholder={t('admin.aiPanel.placeholders.defaultValue')}
+                />
+                <FormInputField
+                  formState={form.formState}
+                  id={`binding-${purpose}-top-p`}
+                  label={t('admin.topP')}
+                  name="topP"
+                  registration={form.register('topP')}
+                  placeholder={t('admin.aiPanel.placeholders.defaultValue')}
+                />
+                <FormInputField
+                  formState={form.formState}
+                  id={`binding-${purpose}-max-output-tokens`}
+                  label={t('admin.maxOutputTokens')}
+                  name="maxOutputTokens"
+                  registration={form.register('maxOutputTokens')}
+                  placeholder={t('admin.aiPanel.placeholders.defaultValue')}
+                />
+              </div>
+              <FormTextareaField
+                formState={form.formState}
+                id={`binding-${purpose}-extra-parameters`}
+                label={t('admin.aiPanel.fields.parameters')}
+                name="extraParametersJson"
+                registration={form.register('extraParametersJson')}
+                placeholder={t('admin.aiPanel.placeholders.emptyJson')}
+                textareaClassName="min-h-[80px] font-mono text-xs"
+              />
+            </div>
+          </details>
+
+          <div className="flex flex-wrap gap-2">
+            <Button size="sm" disabled={!form.formState.isValid || bindingSaving || Boolean(selectedModelUnavailable)} onClick={onSave}>
               {bindingSaving ? <><Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" /> {t('admin.saving')}</> : t('admin.save')}
             </Button>
             <Button size="sm" variant="outline" onClick={onCancel}>{t('admin.cancel')}</Button>

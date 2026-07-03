@@ -4,7 +4,7 @@ import { type DefaultError, type InfiniteData, infiniteQueryOptions, queryOption
 
 import { client } from '../client.gen';
 import { Admin, Ai, Audit, Automation, Billing, Catalog, Content, Iam, Ingest, Knowledge, Ops, type Options, Query, Runtime, Search, System, Webhooks } from '../sdk.gen';
-import type { AppendContentDocumentData, AppendContentDocumentResponse, BatchCancelContentDocumentsData, BatchCancelContentDocumentsResponse, BatchDeleteContentDocumentsData, BatchDeleteContentDocumentsResponse, BatchReprocessContentDocumentsData, BatchReprocessContentDocumentsResponse, CancelContentWebIngestRunData, CancelContentWebIngestRunResponse, CancelIngestQueueJobData, CancelIngestQueueJobResponse, CreateAiCredentialData, CreateAiCredentialResponse, CreateAiLibraryBindingData, CreateAiLibraryBindingResponse, CreateAiModelData, CreateAiModelPresetData, CreateAiModelPresetResponse, CreateAiModelResponse, CreateAiPriceOverrideData, CreateAiPriceOverrideResponse, CreateAiProviderData, CreateAiProviderResponse, CreateCatalogLibraryData, CreateCatalogLibraryResponse, CreateCatalogWorkspaceData, CreateCatalogWorkspaceResponse, CreateContentDocumentData, CreateContentDocumentResponse, CreateContentMutationData, CreateContentMutationResponse, CreateContentWebIngestRunData, CreateContentWebIngestRunResponse, CreateIamGrantData, CreateIamGrantResponse, CreateIamUserData, CreateIamUserResponse, CreateQuerySessionData, CreateQuerySessionResponse, CreateQuerySessionTurnData, CreateQuerySessionTurnResponse, CreateWebhookSubscriptionData, CreateWebhookSubscriptionResponse, DeleteAiCredentialData, DeleteAiLibraryBindingData, DeleteAiModelData, DeleteAiModelPresetData, DeleteAiPriceOverrideData, DeleteAiProviderData, DeleteCatalogLibraryData, DeleteCatalogLibraryResponse, DeleteCatalogWorkspaceData, DeleteCatalogWorkspaceResponse, DeleteContentDocumentData, DeleteContentDocumentResponse, DeleteIamTokenData, DeleteIamTokenResponse, DeleteWebhookSubscriptionData, DeleteWebhookSubscriptionResponse, EditContentDocumentData, EditContentDocumentResponse, ExportLibrarySnapshotData, ExportLibrarySnapshotResponse, ExportWorkspaceSnapshotData, ExportWorkspaceSnapshotResponse, GetAdminSurfaceData, GetAdminSurfaceResponse, GetAssistantSystemPromptData, GetAssistantSystemPromptResponse, GetAsyncOperationData, GetAsyncOperationResponse, GetBillingExecutionCostData, GetBillingExecutionCostResponse, GetBootstrapStatusData, GetBootstrapStatusResponse, GetCatalogLibraryData, GetCatalogLibraryResponse, GetCatalogWorkspaceData, GetCatalogWorkspaceResponse, GetContentDocumentData, GetContentDocumentHeadData, GetContentDocumentHeadResponse, GetContentDocumentResponse, GetContentDocumentSourceData, GetContentDocumentSourceResponse, GetContentMutationData, GetContentMutationResponse, GetContentWebIngestRunData, GetContentWebIngestRunResponse, GetHealthData, GetHealthResponse, GetIamMeData, GetIamMeResponse, GetIamSessionData, GetIamSessionResponse, GetIamUserAccessData, GetIamUserAccessResponse, GetIngestAttemptData, GetIngestAttemptResponse, GetIngestJobData, GetIngestJobResponse, GetKnowledgeContextBundleData, GetKnowledgeContextBundleResponse, GetKnowledgeDocumentData, GetKnowledgeDocumentResponse, GetKnowledgeEntityData, GetKnowledgeEntityResponse, GetKnowledgeGraphWorkbenchData, GetKnowledgeGraphWorkbenchResponse, GetKnowledgeLibrarySummaryData, GetKnowledgeLibrarySummaryResponse, GetKnowledgeRelationData, GetKnowledgeRelationResponse, GetLibraryCostSummaryData, GetLibraryCostSummaryResponse, GetLibraryDashboardData, GetLibraryDashboardResponse, GetLibraryStateData, GetLibraryStateResponse, GetMcpCapabilitiesData, GetMcpCapabilitiesResponse, GetMcpDiagnosticsCapabilitiesData, GetMcpDiagnosticsCapabilitiesResponse, GetOpenApiContractData, GetOpenApiContractResponse, GetQueryExecutionData, GetQueryExecutionLlmContextData, GetQueryExecutionLlmContextResponse, GetQueryExecutionResponse, GetQuerySessionData, GetQuerySessionResponse, GetReadinessData, GetReadinessError, GetReadinessResponse, GetReleaseUpdateData, GetReleaseUpdateResponse, GetRuntimeExecutionData, GetRuntimeExecutionResponse, GetRuntimeExecutionTraceData, GetRuntimeExecutionTraceResponse, GetVersionData, GetVersionResponse, GetWebhookSubscriptionData, GetWebhookSubscriptionResponse, GetWorkspaceCostSummaryData, GetWorkspaceCostSummaryResponse, ImportLibrarySnapshotData, ImportLibrarySnapshotResponse, ImportWorkspaceSnapshotData, ImportWorkspaceSnapshotResponse, ListAiCredentialsData, ListAiCredentialsResponse, ListAiLibraryBindingsData, ListAiLibraryBindingsResponse, ListAiModelPresetsData, ListAiModelPresetsResponse, ListAiModelsData, ListAiModelsResponse, ListAiPricesData, ListAiPricesResponse, ListAiProvidersData, ListAiProvidersResponse, ListAuditEventsData, ListAuditEventsResponse, ListBillingChargesData, ListBillingChargesResponse, ListBillingLibraryDocumentCostsData, ListBillingLibraryDocumentCostsResponse, ListBillingProviderCallsData, ListBillingProviderCallsResponse, ListCatalogLibrariesData, ListCatalogLibrariesResponse, ListCatalogWorkspacesData, ListCatalogWorkspacesResponse, ListChunksData, ListChunksResponse, ListContentDocumentsData, ListContentDocumentsResponse, ListContentMutationsData, ListContentMutationsResponse, ListContentPreparedSegmentsData, ListContentPreparedSegmentsResponse, ListContentRevisionsData, ListContentRevisionsResponse, ListContentTechnicalFactsData, ListContentTechnicalFactsResponse, ListContentWebIngestRunPagesData, ListContentWebIngestRunPagesResponse, ListContentWebIngestRunsData, ListContentWebIngestRunsResponse, ListIamGrantsData, ListIamGrantsResponse, ListIamTokensData, ListIamTokensResponse, ListIamUsersData, ListIamUsersResponse, ListIngestJobsData, ListIngestJobsResponse, ListIngestQueueData, ListIngestQueueResponse, ListIngestStageEventsData, ListIngestStageEventsResponse, ListKnowledgeContextBundlesData, ListKnowledgeContextBundlesResponse, ListKnowledgeDocumentsData, ListKnowledgeDocumentsResponse, ListKnowledgeLibraryGenerationsData, ListKnowledgeLibraryGenerationsResponse, ListQuerySessionsData, ListQuerySessionsResponse, ListWebhookDeliveryAttemptsData, ListWebhookDeliveryAttemptsResponse, ListWebhookSubscriptionsData, ListWebhookSubscriptionsResponse, LoginIamSessionData, LoginIamSessionResponse, LogoutIamSessionData, MintIamTokenData, MintIamTokenResponse, MoveIngestQueueJobData, MoveIngestQueueJobResponse, PatchContentDocumentMetadataData, PatchContentDocumentMetadataResponse, PauseIngestQueueJobData, PauseIngestQueueJobResponse, PostBootstrapSetupData, PostBootstrapSetupResponse, PostMcpDiagnosticsRequestData, PostMcpRequestData, ReplaceContentDocumentData, ReplaceContentDocumentResponse, ReprocessContentDocumentData, ReprocessContentDocumentResponse, ResolveIamSessionData, ResolveIamSessionResponse, ResumeIngestQueueJobData, ResumeIngestQueueJobResponse, RevokeIamGrantData, RevokeIamGrantResponse, RevokeIamTokenData, RevokeIamTokenResponse, SearchDocumentsData, SearchDocumentsResponse, SearchKnowledgeDocumentsData, SearchKnowledgeDocumentsResponse, SetIamUserAccessData, SetIamUserAccessResponse, SetIamUserRoleData, SetIamUserRoleResponse, UpdateAiCredentialData, UpdateAiCredentialResponse, UpdateAiLibraryBindingData, UpdateAiLibraryBindingResponse, UpdateAiModelData, UpdateAiModelPresetData, UpdateAiModelPresetResponse, UpdateAiModelResponse, UpdateAiPriceOverrideData, UpdateAiPriceOverrideResponse, UpdateAiProviderData, UpdateAiProviderResponse, UpdateCatalogLibraryData, UpdateCatalogLibraryRecognitionPolicyData, UpdateCatalogLibraryRecognitionPolicyResponse, UpdateCatalogLibraryResponse, UpdateCatalogLibraryWebIngestPolicyData, UpdateCatalogLibraryWebIngestPolicyResponse, UpdateWebhookSubscriptionData, UpdateWebhookSubscriptionResponse, UploadContentDocumentData, UploadContentDocumentResponse, ValidateAiLibraryBindingData, ValidateAiLibraryBindingResponse } from '../types.gen';
+import type { AppendContentDocumentData, AppendContentDocumentResponse, BatchCancelContentDocumentsData, BatchCancelContentDocumentsResponse, BatchDeleteContentDocumentsData, BatchDeleteContentDocumentsResponse, BatchReprocessContentDocumentsData, BatchReprocessContentDocumentsResponse, CancelContentWebIngestRunData, CancelContentWebIngestRunResponse, CancelIngestQueueJobData, CancelIngestQueueJobResponse, CreateAiAccountData, CreateAiAccountResponse, CreateAiLibraryBindingData, CreateAiLibraryBindingResponse, CreateAiModelData, CreateAiModelResponse, CreateAiPriceOverrideData, CreateAiPriceOverrideResponse, CreateAiProviderData, CreateAiProviderResponse, CreateCatalogLibraryData, CreateCatalogLibraryResponse, CreateCatalogWorkspaceData, CreateCatalogWorkspaceResponse, CreateContentDocumentData, CreateContentDocumentResponse, CreateContentMutationData, CreateContentMutationResponse, CreateContentWebIngestRunData, CreateContentWebIngestRunResponse, CreateIamGrantData, CreateIamGrantResponse, CreateIamUserData, CreateIamUserResponse, CreateQuerySessionData, CreateQuerySessionResponse, CreateQuerySessionTurnData, CreateQuerySessionTurnResponse, CreateWebhookSubscriptionData, CreateWebhookSubscriptionResponse, DeleteAiAccountData, DeleteAiLibraryBindingData, DeleteAiModelData, DeleteAiPriceOverrideData, DeleteAiProviderData, DeleteCatalogLibraryData, DeleteCatalogLibraryResponse, DeleteCatalogWorkspaceData, DeleteCatalogWorkspaceResponse, DeleteContentDocumentData, DeleteContentDocumentResponse, DeleteIamTokenData, DeleteIamTokenResponse, DeleteWebhookSubscriptionData, DeleteWebhookSubscriptionResponse, EditContentDocumentData, EditContentDocumentResponse, ExportLibrarySnapshotData, ExportLibrarySnapshotResponse, ExportWorkspaceSnapshotData, ExportWorkspaceSnapshotResponse, GetAdminSurfaceData, GetAdminSurfaceResponse, GetAssistantSystemPromptData, GetAssistantSystemPromptResponse, GetAsyncOperationData, GetAsyncOperationResponse, GetBillingExecutionCostData, GetBillingExecutionCostResponse, GetBootstrapStatusData, GetBootstrapStatusResponse, GetCatalogLibraryData, GetCatalogLibraryResponse, GetCatalogLibraryRetrievalConfigData, GetCatalogLibraryRetrievalConfigResponse, GetCatalogWorkspaceData, GetCatalogWorkspaceResponse, GetContentDocumentData, GetContentDocumentHeadData, GetContentDocumentHeadResponse, GetContentDocumentResponse, GetContentDocumentSourceData, GetContentDocumentSourceResponse, GetContentMutationData, GetContentMutationResponse, GetContentWebIngestRunData, GetContentWebIngestRunResponse, GetHealthData, GetHealthResponse, GetIamMeData, GetIamMeResponse, GetIamSessionData, GetIamSessionResponse, GetIamUserAccessData, GetIamUserAccessResponse, GetIngestAttemptData, GetIngestAttemptResponse, GetIngestJobData, GetIngestJobResponse, GetKnowledgeContextBundleData, GetKnowledgeContextBundleResponse, GetKnowledgeDocumentData, GetKnowledgeDocumentResponse, GetKnowledgeEntityData, GetKnowledgeEntityResponse, GetKnowledgeGraphWorkbenchData, GetKnowledgeGraphWorkbenchResponse, GetKnowledgeLibrarySummaryData, GetKnowledgeLibrarySummaryResponse, GetKnowledgeRelationData, GetKnowledgeRelationResponse, GetLibraryCostSummaryData, GetLibraryCostSummaryResponse, GetLibraryDashboardData, GetLibraryDashboardResponse, GetLibraryStateData, GetLibraryStateResponse, GetMcpCapabilitiesData, GetMcpCapabilitiesResponse, GetMcpDiagnosticsCapabilitiesData, GetMcpDiagnosticsCapabilitiesResponse, GetOpenApiContractData, GetOpenApiContractResponse, GetQueryExecutionData, GetQueryExecutionLlmContextData, GetQueryExecutionLlmContextResponse, GetQueryExecutionResponse, GetQuerySessionData, GetQuerySessionResponse, GetReadinessData, GetReadinessError, GetReadinessResponse, GetReleaseUpdateData, GetReleaseUpdateResponse, GetRuntimeExecutionData, GetRuntimeExecutionResponse, GetRuntimeExecutionTraceData, GetRuntimeExecutionTraceResponse, GetVersionData, GetVersionResponse, GetWebhookSubscriptionData, GetWebhookSubscriptionResponse, GetWorkspaceCostSummaryData, GetWorkspaceCostSummaryResponse, ImportLibrarySnapshotData, ImportLibrarySnapshotResponse, ImportWorkspaceSnapshotData, ImportWorkspaceSnapshotResponse, ListAiAccountsData, ListAiAccountsResponse, ListAiLibraryBindingsData, ListAiLibraryBindingsResponse, ListAiModelsData, ListAiModelsResponse, ListAiPricesData, ListAiPricesResponse, ListAiProvidersData, ListAiProvidersResponse, ListAuditEventsData, ListAuditEventsResponse, ListBillingChargesData, ListBillingChargesResponse, ListBillingLibraryDocumentCostsData, ListBillingLibraryDocumentCostsResponse, ListBillingProviderCallsData, ListBillingProviderCallsResponse, ListCatalogLibrariesData, ListCatalogLibrariesResponse, ListCatalogWorkspacesData, ListCatalogWorkspacesResponse, ListChunksData, ListChunksResponse, ListContentDocumentsData, ListContentDocumentsResponse, ListContentMutationsData, ListContentMutationsResponse, ListContentPreparedSegmentsData, ListContentPreparedSegmentsResponse, ListContentRevisionsData, ListContentRevisionsResponse, ListContentTechnicalFactsData, ListContentTechnicalFactsResponse, ListContentWebIngestRunPagesData, ListContentWebIngestRunPagesResponse, ListContentWebIngestRunsData, ListContentWebIngestRunsResponse, ListIamGrantsData, ListIamGrantsResponse, ListIamTokensData, ListIamTokensResponse, ListIamUsersData, ListIamUsersResponse, ListIngestJobsData, ListIngestJobsResponse, ListIngestQueueData, ListIngestQueueResponse, ListIngestStageEventsData, ListIngestStageEventsResponse, ListKnowledgeContextBundlesData, ListKnowledgeContextBundlesResponse, ListKnowledgeDocumentsData, ListKnowledgeDocumentsResponse, ListKnowledgeLibraryGenerationsData, ListKnowledgeLibraryGenerationsResponse, ListQuerySessionsData, ListQuerySessionsResponse, ListWebhookDeliveryAttemptsData, ListWebhookDeliveryAttemptsResponse, ListWebhookSubscriptionsData, ListWebhookSubscriptionsResponse, LoginIamSessionData, LoginIamSessionResponse, LogoutIamSessionData, MintIamTokenData, MintIamTokenResponse, MoveIngestQueueJobData, MoveIngestQueueJobResponse, PatchContentDocumentMetadataData, PatchContentDocumentMetadataResponse, PauseIngestQueueJobData, PauseIngestQueueJobResponse, PostBootstrapSetupData, PostBootstrapSetupResponse, PostMcpDiagnosticsRequestData, PostMcpRequestData, ReplaceContentDocumentData, ReplaceContentDocumentResponse, ReprocessContentDocumentData, ReprocessContentDocumentResponse, ResolveIamSessionData, ResolveIamSessionResponse, ResumeIngestQueueJobData, ResumeIngestQueueJobResponse, RevokeIamGrantData, RevokeIamGrantResponse, RevokeIamTokenData, RevokeIamTokenResponse, SearchDocumentsData, SearchDocumentsResponse, SearchKnowledgeDocumentsData, SearchKnowledgeDocumentsResponse, SetIamUserAccessData, SetIamUserAccessResponse, SetIamUserRoleData, SetIamUserRoleResponse, UpdateAiAccountData, UpdateAiAccountResponse, UpdateAiLibraryBindingData, UpdateAiLibraryBindingResponse, UpdateAiModelData, UpdateAiModelResponse, UpdateAiPriceOverrideData, UpdateAiPriceOverrideResponse, UpdateAiProviderData, UpdateAiProviderResponse, UpdateCatalogLibraryData, UpdateCatalogLibraryRecognitionPolicyData, UpdateCatalogLibraryRecognitionPolicyResponse, UpdateCatalogLibraryResponse, UpdateCatalogLibraryRetrievalConfigData, UpdateCatalogLibraryRetrievalConfigResponse, UpdateCatalogLibraryWebIngestPolicyData, UpdateCatalogLibraryWebIngestPolicyResponse, UpdateWebhookSubscriptionData, UpdateWebhookSubscriptionResponse, UploadContentDocumentData, UploadContentDocumentResponse, ValidateAiLibraryBindingData, ValidateAiLibraryBindingResponse } from '../types.gen';
 
 export type QueryKey<TOptions extends Options> = [
     Pick<TOptions, 'baseUrl' | 'body' | 'headers' | 'path' | 'query'> & {
@@ -59,12 +59,89 @@ export const getAdminSurfaceOptions = (options?: Options<GetAdminSurfaceData>) =
     queryKey: getAdminSurfaceQueryKey(options)
 });
 
+export const listAiAccountsQueryKey = (options?: Options<ListAiAccountsData>) => createQueryKey('listAiAccounts', options);
+
+/**
+ * List ai accounts.
+ *
+ * Manages stored AI provider accounts used by runtime bindings. Use these endpoints from the admin UI or automation when registering, rotating, or listing provider secrets without exposing secret material in responses. Call it for paginated or filtered table views. Prefer server-side filters and cursors over fetching broad result sets into the client.
+ */
+export const listAiAccountsOptions = (options?: Options<ListAiAccountsData>) => queryOptions<ListAiAccountsResponse, DefaultError, ListAiAccountsResponse, ReturnType<typeof listAiAccountsQueryKey>>({
+    queryFn: async ({ queryKey, signal }) => {
+        const { data } = await Ai.listAiAccounts({
+            ...options,
+            ...queryKey[0],
+            signal,
+            throwOnError: true
+        });
+        return data;
+    },
+    queryKey: listAiAccountsQueryKey(options)
+});
+
+/**
+ * Create ai account.
+ *
+ * Manages stored AI provider accounts used by runtime bindings. Use these endpoints from the admin UI or automation when registering, rotating, or listing provider secrets without exposing secret material in responses. Call it to create work or submit a command. Some commands complete synchronously, while ingest, mutation, and runtime work can continue asynchronously.
+ */
+export const createAiAccountMutation = (options?: Partial<Options<CreateAiAccountData>>): UseMutationOptions<CreateAiAccountResponse, DefaultError, Options<CreateAiAccountData>> => {
+    const mutationOptions: UseMutationOptions<CreateAiAccountResponse, DefaultError, Options<CreateAiAccountData>> = {
+        mutationFn: async (fnOptions) => {
+            const { data } = await Ai.createAiAccount({
+                ...options,
+                ...fnOptions,
+                throwOnError: true
+            });
+            return data;
+        }
+    };
+    return mutationOptions;
+};
+
+/**
+ * Delete ai account.
+ *
+ * Manages stored AI provider accounts used by runtime bindings. Use these endpoints from the admin UI or automation when registering, rotating, or listing provider secrets without exposing secret material in responses. Call it to remove or revoke a resource. Destructive operations are authorized, audited, and may return an asynchronous operation when cleanup continues in the background.
+ */
+export const deleteAiAccountMutation = (options?: Partial<Options<DeleteAiAccountData>>): UseMutationOptions<unknown, DefaultError, Options<DeleteAiAccountData>> => {
+    const mutationOptions: UseMutationOptions<unknown, DefaultError, Options<DeleteAiAccountData>> = {
+        mutationFn: async (fnOptions) => {
+            const { data } = await Ai.deleteAiAccount({
+                ...options,
+                ...fnOptions,
+                throwOnError: true
+            });
+            return data;
+        }
+    };
+    return mutationOptions;
+};
+
+/**
+ * Update ai account.
+ *
+ * Manages stored AI provider accounts used by runtime bindings. Use these endpoints from the admin UI or automation when registering, rotating, or listing provider secrets without exposing secret material in responses. Call it to replace or partially update server-owned configuration. The request body is validated before changes are persisted.
+ */
+export const updateAiAccountMutation = (options?: Partial<Options<UpdateAiAccountData>>): UseMutationOptions<UpdateAiAccountResponse, DefaultError, Options<UpdateAiAccountData>> => {
+    const mutationOptions: UseMutationOptions<UpdateAiAccountResponse, DefaultError, Options<UpdateAiAccountData>> = {
+        mutationFn: async (fnOptions) => {
+            const { data } = await Ai.updateAiAccount({
+                ...options,
+                ...fnOptions,
+                throwOnError: true
+            });
+            return data;
+        }
+    };
+    return mutationOptions;
+};
+
 export const listAiLibraryBindingsQueryKey = (options?: Options<ListAiLibraryBindingsData>) => createQueryKey('listAiLibraryBindings', options);
 
 /**
  * List ai library bindings.
  *
- * Manages library-level AI runtime bindings. Bindings decide which configured provider/model handles embedding, query answering, graph extraction, and other AI purposes for one library. Call it for paginated or filtered table views. Prefer server-side filters and cursors over fetching broad result sets into the client.
+ * Manages library-level AI runtime bindings. A binding assigns an account and model to a purpose (embedding, query answering, graph extraction, and other AI purposes) for one library, with tuning parameters (system prompt, temperature, top-p, output token budget) stored inline. Call it for paginated or filtered table views. Prefer server-side filters and cursors over fetching broad result sets into the client.
  */
 export const listAiLibraryBindingsOptions = (options?: Options<ListAiLibraryBindingsData>) => queryOptions<ListAiLibraryBindingsResponse, DefaultError, ListAiLibraryBindingsResponse, ReturnType<typeof listAiLibraryBindingsQueryKey>>({
     queryFn: async ({ queryKey, signal }) => {
@@ -82,7 +159,7 @@ export const listAiLibraryBindingsOptions = (options?: Options<ListAiLibraryBind
 /**
  * Create ai library binding.
  *
- * Manages library-level AI runtime bindings. Bindings decide which configured provider/model handles embedding, query answering, graph extraction, and other AI purposes for one library. Call it to create work or submit a command. Some commands complete synchronously, while ingest, mutation, and runtime work can continue asynchronously.
+ * Manages library-level AI runtime bindings. A binding assigns an account and model to a purpose (embedding, query answering, graph extraction, and other AI purposes) for one library, with tuning parameters (system prompt, temperature, top-p, output token budget) stored inline. Call it to create work or submit a command. Some commands complete synchronously, while ingest, mutation, and runtime work can continue asynchronously.
  */
 export const createAiLibraryBindingMutation = (options?: Partial<Options<CreateAiLibraryBindingData>>): UseMutationOptions<CreateAiLibraryBindingResponse, DefaultError, Options<CreateAiLibraryBindingData>> => {
     const mutationOptions: UseMutationOptions<CreateAiLibraryBindingResponse, DefaultError, Options<CreateAiLibraryBindingData>> = {
@@ -101,7 +178,7 @@ export const createAiLibraryBindingMutation = (options?: Partial<Options<CreateA
 /**
  * Delete ai library binding.
  *
- * Manages library-level AI runtime bindings. Bindings decide which configured provider/model handles embedding, query answering, graph extraction, and other AI purposes for one library. Call it to remove or revoke a resource. Destructive operations are authorized, audited, and may return an asynchronous operation when cleanup continues in the background.
+ * Manages library-level AI runtime bindings. A binding assigns an account and model to a purpose (embedding, query answering, graph extraction, and other AI purposes) for one library, with tuning parameters (system prompt, temperature, top-p, output token budget) stored inline. Call it to remove or revoke a resource. Destructive operations are authorized, audited, and may return an asynchronous operation when cleanup continues in the background.
  */
 export const deleteAiLibraryBindingMutation = (options?: Partial<Options<DeleteAiLibraryBindingData>>): UseMutationOptions<unknown, DefaultError, Options<DeleteAiLibraryBindingData>> => {
     const mutationOptions: UseMutationOptions<unknown, DefaultError, Options<DeleteAiLibraryBindingData>> = {
@@ -120,7 +197,7 @@ export const deleteAiLibraryBindingMutation = (options?: Partial<Options<DeleteA
 /**
  * Update ai library binding.
  *
- * Manages library-level AI runtime bindings. Bindings decide which configured provider/model handles embedding, query answering, graph extraction, and other AI purposes for one library. Call it to replace or partially update server-owned configuration. The request body is validated before changes are persisted.
+ * Manages library-level AI runtime bindings. A binding assigns an account and model to a purpose (embedding, query answering, graph extraction, and other AI purposes) for one library, with tuning parameters (system prompt, temperature, top-p, output token budget) stored inline. Call it to replace or partially update server-owned configuration. The request body is validated before changes are persisted.
  */
 export const updateAiLibraryBindingMutation = (options?: Partial<Options<UpdateAiLibraryBindingData>>): UseMutationOptions<UpdateAiLibraryBindingResponse, DefaultError, Options<UpdateAiLibraryBindingData>> => {
     const mutationOptions: UseMutationOptions<UpdateAiLibraryBindingResponse, DefaultError, Options<UpdateAiLibraryBindingData>> = {
@@ -139,166 +216,12 @@ export const updateAiLibraryBindingMutation = (options?: Partial<Options<UpdateA
 /**
  * Validate ai library binding.
  *
- * Manages library-level AI runtime bindings. Bindings decide which configured provider/model handles embedding, query answering, graph extraction, and other AI purposes for one library. Call it to create work or submit a command. Some commands complete synchronously, while ingest, mutation, and runtime work can continue asynchronously.
+ * Manages library-level AI runtime bindings. A binding assigns an account and model to a purpose (embedding, query answering, graph extraction, and other AI purposes) for one library, with tuning parameters (system prompt, temperature, top-p, output token budget) stored inline. Call it to create work or submit a command. Some commands complete synchronously, while ingest, mutation, and runtime work can continue asynchronously.
  */
 export const validateAiLibraryBindingMutation = (options?: Partial<Options<ValidateAiLibraryBindingData>>): UseMutationOptions<ValidateAiLibraryBindingResponse, DefaultError, Options<ValidateAiLibraryBindingData>> => {
     const mutationOptions: UseMutationOptions<ValidateAiLibraryBindingResponse, DefaultError, Options<ValidateAiLibraryBindingData>> = {
         mutationFn: async (fnOptions) => {
             const { data } = await Ai.validateAiLibraryBinding({
-                ...options,
-                ...fnOptions,
-                throwOnError: true
-            });
-            return data;
-        }
-    };
-    return mutationOptions;
-};
-
-export const listAiCredentialsQueryKey = (options?: Options<ListAiCredentialsData>) => createQueryKey('listAiCredentials', options);
-
-/**
- * List ai credentials.
- *
- * Manages stored AI provider credentials used by runtime bindings. Use these endpoints from the admin UI or automation when registering, rotating, or listing provider secrets without exposing secret material in responses. Call it for paginated or filtered table views. Prefer server-side filters and cursors over fetching broad result sets into the client.
- */
-export const listAiCredentialsOptions = (options?: Options<ListAiCredentialsData>) => queryOptions<ListAiCredentialsResponse, DefaultError, ListAiCredentialsResponse, ReturnType<typeof listAiCredentialsQueryKey>>({
-    queryFn: async ({ queryKey, signal }) => {
-        const { data } = await Ai.listAiCredentials({
-            ...options,
-            ...queryKey[0],
-            signal,
-            throwOnError: true
-        });
-        return data;
-    },
-    queryKey: listAiCredentialsQueryKey(options)
-});
-
-/**
- * Create ai credential.
- *
- * Manages stored AI provider credentials used by runtime bindings. Use these endpoints from the admin UI or automation when registering, rotating, or listing provider secrets without exposing secret material in responses. Call it to create work or submit a command. Some commands complete synchronously, while ingest, mutation, and runtime work can continue asynchronously.
- */
-export const createAiCredentialMutation = (options?: Partial<Options<CreateAiCredentialData>>): UseMutationOptions<CreateAiCredentialResponse, DefaultError, Options<CreateAiCredentialData>> => {
-    const mutationOptions: UseMutationOptions<CreateAiCredentialResponse, DefaultError, Options<CreateAiCredentialData>> = {
-        mutationFn: async (fnOptions) => {
-            const { data } = await Ai.createAiCredential({
-                ...options,
-                ...fnOptions,
-                throwOnError: true
-            });
-            return data;
-        }
-    };
-    return mutationOptions;
-};
-
-/**
- * Delete ai credential.
- *
- * Manages stored AI provider credentials used by runtime bindings. Use these endpoints from the admin UI or automation when registering, rotating, or listing provider secrets without exposing secret material in responses. Call it to remove or revoke a resource. Destructive operations are authorized, audited, and may return an asynchronous operation when cleanup continues in the background.
- */
-export const deleteAiCredentialMutation = (options?: Partial<Options<DeleteAiCredentialData>>): UseMutationOptions<unknown, DefaultError, Options<DeleteAiCredentialData>> => {
-    const mutationOptions: UseMutationOptions<unknown, DefaultError, Options<DeleteAiCredentialData>> = {
-        mutationFn: async (fnOptions) => {
-            const { data } = await Ai.deleteAiCredential({
-                ...options,
-                ...fnOptions,
-                throwOnError: true
-            });
-            return data;
-        }
-    };
-    return mutationOptions;
-};
-
-/**
- * Update ai credential.
- *
- * Manages stored AI provider credentials used by runtime bindings. Use these endpoints from the admin UI or automation when registering, rotating, or listing provider secrets without exposing secret material in responses. Call it to replace or partially update server-owned configuration. The request body is validated before changes are persisted.
- */
-export const updateAiCredentialMutation = (options?: Partial<Options<UpdateAiCredentialData>>): UseMutationOptions<UpdateAiCredentialResponse, DefaultError, Options<UpdateAiCredentialData>> => {
-    const mutationOptions: UseMutationOptions<UpdateAiCredentialResponse, DefaultError, Options<UpdateAiCredentialData>> = {
-        mutationFn: async (fnOptions) => {
-            const { data } = await Ai.updateAiCredential({
-                ...options,
-                ...fnOptions,
-                throwOnError: true
-            });
-            return data;
-        }
-    };
-    return mutationOptions;
-};
-
-export const listAiModelPresetsQueryKey = (options?: Options<ListAiModelPresetsData>) => createQueryKey('listAiModelPresets', options);
-
-/**
- * List ai model presets.
- *
- * Manages reusable AI model presets. Presets group provider, model, capability, and tuning metadata so operators can assign consistent runtime behavior to libraries. Call it for paginated or filtered table views. Prefer server-side filters and cursors over fetching broad result sets into the client.
- */
-export const listAiModelPresetsOptions = (options?: Options<ListAiModelPresetsData>) => queryOptions<ListAiModelPresetsResponse, DefaultError, ListAiModelPresetsResponse, ReturnType<typeof listAiModelPresetsQueryKey>>({
-    queryFn: async ({ queryKey, signal }) => {
-        const { data } = await Ai.listAiModelPresets({
-            ...options,
-            ...queryKey[0],
-            signal,
-            throwOnError: true
-        });
-        return data;
-    },
-    queryKey: listAiModelPresetsQueryKey(options)
-});
-
-/**
- * Create ai model preset.
- *
- * Manages reusable AI model presets. Presets group provider, model, capability, and tuning metadata so operators can assign consistent runtime behavior to libraries. Call it to create work or submit a command. Some commands complete synchronously, while ingest, mutation, and runtime work can continue asynchronously.
- */
-export const createAiModelPresetMutation = (options?: Partial<Options<CreateAiModelPresetData>>): UseMutationOptions<CreateAiModelPresetResponse, DefaultError, Options<CreateAiModelPresetData>> => {
-    const mutationOptions: UseMutationOptions<CreateAiModelPresetResponse, DefaultError, Options<CreateAiModelPresetData>> = {
-        mutationFn: async (fnOptions) => {
-            const { data } = await Ai.createAiModelPreset({
-                ...options,
-                ...fnOptions,
-                throwOnError: true
-            });
-            return data;
-        }
-    };
-    return mutationOptions;
-};
-
-/**
- * Delete ai model preset.
- *
- * Manages reusable AI model presets. Presets group provider, model, capability, and tuning metadata so operators can assign consistent runtime behavior to libraries. Call it to remove or revoke a resource. Destructive operations are authorized, audited, and may return an asynchronous operation when cleanup continues in the background.
- */
-export const deleteAiModelPresetMutation = (options?: Partial<Options<DeleteAiModelPresetData>>): UseMutationOptions<unknown, DefaultError, Options<DeleteAiModelPresetData>> => {
-    const mutationOptions: UseMutationOptions<unknown, DefaultError, Options<DeleteAiModelPresetData>> = {
-        mutationFn: async (fnOptions) => {
-            const { data } = await Ai.deleteAiModelPreset({
-                ...options,
-                ...fnOptions,
-                throwOnError: true
-            });
-            return data;
-        }
-    };
-    return mutationOptions;
-};
-
-/**
- * Update ai model preset.
- *
- * Manages reusable AI model presets. Presets group provider, model, capability, and tuning metadata so operators can assign consistent runtime behavior to libraries. Call it to replace or partially update server-owned configuration. The request body is validated before changes are persisted.
- */
-export const updateAiModelPresetMutation = (options?: Partial<Options<UpdateAiModelPresetData>>): UseMutationOptions<UpdateAiModelPresetResponse, DefaultError, Options<UpdateAiModelPresetData>> => {
-    const mutationOptions: UseMutationOptions<UpdateAiModelPresetResponse, DefaultError, Options<UpdateAiModelPresetData>> = {
-        mutationFn: async (fnOptions) => {
-            const { data } = await Ai.updateAiModelPreset({
                 ...options,
                 ...fnOptions,
                 throwOnError: true
@@ -786,6 +709,45 @@ export const updateCatalogLibraryRecognitionPolicyMutation = (options?: Partial<
     const mutationOptions: UseMutationOptions<UpdateCatalogLibraryRecognitionPolicyResponse, DefaultError, Options<UpdateCatalogLibraryRecognitionPolicyData>> = {
         mutationFn: async (fnOptions) => {
             const { data } = await Catalog.updateCatalogLibraryRecognitionPolicy({
+                ...options,
+                ...fnOptions,
+                throwOnError: true
+            });
+            return data;
+        }
+    };
+    return mutationOptions;
+};
+
+export const getCatalogLibraryRetrievalConfigQueryKey = (options: Options<GetCatalogLibraryRetrievalConfigData>) => createQueryKey('getCatalogLibraryRetrievalConfig', options);
+
+/**
+ * Get catalog library retrieval config.
+ *
+ * Manages catalog libraries and their policies. Libraries own documents, knowledge graph data, assistant sessions, ingest settings, and query readiness. Call it when the caller already has the resource identifier and needs the latest authorized server view.
+ */
+export const getCatalogLibraryRetrievalConfigOptions = (options: Options<GetCatalogLibraryRetrievalConfigData>) => queryOptions<GetCatalogLibraryRetrievalConfigResponse, DefaultError, GetCatalogLibraryRetrievalConfigResponse, ReturnType<typeof getCatalogLibraryRetrievalConfigQueryKey>>({
+    queryFn: async ({ queryKey, signal }) => {
+        const { data } = await Catalog.getCatalogLibraryRetrievalConfig({
+            ...options,
+            ...queryKey[0],
+            signal,
+            throwOnError: true
+        });
+        return data;
+    },
+    queryKey: getCatalogLibraryRetrievalConfigQueryKey(options)
+});
+
+/**
+ * Update catalog library retrieval config.
+ *
+ * Manages catalog libraries and their policies. Libraries own documents, knowledge graph data, assistant sessions, ingest settings, and query readiness. Call it to replace or partially update server-owned configuration. The request body is validated before changes are persisted.
+ */
+export const updateCatalogLibraryRetrievalConfigMutation = (options?: Partial<Options<UpdateCatalogLibraryRetrievalConfigData>>): UseMutationOptions<UpdateCatalogLibraryRetrievalConfigResponse, DefaultError, Options<UpdateCatalogLibraryRetrievalConfigData>> => {
+    const mutationOptions: UseMutationOptions<UpdateCatalogLibraryRetrievalConfigResponse, DefaultError, Options<UpdateCatalogLibraryRetrievalConfigData>> = {
+        mutationFn: async (fnOptions) => {
+            const { data } = await Catalog.updateCatalogLibraryRetrievalConfig({
                 ...options,
                 ...fnOptions,
                 throwOnError: true

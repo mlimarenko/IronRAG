@@ -34,10 +34,10 @@ type FieldRenderState = {
 
 type FormFieldProps<TValues extends FieldValues> = {
   children: (field: FieldRenderState) => ReactNode;
-  className?: string;
+  className?: string | undefined;
   description?: ReactNode;
   formState: Pick<FormState<TValues>, "errors">;
-  id?: string;
+  id?: string | undefined;
   label: ReactNode;
   name: FieldPath<TValues>;
 };
@@ -184,7 +184,14 @@ export function FormTextareaField<TValues extends FieldValues>({
 type FormSelectFieldProps<TValues extends FieldValues> =
   Omit<FormFieldProps<TValues>, "children"> & {
     children: ReactNode;
-    control: Control<TValues>;
+    // The third (`TTransformedValues`) generic param only matters for
+    // `handleSubmit` output typing; `useController` below only ever reads/
+    // writes the untransformed field value, so accept `Control` regardless
+    // of a schema's `.transform()` output shape (e.g. a string field parsed
+    // to a number on submit) — pinning it to `TValues` would reject a
+    // `Control` from any resolver-backed form whose output differs from its
+    // input.
+    control: Control<TValues, unknown, FieldValues>;
     disabled?: boolean;
     onValueChange?: (value: string) => void;
     placeholder?: string;
@@ -218,7 +225,7 @@ export function FormSelectField<TValues extends FieldValues>({
     >
       {({ describedBy, id, invalid }) => (
         <Select
-          disabled={disabled}
+          {...(disabled !== undefined ? { disabled } : {})}
           value={typeof field.value === "string" ? field.value : ""}
           onValueChange={(value) => {
             field.onChange(value);

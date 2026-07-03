@@ -269,7 +269,7 @@ impl KnowledgeSearchHttpFixture {
         .into_iter()
         .find(|row| row.capability_kind == "embedding")
         .context("expected seeded embedding model catalog row")?;
-        let credential = ai_repository::create_provider_credential(
+        let credential = ai_repository::create_account(
             &state.persistence.postgres,
             "workspace",
             Some(workspace.id),
@@ -281,31 +281,20 @@ impl KnowledgeSearchHttpFixture {
             None,
         )
         .await
-        .context("failed to create knowledge search provider credential")?;
-        let preset = ai_repository::create_model_preset(
-            &state.persistence.postgres,
-            "workspace",
-            Some(workspace.id),
-            None,
-            model_catalog.id,
-            "knowledge-search-model-preset",
-            None,
-            None,
-            None,
-            None,
-            json!({}),
-            None,
-        )
-        .await
-        .context("failed to create knowledge search model preset")?;
-        ai_repository::create_binding_assignment(
+        .context("failed to create knowledge search AI account")?;
+        ai_repository::create_binding(
             &state.persistence.postgres,
             "library",
             Some(workspace.id),
             Some(library.id),
             "embed_chunk",
             credential.id,
-            preset.id,
+            model_catalog.id,
+            None,
+            None,
+            None,
+            None,
+            json!({}),
             None,
         )
         .await

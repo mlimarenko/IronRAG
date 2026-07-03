@@ -16,7 +16,9 @@ import {
   DialogTitle,
 } from '@/shared/components/ui/dialog';
 import { SelectItem } from '@/shared/components/ui/select';
+import { StatusBadge } from '@/shared/components/StatusBadge';
 import {
+  canEditProviderBaseUrl,
   normalizeProviderBaseUrl,
   resolveProviderCredentialPolicy,
 } from '@/shared/lib/ai-provider';
@@ -29,11 +31,10 @@ import {
   nonEmptyString,
   useTypedForm,
 } from '@/shared/forms';
-import type { AICredential, AIProvider, AIScopeKind } from '@/shared/types';
+import type { AIAccount, AIProvider, AIScopeKind } from '@/shared/types';
 import {
-  badgeClass,
+  accountStateLabel,
   compareByUpdatedAtDesc,
-  credentialStateLabel,
   localScopeQuery,
   matchesFilter,
   scopeLabel as translatedScopeLabel,
@@ -43,36 +44,30 @@ import {
 
 import { EntityWorkbench, InspectorField, InspectorSection } from './EntityWorkbench';
 
-function canOverrideBaseUrl(
-  provider: { credentialSource?: string } | null | undefined,
-): boolean {
-  return Boolean(provider) && provider?.credentialSource !== 'env';
-}
-
-type CredentialsSectionProps = {
+type AccountsSectionProps = {
   selectedScope: AIScopeKind;
   scopeContext: AiScopeContext;
   providers: AIProvider[];
-  credentialsState: AiConfigDataState<AICredential[]>;
+  accountsState: AiConfigDataState<AIAccount[]>;
   invalidateAll: () => void;
   openAddRequest?: number;
 };
 
-export function CredentialsSection({
+export function AccountsSection({
   selectedScope,
   scopeContext,
   providers,
-  credentialsState,
+  accountsState,
   invalidateAll,
   openAddRequest = 0,
-}: CredentialsSectionProps) {
+}: AccountsSectionProps) {
   const { t } = useTranslation();
-  const [credentialOpen, setCredentialOpen] = useState(false);
-  const [editingCredential, setEditingCredential] = useState<AICredential | null>(null);
-  const [deleteTarget, setDeleteTarget] = useState<AICredential | null>(null);
-  const [deletingCredential, setDeletingCredential] = useState(false);
-  const [credentialLabelTouched, setCredentialLabelTouched] = useState(false);
-  const credentialSchema = useMemo(
+  const [accountOpen, setAccountOpen] = useState(false);
+  const [editingAccount, setEditingAccount] = useState<AIAccount | null>(null);
+  const [deleteTarget, setDeleteTarget] = useState<AIAccount | null>(null);
+  const [deletingAccount, setDeletingAccount] = useState(false);
+  const [accountLabelTouched, setAccountLabelTouched] = useState(false);
+  const accountSchema = useMemo(
     () =>
       z.object({
         apiKey: z.string(),
@@ -90,7 +85,8 @@ export function CredentialsSection({
           return;
         }
         const policy = resolveProviderCredentialPolicy(provider);
-        if (policy.baseUrlRequired && canOverrideBaseUrl(provider) && !values.baseUrl.trim()) {
+        const baseUrlEditable = canEditProviderBaseUrl(provider);
+        if (policy.baseUrlRequired && baseUrlEditable && !values.baseUrl.trim()) {
           context.addIssue({
             code: 'custom',
             message: t('admin.aiPanel.fields.baseUrlRequiredHint'),
@@ -98,9 +94,8 @@ export function CredentialsSection({
           });
         }
         if (
-          provider.credentialSource !== 'env'
-          && policy.baseUrlRequired
-          && !canOverrideBaseUrl(provider)
+          policy.baseUrlRequired
+          && !baseUrlEditable
           && !normalizeProviderBaseUrl(provider, provider.defaultBaseUrl)
         ) {
           context.addIssue({
@@ -109,7 +104,7 @@ export function CredentialsSection({
             path: ['baseUrl'],
           });
         }
-        if (!editingCredential && policy.apiKeyRequired && !values.apiKey.trim()) {
+        if (!editingAccount && policy.apiKeyRequired && !values.apiKey.trim()) {
           context.addIssue({
             code: 'custom',
             message: t('admin.aiPanel.fields.tokenRequiredHint'),
@@ -117,10 +112,10 @@ export function CredentialsSection({
           });
         }
       }),
-    [editingCredential, providers, t],
+    [editingAccount, providers, t],
   );
-  const credentialForm = useTypedForm({
-    schema: credentialSchema,
+  const accountForm = useTypedForm({
+    schema: accountSchema,
     defaultValues: {
       apiKey: '',
       baseUrl: '',
@@ -129,33 +124,33 @@ export function CredentialsSection({
     },
     mode: 'onChange',
   });
-  const credentialProviderId = credentialForm.watch('providerId');
-  const credentialBaseUrl = credentialForm.watch('baseUrl');
-  const credentialApiKey = credentialForm.watch('apiKey');
+  const accountProviderId = accountForm.watch('providerId');
+  const accountBaseUrl = accountForm.watch('baseUrl');
+  const accountApiKey = accountForm.watch('apiKey');
   const {
-    reset: resetCredentialForm,
-    setValue: setCredentialValue,
-  } = credentialForm;
+    reset: resetAccountForm,
+    setValue: setAccountValue,
+  } = accountForm;
 
-  const selectedProvider = providers.find(entry => entry.id === credentialProviderId) ?? null;
+  const selectedProvider = providers.find(entry => entry.id === accountProviderId) ?? null;
   const scopeLabel = (value: AIScopeKind) => translatedScopeLabel(value, t);
-  const defaultCredentialLabel = useCallback(
+  const defaultAccountLabel = useCallback(
     (provider: AIProvider | null | undefined) =>
-      provider ? t('admin.aiPanel.placeholders.credentialLabelForProvider', { provider: provider.displayName }) : '',
+      provider ? t('admin.aiPanel.placeholders.accountLabelForProvider', { provider: provider.displayName }) : '',
     [t],
   );
-  const credentials = useMemo(() => credentialsState.data ?? [], [credentialsState.data]);
-  const sortedCredentials = useMemo(
-    () => credentials.slice().sort(compareByUpdatedAtDesc),
-    [credentials],
+  const accounts = useMemo(() => accountsState.data ?? [], [accountsState.data]);
+  const sortedAccounts = useMemo(
+    () => accounts.slice().sort(compareByUpdatedAtDesc),
+    [accounts],
   );
   const lastOpenAddRequestRef = useRef(0);
 
-  const resetCredentialDialog = () => {
-    setCredentialOpen(false);
-    setEditingCredential(null);
-    setCredentialLabelTouched(false);
-    resetCredentialForm({
+  const resetAccountDialog = () => {
+    setAccountOpen(false);
+    setEditingAccount(null);
+    setAccountLabelTouched(false);
+    resetAccountForm({
       apiKey: '',
       baseUrl: '',
       label: '',
@@ -163,136 +158,140 @@ export function CredentialsSection({
     });
   };
 
-  const openNewCredentialEditor = useCallback(() => {
-    const configuredProviderIds = new Set(credentials.map(entry => entry.providerId));
+  const openNewAccountEditor = useCallback(() => {
+    const configuredProviderIds = new Set(accounts.map(entry => entry.providerId));
     const provider =
       providers.find(entry => entry.lifecycleState === 'active' && !configuredProviderIds.has(entry.id)) ??
       providers.find(entry => entry.lifecycleState === 'active') ??
       providers[0];
-    setEditingCredential(null);
-    setCredentialLabelTouched(false);
-    resetCredentialForm({
+    setEditingAccount(null);
+    setAccountLabelTouched(false);
+    resetAccountForm({
       apiKey: '',
       baseUrl: provider ? normalizeProviderBaseUrl(provider, provider.defaultBaseUrl) : '',
-      label: defaultCredentialLabel(provider),
+      label: defaultAccountLabel(provider),
       providerId: provider?.id ?? '',
     });
-    setCredentialOpen(true);
-  }, [credentials, defaultCredentialLabel, providers, resetCredentialForm]);
+    setAccountOpen(true);
+  }, [accounts, defaultAccountLabel, providers, resetAccountForm]);
 
   useEffect(() => {
     if (openAddRequest <= 0 || lastOpenAddRequestRef.current === openAddRequest) {
       return;
     }
     lastOpenAddRequestRef.current = openAddRequest;
-    openNewCredentialEditor();
-  }, [openAddRequest, openNewCredentialEditor]);
+    openNewAccountEditor();
+  }, [openAddRequest, openNewAccountEditor]);
 
-  const credentialSaveErrorMessage = (saveError: unknown) => {
+  const accountSaveErrorMessage = (saveError: unknown) => {
     const message = String((saveError as { message?: string } | null)?.message ?? '');
     if (message.includes('provider credential validation failed')) {
-      return t('admin.aiPanel.messages.credentialValidationFailed');
+      return t('admin.aiPanel.messages.accountValidationFailed');
     }
-    return t('admin.aiPanel.messages.credentialSaveFailed');
+    return t('admin.aiPanel.messages.accountSaveFailed');
   };
 
-  const openCredentialEditor = (entry: AICredential) => {
+  const openAccountEditor = (entry: AIAccount) => {
     const provider = providers.find(providerEntry => providerEntry.id === entry.providerId);
-    setEditingCredential(entry);
-    setCredentialLabelTouched(true);
-    resetCredentialForm({
+    setEditingAccount(entry);
+    setAccountLabelTouched(true);
+    resetAccountForm({
       apiKey: '',
       baseUrl: provider ? normalizeProviderBaseUrl(provider, entry.baseUrl ?? provider.defaultBaseUrl) : entry.baseUrl ?? '',
       label: entry.label,
       providerId: entry.providerId,
     });
-    setCredentialOpen(true);
+    setAccountOpen(true);
   };
 
-  const handleCredentialProviderChange = (providerId: string) => {
+  const handleAccountProviderChange = (providerId: string) => {
     const provider = providers.find(entry => entry.id === providerId) ?? null;
-    setCredentialValue('baseUrl', provider ? normalizeProviderBaseUrl(provider, provider.defaultBaseUrl) : '', {
+    setAccountValue('baseUrl', provider ? normalizeProviderBaseUrl(provider, provider.defaultBaseUrl) : '', {
       shouldDirty: true,
       shouldValidate: true,
     });
-    setCredentialValue('apiKey', '', {
+    setAccountValue('apiKey', '', {
       shouldDirty: true,
       shouldValidate: true,
     });
-    if (!editingCredential && !credentialLabelTouched) {
-      setCredentialValue('label', defaultCredentialLabel(provider), {
+    if (!editingAccount && !accountLabelTouched) {
+      setAccountValue('label', defaultAccountLabel(provider), {
         shouldDirty: true,
         shouldValidate: true,
       });
     }
   };
 
-  const saveCredential = credentialForm.submitWithMutation(
+  const saveAccount = accountForm.submitWithMutation(
     {
       mutateAsync: async (values) => {
         const provider = providers.find(entry => entry.id === values.providerId) ?? null;
         if (!provider) {
           throw new Error(t('admin.provider'));
         }
-        if (editingCredential) {
-          await adminApi.updateCredential(editingCredential.id, {
+        const baseUrlEditable = canEditProviderBaseUrl(provider);
+        if (editingAccount) {
+          await adminApi.updateAccount(editingAccount.id, {
             label: values.label.trim(),
             apiKey: values.apiKey.trim() || undefined,
-            baseUrl: canOverrideBaseUrl(provider) ? values.baseUrl.trim() || undefined : undefined,
+            baseUrl: baseUrlEditable ? values.baseUrl.trim() || undefined : undefined,
             credentialState: 'active',
           });
         } else {
           const localParams = localScopeQuery(selectedScope, scopeContext);
-          await adminApi.createCredential({
+          await adminApi.createAccount({
             ...(localParams.query ?? {}),
             providerCatalogId: values.providerId,
             label: values.label.trim(),
             apiKey: values.apiKey.trim() || undefined,
-            baseUrl: canOverrideBaseUrl(provider) ? values.baseUrl.trim() || undefined : undefined,
+            baseUrl: baseUrlEditable ? values.baseUrl.trim() || undefined : undefined,
           });
         }
-        resetCredentialDialog();
+        resetAccountDialog();
         invalidateAll();
-        toast.success(t('admin.aiPanel.messages.credentialSaved'));
+        toast.success(t('admin.aiPanel.messages.accountSaved'));
       },
     },
     {
-      errorMessage: credentialSaveErrorMessage,
+      errorMessage: accountSaveErrorMessage,
     },
   );
 
-  const deleteCredential = async () => {
-    if (!deleteTarget || deletingCredential) return;
-    setDeletingCredential(true);
+  const deleteAccount = async () => {
+    if (!deleteTarget || deletingAccount) return;
+    setDeletingAccount(true);
     try {
-      await adminApi.deleteCredential(deleteTarget.id);
+      await adminApi.deleteAccount(deleteTarget.id);
       setDeleteTarget(null);
       invalidateAll();
-      toast.success(t('admin.aiPanel.messages.credentialDeleted'));
+      toast.success(t('admin.aiPanel.messages.accountDeleted'));
     } catch (err) {
-      toast.error(errorMessage(err, t('admin.aiPanel.messages.credentialDeleteFailed')));
+      toast.error(errorMessage(err, t('admin.aiPanel.messages.accountDeleteFailed')));
     } finally {
-      setDeletingCredential(false);
+      setDeletingAccount(false);
     }
   };
 
   const toolbar = (
-    <Button size="sm" onClick={openNewCredentialEditor}>
+    <Button size="sm" onClick={openNewAccountEditor}>
       <KeyRound className="mr-1.5 h-3.5 w-3.5" /> {t('admin.add')}
     </Button>
   );
 
+  const accountApiKeyError = fieldErrorMessage(accountForm.formState.errors, 'apiKey');
+  const accountBaseUrlError = fieldErrorMessage(accountForm.formState.errors, 'baseUrl');
+
   return (
     <div className="flex flex-1 min-h-0 flex-col">
-      <EntityWorkbench<AICredential>
-        tableId="admin.ai.credentials"
-        title={t('admin.aiPanel.credentialsTitle')}
-        count={sortedCredentials.length}
-        state={credentialsState}
-        rows={sortedCredentials}
+      <EntityWorkbench<AIAccount>
+        tableId="admin.ai.accounts"
+        title={t('admin.aiPanel.accountsTitle')}
+        count={sortedAccounts.length}
+        state={accountsState}
+        rows={sortedAccounts}
         rowKey={entry => entry.id}
-        emptyMessage={t('admin.aiPanel.empty.noLocalCredentials')}
-        searchPlaceholder={t('admin.aiPanel.filters.credentialsSearch')}
+        emptyMessage={t('admin.aiPanel.empty.noLocalAccounts')}
+        searchPlaceholder={t('admin.aiPanel.filters.accountsSearch')}
         toolbar={toolbar}
         rowActions={entry => (
           <>
@@ -302,7 +301,7 @@ export function CredentialsSection({
               variant="ghost"
               className="h-8 w-8"
               aria-label={`${t('admin.edit')}: ${entry.label}`}
-              onClick={() => openCredentialEditor(entry)}
+              onClick={() => openAccountEditor(entry)}
             >
               <Pencil className="h-3.5 w-3.5" />
             </Button>
@@ -326,7 +325,7 @@ export function CredentialsSection({
               entry.providerKind,
               entry.baseUrl,
               entry.apiKeySummary,
-              credentialStateLabel(entry.state, t),
+              accountStateLabel(entry.state, t),
             ],
             filter,
           )
@@ -341,7 +340,7 @@ export function CredentialsSection({
                 <div className="truncate text-sm font-semibold" title={entry.label}>
                   {entry.label}
                 </div>
-                <div className="truncate text-[11px] text-muted-foreground">
+                <div className="truncate text-2xs text-muted-foreground">
                   {entry.providerName}
                 </div>
               </div>
@@ -379,7 +378,7 @@ export function CredentialsSection({
                 : tone === 'failed'
                   ? 'text-status-failed'
                   : 'text-status-warning';
-              return <span className={`text-xs ${cls}`}>{credentialStateLabel(entry.state, t)}</span>;
+              return <span className={`text-xs ${cls}`}>{accountStateLabel(entry.state, t)}</span>;
             },
           },
         ]}
@@ -395,21 +394,21 @@ export function CredentialsSection({
             body: (
               <>
                 <div>
-                  <span className={`status-badge ${badgeClass(entry.state === 'active' ? 'ready' : entry.state === 'invalid' ? 'failed' : 'warning')}`}>
-                    {credentialStateLabel(entry.state, t)}
-                  </span>
+                  <StatusBadge tone={entry.state === 'active' ? 'ready' : entry.state === 'invalid' ? 'failed' : 'warning'}>
+                    {accountStateLabel(entry.state, t)}
+                  </StatusBadge>
                 </div>
                 <InspectorSection title={t('admin.aiPanel.fields.scope')}>
                   <Badge variant="outline">{scopeLabel(entry.scopeKind)}</Badge>
                 </InspectorSection>
                 <InspectorSection title={t('admin.apiKey')}>
-                  <div className="rounded-md border border-border/70 bg-surface-sunken p-3 font-mono text-xs [overflow-wrap:anywhere]">
+                  <div className="rounded-md bg-surface-sunken p-3 font-mono text-xs [overflow-wrap:anywhere]">
                     {entry.apiKeySummary || t('admin.aiPanel.tokenOptional')}
                   </div>
                 </InspectorSection>
                 {baseUrl && (
                   <InspectorSection title={t('admin.aiPanel.fields.baseUrl')}>
-                    <div className="rounded-md border border-border/70 bg-surface-sunken p-3 font-mono text-xs [overflow-wrap:anywhere]">
+                    <div className="rounded-md bg-surface-sunken p-3 font-mono text-xs [overflow-wrap:anywhere]">
                       {baseUrl}
                     </div>
                   </InspectorSection>
@@ -424,7 +423,7 @@ export function CredentialsSection({
                 <Button
                   size="sm"
                   variant="outline"
-                  onClick={() => openCredentialEditor(entry)}
+                  onClick={() => openAccountEditor(entry)}
                 >
                   <Pencil className="mr-1.5 h-3.5 w-3.5" /> {t('admin.edit')}
                 </Button>
@@ -441,21 +440,21 @@ export function CredentialsSection({
         }}
       />
 
-      <Dialog open={credentialOpen} onOpenChange={open => { if (!open) resetCredentialDialog(); else setCredentialOpen(true); }}>
+      <Dialog open={accountOpen} onOpenChange={open => { if (!open) resetAccountDialog(); else setAccountOpen(true); }}>
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>{editingCredential ? t('admin.aiPanel.dialogs.editCredentialTitle') : t('admin.aiPanel.dialogs.addCredentialTitle')}</DialogTitle>
-            <DialogDescription>{t('admin.aiPanel.dialogs.credentialDescription')}</DialogDescription>
+            <DialogTitle>{editingAccount ? t('admin.aiPanel.dialogs.editAccountTitle') : t('admin.aiPanel.dialogs.addAccountTitle')}</DialogTitle>
+            <DialogDescription>{t('admin.aiPanel.dialogs.accountDescription')}</DialogDescription>
           </DialogHeader>
           <div className="space-y-4">
             <FormSelectField
-              control={credentialForm.control}
-              disabled={Boolean(editingCredential)}
-              formState={credentialForm.formState}
-              id="admin-credential-provider"
+              control={accountForm.control}
+              disabled={Boolean(editingAccount)}
+              formState={accountForm.formState}
+              id="admin-account-provider"
               label={t('admin.provider')}
               name="providerId"
-              onValueChange={handleCredentialProviderChange}
+              onValueChange={handleAccountProviderChange}
               placeholder={t('admin.aiPanel.placeholders.selectProvider')}
             >
               {providers.map(entry => (
@@ -463,19 +462,19 @@ export function CredentialsSection({
               ))}
             </FormSelectField>
             <FormInputField
-              formState={credentialForm.formState}
-              id="admin-credential-label"
+              formState={accountForm.formState}
+              id="admin-account-label"
               label={t('admin.label')}
               name="label"
-              onValueChange={() => setCredentialLabelTouched(true)}
-              registration={credentialForm.register('label')}
-              placeholder={t('admin.aiPanel.placeholders.credentialLabel')}
+              onValueChange={() => setAccountLabelTouched(true)}
+              registration={accountForm.register('label')}
+              placeholder={t('admin.aiPanel.placeholders.accountLabel')}
             />
             <ProviderCredentialFields
               provider={selectedProvider}
               idPrefix="admin-provider-credential"
-              apiKey={credentialApiKey}
-              baseUrl={credentialBaseUrl}
+              apiKey={accountApiKey}
+              baseUrl={accountBaseUrl}
               allowBaseUrlOverride
               labels={{
                 apiKeyRequired: t('admin.apiKey'),
@@ -488,17 +487,17 @@ export function CredentialsSection({
                 fixedBaseUrlHint: t('admin.aiPanel.fields.fixedBaseUrlHint'),
                 keepSecretPlaceholder: t('admin.aiPanel.placeholders.keepSecret'),
               }}
-              apiKeyError={fieldErrorMessage(credentialForm.formState.errors, 'apiKey')}
-              baseUrlError={fieldErrorMessage(credentialForm.formState.errors, 'baseUrl')}
-              onApiKeyChange={value => setCredentialValue('apiKey', value, { shouldDirty: true, shouldValidate: true })}
-              onBaseUrlChange={value => setCredentialValue('baseUrl', value, { shouldDirty: true, shouldValidate: true })}
-              preserveExistingSecret={Boolean(editingCredential)}
+              {...(accountApiKeyError !== undefined ? { apiKeyError: accountApiKeyError } : {})}
+              {...(accountBaseUrlError !== undefined ? { baseUrlError: accountBaseUrlError } : {})}
+              onApiKeyChange={value => setAccountValue('apiKey', value, { shouldDirty: true, shouldValidate: true })}
+              onBaseUrlChange={value => setAccountValue('baseUrl', value, { shouldDirty: true, shouldValidate: true })}
+              preserveExistingSecret={Boolean(editingAccount)}
             />
           </div>
           <DialogFooter>
-            <Button variant="outline" onClick={resetCredentialDialog}>{t('admin.cancel')}</Button>
-            <Button disabled={!credentialForm.formState.isValid || credentialForm.formState.isSubmitting} onClick={() => void saveCredential()}>
-              {credentialForm.formState.isSubmitting ? <><Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" /> {t('admin.saving')}</> : t('admin.save')}
+            <Button variant="outline" onClick={resetAccountDialog}>{t('admin.cancel')}</Button>
+            <Button disabled={!accountForm.formState.isValid || accountForm.formState.isSubmitting} onClick={() => void saveAccount()}>
+              {accountForm.formState.isSubmitting ? <><Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" /> {t('admin.saving')}</> : t('admin.save')}
             </Button>
           </DialogFooter>
         </DialogContent>
@@ -507,17 +506,17 @@ export function CredentialsSection({
       <Dialog open={Boolean(deleteTarget)} onOpenChange={open => { if (!open) setDeleteTarget(null); }}>
         <DialogContent className="max-w-md">
           <DialogHeader>
-            <DialogTitle>{t('admin.aiPanel.dialogs.deleteCredentialTitle')}</DialogTitle>
+            <DialogTitle>{t('admin.aiPanel.dialogs.deleteAccountTitle')}</DialogTitle>
             <DialogDescription>
-              {t('admin.aiPanel.dialogs.deleteCredentialDescription', {
-                credential: deleteTarget?.label ?? '',
+              {t('admin.aiPanel.dialogs.deleteAccountDescription', {
+                account: deleteTarget?.label ?? '',
               })}
             </DialogDescription>
           </DialogHeader>
           <DialogFooter>
             <Button variant="outline" onClick={() => setDeleteTarget(null)}>{t('admin.cancel')}</Button>
-            <Button variant="destructive" disabled={deletingCredential} onClick={() => void deleteCredential()}>
-              {deletingCredential ? <><Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" /> {t('admin.saving')}</> : t('admin.delete')}
+            <Button variant="destructive" disabled={deletingAccount} onClick={() => void deleteAccount()}>
+              {deletingAccount ? <><Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" /> {t('admin.saving')}</> : t('admin.delete')}
             </Button>
           </DialogFooter>
         </DialogContent>

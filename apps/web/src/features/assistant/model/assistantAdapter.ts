@@ -24,11 +24,10 @@ export function mapAssistantTurnToEvidence(
       return {
         documentId: r.documentId ?? r.segmentId,
         documentName:
-          trail.length > 0
-            ? trail[trail.length - 1]
-            : path.join(' / ') || r.blockKind || 'Segment',
+          (trail.length > 0 ? trail[trail.length - 1] : undefined) ??
+          (path.join(' / ') || r.blockKind || 'Segment'),
         documentTitle: r.documentTitle ?? null,
-        sourceUri: r.sourceUri ?? null,
+        sourceUri: r.sourceAccess?.href ?? null,
         sourceAccess: mapSourceAccess(r.sourceAccess) ?? null,
         segmentOrdinal: r.rank ?? 0,
         excerpt: trail.join(' > ') || path.join(' > ') || '',
@@ -89,6 +88,6 @@ export function mapAssistantMessage(m: AssistantConversationMessage): AssistantM
     content: m.content ?? '',
     timestamp: m.timestamp,
     executionId: m.executionId ?? null,
-    evidence: m.evidence ? mapAssistantTurnToEvidence(m.evidence) : undefined,
+    ...(m.evidence ? { evidence: mapAssistantTurnToEvidence(m.evidence) } : {}),
   };
 }

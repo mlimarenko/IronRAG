@@ -12,9 +12,9 @@ use uuid::Uuid;
 use crate::{
     app::state::AppState,
     domains::ai::{
-        AiBindingAssignment, AiBindingPurpose, AiScopeKind, BindingValidation,
-        ModelAvailabilityState, ModelCatalogEntry, ModelPreset, PriceCatalogEntry,
-        ProviderCatalogEntry, ProviderCredential, ResolvedModelCatalogEntry,
+        AiAccount, AiBinding, AiBindingPurpose, AiScopeKind, BindingValidation,
+        ModelAvailabilityState, ModelCatalogEntry, PriceCatalogEntry, ProviderCatalogEntry,
+        ResolvedModelCatalogEntry,
     },
     domains::provider_profiles::{
         ProviderBaseUrlPolicy, ProviderCapabilities, ProviderCapabilityState,
@@ -26,24 +26,25 @@ use crate::{
     interfaces::http::router_support::ApiError,
 };
 
+mod accounts;
 mod bootstrap;
 mod catalog;
-mod credentials;
-mod presets;
 mod provider_validation;
 mod shared;
 #[cfg(test)]
 mod tests;
 
+#[cfg(test)]
+use bootstrap::resolve_bootstrap_provider_binding_descriptors;
 use bootstrap::{
-    bootstrap_bundle_is_self_contained, bootstrap_credential_source,
-    bootstrap_preset_inputs_cover_required_purposes, bootstrap_preset_profile_for_provider_purpose,
-    bootstrap_provider_credential_map, ensure_bootstrap_binding_assignment,
-    ensure_bootstrap_model_preset, ensure_bootstrap_provider_credential,
-    normalize_bootstrap_preset_inputs, resolve_bootstrap_provider_bundle,
-    resolve_bootstrap_provider_preset_bundle, resolve_bootstrap_provider_preset_descriptors,
-    resolve_configured_bootstrap_preset_inputs, validate_bootstrap_model_list_preset_inputs,
-    validate_bootstrap_preset_inputs_cover_required_purposes,
+    bootstrap_binding_inputs_cover_required_purposes,
+    bootstrap_binding_profile_for_provider_purpose, bootstrap_bundle_is_self_contained,
+    bootstrap_credential_source, bootstrap_provider_credential_map, ensure_bootstrap_binding,
+    ensure_bootstrap_provider_account, normalize_bootstrap_binding_inputs,
+    resolve_bootstrap_provider_binding_bundle, resolve_bootstrap_provider_bundle,
+    resolve_configured_bootstrap_binding_inputs,
+    validate_bootstrap_binding_inputs_cover_required_purposes,
+    validate_bootstrap_model_list_binding_inputs,
 };
 #[cfg(test)]
 use catalog::parse_allowed_binding_purposes;
@@ -58,11 +59,10 @@ use provider_validation::{
     provider_credential_base_url_for_update, runtime_provider_base_url, validate_provider_access,
 };
 use shared::{
-    binding_purpose_key, canonical_runtime_preset_name, map_ai_delete_error, map_ai_write_error,
-    map_binding_assignment_row, map_binding_validation_row, normalize_non_empty,
-    normalize_optional, normalize_scope_ref, parse_binding_purpose, parse_scope_kind,
-    scope_can_use_resource, scope_kind_key, scope_ref_from_binding_row,
-    scope_ref_from_model_preset, scope_ref_from_provider_credential, select_runtime_preset,
+    binding_purpose_key, map_ai_delete_error, map_ai_write_error, map_binding_row,
+    map_binding_validation_row, normalize_non_empty, normalize_optional, normalize_scope_ref,
+    parse_binding_purpose, parse_scope_kind, scope_can_use_resource, scope_kind_key,
+    scope_ref_from_account, scope_ref_from_binding_row,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -73,7 +73,7 @@ pub struct AiScopeRef {
 }
 
 #[derive(Debug, Clone)]
-pub struct CreateProviderCredentialCommand {
+pub struct CreateAiAccountCommand {
     pub scope_kind: AiScopeKind,
     pub workspace_id: Option<Uuid>,
     pub library_id: Option<Uuid>,
@@ -85,8 +85,8 @@ pub struct CreateProviderCredentialCommand {
 }
 
 #[derive(Debug, Clone)]
-pub struct UpdateProviderCredentialCommand {
-    pub credential_id: Uuid,
+pub struct UpdateAiAccountCommand {
+    pub account_id: Uuid,
     pub label: String,
     pub api_key: Option<String>,
     pub base_url: Option<String>,
@@ -142,47 +142,31 @@ pub struct UpdateModelCatalogCommand {
 }
 
 #[derive(Debug, Clone)]
-pub struct CreateModelPresetCommand {
-    pub scope_kind: AiScopeKind,
-    pub workspace_id: Option<Uuid>,
-    pub library_id: Option<Uuid>,
-    pub model_catalog_id: Uuid,
-    pub preset_name: String,
-    pub system_prompt: Option<String>,
-    pub temperature: Option<f64>,
-    pub top_p: Option<f64>,
-    pub max_output_tokens_override: Option<i32>,
-    pub extra_parameters_json: serde_json::Value,
-    pub created_by_principal_id: Option<Uuid>,
-}
-
-#[derive(Debug, Clone)]
-pub struct UpdateModelPresetCommand {
-    pub preset_id: Uuid,
-    pub preset_name: String,
-    pub system_prompt: Option<String>,
-    pub temperature: Option<f64>,
-    pub top_p: Option<f64>,
-    pub max_output_tokens_override: Option<i32>,
-    pub extra_parameters_json: serde_json::Value,
-}
-
-#[derive(Debug, Clone)]
-pub struct CreateBindingAssignmentCommand {
+pub struct CreateAiBindingCommand {
     pub scope_kind: AiScopeKind,
     pub workspace_id: Option<Uuid>,
     pub library_id: Option<Uuid>,
     pub binding_purpose: AiBindingPurpose,
-    pub provider_credential_id: Uuid,
-    pub model_preset_id: Uuid,
+    pub account_id: Uuid,
+    pub model_catalog_id: Uuid,
+    pub system_prompt: Option<String>,
+    pub temperature: Option<f64>,
+    pub top_p: Option<f64>,
+    pub max_output_tokens_override: Option<i32>,
+    pub extra_parameters_json: serde_json::Value,
     pub updated_by_principal_id: Option<Uuid>,
 }
 
 #[derive(Debug, Clone)]
-pub struct UpdateBindingAssignmentCommand {
+pub struct UpdateAiBindingCommand {
     pub binding_id: Uuid,
-    pub provider_credential_id: Uuid,
-    pub model_preset_id: Uuid,
+    pub account_id: Uuid,
+    pub model_catalog_id: Uuid,
+    pub system_prompt: Option<String>,
+    pub temperature: Option<f64>,
+    pub top_p: Option<f64>,
+    pub max_output_tokens_override: Option<i32>,
+    pub extra_parameters_json: serde_json::Value,
     pub binding_state: String,
     pub updated_by_principal_id: Option<Uuid>,
 }
@@ -224,13 +208,12 @@ pub enum BootstrapAiCredentialSource {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct BootstrapAiPresetDescriptor {
+pub struct BootstrapAiBindingDescriptor {
     pub binding_purpose: AiBindingPurpose,
     pub owner_provider_catalog_id: Uuid,
     pub owner_provider_kind: String,
     pub model_catalog_id: Uuid,
     pub model_name: String,
-    pub preset_name: String,
     pub system_prompt: Option<String>,
     pub temperature: Option<f64>,
     pub top_p: Option<f64>,
@@ -239,7 +222,7 @@ pub struct BootstrapAiPresetDescriptor {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct BootstrapAiProviderPresetBundle {
+pub struct BootstrapAiProviderBindingBundle {
     pub provider_catalog_id: Uuid,
     pub provider_kind: String,
     pub display_name: String,
@@ -253,7 +236,7 @@ pub struct BootstrapAiProviderPresetBundle {
     pub capabilities: ProviderCapabilities,
     pub runtime: ProviderRuntimeProfile,
     pub ui_hints: serde_json::Value,
-    pub presets: Vec<BootstrapAiPresetDescriptor>,
+    pub bindings: Vec<BootstrapAiBindingDescriptor>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -264,11 +247,10 @@ pub struct BootstrapAiCredentialInput {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct BootstrapAiPresetInput {
+pub struct BootstrapAiBindingInput {
     pub binding_purpose: AiBindingPurpose,
     pub provider_kind: String,
     pub model_catalog_id: Uuid,
-    pub preset_name: String,
     pub system_prompt: Option<String>,
     pub temperature: Option<f64>,
     pub top_p: Option<f64>,
@@ -278,18 +260,18 @@ pub struct BootstrapAiPresetInput {
 
 #[derive(Debug, Clone)]
 pub struct BootstrapAiSetupDescriptor {
-    pub preset_bundles: Vec<BootstrapAiProviderPresetBundle>,
+    pub binding_bundles: Vec<BootstrapAiProviderBindingBundle>,
 }
 
 #[derive(Debug, Clone)]
 pub struct ApplyBootstrapAiSetupCommand {
     pub credentials: Vec<BootstrapAiCredentialInput>,
-    pub preset_inputs: Vec<BootstrapAiPresetInput>,
+    pub binding_inputs: Vec<BootstrapAiBindingInput>,
     pub updated_by_principal_id: Option<Uuid>,
 }
 
 #[derive(Debug, Clone)]
-pub struct ApplyBootstrapProviderPresetBundleCommand {
+pub struct ApplyBootstrapProviderBindingBundleCommand {
     pub provider_kind: String,
     pub api_key: Option<String>,
     pub base_url: Option<String>,
@@ -306,7 +288,7 @@ pub struct ResolvedRuntimeBinding {
     pub provider_kind: String,
     pub provider_base_url: Option<String>,
     pub provider_api_style: String,
-    pub credential_id: Uuid,
+    pub account_id: Uuid,
     pub api_key: Option<String>,
     pub model_catalog_id: Uuid,
     pub model_name: String,
@@ -421,12 +403,12 @@ impl AiCatalogService {
         Self
     }
 
-    pub async fn list_binding_assignments(
+    pub async fn list_bindings(
         &self,
         state: &AppState,
         scope: AiScopeRef,
-    ) -> Result<Vec<AiBindingAssignment>, ApiError> {
-        let rows = ai_repository::list_binding_assignments_exact(
+    ) -> Result<Vec<AiBinding>, ApiError> {
+        let rows = ai_repository::list_bindings_exact(
             &state.persistence.postgres,
             scope_kind_key(scope.scope_kind),
             scope.workspace_id,
@@ -434,27 +416,26 @@ impl AiCatalogService {
         )
         .await
         .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
-        rows.into_iter().map(map_binding_assignment_row).collect()
+        rows.into_iter().map(map_binding_row).collect()
     }
 
-    pub async fn get_binding_assignment(
+    pub async fn get_binding(
         &self,
         state: &AppState,
         binding_id: Uuid,
-    ) -> Result<AiBindingAssignment, ApiError> {
-        let row =
-            ai_repository::get_binding_assignment_by_id(&state.persistence.postgres, binding_id)
-                .await
-                .map_err(|e| ApiError::internal_with_log(e, "internal"))?
-                .ok_or_else(|| ApiError::resource_not_found("binding_assignment", binding_id))?;
-        map_binding_assignment_row(row)
+    ) -> Result<AiBinding, ApiError> {
+        let row = ai_repository::get_binding_by_id(&state.persistence.postgres, binding_id)
+            .await
+            .map_err(|e| ApiError::internal_with_log(e, "internal"))?
+            .ok_or_else(|| ApiError::resource_not_found("binding_assignment", binding_id))?;
+        map_binding_row(row)
     }
 
-    pub async fn create_binding_assignment(
+    pub async fn create_binding(
         &self,
         state: &AppState,
-        command: CreateBindingAssignmentCommand,
-    ) -> Result<AiBindingAssignment, ApiError> {
+        command: CreateAiBindingCommand,
+    ) -> Result<AiBinding, ApiError> {
         let scope = normalize_scope_ref(
             state,
             command.scope_kind,
@@ -466,19 +447,24 @@ impl AiCatalogService {
             state,
             scope,
             command.binding_purpose,
-            command.provider_credential_id,
-            command.model_preset_id,
+            command.account_id,
+            command.model_catalog_id,
             "active",
         )
         .await?;
-        let row = ai_repository::create_binding_assignment(
+        let row = ai_repository::create_binding(
             &state.persistence.postgres,
             scope_kind_key(scope.scope_kind),
             scope.workspace_id,
             scope.library_id,
             binding_purpose_key(command.binding_purpose),
-            command.provider_credential_id,
-            command.model_preset_id,
+            command.account_id,
+            command.model_catalog_id,
+            command.system_prompt.as_deref(),
+            command.temperature,
+            command.top_p,
+            command.max_output_tokens_override,
+            command.extra_parameters_json.clone(),
             command.updated_by_principal_id,
         )
         .await
@@ -487,56 +473,71 @@ impl AiCatalogService {
             state,
             scope,
             command.binding_purpose,
-            command.provider_credential_id,
-            command.model_preset_id,
+            command.account_id,
+            command.model_catalog_id,
+            command.system_prompt.as_deref(),
+            command.temperature,
+            command.top_p,
+            command.max_output_tokens_override,
+            &command.extra_parameters_json,
             command.updated_by_principal_id,
         )
         .await?;
         invalidate_vector_dimension_cache_for_binding(command.binding_purpose);
-        map_binding_assignment_row(row)
+        map_binding_row(row)
     }
 
-    pub async fn update_binding_assignment(
+    pub async fn update_binding(
         &self,
         state: &AppState,
-        command: UpdateBindingAssignmentCommand,
-    ) -> Result<AiBindingAssignment, ApiError> {
-        let existing = ai_repository::get_binding_assignment_by_id(
-            &state.persistence.postgres,
-            command.binding_id,
-        )
-        .await
-        .map_err(|e| ApiError::internal_with_log(e, "internal"))?
-        .ok_or_else(|| ApiError::resource_not_found("binding_assignment", command.binding_id))?;
+        command: UpdateAiBindingCommand,
+    ) -> Result<AiBinding, ApiError> {
+        let existing =
+            ai_repository::get_binding_by_id(&state.persistence.postgres, command.binding_id)
+                .await
+                .map_err(|e| ApiError::internal_with_log(e, "internal"))?
+                .ok_or_else(|| {
+                    ApiError::resource_not_found("binding_assignment", command.binding_id)
+                })?;
         let scope = scope_ref_from_binding_row(&existing)?;
+        let binding_purpose = parse_binding_purpose(&existing.binding_purpose)?;
         self.validate_binding_target_for_scope(
             state,
             scope,
-            parse_binding_purpose(&existing.binding_purpose)?,
-            command.provider_credential_id,
-            command.model_preset_id,
+            binding_purpose,
+            command.account_id,
+            command.model_catalog_id,
             &command.binding_state,
         )
         .await?;
-        let row = ai_repository::update_binding_assignment(
+        let row = ai_repository::update_binding(
             &state.persistence.postgres,
             command.binding_id,
-            command.provider_credential_id,
-            command.model_preset_id,
+            command.account_id,
+            command.model_catalog_id,
+            command.system_prompt.as_deref(),
+            command.temperature,
+            command.top_p,
+            command.max_output_tokens_override,
+            command.extra_parameters_json.clone(),
             &command.binding_state,
             command.updated_by_principal_id,
         )
         .await
         .map_err(map_ai_write_error)?
         .ok_or_else(|| ApiError::resource_not_found("binding_assignment", command.binding_id))?;
-        let binding_purpose = parse_binding_purpose(&existing.binding_purpose)?;
         if command.binding_state == "active" {
             self.sync_vector_counterpart_binding(
                 state,
                 scope,
                 binding_purpose,
-                command.provider_credential_id,
-                command.model_preset_id,
+                command.account_id,
+                command.model_catalog_id,
+                command.system_prompt.as_deref(),
+                command.temperature,
+                command.top_p,
+                command.max_output_tokens_override,
+                &command.extra_parameters_json,
                 command.updated_by_principal_id,
             )
             .await?;
@@ -550,16 +551,22 @@ impl AiCatalogService {
             .await?;
         }
         invalidate_vector_dimension_cache_for_binding(binding_purpose);
-        map_binding_assignment_row(row)
+        map_binding_row(row)
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn sync_vector_counterpart_binding(
         &self,
         state: &AppState,
         scope: AiScopeRef,
         binding_purpose: AiBindingPurpose,
-        provider_credential_id: Uuid,
-        model_preset_id: Uuid,
+        account_id: Uuid,
+        model_catalog_id: Uuid,
+        system_prompt: Option<&str>,
+        temperature: Option<f64>,
+        top_p: Option<f64>,
+        max_output_tokens_override: Option<i32>,
+        extra_parameters_json: &serde_json::Value,
         updated_by_principal_id: Option<Uuid>,
     ) -> Result<(), ApiError> {
         let Some(counterpart_purpose) = vector_index_counterpart_purpose(binding_purpose) else {
@@ -569,13 +576,13 @@ impl AiCatalogService {
             state,
             scope,
             counterpart_purpose,
-            provider_credential_id,
-            model_preset_id,
+            account_id,
+            model_catalog_id,
             "active",
         )
         .await?;
         let counterpart_key = binding_purpose_key(counterpart_purpose);
-        let existing = ai_repository::list_binding_assignments_exact(
+        let existing = ai_repository::list_bindings_exact(
             &state.persistence.postgres,
             scope_kind_key(scope.scope_kind),
             scope.workspace_id,
@@ -587,31 +594,46 @@ impl AiCatalogService {
         .find(|row| row.binding_purpose == counterpart_key);
 
         if let Some(existing) = existing {
-            if existing.provider_credential_id == provider_credential_id
-                && existing.model_preset_id == model_preset_id
+            if existing.account_id == account_id
+                && existing.model_catalog_id == model_catalog_id
+                && existing.system_prompt.as_deref() == system_prompt
+                && existing.temperature == temperature
+                && existing.top_p == top_p
+                && existing.max_output_tokens_override == max_output_tokens_override
+                && &existing.extra_parameters_json == extra_parameters_json
                 && existing.binding_state == "active"
             {
                 return Ok(());
             }
-            ai_repository::update_binding_assignment(
+            ai_repository::update_binding(
                 &state.persistence.postgres,
                 existing.id,
-                provider_credential_id,
-                model_preset_id,
+                account_id,
+                model_catalog_id,
+                system_prompt,
+                temperature,
+                top_p,
+                max_output_tokens_override,
+                extra_parameters_json.clone(),
                 "active",
                 updated_by_principal_id,
             )
             .await
             .map_err(map_ai_write_error)?;
         } else {
-            ai_repository::create_binding_assignment(
+            ai_repository::create_binding(
                 &state.persistence.postgres,
                 scope_kind_key(scope.scope_kind),
                 scope.workspace_id,
                 scope.library_id,
                 counterpart_key,
-                provider_credential_id,
-                model_preset_id,
+                account_id,
+                model_catalog_id,
+                system_prompt,
+                temperature,
+                top_p,
+                max_output_tokens_override,
+                extra_parameters_json.clone(),
                 updated_by_principal_id,
             )
             .await
@@ -625,12 +647,12 @@ impl AiCatalogService {
         state: &AppState,
         scope: AiScopeRef,
         binding_purpose: AiBindingPurpose,
-    ) -> Result<Option<ai_repository::AiBindingAssignmentRow>, ApiError> {
+    ) -> Result<Option<ai_repository::AiBindingRow>, ApiError> {
         let Some(counterpart_purpose) = vector_index_counterpart_purpose(binding_purpose) else {
             return Ok(None);
         };
         let counterpart_key = binding_purpose_key(counterpart_purpose);
-        Ok(ai_repository::list_binding_assignments_exact(
+        Ok(ai_repository::list_bindings_exact(
             &state.persistence.postgres,
             scope_kind_key(scope.scope_kind),
             scope.workspace_id,
@@ -657,11 +679,16 @@ impl AiCatalogService {
         if existing.binding_state != "active" {
             return Ok(());
         }
-        ai_repository::update_binding_assignment(
+        ai_repository::update_binding(
             &state.persistence.postgres,
             existing.id,
-            existing.provider_credential_id,
-            existing.model_preset_id,
+            existing.account_id,
+            existing.model_catalog_id,
+            existing.system_prompt.as_deref(),
+            existing.temperature,
+            existing.top_p,
+            existing.max_output_tokens_override,
+            existing.extra_parameters_json.clone(),
             "inactive",
             updated_by_principal_id,
         )
@@ -670,34 +697,25 @@ impl AiCatalogService {
         Ok(())
     }
 
-    pub async fn delete_binding_assignment(
-        &self,
-        state: &AppState,
-        binding_id: Uuid,
-    ) -> Result<(), ApiError> {
-        let existing =
-            ai_repository::get_binding_assignment_by_id(&state.persistence.postgres, binding_id)
-                .await
-                .map_err(|e| ApiError::internal_with_log(e, "internal"))?
-                .ok_or_else(|| ApiError::resource_not_found("binding_assignment", binding_id))?;
+    pub async fn delete_binding(&self, state: &AppState, binding_id: Uuid) -> Result<(), ApiError> {
+        let existing = ai_repository::get_binding_by_id(&state.persistence.postgres, binding_id)
+            .await
+            .map_err(|e| ApiError::internal_with_log(e, "internal"))?
+            .ok_or_else(|| ApiError::resource_not_found("binding_assignment", binding_id))?;
         let scope = scope_ref_from_binding_row(&existing)?;
         let binding_purpose = parse_binding_purpose(&existing.binding_purpose)?;
         let counterpart =
             self.exact_vector_counterpart_binding(state, scope, binding_purpose).await?;
-        let deleted =
-            ai_repository::delete_binding_assignment(&state.persistence.postgres, binding_id)
-                .await
-                .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
+        let deleted = ai_repository::delete_binding(&state.persistence.postgres, binding_id)
+            .await
+            .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
         if !deleted {
             return Err(ApiError::resource_not_found("binding_assignment", binding_id));
         }
         if let Some(counterpart) = counterpart {
-            let _ = ai_repository::delete_binding_assignment(
-                &state.persistence.postgres,
-                counterpart.id,
-            )
-            .await
-            .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
+            let _ = ai_repository::delete_binding(&state.persistence.postgres, counterpart.id)
+                .await
+                .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
         }
         invalidate_vector_dimension_cache_for_binding(binding_purpose);
         Ok(())
@@ -712,9 +730,9 @@ impl AiCatalogService {
             self.list_model_catalog(state, None),
         )?;
         let configured_ai = state.ui_bootstrap_ai_setup.as_ref();
-        let mut preset_bundles = Vec::new();
+        let mut binding_bundles = Vec::new();
         for provider in &providers {
-            if let Some(bundle) = resolve_bootstrap_provider_preset_bundle(
+            if let Some(bundle) = resolve_bootstrap_provider_binding_bundle(
                 provider,
                 &providers,
                 &models,
@@ -723,16 +741,16 @@ impl AiCatalogService {
                 if !bootstrap_bundle_is_self_contained(&bundle) {
                     continue;
                 }
-                preset_bundles.push(bundle);
+                binding_bundles.push(bundle);
             }
         }
-        preset_bundles.sort_by(|left, right| {
+        binding_bundles.sort_by(|left, right| {
             left.display_name
                 .cmp(&right.display_name)
                 .then_with(|| left.provider_kind.cmp(&right.provider_kind))
         });
 
-        Ok(BootstrapAiSetupDescriptor { preset_bundles })
+        Ok(BootstrapAiSetupDescriptor { binding_bundles })
     }
 
     pub async fn ensure_bootstrap_provider_bundle_available(
@@ -746,28 +764,27 @@ impl AiCatalogService {
         Ok(())
     }
 
-    pub async fn apply_bootstrap_provider_preset_bundle(
+    pub async fn apply_bootstrap_provider_binding_bundle(
         &self,
         state: &AppState,
-        command: ApplyBootstrapProviderPresetBundleCommand,
+        command: ApplyBootstrapProviderBindingBundleCommand,
     ) -> Result<(), ApiError> {
         let providers = self.list_provider_catalog(state).await?;
         let models = self.list_model_catalog(state, None).await?;
         let bundle =
             resolve_bootstrap_provider_bundle(&providers, &models, &command.provider_kind)?;
-        let preset_inputs = bundle
-            .presets
+        let binding_inputs = bundle
+            .bindings
             .into_iter()
-            .map(|preset| BootstrapAiPresetInput {
-                binding_purpose: preset.binding_purpose,
-                provider_kind: preset.owner_provider_kind,
-                model_catalog_id: preset.model_catalog_id,
-                preset_name: preset.preset_name,
-                system_prompt: preset.system_prompt,
-                temperature: preset.temperature,
-                top_p: preset.top_p,
-                max_output_tokens_override: preset.max_output_tokens_override,
-                extra_parameters_json: preset.extra_parameters_json,
+            .map(|binding| BootstrapAiBindingInput {
+                binding_purpose: binding.binding_purpose,
+                provider_kind: binding.owner_provider_kind,
+                model_catalog_id: binding.model_catalog_id,
+                system_prompt: binding.system_prompt,
+                temperature: binding.temperature,
+                top_p: binding.top_p,
+                max_output_tokens_override: binding.max_output_tokens_override,
+                extra_parameters_json: binding.extra_parameters_json,
             })
             .collect();
         self.apply_bootstrap_ai_setup(
@@ -778,84 +795,20 @@ impl AiCatalogService {
                     api_key: command.api_key,
                     base_url: command.base_url,
                 }],
-                preset_inputs,
+                binding_inputs,
                 updated_by_principal_id: command.updated_by_principal_id,
             },
         )
         .await
     }
 
-    /// Pre-creates model presets for every provider that exposes
-    /// `bootstrapPresets` in the provider catalog, regardless of whether
-    /// the operator has configured a credential or API key.
-    /// Presets are cheap — they are just named configurations over a
-    /// model catalog entry. Having them ready means that when the
-    /// operator later adds a credential, they can immediately assign
-    /// bindings to existing presets instead of creating them from
-    /// scratch.
-    ///
-    /// Runs idempotently at startup. Each preset is looked up by its
-    /// canonical name before creation, so re-running does not duplicate.
-    pub async fn seed_all_provider_presets(&self, state: &AppState) -> Result<usize, ApiError> {
-        let providers = self.list_provider_catalog(state).await?;
-        let models = self.list_model_catalog(state, None).await?;
-        let instance_scope =
-            AiScopeRef { scope_kind: AiScopeKind::Instance, workspace_id: None, library_id: None };
-        let mut presets = self.list_model_presets_exact(state, instance_scope).await?;
-        let mut created_count = 0usize;
-
-        for provider in &providers {
-            let descriptors =
-                resolve_bootstrap_provider_preset_descriptors(provider, &providers, &models)?;
-            if descriptors.is_empty() {
-                continue;
-            }
-
-            for descriptor in descriptors {
-                let input = BootstrapAiPresetInput {
-                    binding_purpose: descriptor.binding_purpose,
-                    provider_kind: descriptor.owner_provider_kind,
-                    model_catalog_id: descriptor.model_catalog_id,
-                    preset_name: descriptor.preset_name,
-                    system_prompt: descriptor.system_prompt,
-                    temperature: descriptor.temperature,
-                    top_p: descriptor.top_p,
-                    max_output_tokens_override: descriptor.max_output_tokens_override,
-                    extra_parameters_json: descriptor.extra_parameters_json,
-                };
-                let preset_count_before = presets.len();
-                let _ =
-                    ensure_bootstrap_model_preset(self, state, &input, &mut presets, None).await?;
-                if presets.len() > preset_count_before {
-                    created_count += 1;
-                }
-            }
-        }
-
-        if created_count > 0 {
-            tracing::info!(
-                stage = "bootstrap",
-                presets = created_count,
-                "seeded model presets for all providers",
-            );
-        }
-        Ok(created_count)
-    }
-
     /// Idempotently ensure every env-keyed provider has an instance-scope
-    /// "Bootstrap <DisplayName>" credential.
+    /// "Bootstrap <DisplayName>" account.
     ///
-    /// The legacy `apply_configured_bootstrap_ai_setup` exits early when a
-    /// single chosen provider doesn't cover all binding purposes, so newly
-    /// added `IRONRAG_*_API_KEY` values were dropped on subsequent restarts
-    /// (only the first-claim provider got a credential). This method runs
-    /// independent of binding/preset selection and creates one credential
+    /// Runs independent of binding selection and creates one account
     /// per env-keyed provider; existing rows with the canonical label are
     /// skipped (returning the count of newly created rows).
-    pub async fn ensure_env_provider_credentials(
-        &self,
-        state: &AppState,
-    ) -> Result<usize, ApiError> {
+    pub async fn ensure_env_ai_accounts(&self, state: &AppState) -> Result<usize, ApiError> {
         let Some(configured_ai) = state.ui_bootstrap_ai_setup.as_ref() else {
             return Ok(0);
         };
@@ -864,7 +817,7 @@ impl AiCatalogService {
         }
         let providers = self.list_provider_catalog(state).await?;
         let existing = self
-            .list_provider_credentials_exact(
+            .list_accounts_exact(
                 state,
                 AiScopeRef {
                     scope_kind: AiScopeKind::Instance,
@@ -884,7 +837,7 @@ impl AiCatalogService {
             if existing.iter().any(|c| c.provider_catalog_id == provider.id && c.label == label) {
                 continue;
             }
-            let command = CreateProviderCredentialCommand {
+            let command = CreateAiAccountCommand {
                 scope_kind: AiScopeKind::Instance,
                 workspace_id: None,
                 library_id: None,
@@ -894,7 +847,7 @@ impl AiCatalogService {
                 base_url: None,
                 created_by_principal_id: None,
             };
-            match self.create_provider_credential(state, command).await {
+            match self.create_account(state, command).await {
                 Ok(_) => created += 1,
                 Err(error) if is_provider_credential_validation_error(&error) => {
                     skipped += 1;
@@ -902,20 +855,20 @@ impl AiCatalogService {
                         stage = "bootstrap",
                         provider_kind = %secret.provider_kind,
                         error = %error,
-                        "skipped env-keyed provider credential",
+                        "skipped env-keyed provider account",
                     );
                 }
                 Err(error) => return Err(error),
             }
         }
         if created > 0 {
-            tracing::info!(stage = "bootstrap", created, "ensured env-keyed provider credentials",);
+            tracing::info!(stage = "bootstrap", created, "ensured env-keyed provider accounts",);
         }
         if skipped > 0 {
             tracing::warn!(
                 stage = "bootstrap",
                 skipped,
-                "some env-keyed provider credentials could not be validated",
+                "some env-keyed provider accounts could not be validated",
             );
         }
         Ok(created)
@@ -933,10 +886,10 @@ impl AiCatalogService {
         };
         let providers = self.list_provider_catalog(state).await?;
         let models = self.list_model_catalog(state, None).await?;
-        let preset_inputs =
-            resolve_configured_bootstrap_preset_inputs(configured_ai, &providers, &models)?;
-        if preset_inputs.is_empty()
-            || !bootstrap_preset_inputs_cover_required_purposes(&preset_inputs)
+        let binding_inputs =
+            resolve_configured_bootstrap_binding_inputs(configured_ai, &providers, &models)?;
+        if binding_inputs.is_empty()
+            || !bootstrap_binding_inputs_cover_required_purposes(&binding_inputs)
         {
             return Ok(false);
         }
@@ -952,7 +905,7 @@ impl AiCatalogService {
                         base_url: None,
                     })
                     .collect(),
-                preset_inputs,
+                binding_inputs,
                 updated_by_principal_id,
             },
         )
@@ -967,24 +920,23 @@ impl AiCatalogService {
     ) -> Result<(), ApiError> {
         let providers = self.list_provider_catalog(state).await?;
         let models = self.list_model_catalog(state, None).await?;
-        let preset_inputs =
-            normalize_bootstrap_preset_inputs(&command.preset_inputs, &providers, &models)?;
-        validate_bootstrap_preset_inputs_cover_required_purposes(&preset_inputs)?;
+        let binding_inputs =
+            normalize_bootstrap_binding_inputs(&command.binding_inputs, &providers, &models)?;
+        validate_bootstrap_binding_inputs_cover_required_purposes(&binding_inputs)?;
 
-        for input in &preset_inputs {
+        for input in &binding_inputs {
             tracing::info!(stage = "bootstrap", provider_kind = %input.provider_kind, "AI provider selected for bootstrap");
         }
 
         let instance_scope =
             AiScopeRef { scope_kind: AiScopeKind::Instance, workspace_id: None, library_id: None };
-        let existing_credentials =
-            self.list_provider_credentials_exact(state, instance_scope).await?;
+        let existing_accounts = self.list_accounts_exact(state, instance_scope).await?;
         let provider_credentials = bootstrap_provider_credential_map(
             state.ui_bootstrap_ai_setup.as_ref(),
             &command.credentials,
         );
-        let mut credentials_by_provider = std::collections::HashMap::new();
-        for provider_kind in preset_inputs
+        let mut accounts_by_provider = std::collections::HashMap::new();
+        for provider_kind in binding_inputs
             .iter()
             .map(|selection| selection.provider_kind.as_str())
             .collect::<std::collections::BTreeSet<_>>()
@@ -993,36 +945,35 @@ impl AiCatalogService {
                 providers.iter().find(|entry| entry.provider_kind == provider_kind).ok_or_else(
                     || ApiError::resource_not_found("provider_catalog", provider_kind.to_string()),
                 )?;
-            let credential = ensure_bootstrap_provider_credential(
+            let account = ensure_bootstrap_provider_account(
                 self,
                 state,
                 provider,
                 provider_credentials.get(provider_kind).cloned(),
-                &existing_credentials,
+                &existing_accounts,
                 command.updated_by_principal_id,
             )
             .await?;
             // Clone required: the HashMap outlives the `providers` borrow used later.
-            credentials_by_provider.insert(provider.provider_kind.clone(), credential);
+            accounts_by_provider.insert(provider.provider_kind.clone(), account);
         }
 
-        for (provider_kind, credential) in &credentials_by_provider {
+        for (provider_kind, account) in &accounts_by_provider {
             let provider =
                 providers.iter().find(|entry| entry.provider_kind == *provider_kind).ok_or_else(
                     || ApiError::resource_not_found("provider_catalog", provider_kind.clone()),
                 )?;
-            validate_bootstrap_model_list_preset_inputs(
+            validate_bootstrap_model_list_binding_inputs(
                 provider,
-                credential,
-                &preset_inputs,
+                account,
+                &binding_inputs,
                 &models,
             )
             .await?;
         }
 
-        let mut presets = self.list_model_presets_exact(state, instance_scope).await?;
-        let mut preset_ids_by_purpose = Vec::new();
-        for selection in &preset_inputs {
+        let mut bindings = self.list_bindings(state, instance_scope).await?;
+        for selection in &binding_inputs {
             let provider = providers
                 .iter()
                 .find(|entry| entry.provider_kind == selection.provider_kind)
@@ -1042,43 +993,17 @@ impl AiCatalogService {
                     "bootstrap model selection must belong to the selected provider".to_string(),
                 ));
             }
-            let preset_id = ensure_bootstrap_model_preset(
+            let account_id = accounts_by_provider
+                .get(&selection.provider_kind)
+                .map(|account| account.id)
+                .ok_or_else(|| {
+                    ApiError::BadRequest("bootstrap account was not created".to_string())
+                })?;
+            ensure_bootstrap_binding(
                 self,
                 state,
                 selection,
-                &mut presets,
-                command.updated_by_principal_id,
-            )
-            .await?
-            .id;
-            preset_ids_by_purpose.push((
-                selection.binding_purpose,
-                provider.provider_kind.clone(),
-                preset_id,
-            ));
-        }
-
-        let mut bindings = self.list_binding_assignments(state, instance_scope).await?;
-        for selection in &preset_inputs {
-            let (_, provider_kind, model_preset_id) = preset_ids_by_purpose
-                .iter()
-                .find(|(purpose, _, _)| *purpose == selection.binding_purpose)
-                .cloned()
-                .ok_or_else(|| {
-                    ApiError::BadRequest("bootstrap binding preset was not created".to_string())
-                })?;
-            let provider_credential_id = credentials_by_provider
-                .get(&provider_kind)
-                .map(|credential| credential.id)
-                .ok_or_else(|| {
-                    ApiError::BadRequest("bootstrap credential was not created".to_string())
-                })?;
-            ensure_bootstrap_binding_assignment(
-                self,
-                state,
-                selection.binding_purpose,
-                provider_credential_id,
-                model_preset_id,
+                account_id,
                 &mut bindings,
                 command.updated_by_principal_id,
             )
@@ -1087,7 +1012,7 @@ impl AiCatalogService {
 
         tracing::info!(
             stage = "bootstrap",
-            presets_count = preset_inputs.len(),
+            bindings_count = binding_inputs.len(),
             "bootstrap bundle applied"
         );
 
@@ -1118,12 +1043,12 @@ impl AiCatalogService {
         binding_purpose: AiBindingPurpose,
     ) -> Result<Option<ResolvedRuntimeBinding>, ApiError> {
         // Fan out the two independent PG lookups. The library row and the
-        // effective binding assignment both key off `library_id` only —
-        // neither feeds the other — so running them sequentially used to
-        // pay 2× round-trips for no reason.
+        // effective binding both key off `library_id` only — neither feeds
+        // the other — so running them sequentially used to pay 2× round-trips
+        // for no reason.
         let (library_result, binding_result) = tokio::join!(
             catalog_repository::get_library_by_id(&state.persistence.postgres, library_id),
-            ai_repository::get_effective_binding_assignment_by_purpose(
+            ai_repository::get_effective_binding_by_purpose(
                 &state.persistence.postgres,
                 library_id,
                 binding_purpose_key(binding_purpose),
@@ -1150,11 +1075,10 @@ impl AiCatalogService {
         state: &AppState,
         binding_id: Uuid,
     ) -> Result<ResolvedRuntimeBinding, ApiError> {
-        let binding =
-            ai_repository::get_binding_assignment_by_id(&state.persistence.postgres, binding_id)
-                .await
-                .map_err(|e| ApiError::internal_with_log(e, "internal"))?
-                .ok_or_else(|| ApiError::resource_not_found("library_binding", binding_id))?;
+        let binding = ai_repository::get_binding_by_id(&state.persistence.postgres, binding_id)
+            .await
+            .map_err(|e| ApiError::internal_with_log(e, "internal"))?
+            .ok_or_else(|| ApiError::resource_not_found("library_binding", binding_id))?;
         let workspace_id = binding.workspace_id.unwrap_or_else(Uuid::nil);
         let library_id = binding.library_id.unwrap_or_else(Uuid::nil);
         self.resolve_runtime_binding_by_row(state, binding, workspace_id, library_id).await
@@ -1163,34 +1087,29 @@ impl AiCatalogService {
     async fn resolve_runtime_binding_by_row(
         &self,
         state: &AppState,
-        binding: ai_repository::AiBindingAssignmentRow,
+        binding: ai_repository::AiBindingRow,
         workspace_id: Uuid,
         library_id: Uuid,
     ) -> Result<ResolvedRuntimeBinding, ApiError> {
-        // First parallel hop: credential ⟂ preset (both keyed off `binding` only).
-        let (credential_result, preset_result) = tokio::join!(
-            self.get_provider_credential(state, binding.provider_credential_id),
-            self.get_model_preset(state, binding.model_preset_id),
+        // The account and the model are both independent of each other —
+        // the binding row already carries both foreign keys inline — so we
+        // resolve them in parallel. The provider depends on the resolved
+        // account, so it is fetched afterward.
+        let (account_result, model_result) = tokio::join!(
+            self.get_account(state, binding.account_id),
+            self.get_model_catalog(state, binding.model_catalog_id),
         );
-        let provider_credential = credential_result?;
-        let model_preset = preset_result?;
-        let binding_purpose = parse_binding_purpose(&binding.binding_purpose)?;
-        // Second parallel hop: provider catalog ⟂ model catalog. Provider
-        // depends on the resolved credential, model depends on the resolved
-        // preset, but the two catalog lookups are independent of each other.
-        let (provider_result, model_result) = tokio::join!(
-            self.get_provider_catalog(state, provider_credential.provider_catalog_id),
-            self.get_model_catalog(state, model_preset.model_catalog_id),
-        );
-        let provider = provider_result?;
+        let account = account_result?;
         let model = model_result?;
+        let binding_purpose = parse_binding_purpose(&binding.binding_purpose)?;
+        let provider = self.get_provider_catalog(state, account.provider_catalog_id).await?;
         if model.provider_catalog_id != provider.id {
             return Err(ApiError::BadRequest(
-                "binding links a provider credential to a model from another provider".to_string(),
+                "binding links a provider account to a model from another provider".to_string(),
             ));
         }
-        if provider_credential.credential_state != "active" {
-            return Err(ApiError::BadRequest("provider credential is not active".to_string()));
+        if account.credential_state != "active" {
+            return Err(ApiError::BadRequest("provider account is not active".to_string()));
         }
         validate_model_binding_purpose(binding_purpose, &model)?;
         validate_provider_capability_for_binding(&provider, binding_purpose)?;
@@ -1202,21 +1121,18 @@ impl AiCatalogService {
             binding_purpose,
             provider_catalog_id: provider.id,
             provider_kind: provider.provider_kind.clone(),
-            provider_base_url: runtime_provider_base_url(
-                &provider,
-                provider_credential.base_url.as_deref(),
-            )?,
+            provider_base_url: runtime_provider_base_url(&provider, account.base_url.as_deref())?,
             provider_api_style: provider.api_style.clone(),
-            credential_id: provider_credential.id,
-            api_key: provider_credential.api_key,
+            account_id: account.id,
+            api_key: account.api_key,
             model_catalog_id: model.id,
             model_name: model.model_name,
-            system_prompt: model_preset.system_prompt,
-            temperature: model_preset.temperature,
-            top_p: model_preset.top_p,
-            max_output_tokens_override: model_preset.max_output_tokens_override,
+            system_prompt: binding.system_prompt,
+            temperature: binding.temperature,
+            top_p: binding.top_p,
+            max_output_tokens_override: binding.max_output_tokens_override,
             extra_parameters_json: merge_provider_runtime_profile(
-                model_preset.extra_parameters_json,
+                binding.extra_parameters_json,
                 &provider.profile,
             ),
         })
@@ -1227,37 +1143,28 @@ impl AiCatalogService {
         state: &AppState,
         scope: AiScopeRef,
         binding_purpose: AiBindingPurpose,
-        provider_credential_id: Uuid,
-        model_preset_id: Uuid,
+        account_id: Uuid,
+        model_catalog_id: Uuid,
         binding_state: &str,
     ) -> Result<(), ApiError> {
-        let provider_credential =
-            self.get_provider_credential(state, provider_credential_id).await?;
-        let model_preset = self.get_model_preset(state, model_preset_id).await?;
-        let credential_scope = scope_ref_from_provider_credential(&provider_credential)?;
-        let preset_scope = scope_ref_from_model_preset(&model_preset)?;
-        if !scope_can_use_resource(scope, credential_scope) {
+        let account = self.get_account(state, account_id).await?;
+        let account_scope = scope_ref_from_account(&account)?;
+        if !scope_can_use_resource(scope, account_scope) {
             return Err(ApiError::BadRequest(
-                "binding cannot use a provider credential from an unrelated scope".to_string(),
-            ));
-        }
-        if !scope_can_use_resource(scope, preset_scope) {
-            return Err(ApiError::BadRequest(
-                "binding cannot use a model preset from an unrelated scope".to_string(),
+                "binding cannot use a provider account from an unrelated scope".to_string(),
             ));
         }
 
-        let provider =
-            self.get_provider_catalog(state, provider_credential.provider_catalog_id).await?;
-        let model = self.get_model_catalog(state, model_preset.model_catalog_id).await?;
+        let provider = self.get_provider_catalog(state, account.provider_catalog_id).await?;
+        let model = self.get_model_catalog(state, model_catalog_id).await?;
 
         if model.provider_catalog_id != provider.id {
             return Err(ApiError::BadRequest(
-                "binding links a provider credential to a model from another provider".to_string(),
+                "binding links a provider account to a model from another provider".to_string(),
             ));
         }
-        if provider_credential.credential_state != "active" {
-            return Err(ApiError::BadRequest("provider credential is not active".to_string()));
+        if account.credential_state != "active" {
+            return Err(ApiError::BadRequest("provider account is not active".to_string()));
         }
         validate_model_binding_purpose(binding_purpose, &model)?;
         validate_provider_capability_for_binding(&provider, binding_purpose)?;

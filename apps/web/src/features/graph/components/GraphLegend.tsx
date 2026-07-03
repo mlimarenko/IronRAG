@@ -139,7 +139,7 @@ function GraphLegendImpl({
     return (
       <button
         onClick={() => setLegendOpen(true)}
-        className="absolute top-3 left-3 glass-panel rounded-xl p-2 shadow-lifted cursor-pointer hover:bg-white/10 transition-all"
+        className="absolute left-3 top-3 cursor-pointer workbench-surface p-2 transition-colors hover:bg-muted"
         title={t('graph.showLegend')}
       >
         <Layers className="h-4 w-4 text-muted-foreground" />
@@ -148,28 +148,28 @@ function GraphLegendImpl({
   }
 
   return (
-    <div className="absolute top-3 left-3 bottom-3 max-h-[calc(100%-24px)] overflow-y-auto text-xs glass-panel rounded-xl shadow-lifted min-w-[150px] max-w-[250px] flex flex-col">
-      <div className="flex items-center gap-1 px-3 py-2 border-b border-white/10">
-        <span className="text-[11px] font-semibold text-muted-foreground uppercase tracking-wider flex-1">
+    <div className="absolute bottom-3 left-3 top-3 flex max-h-[calc(100%-24px)] min-w-[150px] max-w-[250px] flex-col overflow-y-auto workbench-surface text-xs">
+      <div className="flex items-center gap-1 border-b px-3 py-2">
+        <span className="section-label flex-1">
           {t('graph.legend')}
         </span>
         <button
           onClick={handleShowAll}
-          className="p-1 rounded hover:bg-white/10 cursor-pointer transition-colors"
+          className="cursor-pointer rounded p-1 transition-colors hover:bg-muted"
           title={t('graph.showAll')}
         >
           <Eye className="h-3.5 w-3.5 text-muted-foreground" />
         </button>
         <button
           onClick={handleInvert}
-          className="p-1 rounded hover:bg-white/10 cursor-pointer transition-colors"
+          className="cursor-pointer rounded p-1 transition-colors hover:bg-muted"
           title={t('graph.invert')}
         >
           <RotateCcw className="h-3.5 w-3.5 text-muted-foreground" />
         </button>
         <button
           onClick={() => setLegendOpen(false)}
-          className="p-1 rounded hover:bg-white/10 cursor-pointer transition-colors"
+          className="cursor-pointer rounded p-1 transition-colors hover:bg-muted"
           title={t('graph.hideLegend')}
         >
           <EyeOff className="h-3.5 w-3.5 text-muted-foreground" />
@@ -197,7 +197,7 @@ function GraphLegendImpl({
             <div key={type} className={`mb-0.5 ${isHidden ? 'opacity-35' : ''}`}>
               <button
                 className={`flex items-center gap-1.5 w-full px-2 py-1 rounded-md transition-all cursor-pointer ${
-                  isHidden ? 'line-through' : 'hover:bg-white/10'
+                  isHidden ? 'line-through' : 'hover:bg-muted'
                 }`}
                 onClick={(e) => handleTypeClick(type, e.ctrlKey || e.metaKey)}
                 title={t(`graph.nodeTypes.${type}`)}
@@ -218,10 +218,10 @@ function GraphLegendImpl({
                       return (
                         <button
                           key={sub}
-                          className={`text-[10px] whitespace-nowrap cursor-pointer rounded px-1 py-0.5 transition-colors ${
+                          className={`text-2xs whitespace-nowrap cursor-pointer rounded px-1 py-0.5 transition-colors ${
                             isSubHidden
                               ? 'opacity-35 line-through text-muted-foreground'
-                              : 'text-muted-foreground hover:bg-white/10'
+                              : 'text-muted-foreground hover:bg-muted'
                           }`}
                           onClick={(e) => {
                             e.stopPropagation();
@@ -242,7 +242,7 @@ function GraphLegendImpl({
                   {subs.length > SUBTYPE_PREVIEW_LIMIT && (
                     <button
                       type="button"
-                      className="mt-1 inline-flex h-6 items-center rounded-md px-1.5 text-[10px] font-medium text-muted-foreground transition-colors hover:bg-white/10 hover:text-foreground"
+                      className="mt-1 inline-flex h-6 items-center rounded-md px-1.5 text-2xs font-medium text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
                       onClick={(e) => {
                         e.stopPropagation();
                         toggleGroupExpanded(type);

@@ -94,7 +94,7 @@ function VerificationChipImpl({ t, state, warnings = [], className }: Verificati
         )}
       </button>
       {hasWarnings && expanded && (
-        <ul className="animate-fade-in space-y-1 rounded-xl border border-border/60 bg-card px-3 py-2.5 text-xs leading-relaxed text-muted-foreground shadow-soft">
+        <ul className="animate-fade-in space-y-1 workbench-surface border-border/60 px-3 py-2.5 text-xs leading-relaxed text-muted-foreground">
           {warnings.map((warning, index) => (
             <li key={index} className="flex gap-1.5">
               <span aria-hidden="true" className={cn('mt-1.5 h-1 w-1 shrink-0 rounded-full', tone.icon)} />

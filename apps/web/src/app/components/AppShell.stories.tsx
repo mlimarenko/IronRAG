@@ -8,20 +8,54 @@ import { AppShell } from "./AppShell";
 function makeSession(
   libraries: NonNullable<SessionResolveResponse["shellBootstrap"]>["libraries"],
   workspaces: NonNullable<SessionResolveResponse["shellBootstrap"]>["workspaces"] = [
-    { id: "ws-default", slug: "default", name: "Default workspace" },
+    { id: "ws-default", slug: "default", name: "Default workspace", lifecycleState: "active" },
   ],
 ): SessionResolveResponse {
   return {
     mode: "authenticated",
     locale: "en",
-    session: { id: "storybook-session", expiresAt: "2026-05-05T12:00:00Z" },
+    session: {
+      sessionId: "storybook-session",
+      expiresAt: "2026-05-05T12:00:00Z",
+      user: {
+        displayName: "Admin User",
+        email: "admin@example.com",
+        login: "admin",
+        principalId: "principal-admin",
+      },
+    },
     me: {
-      principal: { id: "principal-admin", displayLabel: "Admin User" },
-      user: { login: "admin", displayName: "Admin User" },
+      effectiveGrants: [],
+      principal: {
+        id: "principal-admin",
+        displayLabel: "Admin User",
+        principalKind: "user",
+        status: "active",
+      },
+      user: {
+        login: "admin",
+        displayName: "Admin User",
+        principalId: "principal-admin",
+        role: "admin",
+      },
+      workspaceMemberships: [],
     },
     shellBootstrap: {
-      workspaces,
+      capabilities: [],
+      effectiveGrants: [],
       libraries,
+      locale: "en",
+      viewer: {
+        accessLabel: "Admin User",
+        displayName: "Admin User",
+        isAdmin: true,
+        login: "admin",
+        principalId: "principal-admin",
+        role: "admin",
+      },
+      warnings: [],
+      workspaceMemberships: [],
+      workspaces,
     },
     bootstrapStatus: { setupRequired: false },
     message: null,
@@ -44,6 +78,7 @@ const defaultLibraries: NonNullable<SessionResolveResponse["shellBootstrap"]>["l
     slug: "default-library",
     name: "Default library",
     ingestionReady: true,
+    lifecycleState: "active",
     missingBindingPurposes: [],
   },
 ];
@@ -106,6 +141,7 @@ export const LibraryWarning: Story = {
             slug: "warning-library",
             name: "Compliance library",
             ingestionReady: true,
+            lifecycleState: "active",
             missingBindingPurposes: ["query_answer", "embed_chunk"],
           },
         ]),

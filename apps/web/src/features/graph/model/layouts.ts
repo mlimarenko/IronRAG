@@ -202,7 +202,9 @@ function layoutSectors(graph: Graph): void {
   let cursor = -Math.PI / 2;
 
   groups.forEach((group, index) => {
-    const sectorAngle = usableAngle * (weights[index] / totalWeight);
+    const weight = weights[index];
+    if (weight === undefined) return;
+    const sectorAngle = usableAngle * (weight / totalWeight);
     const startAngle = cursor;
     const endAngle = cursor + sectorAngle;
     layoutNodesInSector(graph, group.nodes, startAngle, endAngle, innerRadius, rowGap, arcGap);
@@ -385,6 +387,7 @@ function layoutHubs(graph: Graph): void {
     });
 
     const fallbackHub = hubs[stableHash(`${getNodeType(graph, node)}:${getNodeLabel(graph, node)}`) % hubCount];
+    if (fallbackHub === undefined) continue;
     const owner = selectedHub ?? fallbackHub;
     assignments.get(owner)?.push(node);
   }
@@ -478,6 +481,7 @@ function collectDepthLayers(graph: Graph, seeds: string[], maxDepth: number): st
   while (head < queue.length) {
     const current = queue[head];
     head += 1;
+    if (current === undefined) continue;
     const currentDepth = depthByNode.get(current) ?? 0;
     if (currentDepth >= maxDepth) continue;
     graph.forEachNeighbor(current, (neighbor) => {
@@ -489,7 +493,7 @@ function collectDepthLayers(graph: Graph, seeds: string[], maxDepth: number): st
 
   graph.forEachNode((node) => {
     const depth = depthByNode.get(node);
-    layers[depth == null ? maxDepth + 1 : Math.min(depth, maxDepth)].push(node);
+    layers[depth == null ? maxDepth + 1 : Math.min(depth, maxDepth)]?.push(node);
   });
 
   return layers.map((layer) => sortNodesByImportance(graph, layer));
@@ -543,6 +547,7 @@ function assignRadialSectors(graph: Graph, seeds: string[], maxDepth: number): M
   while (head < queue.length) {
     const current = queue[head];
     head += 1;
+    if (current === undefined) continue;
     const currentAssignment = assignments.get(current);
     if (!currentAssignment || currentAssignment.depth >= maxDepth) continue;
     graph.forEachNeighbor(current, (neighbor) => {
@@ -585,7 +590,7 @@ function layoutRadial(graph: Graph): void {
   graph.forEachNode((node) => {
     const assignment = assignments.get(node);
     if (!assignment) return;
-    groups[assignment.seedIndex][Math.min(assignment.depth, maxDepth + 1)].push(node);
+    groups[assignment.seedIndex]?.[Math.min(assignment.depth, maxDepth + 1)]?.push(node);
   });
 
   const orderRoot = Math.sqrt(graph.order);
@@ -705,6 +710,7 @@ function findConnectedComponents(graph: Graph): string[][] {
     while (head < queue.length) {
       const current = queue[head];
       head += 1;
+      if (current === undefined) continue;
       component.push(current);
 
       graph.forEachNeighbor(current, (neighbor) => {
@@ -839,6 +845,7 @@ function layoutComponents(graph: Graph): void {
       new Array(components.length);
     for (let index = 0; index < components.length; index += 1) {
       const component = components[index];
+      if (!component) continue;
       const side = component.radius * 2 + gapBetweenCells;
       if (cursorX > 0 && cursorX + side > targetRowWidth) {
         cursorX = 0;

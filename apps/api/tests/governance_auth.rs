@@ -33,7 +33,6 @@ use ironrag_backend::{
 
 const TEST_TOKEN_PREFIX: &str = "governance";
 const TEST_PROVIDER_CREDENTIAL_LABEL: &str = "governance-provider-credential";
-const TEST_MODEL_PRESET_NAME: &str = "governance-model-preset";
 const TEST_BINDING_PURPOSE: &str = "query_answer";
 
 #[derive(Clone)]
@@ -1011,7 +1010,7 @@ async fn library_scoped_binding_admin_can_create_library_binding() -> Result<()>
             .mint_workspace_token(fixture.workspace_id, "library-binding-admin", &["binding_admin"])
             .await?;
 
-        let credential = ai_repository::create_provider_credential(
+        let account = ai_repository::create_account(
             fixture.pool(),
             "workspace",
             Some(fixture.workspace_id),
@@ -1023,35 +1022,18 @@ async fn library_scoped_binding_admin_can_create_library_binding() -> Result<()>
             None,
         )
         .await
-        .context("failed to create provider credential for governance auth test")?;
-
-        let preset = ai_repository::create_model_preset(
-            fixture.pool(),
-            "workspace",
-            Some(fixture.workspace_id),
-            None,
-            fixture.model_catalog_id,
-            TEST_MODEL_PRESET_NAME,
-            None,
-            None,
-            None,
-            None,
-            json!({}),
-            None,
-        )
-        .await
-        .context("failed to create model preset for governance auth test")?;
+        .context("failed to create AI account for governance auth test")?;
 
         let (status, body) = fixture
             .rest_post(
                 &token,
-                "/v1/ai/library-bindings",
+                "/v1/ai/bindings",
                 json!({
                     "workspaceId": fixture.workspace_id,
                     "libraryId": fixture.library_id,
                     "bindingPurpose": TEST_BINDING_PURPOSE,
-                    "providerCredentialId": credential.id,
-                    "modelPresetId": preset.id,
+                    "accountId": account.id,
+                    "modelCatalogId": fixture.model_catalog_id,
                 }),
             )
             .await?;
@@ -1059,11 +1041,11 @@ async fn library_scoped_binding_admin_can_create_library_binding() -> Result<()>
         assert_eq!(body["workspaceId"], json!(fixture.workspace_id));
         assert_eq!(body["libraryId"], json!(fixture.library_id));
         assert_eq!(body["bindingPurpose"], json!(TEST_BINDING_PURPOSE));
-        assert_eq!(body["providerCredentialId"], json!(credential.id));
-        assert_eq!(body["modelPresetId"], json!(preset.id));
+        assert_eq!(body["accountId"], json!(account.id));
+        assert_eq!(body["modelCatalogId"], json!(fixture.model_catalog_id));
         assert_eq!(body["bindingState"], json!("active"));
 
-        let library_bindings = ai_repository::list_binding_assignments_exact(
+        let library_bindings = ai_repository::list_bindings_exact(
             fixture.pool(),
             "library",
             Some(fixture.workspace_id),

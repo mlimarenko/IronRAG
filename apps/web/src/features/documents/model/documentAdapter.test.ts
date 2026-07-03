@@ -25,7 +25,12 @@ describe('formatDocumentTypeLabel', () => {
 });
 
 describe('getDocumentProcessingDurationMs', () => {
-  function buildDocument(overrides: Partial<DocumentItem> = {}): DocumentItem {
+  // Widened so a test can explicitly override a field back to `undefined`
+  // (e.g. "never started processing") — `Partial<DocumentItem>` alone
+  // rejects an explicit `undefined` value under `exactOptionalPropertyTypes`.
+  type DocumentItemOverrides = { [K in keyof DocumentItem]?: DocumentItem[K] | undefined };
+
+  function buildDocument(overrides: DocumentItemOverrides = {}): DocumentItem {
     return {
       id: 'doc-1',
       fileName: 'inventory.xlsx',
@@ -37,7 +42,7 @@ describe('getDocumentProcessingDurationMs', () => {
       readiness: 'processing',
       processingStartedAt: '2026-04-10T12:00:05Z',
       ...overrides,
-    };
+    } as DocumentItem;
   }
 
   it('ticks from processingStartedAt through now while the worker holds the job', () => {
@@ -99,11 +104,18 @@ describe('getDocumentProcessingDurationMs', () => {
 });
 
 describe('mapListItem', () => {
-  function buildRaw(overrides: Partial<DocumentListItem> = {}): DocumentListItem {
+  // Widened for the same reason as `DocumentItemOverrides` above — some
+  // tests override a field back to `undefined`/omit it, which
+  // `Partial<DocumentListItem>` alone rejects under
+  // `exactOptionalPropertyTypes`.
+  type DocumentListItemOverrides = { [K in keyof DocumentListItem]?: DocumentListItem[K] | undefined };
+
+  function buildRaw(overrides: DocumentListItemOverrides = {}): DocumentListItem {
     return {
       id: 'doc-1',
       libraryId: 'lib-1',
       workspaceId: 'ws-1',
+      externalKey: 'doc-1',
       fileName: 'inventory.xlsx',
       fileType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
       fileSize: 2048,
@@ -117,7 +129,7 @@ describe('mapListItem', () => {
       cost: '0',
       costCurrencyCode: 'USD',
       ...overrides,
-    };
+    } as DocumentListItem;
   }
 
   it('passes server-derived status and readiness through verbatim', () => {

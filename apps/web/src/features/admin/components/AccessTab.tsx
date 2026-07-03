@@ -29,9 +29,13 @@ import type {
   CatalogWorkspaceResponse,
   IamPermissionKind,
   MintTokenResponse,
+  TokenGrantSummaryResponse,
   TokenResponse,
 } from '@/shared/api/generated';
 import { DataState } from '@/shared/components/DataState';
+import { RowActionsMenu, type RowAction } from '@/shared/components/layout/RowActionsMenu';
+import { WorkbenchEmptyState } from '@/shared/components/layout/WorkbenchEmptyState';
+import { StatusBadge, type StatusTone } from '@/shared/components/StatusBadge';
 import { Badge } from '@/shared/components/ui/badge';
 import { Button } from '@/shared/components/ui/button';
 import { Checkbox } from '@/shared/components/ui/checkbox';
@@ -141,10 +145,10 @@ type AccessTabProps = {
   active: boolean;
 };
 
-function tokenStatusCls(status: string): string {
-  if (status === 'active') return 'status-ready';
-  if (status === 'expired') return 'status-warning';
-  return 'status-failed';
+function tokenStatusTone(status: string): StatusTone {
+  if (status === 'active') return 'ready';
+  if (status === 'expired') return 'warning';
+  return 'failed';
 }
 
 function humanizeTokenStatus(status: APIToken['status'], t: TFunction): string {
@@ -234,6 +238,10 @@ function uniquePermissionLabels(token: APIToken, t: TFunction): string[] {
   return Array.from(new Set(token.grants.map((grant) => permissionLabel(grant.permission, t))));
 }
 
+function tokenLastUsedLabel(token: APIToken, t: TFunction): string {
+  return token.lastUsedAt ? new Date(token.lastUsedAt).toLocaleDateString() : t('admin.never');
+}
+
 function buildOptimisticMintedToken({
   label,
   libraryIds,
@@ -269,7 +277,7 @@ function buildOptimisticMintedToken({
           displayName: library.displayName ?? library.id,
         }))
     : [];
-  const grants = permissionKinds.flatMap((permissionKind) => {
+  const grants = permissionKinds.flatMap<TokenGrantSummaryResponse>((permissionKind) => {
     if (scope === 'system') {
       return [{
         permissionKind,
@@ -282,7 +290,7 @@ function buildOptimisticMintedToken({
         permissionKind,
         resourceId: workspaceId,
         resourceKind: 'workspace' as const,
-        workspace: scopeWorkspace,
+        ...(scopeWorkspace ? { workspace: scopeWorkspace } : {}),
       }];
     }
     return scopeLibraries.map((library) => ({
@@ -290,7 +298,7 @@ function buildOptimisticMintedToken({
       permissionKind,
       resourceId: library.id,
       resourceKind: 'library' as const,
-      workspace: scopeWorkspace,
+      ...(scopeWorkspace ? { workspace: scopeWorkspace } : {}),
     }));
   });
 
@@ -668,6 +676,30 @@ export function AccessTab({ t, activeWorkspaceId, active }: AccessTabProps) {
     deleteTokenMutation.mutate(deleteToken);
   };
 
+  const tokenRowActions = (token: APIToken): RowAction[] => {
+    const actions: RowAction[] = [];
+    if (token.status === 'active') {
+      actions.push({
+        key: 'revoke',
+        label: t('admin.revokeToken'),
+        icon: <Ban className="h-3.5 w-3.5" />,
+        onSelect: () => handleRevoke(token),
+        disabled: revokeTokenMutation.isPending,
+      });
+    }
+    if (token.status === 'revoked') {
+      actions.push({
+        key: 'delete',
+        label: t('admin.deleteToken'),
+        icon: <Trash2 className="h-3.5 w-3.5" />,
+        onSelect: () => setDeleteToken(token),
+        destructive: true,
+        disabled: deleteTokenMutation.isPending,
+      });
+    }
+    return actions;
+  };
+
   const filteredTokens = tokens.filter(
     (token) => !tokenSearch || token.label.toLowerCase().includes(tokenSearch.toLowerCase()),
   );
@@ -690,12 +722,12 @@ export function AccessTab({ t, activeWorkspaceId, active }: AccessTabProps) {
 
   return (
     <>
-      <div className="flex h-full min-h-0 flex-col overflow-hidden">
+      <div className="flex flex-col">
         <div className="mb-5 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
           <div className="flex gap-4 text-xs font-semibold">
             {loading ? (
               <span className="text-muted-foreground flex items-center gap-1.5">
-                <Loader2 className="h-3 w-3 animate-spin" /> {t('admin.loading')}
+                <Loader2 className="h-3.5 w-3.5 animate-spin" /> {t('admin.loading')}
               </span>
             ) : loadError ? (
               <span className="text-status-failed">{loadError}</span>
@@ -739,61 +771,153 @@ export function AccessTab({ t, activeWorkspaceId, active }: AccessTabProps) {
           </div>
         </div>
 
-        <div className="grid gap-6 xl:min-h-0 xl:flex-1 xl:grid-cols-[minmax(0,1fr)_380px] xl:items-stretch xl:overflow-hidden">
-          <div className="min-w-0 space-y-1.5 xl:min-h-0 xl:overflow-y-auto xl:pr-1">
-            {filteredTokens.map((token) => (
-              <button
-                key={token.id}
-                className={`w-full rounded-xl border p-4 text-left transition-all duration-200 ${
-                  selectedToken?.id === token.id
-                    ? 'border-primary/15 bg-card shadow-lifted'
-                    : 'border-transparent hover:bg-accent/50 hover:shadow-soft'
-                }`}
-                onClick={() => setSelectedTokenId(token.id)}
-              >
-                <div className="flex items-start gap-3">
-                  <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-surface-sunken">
-                    <Key className="h-4 w-4 text-muted-foreground" />
-                  </div>
-                  <div className="min-w-0 flex-1">
-                    <div className="flex items-start justify-between gap-3">
-                      <div className="min-w-0">
-                        <div className="truncate text-sm font-bold">{token.label}</div>
-                        <div className="mt-1 flex flex-wrap items-center gap-x-1.5 gap-y-1 text-xs font-medium text-muted-foreground">
-                          <span className="font-mono">{token.tokenPrefix}...</span>
-                          <span className="text-border">&middot;</span>
-                          <span className="min-w-0 truncate">
-                            {tokenScopeLine(token, t)}
-                          </span>
+        <div className="grid gap-6 xl:grid-cols-[minmax(0,1fr)_380px] xl:items-start">
+          <div className="min-w-0">
+            <div className="space-y-3 p-3 xl:hidden">
+              {filteredTokens.map((token) => {
+                const selected = selectedToken?.id === token.id;
+                const actions = tokenRowActions(token);
+                return (
+                  <article
+                    key={token.id}
+                    aria-selected={selected}
+                    className={`workbench-surface p-4 transition-all ${
+                      selected ? 'border-primary/40 bg-primary/5' : ''
+                    }`}
+                  >
+                    <button
+                      type="button"
+                      className="w-full min-w-0 text-left"
+                      onClick={() => setSelectedTokenId(token.id)}
+                    >
+                      <div className="flex items-start justify-between gap-3">
+                        <div className="min-w-0">
+                          <div className="truncate text-sm font-bold">{token.label}</div>
+                          <div className="mt-1 font-mono text-xs text-muted-foreground">
+                            {token.tokenPrefix}...
+                          </div>
                         </div>
+                        <StatusBadge tone={tokenStatusTone(token.status)} className="shrink-0">
+                          {humanizeTokenStatus(token.status, t)}
+                        </StatusBadge>
                       </div>
-                      <span className={`status-badge shrink-0 ${tokenStatusCls(token.status)}`}>
-                        {humanizeTokenStatus(token.status, t)}
-                      </span>
-                    </div>
-                    <div className="mt-2 flex flex-wrap gap-1.5">
-                      {uniquePermissionLabels(token, t).slice(0, 3).map((label) => (
-                        <Badge key={label} variant="outline" className="max-w-full truncate">
-                          {label}
-                        </Badge>
-                      ))}
-                      {uniquePermissionLabels(token, t).length > 3 ? (
-                        <Badge variant="outline">+{uniquePermissionLabels(token, t).length - 3}</Badge>
-                      ) : null}
-                    </div>
-                  </div>
-                </div>
-              </button>
-            ))}
+                      <div className="mt-3 grid grid-cols-[auto_minmax(0,1fr)] gap-x-3 gap-y-1 text-xs">
+                        <span className="text-muted-foreground">{t('admin.scope')}</span>
+                        <span className="truncate font-semibold">{tokenScopeLine(token, t)}</span>
+                        <span className="text-muted-foreground">{t('admin.lastUsed')}</span>
+                        <span className="tabular-nums">{tokenLastUsedLabel(token, t)}</span>
+                      </div>
+                      <div className="mt-3 flex flex-wrap gap-1.5">
+                        {uniquePermissionLabels(token, t).slice(0, 3).map((label) => (
+                          <Badge key={label} variant="outline" className="max-w-full truncate">
+                            {label}
+                          </Badge>
+                        ))}
+                        {uniquePermissionLabels(token, t).length > 3 ? (
+                          <Badge variant="outline">+{uniquePermissionLabels(token, t).length - 3}</Badge>
+                        ) : null}
+                      </div>
+                    </button>
+                    {actions.length > 0 && (
+                      <div className="mt-4 flex justify-end">
+                        <RowActionsMenu
+                          actions={actions}
+                          className="w-full sm:w-8"
+                          label={t('documents.actions')}
+                        />
+                      </div>
+                    )}
+                  </article>
+                );
+              })}
+            </div>
+            <table className="hidden w-full min-w-[880px] table-fixed text-sm xl:table">
+              <colgroup>
+                <col className="w-[22%]" />
+                <col className="w-[16%]" />
+                <col className="w-[30%]" />
+                <col className="w-[12%]" />
+                <col className="w-[10%]" />
+                <col className="w-[10%]" />
+              </colgroup>
+              <thead className="sticky top-0 z-10 bg-card">
+                <tr className="border-b text-left">
+                  <th className="px-4 py-3 section-label">{t('admin.tokenLabel')}</th>
+                  <th className="px-4 py-3 section-label">{t('admin.scope')}</th>
+                  <th className="px-4 py-3 section-label">{t('admin.tokenPermissions')}</th>
+                  <th className="px-4 py-3 section-label">{t('admin.lastUsed')}</th>
+                  <th className="px-4 py-3 section-label">{t('admin.status')}</th>
+                  <th className="px-4 py-3 section-label text-right">{t('documents.actions')}</th>
+                </tr>
+              </thead>
+              <tbody>
+                {filteredTokens.map((token) => {
+                  const selected = selectedToken?.id === token.id;
+                  const actions = tokenRowActions(token);
+                  return (
+                    <tr
+                      key={token.id}
+                      aria-selected={selected}
+                      className={`cursor-pointer border-b border-border/50 transition-colors ${
+                        selected
+                          ? 'border-l-2 border-l-primary bg-primary/5'
+                          : 'hover:bg-accent/30'
+                      }`}
+                      onClick={() => setSelectedTokenId(token.id)}
+                    >
+                      <td className="px-4 py-3">
+                        <div className="max-w-md truncate font-semibold">{token.label}</div>
+                        <div className="mt-1 font-mono text-2xs text-muted-foreground">
+                          {token.tokenPrefix}...
+                        </div>
+                      </td>
+                      <td className="px-4 py-3 text-xs">
+                        <div className="font-semibold">{tokenScopeHeading(token, t)}</div>
+                        {token.scope.kind !== 'system' && (
+                          <div className="mt-1 truncate text-muted-foreground">
+                            {tokenScopeSummary(token, t)}
+                          </div>
+                        )}
+                      </td>
+                      <td className="px-4 py-3">
+                        <div className="flex flex-wrap gap-1.5">
+                          {uniquePermissionLabels(token, t).slice(0, 3).map((label) => (
+                            <Badge key={label} variant="outline" className="max-w-full truncate">
+                              {label}
+                            </Badge>
+                          ))}
+                          {uniquePermissionLabels(token, t).length > 3 ? (
+                            <Badge variant="outline">
+                              +{uniquePermissionLabels(token, t).length - 3}
+                            </Badge>
+                          ) : null}
+                        </div>
+                      </td>
+                      <td className="px-4 py-3 text-xs tabular-nums text-muted-foreground">
+                        {tokenLastUsedLabel(token, t)}
+                      </td>
+                      <td className="px-4 py-3">
+                        <StatusBadge tone={tokenStatusTone(token.status)}>
+                          {humanizeTokenStatus(token.status, t)}
+                        </StatusBadge>
+                      </td>
+                      <td className="px-4 py-3 text-right">
+                        {actions.length > 0 && (
+                          <RowActionsMenu actions={actions} label={t('documents.actions')} />
+                        )}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
             {!loading && !loadError && filteredTokens.length === 0 && (
-              <div className="text-sm text-muted-foreground text-center p-8">
-                {t('admin.noTokens')}
-              </div>
+              <WorkbenchEmptyState title={t('admin.noTokens')} />
             )}
           </div>
 
         {selectedToken && (
-          <aside className="w-full min-w-0 animate-slide-in-right xl:min-h-0 xl:overflow-y-auto">
+          <aside className="w-full min-w-0 animate-slide-in-right xl:sticky xl:top-0 xl:self-start">
             <div className="workbench-surface space-y-4 p-5">
               <div className="flex items-start justify-between gap-3">
                 <div className="min-w-0">
@@ -802,9 +926,9 @@ export function AccessTab({ t, activeWorkspaceId, active }: AccessTabProps) {
                     {tokenScopeLine(selectedToken, t)}
                   </p>
                 </div>
-                <span className={`status-badge shrink-0 ${tokenStatusCls(selectedToken.status)}`}>
+                <StatusBadge tone={tokenStatusTone(selectedToken.status)} className="shrink-0">
                   {humanizeTokenStatus(selectedToken.status, t)}
-                </span>
+                </StatusBadge>
               </div>
 
               {selectedToken.status === 'active' && (
@@ -831,10 +955,10 @@ export function AccessTab({ t, activeWorkspaceId, active }: AccessTabProps) {
                 </Button>
               )}
 
-              <div className="rounded-xl border bg-surface-sunken/70 p-4">
+              <div className="rounded-xl bg-surface-sunken/70 p-4">
                 <div className="space-y-4">
                   <div>
-                    <div className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+                    <div className="section-label">
                       {t('admin.prefix')}
                     </div>
                     <div className="mt-1 break-all font-mono text-xs font-bold">
@@ -842,7 +966,7 @@ export function AccessTab({ t, activeWorkspaceId, active }: AccessTabProps) {
                     </div>
                   </div>
                   <div>
-                    <div className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+                    <div className="section-label">
                       {t('admin.issuedBy')}
                     </div>
                     <div className="mt-1 break-words text-sm font-medium">
@@ -851,7 +975,7 @@ export function AccessTab({ t, activeWorkspaceId, active }: AccessTabProps) {
                   </div>
                   <div className="grid gap-3 sm:grid-cols-2">
                     <div>
-                      <div className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+                      <div className="section-label">
                         {t('admin.expires')}
                       </div>
                       <div className="mt-1 text-sm font-medium">
@@ -861,7 +985,7 @@ export function AccessTab({ t, activeWorkspaceId, active }: AccessTabProps) {
                       </div>
                     </div>
                     <div>
-                      <div className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+                      <div className="section-label">
                         {t('admin.lastUsed')}
                       </div>
                       <div className="mt-1 text-sm font-medium">
@@ -874,8 +998,8 @@ export function AccessTab({ t, activeWorkspaceId, active }: AccessTabProps) {
                 </div>
               </div>
 
-              <div className="rounded-xl border bg-surface-sunken/70 p-4">
-                <div className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+              <div className="rounded-xl bg-surface-sunken/70 p-4">
+                <div className="section-label">
                   {t('admin.scope')}
                 </div>
                 <div className="mt-1 text-sm font-semibold">
@@ -883,7 +1007,7 @@ export function AccessTab({ t, activeWorkspaceId, active }: AccessTabProps) {
                 </div>
                 {selectedToken.scope.workspace ? (
                   <div className="mt-3">
-                    <div className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+                    <div className="section-label">
                       {t('admin.tokenWorkspace')}
                     </div>
                     <div className="mt-1 break-words text-sm font-medium">
@@ -893,7 +1017,7 @@ export function AccessTab({ t, activeWorkspaceId, active }: AccessTabProps) {
                 ) : null}
                 {selectedToken.scope.libraries.length > 0 ? (
                   <div className="mt-3">
-                    <div className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+                    <div className="section-label">
                       {t('admin.tokenLibraries')}
                     </div>
                     <div className="mt-2 flex flex-wrap gap-2">
@@ -907,8 +1031,8 @@ export function AccessTab({ t, activeWorkspaceId, active }: AccessTabProps) {
                 ) : null}
               </div>
 
-              <div className="rounded-xl border bg-surface-sunken/70 p-4">
-                <div className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+              <div className="rounded-xl bg-surface-sunken/70 p-4">
+                <div className="section-label">
                   {t('admin.tokenPermissions')}
                 </div>
                 {selectedTokenPermissionGroups.length === 0 ? (
@@ -917,7 +1041,7 @@ export function AccessTab({ t, activeWorkspaceId, active }: AccessTabProps) {
                   <div className="mt-3 space-y-3">
                     {selectedTokenPermissionGroups.map(({ group, permissions }) => (
                       <div key={group}>
-                        <div className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+                        <div className="section-label">
                           {permissionGroupLabel(group, t)}
                         </div>
                         <div className="mt-2 flex flex-wrap gap-2">
@@ -1089,7 +1213,7 @@ export function AccessTab({ t, activeWorkspaceId, active }: AccessTabProps) {
                 <p className="mt-1 text-xs text-muted-foreground">
                   {t('admin.tokenLibrariesDesc')}
                 </p>
-                <div className="mt-2 space-y-1.5 max-h-40 overflow-y-auto p-3 border rounded-xl bg-surface-sunken">
+                <div className="mt-2 space-y-1.5 max-h-40 overflow-y-auto p-3 rounded-xl bg-surface-sunken">
                   <DataState
                     query={{ isLoading: tokenLibrariesLoading, error: tokenLibrariesError, data: tokenLibraries }}
                     emptyRender={
@@ -1141,8 +1265,8 @@ export function AccessTab({ t, activeWorkspaceId, active }: AccessTabProps) {
                   const groups = visiblePermGroups(tokenScope);
                   const implied = impliedPermissions(selectedPermissions);
                   return groups.map(({ group, perms }) => (
-                    <div key={group} className="border rounded-xl p-2.5 bg-surface-sunken space-y-1">
-                      <div className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground mb-1">
+                    <div key={group} className="rounded-xl p-2.5 bg-surface-sunken space-y-1">
+                      <div className="section-label mb-1">
                         {permissionGroupLabel(group, t)}
                       </div>
                       {perms.map((perm) => {

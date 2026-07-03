@@ -35,7 +35,6 @@ use ironrag_backend::{
 
 const TEST_TOKEN_PREFIX: &str = "audit-events";
 const TEST_PROVIDER_CREDENTIAL_LABEL: &str = "audit-events-provider-credential";
-const TEST_MODEL_PRESET_NAME: &str = "audit-events-model-preset";
 const TEST_BINDING_PURPOSE: &str = "query_answer";
 
 #[derive(Clone)]
@@ -892,7 +891,7 @@ async fn governance_actions_and_denials_append_expected_audit_subjects() -> Resu
         let credential_response = fixture
             .rest_post(
                 &workspace_admin,
-                "/v1/ai/credentials",
+                "/v1/ai/accounts",
                 json!({
                     "workspaceId": fixture.workspace_id,
                     "providerCatalogId": fixture.provider_catalog_id,
@@ -915,33 +914,16 @@ async fn governance_actions_and_denials_append_expected_audit_subjects() -> Resu
         assert_eq!(credential_subjects[0].subject_kind, "provider_credential");
         assert_eq!(credential_subjects[0].subject_id, credential_id);
 
-        let preset = ai_repository::create_model_preset(
-            fixture.pool(),
-            "workspace",
-            Some(fixture.workspace_id),
-            None,
-            fixture.model_catalog_id,
-            TEST_MODEL_PRESET_NAME,
-            None,
-            None,
-            None,
-            None,
-            json!({}),
-            None,
-        )
-        .await
-        .context("failed to create model preset for audit events test")?;
-
         let binding_response = fixture
             .rest_post(
                 &workspace_admin,
-                "/v1/ai/library-bindings",
+                "/v1/ai/bindings",
                 json!({
                     "workspaceId": fixture.workspace_id,
                     "libraryId": fixture.library_id,
                     "bindingPurpose": TEST_BINDING_PURPOSE,
-                    "providerCredentialId": credential_id,
-                    "modelPresetId": preset.id
+                    "accountId": credential_id,
+                    "modelCatalogId": fixture.model_catalog_id
                 }),
             )
             .await?;
@@ -1012,7 +994,7 @@ async fn governance_actions_and_denials_append_expected_audit_subjects() -> Resu
         let denied_response = fixture
             .rest_post(
                 &read_only,
-                "/v1/ai/credentials",
+                "/v1/ai/accounts",
                 json!({
                     "workspaceId": fixture.workspace_id,
                     "providerCatalogId": fixture.provider_catalog_id,

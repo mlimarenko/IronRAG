@@ -1,16 +1,15 @@
 import { describe, expect, it } from 'vitest';
 
 import type {
+  AIAccount,
   AIBindingAssignment,
-  AICredential,
   AIModelOption,
   AIPurpose,
   AIProvider,
   AIScopeKind,
-  ModelPreset,
 } from '@/shared/types';
 import {
-  isModelAvailableForCredential,
+  isModelAvailableForAccount,
   recommendAiConfigSection,
   summarizeAiReadiness,
   suggestBindingSelection,
@@ -50,15 +49,15 @@ function provider(overrides: Partial<AIProvider> = {}): AIProvider {
   };
 }
 
-function credential(overrides: Partial<AICredential> = {}): AICredential {
+function account(overrides: Partial<AIAccount> = {}): AIAccount {
   return {
-    id: 'credential-alpha',
+    id: 'account-alpha',
     scopeKind: 'instance',
     providerId: 'provider-alpha',
     providerName: 'Provider Alpha',
     providerKind: 'alpha',
     provider: provider(),
-    label: 'Credential Alpha',
+    label: 'Account Alpha',
     state: 'active',
     createdAt: '2026-01-01T00:00:00Z',
     updatedAt: '2026-01-02T00:00:00Z',
@@ -76,24 +75,7 @@ function model(overrides: Partial<AIModelOption> = {}): AIModelOption {
     modalityKind: 'text',
     allowedBindingPurposes: ['query_answer'],
     availabilityState: 'available',
-    availableCredentialIds: ['credential-alpha'],
-    ...overrides,
-  };
-}
-
-function preset(overrides: Partial<ModelPreset> = {}): ModelPreset {
-  return {
-    id: 'preset-alpha',
-    scopeKind: 'instance',
-    providerId: 'provider-alpha',
-    providerName: 'Provider Alpha',
-    providerKind: 'alpha',
-    modelCatalogId: 'model-alpha',
-    modelName: 'alpha-chat',
-    presetName: 'Alpha Answer',
-    allowedBindingPurposes: ['query_answer'],
-    createdAt: '2026-01-01T00:00:00Z',
-    updatedAt: '2026-01-02T00:00:00Z',
+    availableAccountIds: ['account-alpha'],
     ...overrides,
   };
 }
@@ -103,21 +85,11 @@ function binding(purpose: AIPurpose, overrides: Partial<AIBindingAssignment> = {
     id: `binding-${purpose}`,
     scopeKind: 'instance',
     purpose,
-    credentialId: 'credential-alpha',
-    presetId: 'preset-alpha',
+    accountId: 'account-alpha',
+    modelCatalogId: 'model-alpha',
     state: 'configured',
     ...overrides,
   };
-}
-
-function runtimePurposePreset(purpose: AIPurpose): ModelPreset {
-  return preset({
-    id: `preset-${purpose}`,
-    modelCatalogId: `model-${purpose}`,
-    modelName: `${purpose}-model`,
-    presetName: `${purpose} preset`,
-    allowedBindingPurposes: [purpose],
-  });
 }
 
 function runtimePurposeModel(purpose: AIPurpose): AIModelOption {
@@ -132,16 +104,14 @@ function runtimePurposeBinding(purpose: AIPurpose): AIBindingAssignment {
   return binding(purpose, {
     id: `binding-${purpose}`,
     purpose,
-    presetId: `preset-${purpose}`,
+    modelCatalogId: `model-${purpose}`,
   });
 }
 
 function summaryInput(overrides: {
   selectedScope?: AIScopeKind;
-  availableCredentials?: AICredential[];
-  localCredentials?: AICredential[];
-  availablePresets?: ModelPreset[];
-  localPresets?: ModelPreset[];
+  availableAccounts?: AIAccount[];
+  localAccounts?: AIAccount[];
   bindingsForScope?: AIBindingAssignment[];
   instanceBindings?: AIBindingAssignment[];
   workspaceBindings?: AIBindingAssignment[];
@@ -150,10 +120,8 @@ function summaryInput(overrides: {
 } = {}) {
   return {
     selectedScope: overrides.selectedScope ?? 'instance',
-    availableCredentials: overrides.availableCredentials ?? [credential()],
-    localCredentials: overrides.localCredentials ?? [credential()],
-    availablePresets: overrides.availablePresets ?? [preset()],
-    localPresets: overrides.localPresets ?? [preset()],
+    availableAccounts: overrides.availableAccounts ?? [account()],
+    localAccounts: overrides.localAccounts ?? [account()],
     bindingsForScope: overrides.bindingsForScope ?? [binding('query_answer')],
     instanceBindings: overrides.instanceBindings ?? [binding('query_answer')],
     workspaceBindings: overrides.workspaceBindings ?? [],
@@ -170,20 +138,9 @@ describe('summarizeAiReadiness', () => {
       workspaceBindings: [binding('query_compile', {
         id: 'binding-workspace-query-compile',
         scopeKind: 'workspace',
-        presetId: 'preset-compile',
+        modelCatalogId: 'model-compile',
       })],
       instanceBindings: [binding('query_answer')],
-      availablePresets: [
-        preset(),
-        preset({
-          id: 'preset-compile',
-          modelCatalogId: 'model-compile',
-          modelName: 'alpha-compile',
-          presetName: 'Alpha Compile',
-          allowedBindingPurposes: ['query_compile'],
-        }),
-      ],
-      localPresets: [],
       models: [
         model(),
         model({
@@ -213,8 +170,6 @@ describe('summarizeAiReadiness', () => {
     const summary = summarizeAiReadiness(summaryInput({
       bindingsForScope: runtimePurposes.map(runtimePurposeBinding),
       instanceBindings: runtimePurposes.map(runtimePurposeBinding),
-      availablePresets: runtimePurposes.map(runtimePurposePreset),
-      localPresets: runtimePurposes.map(runtimePurposePreset),
       models: runtimePurposes.map(runtimePurposeModel),
     }));
 
@@ -223,16 +178,15 @@ describe('summarizeAiReadiness', () => {
     expect(summary.missingPurposes).toEqual([]);
   });
 
-  it('requires executable credential preset model pairs before marking a purpose ready', () => {
+  it('requires an executable account/model pair before marking a purpose ready', () => {
     const summary = summarizeAiReadiness(summaryInput({
-      availableCredentials: [credential({ state: 'revoked' })],
-      localCredentials: [credential({ state: 'revoked' })],
+      availableAccounts: [account({ state: 'revoked' })],
+      localAccounts: [account({ state: 'revoked' })],
       bindingsForScope: [binding('query_answer')],
       instanceBindings: [binding('query_answer')],
     }));
 
     expect(summary.executableEffectiveBindings).toBe(0);
-    expect(summary.usablePresetCount).toBe(0);
     expect(summary.missingPurposes).toContain('query_answer');
   });
 
@@ -242,29 +196,23 @@ describe('summarizeAiReadiness', () => {
     }));
 
     expect(summary.executableEffectiveBindings).toBe(0);
-    expect(summary.usablePresetCount).toBe(0);
     expect(summary.missingPurposes).toContain('query_answer');
   });
 
-  it('keeps unchecked credential-discovered models executable until a credential-specific check disproves them', () => {
+  it('keeps unchecked account-discovered models executable until an account-specific check disproves them', () => {
     const summary = summarizeAiReadiness(summaryInput({
       models: [model({ availabilityState: 'unknown' })],
     }));
 
     expect(summary.executableEffectiveBindings).toBe(1);
-    expect(summary.usablePresetCount).toBe(1);
     expect(summary.missingPurposes).not.toContain('query_answer');
   });
 
   it('recommends the next canonical section from missing readiness data', () => {
     expect(recommendAiConfigSection(summarizeAiReadiness(summaryInput({
-      availableCredentials: [],
-      localCredentials: [],
-    })))).toBe('credentials');
-
-    expect(recommendAiConfigSection(summarizeAiReadiness(summaryInput({
-      models: [model({ availabilityState: 'unavailable' })],
-    })))).toBe('presets');
+      availableAccounts: [],
+      localAccounts: [],
+    })))).toBe('accounts');
 
     expect(recommendAiConfigSection(summarizeAiReadiness(summaryInput({
       bindingsForScope: [],
@@ -273,105 +221,95 @@ describe('summarizeAiReadiness', () => {
   });
 });
 
-describe('isModelAvailableForCredential', () => {
-  it('trusts unresolved catalog availability until credential-scoped discovery returns', () => {
-    expect(isModelAvailableForCredential(
-      model({ availabilityState: 'unknown', availableCredentialIds: ['credential-alpha'] }),
-      credential(),
+describe('isModelAvailableForAccount', () => {
+  it('trusts unresolved catalog availability until account-scoped discovery returns', () => {
+    expect(isModelAvailableForAccount(
+      model({ availabilityState: 'unknown', availableAccountIds: ['account-alpha'] }),
+      account(),
       {},
     )).toBe(true);
   });
 
-  it('trusts credential-scoped discovery when it has returned', () => {
-    expect(isModelAvailableForCredential(
-      model({ availabilityState: 'unknown', availableCredentialIds: ['credential-alpha'] }),
-      credential(),
-      { 'credential-alpha': [] },
+  it('trusts account-scoped discovery when it has returned', () => {
+    expect(isModelAvailableForAccount(
+      model({ availabilityState: 'unknown', availableAccountIds: ['account-alpha'] }),
+      account(),
+      { 'account-alpha': [] },
     )).toBe(false);
 
-    expect(isModelAvailableForCredential(
-      model({ availabilityState: 'unknown', availableCredentialIds: ['credential-alpha'] }),
-      credential(),
-      { 'credential-alpha': [model()] },
+    expect(isModelAvailableForAccount(
+      model({ availabilityState: 'unknown', availableAccountIds: ['account-alpha'] }),
+      account(),
+      { 'account-alpha': [model()] },
     )).toBe(true);
   });
 });
 
 describe('suggestBindingSelection', () => {
-  it('prefills a compatible active credential and preset for the selected purpose', () => {
+  it('prefills a compatible active account and model for the selected purpose', () => {
     const suggestion = suggestBindingSelection({
       purpose: 'query_answer',
-      availableCredentials: [
-        credential({
-          id: 'credential-revoked',
+      availableAccounts: [
+        account({
+          id: 'account-revoked',
           state: 'revoked',
           updatedAt: '2026-01-03T00:00:00Z',
         }),
-        credential(),
+        account(),
       ],
-      availablePresets: [
-        preset({
-          id: 'preset-graph',
+      models: [
+        model({
+          id: 'model-graph',
           allowedBindingPurposes: ['extract_graph'],
         }),
-        preset(),
+        model(),
       ],
-      modelById: new Map([['model-alpha', model()]]),
     });
 
     expect(suggestion).toEqual({
-      credentialId: 'credential-alpha',
-      presetId: 'preset-alpha',
+      accountId: 'account-alpha',
+      modelCatalogId: 'model-alpha',
     });
   });
 
   it('keeps an existing compatible local selection when reopening an editor', () => {
     const suggestion = suggestBindingSelection({
       purpose: 'query_answer',
-      availableCredentials: [credential(), credential({
-        id: 'credential-beta',
+      availableAccounts: [account(), account({
+        id: 'account-beta',
         providerId: 'provider-beta',
         providerName: 'Provider Beta',
         providerKind: 'beta',
       })],
-      availablePresets: [preset(), preset({
-        id: 'preset-beta',
-        providerId: 'provider-beta',
-        providerName: 'Provider Beta',
-        providerKind: 'beta',
-        modelCatalogId: 'model-beta',
-        modelName: 'beta-chat',
-      })],
-      modelById: new Map([
-        ['model-alpha', model()],
-        ['model-beta', model({
+      models: [
+        model(),
+        model({
           id: 'model-beta',
           providerCatalogId: 'provider-beta',
           modelName: 'beta-chat',
-          availableCredentialIds: ['credential-beta'],
-        })],
-      ]),
-      preferredCredentialId: 'credential-beta',
-      preferredPresetId: 'preset-beta',
+          availableAccountIds: ['account-beta'],
+        }),
+      ],
+      preferredAccountId: 'account-beta',
+      preferredModelCatalogId: 'model-beta',
     });
 
     expect(suggestion).toEqual({
-      credentialId: 'credential-beta',
-      presetId: 'preset-beta',
+      accountId: 'account-beta',
+      modelCatalogId: 'model-beta',
     });
   });
 
   it('leaves binding selectors empty when there is no active executable pair', () => {
     const suggestion = suggestBindingSelection({
       purpose: 'query_answer',
-      availableCredentials: [credential({ state: 'revoked' })],
-      availablePresets: [preset()],
-      modelById: new Map([['model-alpha', model()]]),
+      availableAccounts: [account({ state: 'revoked' })],
+      models: [model()],
     });
 
     expect(suggestion).toEqual({
-      credentialId: '',
-      presetId: '',
+      accountId: '',
+      modelCatalogId: '',
     });
   });
 });

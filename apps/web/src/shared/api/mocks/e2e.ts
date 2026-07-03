@@ -119,7 +119,7 @@ export function createBrowserMockHandlers(config: BrowserMockConfig = {}): HttpH
     setupRequired: bootstrapRequired,
     aiSetup: bootstrapRequired
       ? {
-          presetBundles: [
+          bindingBundles: [
             {
               providerCatalogId: "provider-hosted-router",
               providerKind: "hosted-router",
@@ -156,12 +156,11 @@ export function createBrowserMockHandlers(config: BrowserMockConfig = {}): HttpH
                 tokenLimitParameter: "max_tokens",
               },
               uiHints: {},
-              presets: [
+              bindings: [
                 {
                   bindingPurpose: "extract_graph",
                   modelCatalogId: "model-hosted-router-chat",
                   modelName: "hosted/chat-small",
-                  presetName: "Hosted Router Extract Graph",
                   systemPrompt: null,
                   temperature: null,
                   topP: null,
@@ -171,7 +170,6 @@ export function createBrowserMockHandlers(config: BrowserMockConfig = {}): HttpH
                   bindingPurpose: "embed_chunk",
                   modelCatalogId: "model-hosted-router-embedding",
                   modelName: "hosted/text-embedding-small",
-                  presetName: "Hosted Router Embed Chunk",
                   systemPrompt: null,
                   temperature: null,
                   topP: null,
@@ -181,7 +179,6 @@ export function createBrowserMockHandlers(config: BrowserMockConfig = {}): HttpH
                   bindingPurpose: "query_retrieve",
                   modelCatalogId: "model-hosted-router-embedding",
                   modelName: "hosted/text-embedding-small",
-                  presetName: "Hosted Router Query Retrieve",
                   systemPrompt: null,
                   temperature: null,
                   topP: null,
@@ -191,7 +188,6 @@ export function createBrowserMockHandlers(config: BrowserMockConfig = {}): HttpH
                   bindingPurpose: "query_compile",
                   modelCatalogId: "model-hosted-router-chat",
                   modelName: "hosted/chat-small",
-                  presetName: "Hosted Router Query Compile",
                   systemPrompt: null,
                   temperature: null,
                   topP: null,
@@ -201,7 +197,6 @@ export function createBrowserMockHandlers(config: BrowserMockConfig = {}): HttpH
                   bindingPurpose: "query_answer",
                   modelCatalogId: "model-hosted-router-answer",
                   modelName: "hosted/chat-answer",
-                  presetName: "Hosted Router Query Answer",
                   systemPrompt: null,
                   temperature: null,
                   topP: null,
@@ -211,7 +206,6 @@ export function createBrowserMockHandlers(config: BrowserMockConfig = {}): HttpH
                   bindingPurpose: "vision",
                   modelCatalogId: "model-hosted-router-answer",
                   modelName: "hosted/chat-answer",
-                  presetName: "Hosted Router Vision",
                   systemPrompt: null,
                   temperature: null,
                   topP: null,
@@ -255,12 +249,11 @@ export function createBrowserMockHandlers(config: BrowserMockConfig = {}): HttpH
                 tokenLimitParameter: "max_tokens",
               },
               uiHints: {},
-              presets: [
+              bindings: [
                 {
                   bindingPurpose: "extract_graph",
                   modelCatalogId: "model-local-runtime-chat",
                   modelName: "local-chat-small",
-                  presetName: "Local Runtime Extract Graph",
                   systemPrompt: null,
                   temperature: null,
                   topP: null,
@@ -270,7 +263,6 @@ export function createBrowserMockHandlers(config: BrowserMockConfig = {}): HttpH
                   bindingPurpose: "embed_chunk",
                   modelCatalogId: "model-local-runtime-embedding",
                   modelName: "local-embedding-small",
-                  presetName: "Local Runtime Embed Chunk",
                   systemPrompt: null,
                   temperature: null,
                   topP: null,
@@ -280,7 +272,6 @@ export function createBrowserMockHandlers(config: BrowserMockConfig = {}): HttpH
                   bindingPurpose: "query_retrieve",
                   modelCatalogId: "model-local-runtime-embedding",
                   modelName: "local-embedding-small",
-                  presetName: "Local Runtime Query Retrieve",
                   systemPrompt: null,
                   temperature: null,
                   topP: null,
@@ -290,7 +281,6 @@ export function createBrowserMockHandlers(config: BrowserMockConfig = {}): HttpH
                   bindingPurpose: "query_compile",
                   modelCatalogId: "model-local-runtime-chat",
                   modelName: "local-chat-small",
-                  presetName: "Local Runtime Query Compile",
                   systemPrompt: null,
                   temperature: null,
                   topP: null,
@@ -300,7 +290,6 @@ export function createBrowserMockHandlers(config: BrowserMockConfig = {}): HttpH
                   bindingPurpose: "query_answer",
                   modelCatalogId: "model-local-runtime-chat",
                   modelName: "local-chat-small",
-                  presetName: "Local Runtime Query Answer",
                   systemPrompt: null,
                   temperature: null,
                   topP: null,
@@ -310,7 +299,6 @@ export function createBrowserMockHandlers(config: BrowserMockConfig = {}): HttpH
                   bindingPurpose: "vision",
                   modelCatalogId: "model-local-runtime-vision",
                   modelName: "local-vision-small",
-                  presetName: "Local Runtime Vision",
                   systemPrompt: null,
                   temperature: null,
                   topP: null,

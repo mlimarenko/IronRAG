@@ -1,17 +1,15 @@
 import type {
-  AiBindingAssignmentResponse,
+  AiAccountResponse,
+  AiBindingResponse,
   AiScopeKind,
   ModelCatalogEntryResponse,
-  ModelPresetResponse,
   ProviderCatalogEntryResponse,
-  ProviderCredentialResponse,
 } from '@/shared/api/generated';
 import type {
+  AIAccount,
   AIBindingAssignment,
-  AICredential,
   AIModelOption,
   AIProvider,
-  ModelPreset,
 } from '@/shared/types/index';
 import {
   hasStoredApiKeySummary,
@@ -29,10 +27,6 @@ function scopeKind(value: AiScopeKind) {
     return value;
   }
   throw new Error(`AI response has invalid scopeKind: ${value}`);
-}
-
-function optionalString(value: string | null | undefined) {
-  return value ?? undefined;
 }
 
 function optionalNumber(value: number | null | undefined) {
@@ -87,10 +81,10 @@ function mapProvider(raw: ProviderCatalogEntryResponse): AIProvider {
   };
 }
 
-function mapCredential(
-  raw: ProviderCredentialResponse,
+function mapAccount(
+  raw: AiAccountResponse,
   providers: AIProvider[],
-): AICredential {
+): AIAccount {
   const provider =
     providers.find((entry) => entry.id === raw.providerCatalogId) ??
     { displayName: 'Unknown', kind: 'unknown' };
@@ -131,52 +125,25 @@ function mapModelOption(raw: ModelCatalogEntryResponse): AIModelOption {
       ? raw.lifecycleState
       : 'active',
     availabilityState: raw.availabilityState,
-    availableCredentialIds: raw.availableCredentialIds,
+    availableAccountIds: raw.availableAccountIds,
   };
 }
 
-function mapPreset(
-  raw: ModelPresetResponse,
-  providers: AIProvider[],
-  models: AIModelOption[],
-): ModelPreset {
-  const model = models.find((entry) => entry.id === raw.modelCatalogId);
-  const provider = model
-    ? (providers.find((entry) => entry.id === model.providerCatalogId) ??
-      { displayName: 'Unknown', kind: 'unknown' })
-    : { displayName: 'Unknown', kind: 'unknown' };
+function mapBinding(raw: AiBindingResponse): AIBindingAssignment {
   const extraParams = parseExtraParams(raw.extraParametersJson);
   return {
     id: raw.id,
     scopeKind: scopeKind(raw.scopeKind),
     ...(raw.workspaceId ? { workspaceId: raw.workspaceId } : {}),
     ...(raw.libraryId ? { libraryId: raw.libraryId } : {}),
-    providerId: model?.providerCatalogId ?? '',
-    providerName: provider.displayName,
-    providerKind: provider.kind,
+    purpose: raw.bindingPurpose,
+    accountId: raw.accountId,
     modelCatalogId: raw.modelCatalogId ?? '',
-    modelName: model?.modelName ?? raw.modelCatalogId ?? '',
-    presetName: raw.presetName ?? '',
-    allowedBindingPurposes: model?.allowedBindingPurposes ?? [],
-    ...(optionalString(raw.systemPrompt) ? { systemPrompt: raw.systemPrompt as string } : {}),
+    ...(raw.systemPrompt ? { systemPrompt: raw.systemPrompt } : {}),
     ...(optionalNumber(raw.temperature) !== undefined ? { temperature: raw.temperature as number } : {}),
     ...(optionalNumber(raw.topP) !== undefined ? { topP: raw.topP as number } : {}),
     ...(optionalNumber(raw.maxOutputTokensOverride) !== undefined ? { maxOutputTokens: raw.maxOutputTokensOverride as number } : {}),
     ...(extraParams !== undefined ? { extraParams } : {}),
-    createdAt: raw.createdAt ?? '',
-    updatedAt: raw.updatedAt ?? '',
-  };
-}
-
-function mapBinding(raw: AiBindingAssignmentResponse): AIBindingAssignment {
-  return {
-    id: raw.id,
-    scopeKind: scopeKind(raw.scopeKind),
-    ...(raw.workspaceId ? { workspaceId: raw.workspaceId } : {}),
-    ...(raw.libraryId ? { libraryId: raw.libraryId } : {}),
-    purpose: raw.bindingPurpose,
-    credentialId: raw.providerCredentialId,
-    presetId: raw.modelPresetId,
     state:
       raw.bindingState === 'invalid'
         ? 'invalid'
@@ -194,23 +161,15 @@ export function mapModelList(raw: ModelCatalogEntryResponse[] | null | undefined
   return normalizeArray(raw).map(mapModelOption);
 }
 
-export function mapCredentialList(
-  raw: ProviderCredentialResponse[] | null | undefined,
+export function mapAccountList(
+  raw: AiAccountResponse[] | null | undefined,
   providers: AIProvider[],
-): AICredential[] {
-  return normalizeArray(raw).map((entry) => mapCredential(entry, providers));
-}
-
-export function mapPresetList(
-  raw: ModelPresetResponse[] | null | undefined,
-  providers: AIProvider[],
-  models: AIModelOption[],
-): ModelPreset[] {
-  return normalizeArray(raw).map((entry) => mapPreset(entry, providers, models));
+): AIAccount[] {
+  return normalizeArray(raw).map((entry) => mapAccount(entry, providers));
 }
 
 export function mapBindingList(
-  raw: AiBindingAssignmentResponse[] | null | undefined,
+  raw: AiBindingResponse[] | null | undefined,
 ): AIBindingAssignment[] {
   return normalizeArray(raw).map(mapBinding);
 }

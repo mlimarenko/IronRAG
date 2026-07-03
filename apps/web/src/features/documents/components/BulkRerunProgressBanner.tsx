@@ -47,8 +47,8 @@ function BulkRerunProgressBannerImpl({
   const hasFailures = bulkRerun.failed > 0;
   const tone = isTerminal
     ? hasFailures
-      ? "border-amber-500/30 bg-amber-50/40 dark:bg-amber-500/5"
-      : "border-emerald-500/30 bg-emerald-50/40 dark:bg-emerald-500/5"
+      ? "border-status-warning/30 bg-status-warning/5"
+      : "border-status-ready/30 bg-status-ready/5"
     : "border-primary/30 bg-primary/5";
   const label = isTerminal
     ? hasFailures
@@ -89,9 +89,9 @@ function BulkRerunProgressBannerImpl({
       {!isTerminal ? (
         <Loader2 className="h-4 w-4 shrink-0 animate-spin text-primary" />
       ) : hasFailures ? (
-        <XCircle className="h-4 w-4 shrink-0 text-amber-600" />
+        <XCircle className="h-4 w-4 shrink-0 text-status-warning" />
       ) : (
-        <CheckSquare className="h-4 w-4 shrink-0 text-emerald-600" />
+        <CheckSquare className="h-4 w-4 shrink-0 text-status-ready" />
       )}
       <div className="min-w-0 flex-1">
         <div className="truncate text-xs font-medium">{label}</div>
@@ -99,9 +99,9 @@ function BulkRerunProgressBannerImpl({
           <div
             className={
               hasFailures && isTerminal
-                ? "h-full bg-amber-500 transition-all duration-300"
+                ? "h-full bg-status-warning transition-all duration-300"
                 : isTerminal
-                  ? "h-full bg-emerald-500 transition-all duration-300"
+                  ? "h-full bg-status-ready transition-all duration-300"
                   : "h-full bg-primary transition-all duration-300"
             }
             style={{ width: `${pct}%` }}

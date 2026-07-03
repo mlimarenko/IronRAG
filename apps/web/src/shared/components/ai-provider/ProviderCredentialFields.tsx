@@ -108,7 +108,7 @@ export function ProviderCredentialFields({
           ) : (
             <div
               id={baseUrlFieldId}
-              className="mt-2 select-text rounded-md border border-border bg-surface-sunken px-3 py-2 font-mono text-xs leading-relaxed text-foreground [overflow-wrap:anywhere]"
+              className="mt-2 select-text rounded-lg border border-border bg-surface-sunken px-3 py-2 font-mono text-xs leading-relaxed text-foreground [overflow-wrap:anywhere]"
               aria-describedby={baseUrlDescriptionIds}
               aria-label={defaultBaseUrl || labels.baseUrlRequiredHint}
               aria-invalid={Boolean(baseUrlError) || undefined}

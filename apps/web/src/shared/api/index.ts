@@ -23,6 +23,7 @@ export type {
   WebBoundaryPolicy,
   WebIngestMode,
   WebIngestPattern,
+  WebIngestUrlFilter,
 } from "./generated";
 export {
   documentsApi,

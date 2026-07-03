@@ -3,10 +3,10 @@ import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
 /**
- * Static audit that every wave-2 extracted component still carries its
- * responsive breakpoint classes. This is not a full visual QA — the real
+ * Static audit that every extracted dashboard component still carries its
+ * responsive layout contract. This is not a full visual QA — the real
  * runtime check lives in `docs/RESPONSIVE_QA.md` — but it catches the
- * common "accidentally dropped the `sm:` / `md:` / `lg:` prefix while
+ * common "accidentally dropped the dense shell / breakpoint class while
  * reshuffling Tailwind classes" regression during refactors.
  */
 
@@ -23,36 +23,38 @@ type ResponsiveExpectation = {
 
 const expectations: ResponsiveExpectation[] = [
   {
+    // Summary strip is 3 cards (graph-coverage dedup removed the 4th): 1-col
+    // on mobile, 3-col from sm up.
     file: 'features/dashboard/components/SummaryCards.tsx',
-    mustContain: [/sm:grid-cols-2/, /xl:grid-cols-4/],
+    mustContain: [/sm:grid-cols-3/],
   },
   {
     file: 'features/dashboard/components/LibraryHealthPanel.tsx',
-    mustContain: [/sm:p-6/, /sm:items-end/],
+    mustContain: [/workbench-surface p-4/, /sm:items-end/],
   },
   {
+    // `h-full` added so the panel fills its equal-height column wrapper.
     file: 'features/dashboard/components/RecentDocumentsList.tsx',
-    mustContain: [/sm:p-6/, /xl:grid-cols-2/],
+    mustContain: [/workbench-surface h-full p-4/, /xl:grid-cols-2/],
   },
   {
     file: 'features/dashboard/components/AttentionPanel.tsx',
-    mustContain: [/sm:p-6/],
+    mustContain: [/workbench-surface p-4/],
   },
   {
+    // `h-full` added so the panel fills its equal-height column wrapper.
     file: 'features/dashboard/components/LatestIngestPanel.tsx',
-    mustContain: [/sm:p-6/],
+    mustContain: [/workbench-surface h-full p-4/],
   },
   {
     file: 'features/assistant/components/SessionRail.tsx',
     mustContain: [/w-12/, /w-64/, /aria-expanded/],
   },
   {
-    // EvidencePanel is now mounted (it was dead code): its responsive sizing
-    // lives at the call site so it can be a mobile slide-over and an inline
-    // pane on lg+. Guard the call-site contract in AssistantPage instead of
-    // the old always-hidden-below-lg classes baked into the component.
+    // Assistant evidence now uses the shared DataView inspector contract
+    // instead of page-local fixed/lg drawer classes.
     file: 'features/assistant/AssistantPage.tsx',
-    mustContain: [/lg:static/, /lg:w-72/, /xl:w-80/],
+    mustContain: [/DataView/, /inspectorOpen=\{showEvidencePanel\}/, /showDrawerHeader=\{false\}/],
   },
   {
     file: 'features/graph/components/GraphInspector.tsx',

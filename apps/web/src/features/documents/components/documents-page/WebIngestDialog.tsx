@@ -30,9 +30,9 @@ import {
   SelectValue,
 } from "@/shared/components/ui/select";
 import { Textarea } from "@/shared/components/ui/textarea";
+import { StatusBadge, type StatusTone } from "@/shared/components/StatusBadge";
 
 import {
-  WEB_BOUNDARY_POLICIES,
   isSubdomainBoundaryAvailableForSeed,
   isWebBoundaryPolicy,
 } from "@/features/documents/model/webIngestBoundary";
@@ -149,10 +149,10 @@ function buildParsedRuleFilters(
   }
 }
 
-function resultBadgeClass(result: WebIngestFilterEvaluation | null): string {
-  if (!result) return "status-sparse";
-  if (result.status === "no_allow_match") return "status-warning";
-  return result.passes ? "status-ready" : "status-failed";
+function resultTone(result: WebIngestFilterEvaluation | null): StatusTone {
+  if (!result) return "sparse";
+  if (result.status === "no_allow_match") return "warning";
+  return result.passes ? "ready" : "failed";
 }
 
 function resultIcon(result: WebIngestFilterEvaluation | null) {
@@ -209,17 +209,17 @@ type RuleTestRowProps = {
 function RuleTestRow({ icon, result, title, t }: RuleTestRowProps) {
   const Icon = icon === "crawl" ? Compass : FileText;
   return (
-    <div className="flex min-w-0 items-start gap-3 rounded-md border bg-background px-3 py-2.5">
+    <div className="flex min-w-0 items-start gap-3 rounded-md bg-background px-3 py-2.5">
       <span className="mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-muted text-muted-foreground">
         <Icon className="h-3.5 w-3.5" />
       </span>
       <div className="min-w-0 flex-1">
         <div className="flex flex-wrap items-center gap-2">
           <span className="text-sm font-medium leading-5">{title}</span>
-          <span className={`status-badge ${resultBadgeClass(result)}`}>
+          <StatusBadge tone={resultTone(result)}>
             {resultIcon(result)}
             {resultLabel(result, t)}
-          </span>
+          </StatusBadge>
         </div>
         <p className="mt-1 text-xs leading-5 text-muted-foreground [overflow-wrap:anywhere]">
           {resultDetail(result, t)}

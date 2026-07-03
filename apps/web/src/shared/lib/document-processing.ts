@@ -32,11 +32,12 @@ function prettifyToken(value: string): string {
 }
 
 function sentenceCase(value: string): string {
-  if (value.length === 0) {
+  const first = value[0];
+  if (!first) {
     return value;
   }
 
-  return `${value[0].toUpperCase()}${value.slice(1)}`;
+  return `${first.toUpperCase()}${value.slice(1)}`;
 }
 
 function isCodeLike(value: string): boolean {
@@ -99,15 +100,15 @@ export type DocumentFailureNotice = {
   summary: string;
   impact: string;
   action: string;
-  diagnosticCode?: string;
-  diagnosticMessage?: string;
+  diagnosticCode?: string | undefined;
+  diagnosticMessage?: string | undefined;
 };
 
 export type UploadFailureNotice = {
   summary: string;
   action: string;
-  diagnosticCode?: string;
-  diagnosticMessage?: string;
+  diagnosticCode?: string | undefined;
+  diagnosticMessage?: string | undefined;
 };
 
 function recordValue(value: unknown, key: string): unknown {
@@ -121,9 +122,9 @@ function stringRecordValue(value: unknown, key: string): string | undefined {
 
 export function humanizeDocumentFailure(
   input: {
-    failureCode?: string | null;
-    stalledReason?: string | null;
-    stage?: string | null;
+    failureCode?: string | null | undefined;
+    stalledReason?: string | null | undefined;
+    stage?: string | null | undefined;
   },
   t: TFunction,
 ): string | undefined {
@@ -173,9 +174,9 @@ export function humanizeDocumentFailure(
 
 export function buildDocumentFailureNotice(
   input: {
-    failureCode?: string | null;
-    failureMessage?: string | null;
-    stage?: string | null;
+    failureCode?: string | null | undefined;
+    failureMessage?: string | null | undefined;
+    stage?: string | null | undefined;
   },
   t: TFunction,
 ): DocumentFailureNotice | undefined {

@@ -630,7 +630,7 @@ fn select_provider_validation_model<'a>(
     for purpose in
         [AiBindingPurpose::QueryAnswer, AiBindingPurpose::ExtractGraph, AiBindingPurpose::Vision]
     {
-        if let Some(profile) = bootstrap_preset_profile_for_provider_purpose(provider, purpose) {
+        if let Some(profile) = bootstrap_binding_profile_for_provider_purpose(provider, purpose) {
             if let Some(model) = models.iter().find(|entry| {
                 entry.provider_catalog_id == provider.id && entry.model_name == profile.model_name
             }) {

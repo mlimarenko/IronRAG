@@ -1,28 +1,30 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { JSX, KeyboardEventHandler, MouseEventHandler, ReactNode } from "react";
+import type { JSX, KeyboardEventHandler } from "react";
 import type { TFunction } from "i18next";
 import { useTranslation } from "react-i18next";
 import { useNavigate } from "react-router-dom";
-import { useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import {
   ArrowDown,
   ArrowUp,
   Ban,
   BookOpen,
+  Brain,
+  Building2,
   CheckCircle2,
   CheckSquare,
   Database,
   Download,
   ExternalLink,
   FileText,
-  Filter,
   HelpCircle,
   Loader2,
+  Power,
   RotateCw,
   Search,
-  Settings2,
   Trash2,
+  Upload,
   XCircle,
 } from "lucide-react";
 
@@ -30,6 +32,7 @@ import {
   ASYNC_OPERATION_TERMINAL_STATES,
   Catalog,
   Ops,
+  adminApi,
   librarySnapshotApi,
   queries,
   unwrap,
@@ -40,24 +43,12 @@ import type {
   LibraryCostSummary,
   WorkspaceCostSummary,
 } from "@/shared/api/generated";
+import { FilterSelect } from "@/shared/components/FilterSelect";
 import { TablePaginationFooter } from "@/shared/components/TablePaginationFooter";
 import { Button } from "@/shared/components/ui/button";
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from "@/shared/components/ui/dialog";
+import { Checkbox } from "@/shared/components/ui/checkbox";
 import { Input } from "@/shared/components/ui/input";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/shared/components/ui/select";
+import { SelectItem } from "@/shared/components/ui/select";
 import {
   Tooltip,
   TooltipContent,
@@ -66,6 +57,13 @@ import {
 import { DataState } from "@/shared/components/DataState";
 import { useApp } from "@/shared/contexts/app-context";
 import { errorMessage } from "@/shared/lib/errorMessage";
+import { ConfirmDialog } from "@/shared/components/layout/ConfirmDialog";
+import { DataView } from "@/shared/components/layout/DataView";
+import { InspectorPanel } from "@/shared/components/layout/InspectorPanel";
+import { RowActionsMenu, type RowAction } from "@/shared/components/layout/RowActionsMenu";
+import { WorkbenchEmptyState } from "@/shared/components/layout/WorkbenchEmptyState";
+import { StatusBadge } from "@/shared/components/StatusBadge";
+import { BackupExportDialog, BackupImportDialog } from "./BackupDialogs";
 
 const PAGE_SIZE_OPTIONS = [50, 100, 250, 1000] as const;
 const DELETE_POLL_INTERVAL_MS = 2_000;
@@ -180,14 +178,18 @@ export function LibrariesTab({ active }: { active: boolean }) {
   const [selectionMode, setSelectionMode] = useState(false);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(() => new Set());
   const [selectedLibraryId, setSelectedLibraryId] = useState<string | null>(null);
+  const [inspectorOpen, setInspectorOpen] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<DeleteTarget | null>(null);
   const [deletingIds, setDeletingIds] = useState<Set<string>>(() => new Set());
+  const [backupTarget, setBackupTarget] = useState<LibraryRow | null>(null);
+  const [restoreTarget, setRestoreTarget] = useState<LibraryRow | null>(null);
 
   useEffect(() => {
+    const deleteAbortControllers = deleteAbortControllersRef.current;
     return () => {
       mountedRef.current = false;
-      deleteAbortControllersRef.current.forEach((controller) => controller.abort());
-      deleteAbortControllersRef.current.clear();
+      deleteAbortControllers.forEach((controller) => controller.abort());
+      deleteAbortControllers.clear();
     };
   }, []);
 
@@ -260,11 +262,6 @@ export function LibrariesTab({ active }: { active: boolean }) {
     ? Array.from(workspaceCosts.values()).reduce((sum, cost) => sum + cost.providerCallCount, 0)
     : rows.reduce((sum, row) => sum + (row.cost?.providerCallCount ?? 0), 0);
 
-  const effectiveSelectedLibraryId =
-    selectedLibraryId && rows.some((row) => row.library.id === selectedLibraryId)
-      ? selectedLibraryId
-      : rows[0]?.library.id ?? null;
-  const selectedRow = rows.find((row) => row.library.id === effectiveSelectedLibraryId) ?? null;
   const selectedRows = rows.filter((row) => selectedIds.has(row.library.id));
   const readinessCounts = useMemo(() => ({
     all: rows.length,
@@ -319,6 +316,11 @@ export function LibrariesTab({ active }: { active: boolean }) {
   const totalPages = Math.max(1, Math.ceil(filteredRows.length / pageSize));
   const currentPage = Math.min(page, totalPages);
   const pageRows = filteredRows.slice((currentPage - 1) * pageSize, currentPage * pageSize);
+  const effectiveSelectedLibraryId =
+    selectedLibraryId && pageRows.some((row) => row.library.id === selectedLibraryId)
+      ? selectedLibraryId
+      : pageRows[0]?.library.id ?? null;
+  const selectedRow = pageRows.find((row) => row.library.id === effectiveSelectedLibraryId) ?? null;
   const allVisibleSelected =
     pageRows.length > 0 && pageRows.every((row) => selectedIds.has(row.library.id));
 
@@ -395,11 +397,15 @@ export function LibrariesTab({ active }: { active: boolean }) {
     void navigate("/documents");
   };
 
-  // Rows link into the Library Hub (ADM-02) — the per-library detail route
-  // that absorbs operations, ingest jobs, backup, and MCP settings.
-  const openHub = (row: LibraryRow) => {
-    void navigate(`/admin/library/${row.library.id}`);
+  // Per-library actions are surfaced directly on the catalog row + inspector so
+  // they are reachable in one or two clicks. The old per-library "hub" route was
+  // dissolved: backup/restore/AI live here, audit moved to the global Audit page.
+  const configureAi = (row: LibraryRow) => {
+    void navigate(`/admin/ai?scope=library&lib=${row.library.id}&section=bindings`);
   };
+
+  const openBackup = (row: LibraryRow) => setBackupTarget(row);
+  const openRestore = (row: LibraryRow) => setRestoreTarget(row);
 
   const exportRows = (targetRows: LibraryRow[]) => {
     for (const row of targetRows) {
@@ -520,8 +526,28 @@ export function LibrariesTab({ active }: { active: boolean }) {
         emptyRender={<LibrariesEmpty t={t} />}
       >
         {() => (
-          <div className="grid min-h-[34rem] flex-none grid-cols-1 overflow-visible xl:min-h-0 xl:flex-1 xl:grid-cols-[minmax(0,1fr)_22rem] xl:overflow-hidden">
-            <div className="flex min-w-0 min-h-0 flex-col overflow-hidden xl:border-r">
+          <DataView
+            inspectorCloseLabel={t("common.close")}
+            inspectorLabel={t("admin.libraries.inspectorTitle")}
+            inspectorOpen={inspectorOpen}
+            onInspectorOpenChange={setInspectorOpen}
+            inspector={
+              <LibraryInspector
+                currencyCode={costCurrency}
+                locale={i18n.language}
+                onDelete={(row) => {
+                  setSelectedLibraryId(row.library.id);
+                  setDeleteTarget("single");
+                }}
+                onBackup={openBackup}
+                onConfigureAi={configureAi}
+                onOpenDocuments={openDocuments}
+                onRestore={openRestore}
+                row={selectedRow}
+                t={t}
+              />
+            }
+          >
               <div className="min-h-[22rem] flex-1 overflow-auto xl:min-h-0">
                 <LibrariesTable
                   allVisibleSelected={allVisibleSelected}
@@ -531,14 +557,17 @@ export function LibrariesTab({ active }: { active: boolean }) {
                     setSelectedLibraryId(row.library.id);
                     setDeleteTarget("single");
                   }}
+                  onBackup={openBackup}
+                  onConfigureAi={configureAi}
                   onOpenDocuments={openDocuments}
-                  onOpenHub={openHub}
+                  onRestore={openRestore}
                   onSelectRow={(row) => {
                     if (selectionMode) {
                       toggleRowSelection(row.library.id);
                       return;
                     }
                     setSelectedLibraryId(row.library.id);
+                    setInspectorOpen(true);
                   }}
                   onToggleSelection={toggleRowSelection}
                   onToggleSort={toggleSort}
@@ -573,20 +602,7 @@ export function LibrariesTab({ active }: { active: boolean }) {
                 visibleEnd={Math.min(currentPage * pageSize, filteredRows.length)}
                 visibleStart={filteredRows.length === 0 ? 0 : ((currentPage - 1) * pageSize) + 1}
               />
-            </div>
-            <LibraryInspector
-              currencyCode={costCurrency}
-              locale={i18n.language}
-              onDelete={(row) => {
-                setSelectedLibraryId(row.library.id);
-                setDeleteTarget("single");
-              }}
-              onOpenDocuments={openDocuments}
-              onOpenHub={openHub}
-              row={selectedRow}
-              t={t}
-            />
-          </div>
+          </DataView>
         )}
       </DataState>
       <ConfirmDeleteDialog
@@ -598,6 +614,23 @@ export function LibrariesTab({ active }: { active: boolean }) {
         }}
         open={deleteTarget !== null}
         t={t}
+      />
+      <BackupExportDialog
+        open={backupTarget !== null}
+        onOpenChange={(open) => {
+          if (!open) setBackupTarget(null);
+        }}
+        libraryId={backupTarget?.library.id ?? ""}
+        t={t}
+      />
+      <BackupImportDialog
+        open={restoreTarget !== null}
+        onOpenChange={(open) => {
+          if (!open) setRestoreTarget(null);
+        }}
+        libraryId={restoreTarget?.library.id ?? ""}
+        t={t}
+        onCompleted={() => void invalidateCatalog()}
       />
     </div>
   );
@@ -627,48 +660,48 @@ function LibrariesSummary({
       label: t("admin.libraries.totalCost"),
       value: formatCurrency(totalCost, currencyCode, locale),
       icon: Database,
-      iconClass: "bg-primary/10 text-primary",
+      iconClass: "bg-muted text-muted-foreground",
     },
     {
       label: t("admin.libraries.workspaces"),
       value: formatInteger(totalWorkspaces, locale),
       icon: BookOpen,
-      iconClass: "bg-status-sparse-bg text-status-sparse",
+      iconClass: "bg-muted text-muted-foreground",
     },
     {
       label: t("admin.libraries.libraries"),
       value: formatInteger(totalLibraries, locale),
       icon: FileText,
-      iconClass: "bg-status-ready-bg text-status-ready",
+      iconClass: "bg-muted text-muted-foreground",
     },
     {
       label: t("admin.libraries.documents"),
       value: formatInteger(totalDocuments, locale),
       icon: CheckSquare,
-      iconClass: "bg-status-processing-bg text-status-processing",
+      iconClass: "bg-muted text-muted-foreground",
     },
     {
       label: t("admin.libraries.providerCalls"),
       value: formatInteger(totalProviderCalls, locale),
       icon: RotateCw,
-      iconClass: "bg-status-warning-bg text-status-warning",
+      iconClass: "bg-muted text-muted-foreground",
     },
   ];
 
   return (
-    <div className="border-b bg-surface-sunken/50 px-6 py-4">
-      <div className="grid grid-cols-2 gap-3 md:grid-cols-5">
+    <div className="border-b bg-surface-sunken/50 px-3 py-3 sm:px-6">
+      <div className="-mx-1 flex gap-2 overflow-x-auto px-1 pb-1 sm:mx-0 sm:grid sm:grid-cols-2 sm:overflow-visible sm:px-0 sm:pb-0 xl:grid-cols-5">
         {cards.map((card) => (
-          <div key={card.label} className="rounded-lg border bg-card px-4 py-3 shadow-soft">
-            <div className="flex items-center gap-2">
+          <div key={card.label} className="min-w-[10rem] workbench-surface px-3 py-2 sm:min-w-0">
+            <div className="flex items-start gap-2">
               <span className={`flex h-7 w-7 items-center justify-center rounded-md ${card.iconClass}`}>
                 <card.icon className="h-3.5 w-3.5" />
               </span>
-              <span className="text-[11px] font-semibold uppercase text-muted-foreground">
+              <span className="min-w-0 section-label leading-4">
                 {card.label}
               </span>
             </div>
-            <div className="mt-1 text-lg font-bold tabular-nums tracking-tight">
+            <div className="mt-1 text-base font-bold tabular-nums tracking-tight sm:text-lg">
               {card.value}
             </div>
           </div>
@@ -712,14 +745,14 @@ function LibrariesFilters({
   workspaces: CatalogWorkspaceResponse[];
 }) {
   const readinessOptions = [
-    { key: "all" as const, label: t("admin.libraries.allReadiness"), count: readinessCounts.all, icon: <Database className="h-3 w-3 text-primary" /> },
-    { key: "ready" as const, label: t("admin.libraries.ready"), count: readinessCounts.ready, icon: <CheckCircle2 className="h-3 w-3 text-status-ready" /> },
-    { key: "blocked" as const, label: t("admin.libraries.blocked"), count: readinessCounts.blocked, icon: <XCircle className="h-3 w-3 text-status-failed" /> },
+    { key: "all" as const, label: t("admin.libraries.allReadiness"), count: readinessCounts.all },
+    { key: "ready" as const, label: t("admin.libraries.ready"), count: readinessCounts.ready },
+    { key: "blocked" as const, label: t("admin.libraries.blocked"), count: readinessCounts.blocked },
   ];
   const lifecycleOptions = [
-    { key: "all" as const, label: t("admin.libraries.allLifecycle"), count: lifecycleCounts.all, icon: <Filter className="h-3 w-3 text-primary" /> },
-    { key: "active" as const, label: t("admin.libraries.activeLifecycle"), count: lifecycleCounts.active, icon: <CheckCircle2 className="h-3 w-3 text-status-ready" /> },
-    { key: "inactive" as const, label: t("admin.libraries.inactiveLifecycle"), count: lifecycleCounts.inactive, icon: <Ban className="h-3 w-3 text-status-stalled" /> },
+    { key: "all" as const, label: t("admin.libraries.allLifecycle"), count: lifecycleCounts.all },
+    { key: "active" as const, label: t("admin.libraries.activeLifecycle"), count: lifecycleCounts.active },
+    { key: "inactive" as const, label: t("admin.libraries.inactiveLifecycle"), count: lifecycleCounts.inactive },
   ];
 
   return (
@@ -733,7 +766,13 @@ function LibrariesFilters({
           value={search}
         />
       </div>
-      <FilterSelect value={workspaceFilter} onValueChange={onWorkspaceFilterChange} icon={<Filter className="h-3.5 w-3.5" />}>
+      <FilterSelect
+        value={workspaceFilter}
+        onValueChange={onWorkspaceFilterChange}
+        icon={<Building2 />}
+        ariaLabel={t("admin.libraries.allWorkspaces")}
+        className="w-[200px]"
+      >
         <SelectItem value="all">{t("admin.libraries.allWorkspaces")}</SelectItem>
         {workspaces.map((workspace) => (
           <SelectItem key={workspace.id} value={workspace.id}>
@@ -741,30 +780,38 @@ function LibrariesFilters({
           </SelectItem>
         ))}
       </FilterSelect>
-      <div className="flex flex-wrap gap-0.5 rounded-lg border border-border/50 bg-muted p-1">
+      <FilterSelect
+        value={readinessFilter}
+        onValueChange={(value) => onReadinessFilterChange(value as ReadinessFilter)}
+        icon={<Database />}
+        ariaLabel={t("admin.libraries.allReadiness")}
+        className="w-[200px]"
+      >
         {readinessOptions.map((option) => (
-          <FilterChip
-            active={readinessFilter === option.key}
-            count={option.count}
-            icon={option.icon}
-            key={option.key}
-            label={option.label}
-            onClick={() => onReadinessFilterChange(option.key)}
-          />
+          <SelectItem key={option.key} value={option.key}>
+            <span className="inline-flex items-center gap-2">
+              <span>{option.label}</span>
+              <span className="tabular-nums text-muted-foreground">{option.count}</span>
+            </span>
+          </SelectItem>
         ))}
-      </div>
-      <div className="flex flex-wrap gap-0.5 rounded-lg border border-border/50 bg-muted p-1">
+      </FilterSelect>
+      <FilterSelect
+        value={lifecycleFilter}
+        onValueChange={(value) => onLifecycleFilterChange(value as LifecycleFilter)}
+        icon={<Power />}
+        ariaLabel={t("admin.libraries.allLifecycle")}
+        className="w-[200px]"
+      >
         {lifecycleOptions.map((option) => (
-          <FilterChip
-            active={lifecycleFilter === option.key}
-            count={option.count}
-            icon={option.icon}
-            key={option.key}
-            label={option.label}
-            onClick={() => onLifecycleFilterChange(option.key)}
-          />
+          <SelectItem key={option.key} value={option.key}>
+            <span className="inline-flex items-center gap-2">
+              <span>{option.label}</span>
+              <span className="tabular-nums text-muted-foreground">{option.count}</span>
+            </span>
+          </SelectItem>
         ))}
-      </div>
+      </FilterSelect>
       <Button
         size="sm"
         variant={selectionMode ? "default" : "outline"}
@@ -778,72 +825,15 @@ function LibrariesFilters({
   );
 }
 
-function FilterSelect({
-  children,
-  icon,
-  onValueChange,
-  value,
-}: {
-  children: ReactNode;
-  icon?: ReactNode;
-  onValueChange: (value: string) => void;
-  value: string;
-}) {
-  return (
-    <Select value={value} onValueChange={onValueChange}>
-      <SelectTrigger className="h-9 w-[220px] rounded-lg bg-card text-xs shadow-soft">
-        <span className="flex min-w-0 items-center gap-1.5">
-          {icon}
-          <SelectValue />
-        </span>
-      </SelectTrigger>
-      <SelectContent>{children}</SelectContent>
-    </Select>
-  );
-}
-
-function FilterChip({
-  active,
-  count,
-  icon,
-  label,
-  onClick,
-}: {
-  active: boolean;
-  count: number;
-  icon: ReactNode;
-  label: string;
-  onClick: () => void;
-}) {
-  return (
-    <button
-      className={`flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium transition-all duration-200 ${
-        active
-          ? "bg-card text-foreground shadow-soft"
-          : "text-muted-foreground hover:text-foreground"
-      }`}
-      onClick={onClick}
-      type="button"
-    >
-      {icon}
-      {label}
-      {count > 0 && (
-        <span className="tabular-nums text-[10px] opacity-70">
-          {count}
-        </span>
-      )}
-    </button>
-  );
-}
-
 function LibrariesTable({
   allVisibleSelected,
   currencyCode,
   locale,
+  onBackup,
+  onConfigureAi,
   onDelete,
-  onExport,
   onOpenDocuments,
-  onOpenHub,
+  onRestore,
   onSelectRow,
   onToggleSelection,
   onToggleSort,
@@ -855,13 +845,10 @@ function LibrariesTable({
   sortDirection,
   sortKey,
   t,
-}: {
+}: LibraryActionHandlers & {
   allVisibleSelected: boolean;
   currencyCode: string;
   locale: string;
-  onDelete: (row: LibraryRow) => void;
-  onOpenDocuments: (row: LibraryRow) => void;
-  onOpenHub: (row: LibraryRow) => void;
   onSelectRow: (row: LibraryRow) => void;
   onToggleSelection: (libraryId: string) => void;
   onToggleSort: (key: SortKey) => void;
@@ -874,131 +861,259 @@ function LibrariesTable({
   sortKey: SortKey;
   t: TFunction;
 }) {
-  const sortIcon = sortDirection === "asc" ? <ArrowUp className="h-3 w-3" /> : <ArrowDown className="h-3 w-3" />;
+  const sortIcon = sortDirection === "asc" ? <ArrowUp className="h-3.5 w-3.5" /> : <ArrowDown className="h-3.5 w-3.5" />;
 
   if (pageRows.length === 0) {
-    return <div className="empty-state py-20">{t("admin.libraries.noMatches")}</div>;
+    return <WorkbenchEmptyState title={t("admin.libraries.noMatches")} />;
   }
 
   return (
-    <table className="w-full min-w-[1180px] table-fixed text-sm">
-      <colgroup>
-        {selectionMode && <col className="w-12" />}
-        <col className="w-72" />
-        <col className="w-52" />
-        <col className="w-24" />
-        <col className="w-28" />
-        <col className="w-24" />
-        <col className="w-36" />
-        <col className="w-32" />
-        <col className="w-32" />
-      </colgroup>
-      <thead
-        className="sticky top-0 z-10"
-        style={{
-          background: "linear-gradient(180deg, hsl(var(--card)), hsl(var(--card) / 0.95))",
-          backdropFilter: "blur(8px)",
-        }}
-      >
-        <tr className="border-b text-left">
-          {selectionMode && (
-            <th className="px-4 py-3 w-10">
-              <input
-                type="checkbox"
-                checked={allVisibleSelected}
-                onChange={onToggleVisibleSelection}
-                className="h-4 w-4 rounded border-gray-300"
-                aria-label={t("admin.libraries.selectVisible")}
-              />
-            </th>
-          )}
-          <SortHeader active={sortKey === "library"} description={t("admin.libraries.columnHelp.library")} icon={sortIcon} label={t("admin.libraries.library")} onClick={() => onToggleSort("library")} />
-          <SortHeader active={sortKey === "workspace"} description={t("admin.libraries.columnHelp.workspace")} icon={sortIcon} label={t("admin.libraries.workspace")} onClick={() => onToggleSort("workspace")} />
-          <SortHeader active={sortKey === "documents"} description={t("admin.libraries.columnHelp.documents")} icon={sortIcon} label={t("admin.libraries.documents")} onClick={() => onToggleSort("documents")} />
-          <SortHeader active={sortKey === "cost"} description={t("admin.libraries.columnHelp.cost")} icon={sortIcon} label={t("admin.libraries.cost")} onClick={() => onToggleSort("cost")} />
-          <SortHeader active={sortKey === "calls"} description={t("admin.libraries.columnHelp.calls")} icon={sortIcon} label={t("admin.libraries.calls")} onClick={() => onToggleSort("calls")} />
-          <SortHeader active={sortKey === "readiness"} description={t("admin.libraries.columnHelp.readiness")} icon={sortIcon} label={t("admin.libraries.readiness")} onClick={() => onToggleSort("readiness")} />
-          <SortHeader active={sortKey === "lifecycle"} description={t("admin.libraries.columnHelp.lifecycle")} icon={sortIcon} label={t("admin.libraries.lifecycle")} onClick={() => onToggleSort("lifecycle")} />
-          <ColumnHeader description={t("admin.libraries.columnHelp.actions")} label={t("admin.libraries.actions")} />
-        </tr>
-      </thead>
-      <tbody>
+    <>
+      <div className="space-y-3 p-3 xl:hidden">
+        {selectionMode && (
+          <label className="workbench-surface flex items-center gap-2 px-3 py-2 text-xs font-semibold text-muted-foreground">
+            <Checkbox
+              checked={allVisibleSelected}
+              aria-label={t("admin.libraries.selectVisible")}
+              onCheckedChange={onToggleVisibleSelection}
+            />
+            {t("admin.libraries.selectVisible")}
+          </label>
+        )}
         {pageRows.map((row) => (
-          <tr
+          <article
             key={row.library.id}
             aria-selected={selectedLibraryId === row.library.id}
-            className={`border-b cursor-pointer transition-all duration-150 ${
+            className={`workbench-surface p-4 transition-all ${
               selectedIds.has(row.library.id)
-                ? "bg-primary/10"
+                ? "border-primary/30 bg-primary/10"
                 : selectedLibraryId === row.library.id
-                  ? "bg-primary/5 border-l-2 border-l-primary"
-                  : "hover:bg-accent/30"
+                  ? "border-primary/40 bg-primary/5"
+                  : ""
             }`}
-            onKeyDown={rowKeyHandler(() => onSelectRow(row))}
-            onClick={() => onSelectRow(row)}
-            tabIndex={0}
           >
-            {selectionMode && (
-              <td className="px-4 py-3.5 w-10">
-                <input
-                  type="checkbox"
+            <div className="flex items-start gap-3">
+              {selectionMode && (
+                <Checkbox
                   checked={selectedIds.has(row.library.id)}
-                  onChange={(event) => {
-                    event.stopPropagation();
-                    onToggleSelection(row.library.id);
-                  }}
-                  onClick={(event) => event.stopPropagation()}
-                  className="h-4 w-4 rounded border-gray-300"
+                  className="mt-1"
                   aria-label={t("admin.libraries.selectLibrary", { name: row.library.displayName })}
+                  onCheckedChange={() => onToggleSelection(row.library.id)}
+                />
+              )}
+              <button
+                type="button"
+                className="min-w-0 flex-1 text-left"
+                onClick={() => onSelectRow(row)}
+              >
+                <div className="flex min-w-0 items-start justify-between gap-3">
+                  <LibraryNameCell library={row.library} t={t} />
+                  <LifecycleBadge lifecycleState={row.library.lifecycleState} t={t} />
+                </div>
+                <div className="mt-3 flex flex-wrap items-center gap-2">
+                  <ReadinessBadge row={row} t={t} />
+                  <span className="rounded-md bg-muted px-2 py-1 text-xs font-semibold text-muted-foreground">
+                    {row.workspace.displayName}
+                  </span>
+                </div>
+              </button>
+            </div>
+            <div className="mt-4 grid grid-cols-3 gap-2 rounded-lg bg-surface-sunken/60 p-2 text-xs">
+              <MobileMetric
+                label={t("admin.libraries.documents")}
+                value={
+                  row.costLoading
+                    ? t("admin.loading")
+                    : formatInteger(row.cost?.documentCount ?? 0, locale)
+                }
+              />
+              <MobileMetric
+                label={t("admin.libraries.cost")}
+                value={
+                  row.costError
+                    ? t("admin.libraries.costUnavailable")
+                    : formatCurrency(
+                        parseCost(row.cost?.totalCost),
+                        row.cost?.currencyCode ?? currencyCode,
+                        locale,
+                      )
+                }
+              />
+              <MobileMetric
+                label={t("admin.libraries.calls")}
+                value={formatInteger(row.cost?.providerCallCount ?? 0, locale)}
+              />
+            </div>
+            <div className="mt-4 flex justify-end">
+              <RowActionsMenu
+                actions={libraryRowActions({ onBackup, onConfigureAi, onDelete, onOpenDocuments, onRestore, row, t })}
+                className="w-full sm:w-8"
+                label={t("admin.libraries.actions")}
+              />
+            </div>
+          </article>
+        ))}
+      </div>
+      <table className="hidden w-full min-w-[1180px] table-fixed text-sm xl:table">
+        <colgroup>
+          {selectionMode && <col className="w-12" />}
+          <col className="w-72" />
+          <col className="w-52" />
+          <col className="w-24" />
+          <col className="w-28" />
+          <col className="w-24" />
+          <col className="w-36" />
+          <col className="w-32" />
+          <col className="w-32" />
+        </colgroup>
+        <thead className="sticky top-0 z-10 bg-card">
+          <tr className="border-b text-left">
+            {selectionMode && (
+              <th className="px-4 py-3 w-10">
+                <Checkbox
+                  checked={allVisibleSelected}
+                  aria-label={t("admin.libraries.selectVisible")}
+                  onCheckedChange={onToggleVisibleSelection}
+                />
+              </th>
+            )}
+            <SortHeader
+              active={sortKey === "library"}
+              description={t("admin.libraries.columnHelp.library")}
+              icon={sortIcon}
+              label={t("admin.libraries.library")}
+              onClick={() => onToggleSort("library")}
+            />
+            <SortHeader
+              active={sortKey === "workspace"}
+              description={t("admin.libraries.columnHelp.workspace")}
+              icon={sortIcon}
+              label={t("admin.libraries.workspace")}
+              onClick={() => onToggleSort("workspace")}
+            />
+            <SortHeader
+              active={sortKey === "documents"}
+              description={t("admin.libraries.columnHelp.documents")}
+              icon={sortIcon}
+              label={t("admin.libraries.documents")}
+              onClick={() => onToggleSort("documents")}
+            />
+            <SortHeader
+              active={sortKey === "cost"}
+              description={t("admin.libraries.columnHelp.cost")}
+              icon={sortIcon}
+              label={t("admin.libraries.cost")}
+              onClick={() => onToggleSort("cost")}
+            />
+            <SortHeader
+              active={sortKey === "calls"}
+              description={t("admin.libraries.columnHelp.calls")}
+              icon={sortIcon}
+              label={t("admin.libraries.calls")}
+              onClick={() => onToggleSort("calls")}
+            />
+            <SortHeader
+              active={sortKey === "readiness"}
+              description={t("admin.libraries.columnHelp.readiness")}
+              icon={sortIcon}
+              label={t("admin.libraries.readiness")}
+              onClick={() => onToggleSort("readiness")}
+            />
+            <SortHeader
+              active={sortKey === "lifecycle"}
+              description={t("admin.libraries.columnHelp.lifecycle")}
+              icon={sortIcon}
+              label={t("admin.libraries.lifecycle")}
+              onClick={() => onToggleSort("lifecycle")}
+            />
+            <ColumnHeader description={t("admin.libraries.columnHelp.actions")} label={t("admin.libraries.actions")} />
+          </tr>
+        </thead>
+        <tbody>
+          {pageRows.map((row) => (
+            <tr
+              key={row.library.id}
+              aria-selected={selectedLibraryId === row.library.id}
+              className={`border-b cursor-pointer transition-all duration-150 ${
+                selectedIds.has(row.library.id)
+                  ? "bg-primary/10"
+                  : selectedLibraryId === row.library.id
+                    ? "bg-primary/5 border-l-2 border-l-primary"
+                    : "hover:bg-accent/30"
+              }`}
+              onKeyDown={rowKeyHandler(() => onSelectRow(row))}
+              onClick={() => onSelectRow(row)}
+              tabIndex={0}
+            >
+              {selectionMode && (
+                <td className="px-4 py-3 w-10">
+                  <Checkbox
+                    checked={selectedIds.has(row.library.id)}
+                    onClick={(event) => event.stopPropagation()}
+                    aria-label={t("admin.libraries.selectLibrary", { name: row.library.displayName })}
+                    onCheckedChange={() => onToggleSelection(row.library.id)}
+                  />
+                </td>
+              )}
+              <td className="px-4 py-3">
+                <LibraryNameCell library={row.library} t={t} />
+              </td>
+              <td className="px-4 py-3">
+                <NameWithOptionalSlug
+                  displayName={row.workspace.displayName}
+                  meta={row.workspace.id}
+                  metaTitle={t("admin.libraries.workspaceId")}
+                  slug={row.workspace.slug}
                 />
               </td>
-            )}
-            <td className="px-4 py-3.5">
-              <LibraryNameCell library={row.library} />
-            </td>
-            <td className="px-4 py-3.5">
-              <NameWithOptionalSlug displayName={row.workspace.displayName} slug={row.workspace.slug} />
-            </td>
-            <td className="px-4 py-3.5 text-xs tabular-nums text-muted-foreground">
-              {row.costLoading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : formatInteger(row.cost?.documentCount ?? 0, locale)}
-            </td>
-            <td className="px-4 py-3.5 text-xs tabular-nums text-muted-foreground">
-              {row.costError ? t("admin.libraries.costUnavailable") : formatCurrency(parseCost(row.cost?.totalCost), row.cost?.currencyCode ?? currencyCode, locale)}
-            </td>
-            <td className="px-4 py-3.5 text-xs tabular-nums text-muted-foreground">
-              {formatInteger(row.cost?.providerCallCount ?? 0, locale)}
-            </td>
-            <td className="px-4 py-3.5">
-              <ReadinessBadge row={row} t={t} />
-            </td>
-            <td className="px-4 py-3.5 text-xs text-muted-foreground">
-              <LifecycleBadge lifecycleState={row.library.lifecycleState} t={t} />
-            </td>
-            <td className="px-4 py-3.5">
-              <div className="flex items-center gap-1">
-                <IconButton label={t("admin.libraries.openHub")} onClick={(event) => { event.stopPropagation(); onOpenHub(row); }}>
-                  <Settings2 className="h-3.5 w-3.5" />
-                </IconButton>
-                <IconButton label={t("admin.libraries.openDocuments")} onClick={(event) => { event.stopPropagation(); onOpenDocuments(row); }}>
-                  <ExternalLink className="h-3.5 w-3.5" />
-                </IconButton>
-                <IconButton destructive label={t("admin.libraries.delete")} onClick={(event) => { event.stopPropagation(); onDelete(row); }}>
-                  <Trash2 className="h-3.5 w-3.5" />
-                </IconButton>
-              </div>
-            </td>
-          </tr>
-        ))}
-      </tbody>
-    </table>
+              <td className="px-4 py-3 text-xs tabular-nums text-muted-foreground">
+                {row.costLoading ? (
+                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                ) : (
+                  formatInteger(row.cost?.documentCount ?? 0, locale)
+                )}
+              </td>
+              <td className="px-4 py-3 text-xs tabular-nums text-muted-foreground">
+                {row.costError
+                  ? t("admin.libraries.costUnavailable")
+                  : formatCurrency(
+                      parseCost(row.cost?.totalCost),
+                      row.cost?.currencyCode ?? currencyCode,
+                      locale,
+                    )}
+              </td>
+              <td className="px-4 py-3 text-xs tabular-nums text-muted-foreground">
+                {formatInteger(row.cost?.providerCallCount ?? 0, locale)}
+              </td>
+              <td className="px-4 py-3">
+                <ReadinessBadge row={row} t={t} />
+              </td>
+              <td className="px-4 py-3 text-xs text-muted-foreground">
+                <LifecycleBadge lifecycleState={row.library.lifecycleState} t={t} />
+              </td>
+              <td className="px-4 py-3">
+                <RowActionsMenu
+                  actions={libraryRowActions({ onBackup, onConfigureAi, onDelete, onOpenDocuments, onRestore, row, t })}
+                  label={t("admin.libraries.actions")}
+                />
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </>
   );
 }
 
 function NameWithOptionalSlug({
   displayName,
+  meta,
+  metaTitle,
   slug,
 }: {
   displayName: string;
+  meta?: string;
+  metaTitle?: string;
   slug: string;
 }) {
   const secondarySlug = visibleSecondarySlug(displayName, slug);
@@ -1008,21 +1123,47 @@ function NameWithOptionalSlug({
         {displayName}
       </span>
       {secondarySlug && (
-        <span className="block truncate font-mono text-[10px] text-muted-foreground" title={secondarySlug}>
+        <span className="block truncate font-mono text-2xs text-muted-foreground" title={secondarySlug}>
           {secondarySlug}
+        </span>
+      )}
+      {meta && (
+        <span
+          className="block truncate font-mono text-2xs text-muted-foreground/80"
+          title={metaTitle ? `${metaTitle}: ${meta}` : meta}
+        >
+          {meta}
         </span>
       )}
     </div>
   );
 }
 
-function LibraryNameCell({ library }: { library: CatalogLibraryResponse }) {
+function LibraryNameCell({ library, t }: { library: CatalogLibraryResponse; t: TFunction }) {
   return (
     <div className="flex min-w-0 items-center gap-3">
       <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-surface-sunken">
         <Database className="h-3.5 w-3.5 text-muted-foreground" />
       </div>
-      <NameWithOptionalSlug displayName={library.displayName} slug={library.slug} />
+      <NameWithOptionalSlug
+        displayName={library.displayName}
+        meta={library.id}
+        metaTitle={t("admin.libraries.libraryId")}
+        slug={library.slug}
+      />
+    </div>
+  );
+}
+
+function MobileMetric({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="min-w-0">
+      <div className="truncate section-label">
+        {label}
+      </div>
+      <div className="mt-0.5 truncate font-semibold" title={value}>
+        {value}
+      </div>
     </div>
   );
 }
@@ -1052,7 +1193,7 @@ function SortHeader({
           >
             {label}
             {active && icon}
-            <HelpCircle className="h-3 w-3 text-muted-foreground/70" aria-hidden="true" />
+            <HelpCircle className="h-3.5 w-3.5 text-muted-foreground/70" aria-hidden="true" />
           </button>
         </TooltipTrigger>
         <TooltipContent align="start" className="max-w-72 normal-case tracking-normal">
@@ -1080,7 +1221,7 @@ function ColumnHeader({
             tabIndex={0}
           >
             {label}
-            <HelpCircle className="h-3 w-3 text-muted-foreground/70" aria-hidden="true" />
+            <HelpCircle className="h-3.5 w-3.5 text-muted-foreground/70" aria-hidden="true" />
           </span>
         </TooltipTrigger>
         <TooltipContent align="start" className="max-w-72 normal-case tracking-normal">
@@ -1099,19 +1240,73 @@ function rowKeyHandler(action: () => void): KeyboardEventHandler<HTMLTableRowEle
   };
 }
 
+type LibraryActionHandlers = {
+  onBackup: (row: LibraryRow) => void;
+  onConfigureAi: (row: LibraryRow) => void;
+  onDelete: (row: LibraryRow) => void;
+  onOpenDocuments: (row: LibraryRow) => void;
+  onRestore: (row: LibraryRow) => void;
+};
+
+function libraryRowActions({
+  onBackup,
+  onConfigureAi,
+  onDelete,
+  onOpenDocuments,
+  onRestore,
+  row,
+  t,
+}: LibraryActionHandlers & {
+  row: LibraryRow;
+  t: TFunction;
+}): RowAction[] {
+  return [
+    {
+      key: "documents",
+      label: t("admin.libraries.openDocuments"),
+      icon: <ExternalLink className="h-3.5 w-3.5" />,
+      onSelect: () => onOpenDocuments(row),
+    },
+    {
+      key: "configure-ai",
+      label: t("admin.libraries.configureAi"),
+      icon: <Brain className="h-3.5 w-3.5" />,
+      onSelect: () => onConfigureAi(row),
+    },
+    {
+      key: "backup",
+      label: t("admin.snapshot.export"),
+      icon: <Download className="h-3.5 w-3.5" />,
+      onSelect: () => onBackup(row),
+    },
+    {
+      key: "restore",
+      label: t("admin.snapshot.import"),
+      icon: <Upload className="h-3.5 w-3.5" />,
+      onSelect: () => onRestore(row),
+    },
+    {
+      key: "delete",
+      label: t("admin.libraries.delete"),
+      icon: <Trash2 className="h-3.5 w-3.5" />,
+      onSelect: () => onDelete(row),
+      destructive: true,
+    },
+  ];
+}
+
 function ReadinessBadge({ row, t }: { row: LibraryRow; t: TFunction }) {
   const ready = row.library.ingestionReadiness.ready;
   const missingCount = row.library.ingestionReadiness.missingBindingPurposes.length;
   return (
     <span
-      className={`status-badge whitespace-nowrap ${
-        ready ? "status-ready" : "status-failed"
-      }`}
       title={missingCount > 0 ? row.library.ingestionReadiness.missingBindingPurposes.join(", ") : undefined}
     >
-      {ready ? <CheckCircle2 className="h-3 w-3" /> : <XCircle className="h-3 w-3" />}
-      {ready ? t("admin.libraries.ready") : t("admin.libraries.blocked")}
-      {!ready && missingCount > 0 ? ` · ${missingCount}` : ""}
+      <StatusBadge tone={ready ? "ready" : "failed"} className="whitespace-nowrap">
+        {ready ? <CheckCircle2 className="h-3.5 w-3.5" /> : <XCircle className="h-3.5 w-3.5" />}
+        {ready ? t("admin.libraries.ready") : t("admin.libraries.blocked")}
+        {!ready && missingCount > 0 ? ` · ${missingCount}` : ""}
+      </StatusBadge>
     </span>
   );
 }
@@ -1125,38 +1320,10 @@ function LifecycleBadge({
 }) {
   const active = lifecycleState === "active";
   return (
-    <span className={`status-badge whitespace-nowrap ${active ? "status-ready" : "status-stalled"}`}>
-      {active ? <CheckCircle2 className="h-3 w-3" /> : <Ban className="h-3 w-3" />}
+    <StatusBadge tone={active ? "ready" : "stalled"} className="whitespace-nowrap">
+      {active ? <CheckCircle2 className="h-3.5 w-3.5" /> : <Ban className="h-3.5 w-3.5" />}
       {lifecycleLabel(t, lifecycleState)}
-    </span>
-  );
-}
-
-function IconButton({
-  children,
-  destructive = false,
-  label,
-  onClick,
-}: {
-  children: ReactNode;
-  destructive?: boolean;
-  label: string;
-  onClick: MouseEventHandler<HTMLButtonElement>;
-}) {
-  return (
-    <button
-      aria-label={label}
-      className={`inline-flex h-8 w-8 items-center justify-center rounded-md border transition-colors ${
-        destructive
-          ? "text-destructive hover:bg-destructive/10"
-          : "text-muted-foreground hover:bg-accent hover:text-foreground"
-      }`}
-      onClick={onClick}
-      title={label}
-      type="button"
-    >
-      {children}
-    </button>
+    </StatusBadge>
   );
 }
 
@@ -1209,81 +1376,140 @@ function LibrariesPagination({
 function LibraryInspector({
   currencyCode,
   locale,
+  onBackup,
+  onConfigureAi,
   onDelete,
   onOpenDocuments,
-  onOpenHub,
+  onRestore,
   row,
   t,
-}: {
+}: LibraryActionHandlers & {
   currencyCode: string;
   locale: string;
-  onDelete: (row: LibraryRow) => void;
-  onOpenDocuments: (row: LibraryRow) => void;
-  onOpenHub: (row: LibraryRow) => void;
   row: LibraryRow | null;
   t: TFunction;
 }) {
   if (!row) {
-    return (
-      <aside className="hidden min-h-0 border-l bg-surface-sunken/40 p-5 xl:block">
-        <div className="empty-state py-12 text-sm">{t("admin.libraries.inspectorEmpty")}</div>
-      </aside>
-    );
+    return <InspectorPanel empty={t("admin.libraries.inspectorEmpty")} />;
   }
 
   return (
-    <aside className="min-h-0 overflow-auto bg-surface-sunken/40 p-5">
-      <div className="rounded-lg border bg-card p-4 shadow-soft">
-        <div className="section-label">{t("admin.libraries.inspectorTitle")}</div>
-        <h2 className="mt-2 truncate text-base font-bold tracking-tight" title={row.library.displayName}>
-          {row.library.displayName}
-        </h2>
-        <p className="mt-1 truncate text-xs text-muted-foreground" title={row.workspace.displayName}>
-          {row.workspace.displayName}
-        </p>
-        <div className="mt-4 space-y-3 text-sm">
-          <InspectorMetric label={t("admin.libraries.documents")} value={formatInteger(row.cost?.documentCount ?? 0, locale)} />
-          <InspectorMetric label={t("admin.libraries.cost")} value={formatCurrency(parseCost(row.cost?.totalCost), row.cost?.currencyCode ?? currencyCode, locale)} />
-          <InspectorMetric label={t("admin.libraries.calls")} value={formatInteger(row.cost?.providerCallCount ?? 0, locale)} />
-          <InspectorMetric label={t("admin.libraries.lifecycle")} value={lifecycleLabel(t, row.library.lifecycleState)} />
-          <InspectorMetric label={t("admin.libraries.libraryId")} value={row.library.id} mono />
-          <InspectorMetric label={t("admin.libraries.workspaceId")} value={row.workspace.id} mono />
-        </div>
-        <div className="mt-4 flex flex-col gap-2">
-          <Button onClick={() => onOpenHub(row)} size="sm">
-            <Settings2 className="mr-1.5 h-3.5 w-3.5" />
-            {t("admin.libraries.openHub")}
-          </Button>
-          <Button onClick={() => onOpenDocuments(row)} size="sm" variant="outline">
+    <InspectorPanel
+      title={row.library.displayName}
+      titleText={row.library.displayName}
+      subtitle={row.workspace.displayName}
+      metrics={[
+        {
+          label: t("admin.libraries.documents"),
+          value: formatInteger(row.cost?.documentCount ?? 0, locale),
+        },
+        {
+          label: t("admin.libraries.cost"),
+          value: formatCurrency(
+            parseCost(row.cost?.totalCost),
+            row.cost?.currencyCode ?? currencyCode,
+            locale,
+          ),
+        },
+        {
+          label: t("admin.libraries.calls"),
+          value: formatInteger(row.cost?.providerCallCount ?? 0, locale),
+        },
+        {
+          label: t("admin.libraries.lifecycle"),
+          value: lifecycleLabel(t, row.library.lifecycleState),
+        },
+        {
+          label: t("admin.libraries.libraryId"),
+          value: row.library.id,
+          title: row.library.id,
+          mono: true,
+        },
+        {
+          label: t("admin.libraries.workspaceId"),
+          value: row.workspace.id,
+          title: row.workspace.id,
+          mono: true,
+        },
+      ]}
+      actions={
+        <div className="w-full space-y-2">
+          <Button onClick={() => onOpenDocuments(row)} size="sm" className="w-full">
             <ExternalLink className="mr-1.5 h-3.5 w-3.5" />
             {t("admin.libraries.openDocuments")}
           </Button>
-          <Button onClick={() => onDelete(row)} size="sm" variant="destructive">
+          <Button onClick={() => onConfigureAi(row)} size="sm" variant="outline" className="w-full">
+            <Brain className="mr-1.5 h-3.5 w-3.5" />
+            {t("admin.libraries.configureAi")}
+          </Button>
+          <div className="grid grid-cols-2 gap-2">
+            <Button onClick={() => onBackup(row)} size="sm" variant="outline">
+              <Download className="mr-1.5 h-3.5 w-3.5" />
+              {t("admin.snapshot.export")}
+            </Button>
+            <Button onClick={() => onRestore(row)} size="sm" variant="outline">
+              <Upload className="mr-1.5 h-3.5 w-3.5" />
+              {t("admin.snapshot.import")}
+            </Button>
+          </div>
+          <Button onClick={() => onDelete(row)} size="sm" variant="destructive" className="w-full">
             <Trash2 className="mr-1.5 h-3.5 w-3.5" />
             {t("admin.libraries.delete")}
           </Button>
         </div>
-      </div>
-    </aside>
+      }
+    >
+      <LibraryMcpHintToggle library={row.library} t={t} />
+    </InspectorPanel>
   );
 }
 
-function InspectorMetric({
-  label,
-  mono = false,
-  value,
-}: {
-  label: string;
-  mono?: boolean;
-  value: string;
-}) {
+function LibraryMcpHintToggle({ library, t }: { library: CatalogLibraryResponse; t: TFunction }) {
+  const { activeLibrary, setActiveLibrary, setLibraries, refreshSession } = useApp();
+  const [override, setOverride] = useState<{ id: string; value: boolean } | null>(null);
+  const checked =
+    override?.id === library.id
+      ? override.value
+      : library.includeDocumentHintInMcpAnswers ?? true;
+  const mutation = useMutation({
+    mutationFn: (value: boolean) =>
+      adminApi.updateLibraryMcpSettings(library.id, { includeDocumentHintInMcpAnswers: value }),
+    onMutate: (value: boolean) => {
+      setOverride({ id: library.id, value });
+    },
+    onSuccess: (updated, requested) => {
+      const value = updated.includeDocumentHintInMcpAnswers ?? requested;
+      setOverride({ id: library.id, value });
+      setLibraries((prev) =>
+        prev.map((item) =>
+          item.id === library.id ? { ...item, includeDocumentHintInMcpAnswers: value } : item,
+        ),
+      );
+      if (activeLibrary?.id === library.id) {
+        setActiveLibrary({ ...activeLibrary, includeDocumentHintInMcpAnswers: value });
+      }
+      void Promise.resolve(refreshSession()).catch(() => undefined);
+    },
+    onError: (error: unknown) => {
+      setOverride(null);
+      toast.error(errorMessage(error, t("admin.mcp.updateFailed")));
+    },
+  });
   return (
-    <div className="min-w-0">
-      <div className="text-[10px] font-semibold uppercase text-muted-foreground">{label}</div>
-      <div className={`mt-0.5 truncate ${mono ? "font-mono text-xs" : "font-semibold"}`} title={value}>
-        {value}
-      </div>
-    </div>
+    <label className="flex items-start gap-2.5 rounded-lg bg-surface-sunken/60 p-3">
+      <Checkbox
+        checked={checked}
+        disabled={mutation.isPending}
+        className="mt-0.5"
+        onCheckedChange={(value) => mutation.mutate(value === true)}
+      />
+      <span className="min-w-0">
+        <span className="block text-xs font-semibold">{t("admin.mcp.includeDocumentHint")}</span>
+        <span className="mt-0.5 block text-2xs leading-snug text-muted-foreground">
+          {t("admin.mcp.includeDocumentHintHelp")}
+        </span>
+      </span>
+    </label>
   );
 }
 
@@ -1336,30 +1562,32 @@ function ConfirmDeleteDialog({
   t: TFunction;
 }) {
   return (
-    <Dialog open={open} onOpenChange={(nextOpen) => { if (!nextOpen) onCancel(); }}>
-      <DialogContent>
-        <DialogHeader>
-          <DialogTitle>{t("admin.libraries.deleteTitle", { count })}</DialogTitle>
-          <DialogDescription>{t("admin.libraries.deleteDesc", { count })}</DialogDescription>
-        </DialogHeader>
-        <DialogFooter>
-          <Button onClick={onCancel} variant="outline">{t("common.cancel")}</Button>
-          <Button disabled={count <= 0} onClick={onConfirm} variant="destructive">
-            <Trash2 className="mr-1.5 h-3.5 w-3.5" />
-            {t("admin.libraries.delete")}
-          </Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
+    <ConfirmDialog
+      cancelLabel={t("common.cancel")}
+      confirmDisabled={count <= 0}
+      confirmLabel={(
+        <>
+          <Trash2 className="mr-1.5 h-3.5 w-3.5" />
+          {t("admin.libraries.delete")}
+        </>
+      )}
+      description={t("admin.libraries.deleteDesc", { count })}
+      destructive
+      icon={<Trash2 className="h-4 w-4 text-destructive" />}
+      onCancel={onCancel}
+      onConfirm={onConfirm}
+      open={open}
+      title={t("admin.libraries.deleteTitle", { count })}
+    />
   );
 }
 
 function LibrariesLoading({ t }: { t: TFunction }) {
   return (
-    <div className="empty-state py-20">
-      <Loader2 className="mb-4 h-7 w-7 animate-spin text-primary" />
-      <h2 className="text-base font-bold tracking-tight">{t("admin.libraries.loading")}</h2>
-    </div>
+    <WorkbenchEmptyState
+      icon={<Loader2 className="h-7 w-7 animate-spin text-primary/70" />}
+      title={t("admin.libraries.loading")}
+    />
   );
 }
 
@@ -1373,27 +1601,25 @@ function LibrariesError({
   t: TFunction;
 }) {
   return (
-    <div className="empty-state py-20">
-      <div className="mb-4 flex h-14 w-14 items-center justify-center rounded-lg bg-destructive/10">
-        <XCircle className="h-7 w-7 text-destructive" />
-      </div>
-      <h2 className="text-base font-bold tracking-tight">{t("admin.libraries.loadFailed")}</h2>
-      <p className="mt-2 text-sm text-muted-foreground">{error}</p>
-      <Button className="mt-4" onClick={onRetry} size="sm" variant="outline">
-        <RotateCw className="mr-1.5 h-3.5 w-3.5" />
-        {t("documents.retry")}
-      </Button>
-    </div>
+    <WorkbenchEmptyState
+      action={(
+        <Button onClick={onRetry} size="sm" variant="outline">
+          <RotateCw className="mr-1.5 h-3.5 w-3.5" />
+          {t("documents.retry")}
+        </Button>
+      )}
+      description={error}
+      icon={<XCircle className="h-7 w-7 text-destructive" />}
+      title={t("admin.libraries.loadFailed")}
+    />
   );
 }
 
 function LibrariesEmpty({ t }: { t: TFunction }) {
   return (
-    <div className="empty-state py-20">
-      <div className="mb-4 flex h-14 w-14 items-center justify-center rounded-lg bg-muted">
-        <Database className="h-7 w-7 text-muted-foreground" />
-      </div>
-      <h2 className="text-base font-bold tracking-tight">{t("admin.libraries.empty")}</h2>
-    </div>
+    <WorkbenchEmptyState
+      icon={<Database className="h-7 w-7 text-muted-foreground" />}
+      title={t("admin.libraries.empty")}
+    />
   );
 }

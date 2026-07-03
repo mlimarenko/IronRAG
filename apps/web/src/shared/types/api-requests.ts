@@ -1,14 +1,12 @@
 import type {
-  CreateProviderCredentialRequest,
-  UpdateProviderCredentialRequest,
-  CreateBindingAssignmentRequest,
-  UpdateBindingAssignmentRequest,
+  CreateAiAccountRequest,
+  UpdateAiAccountRequest,
+  CreateAiBindingRequest,
+  UpdateAiBindingRequest,
   CreateProviderCatalogRequest as GeneratedCreateProviderCatalogRequest,
   UpdateProviderCatalogRequest as GeneratedUpdateProviderCatalogRequest,
   CreateModelCatalogRequest as GeneratedCreateModelCatalogRequest,
   UpdateModelCatalogRequest as GeneratedUpdateModelCatalogRequest,
-  CreateModelPresetRequest as GeneratedCreateModelPresetRequest,
-  UpdateModelPresetRequest as GeneratedUpdateModelPresetRequest,
   CreateWorkspacePriceOverrideRequest,
   UpdateWorkspacePriceOverrideRequest,
 } from "@/shared/api/generated";
@@ -21,15 +19,13 @@ type RequestInput<T> = Omit<T, OptionalKeys<T>> & {
   [K in OptionalKeys<T>]?: T[K] | undefined;
 };
 
-export type CreateCredentialRequest = RequestInput<CreateProviderCredentialRequest>;
-export type UpdateCredentialRequest = RequestInput<UpdateProviderCredentialRequest>;
-export type CreateBindingRequest = RequestInput<CreateBindingAssignmentRequest>;
-export type UpdateBindingRequest = RequestInput<UpdateBindingAssignmentRequest>;
+export type CreateAccountRequest = RequestInput<CreateAiAccountRequest>;
+export type UpdateAccountRequest = RequestInput<UpdateAiAccountRequest>;
+export type CreateBindingRequest = RequestInput<CreateAiBindingRequest>;
+export type UpdateBindingRequest = RequestInput<UpdateAiBindingRequest>;
 export type CreateProviderRequest = RequestInput<GeneratedCreateProviderCatalogRequest>;
 export type UpdateProviderRequest = RequestInput<GeneratedUpdateProviderCatalogRequest>;
 export type CreateModelRequest = RequestInput<GeneratedCreateModelCatalogRequest>;
 export type UpdateModelRequest = RequestInput<GeneratedUpdateModelCatalogRequest>;
-export type CreateModelPresetRequest = RequestInput<GeneratedCreateModelPresetRequest>;
-export type UpdateModelPresetRequest = RequestInput<GeneratedUpdateModelPresetRequest>;
 export type CreatePriceOverrideRequest = RequestInput<CreateWorkspacePriceOverrideRequest>;
 export type UpdatePriceOverrideRequest = RequestInput<UpdateWorkspacePriceOverrideRequest>;

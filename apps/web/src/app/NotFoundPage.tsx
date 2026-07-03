@@ -10,11 +10,9 @@ export default function NotFoundPage() {
   return (
     <div className="min-h-screen flex items-center justify-center bg-background ambient-bg">
       <div className="text-center animate-fade-in relative z-10">
-        <div className="text-8xl font-black tracking-tighter mb-4" style={{
-          background: 'linear-gradient(180deg, hsl(var(--foreground) / 0.15), hsl(var(--foreground) / 0.05))',
-          WebkitBackgroundClip: 'text',
-          WebkitTextFillColor: 'transparent',
-        }}>404</div>
+        <div className="mb-4 bg-gradient-to-b from-foreground/15 to-foreground/5 bg-clip-text text-8xl font-black tracking-tighter text-transparent">
+          404
+        </div>
         <h1 className="text-lg font-bold tracking-tight">{t('common.pageNotFoundTitle')}</h1>
         <p className="text-sm text-muted-foreground mt-2 mb-6">{t('common.pageNotFoundDescription')}</p>
         <Button variant="outline" onClick={() => navigate('/dashboard')}>

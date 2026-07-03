@@ -137,7 +137,7 @@ pub enum ModelAvailabilityState {
 pub struct ResolvedModelCatalogEntry {
     pub model: ModelCatalogEntry,
     pub availability_state: ModelAvailabilityState,
-    pub available_credential_ids: Vec<Uuid>,
+    pub available_account_ids: Vec<Uuid>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
@@ -157,19 +157,24 @@ pub struct PriceCatalogEntry {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
-pub struct AiBindingAssignment {
+pub struct AiBinding {
     pub id: Uuid,
     pub scope_kind: AiScopeKind,
     pub workspace_id: Option<Uuid>,
     pub library_id: Option<Uuid>,
     pub binding_purpose: AiBindingPurpose,
-    pub provider_credential_id: Uuid,
-    pub model_preset_id: Uuid,
+    pub account_id: Uuid,
+    pub model_catalog_id: Uuid,
+    pub system_prompt: Option<String>,
+    pub temperature: Option<f64>,
+    pub top_p: Option<f64>,
+    pub max_output_tokens_override: Option<i32>,
+    pub extra_parameters_json: serde_json::Value,
     pub binding_state: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
-pub struct ProviderCredential {
+pub struct AiAccount {
     pub id: Uuid,
     pub scope_kind: AiScopeKind,
     pub workspace_id: Option<Uuid>,
@@ -179,23 +184,6 @@ pub struct ProviderCredential {
     pub api_key: Option<String>,
     pub base_url: Option<String>,
     pub credential_state: String,
-    pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
-pub struct ModelPreset {
-    pub id: Uuid,
-    pub scope_kind: AiScopeKind,
-    pub workspace_id: Option<Uuid>,
-    pub library_id: Option<Uuid>,
-    pub model_catalog_id: Uuid,
-    pub preset_name: String,
-    pub system_prompt: Option<String>,
-    pub temperature: Option<f64>,
-    pub top_p: Option<f64>,
-    pub max_output_tokens_override: Option<i32>,
-    pub extra_parameters_json: serde_json::Value,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }

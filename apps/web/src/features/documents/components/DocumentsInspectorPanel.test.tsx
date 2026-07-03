@@ -87,7 +87,6 @@ describe('DocumentsInspectorPanel', () => {
     editorActionEnabled?: boolean;
     editorActionReadOnly?: boolean;
     onDocumentHintUpdated?: (documentId: string, documentHint: string | null) => void;
-    presentation?: 'sidebar' | 'drawer';
     selectedDoc?: DocumentItem;
   }) {
     await act(async () => {
@@ -106,7 +105,6 @@ describe('DocumentsInspectorPanel', () => {
           onDocumentHintUpdated={overrides?.onDocumentHintUpdated}
           onOpenEditor={noop}
           onRetry={noop}
-          presentation={overrides?.presentation}
           selectedDoc={overrides?.selectedDoc ?? buildSelectedDoc()}
           selectionMode={false}
           setDeleteDocOpen={noop}
@@ -739,7 +737,6 @@ describe('DocumentsInspectorPanel', () => {
 
   it('renders the same failed-document error in the mobile drawer presentation', async () => {
     await renderPanel({
-      presentation: 'drawer',
       selectedDoc: buildSelectedDoc({
         status: 'failed',
         readiness: 'failed',

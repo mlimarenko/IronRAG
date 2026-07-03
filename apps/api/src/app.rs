@@ -210,22 +210,15 @@ async fn run_startup_bootstraps(
     _bootstrap_settings: &config::BootstrapSettings,
     _destructive_bootstrap: &config::DestructiveFreshBootstrapSettings,
 ) -> anyhow::Result<()> {
-    // Provider preset + env-keyed credential side effects must run on
-    // every startup, regardless of whether a bootstrap admin login is
-    // configured. Operators who created the admin via the UI still need
-    // their `IRONRAG_<PROVIDER>_API_KEY` values to land as instance-scope
-    // credentials and have the matching presets seeded; gating those on
-    // `ui_bootstrap_admin` was the bug behind "I added a key and it
-    // never appeared in admin → AI".
-    state
-        .canonical_services
-        .ai_catalog
-        .seed_all_provider_presets(state)
-        .await
-        .map_err(|error| anyhow::anyhow!("failed to seed provider presets: {error}"))?;
-    state.canonical_services.ai_catalog.ensure_env_provider_credentials(state).await.map_err(
-        |error| anyhow::anyhow!("failed to ensure env-keyed provider credentials: {error}"),
-    )?;
+    // Env-keyed account side effects must run on every startup, regardless
+    // of whether a bootstrap admin login is configured. Operators who
+    // created the admin via the UI still need their
+    // `IRONRAG_<PROVIDER>_API_KEY` values to land as instance-scope
+    // accounts; gating that on `ui_bootstrap_admin` was the bug behind "I
+    // added a key and it never appeared in admin → AI".
+    state.canonical_services.ai_catalog.ensure_env_ai_accounts(state).await.map_err(|error| {
+        anyhow::anyhow!("failed to ensure env-keyed provider accounts: {error}")
+    })?;
 
     if state.ui_bootstrap_admin.is_some() {
         bootstrap::ensure_canonical_bootstrap_admin(state).await.map_err(|error| {

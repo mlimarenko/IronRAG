@@ -228,47 +228,44 @@ impl AiCatalogService {
         provider_catalog_id: Option<Uuid>,
         workspace_id: Option<Uuid>,
         library_id: Option<Uuid>,
-        credential_id: Option<Uuid>,
+        account_id: Option<Uuid>,
     ) -> Result<Vec<ResolvedModelCatalogEntry>, ApiError> {
         let providers = self.list_provider_catalog(state).await?;
         let provider_by_id =
             providers.iter().map(|provider| (provider.id, provider)).collect::<HashMap<_, _>>();
-        let visible_credentials =
-            self.list_visible_provider_credentials(state, workspace_id, library_id).await?;
-        let scoped_credentials = match credential_id {
-            Some(target_credential_id) => vec![
-                visible_credentials
+        let visible_accounts = self.list_visible_accounts(state, workspace_id, library_id).await?;
+        let scoped_accounts = match account_id {
+            Some(target_account_id) => vec![
+                visible_accounts
                     .iter()
-                    .find(|credential| credential.id == target_credential_id)
+                    .find(|account| account.id == target_account_id)
                     .cloned()
                     .ok_or_else(|| {
-                        ApiError::resource_not_found("provider_credential", target_credential_id)
+                        ApiError::resource_not_found("provider_credential", target_account_id)
                     })?,
             ],
-            None => visible_credentials,
+            None => visible_accounts,
         };
 
-        let mut available_credential_ids_by_provider = HashMap::<Uuid, BTreeSet<Uuid>>::new();
-        for credential in
-            scoped_credentials.iter().filter(|credential| credential.credential_state == "active")
+        let mut available_account_ids_by_provider = HashMap::<Uuid, BTreeSet<Uuid>>::new();
+        for account in scoped_accounts.iter().filter(|account| account.credential_state == "active")
         {
-            if provider_catalog_id.is_some_and(|value| value != credential.provider_catalog_id) {
+            if provider_catalog_id.is_some_and(|value| value != account.provider_catalog_id) {
                 continue;
             }
-            available_credential_ids_by_provider
-                .entry(credential.provider_catalog_id)
+            available_account_ids_by_provider
+                .entry(account.provider_catalog_id)
                 .or_default()
-                .insert(credential.id);
+                .insert(account.id);
         }
 
-        let mut explicitly_available_credential_ids =
-            HashMap::<(Uuid, String), BTreeSet<Uuid>>::new();
+        let mut explicitly_available_account_ids = HashMap::<(Uuid, String), BTreeSet<Uuid>>::new();
         let mut explicitly_checked_providers = BTreeSet::<Uuid>::new();
-        if let Some(target_credential_id) = credential_id {
-            if let Some(credential) = scoped_credentials.iter().find(|credential| {
-                credential.id == target_credential_id && credential.credential_state == "active"
+        if let Some(target_account_id) = account_id {
+            if let Some(account) = scoped_accounts.iter().find(|account| {
+                account.id == target_account_id && account.credential_state == "active"
             }) {
-                if let Some(provider) = provider_by_id.get(&credential.provider_catalog_id) {
+                if let Some(provider) = provider_by_id.get(&account.provider_catalog_id) {
                     let should_refresh = provider_catalog_id
                         .is_none_or(|value| value == provider.id)
                         && provider_credential_policy(provider).validation_mode
@@ -277,26 +274,26 @@ impl AiCatalogService {
                         match sync_provider_model_catalog(
                             state,
                             provider,
-                            credential.api_key.as_deref(),
-                            credential.base_url.as_deref(),
+                            account.api_key.as_deref(),
+                            account.base_url.as_deref(),
                         )
                         .await
                         {
                             Ok(model_names) => {
                                 explicitly_checked_providers.insert(provider.id);
                                 for model_name in model_names {
-                                    explicitly_available_credential_ids
+                                    explicitly_available_account_ids
                                         .entry((provider.id, model_name))
                                         .or_default()
-                                        .insert(credential.id);
+                                        .insert(account.id);
                                 }
                             }
                             Err(error) => {
                                 tracing::warn!(
                                     provider_kind = %provider.provider_kind,
-                                    credential_id = %credential.id,
+                                    account_id = %account.id,
                                     error = %error,
-                                    "failed to refresh provider models for credential-specific request"
+                                    "failed to refresh provider models for account-specific request"
                                 );
                             }
                         }
@@ -309,19 +306,18 @@ impl AiCatalogService {
         Ok(models
             .into_iter()
             .map(|model| {
-                let available_credential_ids = if explicitly_checked_providers
-                    .contains(&model.provider_catalog_id)
-                {
-                    explicitly_available_credential_ids
-                        .get(&(model.provider_catalog_id, model.model_name.clone()))
-                        .map(|credential_ids| credential_ids.iter().copied().collect::<Vec<_>>())
-                        .unwrap_or_default()
-                } else {
-                    available_credential_ids_by_provider
-                        .get(&model.provider_catalog_id)
-                        .map(|credential_ids| credential_ids.iter().copied().collect::<Vec<_>>())
-                        .unwrap_or_default()
-                };
+                let available_account_ids =
+                    if explicitly_checked_providers.contains(&model.provider_catalog_id) {
+                        explicitly_available_account_ids
+                            .get(&(model.provider_catalog_id, model.model_name.clone()))
+                            .map(|account_ids| account_ids.iter().copied().collect::<Vec<_>>())
+                            .unwrap_or_default()
+                    } else {
+                        available_account_ids_by_provider
+                            .get(&model.provider_catalog_id)
+                            .map(|account_ids| account_ids.iter().copied().collect::<Vec<_>>())
+                            .unwrap_or_default()
+                    };
                 let availability_state = if model.lifecycle_state == "disabled"
                     || provider_by_id
                         .get(&model.provider_catalog_id)
@@ -337,7 +333,7 @@ impl AiCatalogService {
                             if explicitly_checked_providers
                                 .contains(&model.provider_catalog_id) =>
                         {
-                            if available_credential_ids.is_empty() {
+                            if available_account_ids.is_empty() {
                                 ModelAvailabilityState::Unavailable
                             } else {
                                 ModelAvailabilityState::Available
@@ -350,7 +346,7 @@ impl AiCatalogService {
                         None => ModelAvailabilityState::Unknown,
                     }
                 };
-                ResolvedModelCatalogEntry { model, availability_state, available_credential_ids }
+                ResolvedModelCatalogEntry { model, availability_state, available_account_ids }
             })
             .collect())
     }

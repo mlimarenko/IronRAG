@@ -113,8 +113,8 @@ function InspectorMetric({
 }) {
   return (
     <div className="min-w-0 rounded-lg border border-border/60 bg-background/45 px-2.5 py-2">
-      <div className="flex items-center gap-1.5 text-[10px] font-medium uppercase text-muted-foreground">
-        <Icon className="h-3 w-3 shrink-0" />
+      <div className="flex items-center gap-1.5 section-label">
+        <Icon className="h-3.5 w-3.5 shrink-0" />
         <span className="truncate">{label}</span>
       </div>
       <div className="mt-1 truncate text-sm font-bold tabular-nums text-foreground">{value}</div>
@@ -194,7 +194,7 @@ function NeighborList({
     <div>
       <div className="mb-1.5 flex items-center justify-between gap-2">
         <div className="section-label">{title}</div>
-        <span className="text-[10px] font-semibold tabular-nums text-muted-foreground">
+        <span className="text-2xs font-semibold tabular-nums text-muted-foreground">
           {nodes.length}
         </span>
       </div>
@@ -217,7 +217,7 @@ function NeighborList({
                   {compactLabel.text}
                 </span>
                 {node.edgeCount > 0 && (
-                  <span className="shrink-0 text-[10px] tabular-nums text-muted-foreground">
+                  <span className="shrink-0 text-2xs tabular-nums text-muted-foreground">
                     {node.edgeCount}
                   </span>
                 )}
@@ -328,7 +328,7 @@ function GraphInspectorImpl({
                   className="h-2.5 w-2.5 shrink-0 rounded-full"
                   style={{ background: GRAPH_NODE_COLORS[selected.type] ?? GRAPH_NODE_COLORS.entity }}
                 />
-                <span className="truncate text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+                <span className="truncate section-label">
                   {t(`graph.nodeTypes.${selected.type}`)}
                   {selected.subType ? ` · ${selected.subType}` : ''}
                 </span>
@@ -342,15 +342,17 @@ function GraphInspectorImpl({
             </div>
             <div className="flex shrink-0 items-center gap-1">
               {detailLoading && <Loader2 className="h-3.5 w-3.5 animate-spin text-muted-foreground" />}
-              <button
+              <Button
                 type="button"
+                variant="ghost"
+                size="icon"
+                className="h-8 w-8"
                 onClick={onClose}
-                className="rounded-lg p-1.5 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
                 aria-label={t('common.close')}
                 title={t('common.close')}
               >
                 <X className="h-4 w-4" />
-              </button>
+              </Button>
             </div>
           </div>
         </div>

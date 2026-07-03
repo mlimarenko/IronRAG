@@ -25,11 +25,11 @@ type DocumentEditorBlock =
   | (BaseBlock & { kind: "heading"; level: number; text: string })
   | (BaseBlock & { kind: "paragraph"; text: string })
   | (BaseBlock & { kind: "list_item"; text: string })
-  | (BaseBlock & { kind: "code_block"; text: string; language?: string })
+  | (BaseBlock & { kind: "code_block"; text: string; language?: string | undefined })
   | (BaseBlock & { kind: "quote_block"; text: string })
   | (BaseBlock & { kind: "metadata_block"; text: string })
   | (BaseBlock & { kind: "source_unit"; text: string })
-  | (BaseBlock & { kind: "table"; rows: string[][]; sheetName?: string });
+  | (BaseBlock & { kind: "table"; rows: string[][]; sheetName?: string | undefined });
 
 type NormalizedSegment = {
   ordinal: number;
@@ -120,16 +120,18 @@ export function serializeEditorBlocks(blocks: DocumentEditorBlock[]): string {
 
   for (let index = 0; index < blocks.length; index += 1) {
     const block = blocks[index];
+    if (!block) {
+      continue;
+    }
     if (block.kind === "list_item") {
-      const items = [block];
-      while (
-        index + 1 < blocks.length &&
-        blocks[index + 1]?.kind === "list_item"
-      ) {
+      const items: Extract<DocumentEditorBlock, { kind: "list_item" }>[] = [block];
+      while (index + 1 < blocks.length) {
+        const next = blocks[index + 1];
+        if (!next || next.kind !== "list_item") {
+          break;
+        }
         index += 1;
-        items.push(
-          blocks[index],
-        );
+        items.push(next);
       }
       rendered.push(items.map((item) => `- ${item.text}`.trimEnd()).join("\n"));
       continue;
@@ -233,11 +235,13 @@ function parseHeading(
   headingTrail: string[],
 ): Extract<DocumentEditorBlock, { kind: "heading" }> {
   const match = text.match(/^(#{1,6})\s+(.*)$/);
-  if (match) {
+  const hashes = match?.[1];
+  const body = match?.[2];
+  if (hashes !== undefined && body !== undefined) {
     return {
       kind: "heading",
-      level: match[1].length,
-      text: normalizeDisplayText(match[2]),
+      level: hashes.length,
+      text: normalizeDisplayText(body),
     };
   }
 
@@ -414,8 +418,13 @@ function renderMarkdownTable(rows: string[][]): string {
     });
   });
 
+  const headerRow = normalizedRows[0];
+  if (!headerRow) {
+    return "";
+  }
+
   const lines = [
-    `| ${normalizedRows[0].join(" | ")} |`,
+    `| ${headerRow.join(" | ")} |`,
     `| ${Array.from({ length: maxColumns }, () => "---").join(" | ")} |`,
   ];
   for (const row of normalizedRows.slice(1)) {

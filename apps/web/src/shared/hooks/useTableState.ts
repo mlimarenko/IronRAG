@@ -31,7 +31,7 @@ export function parseNumberOption<Option extends number>(
   fallback: Option,
 ): Option {
   return typeof raw === "number" && options.some((option) => option === raw)
-    ? raw
+    ? (raw as Option)
     : fallback;
 }
 
@@ -41,7 +41,7 @@ export function parseStringOption<Option extends string>(
   fallback: Option,
 ): Option {
   return typeof raw === "string" && options.some((option) => option === raw)
-    ? raw
+    ? (raw as Option)
     : fallback;
 }
 

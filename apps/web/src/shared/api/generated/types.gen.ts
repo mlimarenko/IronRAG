@@ -51,20 +51,39 @@ export type AgentLoopMetadata = {
 /**
  * Reason the tool-use loop stopped iterating.
  */
-export type AgentStopReason = 'final_answer' | 'iteration_cap' | 'deadline' | 'tool_error' | 'provider_error';
+export type AgentStopReason = 'final_answer' | 'iteration_cap' | 'deadline' | 'no_progress' | 'tool_error' | 'provider_error';
 
-export type AiBindingAssignmentResponse = {
-    bindingPurpose: AiBindingPurpose;
-    bindingState: string;
+export type AiAccountResponse = {
+    apiKeySummary: string;
+    baseUrl?: string | null;
+    createdAt: string;
+    credentialState: string;
     id: string;
+    label: string;
     libraryId?: string | null;
-    modelPresetId: string;
-    providerCredentialId: string;
+    providerCatalogId: string;
     scopeKind: AiScopeKind;
+    updatedAt: string;
     workspaceId?: string | null;
 };
 
 export type AiBindingPurpose = 'extract_text' | 'extract_graph' | 'embed_chunk' | 'query_compile' | 'query_retrieve' | 'query_answer' | 'vision' | 'agent';
+
+export type AiBindingResponse = {
+    accountId: string;
+    bindingPurpose: AiBindingPurpose;
+    bindingState: string;
+    extraParametersJson: unknown;
+    id: string;
+    libraryId?: string | null;
+    maxOutputTokensOverride?: number | null;
+    modelCatalogId: string;
+    scopeKind: AiScopeKind;
+    systemPrompt?: string | null;
+    temperature?: number | null;
+    topP?: number | null;
+    workspaceId?: string | null;
+};
 
 export type AiScopeKind = 'instance' | 'workspace' | 'library';
 
@@ -73,11 +92,57 @@ export type AppendDocumentBodyRequest = {
     idempotencyKey?: string | null;
 };
 
+/**
+ * One typed disambiguation choice the answer pipeline surfaced alongside a
+ * clarifying answer.
+ *
+ * `kind` reuses the existing typed vocabulary where it applies — a graph
+ * `node_type` for entity probes, `"document"` for a document-derived variant
+ * — so agents can route a follow-up without parsing the prose answer body.
+ * `confidence` is `None` when the branch has no ranking signal to expose.
+ */
+export type AssistantAnswerCandidate = {
+    confidence?: number | null;
+    kind: string;
+    label: string;
+    provenance: AssistantAnswerCandidateProvenance;
+};
+
+/**
+ * Structured provenance for a single answer candidate.
+ *
+ * Every field is optional because the clarify branches surface candidates
+ * derived from different evidence shapes: a graph-entity probe carries an
+ * `entity_id`, a document-derived variant carries a `document_id`, and a
+ * label-only variant (e.g. a grouped-reference title) carries none.
+ * Callers treat a present id as a stable handle for a follow-up tool call
+ * and a missing id as "label only".
+ */
+export type AssistantAnswerCandidateProvenance = {
+    chunkId?: string | null;
+    documentId?: string | null;
+    entityId?: string | null;
+};
+
 export type AssistantChunkReference = {
     chunkId: string;
     executionId: string;
     rank: number;
     score: number;
+};
+
+/**
+ * Typed clarification metadata attached to a grounded-answer turn.
+ *
+ * The prose answer body stays authoritative for humans; this object is
+ * additive machine-readable metadata for agent callers. `required` is
+ * `true` only when the turn returned a clarifying answer; otherwise the
+ * candidate list is empty and `question` is `None`.
+ */
+export type AssistantClarification = {
+    answerCandidates?: Array<AssistantAnswerCandidate>;
+    question?: string | null;
+    required: boolean;
 };
 
 export type AssistantContentSourceAccess = {
@@ -136,6 +201,13 @@ export type AssistantExecution = {
 
 export type AssistantExecutionDetail = {
     chunkReferences: Array<AssistantChunkReference>;
+    /**
+     * Typed clarification metadata for this turn. Defaults to
+     * `required: false` with no candidates for ordinary answers and for
+     * historical-replay reads (the replay surface carries no clarification
+     * metadata); a clarify turn populates `question` and `answer_candidates`.
+     */
+    clarification?: AssistantClarification;
     contextBundleId: string;
     entityReferences: Array<AssistantEntityReference>;
     execution: AssistantExecution;
@@ -453,35 +525,34 @@ export type BindingValidationResponse = {
 };
 
 export type BootstrapAiSetup = {
-    presetBundles: Array<BootstrapProviderPresetBundle>;
+    bindingBundles: Array<BootstrapProviderBindingBundle>;
 };
 
 export type BootstrapBindingPurpose = 'extract_text' | 'extract_graph' | 'embed_chunk' | 'query_compile' | 'query_retrieve' | 'query_answer' | 'vision' | 'agent';
 
 export type BootstrapCredentialSource = 'missing' | 'env';
 
-export type BootstrapProviderPreset = {
+export type BootstrapProviderBinding = {
     bindingPurpose: BootstrapBindingPurpose;
     maxOutputTokensOverride?: number | null;
     modelCatalogId: string;
     modelName: string;
-    presetName: string;
     systemPrompt?: string | null;
     temperature?: number | null;
     topP?: number | null;
 };
 
-export type BootstrapProviderPresetBundle = {
+export type BootstrapProviderBindingBundle = {
     apiKeyRequired: boolean;
     baseUrlPolicy: ProviderBaseUrlPolicy;
     baseUrlRequired: boolean;
+    bindings: Array<BootstrapProviderBinding>;
     capabilities: ProviderCapabilities;
     credentialPolicy: ProviderCredentialPolicy;
     credentialSource: BootstrapCredentialSource;
     defaultBaseUrl?: string | null;
     displayName: string;
     modelDiscovery: ProviderModelDiscovery;
-    presets: Array<BootstrapProviderPreset>;
     providerCatalogId: string;
     providerKind: string;
     runtime: ProviderRuntimeProfile;
@@ -532,6 +603,7 @@ export type CatalogLibraryResponse = {
     ingestionReadiness: CatalogLibraryIngestionReadinessResponse;
     lifecycleState: string;
     recognitionPolicy: LibraryRecognitionPolicy;
+    retrievalConfig: RetrievalConfig;
     slug: string;
     webIngestPolicy: WebIngestPolicy;
     workspaceId: string;
@@ -774,12 +846,27 @@ export type ContentSourceAccess = {
 
 export type ContentSourceAccessKind = 'stored_document' | 'external_url';
 
-export type CreateBindingAssignmentRequest = {
-    bindingPurpose: AiBindingPurpose;
+export type CreateAiAccountRequest = {
+    apiKey?: string | null;
+    baseUrl?: string | null;
+    label: string;
     libraryId?: string | null;
-    modelPresetId: string;
-    providerCredentialId: string;
+    providerCatalogId: string;
     scopeKind: AiScopeKind;
+    workspaceId?: string | null;
+};
+
+export type CreateAiBindingRequest = {
+    accountId: string;
+    bindingPurpose: AiBindingPurpose;
+    extraParametersJson?: unknown;
+    libraryId?: string | null;
+    maxOutputTokensOverride?: number | null;
+    modelCatalogId: string;
+    scopeKind: AiScopeKind;
+    systemPrompt?: string | null;
+    temperature?: number | null;
+    topP?: number | null;
     workspaceId?: string | null;
 };
 
@@ -804,6 +891,13 @@ export type CreateDocumentRequest = {
     languageCode?: string | null;
     libraryId: string;
     mimeType?: string | null;
+    /**
+     * Optional connector-declared structural parent identity
+     * (`content_document.external_key` of the parent document). When the
+     * parent already exists in the library it is resolved at admission;
+     * otherwise the deferred resolver reconciles it later.
+     */
+    parentExternalKey?: string | null;
     sourceUri?: string | null;
     storageKey?: string | null;
     title?: string | null;
@@ -835,19 +929,6 @@ export type CreateModelCatalogRequest = {
     providerCatalogId: string;
 };
 
-export type CreateModelPresetRequest = {
-    extraParametersJson?: unknown;
-    libraryId?: string | null;
-    maxOutputTokensOverride?: number | null;
-    modelCatalogId: string;
-    presetName: string;
-    scopeKind: AiScopeKind;
-    systemPrompt?: string | null;
-    temperature?: number | null;
-    topP?: number | null;
-    workspaceId?: string | null;
-};
-
 export type CreateMutationRequest = {
     byteSize?: number | null;
     checksum?: string | null;
@@ -872,16 +953,6 @@ export type CreateProviderCatalogRequest = {
     displayName: string;
     lifecycleState: string;
     providerKind: string;
-};
-
-export type CreateProviderCredentialRequest = {
-    apiKey?: string | null;
-    baseUrl?: string | null;
-    label: string;
-    libraryId?: string | null;
-    providerCatalogId: string;
-    scopeKind: AiScopeKind;
-    workspaceId?: string | null;
 };
 
 export type CreateSessionRequest = {
@@ -1361,7 +1432,6 @@ export type IngestStageTimelineResponse = {
 };
 
 export type KnowledgeBundleChunkReferenceRow = {
-    _key: string;
     bundle_id: string;
     chunk_id: string;
     created_at: string;
@@ -1371,7 +1441,6 @@ export type KnowledgeBundleChunkReferenceRow = {
 };
 
 export type KnowledgeBundleEntityReferenceRow = {
-    _key: string;
     bundle_id: string;
     created_at: string;
     entity_id: string;
@@ -1381,7 +1450,6 @@ export type KnowledgeBundleEntityReferenceRow = {
 };
 
 export type KnowledgeBundleEvidenceReferenceRow = {
-    _key: string;
     bundle_id: string;
     created_at: string;
     evidence_id: string;
@@ -1391,7 +1459,6 @@ export type KnowledgeBundleEvidenceReferenceRow = {
 };
 
 export type KnowledgeBundleRelationReferenceRow = {
-    _key: string;
     bundle_id: string;
     created_at: string;
     inclusion_reason?: string | null;
@@ -1401,9 +1468,6 @@ export type KnowledgeBundleRelationReferenceRow = {
 };
 
 export type KnowledgeChunkRow = {
-    _id?: string | null;
-    _key: string;
-    _rev?: string | null;
     chunk_id: string;
     chunk_index: number;
     chunk_kind?: string | null;
@@ -1417,7 +1481,7 @@ export type KnowledgeChunkRow = {
     /**
      * Earliest record timestamp aggregated into this chunk (JSONL ingest
      * only; None for non-temporal sources). Mirrored from
-     * `content_chunk.occurred_at` so AQL FILTER can hard-bound by time.
+     * `content_chunk.occurred_at` so search can hard-bound by time.
      */
     occurred_at?: string | null;
     /**
@@ -1475,9 +1539,6 @@ export type KnowledgeContextBundleDetailResponse = {
 };
 
 export type KnowledgeContextBundleRow = {
-    _id?: string | null;
-    _key: string;
-    _rev?: string | null;
     assembly_diagnostics: unknown;
     bundle_id: string;
     bundle_state: string;
@@ -1513,19 +1574,26 @@ export type KnowledgeDocumentProvenanceSummary = {
 };
 
 export type KnowledgeDocumentRow = {
-    _id?: string | null;
-    _key: string;
-    _rev?: string | null;
     active_revision_id?: string | null;
     created_at: string;
     deleted_at?: string | null;
     document_hint?: string | null;
     document_id: string;
+    /**
+     * Typed document role mirrored from `content_document.document_role`
+     * (`primary` | `attachment` | `attached_context`).
+     */
+    document_role?: string;
     document_state: string;
     external_key: string;
     file_name?: string | null;
     latest_revision_no?: number | null;
     library_id: string;
+    /**
+     * Canonical structural source parent (mirrored from
+     * `content_document.parent_document_id`). `None` for primary documents.
+     */
+    parent_document_id?: string | null;
     readable_revision_id?: string | null;
     source_uri?: string | null;
     title?: string | null;
@@ -1563,7 +1631,6 @@ export type KnowledgeEntityMentionEdgeRow = {
     createdAt: string;
     entityId: string;
     inclusionReason?: string | null;
-    key: string;
     rank?: number | null;
     score?: number | null;
 };
@@ -1590,9 +1657,6 @@ export type KnowledgeEntityVectorSearchRow = {
 };
 
 export type KnowledgeEvidenceRow = {
-    _id?: string | null;
-    _key: string;
-    _rev?: string | null;
     block_id?: string | null;
     chunk_id?: string | null;
     confidence?: number | null;
@@ -1619,7 +1683,6 @@ export type KnowledgeEvidenceSupportEntityEdgeRow = {
     entityId: string;
     evidenceId: string;
     inclusionReason?: string | null;
-    key: string;
     rank?: number | null;
     score?: number | null;
 };
@@ -1628,7 +1691,6 @@ export type KnowledgeEvidenceSupportRelationEdgeRow = {
     createdAt: string;
     evidenceId: string;
     inclusionReason?: string | null;
-    key: string;
     rank?: number | null;
     relationId: string;
     score?: number | null;
@@ -1694,9 +1756,6 @@ export type KnowledgeRelationSearchRow = {
 };
 
 export type KnowledgeRetrievalTraceRow = {
-    _id?: string | null;
-    _key: string;
-    _rev?: string | null;
     bundle_id: string;
     candidate_counts: unknown;
     created_at: string;
@@ -1713,9 +1772,6 @@ export type KnowledgeRetrievalTraceRow = {
 };
 
 export type KnowledgeRevisionRow = {
-    _id?: string | null;
-    _key: string;
-    _rev?: string | null;
     byte_size: number;
     checksum: string;
     created_at: string;
@@ -1867,7 +1923,7 @@ export type LlmContextSnapshot = {
     question: string;
     /**
      * Fine-grained timed sub-operations recorded during this execution
-     * (individual DB/Arango queries, retrieval lanes, …) so the inspector can
+     * (individual DB queries, retrieval lanes, …) so the inspector can
      * surface where time went and operators can catch heavy sections. Empty
      * on records written before span capture existed.
      */
@@ -1967,7 +2023,7 @@ export type ModelAvailabilityState = 'available' | 'unavailable' | 'unknown';
 export type ModelCatalogEntryResponse = {
     allowedBindingPurposes: Array<AiBindingPurpose>;
     availabilityState: ModelAvailabilityState;
-    availableCredentialIds: Array<string>;
+    availableAccountIds: Array<string>;
     capabilityKind: string;
     contextWindow?: number | null;
     id: string;
@@ -1976,22 +2032,6 @@ export type ModelCatalogEntryResponse = {
     modalityKind: string;
     modelName: string;
     providerCatalogId: string;
-};
-
-export type ModelPresetResponse = {
-    createdAt: string;
-    extraParametersJson: unknown;
-    id: string;
-    libraryId?: string | null;
-    maxOutputTokensOverride?: number | null;
-    modelCatalogId: string;
-    presetName: string;
-    scopeKind: AiScopeKind;
-    systemPrompt?: string | null;
-    temperature?: number | null;
-    topP?: number | null;
-    updatedAt: string;
-    workspaceId?: string | null;
 };
 
 export type MoveIngestQueueJobRequest = {
@@ -2182,20 +2222,6 @@ export type ProviderCredentialPolicy = {
     validationMode: ProviderCredentialValidationMode;
 };
 
-export type ProviderCredentialResponse = {
-    apiKeySummary: string;
-    baseUrl?: string | null;
-    createdAt: string;
-    credentialState: string;
-    id: string;
-    label: string;
-    libraryId?: string | null;
-    providerCatalogId: string;
-    scopeKind: AiScopeKind;
-    updatedAt: string;
-    workspaceId?: string | null;
-};
-
 export type ProviderCredentialValidationMode = 'chat_round_trip' | 'model_list' | 'none';
 
 export type ProviderModelDiscovery = {
@@ -2220,11 +2246,7 @@ export type ProviderRuntimeProfile = {
     tokenLimitParameter: ProviderTokenLimitParameter;
 };
 
-export type ProviderStructuredOutputMode =
-    | 'json_schema'
-    | 'json_object'
-    | 'prompt_only_json_object'
-    | 'unsupported';
+export type ProviderStructuredOutputMode = 'json_schema' | 'json_object' | 'prompt_only_json_object' | 'unsupported';
 
 export type ProviderTokenLimitParameter = 'max_completion_tokens' | 'max_tokens';
 
@@ -2279,6 +2301,31 @@ export type ResponseToolCallDebug = {
     requestedArgumentsJson?: string | null;
     resultJson?: unknown;
     resultText?: string | null;
+};
+
+/**
+ * Top-level per-library retrieval configuration persisted as the
+ * `catalog_library.retrieval_config` JSONB column.
+ */
+export type RetrievalConfig = {
+    /**
+     * Lexical (full-text-search) lane configuration.
+     */
+    lexical?: RetrievalLexicalConfig;
+};
+
+/**
+ * Lexical-lane knobs sourced by the Postgres search store when rendering the
+ * full-text-search SQL.
+ */
+export type RetrievalLexicalConfig = {
+    /**
+     * Name of the Postgres text-search configuration (`regconfig`) used by the
+     * `to_tsquery` / `websearch_to_tsquery` constructors in the lexical lane.
+     * Validated against the live `pg_ts_config` catalog at write time; defaults
+     * to [`DEFAULT_TEXT_SEARCH_CONFIG`].
+     */
+    textSearchConfig?: string;
 };
 
 export type RuntimeActionKind = 'deterministic_step' | 'model_request' | 'tool_request' | 'tool_result' | 'recovery_attempt' | 'persistence_write';
@@ -2343,7 +2390,6 @@ export type RuntimeKnowledgeEntityRow = {
     entitySubType?: string | null;
     entityType: string;
     freshnessGeneration: number;
-    key: string;
     libraryId: string;
     summary?: string | null;
     supportCount: number;
@@ -2361,7 +2407,6 @@ export type RuntimeKnowledgeEvidenceRow = {
     excerpt: string;
     extractionMethod: string;
     freshnessGeneration: number;
-    key: string;
     libraryId: string;
     revisionId: string;
     spanEnd?: number | null;
@@ -2376,7 +2421,6 @@ export type RuntimeKnowledgeRelationRow = {
     contradictionState: string;
     createdAt: string;
     freshnessGeneration: number;
-    key: string;
     libraryId: string;
     normalizedAssertion: string;
     objectEntityId: string;
@@ -2675,7 +2719,7 @@ export type TurnSpan = {
      */
     kind: string;
     /**
-     * Operator-facing label, e.g. `arango.cursor`, `retrieve.vector`.
+     * Operator-facing label, e.g. `db.cursor`, `retrieve.vector`.
      */
     name: string;
     rows?: number | null;
@@ -2705,10 +2749,22 @@ export type TypedTechnicalFact = {
 
 export type UiLocale = 'en' | 'ru';
 
-export type UpdateBindingAssignmentRequest = {
+export type UpdateAiAccountRequest = {
+    apiKey?: string | null;
+    baseUrl?: string | null;
+    credentialState: string;
+    label: string;
+};
+
+export type UpdateAiBindingRequest = {
+    accountId: string;
     bindingState: string;
-    modelPresetId: string;
-    providerCredentialId: string;
+    extraParametersJson?: unknown;
+    maxOutputTokensOverride?: number | null;
+    modelCatalogId: string;
+    systemPrompt?: string | null;
+    temperature?: number | null;
+    topP?: number | null;
 };
 
 export type UpdateCatalogLibraryRequest = {
@@ -2741,15 +2797,6 @@ export type UpdateModelCatalogRequest = {
     providerCatalogId: string;
 };
 
-export type UpdateModelPresetRequest = {
-    extraParametersJson?: unknown;
-    maxOutputTokensOverride?: number | null;
-    presetName: string;
-    systemPrompt?: string | null;
-    temperature?: number | null;
-    topP?: number | null;
-};
-
 export type UpdateProviderCatalogRequest = {
     apiStyle: string;
     capabilityFlagsJson?: unknown;
@@ -2757,13 +2804,6 @@ export type UpdateProviderCatalogRequest = {
     displayName: string;
     lifecycleState: string;
     providerKind: string;
-};
-
-export type UpdateProviderCredentialRequest = {
-    apiKey?: string | null;
-    baseUrl?: string | null;
-    credentialState: string;
-    label: string;
 };
 
 export type UpdateSubscriptionRequest = {
@@ -2980,18 +3020,9 @@ export type WorkspaceCostSummary = {
  * One library's restore counts inside a [`WorkspaceSnapshotImportReportResponse`].
  */
 export type WorkspaceLibraryImportReportResponse = {
-    arangoDocsByStore: {
-        [key: string]: number;
-    };
-    arangoEdgesByStore: {
-        [key: string]: number;
-    };
     blobsRestored: number;
     libraryId: string;
     postgresRowsByTable: {
-        [key: string]: number;
-    };
-    skippedArangoEdgesByStore: {
         [key: string]: number;
     };
     slug: string;
@@ -3053,6 +3084,138 @@ export type GetAdminSurfaceResponses = {
 
 export type GetAdminSurfaceResponse = GetAdminSurfaceResponses[keyof GetAdminSurfaceResponses];
 
+export type ListAiAccountsData = {
+    body?: never;
+    path?: never;
+    query?: {
+        scopeKind?: AiScopeKind;
+        workspaceId?: string;
+        libraryId?: string;
+    };
+    url: '/v1/ai/accounts';
+};
+
+export type ListAiAccountsErrors = {
+    /**
+     * Caller is not authenticated
+     */
+    401: unknown;
+    /**
+     * Caller is not authorized for the requested scope
+     */
+    403: unknown;
+};
+
+export type ListAiAccountsResponses = {
+    /**
+     * Visible AI accounts for the requested scope
+     */
+    200: Array<AiAccountResponse>;
+};
+
+export type ListAiAccountsResponse = ListAiAccountsResponses[keyof ListAiAccountsResponses];
+
+export type CreateAiAccountData = {
+    body: CreateAiAccountRequest;
+    path?: never;
+    query?: never;
+    url: '/v1/ai/accounts';
+};
+
+export type CreateAiAccountErrors = {
+    /**
+     * Caller is not authenticated
+     */
+    401: unknown;
+    /**
+     * Caller cannot administer accounts in the requested scope
+     */
+    403: unknown;
+};
+
+export type CreateAiAccountResponses = {
+    /**
+     * Newly created AI account
+     */
+    200: AiAccountResponse;
+};
+
+export type CreateAiAccountResponse = CreateAiAccountResponses[keyof CreateAiAccountResponses];
+
+export type DeleteAiAccountData = {
+    body?: never;
+    path: {
+        /**
+         * AI account identifier
+         */
+        accountId: string;
+    };
+    query?: never;
+    url: '/v1/ai/accounts/{accountId}';
+};
+
+export type DeleteAiAccountErrors = {
+    /**
+     * Caller is not authenticated
+     */
+    401: unknown;
+    /**
+     * Caller cannot administer accounts in the account's scope
+     */
+    403: unknown;
+    /**
+     * Account not found
+     */
+    404: unknown;
+    /**
+     * Account is still referenced
+     */
+    409: unknown;
+};
+
+export type DeleteAiAccountResponses = {
+    /**
+     * Empty acknowledgement payload
+     */
+    200: unknown;
+};
+
+export type UpdateAiAccountData = {
+    body: UpdateAiAccountRequest;
+    path: {
+        /**
+         * AI account identifier
+         */
+        accountId: string;
+    };
+    query?: never;
+    url: '/v1/ai/accounts/{accountId}';
+};
+
+export type UpdateAiAccountErrors = {
+    /**
+     * Caller is not authenticated
+     */
+    401: unknown;
+    /**
+     * Caller cannot administer accounts in the account's scope
+     */
+    403: unknown;
+    /**
+     * Account not found
+     */
+    404: unknown;
+};
+
+export type UpdateAiAccountResponses = {
+    /**
+     * Updated AI account
+     */
+    200: AiAccountResponse;
+};
+
+export type UpdateAiAccountResponse = UpdateAiAccountResponses[keyof UpdateAiAccountResponses];
+
 export type ListAiLibraryBindingsData = {
     body?: never;
     path?: never;
@@ -3081,15 +3244,15 @@ export type ListAiLibraryBindingsErrors = {
 
 export type ListAiLibraryBindingsResponses = {
     /**
-     * Binding assignments for the requested scope
+     * Bindings for the requested scope
      */
-    200: Array<AiBindingAssignmentResponse>;
+    200: Array<AiBindingResponse>;
 };
 
 export type ListAiLibraryBindingsResponse = ListAiLibraryBindingsResponses[keyof ListAiLibraryBindingsResponses];
 
 export type CreateAiLibraryBindingData = {
-    body: CreateBindingAssignmentRequest;
+    body: CreateAiBindingRequest;
     path?: never;
     query?: never;
     url: '/v1/ai/bindings';
@@ -3108,9 +3271,9 @@ export type CreateAiLibraryBindingErrors = {
 
 export type CreateAiLibraryBindingResponses = {
     /**
-     * Newly created binding assignment
+     * Newly created binding
      */
-    200: AiBindingAssignmentResponse;
+    200: AiBindingResponse;
 };
 
 export type CreateAiLibraryBindingResponse = CreateAiLibraryBindingResponses[keyof CreateAiLibraryBindingResponses];
@@ -3119,7 +3282,7 @@ export type DeleteAiLibraryBindingData = {
     body?: never;
     path: {
         /**
-         * Binding assignment identifier
+         * Binding identifier
          */
         bindingId: string;
     };
@@ -3150,10 +3313,10 @@ export type DeleteAiLibraryBindingResponses = {
 };
 
 export type UpdateAiLibraryBindingData = {
-    body: UpdateBindingAssignmentRequest;
+    body: UpdateAiBindingRequest;
     path: {
         /**
-         * Binding assignment identifier
+         * Binding identifier
          */
         bindingId: string;
     };
@@ -3178,9 +3341,9 @@ export type UpdateAiLibraryBindingErrors = {
 
 export type UpdateAiLibraryBindingResponses = {
     /**
-     * Updated binding assignment
+     * Updated binding
      */
-    200: AiBindingAssignmentResponse;
+    200: AiBindingResponse;
 };
 
 export type UpdateAiLibraryBindingResponse = UpdateAiLibraryBindingResponses[keyof UpdateAiLibraryBindingResponses];
@@ -3189,7 +3352,7 @@ export type ValidateAiLibraryBindingData = {
     body?: never;
     path: {
         /**
-         * Binding assignment identifier
+         * Binding identifier
          */
         bindingId: string;
     };
@@ -3221,270 +3384,6 @@ export type ValidateAiLibraryBindingResponses = {
 
 export type ValidateAiLibraryBindingResponse = ValidateAiLibraryBindingResponses[keyof ValidateAiLibraryBindingResponses];
 
-export type ListAiCredentialsData = {
-    body?: never;
-    path?: never;
-    query?: {
-        scopeKind?: AiScopeKind;
-        workspaceId?: string;
-        libraryId?: string;
-    };
-    url: '/v1/ai/credentials';
-};
-
-export type ListAiCredentialsErrors = {
-    /**
-     * Caller is not authenticated
-     */
-    401: unknown;
-    /**
-     * Caller is not authorized for the requested scope
-     */
-    403: unknown;
-};
-
-export type ListAiCredentialsResponses = {
-    /**
-     * Visible provider credentials for the requested scope
-     */
-    200: Array<ProviderCredentialResponse>;
-};
-
-export type ListAiCredentialsResponse = ListAiCredentialsResponses[keyof ListAiCredentialsResponses];
-
-export type CreateAiCredentialData = {
-    body: CreateProviderCredentialRequest;
-    path?: never;
-    query?: never;
-    url: '/v1/ai/credentials';
-};
-
-export type CreateAiCredentialErrors = {
-    /**
-     * Caller is not authenticated
-     */
-    401: unknown;
-    /**
-     * Caller cannot administer credentials in the requested scope
-     */
-    403: unknown;
-};
-
-export type CreateAiCredentialResponses = {
-    /**
-     * Newly created provider credential
-     */
-    200: ProviderCredentialResponse;
-};
-
-export type CreateAiCredentialResponse = CreateAiCredentialResponses[keyof CreateAiCredentialResponses];
-
-export type DeleteAiCredentialData = {
-    body?: never;
-    path: {
-        /**
-         * Provider credential identifier
-         */
-        credentialId: string;
-    };
-    query?: never;
-    url: '/v1/ai/credentials/{credentialId}';
-};
-
-export type DeleteAiCredentialErrors = {
-    /**
-     * Caller is not authenticated
-     */
-    401: unknown;
-    /**
-     * Caller cannot administer credentials in the credential's scope
-     */
-    403: unknown;
-    /**
-     * Credential not found
-     */
-    404: unknown;
-    /**
-     * Credential is still referenced
-     */
-    409: unknown;
-};
-
-export type DeleteAiCredentialResponses = {
-    /**
-     * Empty acknowledgement payload
-     */
-    200: unknown;
-};
-
-export type UpdateAiCredentialData = {
-    body: UpdateProviderCredentialRequest;
-    path: {
-        /**
-         * Provider credential identifier
-         */
-        credentialId: string;
-    };
-    query?: never;
-    url: '/v1/ai/credentials/{credentialId}';
-};
-
-export type UpdateAiCredentialErrors = {
-    /**
-     * Caller is not authenticated
-     */
-    401: unknown;
-    /**
-     * Caller cannot administer credentials in the credential's scope
-     */
-    403: unknown;
-    /**
-     * Credential not found
-     */
-    404: unknown;
-};
-
-export type UpdateAiCredentialResponses = {
-    /**
-     * Updated provider credential
-     */
-    200: ProviderCredentialResponse;
-};
-
-export type UpdateAiCredentialResponse = UpdateAiCredentialResponses[keyof UpdateAiCredentialResponses];
-
-export type ListAiModelPresetsData = {
-    body?: never;
-    path?: never;
-    query?: {
-        scopeKind?: AiScopeKind;
-        workspaceId?: string;
-        libraryId?: string;
-    };
-    url: '/v1/ai/model-presets';
-};
-
-export type ListAiModelPresetsErrors = {
-    /**
-     * Caller is not authenticated
-     */
-    401: unknown;
-    /**
-     * Caller is not authorized for the requested scope
-     */
-    403: unknown;
-};
-
-export type ListAiModelPresetsResponses = {
-    /**
-     * Visible model presets for the requested scope
-     */
-    200: Array<ModelPresetResponse>;
-};
-
-export type ListAiModelPresetsResponse = ListAiModelPresetsResponses[keyof ListAiModelPresetsResponses];
-
-export type CreateAiModelPresetData = {
-    body: CreateModelPresetRequest;
-    path?: never;
-    query?: never;
-    url: '/v1/ai/model-presets';
-};
-
-export type CreateAiModelPresetErrors = {
-    /**
-     * Caller is not authenticated
-     */
-    401: unknown;
-    /**
-     * Caller cannot administer presets in the requested scope
-     */
-    403: unknown;
-};
-
-export type CreateAiModelPresetResponses = {
-    /**
-     * Newly created model preset
-     */
-    200: ModelPresetResponse;
-};
-
-export type CreateAiModelPresetResponse = CreateAiModelPresetResponses[keyof CreateAiModelPresetResponses];
-
-export type DeleteAiModelPresetData = {
-    body?: never;
-    path: {
-        /**
-         * Model preset identifier
-         */
-        presetId: string;
-    };
-    query?: never;
-    url: '/v1/ai/model-presets/{presetId}';
-};
-
-export type DeleteAiModelPresetErrors = {
-    /**
-     * Caller is not authenticated
-     */
-    401: unknown;
-    /**
-     * Caller cannot administer presets in the preset's scope
-     */
-    403: unknown;
-    /**
-     * Preset not found
-     */
-    404: unknown;
-    /**
-     * Preset is still referenced
-     */
-    409: unknown;
-};
-
-export type DeleteAiModelPresetResponses = {
-    /**
-     * Empty acknowledgement payload
-     */
-    200: unknown;
-};
-
-export type UpdateAiModelPresetData = {
-    body: UpdateModelPresetRequest;
-    path: {
-        /**
-         * Model preset identifier
-         */
-        presetId: string;
-    };
-    query?: never;
-    url: '/v1/ai/model-presets/{presetId}';
-};
-
-export type UpdateAiModelPresetErrors = {
-    /**
-     * Caller is not authenticated
-     */
-    401: unknown;
-    /**
-     * Caller cannot administer presets in the preset's scope
-     */
-    403: unknown;
-    /**
-     * Preset not found
-     */
-    404: unknown;
-};
-
-export type UpdateAiModelPresetResponses = {
-    /**
-     * Updated model preset
-     */
-    200: ModelPresetResponse;
-};
-
-export type UpdateAiModelPresetResponse = UpdateAiModelPresetResponses[keyof UpdateAiModelPresetResponses];
-
 export type ListAiModelsData = {
     body?: never;
     path?: never;
@@ -3492,7 +3391,7 @@ export type ListAiModelsData = {
         providerCatalogId?: string;
         workspaceId?: string;
         libraryId?: string;
-        credentialId?: string;
+        accountId?: string;
     };
     url: '/v1/ai/models';
 };
@@ -4216,6 +4115,82 @@ export type UpdateCatalogLibraryRecognitionPolicyResponses = {
 };
 
 export type UpdateCatalogLibraryRecognitionPolicyResponse = UpdateCatalogLibraryRecognitionPolicyResponses[keyof UpdateCatalogLibraryRecognitionPolicyResponses];
+
+export type GetCatalogLibraryRetrievalConfigData = {
+    body?: never;
+    path: {
+        /**
+         * Library identifier
+         */
+        libraryId: string;
+    };
+    query?: never;
+    url: '/v1/catalog/libraries/{libraryId}/retrieval-config';
+};
+
+export type GetCatalogLibraryRetrievalConfigErrors = {
+    /**
+     * Caller is not authenticated
+     */
+    401: unknown;
+    /**
+     * Caller does not have library write permission
+     */
+    403: unknown;
+    /**
+     * Library not found
+     */
+    404: unknown;
+};
+
+export type GetCatalogLibraryRetrievalConfigResponses = {
+    /**
+     * Library retrieval configuration
+     */
+    200: RetrievalConfig;
+};
+
+export type GetCatalogLibraryRetrievalConfigResponse = GetCatalogLibraryRetrievalConfigResponses[keyof GetCatalogLibraryRetrievalConfigResponses];
+
+export type UpdateCatalogLibraryRetrievalConfigData = {
+    body: RetrievalConfig;
+    path: {
+        /**
+         * Library identifier
+         */
+        libraryId: string;
+    };
+    query?: never;
+    url: '/v1/catalog/libraries/{libraryId}/retrieval-config';
+};
+
+export type UpdateCatalogLibraryRetrievalConfigErrors = {
+    /**
+     * Retrieval configuration is invalid or names an unknown text search config
+     */
+    400: unknown;
+    /**
+     * Caller is not authenticated
+     */
+    401: unknown;
+    /**
+     * Caller does not have library write permission
+     */
+    403: unknown;
+    /**
+     * Library not found
+     */
+    404: unknown;
+};
+
+export type UpdateCatalogLibraryRetrievalConfigResponses = {
+    /**
+     * Library after applying the new retrieval configuration
+     */
+    200: CatalogLibraryResponse;
+};
+
+export type UpdateCatalogLibraryRetrievalConfigResponse = UpdateCatalogLibraryRetrievalConfigResponses[keyof UpdateCatalogLibraryRetrievalConfigResponses];
 
 export type UpdateCatalogLibraryWebIngestPolicyData = {
     body: UpdateLibraryWebIngestPolicyRequest;

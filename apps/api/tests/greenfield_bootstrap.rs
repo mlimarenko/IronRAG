@@ -1,3 +1,15 @@
+//! Greenfield bootstrap integration tests. Ignored by default: they need a
+//! live PostgreSQL with the pgvector extension (same image as
+//! docker-compose.yml, `pgvector/pgvector:pg18`) reachable via
+//! `IRONRAG_DATABASE_URL`; each test creates and drops its own temporary
+//! database on that server. Run with:
+//!
+//! ```sh
+//! docker run -d --name ironrag-test-pg -e POSTGRES_PASSWORD=postgres \
+//!     -p 127.0.0.1:55433:5432 pgvector/pgvector:pg18
+//! IRONRAG_DATABASE_URL='postgres://postgres:postgres@127.0.0.1:55433/ironrag' cargo test -p ironrag-backend --test greenfield_bootstrap -- --ignored # pragma: allowlist secret
+//! ```
+
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::{borrow::Cow, path::Path, sync::Arc};
@@ -33,9 +45,14 @@ use ironrag_backend::{
     interfaces::http::router,
 };
 
-const SEEDED_PROVIDER_COUNT: i64 = 3;
-const SEEDED_MODEL_COUNT: i64 = 40;
-const SEEDED_PRICE_COUNT: i64 = 118;
+const SEEDED_PROVIDER_COUNT: i64 = 8;
+const SEEDED_MODEL_COUNT: i64 = 1143;
+const SEEDED_PRICE_COUNT: i64 = 2147;
+
+// Env-backed bootstrap seeds the six canonical required purposes plus vision;
+// the interactive provider-bundle path additionally covers extract_text.
+const ENV_BOOTSTRAP_BINDING_COUNT: i64 = 7;
+const BUNDLE_BOOTSTRAP_BINDING_COUNT: i64 = 8;
 
 struct TempDatabase {
     name: String,
@@ -377,7 +394,11 @@ async fn graph_index_migration_accepts_long_entity_labels() -> Result<()> {
         .await
         .context("failed to create graph index migration library")?;
 
-        let long_label = format!("{}{}", "Alpha ".repeat(700), suffix);
+        // Long enough to overflow the pre-0.5.0 double-term btree index
+        // (lower(label) + raw label > 2704 bytes), short enough to stay under
+        // the 2000-byte write clamp so the exact-match lookup sees the
+        // verbatim label.
+        let long_label = format!("{}{}", "Alpha ".repeat(320), suffix);
         let node = repositories::upsert_runtime_graph_node(
             &pool,
             library.id,
@@ -406,17 +427,11 @@ async fn graph_index_migration_accepts_long_entity_labels() -> Result<()> {
                 .await
                 .context("failed to inspect exact graph label index")?;
         let exact_index_definition = exact_index_definition.to_lowercase();
-        assert!(exact_index_definition.contains("md5(lower"));
-        assert!(!exact_index_definition.contains("lower(label),"));
-
-        let projection_index_definition =
-            sqlx::query_scalar::<_, String>("select indexdef from pg_indexes where indexname = $1")
-                .bind("idx_runtime_graph_node_projection_entity_support")
-                .fetch_one(&pool)
-                .await
-                .context("failed to inspect graph projection support index")?
-                .to_lowercase();
-        assert!(!projection_index_definition.contains("label"));
+        assert!(exact_index_definition.contains("lower(label)"));
+        // The pre-0.5.0 bug indexed the raw label alongside lower(label)
+        // ("support_count desc, label, created_at"), overflowing the btree
+        // tuple limit; the baseline must keep a single lower(label) term.
+        assert!(!exact_index_definition.contains("desc, label,"));
 
         let edge_index_definition =
             sqlx::query_scalar::<_, String>("select indexdef from pg_indexes where indexname = $1")
@@ -605,9 +620,8 @@ async fn bootstrap_setup_route_uses_env_backed_openai_defaults() -> Result<()> {
         assert_eq!(status_body["setupRequired"], false);
 
         assert_eq!(scalar_count(fixture.pool(), "iam_user").await?, 1);
-        assert_eq!(scalar_count(fixture.pool(), "ai_provider_credential").await?, 1);
-        assert_eq!(scalar_count(fixture.pool(), "ai_model_preset").await?, 4);
-        assert_eq!(scalar_count(fixture.pool(), "ai_library_model_binding").await?, 4);
+        assert_eq!(scalar_count(fixture.pool(), "ai_account").await?, 1);
+        assert_eq!(scalar_count(fixture.pool(), "ai_binding").await?, ENV_BOOTSTRAP_BINDING_COUNT);
         Ok(())
     }
     .await;
@@ -636,28 +650,30 @@ async fn bootstrap_setup_route_accepts_provider_bundle_payload() -> Result<()> {
         assert_eq!(status_response.status(), StatusCode::OK);
         let status_body = response_json(status_response).await?;
         assert_eq!(status_body["setupRequired"], true);
-        assert!(status_body["aiSetup"]["presetBundles"].is_array());
+        assert!(status_body["aiSetup"]["bindingBundles"].is_array());
         assert!(
-            status_body["aiSetup"]["presetBundles"]
+            status_body["aiSetup"]["bindingBundles"]
                 .as_array()
-                .expect("preset bundles array")
+                .expect("binding bundles array")
                 .iter()
                 .any(|bundle| {
                     bundle["providerKind"] == "openai"
                         && bundle["apiKeyRequired"] == true
                         && bundle["baseUrlRequired"] == false
-                        && bundle["presets"].as_array().expect("provider presets array").iter().any(
-                            |preset| {
-                                preset["bindingPurpose"] == "extract_graph"
-                                    && preset["modelName"] == "gpt-5.4-nano"
-                            },
-                        )
+                        && bundle["bindings"]
+                            .as_array()
+                            .expect("provider bindings array")
+                            .iter()
+                            .any(|binding| {
+                                binding["bindingPurpose"] == "extract_graph"
+                                    && binding["modelName"] == "gpt-5.4-nano"
+                            })
                 })
         );
         assert!(
-            status_body["aiSetup"]["presetBundles"]
+            status_body["aiSetup"]["bindingBundles"]
                 .as_array()
-                .expect("preset bundles array")
+                .expect("binding bundles array")
                 .iter()
                 .any(|bundle| {
                     bundle["providerKind"] == "ollama"
@@ -707,16 +723,17 @@ async fn bootstrap_setup_route_accepts_provider_bundle_payload() -> Result<()> {
         assert_eq!(status_body["setupRequired"], false);
 
         assert_eq!(scalar_count(fixture.pool(), "iam_user").await?, 1);
-        assert_eq!(scalar_count(fixture.pool(), "ai_provider_credential").await?, 1);
-        assert_eq!(scalar_count(fixture.pool(), "ai_model_preset").await?, 4);
-        assert_eq!(scalar_count(fixture.pool(), "ai_library_model_binding").await?, 4);
+        assert_eq!(scalar_count(fixture.pool(), "ai_account").await?, 1);
+        assert_eq!(
+            scalar_count(fixture.pool(), "ai_binding").await?,
+            BUNDLE_BOOTSTRAP_BINDING_COUNT
+        );
 
         let binding_models = sqlx::query_scalar::<_, String>(
             "select amc.model_name
-             from ai_library_model_binding almb
-             join ai_model_preset amp on amp.id = almb.model_preset_id
-             join ai_model_catalog amc on amc.id = amp.model_catalog_id
-             where almb.binding_purpose = 'extract_graph'",
+             from ai_binding ab
+             join ai_model_catalog amc on amc.id = ab.model_catalog_id
+             where ab.binding_purpose = 'extract_graph'",
         )
         .fetch_one(fixture.pool())
         .await
@@ -733,8 +750,11 @@ async fn bootstrap_setup_route_accepts_provider_bundle_payload() -> Result<()> {
 
 #[tokio::test]
 #[ignore = "requires local postgres service"]
-async fn bootstrap_setup_route_deepseek_bundle_uses_openai_for_vision_when_available() -> Result<()>
-{
+async fn bootstrap_setup_route_rejects_provider_without_self_contained_bundle() -> Result<()> {
+    // A provider bundle must cover every required purpose with its own models
+    // (deepseek ships no embedding models). Even with an env-backed openai
+    // secret available, the bundle must not borrow models from another
+    // provider — the request is rejected without leaving partial state.
     let fixture =
         GreenfieldBootstrapFixture::create_with_ui_bootstrap_ai_setup(Some(UiBootstrapAiSetup {
             provider_secrets: vec![UiBootstrapAiProviderSecret {
@@ -746,6 +766,26 @@ async fn bootstrap_setup_route_deepseek_bundle_uses_openai_for_vision_when_avail
         .await?;
 
     let result = async {
+        let status_response = fixture
+            .app()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/v1/iam/bootstrap/status")
+                    .body(Body::empty())
+                    .expect("build bootstrap status request"),
+            )
+            .await
+            .context("bootstrap status request failed")?;
+        let status_body = response_json(status_response).await?;
+        assert!(
+            !status_body["aiSetup"]["bindingBundles"]
+                .as_array()
+                .expect("binding bundles array")
+                .iter()
+                .any(|bundle| bundle["providerKind"] == "deepseek")
+        );
+
         let payload = json!({
             "login": "admin",
             "displayName": "Admin",
@@ -768,28 +808,14 @@ async fn bootstrap_setup_route_deepseek_bundle_uses_openai_for_vision_when_avail
             )
             .await
             .context("deepseek provider bundle bootstrap setup request failed")?;
-        assert_eq!(response.status(), StatusCode::OK);
-        assert!(response.headers().contains_key(header::SET_COOKIE));
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = response_json(response).await?;
+        assert_eq!(body["errorKind"], "bad_request");
 
-        assert_eq!(scalar_count(fixture.pool(), "iam_user").await?, 1);
-        assert_eq!(scalar_count(fixture.pool(), "ai_provider_credential").await?, 2);
-        assert_eq!(scalar_count(fixture.pool(), "ai_model_preset").await?, 4);
-        assert_eq!(scalar_count(fixture.pool(), "ai_library_model_binding").await?, 4);
-
-        let vision_binding = sqlx::query_as::<_, (String, String)>(
-            "select apc2.provider_kind, amc.model_name
-             from ai_library_model_binding almb
-             join ai_provider_credential apc on apc.id = almb.provider_credential_id
-             join ai_provider_catalog apc2 on apc2.id = apc.provider_catalog_id
-             join ai_model_preset amp on amp.id = almb.model_preset_id
-             join ai_model_catalog amc on amc.id = amp.model_catalog_id
-             where almb.binding_purpose = 'vision'",
-        )
-        .fetch_one(fixture.pool())
-        .await
-        .context("failed to load vision bootstrap binding")?;
-        assert_eq!(vision_binding.0, "openai");
-        assert_eq!(vision_binding.1, "gpt-5.4-mini");
+        assert_eq!(scalar_count(fixture.pool(), "iam_principal").await?, 0);
+        assert_eq!(scalar_count(fixture.pool(), "iam_user").await?, 0);
+        assert_eq!(scalar_count(fixture.pool(), "ai_account").await?, 0);
+        assert_eq!(scalar_count(fixture.pool(), "ai_binding").await?, 0);
 
         Ok(())
     }
@@ -813,9 +839,8 @@ async fn bootstrap_setup_route_recovers_from_orphaned_env_backed_ai_state() -> R
         assert_eq!(scalar_count(fixture.pool(), "iam_user").await?, 0);
         assert_eq!(scalar_count(fixture.pool(), "catalog_workspace").await?, 1);
         assert_eq!(scalar_count(fixture.pool(), "catalog_library").await?, 1);
-        assert_eq!(scalar_count(fixture.pool(), "ai_provider_credential").await?, 2);
-        assert_eq!(scalar_count(fixture.pool(), "ai_model_preset").await?, 4);
-        assert_eq!(scalar_count(fixture.pool(), "ai_library_model_binding").await?, 4);
+        assert_eq!(scalar_count(fixture.pool(), "ai_account").await?, 2);
+        assert_eq!(scalar_count(fixture.pool(), "ai_binding").await?, ENV_BOOTSTRAP_BINDING_COUNT);
 
         let payload = json!({
             "login": "admin",
@@ -856,9 +881,8 @@ async fn bootstrap_setup_route_recovers_from_orphaned_env_backed_ai_state() -> R
         assert_eq!(scalar_count(fixture.pool(), "iam_user").await?, 1);
         assert_eq!(scalar_count(fixture.pool(), "catalog_workspace").await?, 1);
         assert_eq!(scalar_count(fixture.pool(), "catalog_library").await?, 1);
-        assert_eq!(scalar_count(fixture.pool(), "ai_provider_credential").await?, 2);
-        assert_eq!(scalar_count(fixture.pool(), "ai_model_preset").await?, 4);
-        assert_eq!(scalar_count(fixture.pool(), "ai_library_model_binding").await?, 4);
+        assert_eq!(scalar_count(fixture.pool(), "ai_account").await?, 2);
+        assert_eq!(scalar_count(fixture.pool(), "ai_binding").await?, ENV_BOOTSTRAP_BINDING_COUNT);
 
         Ok(())
     }

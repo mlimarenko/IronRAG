@@ -32,10 +32,10 @@ export interface GraphLayoutRequestNode {
 export interface GraphLayoutRequest {
   type: 'compute';
   requestId: number;
-  topologyId?: number;
+  topologyId?: number | undefined;
   layout: GraphLayoutType;
-  nodes?: GraphLayoutRequestNode[];
-  edges?: Array<{ sourceId: string; targetId: string }>;
+  nodes?: GraphLayoutRequestNode[] | undefined;
+  edges?: Array<{ sourceId: string; targetId: string }> | undefined;
 }
 
 export interface GraphLayoutResponse {
@@ -52,7 +52,22 @@ export interface GraphLayoutErrorResponse {
   message: string;
 }
 
-const ctx = self as unknown as DedicatedWorkerGlobalScope;
+// The `WebWorker` lib (which declares `DedicatedWorkerGlobalScope`) is not
+// part of this project's `lib` compiler option (only `ES2020`/`DOM` are, so
+// the same tsconfig also type-checks DOM-side code). Declare the minimal
+// surface this worker actually uses instead of pulling in the global type.
+interface WorkerGlobalMessagePort {
+  addEventListener(
+    type: 'message',
+    listener: (event: MessageEvent<GraphLayoutRequest>) => void,
+  ): void;
+  postMessage(
+    message: GraphLayoutResponse | GraphLayoutErrorResponse,
+    transfer?: Transferable[],
+  ): void;
+}
+
+const ctx = self as unknown as WorkerGlobalMessagePort;
 let cachedTopologyId: number | null = null;
 let cachedNodes: GraphLayoutRequestNode[] | null = null;
 let cachedEdges: Array<{ sourceId: string; targetId: string }> | null = null;
@@ -110,7 +125,9 @@ ctx.addEventListener('message', (event: MessageEvent<GraphLayoutRequest>) => {
     const order = cachedNodes.length;
     const positions = new Float32Array(order * 2);
     for (let i = 0; i < cachedNodes.length; i += 1) {
-      const attrs = graph.getNodeAttributes(cachedNodes[i].id);
+      const node = cachedNodes[i];
+      if (!node) continue;
+      const attrs = graph.getNodeAttributes(node.id);
       positions[i * 2] = (attrs.x as number | undefined) ?? 0;
       positions[i * 2 + 1] = (attrs.y as number | undefined) ?? 0;
     }

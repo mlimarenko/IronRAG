@@ -1,24 +1,20 @@
 import type { TFunction } from 'i18next';
+import { z } from 'zod';
+
+import { nonEmptyString, optionalIntegerString, optionalNumberString } from '@/shared/forms';
 import type {
+  AIAccount,
   AIBindingAssignment,
-  AICredential,
   AIModelOption,
   AIProvider,
   AIPurpose,
   AIScopeKind,
-  ModelPreset,
+  PricingRule,
 } from '@/shared/types';
 
-export type AiConfigSection =
-  | 'bindings'
-  | 'credentials'
-  | 'presets'
-  | 'providers'
-  | 'models'
-  // Pricing folded into the AI → Catalog group (ADM-08/RM-07): it prices the
-  // very models listed beside it, so it belongs here rather than as an
-  // isolated top-level admin tab.
-  | 'pricing';
+export type AiConfigSection = 'bindings' | 'accounts' | 'catalog';
+
+export type AiCatalogTab = 'providers' | 'models';
 
 export type AiConfigDataState<T> = {
   isLoading: boolean;
@@ -59,7 +55,7 @@ export type BindingResolution = {
   sourceKind: AIScopeKind | null;
 };
 
-export type CredentialModelLoadState = 'loading' | 'ready' | 'failed';
+export type AccountModelLoadState = 'loading' | 'ready' | 'failed';
 
 export type AiReadinessSummary = {
   totalPurposes: number;
@@ -69,12 +65,9 @@ export type AiReadinessSummary = {
   /** Optional bindings that are not configured — the system falls back
    *  to local CPU processing (lower quality / higher latency). */
   missingOptionalPurposes: AIPurpose[];
-  availableCredentialCount: number;
-  activeCredentialCount: number;
-  localCredentialCount: number;
-  availablePresetCount: number;
-  usablePresetCount: number;
-  localPresetCount: number;
+  totalAccountCount: number;
+  activeAccountCount: number;
+  localAccountCount: number;
   visibleModelCount: number;
   availableModelCount: number;
   providerCatalogCount: number;
@@ -83,17 +76,11 @@ export type AiReadinessSummary = {
 };
 
 export type AiBindingSuggestion = {
-  credentialId: string;
-  presetId: string;
+  accountId: string;
+  modelCatalogId: string;
 };
 
-export const AI_CONFIG_SECTIONS: AiConfigSection[] = [
-  'bindings',
-  'credentials',
-  'presets',
-  'providers',
-  'models',
-];
+export const AI_CONFIG_SECTIONS: AiConfigSection[] = ['bindings', 'accounts', 'catalog'];
 
 export const PURPOSE_ORDER: AIPurpose[] = [
   'extract_text',
@@ -126,8 +113,8 @@ export function scopeLabel(value: AIScopeKind, t: TFunction) {
   return t(`admin.aiPanel.scopeLabels.${value}`);
 }
 
-export function credentialStateLabel(value: AICredential['state'], t: TFunction) {
-  return t(`admin.aiPanel.credentialStateLabels.${value}`);
+export function accountStateLabel(value: AIAccount['state'], t: TFunction) {
+  return t(`admin.aiPanel.accountStateLabels.${value}`);
 }
 
 export function localScopeQuery(scopeKind: AIScopeKind, context: AiScopeContext): LocalAiScopeQueryParams {
@@ -165,25 +152,6 @@ export function modelCatalogScopeQuery(params: AiScopeQueryParams['query']) {
   };
 }
 
-export function formatPresetLabel(preset: Pick<ModelPreset, 'presetName' | 'modelName'>) {
-  const presetName = preset.presetName.trim();
-  const modelName = preset.modelName.trim();
-  if (!presetName) {
-    return modelName;
-  }
-  if (!modelName) {
-    return presetName;
-  }
-  if (presetName.toLocaleLowerCase().includes(modelName.toLocaleLowerCase())) {
-    return presetName;
-  }
-  return `${presetName} · ${modelName}`;
-}
-
-export function badgeClass(value: 'ready' | 'warning' | 'failed') {
-  return value === 'ready' ? 'status-ready' : value === 'failed' ? 'status-failed' : 'status-warning';
-}
-
 export function parseNumber(value: string): number | null {
   const normalized = value.trim();
   if (!normalized) {
@@ -202,52 +170,88 @@ export function parseInteger(value: string): number | null {
   return Number.isFinite(parsed) ? parsed : null;
 }
 
-export function isModelAvailableForCredential(
+export function isModelAvailableForAccount(
   model: AIModelOption | undefined,
-  credential: AICredential | null | undefined,
-  modelsByCredentialId: Record<string, AIModelOption[]>,
+  account: AIAccount | null | undefined,
+  modelsByAccountId: Record<string, AIModelOption[]>,
 ): boolean {
-  if (!model || !credential) {
+  if (!model || !account) {
     return true;
   }
-  const discoveredModels = modelsByCredentialId[credential.id];
+  const discoveredModels = modelsByAccountId[account.id];
   if (!discoveredModels) {
     return model.availabilityState !== 'unavailable';
   }
   return discoveredModels.some(entry => entry.id === model.id);
 }
 
-function canUsePresetWithCredential({
+function canExecuteBinding({
   purpose,
-  credential,
-  preset,
+  account,
   model,
-  modelsByCredentialId,
+  modelsByAccountId,
 }: {
   purpose: AIPurpose;
-  credential: AICredential | undefined;
-  preset: ModelPreset | undefined;
+  account: AIAccount | undefined;
   model: AIModelOption | undefined;
-  modelsByCredentialId: Record<string, AIModelOption[]>;
+  modelsByAccountId: Record<string, AIModelOption[]>;
 }) {
-  if (!credential || credential.state !== 'active' || !preset || !model) {
+  if (!account || account.state !== 'active' || !model) {
     return false;
   }
-  if (preset.providerId !== credential.providerId || model.providerCatalogId !== credential.providerId) {
+  if (model.providerCatalogId !== account.providerId) {
     return false;
   }
-  if (!preset.allowedBindingPurposes.includes(purpose) || !model.allowedBindingPurposes.includes(purpose)) {
+  if (!model.allowedBindingPurposes.includes(purpose)) {
     return false;
   }
   if (model.availabilityState === 'unavailable') {
     return false;
   }
-  return isModelAvailableForCredential(model, credential, modelsByCredentialId);
+  return isModelAvailableForAccount(model, account, modelsByAccountId);
 }
 
 export function formatModelLabel(model: AIModelOption, providers: AIProvider[]) {
   const provider = providers.find(entry => entry.id === model.providerCatalogId);
   return provider ? `${provider.displayName} · ${model.modelName}` : model.modelName;
+}
+
+export type ModelPriceSummary = {
+  inputPerMillion?: number;
+  outputPerMillion?: number;
+  currency: string;
+};
+
+/** Effective per-model price, preferring a workspace override over the base catalog row. */
+export function resolveModelPriceSummary(modelId: string, prices: PricingRule[]): ModelPriceSummary | null {
+  const forModel = prices.filter(entry => entry.modelCatalogId === modelId);
+  if (forModel.length === 0) {
+    return null;
+  }
+  const pick = (unit: string) => {
+    const overrides = forModel.filter(entry => entry.billingUnit === unit && entry.sourceOrigin === 'workspace_override');
+    const candidates = overrides.length > 0 ? overrides : forModel.filter(entry => entry.billingUnit === unit);
+    return candidates[0];
+  };
+  const input = pick('per_1m_input_tokens');
+  const output = pick('per_1m_output_tokens');
+  if (!input && !output) {
+    return null;
+  }
+  return {
+    ...(input ? { inputPerMillion: input.unitPrice } : {}),
+    ...(output ? { outputPerMillion: output.unitPrice } : {}),
+    currency: input?.currency ?? output?.currency ?? 'USD',
+  };
+}
+
+/** Renders as `$0.15/$0.60`; missing sides fall back to an em dash. */
+export function formatModelPriceSuffix(summary: ModelPriceSummary | null): string {
+  if (!summary) {
+    return '';
+  }
+  const fmt = (value: number | undefined) => (value === undefined ? '—' : `$${value.toFixed(2)}`);
+  return `${fmt(summary.inputPerMillion)}/${fmt(summary.outputPerMillion)}`;
 }
 
 export function matchesFilter(values: Array<string | undefined>, filter: string) {
@@ -298,10 +302,8 @@ export function resolveBindingForPurpose({
 
 export function summarizeAiReadiness({
   selectedScope,
-  availableCredentials,
-  localCredentials,
-  availablePresets,
-  localPresets,
+  availableAccounts,
+  localAccounts,
   bindingsForScope,
   instanceBindings,
   workspaceBindings,
@@ -310,10 +312,8 @@ export function summarizeAiReadiness({
   priceRuleCount,
 }: {
   selectedScope: AIScopeKind;
-  availableCredentials: AICredential[];
-  localCredentials: AICredential[];
-  availablePresets: ModelPreset[];
-  localPresets: ModelPreset[];
+  availableAccounts: AIAccount[];
+  localAccounts: AIAccount[];
   bindingsForScope: AIBindingAssignment[];
   instanceBindings: AIBindingAssignment[];
   workspaceBindings: AIBindingAssignment[];
@@ -321,55 +321,35 @@ export function summarizeAiReadiness({
   providers: AIProvider[];
   priceRuleCount?: number;
 }): AiReadinessSummary {
-  const credentialById = new Map(availableCredentials.map(entry => [entry.id, entry]));
-  const presetById = new Map(availablePresets.map(entry => [entry.id, entry]));
+  const accountById = new Map(availableAccounts.map(entry => [entry.id, entry]));
   const modelById = new Map(models.map(entry => [entry.id, entry]));
-  const resolutions = REQUIRED_RUNTIME_PURPOSE_ORDER.map(purpose =>
-    resolveBindingForPurpose({
+  const resolutions = REQUIRED_RUNTIME_PURPOSE_ORDER.map(purpose => ({
+    purpose,
+    resolution: resolveBindingForPurpose({
       purpose,
       selectedScope,
       bindingsForScope,
       instanceBindings,
       workspaceBindings,
     }),
-  );
+  }));
   const executablePurposeIds = new Set<AIPurpose>();
-  resolutions.forEach((resolution, index) => {
+  resolutions.forEach(({ purpose, resolution }) => {
     const binding = resolution.effectiveBinding;
     if (!binding || binding.state !== 'configured') {
       return;
     }
-    const preset = presetById.get(binding.presetId);
-    const canExecute = canUsePresetWithCredential({
-      purpose: REQUIRED_RUNTIME_PURPOSE_ORDER[index],
-      credential: credentialById.get(binding.credentialId),
-      preset,
-      model: preset ? modelById.get(preset.modelCatalogId) : undefined,
-      modelsByCredentialId: {},
+    const canExecute = canExecuteBinding({
+      purpose,
+      account: accountById.get(binding.accountId),
+      model: modelById.get(binding.modelCatalogId),
+      modelsByAccountId: {},
     });
     if (canExecute) {
-      executablePurposeIds.add(REQUIRED_RUNTIME_PURPOSE_ORDER[index]);
+      executablePurposeIds.add(purpose);
     }
   });
-  const usablePresetIds = new Set<string>();
-  for (const preset of availablePresets) {
-    const model = modelById.get(preset.modelCatalogId);
-    const purpose = preset.allowedBindingPurposes.find(candidate =>
-      availableCredentials.some(credential =>
-        canUsePresetWithCredential({
-          purpose: candidate,
-          credential,
-          preset,
-          model,
-          modelsByCredentialId: {},
-        }),
-      ),
-    );
-    if (purpose) {
-      usablePresetIds.add(preset.id);
-    }
-  }
-  const configuredProviderIds = new Set(availableCredentials.map(entry => entry.providerId));
+  const configuredProviderIds = new Set(availableAccounts.map(entry => entry.providerId));
 
   // Optional bindings — check separately from required runtime purposes.
   const missingOptionalPurposes = OPTIONAL_PURPOSES.filter(purpose => {
@@ -382,13 +362,11 @@ export function summarizeAiReadiness({
     });
     const binding = resolution.effectiveBinding;
     if (!binding || binding.state !== 'configured') return true;
-    const preset = presetById.get(binding.presetId);
-    return !canUsePresetWithCredential({
+    return !canExecuteBinding({
       purpose,
-      credential: credentialById.get(binding.credentialId),
-      preset,
-      model: preset ? modelById.get(preset.modelCatalogId) : undefined,
-      modelsByCredentialId: {},
+      account: accountById.get(binding.accountId),
+      model: modelById.get(binding.modelCatalogId),
+      modelsByAccountId: {},
     });
   });
 
@@ -398,12 +376,9 @@ export function summarizeAiReadiness({
     localBindingCount: bindingsForScope.length,
     missingPurposes: REQUIRED_RUNTIME_PURPOSE_ORDER.filter(purpose => !executablePurposeIds.has(purpose)),
     missingOptionalPurposes,
-    availableCredentialCount: availableCredentials.length,
-    activeCredentialCount: availableCredentials.filter(entry => entry.state === 'active').length,
-    localCredentialCount: localCredentials.length,
-    availablePresetCount: availablePresets.length,
-    usablePresetCount: usablePresetIds.size,
-    localPresetCount: localPresets.length,
+    totalAccountCount: availableAccounts.length,
+    activeAccountCount: availableAccounts.filter(entry => entry.state === 'active').length,
+    localAccountCount: localAccounts.length,
     visibleModelCount: models.length,
     availableModelCount: models.filter(entry => entry.availabilityState !== 'unavailable').length,
     providerCatalogCount: providers.length,
@@ -413,83 +388,98 @@ export function summarizeAiReadiness({
 }
 
 export function recommendAiConfigSection(summary: AiReadinessSummary): AiConfigSection {
-  if (summary.activeCredentialCount === 0) {
-    return 'credentials';
-  }
-  if (summary.usablePresetCount === 0 || summary.availableModelCount === 0) {
-    return 'presets';
-  }
-  if (summary.missingPurposes.length > 0) {
-    return 'bindings';
+  if (summary.activeAccountCount === 0) {
+    return 'accounts';
   }
   return 'bindings';
 }
 
 export function suggestBindingSelection({
   purpose,
-  availableCredentials,
-  availablePresets,
-  modelById,
-  preferredCredentialId,
-  preferredPresetId,
+  availableAccounts,
+  models,
+  preferredAccountId,
+  preferredModelCatalogId,
 }: {
   purpose: AIPurpose;
-  availableCredentials: AICredential[];
-  availablePresets: ModelPreset[];
-  modelById: Map<string, AIModelOption>;
-  preferredCredentialId?: string | undefined;
-  preferredPresetId?: string | undefined;
+  availableAccounts: AIAccount[];
+  models: AIModelOption[];
+  preferredAccountId?: string | undefined;
+  preferredModelCatalogId?: string | undefined;
 }): AiBindingSuggestion {
-  const purposePresets = availablePresets
-    .filter(entry => entry.allowedBindingPurposes.includes(purpose))
+  const purposeModels = models
+    .filter(entry => entry.allowedBindingPurposes.includes(purpose) && entry.availabilityState !== 'unavailable');
+  const activeAccounts = availableAccounts
+    .filter(entry => entry.state === 'active')
     .slice()
     .sort(compareByUpdatedAtDesc);
-  const activeCredentials = availableCredentials.filter(entry => entry.state === 'active');
-  const preferredCredential = preferredCredentialId
-    ? activeCredentials.find(entry => entry.id === preferredCredentialId)
+  const preferredAccount = preferredAccountId
+    ? activeAccounts.find(entry => entry.id === preferredAccountId)
     : undefined;
-  const preferredPreset = preferredPresetId
-    ? purposePresets.find(entry => entry.id === preferredPresetId)
+  const preferredModel = preferredModelCatalogId
+    ? purposeModels.find(entry => entry.id === preferredModelCatalogId)
     : undefined;
-  if (canUsePresetWithCredential({
-    purpose,
-    credential: preferredCredential,
-    preset: preferredPreset,
-    model: preferredPreset ? modelById.get(preferredPreset.modelCatalogId) : undefined,
-    modelsByCredentialId: {},
-  })) {
-    return {
-      credentialId: preferredCredential.id,
-      presetId: preferredPreset.id,
-    };
+  if (preferredAccount && preferredModel && preferredModel.providerCatalogId === preferredAccount.providerId) {
+    return { accountId: preferredAccount.id, modelCatalogId: preferredModel.id };
   }
 
-  const credentials = activeCredentials
-    .slice()
-    .sort((left, right) => {
-      const activeDelta = Number(right.state === 'active') - Number(left.state === 'active');
-      return activeDelta || compareByUpdatedAtDesc(left, right);
-    });
-  for (const credential of credentials) {
-    const preset = purposePresets.find(entry => {
-      return canUsePresetWithCredential({
-        purpose,
-        credential,
-        preset: entry,
-        model: modelById.get(entry.modelCatalogId),
-        modelsByCredentialId: {},
-      });
-    });
-    if (preset) {
-      return {
-        credentialId: credential.id,
-        presetId: preset.id,
-      };
+  for (const account of activeAccounts) {
+    const model = purposeModels.find(entry => entry.providerCatalogId === account.providerId);
+    if (model) {
+      return { accountId: account.id, modelCatalogId: model.id };
     }
   }
 
+  return { accountId: '', modelCatalogId: '' };
+}
+
+/**
+ * Shared Zod shape for the binding "model + parameters" step, used both by
+ * the inline per-purpose editor (BindingPurposeCard) and the guided wizard's
+ * second step — both create/update the same `CreateAiBindingRequest` /
+ * `UpdateAiBindingRequest` inline-parameter payload.
+ */
+export function bindingParamsSchema(t: TFunction) {
+  return z.object({
+    accountId: nonEmptyString(t('admin.aiPanel.fields.account')),
+    modelCatalogId: nonEmptyString(t('admin.model')),
+    systemPrompt: z.string(),
+    temperature: optionalNumberString(t('admin.temperature')),
+    topP: optionalNumberString(t('admin.topP')),
+    maxOutputTokens: optionalIntegerString(t('admin.maxOutputTokens')),
+    extraParametersJson: z.string().superRefine((value, context) => {
+      const normalized = value.trim();
+      if (!normalized) {
+        return;
+      }
+      try {
+        const parsed = JSON.parse(normalized) as unknown;
+        if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+          throw new Error('not an object');
+        }
+      } catch {
+        context.addIssue({
+          code: 'custom',
+          message: t('admin.aiPanel.messages.invalidJson'),
+        });
+      }
+    }),
+  });
+}
+
+export type BindingParamsFormValues = z.output<ReturnType<typeof bindingParamsSchema>>;
+
+export function bindingParamsRequestBody(values: BindingParamsFormValues) {
+  const extraParametersJson = values.extraParametersJson.trim()
+    ? (JSON.parse(values.extraParametersJson) as Record<string, unknown>)
+    : undefined;
   return {
-    credentialId: '',
-    presetId: '',
+    accountId: values.accountId,
+    modelCatalogId: values.modelCatalogId,
+    systemPrompt: values.systemPrompt.trim() || undefined,
+    temperature: values.temperature,
+    topP: values.topP,
+    maxOutputTokensOverride: values.maxOutputTokens,
+    ...(extraParametersJson !== undefined ? { extraParametersJson } : {}),
   };
 }

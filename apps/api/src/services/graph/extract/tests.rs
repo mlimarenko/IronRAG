@@ -132,7 +132,7 @@ fn sample_runtime_binding() -> ResolvedRuntimeBinding {
         provider_kind: "provider-alpha".to_string(),
         provider_base_url: None,
         provider_api_style: "provider-alpha-compatible".to_string(),
-        credential_id: uuid::Uuid::now_v7(),
+        account_id: uuid::Uuid::now_v7(),
         api_key: Some("test-api-key".to_string()),
         model_catalog_id: uuid::Uuid::now_v7(),
         model_name: "alpha-chat-mini".to_string(),

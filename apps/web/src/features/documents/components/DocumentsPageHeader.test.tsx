@@ -41,7 +41,6 @@ describe("DocumentsPageHeader", () => {
     await act(async () => {
       root?.render(
         <DocumentsPageHeader
-          activeLibraryName="Library"
           activeTab="documents"
           canUpload
           documentsCount={2}

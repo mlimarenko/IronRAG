@@ -10,9 +10,8 @@ use uuid::Uuid;
 use crate::{
     app::state::AppState,
     domains::ai::{
-        AiBindingAssignment, AiBindingPurpose, AiScopeKind, BindingValidation,
-        ModelAvailabilityState, ModelPreset, PriceCatalogEntry, ProviderCatalogEntry,
-        ProviderCredential, ResolvedModelCatalogEntry,
+        AiAccount, AiBinding, AiBindingPurpose, AiScopeKind, BindingValidation,
+        ModelAvailabilityState, PriceCatalogEntry, ProviderCatalogEntry, ResolvedModelCatalogEntry,
     },
     domains::provider_profiles::{
         ProviderBaseUrlPolicy, ProviderCapabilities, ProviderCredentialPolicy,
@@ -27,11 +26,10 @@ use crate::{
         router_support::{ApiError, RequestId},
     },
     services::ai_catalog_service::{
-        AiScopeRef, CreateBindingAssignmentCommand, CreateBindingValidationCommand,
-        CreateModelCatalogCommand, CreateModelPresetCommand, CreateProviderCatalogCommand,
-        CreateProviderCredentialCommand, CreateWorkspacePriceOverrideCommand,
-        UpdateBindingAssignmentCommand, UpdateModelCatalogCommand, UpdateModelPresetCommand,
-        UpdateProviderCatalogCommand, UpdateProviderCredentialCommand,
+        AiScopeRef, CreateAiAccountCommand, CreateAiBindingCommand, CreateBindingValidationCommand,
+        CreateModelCatalogCommand, CreateProviderCatalogCommand,
+        CreateWorkspacePriceOverrideCommand, UpdateAiAccountCommand, UpdateAiBindingCommand,
+        UpdateModelCatalogCommand, UpdateProviderCatalogCommand,
         UpdateWorkspacePriceOverrideCommand,
     },
     services::iam::audit::{AppendAuditEventCommand, AppendAuditEventSubjectCommand},
@@ -44,7 +42,7 @@ pub struct ModelsQuery {
     pub provider_catalog_id: Option<Uuid>,
     pub workspace_id: Option<Uuid>,
     pub library_id: Option<Uuid>,
-    pub credential_id: Option<Uuid>,
+    pub account_id: Option<Uuid>,
 }
 
 #[derive(Debug, Deserialize, utoipa::ToSchema, utoipa::IntoParams)]
@@ -119,7 +117,7 @@ pub struct UpdateModelCatalogRequest {
 
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
-pub struct CreateProviderCredentialRequest {
+pub struct CreateAiAccountRequest {
     pub scope_kind: AiScopeKind,
     pub workspace_id: Option<Uuid>,
     pub library_id: Option<Uuid>,
@@ -131,7 +129,7 @@ pub struct CreateProviderCredentialRequest {
 
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
-pub struct UpdateProviderCredentialRequest {
+pub struct UpdateAiAccountRequest {
     pub label: String,
     pub api_key: Option<String>,
     pub base_url: Option<String>,
@@ -163,48 +161,32 @@ pub struct UpdateWorkspacePriceOverrideRequest {
 
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
-pub struct CreateModelPresetRequest {
-    pub scope_kind: AiScopeKind,
-    pub workspace_id: Option<Uuid>,
-    pub library_id: Option<Uuid>,
-    pub model_catalog_id: Uuid,
-    pub preset_name: String,
-    pub system_prompt: Option<String>,
-    pub temperature: Option<f64>,
-    pub top_p: Option<f64>,
-    pub max_output_tokens_override: Option<i32>,
-    #[serde(default)]
-    pub extra_parameters_json: serde_json::Value,
-}
-
-#[derive(Debug, Deserialize, utoipa::ToSchema)]
-#[serde(rename_all = "camelCase")]
-pub struct UpdateModelPresetRequest {
-    pub preset_name: String,
-    pub system_prompt: Option<String>,
-    pub temperature: Option<f64>,
-    pub top_p: Option<f64>,
-    pub max_output_tokens_override: Option<i32>,
-    #[serde(default)]
-    pub extra_parameters_json: serde_json::Value,
-}
-
-#[derive(Debug, Deserialize, utoipa::ToSchema)]
-#[serde(rename_all = "camelCase")]
-pub struct CreateBindingAssignmentRequest {
+pub struct CreateAiBindingRequest {
     pub scope_kind: AiScopeKind,
     pub workspace_id: Option<Uuid>,
     pub library_id: Option<Uuid>,
     pub binding_purpose: AiBindingPurpose,
-    pub provider_credential_id: Uuid,
-    pub model_preset_id: Uuid,
+    pub account_id: Uuid,
+    pub model_catalog_id: Uuid,
+    pub system_prompt: Option<String>,
+    pub temperature: Option<f64>,
+    pub top_p: Option<f64>,
+    pub max_output_tokens_override: Option<i32>,
+    #[serde(default)]
+    pub extra_parameters_json: serde_json::Value,
 }
 
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
-pub struct UpdateBindingAssignmentRequest {
-    pub provider_credential_id: Uuid,
-    pub model_preset_id: Uuid,
+pub struct UpdateAiBindingRequest {
+    pub account_id: Uuid,
+    pub model_catalog_id: Uuid,
+    pub system_prompt: Option<String>,
+    pub temperature: Option<f64>,
+    pub top_p: Option<f64>,
+    pub max_output_tokens_override: Option<i32>,
+    #[serde(default)]
+    pub extra_parameters_json: serde_json::Value,
     pub binding_state: String,
 }
 
@@ -240,7 +222,7 @@ pub struct ModelCatalogEntryResponse {
     pub context_window: Option<i32>,
     pub max_output_tokens: Option<i32>,
     pub availability_state: ModelAvailabilityState,
-    pub available_credential_ids: Vec<Uuid>,
+    pub available_account_ids: Vec<Uuid>,
 }
 
 #[derive(Debug, Serialize, utoipa::ToSchema)]
@@ -262,7 +244,7 @@ pub struct PriceCatalogEntryResponse {
 
 #[derive(Debug, Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
-pub struct ProviderCredentialResponse {
+pub struct AiAccountResponse {
     pub id: Uuid,
     pub scope_kind: AiScopeKind,
     pub workspace_id: Option<Uuid>,
@@ -278,32 +260,19 @@ pub struct ProviderCredentialResponse {
 
 #[derive(Debug, Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
-pub struct ModelPresetResponse {
-    pub id: Uuid,
-    pub scope_kind: AiScopeKind,
-    pub workspace_id: Option<Uuid>,
-    pub library_id: Option<Uuid>,
-    pub model_catalog_id: Uuid,
-    pub preset_name: String,
-    pub system_prompt: Option<String>,
-    pub temperature: Option<f64>,
-    pub top_p: Option<f64>,
-    pub max_output_tokens_override: Option<i32>,
-    pub extra_parameters_json: serde_json::Value,
-    pub created_at: chrono::DateTime<chrono::Utc>,
-    pub updated_at: chrono::DateTime<chrono::Utc>,
-}
-
-#[derive(Debug, Serialize, utoipa::ToSchema)]
-#[serde(rename_all = "camelCase")]
-pub struct AiBindingAssignmentResponse {
+pub struct AiBindingResponse {
     pub id: Uuid,
     pub scope_kind: AiScopeKind,
     pub workspace_id: Option<Uuid>,
     pub library_id: Option<Uuid>,
     pub binding_purpose: AiBindingPurpose,
-    pub provider_credential_id: Uuid,
-    pub model_preset_id: Uuid,
+    pub account_id: Uuid,
+    pub model_catalog_id: Uuid,
+    pub system_prompt: Option<String>,
+    pub temperature: Option<f64>,
+    pub top_p: Option<f64>,
+    pub max_output_tokens_override: Option<i32>,
+    pub extra_parameters_json: serde_json::Value,
     pub binding_state: String,
 }
 
@@ -324,21 +293,13 @@ pub fn router() -> Router<AppState> {
         .route("/ai/providers/{provider_id}", put(update_provider).delete(delete_provider))
         .route("/ai/models", get(list_models).post(create_model))
         .route("/ai/models/{model_id}", put(update_model).delete(delete_model))
-        .route("/ai/model-presets", get(list_model_presets).post(create_model_preset))
-        .route(
-            "/ai/model-presets/{preset_id}",
-            put(update_model_preset).delete(delete_model_preset),
-        )
         .route("/ai/prices", get(list_prices).post(create_price_override))
         .route("/ai/prices/{price_id}", put(update_price_override).delete(delete_price_override))
-        .route("/ai/credentials", get(list_credentials).post(create_credential))
-        .route("/ai/credentials/{credential_id}", put(update_credential).delete(delete_credential))
-        .route("/ai/bindings", get(list_binding_assignments).post(create_binding_assignment))
-        .route(
-            "/ai/bindings/{binding_id}",
-            put(update_binding_assignment).delete(delete_binding_assignment),
-        )
-        .route("/ai/bindings/{binding_id}/validate", post(validate_binding_assignment))
+        .route("/ai/accounts", get(list_accounts).post(create_account))
+        .route("/ai/accounts/{account_id}", put(update_account).delete(delete_account))
+        .route("/ai/bindings", get(list_bindings).post(create_binding))
+        .route("/ai/bindings/{binding_id}", put(update_binding).delete(delete_binding))
+        .route("/ai/bindings/{binding_id}/validate", post(validate_binding))
 }
 
 #[utoipa::path(
@@ -387,7 +348,7 @@ pub async fn list_models(
     auth.require_any_scope(POLICY_MCP_DISCOVERY)?;
     let (workspace_id, library_id) = if query.workspace_id.is_some()
         || query.library_id.is_some()
-        || query.credential_id.is_some()
+        || query.account_id.is_some()
     {
         authorize_visible_ai_context(&auth, &state, query.workspace_id, query.library_id).await?
     } else {
@@ -401,7 +362,7 @@ pub async fn list_models(
             query.provider_catalog_id,
             workspace_id,
             library_id,
-            query.credential_id,
+            query.account_id,
         )
         .await?;
     Ok(Json(entries.into_iter().map(map_model).collect()))
@@ -610,7 +571,7 @@ pub async fn create_model(
     Ok(Json(map_model(ResolvedModelCatalogEntry {
         model: entry,
         availability_state: ModelAvailabilityState::Unknown,
-        available_credential_ids: Vec::new(),
+        available_account_ids: Vec::new(),
     })))
 }
 
@@ -673,7 +634,7 @@ pub async fn update_model(
     Ok(Json(map_model(ResolvedModelCatalogEntry {
         model: entry,
         availability_state: ModelAvailabilityState::Unknown,
-        available_credential_ids: Vec::new(),
+        available_account_ids: Vec::new(),
     })))
 }
 
@@ -756,27 +717,27 @@ pub async fn list_prices(
 
 #[utoipa::path(
     get,
-    path = "/v1/ai/model-presets",
+    path = "/v1/ai/accounts",
     tag = "ai",
-    operation_id = "listAiModelPresets",
+    operation_id = "listAiAccounts",
     params(AiScopeQuery),
     responses(
-        (status = 200, description = "Visible model presets for the requested scope", body = [ModelPresetResponse]),
+        (status = 200, description = "Visible AI accounts for the requested scope", body = [AiAccountResponse]),
         (status = 401, description = "Caller is not authenticated"),
         (status = 403, description = "Caller is not authorized for the requested scope"),
     ),
 )]
 #[tracing::instrument(
     level = "info",
-    name = "http.list_model_presets",
+    name = "http.list_accounts",
     skip_all,
     fields(workspace_id = ?query.workspace_id, library_id = ?query.library_id)
 )]
-pub async fn list_model_presets(
+pub async fn list_accounts(
     auth: AuthContext,
     State(state): State<AppState>,
     Query(query): Query<AiScopeQuery>,
-) -> Result<Json<Vec<ModelPresetResponse>>, ApiError> {
+) -> Result<Json<Vec<AiAccountResponse>>, ApiError> {
     let entries = if let Some(scope_kind) = query.scope_kind {
         let scope = authorize_exact_ai_scope(
             &auth,
@@ -786,7 +747,7 @@ pub async fn list_model_presets(
             query.library_id,
         )
         .await?;
-        state.canonical_services.ai_catalog.list_model_presets_exact(&state, scope).await?
+        state.canonical_services.ai_catalog.list_accounts_exact(&state, scope).await?
     } else {
         let (workspace_id, library_id) =
             authorize_visible_ai_context(&auth, &state, query.workspace_id, query.library_id)
@@ -794,56 +755,10 @@ pub async fn list_model_presets(
         state
             .canonical_services
             .ai_catalog
-            .list_visible_model_presets(&state, workspace_id, library_id)
+            .list_visible_accounts(&state, workspace_id, library_id)
             .await?
     };
-    Ok(Json(entries.into_iter().map(map_model_preset).collect()))
-}
-
-#[utoipa::path(
-    get,
-    path = "/v1/ai/credentials",
-    tag = "ai",
-    operation_id = "listAiCredentials",
-    params(AiScopeQuery),
-    responses(
-        (status = 200, description = "Visible provider credentials for the requested scope", body = [ProviderCredentialResponse]),
-        (status = 401, description = "Caller is not authenticated"),
-        (status = 403, description = "Caller is not authorized for the requested scope"),
-    ),
-)]
-#[tracing::instrument(
-    level = "info",
-    name = "http.list_credentials",
-    skip_all,
-    fields(workspace_id = ?query.workspace_id, library_id = ?query.library_id)
-)]
-pub async fn list_credentials(
-    auth: AuthContext,
-    State(state): State<AppState>,
-    Query(query): Query<AiScopeQuery>,
-) -> Result<Json<Vec<ProviderCredentialResponse>>, ApiError> {
-    let entries = if let Some(scope_kind) = query.scope_kind {
-        let scope = authorize_exact_ai_scope(
-            &auth,
-            &state,
-            scope_kind,
-            query.workspace_id,
-            query.library_id,
-        )
-        .await?;
-        state.canonical_services.ai_catalog.list_provider_credentials_exact(&state, scope).await?
-    } else {
-        let (workspace_id, library_id) =
-            authorize_visible_ai_context(&auth, &state, query.workspace_id, query.library_id)
-                .await?;
-        state
-            .canonical_services
-            .ai_catalog
-            .list_visible_provider_credentials(&state, workspace_id, library_id)
-            .await?
-    };
-    Ok(Json(entries.into_iter().map(map_provider_credential).collect()))
+    Ok(Json(entries.into_iter().map(map_account).collect()))
 }
 
 #[utoipa::path(
@@ -853,7 +768,7 @@ pub async fn list_credentials(
     operation_id = "listAiLibraryBindings",
     params(AiScopeQuery),
     responses(
-        (status = 200, description = "Binding assignments for the requested scope", body = [AiBindingAssignmentResponse]),
+        (status = 200, description = "Bindings for the requested scope", body = [AiBindingResponse]),
         (status = 400, description = "scopeKind query parameter is required"),
         (status = 401, description = "Caller is not authenticated"),
         (status = 403, description = "Caller is not authorized for the requested scope"),
@@ -861,50 +776,49 @@ pub async fn list_credentials(
 )]
 #[tracing::instrument(
     level = "info",
-    name = "http.list_binding_assignments",
+    name = "http.list_bindings",
     skip_all,
     fields(workspace_id = ?query.workspace_id, library_id = ?query.library_id)
 )]
-pub async fn list_binding_assignments(
+pub async fn list_bindings(
     auth: AuthContext,
     State(state): State<AppState>,
     Query(query): Query<AiScopeQuery>,
-) -> Result<Json<Vec<AiBindingAssignmentResponse>>, ApiError> {
+) -> Result<Json<Vec<AiBindingResponse>>, ApiError> {
     let scope_kind = query.scope_kind.ok_or_else(|| {
         ApiError::BadRequest("scopeKind is required for binding queries".to_string())
     })?;
     let scope =
         authorize_exact_ai_scope(&auth, &state, scope_kind, query.workspace_id, query.library_id)
             .await?;
-    let entries =
-        state.canonical_services.ai_catalog.list_binding_assignments(&state, scope).await?;
-    Ok(Json(entries.into_iter().map(map_binding_assignment).collect()))
+    let entries = state.canonical_services.ai_catalog.list_bindings(&state, scope).await?;
+    Ok(Json(entries.into_iter().map(map_binding).collect()))
 }
 
 #[utoipa::path(
     post,
-    path = "/v1/ai/credentials",
+    path = "/v1/ai/accounts",
     tag = "ai",
-    operation_id = "createAiCredential",
-    request_body = CreateProviderCredentialRequest,
+    operation_id = "createAiAccount",
+    request_body = CreateAiAccountRequest,
     responses(
-        (status = 200, description = "Newly created provider credential", body = ProviderCredentialResponse),
+        (status = 200, description = "Newly created AI account", body = AiAccountResponse),
         (status = 401, description = "Caller is not authenticated"),
-        (status = 403, description = "Caller cannot administer credentials in the requested scope"),
+        (status = 403, description = "Caller cannot administer accounts in the requested scope"),
     ),
 )]
 #[tracing::instrument(
     level = "info",
-    name = "http.create_credential",
+    name = "http.create_account",
     skip_all,
     fields(workspace_id = ?payload.workspace_id, library_id = ?payload.library_id)
 )]
-pub async fn create_credential(
+pub async fn create_account(
     auth: AuthContext,
     State(state): State<AppState>,
     request_id: Option<axum::Extension<RequestId>>,
-    Json(payload): Json<CreateProviderCredentialRequest>,
-) -> Result<Json<ProviderCredentialResponse>, ApiError> {
+    Json(payload): Json<CreateAiAccountRequest>,
+) -> Result<Json<AiAccountResponse>, ApiError> {
     let request_id = request_id.map(|value| value.0.0);
     let scope = authorize_exact_ai_scope(
         &auth,
@@ -917,9 +831,9 @@ pub async fn create_credential(
     let entry = state
         .canonical_services
         .ai_catalog
-        .create_provider_credential(
+        .create_account(
             &state,
-            CreateProviderCredentialCommand {
+            CreateAiAccountCommand {
                 scope_kind: payload.scope_kind,
                 workspace_id: scope.workspace_id,
                 library_id: scope.library_id,
@@ -937,9 +851,9 @@ pub async fn create_credential(
         request_id,
         "ai.provider_credential.create",
         "succeeded",
-        Some(format!("provider credential {} created", entry.label)),
+        Some(format!("AI account {} created", entry.label)),
         Some(format!(
-            "principal {} created provider credential {} in {}",
+            "principal {} created AI account {} in {}",
             auth.principal_id,
             entry.id,
             describe_scope(entry.scope_kind, entry.workspace_id, entry.library_id),
@@ -952,53 +866,52 @@ pub async fn create_credential(
         )],
     )
     .await;
-    Ok(Json(map_provider_credential(entry)))
+    Ok(Json(map_account(entry)))
 }
 
 #[tracing::instrument(
     level = "info",
-    name = "http.update_credential",
+    name = "http.update_account",
     skip_all,
-    fields(credential_id = %credential_id)
+    fields(account_id = %account_id)
 )]
 #[utoipa::path(
     put,
-    path = "/v1/ai/credentials/{credentialId}",
+    path = "/v1/ai/accounts/{accountId}",
     tag = "ai",
-    operation_id = "updateAiCredential",
-    params(("credentialId" = uuid::Uuid, Path, description = "Provider credential identifier")),
-    request_body = UpdateProviderCredentialRequest,
+    operation_id = "updateAiAccount",
+    params(("accountId" = uuid::Uuid, Path, description = "AI account identifier")),
+    request_body = UpdateAiAccountRequest,
     responses(
-        (status = 200, description = "Updated provider credential", body = ProviderCredentialResponse),
+        (status = 200, description = "Updated AI account", body = AiAccountResponse),
         (status = 401, description = "Caller is not authenticated"),
-        (status = 403, description = "Caller cannot administer credentials in the credential's scope"),
-        (status = 404, description = "Credential not found"),
+        (status = 403, description = "Caller cannot administer accounts in the account's scope"),
+        (status = 404, description = "Account not found"),
     ),
 )]
-pub async fn update_credential(
+pub async fn update_account(
     auth: AuthContext,
     State(state): State<AppState>,
     request_id: Option<axum::Extension<RequestId>>,
-    Path(credential_id): Path<Uuid>,
-    Json(payload): Json<UpdateProviderCredentialRequest>,
-) -> Result<Json<ProviderCredentialResponse>, ApiError> {
-    let credential =
-        state.canonical_services.ai_catalog.get_provider_credential(&state, credential_id).await?;
+    Path(account_id): Path<Uuid>,
+    Json(payload): Json<UpdateAiAccountRequest>,
+) -> Result<Json<AiAccountResponse>, ApiError> {
+    let account = state.canonical_services.ai_catalog.get_account(&state, account_id).await?;
     authorize_exact_ai_scope(
         &auth,
         &state,
-        credential.scope_kind,
-        credential.workspace_id,
-        credential.library_id,
+        account.scope_kind,
+        account.workspace_id,
+        account.library_id,
     )
     .await?;
     let entry = state
         .canonical_services
         .ai_catalog
-        .update_provider_credential(
+        .update_account(
             &state,
-            UpdateProviderCredentialCommand {
-                credential_id,
+            UpdateAiAccountCommand {
+                account_id,
                 label: payload.label,
                 api_key: payload.api_key,
                 base_url: payload.base_url,
@@ -1012,9 +925,9 @@ pub async fn update_credential(
         request_id.map(|value| value.0.0),
         "ai.provider_credential.update",
         "succeeded",
-        Some(format!("provider credential {} updated", entry.label)),
+        Some(format!("AI account {} updated", entry.label)),
         Some(format!(
-            "principal {} updated provider credential {} in {}",
+            "principal {} updated AI account {} in {}",
             auth.principal_id,
             entry.id,
             describe_scope(entry.scope_kind, entry.workspace_id, entry.library_id),
@@ -1027,64 +940,63 @@ pub async fn update_credential(
         )],
     )
     .await;
-    Ok(Json(map_provider_credential(entry)))
+    Ok(Json(map_account(entry)))
 }
 
 #[tracing::instrument(
     level = "info",
-    name = "http.delete_credential",
+    name = "http.delete_account",
     skip_all,
-    fields(credential_id = %credential_id)
+    fields(account_id = %account_id)
 )]
 #[utoipa::path(
     delete,
-    path = "/v1/ai/credentials/{credentialId}",
+    path = "/v1/ai/accounts/{accountId}",
     tag = "ai",
-    operation_id = "deleteAiCredential",
-    params(("credentialId" = uuid::Uuid, Path, description = "Provider credential identifier")),
+    operation_id = "deleteAiAccount",
+    params(("accountId" = uuid::Uuid, Path, description = "AI account identifier")),
     responses(
         (status = 200, description = "Empty acknowledgement payload", body = serde_json::Value),
         (status = 401, description = "Caller is not authenticated"),
-        (status = 403, description = "Caller cannot administer credentials in the credential's scope"),
-        (status = 404, description = "Credential not found"),
-        (status = 409, description = "Credential is still referenced"),
+        (status = 403, description = "Caller cannot administer accounts in the account's scope"),
+        (status = 404, description = "Account not found"),
+        (status = 409, description = "Account is still referenced"),
     ),
 )]
-pub async fn delete_credential(
+pub async fn delete_account(
     auth: AuthContext,
     State(state): State<AppState>,
     request_id: Option<axum::Extension<RequestId>>,
-    Path(credential_id): Path<Uuid>,
+    Path(account_id): Path<Uuid>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let credential =
-        state.canonical_services.ai_catalog.get_provider_credential(&state, credential_id).await?;
+    let account = state.canonical_services.ai_catalog.get_account(&state, account_id).await?;
     authorize_exact_ai_scope(
         &auth,
         &state,
-        credential.scope_kind,
-        credential.workspace_id,
-        credential.library_id,
+        account.scope_kind,
+        account.workspace_id,
+        account.library_id,
     )
     .await?;
-    state.canonical_services.ai_catalog.delete_provider_credential(&state, credential_id).await?;
+    state.canonical_services.ai_catalog.delete_account(&state, account_id).await?;
     record_ai_audit_event(
         &state,
         &auth,
         request_id.map(|value| value.0.0),
         "ai.provider_credential.delete",
         "succeeded",
-        Some(format!("provider credential {} deleted", credential.label)),
+        Some(format!("AI account {} deleted", account.label)),
         Some(format!(
-            "principal {} deleted provider credential {} in {}",
+            "principal {} deleted AI account {} in {}",
             auth.principal_id,
-            credential_id,
-            describe_scope(credential.scope_kind, credential.workspace_id, credential.library_id),
+            account_id,
+            describe_scope(account.scope_kind, account.workspace_id, account.library_id),
         )),
         vec![subject_from_scope(
             "provider_credential",
-            credential_id,
-            credential.workspace_id,
-            credential.library_id,
+            account_id,
+            account.workspace_id,
+            account.library_id,
         )],
     )
     .await;
@@ -1292,204 +1204,7 @@ pub async fn delete_price_override(
 
 #[tracing::instrument(
     level = "info",
-    name = "http.create_model_preset",
-    skip_all,
-    fields(workspace_id = ?payload.workspace_id, library_id = ?payload.library_id)
-)]
-#[utoipa::path(
-    post,
-    path = "/v1/ai/model-presets",
-    tag = "ai",
-    operation_id = "createAiModelPreset",
-    request_body = CreateModelPresetRequest,
-    responses(
-        (status = 200, description = "Newly created model preset", body = ModelPresetResponse),
-        (status = 401, description = "Caller is not authenticated"),
-        (status = 403, description = "Caller cannot administer presets in the requested scope"),
-    ),
-)]
-pub async fn create_model_preset(
-    auth: AuthContext,
-    State(state): State<AppState>,
-    request_id: Option<axum::Extension<RequestId>>,
-    Json(payload): Json<CreateModelPresetRequest>,
-) -> Result<Json<ModelPresetResponse>, ApiError> {
-    let scope = authorize_exact_ai_scope(
-        &auth,
-        &state,
-        payload.scope_kind,
-        payload.workspace_id,
-        payload.library_id,
-    )
-    .await?;
-    let entry = state
-        .canonical_services
-        .ai_catalog
-        .create_model_preset(
-            &state,
-            CreateModelPresetCommand {
-                scope_kind: payload.scope_kind,
-                workspace_id: scope.workspace_id,
-                library_id: scope.library_id,
-                model_catalog_id: payload.model_catalog_id,
-                preset_name: payload.preset_name,
-                system_prompt: payload.system_prompt,
-                temperature: payload.temperature,
-                top_p: payload.top_p,
-                max_output_tokens_override: payload.max_output_tokens_override,
-                extra_parameters_json: payload.extra_parameters_json,
-                created_by_principal_id: Some(auth.principal_id),
-            },
-        )
-        .await?;
-    record_ai_audit_event(
-        &state,
-        &auth,
-        request_id.map(|value| value.0.0),
-        "ai.model_preset.create",
-        "succeeded",
-        Some(format!("model preset {} created", entry.preset_name)),
-        Some(format!(
-            "principal {} created model preset {} in {}",
-            auth.principal_id,
-            entry.id,
-            describe_scope(entry.scope_kind, entry.workspace_id, entry.library_id),
-        )),
-        vec![subject_from_scope("model_preset", entry.id, entry.workspace_id, entry.library_id)],
-    )
-    .await;
-    Ok(Json(map_model_preset(entry)))
-}
-
-#[tracing::instrument(
-    level = "info",
-    name = "http.update_model_preset",
-    skip_all,
-    fields(preset_id = %preset_id)
-)]
-#[utoipa::path(
-    put,
-    path = "/v1/ai/model-presets/{presetId}",
-    tag = "ai",
-    operation_id = "updateAiModelPreset",
-    params(("presetId" = uuid::Uuid, Path, description = "Model preset identifier")),
-    request_body = UpdateModelPresetRequest,
-    responses(
-        (status = 200, description = "Updated model preset", body = ModelPresetResponse),
-        (status = 401, description = "Caller is not authenticated"),
-        (status = 403, description = "Caller cannot administer presets in the preset's scope"),
-        (status = 404, description = "Preset not found"),
-    ),
-)]
-pub async fn update_model_preset(
-    auth: AuthContext,
-    State(state): State<AppState>,
-    request_id: Option<axum::Extension<RequestId>>,
-    Path(preset_id): Path<Uuid>,
-    Json(payload): Json<UpdateModelPresetRequest>,
-) -> Result<Json<ModelPresetResponse>, ApiError> {
-    let preset = state.canonical_services.ai_catalog.get_model_preset(&state, preset_id).await?;
-    authorize_exact_ai_scope(
-        &auth,
-        &state,
-        preset.scope_kind,
-        preset.workspace_id,
-        preset.library_id,
-    )
-    .await?;
-    let entry = state
-        .canonical_services
-        .ai_catalog
-        .update_model_preset(
-            &state,
-            UpdateModelPresetCommand {
-                preset_id,
-                preset_name: payload.preset_name,
-                system_prompt: payload.system_prompt,
-                temperature: payload.temperature,
-                top_p: payload.top_p,
-                max_output_tokens_override: payload.max_output_tokens_override,
-                extra_parameters_json: payload.extra_parameters_json,
-            },
-        )
-        .await?;
-    record_ai_audit_event(
-        &state,
-        &auth,
-        request_id.map(|value| value.0.0),
-        "ai.model_preset.update",
-        "succeeded",
-        Some(format!("model preset {} updated", entry.preset_name)),
-        Some(format!(
-            "principal {} updated model preset {} in {}",
-            auth.principal_id,
-            entry.id,
-            describe_scope(entry.scope_kind, entry.workspace_id, entry.library_id),
-        )),
-        vec![subject_from_scope("model_preset", entry.id, entry.workspace_id, entry.library_id)],
-    )
-    .await;
-    Ok(Json(map_model_preset(entry)))
-}
-
-#[tracing::instrument(
-    level = "info",
-    name = "http.delete_model_preset",
-    skip_all,
-    fields(preset_id = %preset_id)
-)]
-#[utoipa::path(
-    delete,
-    path = "/v1/ai/model-presets/{presetId}",
-    tag = "ai",
-    operation_id = "deleteAiModelPreset",
-    params(("presetId" = uuid::Uuid, Path, description = "Model preset identifier")),
-    responses(
-        (status = 200, description = "Empty acknowledgement payload", body = serde_json::Value),
-        (status = 401, description = "Caller is not authenticated"),
-        (status = 403, description = "Caller cannot administer presets in the preset's scope"),
-        (status = 404, description = "Preset not found"),
-        (status = 409, description = "Preset is still referenced"),
-    ),
-)]
-pub async fn delete_model_preset(
-    auth: AuthContext,
-    State(state): State<AppState>,
-    request_id: Option<axum::Extension<RequestId>>,
-    Path(preset_id): Path<Uuid>,
-) -> Result<Json<serde_json::Value>, ApiError> {
-    let preset = state.canonical_services.ai_catalog.get_model_preset(&state, preset_id).await?;
-    authorize_exact_ai_scope(
-        &auth,
-        &state,
-        preset.scope_kind,
-        preset.workspace_id,
-        preset.library_id,
-    )
-    .await?;
-    state.canonical_services.ai_catalog.delete_model_preset(&state, preset_id).await?;
-    record_ai_audit_event(
-        &state,
-        &auth,
-        request_id.map(|value| value.0.0),
-        "ai.model_preset.delete",
-        "succeeded",
-        Some(format!("model preset {} deleted", preset.preset_name)),
-        Some(format!(
-            "principal {} deleted model preset {} in {}",
-            auth.principal_id,
-            preset_id,
-            describe_scope(preset.scope_kind, preset.workspace_id, preset.library_id),
-        )),
-        vec![subject_from_scope("model_preset", preset_id, preset.workspace_id, preset.library_id)],
-    )
-    .await;
-    Ok(Json(serde_json::json!({ "deleted": true })))
-}
-
-#[tracing::instrument(
-    level = "info",
-    name = "http.create_binding_assignment",
+    name = "http.create_binding",
     skip_all,
     fields(workspace_id = ?payload.workspace_id, library_id = ?payload.library_id)
 )]
@@ -1498,19 +1213,19 @@ pub async fn delete_model_preset(
     path = "/v1/ai/bindings",
     tag = "ai",
     operation_id = "createAiLibraryBinding",
-    request_body = CreateBindingAssignmentRequest,
+    request_body = CreateAiBindingRequest,
     responses(
-        (status = 200, description = "Newly created binding assignment", body = AiBindingAssignmentResponse),
+        (status = 200, description = "Newly created binding", body = AiBindingResponse),
         (status = 401, description = "Caller is not authenticated"),
         (status = 403, description = "Caller cannot administer bindings in the requested scope"),
     ),
 )]
-pub async fn create_binding_assignment(
+pub async fn create_binding(
     auth: AuthContext,
     State(state): State<AppState>,
     request_id: Option<axum::Extension<RequestId>>,
-    Json(payload): Json<CreateBindingAssignmentRequest>,
-) -> Result<Json<AiBindingAssignmentResponse>, ApiError> {
+    Json(payload): Json<CreateAiBindingRequest>,
+) -> Result<Json<AiBindingResponse>, ApiError> {
     let scope = authorize_exact_ai_scope(
         &auth,
         &state,
@@ -1522,15 +1237,20 @@ pub async fn create_binding_assignment(
     let entry = state
         .canonical_services
         .ai_catalog
-        .create_binding_assignment(
+        .create_binding(
             &state,
-            CreateBindingAssignmentCommand {
+            CreateAiBindingCommand {
                 scope_kind: payload.scope_kind,
                 workspace_id: scope.workspace_id,
                 library_id: scope.library_id,
                 binding_purpose: payload.binding_purpose,
-                provider_credential_id: payload.provider_credential_id,
-                model_preset_id: payload.model_preset_id,
+                account_id: payload.account_id,
+                model_catalog_id: payload.model_catalog_id,
+                system_prompt: payload.system_prompt,
+                temperature: payload.temperature,
+                top_p: payload.top_p,
+                max_output_tokens_override: payload.max_output_tokens_override,
+                extra_parameters_json: payload.extra_parameters_json,
                 updated_by_principal_id: Some(auth.principal_id),
             },
         )
@@ -1541,9 +1261,9 @@ pub async fn create_binding_assignment(
         request_id.map(|value| value.0.0),
         "ai.binding_assignment.create",
         "succeeded",
-        Some(format!("binding assignment {} created", entry.id)),
+        Some(format!("binding {} created", entry.id)),
         Some(format!(
-            "principal {} created binding assignment {} in {}",
+            "principal {} created binding {} in {}",
             auth.principal_id,
             entry.id,
             describe_scope(entry.scope_kind, entry.workspace_id, entry.library_id),
@@ -1556,12 +1276,12 @@ pub async fn create_binding_assignment(
         )],
     )
     .await;
-    Ok(Json(map_binding_assignment(entry)))
+    Ok(Json(map_binding(entry)))
 }
 
 #[tracing::instrument(
     level = "info",
-    name = "http.update_binding_assignment",
+    name = "http.update_binding",
     skip_all,
     fields(binding_id = %binding_id)
 )]
@@ -1570,24 +1290,23 @@ pub async fn create_binding_assignment(
     path = "/v1/ai/bindings/{bindingId}",
     tag = "ai",
     operation_id = "updateAiLibraryBinding",
-    params(("bindingId" = uuid::Uuid, Path, description = "Binding assignment identifier")),
-    request_body = UpdateBindingAssignmentRequest,
+    params(("bindingId" = uuid::Uuid, Path, description = "Binding identifier")),
+    request_body = UpdateAiBindingRequest,
     responses(
-        (status = 200, description = "Updated binding assignment", body = AiBindingAssignmentResponse),
+        (status = 200, description = "Updated binding", body = AiBindingResponse),
         (status = 401, description = "Caller is not authenticated"),
         (status = 403, description = "Caller cannot administer bindings in the binding's scope"),
         (status = 404, description = "Binding not found"),
     ),
 )]
-pub async fn update_binding_assignment(
+pub async fn update_binding(
     auth: AuthContext,
     State(state): State<AppState>,
     request_id: Option<axum::Extension<RequestId>>,
     Path(binding_id): Path<Uuid>,
-    Json(payload): Json<UpdateBindingAssignmentRequest>,
-) -> Result<Json<AiBindingAssignmentResponse>, ApiError> {
-    let binding =
-        state.canonical_services.ai_catalog.get_binding_assignment(&state, binding_id).await?;
+    Json(payload): Json<UpdateAiBindingRequest>,
+) -> Result<Json<AiBindingResponse>, ApiError> {
+    let binding = state.canonical_services.ai_catalog.get_binding(&state, binding_id).await?;
     authorize_exact_ai_scope(
         &auth,
         &state,
@@ -1599,12 +1318,17 @@ pub async fn update_binding_assignment(
     let entry = state
         .canonical_services
         .ai_catalog
-        .update_binding_assignment(
+        .update_binding(
             &state,
-            UpdateBindingAssignmentCommand {
+            UpdateAiBindingCommand {
                 binding_id,
-                provider_credential_id: payload.provider_credential_id,
-                model_preset_id: payload.model_preset_id,
+                account_id: payload.account_id,
+                model_catalog_id: payload.model_catalog_id,
+                system_prompt: payload.system_prompt,
+                temperature: payload.temperature,
+                top_p: payload.top_p,
+                max_output_tokens_override: payload.max_output_tokens_override,
+                extra_parameters_json: payload.extra_parameters_json,
                 binding_state: payload.binding_state,
                 updated_by_principal_id: Some(auth.principal_id),
             },
@@ -1616,9 +1340,9 @@ pub async fn update_binding_assignment(
         request_id.map(|value| value.0.0),
         "ai.binding_assignment.update",
         "succeeded",
-        Some(format!("binding assignment {} updated", entry.id)),
+        Some(format!("binding {} updated", entry.id)),
         Some(format!(
-            "principal {} updated binding assignment {} in {}",
+            "principal {} updated binding {} in {}",
             auth.principal_id,
             entry.id,
             describe_scope(entry.scope_kind, entry.workspace_id, entry.library_id),
@@ -1631,12 +1355,12 @@ pub async fn update_binding_assignment(
         )],
     )
     .await;
-    Ok(Json(map_binding_assignment(entry)))
+    Ok(Json(map_binding(entry)))
 }
 
 #[tracing::instrument(
     level = "info",
-    name = "http.delete_binding_assignment",
+    name = "http.delete_binding",
     skip_all,
     fields(binding_id = %binding_id)
 )]
@@ -1645,7 +1369,7 @@ pub async fn update_binding_assignment(
     path = "/v1/ai/bindings/{bindingId}",
     tag = "ai",
     operation_id = "deleteAiLibraryBinding",
-    params(("bindingId" = uuid::Uuid, Path, description = "Binding assignment identifier")),
+    params(("bindingId" = uuid::Uuid, Path, description = "Binding identifier")),
     responses(
         (status = 200, description = "Empty acknowledgement payload", body = serde_json::Value),
         (status = 401, description = "Caller is not authenticated"),
@@ -1653,14 +1377,13 @@ pub async fn update_binding_assignment(
         (status = 404, description = "Binding not found"),
     ),
 )]
-pub async fn delete_binding_assignment(
+pub async fn delete_binding(
     auth: AuthContext,
     State(state): State<AppState>,
     request_id: Option<axum::Extension<RequestId>>,
     Path(binding_id): Path<Uuid>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let binding =
-        state.canonical_services.ai_catalog.get_binding_assignment(&state, binding_id).await?;
+    let binding = state.canonical_services.ai_catalog.get_binding(&state, binding_id).await?;
     authorize_exact_ai_scope(
         &auth,
         &state,
@@ -1669,16 +1392,16 @@ pub async fn delete_binding_assignment(
         binding.library_id,
     )
     .await?;
-    state.canonical_services.ai_catalog.delete_binding_assignment(&state, binding_id).await?;
+    state.canonical_services.ai_catalog.delete_binding(&state, binding_id).await?;
     record_ai_audit_event(
         &state,
         &auth,
         request_id.map(|value| value.0.0),
         "ai.binding_assignment.delete",
         "succeeded",
-        Some(format!("binding assignment {} deleted", binding_id)),
+        Some(format!("binding {binding_id} deleted")),
         Some(format!(
-            "principal {} deleted binding assignment {} in {}",
+            "principal {} deleted binding {} in {}",
             auth.principal_id,
             binding_id,
             describe_scope(binding.scope_kind, binding.workspace_id, binding.library_id),
@@ -1696,7 +1419,7 @@ pub async fn delete_binding_assignment(
 
 #[tracing::instrument(
     level = "info",
-    name = "http.validate_binding_assignment",
+    name = "http.validate_binding",
     skip_all,
     fields(binding_id = %binding_id)
 )]
@@ -1705,7 +1428,7 @@ pub async fn delete_binding_assignment(
     path = "/v1/ai/bindings/{bindingId}/validate",
     tag = "ai",
     operation_id = "validateAiLibraryBinding",
-    params(("bindingId" = uuid::Uuid, Path, description = "Binding assignment identifier")),
+    params(("bindingId" = uuid::Uuid, Path, description = "Binding identifier")),
     responses(
         (status = 200, description = "Binding validation result", body = BindingValidationResponse),
         (status = 401, description = "Caller is not authenticated"),
@@ -1713,14 +1436,13 @@ pub async fn delete_binding_assignment(
         (status = 404, description = "Binding not found"),
     ),
 )]
-pub async fn validate_binding_assignment(
+pub async fn validate_binding(
     auth: AuthContext,
     State(state): State<AppState>,
     request_id: Option<axum::Extension<RequestId>>,
     Path(binding_id): Path<Uuid>,
 ) -> Result<Json<BindingValidationResponse>, ApiError> {
-    let binding =
-        state.canonical_services.ai_catalog.get_binding_assignment(&state, binding_id).await?;
+    let binding = state.canonical_services.ai_catalog.get_binding(&state, binding_id).await?;
     authorize_exact_ai_scope(
         &auth,
         &state,
@@ -1748,9 +1470,9 @@ pub async fn validate_binding_assignment(
         request_id.map(|value| value.0.0),
         "ai.binding_assignment.validate",
         "succeeded",
-        Some(format!("binding assignment {} validation requested", binding_id)),
+        Some(format!("binding {binding_id} validation requested")),
         Some(format!(
-            "principal {} requested validation for binding assignment {} in {}",
+            "principal {} requested validation for binding {} in {}",
             auth.principal_id,
             binding_id,
             describe_scope(binding.scope_kind, binding.workspace_id, binding.library_id),
@@ -1830,7 +1552,7 @@ fn map_model(entry: ResolvedModelCatalogEntry) -> ModelCatalogEntryResponse {
         context_window: entry.model.context_window,
         max_output_tokens: entry.model.max_output_tokens,
         availability_state: entry.availability_state,
-        available_credential_ids: entry.available_credential_ids,
+        available_account_ids: entry.available_account_ids,
     }
 }
 
@@ -1851,8 +1573,8 @@ fn map_price(entry: PriceCatalogEntry) -> PriceCatalogEntryResponse {
     }
 }
 
-fn map_provider_credential(entry: ProviderCredential) -> ProviderCredentialResponse {
-    ProviderCredentialResponse {
+fn map_account(entry: AiAccount) -> AiAccountResponse {
+    AiAccountResponse {
         id: entry.id,
         scope_kind: entry.scope_kind,
         workspace_id: entry.workspace_id,
@@ -1881,33 +1603,20 @@ fn summarize_api_key(value: Option<&str>) -> String {
     }
 }
 
-fn map_model_preset(entry: ModelPreset) -> ModelPresetResponse {
-    ModelPresetResponse {
-        id: entry.id,
-        scope_kind: entry.scope_kind,
-        workspace_id: entry.workspace_id,
-        library_id: entry.library_id,
-        model_catalog_id: entry.model_catalog_id,
-        preset_name: entry.preset_name,
-        system_prompt: entry.system_prompt,
-        temperature: entry.temperature,
-        top_p: entry.top_p,
-        max_output_tokens_override: entry.max_output_tokens_override,
-        extra_parameters_json: entry.extra_parameters_json,
-        created_at: entry.created_at,
-        updated_at: entry.updated_at,
-    }
-}
-
-fn map_binding_assignment(entry: AiBindingAssignment) -> AiBindingAssignmentResponse {
-    AiBindingAssignmentResponse {
+fn map_binding(entry: AiBinding) -> AiBindingResponse {
+    AiBindingResponse {
         id: entry.id,
         scope_kind: entry.scope_kind,
         workspace_id: entry.workspace_id,
         library_id: entry.library_id,
         binding_purpose: entry.binding_purpose,
-        provider_credential_id: entry.provider_credential_id,
-        model_preset_id: entry.model_preset_id,
+        account_id: entry.account_id,
+        model_catalog_id: entry.model_catalog_id,
+        system_prompt: entry.system_prompt,
+        temperature: entry.temperature,
+        top_p: entry.top_p,
+        max_output_tokens_override: entry.max_output_tokens_override,
+        extra_parameters_json: entry.extra_parameters_json,
         binding_state: entry.binding_state,
     }
 }

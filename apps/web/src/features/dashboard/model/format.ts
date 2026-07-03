@@ -1,4 +1,5 @@
 import type { TFunction } from 'i18next';
+import type { StatusTone } from '@/shared/components/StatusBadge';
 import type { DocumentReadiness } from '@/shared/types';
 import type {
   DashboardAttentionItem,
@@ -6,6 +7,15 @@ import type {
   MessageLevel,
   WebIngestRunState,
 } from './types';
+
+/**
+ * Strips the `status-` prefix so a `status-*` class name (as produced by
+ * `readinessClass` / `attentionClass` / `graphStatusClass` / `runStateClass`)
+ * can be passed as the canonical `<StatusBadge tone>` prop.
+ */
+export function toStatusTone(statusClass: string): StatusTone {
+  return statusClass.replace(/^status-/, '') as StatusTone;
+}
 
 export function formatRelativeTime(iso: string, locale: string): string {
   const timestamp = new Date(iso).getTime();
@@ -111,28 +121,20 @@ export function runStateClass(state: WebIngestRunState): string {
 
 export type ToneKey = 'neutral' | 'ready' | 'warning' | 'processing' | 'failed';
 
-export function toneStyle(tone: ToneKey) {
-  if (tone === 'neutral') {
-    return {
-      container: { background: 'hsl(var(--muted))' },
-      iconClass: 'text-muted-foreground',
-    };
+export function toneClass(tone: ToneKey): { containerClass: string; iconClass: string } {
+  switch (tone) {
+    case 'ready':
+      return { containerClass: 'bg-status-ready-bg ring-1 ring-status-ready-ring/35', iconClass: 'text-status-ready' };
+    case 'warning':
+      return { containerClass: 'bg-status-warning-bg ring-1 ring-status-warning-ring/35', iconClass: 'text-status-warning' };
+    case 'failed':
+      return { containerClass: 'bg-status-failed-bg ring-1 ring-status-failed-ring/35', iconClass: 'text-status-failed' };
+    case 'processing':
+      return { containerClass: 'bg-status-processing-bg ring-1 ring-status-processing-ring/35', iconClass: 'text-status-processing' };
+    case 'neutral':
+    default:
+      return { containerClass: 'bg-muted', iconClass: 'text-muted-foreground' };
   }
-
-  return {
-    container: {
-      background: `hsl(var(--status-${tone}-bg))`,
-      boxShadow: `inset 0 0 0 1px hsl(var(--status-${tone}-ring) / 0.35)`,
-    },
-    iconClass:
-      tone === 'ready'
-        ? 'text-status-ready'
-        : tone === 'warning'
-          ? 'text-status-warning'
-          : tone === 'failed'
-            ? 'text-status-failed'
-            : 'text-status-processing',
-  };
 }
 
 export function hostnameFromUrl(value: string): string {

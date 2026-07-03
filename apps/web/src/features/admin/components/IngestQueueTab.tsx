@@ -1,18 +1,21 @@
-import { useCallback, useMemo, useState } from "react";
+import { Fragment, useCallback, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import type { TFunction } from "i18next";
 import {
   ArrowDown,
   ArrowUp,
+  Boxes,
+  Building2,
   CheckSquare,
   Clock3,
   ExternalLink,
-  ListOrdered,
+  ListFilter,
   Pause,
   Play,
   RefreshCw,
   Search,
   Square,
+  Wrench,
 } from "lucide-react";
 import { useNavigate } from "react-router-dom";
 import { toast } from "sonner";
@@ -25,21 +28,23 @@ import type {
 } from "@/shared/api/generated";
 import { useApp } from "@/shared/contexts/app-context";
 import { DataState } from "@/shared/components/DataState";
+import { FilterSelect } from "@/shared/components/FilterSelect";
+import { DataView } from "@/shared/components/layout/DataView";
+import { InspectorPanel } from "@/shared/components/layout/InspectorPanel";
+import { RowActionsMenu, type RowAction } from "@/shared/components/layout/RowActionsMenu";
+import { WorkbenchEmptyState } from "@/shared/components/layout/WorkbenchEmptyState";
+import { StatusBadge, type StatusTone } from "@/shared/components/StatusBadge";
 import {
   TABLE_PAGE_SIZE_OPTIONS,
   TablePaginationFooter,
   type TablePageSizeOption,
 } from "@/shared/components/TablePaginationFooter";
 import { Button } from "@/shared/components/ui/button";
+import { Checkbox } from "@/shared/components/ui/checkbox";
 import { Input } from "@/shared/components/ui/input";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/shared/components/ui/select";
+import { SelectItem } from "@/shared/components/ui/select";
 import { errorMessage } from "@/shared/lib/errorMessage";
+import { buildDocumentFailureNotice, humanizeDocumentStage } from "@/shared/lib/document-processing";
 import {
   isStorageRecord,
   parseNumberOption,
@@ -84,13 +89,13 @@ function stageLabel(item: IngestQueueItemResponse, t: TFunction): string {
   if (item.queueState === "queued") {
     return t("admin.queueStateQueued");
   }
-  return item.currentStage || t("admin.queueStateRunning");
+  return humanizeDocumentStage(item.currentStage, t) ?? t("admin.queueStateRunning");
 }
 
-function stateBadgeClass(queueState: string): string {
-  if (queueState === "leased") return "status-processing";
-  if (queueState === "paused") return "status-warning";
-  return "bg-muted text-muted-foreground shadow-none";
+function stateTone(queueState: string): StatusTone {
+  if (queueState === "leased") return "processing";
+  if (queueState === "paused") return "warning";
+  return "queued";
 }
 
 function stateLabel(item: IngestQueueItemResponse, t: TFunction): string {
@@ -130,11 +135,11 @@ function progressValue(item: IngestQueueItemResponse): number {
 }
 
 function eventTone(event: IngestStageEvent): string {
-  if (event.stage_state === "failed") return "bg-red-500";
-  if (event.stage_state === "completed") return "bg-emerald-500";
+  if (event.stage_state === "failed") return "bg-status-failed";
+  if (event.stage_state === "completed") return "bg-status-ready";
   if (event.stage_state === "running" || event.stage_state === "started")
-    return "bg-blue-600";
-  return "bg-slate-400";
+    return "bg-status-processing";
+  return "bg-muted-foreground/35";
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -205,6 +210,7 @@ export function IngestQueueTab({
   const [workspaceFilter, setWorkspaceFilter] = useState(ALL_SCOPE_VALUE);
   const [libraryFilter, setLibraryFilter] = useState(ALL_SCOPE_VALUE);
   const [selectedJobId, setSelectedJobId] = useState<string | null>(null);
+  const [inspectorOpen, setInspectorOpen] = useState(false);
   const [selectionMode, setSelectionMode] = useState(false);
   const [selectedJobIds, setSelectedJobIds] = useState<Set<string>>(
     () => new Set(),
@@ -473,6 +479,7 @@ export function IngestQueueTab({
         workspaceId: item.workspaceId,
         name: item.libraryName,
         createdAt: "",
+        includeDocumentHintInMcpAnswers: false,
         ingestionReady: true,
         queryReady: true,
         missingBindingPurposes: [],
@@ -522,61 +529,256 @@ export function IngestQueueTab({
     });
   };
 
+  const queueRowActions = (item: IngestQueueItemResponse): RowAction[] => [
+    {
+      key: "move-up",
+      label: t("admin.queueMoveUp"),
+      icon: <ArrowUp className={`h-3.5 w-3.5 ${movingJobId === item.jobId ? "animate-pulse" : ""}`} />,
+      disabled: !canMove(item) || moveMutation.isPending,
+      onSelect: () => moveMutation.mutate({ jobId: item.jobId, direction: "up" }),
+    },
+    {
+      key: "move-down",
+      label: t("admin.queueMoveDown"),
+      icon: <ArrowDown className={`h-3.5 w-3.5 ${movingJobId === item.jobId ? "animate-pulse" : ""}`} />,
+      disabled: !canMove(item) || moveMutation.isPending,
+      onSelect: () => moveMutation.mutate({ jobId: item.jobId, direction: "down" }),
+    },
+    item.queueState === "paused"
+      ? {
+          key: "resume",
+          label: isPausing(item) ? t("admin.queueResumeBlocked") : t("admin.queueResumeJob"),
+          icon: <Play className={`h-3.5 w-3.5 ${resumingJobId === item.jobId ? "animate-pulse" : ""}`} />,
+          disabled: !canResume(item) || resumeMutation.isPending,
+          onSelect: () => resumeMutation.mutate(item.jobId),
+        }
+      : {
+          key: "pause",
+          label: t("admin.queuePauseJob"),
+          icon: <Pause className={`h-3.5 w-3.5 ${pausingJobId === item.jobId ? "animate-pulse" : ""}`} />,
+          disabled: !canPause(item) || pauseMutation.isPending,
+          onSelect: () => pauseMutation.mutate(item.jobId),
+        },
+    {
+      key: "documents",
+      label: t("admin.queueOpenDocuments"),
+      icon: <ExternalLink className="h-3.5 w-3.5" />,
+      onSelect: () => openDocuments(item),
+    },
+    {
+      key: "cancel",
+      label: t("admin.queueCancelJob"),
+      icon: <Square className={`h-3.5 w-3.5 ${cancelingJobId === item.jobId ? "animate-pulse" : ""}`} />,
+      disabled: cancelMutation.isPending,
+      onSelect: () => cancelMutation.mutate(item.jobId),
+      destructive: true,
+    },
+  ];
+
   return (
     <div className="flex h-full min-h-0 flex-col">
-      <div
-        className="mb-4 flex shrink-0 flex-col gap-3 xl:flex-row xl:items-center xl:justify-between"
-      >
-        <div>
-          <h2 className="flex items-center gap-2 text-base font-bold tracking-tight">
-            <ListOrdered className="h-4 w-4 text-muted-foreground" />
-            {t("admin.ingestQueue")}
-          </h2>
-          <p className="mt-1 text-xs text-muted-foreground">
-            {t("admin.ingestQueueDesc")}
-          </p>
-        </div>
-        <div className="flex flex-wrap items-center gap-2">
-          <div className="rounded-lg border bg-card px-3 py-2 text-xs">
-            <span className="text-muted-foreground">
-              {t("admin.queueRunning")}
-            </span>
-            <span className="ml-2 font-bold tabular-nums">
-              {queueData?.summary.running ?? 0}
-            </span>
-          </div>
-          <div className="rounded-lg border bg-card px-3 py-2 text-xs">
-            <span className="text-muted-foreground">
-              {t("admin.queueQueued")}
-            </span>
-            <span className="ml-2 font-bold tabular-nums">
-              {queueData?.summary.queued ?? 0}
-            </span>
-          </div>
-          <div className="rounded-lg border bg-card px-3 py-2 text-xs">
-            <span className="text-muted-foreground">
-              {t("admin.queuePaused")}
-            </span>
-            <span className="ml-2 font-bold tabular-nums">
-              {queueData?.summary.paused ?? 0}
-            </span>
-          </div>
-          <Button size="sm" variant="outline" onClick={refreshQueue}>
-            <RefreshCw
-              className={`mr-1.5 h-3.5 w-3.5 ${queueIsFetching ? "animate-spin" : ""}`}
-            />
-            {t("dashboard.refresh")}
-          </Button>
-        </div>
-      </div>
+      <DataView
+        className="min-h-0 flex-1"
+        inspectorCloseLabel={t("common.close")}
+        inspectorLabel={t("admin.queueInspectorTitle")}
+        inspectorOpen={inspectorOpen}
+        mainClassName="min-h-0"
+        onInspectorOpenChange={setInspectorOpen}
+        inspector={
+          <InspectorPanel
+            {...(!selectedItem ? { empty: t("admin.queueInspectorEmpty") } : {})}
+            {...(selectedItem
+              ? { title: selectedItem.documentName, titleText: selectedItem.documentName }
+              : {})}
+            status={
+              selectedItem ? (
+                <StatusBadge tone={stateTone(selectedItem.queueState)}>
+                  {stateLabel(selectedItem, t)}
+                </StatusBadge>
+              ) : null
+            }
+            {...(selectedItem
+              ? {
+                  metrics: [
+                    {
+                      label: t("admin.queueInspectorScope"),
+                      value: selectedItem.libraryName,
+                      title: selectedItem.libraryName,
+                    },
+                    {
+                      label: t("admin.queueStage"),
+                      value: stageLabel(selectedItem, t),
+                      title: stageLabel(selectedItem, t),
+                    },
+                    {
+                      label: t("admin.queueQueuedAt"),
+                      value: formatQueueTime(selectedItem.queuedAt),
+                      title: formatQueueTime(selectedItem.queuedAt),
+                    },
+                    {
+                      label: t("admin.queueInspectorHeartbeat"),
+                      value: formatQueueTime(selectedItem.heartbeatAt),
+                      title: formatQueueTime(selectedItem.heartbeatAt),
+                    },
+                  ],
+                }
+              : {})}
+            actions={
+              selectedItem ? (
+                <>
+                  {selectedItem.queueState === "paused" ? (
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      className="text-status-ready hover:text-status-ready"
+                      disabled={!canResume(selectedItem) || resumeMutation.isPending}
+                      onClick={() => resumeMutation.mutate(selectedItem.jobId)}
+                      title={
+                        isPausing(selectedItem)
+                          ? t("admin.queueResumeBlocked")
+                          : t("admin.queueResumeJob")
+                      }
+                    >
+                      <Play className="mr-1.5 h-3.5 w-3.5" />
+                      {t("admin.queueResumeJob")}
+                    </Button>
+                  ) : (
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      className="text-status-warning hover:text-status-warning"
+                      disabled={!canPause(selectedItem) || pauseMutation.isPending}
+                      onClick={() => pauseMutation.mutate(selectedItem.jobId)}
+                    >
+                      <Pause className="mr-1.5 h-3.5 w-3.5" />
+                      {t("admin.queuePauseJob")}
+                    </Button>
+                  )}
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={() => openDocuments(selectedItem)}
+                  >
+                    <ExternalLink className="mr-1.5 h-3.5 w-3.5" />
+                    {t("admin.queueOpenDocuments")}
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    className="text-status-failed hover:text-status-failed"
+                    disabled={cancelMutation.isPending}
+                    onClick={() => cancelMutation.mutate(selectedItem.jobId)}
+                  >
+                    <Square className="mr-1.5 h-3.5 w-3.5" />
+                    {t("admin.queueCancelJob")}
+                  </Button>
+                </>
+              ) : null
+            }
+          >
+            {selectedItem ? (
+              <>
+                <div>
+                  <div className="mb-1 flex items-center justify-between text-xs">
+                    <span className="font-semibold">
+                      {t("admin.queueInspectorProgress")}
+                    </span>
+                    <span className="font-mono">
+                      {progressValue(selectedItem)}%
+                    </span>
+                  </div>
+                  <div className="h-2 rounded-full bg-muted">
+                    <div
+                      className="h-full rounded-full bg-primary transition-all"
+                      style={{ width: `${progressValue(selectedItem)}%` }}
+                    />
+                  </div>
+                </div>
+                <QueueFailureNotice item={selectedItem} t={t} />
 
-      <div className="flex min-h-0 flex-1 overflow-hidden">
+                <div>
+                  <div className="mb-2 flex items-center gap-2 section-label">
+                    <Clock3 className="h-3.5 w-3.5" />
+                    {t("admin.queueInspectorTimeline")}
+                  </div>
+                  {!selectedItem.attemptId ? (
+                    <div className="rounded-lg border bg-muted/30 px-3 py-4 text-sm text-muted-foreground">
+                      {t("admin.queueInspectorNoAttempt")}
+                    </div>
+                  ) : timelineQuery.isLoading ? (
+                    <div className="rounded-lg border bg-muted/30 px-3 py-4 text-sm text-muted-foreground">
+                      {t("admin.queueInspectorLoading")}
+                    </div>
+                  ) : timelineQuery.error ? (
+                    <div className="inline-error text-destructive">
+                      {errorMessage(
+                        timelineQuery.error,
+                        t("admin.queueInspectorError"),
+                      )}
+                    </div>
+                  ) : (timelineQuery.data?.stages?.length ?? 0) === 0 ? (
+                    <div className="rounded-lg border bg-muted/30 px-3 py-4 text-sm text-muted-foreground">
+                      {t("admin.queueInspectorNoEvents")}
+                    </div>
+                  ) : (
+                    <div className="overflow-hidden rounded-lg border">
+                      {timelineQuery.data?.stages.map((event) => (
+                        <div
+                          key={event.id}
+                          className="border-b p-3 last:border-b-0"
+                        >
+                          <div className="flex items-start justify-between gap-3">
+                            <div className="min-w-0">
+                              <div className="flex items-center gap-2">
+                                <span
+                                  className={`h-2 w-2 shrink-0 rounded-full ${eventTone(event)}`}
+                                />
+                                <span className="truncate text-sm font-semibold">
+                                  {event.stage_name}
+                                </span>
+                              </div>
+                              {event.message && (
+                                <p className="mt-1 whitespace-pre-wrap text-xs text-muted-foreground">
+                                  {event.message}
+                                </p>
+                              )}
+                            </div>
+                            <div className="shrink-0 text-right text-2xs text-muted-foreground">
+                              <div>{event.stage_state}</div>
+                              <div>{formatQueueTime(event.recorded_at)}</div>
+                            </div>
+                          </div>
+                          {stageDetails(event).length > 0 && (
+                            <div className="mt-2 flex flex-wrap gap-1.5">
+                              {stageDetails(event).map(([key, value]) => (
+                                <span
+                                  key={key}
+                                  className="rounded-md bg-muted px-2 py-1 text-2xs"
+                                >
+                                  <span className="text-muted-foreground">
+                                    {key}
+                                  </span>{" "}
+                                  <span className="font-semibold">{value}</span>
+                                </span>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              </>
+            ) : null}
+          </InspectorPanel>
+        }
+      >
         <div className="flex min-w-0 flex-1 flex-col">
-          <div className="mb-3 grid shrink-0 grid-cols-1 gap-2 lg:grid-cols-[minmax(220px,1.3fr)_minmax(180px,0.8fr)_minmax(200px,0.9fr)_minmax(220px,1fr)_auto] lg:items-center">
+          <div className="grid shrink-0 grid-cols-1 gap-2 border-b bg-surface-sunken/50 px-6 py-3 lg:grid-cols-[minmax(220px,1.3fr)_minmax(180px,0.8fr)_minmax(200px,0.9fr)_minmax(220px,1fr)_auto] lg:items-center">
             <div className="relative min-w-0">
               <Search className="absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
               <Input
-                className="h-8 pl-9 text-xs"
+                className="h-9 pl-9 text-xs"
                 placeholder={t("admin.queueSearchPlaceholder")}
                 value={search}
                 onChange={(event) => {
@@ -587,7 +789,10 @@ export function IngestQueueTab({
                 }}
               />
             </div>
-            <Select
+            <FilterSelect
+              ariaLabel={t("admin.queueWorkspaceFilter")}
+              className="w-full"
+              icon={<Building2 />}
               value={effectiveWorkspaceFilter}
               onValueChange={(value) => {
                 setWorkspaceFilter(value);
@@ -597,29 +802,24 @@ export function IngestQueueTab({
                 setSelectedJobIds(new Set());
               }}
             >
-              <SelectTrigger
-                aria-label={t("admin.queueWorkspaceFilter")}
-                className="h-8 w-full text-xs"
-              >
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value={ALL_SCOPE_VALUE}>
-                  {t("admin.queueAllWorkspaces", {
-                    count: queueData?.items.length ?? 0,
+              <SelectItem value={ALL_SCOPE_VALUE}>
+                {t("admin.queueAllWorkspaces", {
+                  count: queueData?.items.length ?? 0,
+                })}
+              </SelectItem>
+              {workspaceOptions.map((option) => (
+                <SelectItem key={option.id} value={option.id}>
+                  {t("admin.queueFilterOptionWithCount", {
+                    count: option.count,
+                    name: option.label,
                   })}
                 </SelectItem>
-                {workspaceOptions.map((option) => (
-                  <SelectItem key={option.id} value={option.id}>
-                    {t("admin.queueFilterOptionWithCount", {
-                      count: option.count,
-                      name: option.label,
-                    })}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-            <Select
+              ))}
+            </FilterSelect>
+            <FilterSelect
+              ariaLabel={t("admin.queueLibraryFilter")}
+              className="w-full"
+              icon={<Boxes />}
               value={effectiveLibraryFilter}
               onValueChange={(value) => {
                 setLibraryFilter(value);
@@ -628,32 +828,26 @@ export function IngestQueueTab({
                 setSelectedJobIds(new Set());
               }}
             >
-              <SelectTrigger
-                aria-label={t("admin.queueLibraryFilter")}
-                className="h-8 w-full text-xs"
-              >
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value={ALL_SCOPE_VALUE}>
-                  {t("admin.queueAllLibraries", {
-                    count: libraryOptions.reduce(
-                      (total, option) => total + option.count,
-                      0,
-                    ),
+              <SelectItem value={ALL_SCOPE_VALUE}>
+                {t("admin.queueAllLibraries", {
+                  count: libraryOptions.reduce(
+                    (total, option) => total + option.count,
+                    0,
+                  ),
+                })}
+              </SelectItem>
+              {libraryOptions.map((option) => (
+                <SelectItem key={option.id} value={option.id}>
+                  {t("admin.queueFilterOptionWithCount", {
+                    count: option.count,
+                    name: option.label,
                   })}
                 </SelectItem>
-                {libraryOptions.map((option) => (
-                  <SelectItem key={option.id} value={option.id}>
-                    {t("admin.queueFilterOptionWithCount", {
-                      count: option.count,
-                      name: option.label,
-                    })}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-            <Select
+              ))}
+            </FilterSelect>
+            <FilterSelect
+              className="w-full"
+              icon={<ListFilter />}
               value={stateFilter}
               onValueChange={(value) => {
                 setStateFilter(value as QueueStateFilter);
@@ -662,26 +856,46 @@ export function IngestQueueTab({
                 setSelectedJobIds(new Set());
               }}
             >
-              <SelectTrigger className="h-8 w-full text-xs">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="active">
-                  {t("admin.queueFilterActive")}
-                </SelectItem>
-                <SelectItem value="running">
-                  {t("admin.queueFilterRunning")}
-                </SelectItem>
-                <SelectItem value="queued">
-                  {t("admin.queueFilterQueued")}
-                </SelectItem>
-                <SelectItem value="paused">
-                  {t("admin.queueFilterPaused")}
-                </SelectItem>
-              </SelectContent>
-            </Select>
+              <SelectItem value="active">
+                {t("admin.queueFilterOptionWithCount", {
+                  count: (queueData?.summary.running ?? 0) + (queueData?.summary.queued ?? 0) + (queueData?.summary.paused ?? 0),
+                  name: t("admin.queueFilterActive"),
+                })}
+              </SelectItem>
+              <SelectItem value="running">
+                {t("admin.queueFilterOptionWithCount", {
+                  count: queueData?.summary.running ?? 0,
+                  name: t("admin.queueFilterRunning"),
+                })}
+              </SelectItem>
+              <SelectItem value="queued">
+                {t("admin.queueFilterOptionWithCount", {
+                  count: queueData?.summary.queued ?? 0,
+                  name: t("admin.queueFilterQueued"),
+                })}
+              </SelectItem>
+              <SelectItem value="paused">
+                {t("admin.queueFilterOptionWithCount", {
+                  count: queueData?.summary.paused ?? 0,
+                  name: t("admin.queueFilterPaused"),
+                })}
+              </SelectItem>
+            </FilterSelect>
+            <div className="flex items-center gap-2 lg:justify-self-end">
+              <Button
+                className="h-9 text-xs"
+                onClick={refreshQueue}
+                size="sm"
+                variant="outline"
+                aria-label={t("dashboard.refresh")}
+                title={t("dashboard.refresh")}
+              >
+                <RefreshCw
+                  className={`h-3.5 w-3.5 ${queueIsFetching ? "animate-spin" : ""}`}
+                />
+              </Button>
             <Button
-              className="h-8 text-xs lg:justify-self-end"
+              className="h-9 text-xs"
               onClick={selectionMode ? cancelSelection : () => setSelectionMode(true)}
               size="sm"
               variant={selectionMode ? "default" : "outline"}
@@ -689,6 +903,7 @@ export function IngestQueueTab({
               <CheckSquare className="mr-1.5 h-3.5 w-3.5" />
               {selectionMode ? t("admin.queueCancelSelection") : t("admin.queueSelect")}
             </Button>
+            </div>
           </div>
 
           <div className="min-h-0 flex-1 overflow-hidden">
@@ -701,16 +916,111 @@ export function IngestQueueTab({
                 data: queueData,
               }}
               emptyCheck={(queue) => (queue.items ?? []).length === 0}
-              emptyRender={
-                <div className="flex min-h-64 items-center justify-center rounded-xl border bg-card text-sm text-muted-foreground">
-                  {t("admin.queueEmpty")}
-                </div>
-              }
+              emptyRender={<WorkbenchEmptyState title={t("admin.queueEmpty")} />}
             >
               {() => (
                 <div className="flex h-full min-h-0 flex-col">
-                  <div className="min-h-0 flex-1 overflow-auto workbench-surface rounded-b-none">
-                    <table className="w-full min-w-[1000px] table-fixed text-sm">
+                  <div className="min-h-0 flex-1 overflow-auto">
+                    <div className="space-y-3 p-3 xl:hidden">
+                      {selectionMode && (
+                        <label className="workbench-surface flex items-center gap-2 px-3 py-2 text-xs font-semibold text-muted-foreground">
+                          <Checkbox
+                            aria-label={t("admin.queueSelectVisible")}
+                            checked={allVisibleSelected}
+                            onCheckedChange={toggleVisibleSelection}
+                          />
+                          {t("admin.queueSelectVisible")}
+                        </label>
+                      )}
+                      {pagedItems.map((item) => {
+                        const selected = selectedItem?.jobId === item.jobId;
+                        const progress = progressValue(item);
+                        return (
+                          <article
+                            key={item.jobId}
+                            className={`workbench-surface p-4 transition-all ${
+                              selected
+                                ? "border-primary/40 bg-primary/5"
+                                : ""
+                            }`}
+                          >
+                            <div className="flex items-start gap-3">
+                              {selectionMode && (
+                                <Checkbox
+                                  aria-label={t("admin.queueSelectJob", { name: item.documentName })}
+                                  checked={selectedJobIds.has(item.jobId)}
+                                  className="mt-1"
+                                  onCheckedChange={() => toggleJobSelection(item.jobId)}
+                                />
+                              )}
+                              <button
+                                type="button"
+                                className="min-w-0 flex-1 text-left"
+                                onClick={() => {
+                                  setSelectedJobId(item.jobId);
+                                  setInspectorOpen(true);
+                                }}
+                              >
+                                <div className="flex items-start justify-between gap-3">
+                                  <div className="min-w-0">
+                                    <div className="truncate text-sm font-bold" title={item.documentName}>
+                                      {item.documentName}
+                                    </div>
+                                    <div className="mt-1 text-xs text-muted-foreground">
+                                      {item.libraryName} · {item.workspaceName}
+                                    </div>
+                                  </div>
+                                  <StatusBadge tone={stateTone(item.queueState)} className="shrink-0">
+                                    {stateLabel(item, t)}
+                                  </StatusBadge>
+                                </div>
+                                <div className="mt-3 grid grid-cols-[auto_minmax(0,1fr)] gap-x-3 gap-y-1 text-xs">
+                                  <span className="text-muted-foreground">{t("admin.queueOrder")}</span>
+                                  <span className="font-mono font-semibold">
+                                    {item.queueState === "leased" ? t("admin.queueNow") : `#${item.queuePosition ?? "—"}`}
+                                  </span>
+                                  <span className="text-muted-foreground">{t("admin.queueStage")}</span>
+                                  <span className="truncate font-semibold">{stageLabel(item, t)}</span>
+                                  <span className="text-muted-foreground">{t("admin.queueQueuedAt")}</span>
+                                  <span className="truncate">{formatQueueTime(item.queuedAt)}</span>
+                                </div>
+                              </button>
+                            </div>
+                            <div className="mt-4">
+                              <div className="mb-1 flex items-center justify-between text-xs">
+                                <span className="text-muted-foreground">
+                                  {isPausing(item)
+                                    ? t("admin.queuePausingWaiting")
+                                    : item.queueState === "paused"
+                                      ? t("admin.queuePausedWaiting")
+                                      : item.progressPercent != null
+                                        ? t("admin.queueProgressValue", { value: item.progressPercent })
+                                        : item.attemptNumber
+                                          ? t("admin.queueAttemptValue", { value: item.attemptNumber })
+                                          : t("admin.queueWaiting")}
+                                </span>
+                                <span className="font-mono font-semibold">{progress}%</span>
+                              </div>
+                              <div className="h-2 rounded-full bg-muted">
+                                <div
+                                  className="h-full rounded-full bg-primary transition-all"
+                                  style={{ width: `${progress}%` }}
+                                />
+                              </div>
+                            </div>
+                            <QueueFailureNotice item={item} t={t} />
+                            <div className="mt-4 flex justify-end">
+                              <RowActionsMenu
+                                actions={queueRowActions(item)}
+                                className="w-full sm:w-8"
+                                label={t("documents.actions")}
+                              />
+                            </div>
+                          </article>
+                        );
+                      })}
+                    </div>
+                    <table className="hidden w-full min-w-[1000px] table-fixed text-sm xl:table">
                       <colgroup>
                         {selectionMode && <col className="w-[4%]" />}
                         <col className="w-[7%]" />
@@ -721,23 +1031,14 @@ export function IngestQueueTab({
                         <col className="w-[13%]" />
                         <col className="w-[12%]" />
                       </colgroup>
-                      <thead
-                        className="sticky top-0 z-10"
-                        style={{
-                          background:
-                            "linear-gradient(180deg, hsl(var(--card)), hsl(var(--card) / 0.95))",
-                          backdropFilter: "blur(8px)",
-                        }}
-                      >
+                      <thead className="sticky top-0 z-10 bg-card">
                         <tr className="border-b text-left">
                           {selectionMode && (
                             <th className="px-4 py-3">
-                              <input
+                              <Checkbox
                                 aria-label={t("admin.queueSelectVisible")}
                                 checked={allVisibleSelected}
-                                className="h-4 w-4 rounded border-gray-300"
-                                onChange={toggleVisibleSelection}
-                                type="checkbox"
+                                onCheckedChange={toggleVisibleSelection}
                               />
                             </th>
                           )}
@@ -768,27 +1069,27 @@ export function IngestQueueTab({
                         {pagedItems.map((item) => {
                           const selected = selectedItem?.jobId === item.jobId;
                           return (
+                            <Fragment key={item.jobId}>
                             <tr
-                              key={item.jobId}
                               className={`cursor-pointer border-b border-border/50 transition-colors ${
                                 selected
                                   ? "border-l-2 border-l-primary bg-primary/5"
-                                  : "hover:bg-accent/30"
+                                  : item.failureMessage
+                                    ? "border-l-2 border-l-destructive/60 bg-destructive/[0.03] hover:bg-destructive/[0.06]"
+                                    : "hover:bg-accent/30"
                               }`}
-                              onClick={() => setSelectedJobId(item.jobId)}
+                              onClick={() => {
+                                setSelectedJobId(item.jobId);
+                                setInspectorOpen(true);
+                              }}
                             >
                               {selectionMode && (
                                 <td className="px-4 py-3">
-                                  <input
+                                  <Checkbox
                                     aria-label={t("admin.queueSelectJob", { name: item.documentName })}
                                     checked={selectedJobIds.has(item.jobId)}
-                                    className="h-4 w-4 rounded border-gray-300"
-                                    onChange={(event) => {
-                                      event.stopPropagation();
-                                      toggleJobSelection(item.jobId);
-                                    }}
                                     onClick={(event) => event.stopPropagation()}
-                                    type="checkbox"
+                                    onCheckedChange={() => toggleJobSelection(item.jobId)}
                                   />
                                 </td>
                               )}
@@ -804,7 +1105,7 @@ export function IngestQueueTab({
                                 >
                                   {item.documentName}
                                 </div>
-                                <div className="mt-1 text-[11px] text-muted-foreground">
+                                <div className="mt-1 text-2xs text-muted-foreground">
                                   {item.jobKind}
                                 </div>
                               </td>
@@ -817,11 +1118,9 @@ export function IngestQueueTab({
                                 </div>
                               </td>
                               <td className="px-4 py-3">
-                                <span
-                                  className={`status-badge text-[10px] ${stateBadgeClass(item.queueState)}`}
-                                >
+                                <StatusBadge tone={stateTone(item.queueState)}>
                                   {stateLabel(item, t)}
-                                </span>
+                                </StatusBadge>
                               </td>
                               <td className="px-4 py-3 text-xs">
                                 <div className="font-medium">
@@ -854,134 +1153,26 @@ export function IngestQueueTab({
                                 )}
                               </td>
                               <td className="px-4 py-3">
-                                <div className="flex items-center justify-end gap-1">
-                                  <Button
-                                    type="button"
-                                    size="icon"
-                                    variant="ghost"
-                                    className="h-8 w-8"
-                                    disabled={
-                                      !canMove(item) || moveMutation.isPending
-                                    }
-                                    onClick={(event) => {
-                                      event.stopPropagation();
-                                      moveMutation.mutate({
-                                        jobId: item.jobId,
-                                        direction: "up",
-                                      });
-                                    }}
-                                    title={t("admin.queueMoveUp")}
-                                  >
-                                    <ArrowUp
-                                      className={`h-4 w-4 ${movingJobId === item.jobId ? "animate-pulse" : ""}`}
-                                    />
-                                  </Button>
-                                  <Button
-                                    type="button"
-                                    size="icon"
-                                    variant="ghost"
-                                    className="h-8 w-8"
-                                    disabled={
-                                      !canMove(item) || moveMutation.isPending
-                                    }
-                                    onClick={(event) => {
-                                      event.stopPropagation();
-                                      moveMutation.mutate({
-                                        jobId: item.jobId,
-                                        direction: "down",
-                                      });
-                                    }}
-                                    title={t("admin.queueMoveDown")}
-                                  >
-                                    <ArrowDown
-                                      className={`h-4 w-4 ${movingJobId === item.jobId ? "animate-pulse" : ""}`}
-                                    />
-                                  </Button>
-                                  {item.queueState === "paused" ? (
-                                    <Button
-                                      type="button"
-                                      size="icon"
-                                      variant="ghost"
-                                      className="h-8 w-8 text-status-ready hover:text-status-ready"
-                                      disabled={
-                                        !canResume(item) ||
-                                        resumeMutation.isPending
-                                      }
-                                      onClick={(event) => {
-                                        event.stopPropagation();
-                                        resumeMutation.mutate(item.jobId);
-                                      }}
-                                      title={
-                                        isPausing(item)
-                                          ? t("admin.queueResumeBlocked")
-                                          : t("admin.queueResumeJob")
-                                      }
-                                    >
-                                      <Play
-                                        className={`h-4 w-4 ${resumingJobId === item.jobId ? "animate-pulse" : ""}`}
-                                      />
-                                    </Button>
-                                  ) : (
-                                    <Button
-                                      type="button"
-                                      size="icon"
-                                      variant="ghost"
-                                      className="h-8 w-8 text-status-warning hover:text-status-warning"
-                                      disabled={
-                                        !canPause(item) ||
-                                        pauseMutation.isPending
-                                      }
-                                      onClick={(event) => {
-                                        event.stopPropagation();
-                                        pauseMutation.mutate(item.jobId);
-                                      }}
-                                      title={t("admin.queuePauseJob")}
-                                    >
-                                      <Pause
-                                        className={`h-4 w-4 ${pausingJobId === item.jobId ? "animate-pulse" : ""}`}
-                                      />
-                                    </Button>
-                                  )}
-                                  <Button
-                                    type="button"
-                                    size="icon"
-                                    variant="ghost"
-                                    className="h-8 w-8"
-                                    onClick={(event) => {
-                                      event.stopPropagation();
-                                      openDocuments(item);
-                                    }}
-                                    title={t("admin.queueOpenDocuments")}
-                                  >
-                                    <ExternalLink className="h-4 w-4" />
-                                  </Button>
-                                  <Button
-                                    type="button"
-                                    size="icon"
-                                    variant="ghost"
-                                    className="h-8 w-8 text-status-failed hover:text-status-failed"
-                                    disabled={cancelMutation.isPending}
-                                    onClick={(event) => {
-                                      event.stopPropagation();
-                                      cancelMutation.mutate(item.jobId);
-                                    }}
-                                    title={t("admin.queueCancelJob")}
-                                  >
-                                    <Square
-                                      className={`h-4 w-4 ${cancelingJobId === item.jobId ? "animate-pulse" : ""}`}
-                                    />
-                                  </Button>
-                                </div>
+                                <RowActionsMenu
+                                  actions={queueRowActions(item)}
+                                  label={t("documents.actions")}
+                                />
                               </td>
                             </tr>
+                            {item.failureMessage ? (
+                              <tr className={selected ? "bg-primary/5" : "border-l-2 border-l-destructive/60 bg-destructive/[0.03]"}>
+                                <td className="border-b border-border/50 px-4 pb-3 pt-0" colSpan={selectionMode ? 8 : 7}>
+                                  <QueueFailureNotice compact item={item} t={t} />
+                                </td>
+                              </tr>
+                            ) : null}
+                            </Fragment>
                           );
                         })}
                       </tbody>
                     </table>
                     {filteredItems.length === 0 && (
-                      <div className="py-16 text-center text-sm text-muted-foreground">
-                        {t("admin.queueNoMatches")}
-                      </div>
+                      <WorkbenchEmptyState title={t("admin.queueNoMatches")} />
                     )}
                   </div>
                   {filteredItems.length > 0 && (
@@ -1037,239 +1228,100 @@ export function IngestQueueTab({
             </DataState>
           </div>
         </div>
+      </DataView>
+    </div>
+  );
+}
 
-        <aside className="inspector-panel hidden w-80 shrink-0 animate-slide-in-right overflow-y-auto md:block lg:w-96">
-          {selectedItem ? (
-            <div className="space-y-4 p-4">
-              <div className="flex items-start justify-between gap-3 border-b border-border/70 pb-3">
-                <div className="min-w-0">
-                  <div className="section-label">
-                    {t("admin.queueInspectorTitle")}
-                  </div>
-                  <h3
-                    className="mt-1 truncate text-sm font-bold"
-                    title={selectedItem.documentName}
-                  >
-                    {selectedItem.documentName}
-                  </h3>
-                </div>
-                <span
-                  className={`status-badge shrink-0 text-[10px] ${stateBadgeClass(selectedItem.queueState)}`}
-                >
-                  {stateLabel(selectedItem, t)}
-                </span>
-              </div>
+function QueueFailureNotice({
+  compact = false,
+  item,
+  t,
+}: {
+  compact?: boolean;
+  item: IngestQueueItemResponse;
+  t: TFunction;
+}) {
+  const [expanded, setExpanded] = useState(false);
 
-              <div>
-                <div className="mb-1 flex items-center justify-between text-xs">
-                  <span className="font-semibold">
-                    {t("admin.queueInspectorProgress")}
-                  </span>
-                  <span className="font-mono">
-                    {progressValue(selectedItem)}%
-                  </span>
-                </div>
-                <div className="h-2 rounded-full bg-muted">
-                  <div
-                    className="h-full rounded-full bg-primary transition-all"
-                    style={{ width: `${progressValue(selectedItem)}%` }}
-                  />
-                </div>
-              </div>
+  if (!item.failureMessage) return null;
+  const paused = item.queueState === "paused";
 
-              <dl className="grid grid-cols-2 gap-3 text-xs">
-                <div>
-                  <dt className="text-muted-foreground">
-                    {t("admin.queueInspectorScope")}
-                  </dt>
-                  <dd className="mt-0.5 font-semibold">
-                    {selectedItem.libraryName}
-                  </dd>
-                  <dd className="truncate text-muted-foreground">
-                    {selectedItem.workspaceName}
-                  </dd>
-                </div>
-                <div>
-                  <dt className="text-muted-foreground">
-                    {t("admin.queueStage")}
-                  </dt>
-                  <dd className="mt-0.5 font-semibold">
-                    {stageLabel(selectedItem, t)}
-                  </dd>
-                  <dd className="truncate text-muted-foreground">
-                    {selectedItem.jobKind}
-                  </dd>
-                </div>
-                <div>
-                  <dt className="text-muted-foreground">
-                    {t("admin.queueQueuedAt")}
-                  </dt>
-                  <dd className="mt-0.5 font-semibold">
-                    {formatQueueTime(selectedItem.queuedAt)}
-                  </dd>
-                </div>
-                <div>
-                  <dt className="text-muted-foreground">
-                    {t("admin.queueInspectorHeartbeat")}
-                  </dt>
-                  <dd className="mt-0.5 font-semibold">
-                    {formatQueueTime(selectedItem.heartbeatAt)}
-                  </dd>
-                </div>
-              </dl>
-
-              <div className="flex flex-wrap gap-2">
-                {selectedItem.queueState === "paused" ? (
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    className="text-status-ready hover:text-status-ready"
-                    disabled={
-                      !canResume(selectedItem) || resumeMutation.isPending
-                    }
-                    onClick={() => resumeMutation.mutate(selectedItem.jobId)}
-                    title={
-                      isPausing(selectedItem)
-                        ? t("admin.queueResumeBlocked")
-                        : t("admin.queueResumeJob")
-                    }
-                  >
-                    <Play className="mr-1.5 h-3.5 w-3.5" />
-                    {t("admin.queueResumeJob")}
-                  </Button>
-                ) : (
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    className="text-status-warning hover:text-status-warning"
-                    disabled={
-                      !canPause(selectedItem) || pauseMutation.isPending
-                    }
-                    onClick={() => pauseMutation.mutate(selectedItem.jobId)}
-                  >
-                    <Pause className="mr-1.5 h-3.5 w-3.5" />
-                    {t("admin.queuePauseJob")}
-                  </Button>
-                )}
-                <Button
-                  size="sm"
-                  variant="outline"
-                  onClick={() => openDocuments(selectedItem)}
-                >
-                  <ExternalLink className="mr-1.5 h-3.5 w-3.5" />
-                  {t("admin.queueOpenDocuments")}
-                </Button>
-                <Button
-                  size="sm"
-                  variant="outline"
-                  className="text-status-failed hover:text-status-failed"
-                  disabled={cancelMutation.isPending}
-                  onClick={() => cancelMutation.mutate(selectedItem.jobId)}
-                >
-                  <Square className="mr-1.5 h-3.5 w-3.5" />
-                  {t("admin.queueCancelJob")}
-                </Button>
-              </div>
-
-              {selectedItem.failureMessage && (
-                <div
-                  className={`rounded-lg border px-3 py-2 text-xs ${
-                    selectedItem.queueState === "paused"
-                      ? "border-status-warning/30 bg-status-warning/5 text-status-warning"
-                      : "border-red-200 bg-red-50 text-red-700"
-                  }`}
-                >
-                  <div className="font-bold">
-                    {selectedItem.queueState === "paused"
-                      ? t("admin.queueStatePaused")
-                      : (selectedItem.failureCode ?? t("admin.queueFailure"))}
-                  </div>
-                  <div className="mt-1 whitespace-pre-wrap">
-                    {selectedItem.failureMessage}
-                  </div>
-                </div>
-              )}
-
-              <div>
-                <div className="mb-2 flex items-center gap-2 section-label">
-                  <Clock3 className="h-3.5 w-3.5" />
-                  {t("admin.queueInspectorTimeline")}
-                </div>
-                {!selectedItem.attemptId ? (
-                  <div className="rounded-lg border bg-muted/30 px-3 py-4 text-sm text-muted-foreground">
-                    {t("admin.queueInspectorNoAttempt")}
-                  </div>
-                ) : timelineQuery.isLoading ? (
-                  <div className="rounded-lg border bg-muted/30 px-3 py-4 text-sm text-muted-foreground">
-                    {t("admin.queueInspectorLoading")}
-                  </div>
-                ) : timelineQuery.error ? (
-                  <div className="rounded-lg border bg-red-50 px-3 py-4 text-sm text-red-700">
-                    {errorMessage(
-                      timelineQuery.error,
-                      t("admin.queueInspectorError"),
-                    )}
-                  </div>
-                ) : (timelineQuery.data?.stages?.length ?? 0) === 0 ? (
-                  <div className="rounded-lg border bg-muted/30 px-3 py-4 text-sm text-muted-foreground">
-                    {t("admin.queueInspectorNoEvents")}
-                  </div>
-                ) : (
-                  <div className="overflow-hidden rounded-lg border">
-                    {timelineQuery.data?.stages.map((event) => (
-                      <div
-                        key={event.id}
-                        className="border-b p-3 last:border-b-0"
-                      >
-                        <div className="flex items-start justify-between gap-3">
-                          <div className="min-w-0">
-                            <div className="flex items-center gap-2">
-                              <span
-                                className={`h-2 w-2 shrink-0 rounded-full ${eventTone(event)}`}
-                              />
-                              <span className="truncate text-sm font-semibold">
-                                {event.stage_name}
-                              </span>
-                            </div>
-                            {event.message && (
-                              <p className="mt-1 whitespace-pre-wrap text-xs text-muted-foreground">
-                                {event.message}
-                              </p>
-                            )}
-                          </div>
-                          <div className="shrink-0 text-right text-[11px] text-muted-foreground">
-                            <div>{event.stage_state}</div>
-                            <div>{formatQueueTime(event.recorded_at)}</div>
-                          </div>
-                        </div>
-                        {stageDetails(event).length > 0 && (
-                          <div className="mt-2 flex flex-wrap gap-1.5">
-                            {stageDetails(event).map(([key, value]) => (
-                              <span
-                                key={key}
-                                className="rounded-md bg-muted px-2 py-1 text-[11px]"
-                              >
-                                <span className="text-muted-foreground">
-                                  {key}
-                                </span>{" "}
-                                <span className="font-semibold">{value}</span>
-                              </span>
-                            ))}
-                          </div>
-                        )}
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </div>
-            </div>
-          ) : (
-            <div className="flex h-full min-h-64 items-center justify-center text-center text-sm text-muted-foreground">
-              {t("admin.queueInspectorEmpty")}
-            </div>
-          )}
-        </aside>
+  // Paused jobs are not failures — keep a calm, minimal notice.
+  if (paused) {
+    return (
+      <div className="mt-2 rounded-md border-l-2 border-status-warning/60 bg-status-warning/5 px-3 py-2 text-xs">
+        <div className="flex flex-wrap items-baseline gap-x-2">
+          <span className="font-bold text-status-warning">{t("admin.queueStatePaused")}</span>
+          <span className="min-w-0 truncate text-2xs font-normal text-muted-foreground">
+            {item.documentName}
+          </span>
+        </div>
+        <div className="mt-1 whitespace-pre-wrap break-words text-foreground">
+          {item.failureMessage}
+        </div>
       </div>
+    );
+  }
+
+  // Reuse the shared document-failure taxonomy so a failed job explains BOTH
+  // what happened (summary) and how to fix it (action) instead of a raw
+  // backend string; the technical code + message stay behind the toggle.
+  const notice = buildDocumentFailureNotice(
+    {
+      failureCode: item.failureCode ?? null,
+      failureMessage: item.failureMessage,
+      stage: item.currentStage ?? null,
+    },
+    t,
+  );
+  const summary = notice?.summary ?? item.failureMessage;
+  const diagnosticCode = notice?.diagnosticCode ?? item.failureCode ?? undefined;
+  const diagnosticMessage = notice?.diagnosticMessage;
+  const hasDetails = Boolean(diagnosticCode || diagnosticMessage);
+  const showDetails = !compact || expanded;
+
+  return (
+    <div className="mt-2 rounded-md border-l-2 border-destructive/60 bg-destructive/5 px-3 py-2 text-xs">
+      <div className="flex flex-wrap items-baseline gap-x-2">
+        <span className="font-bold text-destructive">
+          {notice?.title ?? t("admin.queueFailure")}
+        </span>
+        <span className="min-w-0 truncate text-2xs font-normal text-muted-foreground">
+          {item.documentName}
+        </span>
+      </div>
+      <div className="mt-1 whitespace-pre-wrap break-words text-foreground">{summary}</div>
+      {notice?.action ? (
+        <div className="mt-1.5 flex items-start gap-1.5 text-2xs text-muted-foreground">
+          <Wrench className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+          <span>{notice.action}</span>
+        </div>
+      ) : null}
+      {hasDetails && showDetails ? (
+        <div className="mt-1.5 space-y-0.5 border-t border-destructive/15 pt-1.5 text-2xs text-muted-foreground">
+          {diagnosticCode ? (
+            <div className="truncate">
+              {t("admin.queueFailureCode")}: <code className="font-mono">{diagnosticCode}</code>
+            </div>
+          ) : null}
+          {diagnosticMessage ? (
+            <div className="whitespace-pre-wrap break-words font-mono">{diagnosticMessage}</div>
+          ) : null}
+        </div>
+      ) : null}
+      {hasDetails && compact ? (
+        <button
+          type="button"
+          className="mt-1 inline-flex text-2xs font-semibold text-muted-foreground underline-offset-2 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          onClick={(event) => {
+            event.stopPropagation();
+            setExpanded((value) => !value);
+          }}
+        >
+          {expanded ? t("admin.queueFailureCollapse") : t("admin.queueFailureExpand")}
+        </button>
+      ) : null}
     </div>
   );
 }

@@ -86,9 +86,6 @@ app:
   # worker.replicaCount plus api.replicaCount and one API rollout surge slot
   # before opening SQLx pools.
   databaseMaxConnections: 20
-  ingestionMaxParallelJobsGlobal: 16
-  ingestionMaxParallelJobsPerWorkspace: 8
-  ingestionMaxParallelJobsPerLibrary: 4
   knowledgePlaneBackend: postgres
   queryAnswerSourceLinksEnabled: false
   uiDefaultLocale: ru

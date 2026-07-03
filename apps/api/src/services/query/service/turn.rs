@@ -317,7 +317,7 @@ impl QueryService {
             )
         };
 
-        let binding_id = ai_repository::get_effective_binding_assignment_by_purpose(
+        let binding_id = ai_repository::get_effective_binding_by_purpose(
             &state.persistence.postgres,
             conversation.library_id,
             AiBindingPurpose::QueryAnswer.as_str(),
@@ -1243,7 +1243,7 @@ impl QueryService {
             )
         };
 
-        let binding_id = ai_repository::get_effective_binding_assignment_by_purpose(
+        let binding_id = ai_repository::get_effective_binding_by_purpose(
             &state.persistence.postgres,
             conversation.library_id,
             AiBindingPurpose::QueryAnswer.as_str(),
@@ -2549,7 +2549,7 @@ async fn build_query_result_binding_fingerprint(
         AiBindingPurpose::QueryRetrieve,
         AiBindingPurpose::QueryAnswer,
     ] {
-        let binding = ai_repository::get_effective_binding_assignment_by_purpose(
+        let binding = ai_repository::get_effective_binding_by_purpose(
             &state.persistence.postgres,
             library_id,
             purpose.as_str(),
@@ -2560,8 +2560,8 @@ async fn build_query_result_binding_fingerprint(
                 "{}:{}:{}:{}:{}",
                 purpose.as_str(),
                 binding.id,
-                binding.provider_credential_id,
-                binding.model_preset_id,
+                binding.account_id,
+                binding.model_catalog_id,
                 binding.updated_at.timestamp_micros()
             ),
             None => format!("{}:none", purpose.as_str()),

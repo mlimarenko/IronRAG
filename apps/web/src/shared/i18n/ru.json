@@ -66,9 +66,9 @@
     "summaryEndpointHosted": "Хостед endpoint",
     "summaryEndpointRequired": "Нужен endpoint",
     "summaryDiscovery": "Discovery",
-    "summaryPresets": "Пресеты",
+    "summaryBindings": "Привязки",
     "summaryUnknown": "Неизвестно",
-    "noBootstrapBundles": "Для текущего каталога провайдеров нет готовых стартовых пресетов.",
+    "noBootstrapBundles": "В текущем каталоге провайдеров нет доступных стартовых наборов.",
     "bootstrapStatusLoading": "Загрузка стартовой настройки AI-провайдера...",
     "bootstrapBundleRequired": "Выберите готовый bundle AI-провайдера, чтобы завершить настройку.",
     "fillAllFields": "Пожалуйста, заполните все поля",
@@ -81,7 +81,8 @@
     "adminNamePlaceholder": "Администратор"
   },
   "dashboard": {
-    "title": "Панель управления",
+    "title": "Обзор",
+    "subtitle": "Состояние активной библиотеки",
     "total": "Всего",
     "graphCoverage": "Покрытие графа",
     "inFlight": "Активных операций",
@@ -100,6 +101,8 @@
     "selectLibrary": "Выбрать библиотеку",
     "createLibrary": "Создать библиотеку",
     "askAssistant": "Спросить ассистента",
+    "answerReady": "Ответы готовы",
+    "answerNotReady": "Нужна настройка AI",
     "assistantCtaTitle": "Спросить ассистента",
     "assistantCtaReady": "Задавайте вопросы по библиотеке {{name}} — ответы ссылаются на конкретные документы и сущности графа.",
     "assistantCtaNotReady": "Завершите настройку AI-привязок этой библиотеки, чтобы задавать вопросы с опорой на документы.",
@@ -108,7 +111,6 @@
     "documents": "Документы",
     "graph": "Граф",
     "noDocs": "Документов пока нет",
-    "headerSummary": "{{total}} документов · {{coverage}}% граф-покрытия · сигналов: {{attention}}",
     "documentsReadySummary": "Читаемых сейчас: {{count}}",
     "graphCoverageSummary": "Граф готов: {{ready}} / {{total}}",
     "readableNoGraphSummary": "Без графа: {{count}}",
@@ -355,6 +357,7 @@
     "webSource": "Веб-источник",
     "openSourceUrl": "Открыть исходный URL",
     "webIngestRuns": "Запуски веб-загрузки",
+    "noWebRunsDesc": "Добавьте ссылку, чтобы запустить веб-загрузку.",
     "pages": "стр.",
     "loadingPages": "Загружаем найденные страницы...",
     "refreshRunPages": "Обновить страницы",
@@ -493,6 +496,7 @@
       "unknownCode": "Обработка завершилась ошибкой: {{code}}.",
       "byCode": {
         "canonical_pipeline_failed": "Обработка документа завершилась ошибкой.",
+        "docling_insufficient_memory": "Экстрактору документов (docling) не хватило памяти в контейнере worker-а.",
         "upload_extraction_failed": "Файл принят, но из него не удалось извлечь текст или структурированное содержимое.",
         "unsupported_upload_type": "Этот тип файла не поддерживается для загрузки документов.",
         "invalid_text_encoding": "Файл похож на текстовый, но его кодировку не удалось прочитать.",
@@ -569,6 +573,7 @@
       "uploadGeneric": "Повторите загрузку. Если ошибка повторяется, загрузите файл отдельно или замените его чисто экспортированной копией.",
       "byCode": {
         "canonical_pipeline_failed": "Повторите обработку. Если тот же этап снова падает, проверьте детали этапа и настройки провайдера.",
+        "docling_insufficient_memory": "Поднимите лимит памяти worker-а IRONRAG_WORKER_MEMORY_LIMIT (в docker-compose или helm values) и пересоздайте контейнер: docker compose up -d --force-recreate worker. Одному docling-процессу нужно ≥2560 MiB плюс запас.",
         "upload_extraction_failed": "Повторите загрузку или замените файл чисто экспортированной копией. Если ошибка повторяется, используйте поддерживаемый формат с извлекаемым текстом.",
         "unsupported_upload_type": "Загрузите поддерживаемый формат документа или конвертируйте файл перед загрузкой.",
         "invalid_text_encoding": "Сохраните файл в стандартной текстовой кодировке или загрузите его в формате с отдельным парсером.",
@@ -658,7 +663,10 @@
   },
   "graph": {
     "title": "Граф знаний",
+    "subtitle": "Сущности, связи и источники",
     "searchPlaceholder": "Поиск узлов...",
+    "layoutControls": "Раскладка",
+    "viewControls": "Вид",
     "legend": "Легенда",
     "noGraph": "Граф пуст",
     "noGraphDesc": "Загрузите документы для построения графа знаний.",
@@ -827,6 +835,8 @@
     "retryTitle": "Запрос не прошёл",
     "retryAction": "Повторить",
     "searchingScope": "Поиск по",
+    "currentSession": "Текущая сессия",
+    "newQuestionSession": "Новый вопрос",
     "verdictLabel": "Проверка: {{verdict}}",
     "copyAnswer": "Копировать",
     "copied": "Скопировано",
@@ -849,10 +859,10 @@
     "noSessionsMatch": "Нет подходящих сессий",
     "noSessionsMatchDesc": "Попробуйте изменить запрос.",
     "starterPrompts": {
-      "technologies": "Какие технологии используются в системе?",
-      "deployment": "Кратко опиши процесс деплоя",
-      "security": "Какие основные риски по безопасности здесь есть?",
-      "storage": "Как здесь хранятся и используются данные?"
+      "overview": "Кратко опиши, что есть в этой библиотеке",
+      "keyPoints": "Какие главные факты здесь стоит знать?",
+      "openQuestions": "Какие вопросы остаются неясными по материалам?",
+      "recentItems": "Что важного есть в последних документах?"
     },
     "debugInspectorTitle": "Инспектор отладки",
     "debugInspectorToggle": "Отладка",
@@ -933,7 +943,7 @@
     "tooltipSpanDetail": "{{name}} · {{duration}} · {{rows}} строк",
     "tooltipToolCall": "{{name}} · Ожидание: {{wait}}",
     "activity": {
-      "started": "Агент запустил turn",
+      "started": "Агент начал работу",
       "modelRequest": "Итерация {{iteration}}: запрос к {{model}}",
       "modelFinal": "Модель вернула итоговый ответ",
       "modelToolPlan": "Модель запросила инструментов: {{count}}",
@@ -942,7 +952,7 @@
       "toolFinished": "Инструмент {{tool}} завершён",
       "toolFailed": "Инструмент {{tool}} вернул ошибку",
       "persisting": "Сохраняю ответ и трассировку",
-      "working": "Агент выполняет turn",
+      "working": "Агент работает",
       "complete": "Трассировка завершена",
       "modelUnknown": "модели",
       "toolUnknown": "инструмент"
@@ -952,7 +962,6 @@
     "failedToLoadSpec": "Не удалось загрузить спецификацию API"
   },
   "admin": {
-    "title": "Администрирование",
     "libraries": {
       "totalCost": "Общая стоимость",
       "workspaces": "Пространства",
@@ -1042,7 +1051,7 @@
       "deleteDesc_few": "Удаление выполняется асинхронно и удаляет выбранные библиотеки вместе с документами, графом, сессиями ассистента и состоянием обработки.",
       "deleteDesc_many": "Удаление выполняется асинхронно и удаляет выбранные библиотеки вместе с документами, графом, сессиями ассистента и состоянием обработки.",
       "deleteDesc_other": "Удаление выполняется асинхронно и удаляет выбранные библиотеки вместе с документами, графом, сессиями ассистента и состоянием обработки.",
-      "openHub": "Открыть хаб библиотеки"
+      "configureAi": "Настроить AI"
     },
     "mcp": {
       "includeDocumentHint": "Включать подсказки источников в ответы MCP",
@@ -1050,14 +1059,11 @@
       "updateFailed": "Не удалось обновить настройки MCP"
     },
     "operations": "Операции",
-    "ingestQueue": "Очередь",
-    "pricing": "Тарификация",
     "createToken": "Создать токен",
     "revokeToken": "Отозвать",
     "deleteToken": "Удалить",
     "providers": "Провайдеры",
-    "credentials": "Учётные данные",
-    "modelPresets": "Пресеты моделей",
+    "accounts": "Учётные записи",
     "add": "Добавить",
     "status": "Статус",
     "edit": "Редактировать",
@@ -1114,7 +1120,7 @@
       "includeWorkspaceLabel": "Настройки воркспейса",
       "includeWorkspaceDesc": "Запись воркспейса-владельца, чтобы восстановление на чистом стенде заново создало воркспейс, в котором живёт эта библиотека.",
       "includeAiConfigLabel": "Конфигурация AI",
-      "includeAiConfigDesc": "Каталоги провайдеров и моделей, цены, пресеты моделей, учётные данные (без API-ключей) и назначения. Импорт никогда не перезаписывает уже существующую AI-конфигурацию на целевом стенде.",
+      "includeAiConfigDesc": "Каталоги провайдеров и моделей, цены, учётные записи AI (без API-ключей) и привязки. Импорт никогда не перезаписывает уже существующую AI-конфигурацию на целевом стенде.",
       "overwriteTitle": "Режим восстановления",
       "overwriteReject": "Только если библиотеки нет (безопасный)",
       "overwriteReplace": "Перезаписать существующую",
@@ -1124,7 +1130,6 @@
       "runImport": "Восстановить"
     },
     "noOpsData": "Данные операций недоступны.",
-    "ingestQueueDesc": "Общая очередь обработки по всем рабочим пространствам и библиотекам. Здесь видны активные задания, порядок ожидания, пауза, продолжение, отмена и переход к документу.",
     "queueRunning": "Выполняется",
     "queueQueued": "В очереди",
     "queuePaused": "Пауза",
@@ -1187,6 +1192,9 @@
     "queueClearSelection": "Очистить выбор",
     "queueNoMatches": "Нет заданий под текущий фильтр.",
     "queueFailure": "Ошибка",
+    "queueFailureCode": "Диагностический код",
+    "queueFailureExpand": "Показать ошибку полностью",
+    "queueFailureCollapse": "Свернуть ошибку",
     "queueInspectorTitle": "Инспектор задания",
     "queueInspectorEmpty": "Выберите задание, чтобы увидеть текущую обработку.",
     "queueInspectorScope": "Область",
@@ -1201,6 +1209,8 @@
     "noPricingData": "Данные о тарифах не найдены.",
     "mcpServerUrl": "URL сервера MCP",
     "capabilitiesProbe": "Проверка возможностей",
+    "mcpScopeTitle": "Область доступа",
+    "mcpScopeNote": "Клиент подключается с bearer-токеном из раздела «Доступ». Какие библиотеки доступны MCP-клиенту, определяет область токена — система, рабочее пространство или набор библиотек, а не одна конкретная библиотека.",
     "mcpSystemPromptTitle": "Рекомендуемый системный промпт",
     "mcpSystemPromptDesc": "Системный промпт для внешних MCP-агентов: Claude Desktop, Codex, Cursor, Continue.dev, OpenClaw и Hermes. Тот же текст используется встроенным ассистентом.",
     "mcpParityTitle": "MCP — паритет с UI",
@@ -1234,9 +1244,7 @@
     "provider": "Провайдер",
     "label": "Название",
     "apiKey": "API ключ",
-    "presetName": "Имя пресета",
     "model": "Модель",
-    "selectModel": "Выберите модель",
     "systemPrompt": "Системный промпт",
     "temperature": "Температура",
     "topP": "Top P",
@@ -1251,11 +1259,8 @@
     "per1mInputTokens": "За 1 млн входных токенов",
     "per1mCachedInputTokens": "За 1 млн кешированных входных токенов",
     "per1mOutputTokens": "За 1 млн выходных токенов",
-    "allProviders": "Все провайдеры",
     "searchModels": "Поиск моделей...",
     "override": "Переопределить",
-    "source": "Источник",
-    "price": "Цена",
     "knowledgeGeneration": "Генерация знаний",
     "never": "Никогда",
     "selectProvider": "Выберите провайдера",
@@ -1286,10 +1291,10 @@
     "pricingOverrideCreated": "Переопределение тарифа создано",
     "pricingOverrideUpdated": "Переопределение тарифа обновлено",
     "pricingOverrideDeleted": "Переопределение тарифа удалено",
-    "createPricingFailed": "Не удалось создать переопределение тарифа",
     "savePricingFailed": "Не удалось сохранить переопределение тарифа",
     "deletePricingFailed": "Не удалось удалить переопределение тарифа",
     "editPricingOverride": "Редактировать переопределение тарифа",
+    "pricingOverrideDialogTitle": "Цена — {{model}}",
     "pricingOverrideDescription": "Переопределения тарифа сохраняются для текущего рабочего пространства и перекрывают системный каталог.",
     "deletePricingOverrideTitle": "Удалить переопределение тарифа",
     "deletePricingOverrideDescription": "Удалить переопределение тарифа для {{model}}? После удаления снова будет использоваться системный каталог.",
@@ -1325,44 +1330,26 @@
       "bundleFailures": {}
     },
     "aiPanel": {
-      "title": "AI",
       "tokenOptional": "токен необязателен",
-      "credentialsTitle": "Учётные данные в этой области",
-      "credentialsDescription": "Хранятся локально на выбранном уровне.",
-      "presetsTitle": "Пресеты в этой области",
-      "presetsDescription": "Редактируемые пресеты моделей, сохранённые локально на выбранном уровне.",
-      "presetsProviderDescription": "Показаны только пресеты {{provider}} на выбранном уровне.",
+      "accountsTitle": "Учётные записи в этой области",
       "optionalBindingsMissingTitle": "Опциональные привязки не настроены",
       "optionalBindingsMissingDetail": "Не настроены: {{purposes}}. Изображения будут обрабатываться на локальном CPU — возможно снижение качества и скорости обработки.",
       "readiness": {
         "readyTitle": "AI готов",
         "readyDetail": "Обязательные привязки настроены для выбранного уровня.",
-        "missingCredentialsTitle": "Нужны учётные данные",
-        "missingCredentialsDetail": "Добавьте активные учётные данные провайдера.",
-        "missingPresetsTitle": "Нужен рабочий пресет",
-        "missingPresetsDetail": "Создайте пресет, который подходит к активным учётным данным.",
+        "missingAccountsTitle": "Нужна учётная запись",
+        "missingAccountsDetail": "Добавьте активную учётную запись AI.",
         "missingBindingsTitle": "Не хватает привязок: {{count}}",
         "missingBindingsDetail": "Сначала настройте: {{purposes}}.",
         "actions": {
           "bindings": "Проверить рабочие привязки",
-          "credentials": "Добавить учётные данные",
-          "presets": "Создать пресет",
-          "providers": "Открыть каталог провайдеров",
-          "models": "Проверить видимые модели"
+          "accounts": "Добавить учётную запись"
         }
       },
       "navigation": {
         "label": "Разделы AI",
         "setupGroup": "Настройка",
-        "catalogGroup": "Каталог",
-        "descriptions": {
-          "bindings": "Какие учётные данные и пресеты выполняют AI-задачи.",
-          "credentials": "Токены и endpoints провайдеров.",
-          "presets": "Модели и параметры для задач.",
-          "providers": "Доступные провайдеры.",
-          "models": "Модели, видимые в текущей области.",
-          "pricing": "Переопределение цен на модели"
-        }
+        "catalogLink": "Справочник моделей и цен →"
       },
       "scopeCards": {
         "instanceTitle": "По умолчанию для инстанса",
@@ -1384,7 +1371,7 @@
         "agent": "AI-ассистент (MCP-агент)",
         "vision": "Визуальный анализ"
       },
-      "credentialStateLabels": {
+      "accountStateLabels": {
         "active": "активен",
         "invalid": "невалиден",
         "revoked": "отозван",
@@ -1399,35 +1386,21 @@
       "apiStyleLabels": {
         "openai_compatible": "OpenAI-совместимый"
       },
-      "capabilityLabels": {
-        "chat": "Чат",
-        "embedding": "Эмбеддинги"
-      },
-      "modalityLabels": {
-        "text": "Текст",
-        "multimodal": "Мультимодальная"
-      },
       "notices": {
-        "missingInstanceBaseline": "Базовый набор на уровне инстанса ещё не настроен. Сейчас показан ближайший уровень, где уже есть AI-настройки. Настройте значения по умолчанию для инстанса, если хотите один общий набор пресетов для всех рабочих пространств и библиотек."
+        "missingInstanceBaseline": "Базовый набор на уровне инстанса ещё не настроен. Сейчас показан ближайший уровень, где уже есть AI-настройки. Настройте значения по умолчанию для инстанса, если хотите один общий набор учётных записей и привязок для всех рабочих пространств и библиотек."
       },
       "empty": {
         "noEffectiveBinding": "Не настроено.",
-        "noLocalCredentials": "Локальных учётных данных пока нет.",
-        "noLocalPresets": "Локальных пресетов пока нет.",
-        "noProviderPresets": "У {{provider}} пока нет пресетов на этом уровне.",
-        "noSelectableModels": "Подходящих моделей пока нет. Сначала сохраните доступные учётные данные и убедитесь, что модель есть у настроенного провайдера.",
-        "noMatchingCredentials": "Нет учётных данных, подходящих под фильтр.",
-        "noMatchingPresets": "Нет пресетов, подходящих под фильтр."
+        "noLocalAccounts": "Локальных учётных записей пока нет.",
+        "noSelectableModels": "Подходящих моделей пока нет. Сначала сохраните доступную учётную запись и убедитесь, что модель есть у настроенного провайдера."
       },
       "fields": {
-        "credential": "Учётные данные",
-        "provider": "Провайдер",
-        "modelPreset": "Пресет модели",
+        "account": "Учётная запись",
         "baseUrl": "Базовый URL",
         "baseUrlOptional": "Базовый URL (опционально)",
-        "baseUrlRequiredHint": "Укажите endpoint провайдера, чтобы сохранить эти учётные данные.",
+        "baseUrlRequiredHint": "Укажите endpoint провайдера, чтобы сохранить эту учётную запись.",
         "fixedBaseUrlHint": "Этот endpoint зафиксирован в каталоге провайдеров.",
-        "tokenRequiredHint": "Укажите токен провайдера, чтобы сохранить эти учётные данные.",
+        "tokenRequiredHint": "Укажите токен провайдера, чтобы сохранить эту учётную запись.",
         "tokenOptional": "Токен (опционально)",
         "profile": "Профиль",
         "capability": "Возможность",
@@ -1439,58 +1412,45 @@
         "identifier": "Идентификатор",
         "providerId": "ID провайдера",
         "parameters": "Параметры",
+        "pricePerMillion": "Цена, $/1M",
         "scope": "Уровень",
         "apiStyle": "Стиль API",
         "displayName": "Отображаемое имя",
         "providerKind": "Тип провайдера",
         "lifecycle": "Состояние",
         "providerProfileJson": "Профиль провайдера (JSON)",
-        "metadataJson": "Метаданные (JSON)"
+        "advancedSettings": "Дополнительно",
+        "advancedProviderSettings": "Расширенные настройки провайдера"
       },
       "actions": {
         "editHere": "Изменить",
         "setDefault": "Настроить",
         "createOverride": "Переопределить",
         "resetToInherited": "Сбросить к унаследованному",
-        "addPreset": "Добавить пресет",
         "addProvider": "Добавить провайдера",
         "disableProvider": "Отключить провайдера",
-        "addModel": "Добавить модель",
-        "disableModel": "Отключить модель"
+        "overridePrice": "Переопределить цену"
       },
       "dialogs": {
-        "addCredentialTitle": "Добавить учётные данные",
-        "editCredentialTitle": "Редактировать учётные данные",
-        "credentialDescription": "Учётные данные будут сохранены на текущем выбранном уровне.",
-        "addPresetTitle": "Добавить пресет",
-        "editPresetTitle": "Редактировать пресет",
-        "presetDescription": "Пресеты будут сохранены на текущем выбранном уровне.",
-        "deleteCredentialTitle": "Удалить учётные данные",
-        "deleteCredentialDescription": "Удалить учётные данные {{label}}? Привязки, которые на них ссылаются, нужно будет перенастроить.",
-        "deletePresetTitle": "Удалить пресет",
-        "deletePresetDescription": "Удалить пресет {{preset}}? Привязки, которые на него ссылаются, нужно будет перенастроить.",
+        "addAccountTitle": "Добавить учётную запись",
+        "editAccountTitle": "Редактировать учётную запись",
+        "accountDescription": "Учётные записи будут сохранены на текущем выбранном уровне.",
+        "deleteAccountTitle": "Удалить учётную запись",
+        "deleteAccountDescription": "Удалить учётную запись {{account}}? Привязки, которые на неё ссылаются, нужно будет перенастроить.",
         "addProviderTitle": "Добавить провайдера",
         "editProviderTitle": "Редактировать провайдера",
         "providerDescription": "Каталог провайдеров доступен всем рабочим пространствам. Изменения выполняются только системным администратором.",
         "disableProviderTitle": "Отключить провайдера",
-        "disableProviderDescription": "Отключить {{provider}}? Провайдер останется в каталоге, но модели перестанут быть доступными для новых привязок.",
-        "addModelTitle": "Добавить модель",
-        "editModelTitle": "Редактировать модель",
-        "modelDescription": "Модель привязана к провайдеру и описывает назначение, модальность и лимиты.",
-        "disableModelTitle": "Отключить модель",
-        "disableModelDescription": "Отключить {{model}}? Модель останется в каталоге, но перестанет быть доступной для новых привязок."
+        "disableProviderDescription": "Отключить {{provider}}? Провайдер останется в каталоге, но модели перестанут быть доступными для новых привязок."
       },
       "placeholders": {
-        "selectCredential": "Выберите учётные данные",
-        "selectPreset": "Выберите пресет",
+        "selectAccount": "Выберите учётную запись",
         "selectProvider": "Выберите провайдера",
         "selectModel": "Выберите модель",
-        "credentialLabel": "Основные учётные данные провайдера",
-        "credentialLabelForProvider": "Учётные данные {{provider}}",
+        "accountLabel": "Основная учётная запись провайдера",
+        "accountLabelForProvider": "Учётная запись {{provider}}",
         "keepSecret": "Оставьте пустым, чтобы сохранить текущий секрет",
         "providerToken": "Токен провайдера",
-        "presetName": "Пресет модели",
-        "presetNameForModel": "Пресет {{model}}",
         "systemPrompt": "Необязательный системный промпт",
         "defaultValue": "по умолчанию",
         "providerDisplayName": "Название провайдера",
@@ -1498,44 +1458,32 @@
         "apiStyle": "Стиль API",
         "lifecycle": "Выберите состояние",
         "baseUrl": "https://api.provider.example",
-        "modelName": "model/name",
-        "keepModelMetadata": "Оставьте пустым, чтобы сохранить текущие метаданные",
         "emptyJson": "{}",
         "priceAmount": "0.00"
       },
       "messages": {
         "invalidJson": "Введите корректный JSON-объект.",
-        "credentialSaved": "Учётные данные сохранены.",
-        "credentialSaveFailed": "Не удалось сохранить учётные данные.",
-        "credentialDeleted": "Учётные данные удалены.",
-        "credentialDeleteFailed": "Не удалось удалить учётные данные.",
-        "credentialValidationFailed": "IronRAG не смог проверить этого провайдера на стороне сервера. Проверьте, что учётные данные и endpoint провайдера доступны из backend-контейнера.",
-        "bindingModelUnavailable": "Настроенная модель {{model}} больше недоступна через эти учётные данные. Перенастройте эту привязку.",
-        "presetSaved": "Пресет сохранён.",
-        "presetSaveFailed": "Не удалось сохранить пресет.",
-        "presetDeleted": "Пресет удалён.",
-        "presetDeleteFailed": "Не удалось удалить пресет.",
-        "presetModelUnavailable": "Модель {{model}} из этого пресета больше недоступна через видимые учётные данные провайдера. Создайте новый пресет и обновите привязки, которые всё ещё его используют.",
-        "selectedPresetUnavailable": "Этот пресет ссылается на модель, недоступную для выбранных учётных данных провайдера.",
+        "accountSaved": "Учётная запись сохранена.",
+        "accountSaveFailed": "Не удалось сохранить учётную запись.",
+        "accountDeleted": "Учётная запись удалена.",
+        "accountDeleteFailed": "Не удалось удалить учётную запись.",
+        "accountValidationFailed": "IronRAG не смог проверить этого провайдера на стороне сервера. Проверьте, что учётная запись и endpoint провайдера доступны из backend-контейнера.",
+        "bindingModelUnavailable": "Настроенная модель {{model}} больше недоступна через эту учётную запись. Перенастройте эту привязку.",
+        "selectedModelUnavailable": "Выбранная модель недоступна для выбранной учётной записи.",
         "providerSaved": "Провайдер сохранён.",
         "providerSaveFailed": "Не удалось сохранить провайдера.",
         "providerDisabled": "Провайдер отключён.",
         "providerDisableFailed": "Не удалось отключить провайдера.",
-        "modelPurposeRequired": "Выберите хотя бы одно назначение.",
-        "modelSaved": "Модель сохранена.",
-        "modelSaveFailed": "Не удалось сохранить модель.",
-        "modelDisabled": "Модель отключена.",
-        "modelDisableFailed": "Не удалось отключить модель.",
-        "bindingEmbeddingDimensionChanged": "Размерность векторов изменена с {{previous}} на {{current}}. Векторный поиск не будет работать, пока индекс не будет перестроен.",
         "bindingSaved": "Привязка сохранена.",
         "bindingSaveFailed": "Не удалось сохранить привязку.",
         "bindingRollbackFailed": "Изменение привязки было откатано: {{error}}",
         "overrideRemoved": "Переопределение удалено.",
         "overrideRemoveFailed": "Не удалось удалить переопределение.",
-        "checkingCredentialModels": "Проверяю доступные модели для выбранных учётных данных провайдера...",
-        "credentialModelRefreshFailed": "Не удалось обновить список моделей для выбранных учётных данных провайдера. Показываю только каталог."
+        "checkingAccountModels": "Проверяю доступные модели для выбранной учётной записи...",
+        "accountModelRefreshFailed": "Не удалось обновить список моделей для выбранной учётной записи. Показываю только каталог."
       },
       "unavailableBadge": "недоступно",
+      "modelPricePerMillion": "{{model}} · {{price}} за 1M",
       "sections": {
         "bindingsTitle": "Рабочие привязки",
         "requiredBindingsTitle": "Обязательные привязки",
@@ -1546,8 +1494,7 @@
         "visibleModels": "Видимые модели"
       },
       "filters": {
-        "credentialsSearch": "Фильтр учётных данных",
-        "presetsSearch": "Фильтр пресетов",
+        "accountsSearch": "Фильтр учётных записей",
         "providersSearch": "Фильтр провайдеров"
       },
       "labels": {
@@ -1558,9 +1505,7 @@
     "auditSearchPlaceholder": "Поиск по действию, сообщению, субъекту или actor...",
     "auditResultAll": "Все результаты",
     "auditSurfaceAll": "Все поверхности",
-    "auditPageSizeOption": "{{count}} на странице",
     "auditSummary": "Показаны {{from}}-{{to}} из {{total}}",
-    "auditPageLabel": "Страница {{page}} из {{total}}",
     "previous": "Назад",
     "next": "Далее",
     "auditResultLabels": {
@@ -1600,73 +1545,45 @@
       "subtitle": "Управление инстансом",
       "libraries": "Библиотеки",
       "queue": "Очередь",
+      "audit": "Аудит",
       "ai": "AI-конфигурация",
       "access": "Доступ",
       "users": "Пользователи",
-      "system": "Система"
-    },
-    "libraryHub": {
-      "backToCatalog": "К каталогу библиотек",
-      "ready": "Готова",
-      "blocked": "Заблокирована",
-      "configureAi": "Настроить AI",
-      "noLibrary": "Библиотека не выбрана.",
-      "sections": {
-        "overview": "Обзор",
-        "activity": "Активность",
-        "backup": "Резервная копия",
-        "mcp": "MCP"
+      "system": "Система",
+      "group": {
+        "content": "Контент",
+        "intelligence": "ИИ",
+        "governance": "Доступ и роли",
+        "instance": "Инстанс"
       },
-      "overview": {
-        "readyTitle": "Библиотека готова отвечать на вопросы",
-        "readyDesc": "Все обязательные AI-привязки настроены для этой библиотеки.",
-        "blockedTitle": "Не настроено привязок: {{count}}",
-        "blockedTitle_one": "Не настроена {{count}} привязка",
-        "blockedTitle_few": "Не настроено {{count}} привязки",
-        "blockedTitle_many": "Не настроено {{count}} привязок",
-        "blockedDesc": "Эта библиотека не сможет давать ответы, пока не настроены обязательные AI-привязки.",
-        "hint": "Используйте разделы выше для управления активностью, резервными копиями и настройками MCP этой библиотеки."
-      },
-      "backup": {
-        "title": "Резервное копирование и восстановление",
-        "desc": "Экспортируйте полный настраиваемый снимок этой библиотеки или восстановите её из архива.",
-        "exportDesc": "Скачать архив с документами, графом и при необходимости исходными файлами и AI-конфигурацией.",
-        "importDesc": "Восстановить библиотеку из ранее экспортированного снимка."
-      },
-      "mcp": {
-        "title": "Настройки MCP",
-        "desc": "Настройки MCP для этой библиотеки и руководство по подключению клиентов."
-      }
+      "librariesDesc": "Каталог библиотек всех рабочих пространств",
+      "queueDesc": "Обработка документов по всем пространствам и библиотекам",
+      "auditDesc": "Журнал действий по всем пространствам и библиотекам",
+      "aiDesc": "Учётные записи AI, модели и рабочие привязки",
+      "accessDesc": "API-токены и их права доступа"
     },
     "aiWizard": {
       "launch": "Мастер настройки",
       "title": "Настройка AI-привязки",
-      "description": "Пошаговое руководство: учётные данные → пресет → привязка для выбранной цели и области.",
+      "description": "Пошаговое руководство: учётная запись → модель → привязка для выбранной цели и области.",
       "purposeLabel": "Цель",
       "scopeLabel": "Область",
-      "checklistTitle": "Шаги",
-      "progress": "Готово {{done}} из {{total}}",
       "stepNumber": "Шаг {{number}}.",
-      "stepDone": "Готово",
       "continue": "Продолжить",
-      "allDone": "Всё настроено",
+      "back": "Назад",
+      "createBinding": "Создать привязку",
+      "useExistingAccount": "Использовать существующую",
+      "createNewAccount": "Создать новую учётную запись",
       "steps": {
-        "credential": {
-          "title": "Учётные данные провайдера",
-          "desc": "Добавьте ключ доступа к провайдеру модели."
+        "account": {
+          "title": "Учётная запись AI"
         },
-        "preset": {
-          "title": "Пресет модели",
-          "desc": "Создайте пресет с конкретной моделью и параметрами."
-        },
-        "binding": {
-          "title": "Привязка цели",
-          "desc": "Свяжите цель с учётными данными и пресетом."
+        "model": {
+          "title": "Модель и параметры"
         }
       }
     },
     "users": {
-      "title": "Пользователи",
       "subtitle": "Управление пользователями и ролями",
       "currentUser": "Текущий пользователь",
       "createUser": "Создать пользователя",
@@ -1675,7 +1592,10 @@
       "loadFailed": "Не удалось загрузить пользователей",
       "empty": "Пользователей пока нет",
       "loading": "Загрузка пользователей...",
-      "total": "пользователей",
+      "total_one": "{{count}} пользователь",
+      "total_few": "{{count}} пользователя",
+      "total_many": "{{count}} пользователей",
+      "total_other": "{{count}} пользователя",
       "role": "Роль",
       "changeRole": "Изменить роль",
       "loginLabel": "Логин",
@@ -1715,13 +1635,14 @@
       }
     },
     "systemPage": {
-      "title": "Системные настройки",
       "subtitle": "Параметры инстанса по умолчанию и инструменты разработчика",
       "languageTitle": "Язык по умолчанию",
       "themeTitle": "Тема",
       "themeDesc": "Оформление интерфейса.",
       "developerTitle": "Инструменты разработчика",
       "developerDesc": "Обозреватель API и техническая справка.",
+      "mcpTitle": "Подключение MCP",
+      "mcpDesc": "URL сервера, системный промпт и настройка клиентов для внешних MCP-агентов. Одинаково для всех библиотек инстанса.",
       "theme": {
         "light": "Светлая",
         "dark": "Тёмная",
@@ -1778,6 +1699,8 @@
     "workspaceScope": "Пространство",
     "libraryScope": "Библиотека",
     "primaryNav": "Основная навигация",
+    "collapseSidebar": "Свернуть панель",
+    "expandSidebar": "Развернуть панель",
     "userMenu": "Меню пользователя",
     "account": "Учётная запись",
     "theme": "Тема",

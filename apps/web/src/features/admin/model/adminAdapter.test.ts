@@ -7,17 +7,16 @@ import {
   parseProviderCatalogResponse,
 } from '@/shared/api/admin';
 import type {
-  AiBindingAssignmentResponse,
+  AiAccountResponse,
+  AiBindingResponse,
   AuditEventPageResponse,
   AuditEventResponse,
   ModelCatalogEntryResponse,
-  ModelPresetResponse,
   OpsLibraryStateResponse,
-  ProviderCredentialResponse,
   TokenResponse,
 } from '@/shared/api/generated';
 import { mapAudit, mapAuditPage, mapOps, mapToken } from "./adminAdapter";
-import { mapBindingList, mapCredentialList, mapModelList, mapPresetList, mapProviderList } from "./aiAdapter";
+import { mapAccountList, mapBindingList, mapModelList, mapProviderList } from "./aiAdapter";
 
 describe('mapToken', () => {
   it('maps generated token responses without a raw shadow type', () => {
@@ -369,7 +368,7 @@ describe('parseModelCatalogResponse', () => {
           availabilityState: 'available',
         },
       ]),
-    ).toThrow('availableCredentialIds');
+    ).toThrow('availableAccountIds');
   });
 });
 
@@ -384,20 +383,21 @@ describe('adminModelCatalogOptions', () => {
         modalityKind: 'text',
         allowedBindingPurposes: ['extract_text', 'query_retrieve', 'query_answer'],
         availabilityState: 'available',
-        availableCredentialIds: ['credential-alpha'],
+        availableAccountIds: ['account-alpha'],
+        lifecycleState: 'active',
       },
     ];
     const listModels = vi.spyOn(adminApi, 'listModels').mockResolvedValueOnce(catalog);
 
     const options = adminModelCatalogOptions({
       providerCatalogId: 'provider-alpha',
-      credentialId: 'credential-alpha',
+      accountId: 'account-alpha',
     });
 
     await expect(options.queryFn()).resolves.toBe(catalog);
     expect(listModels).toHaveBeenCalledWith({
       providerCatalogId: 'provider-alpha',
-      credentialId: 'credential-alpha',
+      accountId: 'account-alpha',
     });
   });
 });
@@ -413,7 +413,8 @@ describe('mapModelList', () => {
         modalityKind: 'text',
         allowedBindingPurposes: ['extract_text', 'query_retrieve', 'query_answer'],
         availabilityState: 'unknown',
-        availableCredentialIds: ['credential-alpha'],
+        availableAccountIds: ['account-alpha'],
+        lifecycleState: 'active',
       } satisfies ModelCatalogEntryResponse,
     ]);
 
@@ -421,84 +422,62 @@ describe('mapModelList', () => {
       id: 'model-alpha',
       allowedBindingPurposes: ['extract_text', 'query_retrieve', 'query_answer'],
       availabilityState: 'unknown',
-      availableCredentialIds: ['credential-alpha'],
+      availableAccountIds: ['account-alpha'],
     });
   });
 });
 
-describe('mapPresetList', () => {
-  it('keeps object extra parameters from OpenAPI responses', () => {
-    const presets = mapPresetList(
-      [
-        {
-          id: 'preset-alpha',
-          scopeKind: 'workspace',
-          modelCatalogId: 'model-alpha',
-          presetName: 'Answer',
-          extraParametersJson: { response_format: { type: 'json_object' } },
-          createdAt: '2026-04-01T00:00:00Z',
-          updatedAt: '2026-04-01T00:00:00Z',
-        } satisfies ModelPresetResponse,
-      ],
-      [{ id: 'provider-alpha', displayName: 'Provider Alpha', kind: 'provider_alpha', apiStyle: '', lifecycleState: 'active', apiKeyRequired: true, baseUrlRequired: false, credentialPolicy: { apiKeyRequired: true, baseUrlRequired: false, baseUrlMode: 'optional', validationMode: 'model_list' }, baseUrlPolicy: { allowOverride: false, requireHttps: true, allowPrivateNetwork: false, trimSuffixes: [] }, modelDiscovery: { mode: 'credential', paths: [{ capabilityKind: 'chat', path: '/models' }] }, capabilities: {}, runtime: {}, uiHints: {}, modelCount: 0, credentialCount: 0 }],
-      [{ id: 'model-alpha', providerCatalogId: 'provider-alpha', modelName: 'alpha-chat', capabilityKind: 'chat', modalityKind: 'text', allowedBindingPurposes: ['query_answer'], availabilityState: 'available', availableCredentialIds: [] }],
-    );
-
-    expect(presets[0]?.extraParams).toEqual({ response_format: { type: 'json_object' } });
-  });
-
-  it('does not parse legacy JSON strings as extra parameter objects', () => {
-    const presets = mapPresetList(
-      [
-        {
-          id: 'preset-alpha',
-          scopeKind: 'workspace',
-          modelCatalogId: 'model-alpha',
-          presetName: 'Answer',
-          extraParametersJson: '{"response_format":{"type":"json_object"}}',
-          createdAt: '2026-04-01T00:00:00Z',
-          updatedAt: '2026-04-01T00:00:00Z',
-        } satisfies ModelPresetResponse,
-      ],
-      [{ id: 'provider-alpha', displayName: 'Provider Alpha', kind: 'provider_alpha', apiStyle: '', lifecycleState: 'active', apiKeyRequired: true, baseUrlRequired: false, credentialPolicy: { apiKeyRequired: true, baseUrlRequired: false, baseUrlMode: 'optional', validationMode: 'model_list' }, baseUrlPolicy: { allowOverride: false, requireHttps: true, allowPrivateNetwork: false, trimSuffixes: [] }, modelDiscovery: { mode: 'credential', paths: [{ capabilityKind: 'chat', path: '/models' }] }, capabilities: {}, runtime: {}, uiHints: {}, modelCount: 0, credentialCount: 0 }],
-      [{ id: 'model-alpha', providerCatalogId: 'provider-alpha', modelName: 'alpha-chat', capabilityKind: 'chat', modalityKind: 'text', allowedBindingPurposes: ['query_answer'], availabilityState: 'available', availableCredentialIds: [] }],
-    );
-
-    expect(presets[0]).not.toHaveProperty('extraParams');
-  });
-});
-
 describe('mapBindingList', () => {
-  it('keeps every generated binding purpose without local narrowing casts', () => {
+  it('keeps every generated binding purpose without local narrowing casts, including inline parameters', () => {
     const bindings = mapBindingList([
       {
         id: 'binding-alpha',
         scopeKind: 'workspace',
         bindingPurpose: 'query_retrieve',
         bindingState: 'active',
-        providerCredentialId: 'credential-alpha',
-        modelPresetId: 'preset-alpha',
-      } satisfies AiBindingAssignmentResponse,
+        accountId: 'account-alpha',
+        modelCatalogId: 'model-alpha',
+        extraParametersJson: { response_format: { type: 'json_object' } },
+      } satisfies AiBindingResponse,
     ]);
 
     expect(bindings[0]?.purpose).toBe('query_retrieve');
+    expect(bindings[0]?.accountId).toBe('account-alpha');
+    expect(bindings[0]?.modelCatalogId).toBe('model-alpha');
+    expect(bindings[0]?.extraParams).toEqual({ response_format: { type: 'json_object' } });
+  });
+
+  it('does not parse legacy JSON strings as extra parameter objects', () => {
+    const bindings = mapBindingList([
+      {
+        id: 'binding-alpha',
+        scopeKind: 'workspace',
+        bindingPurpose: 'query_retrieve',
+        bindingState: 'active',
+        accountId: 'account-alpha',
+        modelCatalogId: 'model-alpha',
+        extraParametersJson: '{"response_format":{"type":"json_object"}}',
+      } satisfies AiBindingResponse,
+    ]);
+
+    expect(bindings[0]).not.toHaveProperty('extraParams');
   });
 });
 
 describe('AI scope handling', () => {
   it('throws on malformed generated scopeKind instead of defaulting to workspace', () => {
     expect(() =>
-      mapCredentialList(
+      mapAccountList(
         [
           {
-            id: 'credential-alpha',
+            id: 'account-alpha',
             scopeKind: 'organization',
             providerCatalogId: 'provider-alpha',
-            label: 'Credential Alpha',
+            label: 'Account Alpha',
             credentialState: 'active',
             createdAt: '2026-04-01T00:00:00Z',
             updatedAt: '2026-04-01T00:00:00Z',
-          } as unknown as ProviderCredentialResponse,
+          } as unknown as AiAccountResponse,
         ],
         [],
       ),

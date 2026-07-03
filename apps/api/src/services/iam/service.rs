@@ -14,7 +14,7 @@ use crate::{
     infra::repositories::{audit_repository, iam_repository, query_repository, runtime_repository},
     interfaces::http::router_support::ApiError,
     services::ai_catalog_service::{
-        ApplyBootstrapProviderPresetBundleCommand, BootstrapAiSetupDescriptor,
+        ApplyBootstrapProviderBindingBundleCommand, BootstrapAiSetupDescriptor,
     },
     shared::auth_tokens::{
         hash_api_token, hash_session_secret, mint_plaintext_api_token,
@@ -278,9 +278,9 @@ impl IamService {
                 state
                     .canonical_services
                     .ai_catalog
-                    .apply_bootstrap_provider_preset_bundle(
+                    .apply_bootstrap_provider_binding_bundle(
                         state,
-                        ApplyBootstrapProviderPresetBundleCommand {
+                        ApplyBootstrapProviderBindingBundleCommand {
                             provider_kind: ai_setup.provider_kind,
                             api_key: ai_setup.api_key,
                             base_url: ai_setup.base_url,

@@ -72,7 +72,7 @@ function buildKeyMap(fields: FieldsConfig, map?: KeyMap): KeyMap {
       if (config.key) {
         map.set(config.key, {
           in: config.in,
-          map: config.map,
+          ...(config.map !== undefined ? { map: config.map } : {}),
         });
       }
     } else if ('key' in config) {

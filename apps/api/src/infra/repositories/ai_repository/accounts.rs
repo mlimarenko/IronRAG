@@ -3,7 +3,7 @@ use sqlx::{FromRow, PgPool};
 use uuid::Uuid;
 
 #[derive(Debug, Clone, FromRow)]
-pub struct AiProviderCredentialRow {
+pub struct AiAccountRow {
     pub id: Uuid,
     pub scope_kind: String,
     pub workspace_id: Option<Uuid>,
@@ -18,13 +18,13 @@ pub struct AiProviderCredentialRow {
     pub updated_at: DateTime<Utc>,
 }
 
-pub async fn list_provider_credentials_exact(
+pub async fn list_accounts_exact(
     postgres: &PgPool,
     scope_kind: &str,
     workspace_id: Option<Uuid>,
     library_id: Option<Uuid>,
-) -> Result<Vec<AiProviderCredentialRow>, sqlx::Error> {
-    sqlx::query_as::<_, AiProviderCredentialRow>(
+) -> Result<Vec<AiAccountRow>, sqlx::Error> {
+    sqlx::query_as::<_, AiAccountRow>(
         "select
             id,
             scope_kind::text as scope_kind,
@@ -38,7 +38,7 @@ pub async fn list_provider_credentials_exact(
             created_by_principal_id,
             created_at,
             updated_at
-         from ai_provider_credential
+         from ai_account
          where scope_kind = $1::ai_scope_kind
            and workspace_id is not distinct from $2
            and library_id is not distinct from $3
@@ -51,14 +51,14 @@ pub async fn list_provider_credentials_exact(
     .await
 }
 
-pub async fn list_visible_provider_credentials(
+pub async fn list_visible_accounts(
     postgres: &PgPool,
     workspace_id: Option<Uuid>,
     library_id: Option<Uuid>,
-) -> Result<Vec<AiProviderCredentialRow>, sqlx::Error> {
+) -> Result<Vec<AiAccountRow>, sqlx::Error> {
     match (workspace_id, library_id) {
         (Some(workspace_id), Some(library_id)) => {
-            sqlx::query_as::<_, AiProviderCredentialRow>(
+            sqlx::query_as::<_, AiAccountRow>(
                 "select
                     id,
                     scope_kind::text as scope_kind,
@@ -72,7 +72,7 @@ pub async fn list_visible_provider_credentials(
                     created_by_principal_id,
                     created_at,
                     updated_at
-                 from ai_provider_credential
+                 from ai_account
                  where scope_kind = 'instance'
                     or (scope_kind = 'workspace' and workspace_id = $1)
                     or (scope_kind = 'library' and library_id = $2)
@@ -84,7 +84,7 @@ pub async fn list_visible_provider_credentials(
             .await
         }
         (Some(workspace_id), None) => {
-            sqlx::query_as::<_, AiProviderCredentialRow>(
+            sqlx::query_as::<_, AiAccountRow>(
                 "select
                     id,
                     scope_kind::text as scope_kind,
@@ -98,7 +98,7 @@ pub async fn list_visible_provider_credentials(
                     created_by_principal_id,
                     created_at,
                     updated_at
-                 from ai_provider_credential
+                 from ai_account
                  where scope_kind = 'instance'
                     or (scope_kind = 'workspace' and workspace_id = $1)
                  order by created_at desc, id desc",
@@ -108,7 +108,7 @@ pub async fn list_visible_provider_credentials(
             .await
         }
         (None, None) => {
-            sqlx::query_as::<_, AiProviderCredentialRow>(
+            sqlx::query_as::<_, AiAccountRow>(
                 "select
                     id,
                     scope_kind::text as scope_kind,
@@ -122,7 +122,7 @@ pub async fn list_visible_provider_credentials(
                     created_by_principal_id,
                     created_at,
                     updated_at
-                 from ai_provider_credential
+                 from ai_account
                  where scope_kind = 'instance'
                  order by created_at desc, id desc",
             )
@@ -130,26 +130,26 @@ pub async fn list_visible_provider_credentials(
             .await
         }
         (None, Some(library_id)) => {
-            sqlx::query_as::<_, AiProviderCredentialRow>(
+            sqlx::query_as::<_, AiAccountRow>(
                 "select
-                    credential.id,
-                    credential.scope_kind::text as scope_kind,
-                    credential.workspace_id,
-                    credential.library_id,
-                    credential.provider_catalog_id,
-                    credential.label,
-                    credential.api_key,
-                    credential.base_url,
-                    credential.credential_state::text as credential_state,
-                    credential.created_by_principal_id,
-                    credential.created_at,
-                    credential.updated_at
-                 from ai_provider_credential credential
+                    account.id,
+                    account.scope_kind::text as scope_kind,
+                    account.workspace_id,
+                    account.library_id,
+                    account.provider_catalog_id,
+                    account.label,
+                    account.api_key,
+                    account.base_url,
+                    account.credential_state::text as credential_state,
+                    account.created_by_principal_id,
+                    account.created_at,
+                    account.updated_at
+                 from ai_account account
                  join catalog_library library on library.id = $1
-                 where credential.scope_kind = 'instance'
-                    or (credential.scope_kind = 'workspace' and credential.workspace_id = library.workspace_id)
-                    or (credential.scope_kind = 'library' and credential.library_id = library.id)
-                 order by credential.created_at desc, credential.id desc",
+                 where account.scope_kind = 'instance'
+                    or (account.scope_kind = 'workspace' and account.workspace_id = library.workspace_id)
+                    or (account.scope_kind = 'library' and account.library_id = library.id)
+                 order by account.created_at desc, account.id desc",
             )
             .bind(library_id)
             .fetch_all(postgres)
@@ -158,11 +158,11 @@ pub async fn list_visible_provider_credentials(
     }
 }
 
-pub async fn get_provider_credential_by_id(
+pub async fn get_account_by_id(
     postgres: &PgPool,
-    credential_id: Uuid,
-) -> Result<Option<AiProviderCredentialRow>, sqlx::Error> {
-    sqlx::query_as::<_, AiProviderCredentialRow>(
+    account_id: Uuid,
+) -> Result<Option<AiAccountRow>, sqlx::Error> {
+    sqlx::query_as::<_, AiAccountRow>(
         "select
             id,
             scope_kind::text as scope_kind,
@@ -176,15 +176,15 @@ pub async fn get_provider_credential_by_id(
             created_by_principal_id,
             created_at,
             updated_at
-         from ai_provider_credential
+         from ai_account
          where id = $1",
     )
-    .bind(credential_id)
+    .bind(account_id)
     .fetch_optional(postgres)
     .await
 }
 
-pub async fn create_provider_credential(
+pub async fn create_account(
     postgres: &PgPool,
     scope_kind: &str,
     workspace_id: Option<Uuid>,
@@ -194,9 +194,9 @@ pub async fn create_provider_credential(
     api_key: Option<&str>,
     base_url: Option<&str>,
     created_by_principal_id: Option<Uuid>,
-) -> Result<AiProviderCredentialRow, sqlx::Error> {
-    sqlx::query_as::<_, AiProviderCredentialRow>(
-        "insert into ai_provider_credential (
+) -> Result<AiAccountRow, sqlx::Error> {
+    sqlx::query_as::<_, AiAccountRow>(
+        "insert into ai_account (
             id,
             scope_kind,
             workspace_id,
@@ -238,20 +238,20 @@ pub async fn create_provider_credential(
     .await
 }
 
-pub async fn update_provider_credential(
+pub async fn update_account(
     postgres: &PgPool,
-    credential_id: Uuid,
+    account_id: Uuid,
     label: &str,
     api_key: Option<&str>,
     base_url: Option<&str>,
     credential_state: &str,
-) -> Result<Option<AiProviderCredentialRow>, sqlx::Error> {
-    sqlx::query_as::<_, AiProviderCredentialRow>(
-        "update ai_provider_credential
+) -> Result<Option<AiAccountRow>, sqlx::Error> {
+    sqlx::query_as::<_, AiAccountRow>(
+        "update ai_account
          set label = $2,
              api_key = coalesce($3, api_key),
              base_url = $4,
-             credential_state = $5::ai_credential_state,
+             credential_state = $5::ai_account_state,
              updated_at = now()
          where id = $1
          returning
@@ -268,7 +268,7 @@ pub async fn update_provider_credential(
             created_at,
             updated_at",
     )
-    .bind(credential_id)
+    .bind(account_id)
     .bind(label)
     .bind(api_key)
     .bind(base_url)
@@ -277,12 +277,9 @@ pub async fn update_provider_credential(
     .await
 }
 
-pub async fn delete_provider_credential(
-    postgres: &PgPool,
-    credential_id: Uuid,
-) -> Result<u64, sqlx::Error> {
-    let result = sqlx::query("delete from ai_provider_credential where id = $1")
-        .bind(credential_id)
+pub async fn delete_account(postgres: &PgPool, account_id: Uuid) -> Result<u64, sqlx::Error> {
+    let result = sqlx::query("delete from ai_account where id = $1")
+        .bind(account_id)
         .execute(postgres)
         .await?;
     Ok(result.rows_affected())

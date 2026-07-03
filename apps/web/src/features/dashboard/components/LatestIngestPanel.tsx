@@ -1,8 +1,9 @@
 import { memo } from 'react';
 import type { TFunction } from 'i18next';
 import { Globe } from 'lucide-react';
+import { StatusBadge } from '@/shared/components/StatusBadge';
 import type { RecentWebRun } from "../model/types";
-import { formatDateTime, hostnameFromUrl, runStateClass } from "../model/format";
+import { formatDateTime, hostnameFromUrl, runStateClass, toStatusTone } from "../model/format";
 
 type LatestIngestPanelProps = {
   t: TFunction;
@@ -13,13 +14,13 @@ type LatestIngestPanelProps = {
 function LatestIngestPanelImpl({ t, locale, latestRun }: LatestIngestPanelProps) {
   const emptyLabel = t('dashboard.notAvailable');
   return (
-    <div className="workbench-surface p-5 sm:p-6">
+    <div className="workbench-surface h-full p-4">
       <div className="flex items-center justify-between gap-3">
         <h2 className="text-sm font-bold tracking-tight">{t('dashboard.latestIngest')}</h2>
         {latestRun ? (
-          <span className={`status-badge ${runStateClass(latestRun.runState)}`}>
+          <StatusBadge tone={toStatusTone(runStateClass(latestRun.runState))}>
             {t(`dashboard.runStateLabels.${latestRun.runState}`)}
-          </span>
+          </StatusBadge>
         ) : null}
       </div>
 
@@ -33,7 +34,7 @@ function LatestIngestPanelImpl({ t, locale, latestRun }: LatestIngestPanelProps)
             <div className="mt-1 truncate text-xs text-muted-foreground">{latestRun.seedUrl}</div>
           </div>
 
-          <div className="mt-4 grid grid-cols-3 gap-3">
+          <div className="mt-4 grid grid-cols-3 gap-2 border-t pt-3">
             {[
               {
                 label: t('dashboard.processed'),
@@ -53,9 +54,9 @@ function LatestIngestPanelImpl({ t, locale, latestRun }: LatestIngestPanelProps)
             ].map((item) => (
               <div
                 key={item.label}
-                className="rounded-xl border border-border/60 bg-background/70 p-3"
+                className="rounded-md bg-surface-sunken p-2.5"
               >
-                <div className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
+                <div className="section-label">
                   {item.label}
                 </div>
                 <div
@@ -75,7 +76,7 @@ function LatestIngestPanelImpl({ t, locale, latestRun }: LatestIngestPanelProps)
           </div>
         </>
       ) : (
-        <div className="mt-4 rounded-xl border border-dashed border-border/70 bg-background/60 p-4 text-sm text-muted-foreground">
+        <div className="mt-4 rounded-lg border border-dashed border-border bg-surface-sunken/40 p-4 text-sm text-muted-foreground">
           {t('dashboard.noRecentRuns')}
         </div>
       )}

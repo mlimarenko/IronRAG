@@ -21,7 +21,7 @@ use crate::{
 use ironrag_contracts::{
     auth::{
         BootstrapAiSetup, BootstrapBindingPurpose, BootstrapCredentialSource,
-        BootstrapProviderPreset, BootstrapProviderPresetBundle, BootstrapStatus, UiLocale,
+        BootstrapProviderBinding, BootstrapProviderBindingBundle, BootstrapStatus, UiLocale,
     },
     provider::{
         ProviderAuthScheme as ContractProviderAuthScheme,
@@ -315,10 +315,10 @@ fn map_contract_provider_capabilities(
 
 pub(crate) fn to_bootstrap_contract(value: &BootstrapStatusOutcome) -> BootstrapStatus {
     let ai_setup = value.ai_setup.as_ref().map(|descriptor| BootstrapAiSetup {
-        preset_bundles: descriptor
-            .preset_bundles
+        binding_bundles: descriptor
+            .binding_bundles
             .iter()
-            .map(|bundle| BootstrapProviderPresetBundle {
+            .map(|bundle| BootstrapProviderBindingBundle {
                 provider_catalog_id: bundle.provider_catalog_id,
                 provider_kind: bundle.provider_kind.clone(),
                 display_name: bundle.display_name.clone(),
@@ -341,18 +341,17 @@ pub(crate) fn to_bootstrap_contract(value: &BootstrapStatusOutcome) -> Bootstrap
                 capabilities: map_contract_provider_capabilities(&bundle.capabilities),
                 runtime: map_contract_provider_runtime_profile(&bundle.runtime),
                 ui_hints: bundle.ui_hints.clone(),
-                presets: bundle
-                    .presets
+                bindings: bundle
+                    .bindings
                     .iter()
-                    .map(|preset| BootstrapProviderPreset {
-                        binding_purpose: map_bootstrap_binding_purpose(preset.binding_purpose),
-                        model_catalog_id: preset.model_catalog_id,
-                        model_name: preset.model_name.clone(),
-                        preset_name: preset.preset_name.clone(),
-                        system_prompt: preset.system_prompt.clone(),
-                        temperature: preset.temperature,
-                        top_p: preset.top_p,
-                        max_output_tokens_override: preset.max_output_tokens_override,
+                    .map(|binding| BootstrapProviderBinding {
+                        binding_purpose: map_bootstrap_binding_purpose(binding.binding_purpose),
+                        model_catalog_id: binding.model_catalog_id,
+                        model_name: binding.model_name.clone(),
+                        system_prompt: binding.system_prompt.clone(),
+                        temperature: binding.temperature,
+                        top_p: binding.top_p,
+                        max_output_tokens_override: binding.max_output_tokens_override,
                     })
                     .collect(),
             })

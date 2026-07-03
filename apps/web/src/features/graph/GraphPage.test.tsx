@@ -1,4 +1,5 @@
 import { act } from 'react';
+import { fireEvent } from '@testing-library/react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { createRoot, type Root } from 'react-dom/client';
 import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom';
@@ -82,6 +83,25 @@ describe('GraphPage', () => {
     (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
     localStorage.setItem('ironrag_locale', 'en');
     await i18n.changeLanguage('en');
+    Object.defineProperty(window, 'matchMedia', {
+      writable: true,
+      value: (query: string) => ({
+        matches: query.includes('min-width: 768px'),
+        media: query,
+        onchange: null,
+        addListener: () => {},
+        removeListener: () => {},
+        addEventListener: () => {},
+        removeEventListener: () => {},
+        dispatchEvent: () => false,
+      }),
+    });
+    Object.assign(window.HTMLElement.prototype, {
+      hasPointerCapture: window.HTMLElement.prototype.hasPointerCapture ?? (() => false),
+      setPointerCapture: window.HTMLElement.prototype.setPointerCapture ?? (() => {}),
+      releasePointerCapture: window.HTMLElement.prototype.releasePointerCapture ?? (() => {}),
+      scrollIntoView: window.HTMLElement.prototype.scrollIntoView ?? (() => {}),
+    });
 
     container = document.createElement('div');
     document.body.appendChild(container);
@@ -213,6 +233,28 @@ describe('GraphPage', () => {
     input.dispatchEvent(new Event('input', { bubbles: true }));
   }
 
+  async function selectGraphLayout(label: string) {
+    const trigger = container.querySelector(
+      `[role="combobox"][aria-label="${i18n.t('graph.layoutControls')}"]`,
+    );
+    expect(trigger).toBeTruthy();
+
+    await act(async () => {
+      fireEvent.click(trigger!);
+    });
+    await flushUi();
+
+    const option = Array.from(document.body.querySelectorAll('[role="option"]')).find((candidate) =>
+      candidate.textContent?.trim().includes(label),
+    );
+    expect(option).toBeTruthy();
+
+    await act(async () => {
+      fireEvent.click(option!);
+    });
+    await flushUi();
+  }
+
   it('does not render a global reset action and clears selection by closing the inspector', async () => {
     await renderPage();
 
@@ -340,15 +382,7 @@ describe('GraphPage', () => {
 
     expect(container.textContent).not.toContain(i18n.t('graph.layoutDescriptions.sectors'));
 
-    const bandsLabel = i18n.t('graph.layouts.bands');
-    const bandsButton = Array.from(container.querySelectorAll('button')).find((button) =>
-      button.getAttribute('aria-label') === bandsLabel,
-    );
-    expect(bandsButton).toBeTruthy();
-
-    await act(async () => {
-      bandsButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
-    });
+    await selectGraphLayout(i18n.t('graph.layouts.bands'));
     await flushUi();
 
     const recommendedLabel = i18n.t('graph.recommended');
@@ -377,15 +411,7 @@ describe('GraphPage', () => {
 
     for (const option of GRAPH_LAYOUT_OPTIONS) {
       const label = i18n.t(option.labelKey);
-      const button = Array.from(container.querySelectorAll('button')).find((candidate) =>
-        candidate.getAttribute('aria-label') === label,
-      );
-      expect(button).toBeTruthy();
-
-      await act(async () => {
-        button?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
-      });
-      await flushUi();
+      await selectGraphLayout(label);
 
       expect(activeLayout()).toBe(option.id);
     }

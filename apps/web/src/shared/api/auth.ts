@@ -1,7 +1,7 @@
 import { Iam } from "./generated";
 import { ApiError, type ApiErrorBody, unwrap } from "./runtime";
 import type {
-  BootstrapProviderPresetBundle,
+  BootstrapProviderBindingBundle,
   BootstrapSetupRequest,
   BootstrapStatus,
   LoginSessionRequest,
@@ -10,7 +10,7 @@ import type {
 } from "./generated";
 
 export type BootstrapSetup = BootstrapSetupRequest;
-export type { BootstrapProviderPresetBundle, BootstrapStatus, SessionResolveResponse, SessionResponse };
+export type { BootstrapProviderBindingBundle, BootstrapStatus, SessionResolveResponse, SessionResponse };
 
 function unwrapRequired<T>(
   result: { data?: T | undefined; error?: unknown; response?: Response | undefined },

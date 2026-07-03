@@ -1,6 +1,7 @@
 import { act } from 'react';
 import { QueryClient, QueryClientProvider, useQuery } from '@tanstack/react-query';
 import { createRoot, type Root } from 'react-dom/client';
+import type { TFunction } from 'i18next';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { CatalogLibraryResponse } from '@/shared/api';
@@ -46,6 +47,7 @@ const activeLibrary: Library = {
   workspaceId: 'ws-1',
   name: 'Docs',
   createdAt: '2026-04-10T10:00:00Z',
+  includeDocumentHintInMcpAnswers: false,
   ingestionReady: true,
   queryReady: true,
   missingBindingPurposes: [],
@@ -57,6 +59,7 @@ const initialLibrary: CatalogLibraryResponse = {
   displayName: 'Docs',
   description: null,
   extractionPrompt: null,
+  includeDocumentHintInMcpAnswers: false,
   ingestionReadiness: {
     ready: true,
     missingBindingPurposes: [],
@@ -65,6 +68,7 @@ const initialLibrary: CatalogLibraryResponse = {
   recognitionPolicy: {
     rasterImageEngine: 'native',
   },
+  retrievalConfig: {},
   slug: 'docs',
   webIngestPolicy: {
     crawlFilter: {
@@ -78,9 +82,8 @@ const initialLibrary: CatalogLibraryResponse = {
   },
 };
 
-function t(key: string, options?: Record<string, unknown>) {
-  return options?.error ? `${key}: ${String(options.error)}` : key;
-}
+const t = ((key: string, options?: Record<string, unknown>) =>
+  options?.error ? `${key}: ${String(options.error)}` : key) as TFunction;
 
 function Harness({
   loadFirstPage,

@@ -1314,7 +1314,7 @@ fn runtime_binding_vector_fingerprint(binding: &ResolvedRuntimeBinding) -> Strin
         serde_json::to_string(&binding.extra_parameters_json).unwrap_or_else(|_| "{}".to_string());
     format!(
         "{}:{}:{:?}:{}:{}:{}",
-        binding.credential_id,
+        binding.account_id,
         binding.provider_kind,
         binding.provider_base_url,
         binding.model_catalog_id,

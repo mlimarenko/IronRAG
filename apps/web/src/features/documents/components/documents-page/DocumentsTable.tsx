@@ -3,13 +3,14 @@ import type { TFunction } from "i18next";
 import { ArrowDown, ArrowUp, ChevronsUpDown, File, Globe, Loader2, XCircle } from "lucide-react";
 
 import type { DocumentListSortKey, DocumentListSortOrder } from "@/shared/api";
+import { Checkbox } from "@/shared/components/ui/checkbox";
+import { StatusBadge } from "@/shared/components/StatusBadge";
 import type { DocumentItem, Locale } from "@/shared/types";
 
 import {
   buildDocumentStatusBadgeConfig,
   formatDate,
   formatDocumentTypeLabel,
-  formatSize,
   getDocumentProcessingDurationMs,
   isWebPageDocument,
 } from "@/features/documents/model/documentAdapter";
@@ -69,7 +70,28 @@ export function DocumentsTable({
   const placeholderSpan = 2 + detailColCount; // Type + Uploaded + opt-in detail columns
 
   return (
-    <table className={`w-full ${minWidth} table-fixed text-sm`}>
+    <>
+      <div className="space-y-3 p-3 xl:hidden">
+        {pendingUploads.map((upload) => (
+          <PendingUploadCard key={`upload-card-${upload.name}`} t={t} upload={upload} />
+        ))}
+        {documents.map((doc) => (
+          <DocumentCard
+            key={doc.id}
+            doc={doc}
+            isCursor={selectedDocId === doc.id}
+            locale={locale}
+            onSelectDoc={onSelectDoc}
+            onToggleSelection={onToggleSelection}
+            processingClockMs={processingClockMs}
+            selected={selectedIds.has(doc.id)}
+            selectionMode={selectionMode}
+            showDetailColumns={showDetailColumns}
+            t={t}
+          />
+        ))}
+      </div>
+      <table className={`hidden w-full ${minWidth} table-fixed text-sm xl:table`}>
       <colgroup>
         {selectionMode && <col className="w-12" />}
         <col />
@@ -78,24 +100,16 @@ export function DocumentsTable({
         {showDetailColumns && <col className="w-24" />}
         {showDetailColumns && <col className="w-28" />}
         {showDetailColumns && <col className="w-36" />}
-        <col style={{ width: "13rem" }} />
+        <col className="w-52" />
       </colgroup>
-      <thead
-        className="sticky top-0 z-10"
-        style={{
-          background:
-            "linear-gradient(180deg, hsl(var(--card)), hsl(var(--card) / 0.95))",
-          backdropFilter: "blur(8px)",
-        }}
-      >
+      <thead className="sticky top-0 z-10 bg-card">
         <tr className="border-b text-left">
           {selectionMode && (
             <th className="px-4 py-3 w-10">
-              <input
-                type="checkbox"
+              <Checkbox
                 aria-label={t("documents.selectAllVisible")}
                 checked={allVisibleSelected}
-                onChange={() =>
+                onCheckedChange={() =>
                   setSelectedIds((prev) => {
                     const next = new Set(prev);
                     for (const doc of items) {
@@ -105,7 +119,6 @@ export function DocumentsTable({
                     return next;
                   })
                 }
-                className="h-4 w-4 rounded border-gray-300"
               />
             </th>
           )}
@@ -173,18 +186,18 @@ export function DocumentsTable({
 
           return (
             <tr key={`upload-${upload.name}`} className="border-b opacity-80">
-              {selectionMode && <td className="px-4 py-3.5 w-10" />}
-              <td className="px-4 py-3.5">
+              {selectionMode && <td className="px-4 py-3 w-10" />}
+              <td className="px-4 py-3">
                 <DocumentNameCell fileName={upload.name} />
               </td>
-              <td className="px-4 py-3.5 text-muted-foreground text-[10px]" colSpan={placeholderSpan} />
-              <td className="px-4 py-3.5 max-w-[320px]">
+              <td className="px-4 py-3 text-muted-foreground text-2xs" colSpan={placeholderSpan} />
+              <td className="px-4 py-3 max-w-[320px]">
                 {upload.state === "error" ? (
                   <span
                     className="flex items-start gap-1.5 text-xs text-status-failed"
                     title={uploadErrorTitle || undefined}
                   >
-                    <XCircle className="mt-0.5 h-3 w-3 shrink-0" />
+                    <XCircle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
                     <span className="min-w-0">
                       <span className="block truncate">
                         {upload.error ?? t("documents.uploadFailed")}
@@ -198,7 +211,7 @@ export function DocumentsTable({
                   </span>
                 ) : (
                   <span className="inline-flex items-center gap-1.5 text-xs text-muted-foreground">
-                    <Loader2 className="h-3 w-3 animate-spin text-primary" />
+                    <Loader2 className="h-3.5 w-3.5 animate-spin text-primary" />
                     {t("documents.uploading")}
                   </span>
                 )}
@@ -222,7 +235,8 @@ export function DocumentsTable({
           />
         ))}
       </tbody>
-    </table>
+      </table>
+    </>
   );
 }
 
@@ -238,6 +252,133 @@ type DocumentRowProps = {
   onToggleSelection: (id: string) => void;
   t: TFunction;
 };
+
+function PendingUploadCard({
+  t,
+  upload,
+}: {
+  t: TFunction;
+  upload: UploadQueueItem;
+}) {
+  const uploadErrorTitle = [
+    upload.error,
+    upload.errorAction,
+    upload.errorDiagnosticCode,
+    upload.errorDiagnosticMessage,
+  ]
+    .filter(Boolean)
+    .join('\n');
+
+  return (
+    <article className="workbench-surface p-4">
+      <DocumentNameCell fileName={upload.name} />
+      <div className="mt-3">
+        {upload.state === "error" ? (
+          <div
+            className="rounded-lg bg-destructive/5 px-3 py-2 text-xs text-destructive"
+            title={uploadErrorTitle || undefined}
+          >
+            <div className="font-bold">{upload.error ?? t("documents.uploadFailed")}</div>
+            {upload.errorAction && (
+              <div className="mt-1 text-muted-foreground">{upload.errorAction}</div>
+            )}
+          </div>
+        ) : (
+          <span className="inline-flex items-center gap-1.5 text-xs text-muted-foreground">
+            <Loader2 className="h-3.5 w-3.5 animate-spin text-primary" />
+            {t("documents.uploading")}
+          </span>
+        )}
+      </div>
+    </article>
+  );
+}
+
+function DocumentCard({
+  doc,
+  isCursor,
+  locale,
+  onSelectDoc,
+  onToggleSelection,
+  processingClockMs,
+  selected,
+  selectionMode,
+  showDetailColumns,
+  t,
+}: DocumentRowProps) {
+  const isWebPage = isWebPageDocument(doc.sourceKind, doc.sourceUri, doc.fileName);
+  const typeLabel = formatDocumentTypeLabel(doc.fileType, doc.sourceKind, t, {
+    sourceUri: doc.sourceUri,
+    fileName: doc.fileName,
+  });
+  const processingDurationMs = getDocumentProcessingDurationMs(doc, processingClockMs);
+
+  return (
+    <article
+      aria-selected={isCursor}
+      className={`workbench-surface p-4 transition-all ${
+        selected
+          ? "border-primary/30 bg-primary/10"
+          : isCursor
+            ? "border-primary/40 bg-primary/5"
+            : "border-border/70"
+      }`}
+    >
+      <div className="flex items-start gap-3">
+        {selectionMode && (
+          <Checkbox
+            aria-label={t("documents.selectRow", { name: doc.fileName })}
+            checked={selected}
+            className="mt-1"
+            onCheckedChange={() => onToggleSelection(doc.id)}
+          />
+        )}
+        <button
+          type="button"
+          className="min-w-0 flex-1 text-left"
+          onClick={() => (selectionMode ? onToggleSelection(doc.id) : onSelectDoc(doc))}
+        >
+          <div className="flex min-w-0 items-start justify-between gap-3">
+            <DocumentNameCell fileName={doc.fileName} isWebPage={isWebPage} sourceUri={doc.sourceUri} />
+            <DocumentStatusBadge doc={doc} t={t} />
+          </div>
+        </button>
+      </div>
+      <div className="mt-4 grid grid-cols-2 gap-2 rounded-lg bg-surface-sunken/60 p-2 text-xs">
+        <MobileDocumentMetric label={t("documents.type")} value={typeLabel} />
+        <MobileDocumentMetric label={t("documents.uploaded")} value={formatDate(doc.uploadedAt, locale)} />
+        {showDetailColumns && (
+          <>
+            <MobileDocumentMetric label={t("documents.cost")} value={doc.cost != null ? `$${doc.cost.toFixed(3)}` : EMPTY_VALUE} />
+            <MobileDocumentMetric
+              label={t("documents.pipelineTime")}
+              value={processingDurationMs != null ? `${Math.floor(processingDurationMs / 1000)}s` : EMPTY_VALUE}
+            />
+          </>
+        )}
+      </div>
+    </article>
+  );
+}
+
+function MobileDocumentMetric({
+  label,
+  value,
+}: {
+  label: string;
+  value: string;
+}) {
+  return (
+    <div className="min-w-0">
+      <div className="truncate section-label">
+        {label}
+      </div>
+      <div className="mt-0.5 truncate font-semibold" title={value}>
+        {value}
+      </div>
+    </div>
+  );
+}
 
 function isActiveProcessingDoc(doc: DocumentItem): boolean {
   return doc.status === "processing" || doc.status === "queued";
@@ -273,47 +414,42 @@ function DocumentRowImpl({
       onClick={() => (selectionMode ? onToggleSelection(doc.id) : onSelectDoc(doc))}
     >
       {selectionMode && (
-        <td className="px-4 py-3.5 w-10">
-          <input
-            type="checkbox"
+        <td className="px-4 py-3 w-10">
+          <Checkbox
             aria-label={t("documents.selectRow", { name: doc.fileName })}
             checked={selected}
-            onChange={(event) => {
-              event.stopPropagation();
-              onToggleSelection(doc.id);
-            }}
             onClick={(event) => event.stopPropagation()}
-            className="h-4 w-4 rounded border-gray-300"
+            onCheckedChange={() => onToggleSelection(doc.id)}
           />
         </td>
       )}
-      <td className="px-4 py-3.5">
+      <td className="px-4 py-3">
         <DocumentNameCell
           fileName={doc.fileName}
           isWebPage={isWebPage}
           sourceUri={doc.sourceUri}
         />
       </td>
-      <td className={`px-4 py-3.5 text-muted-foreground text-[10px] font-bold tracking-widest ${isWebPage ? "" : "uppercase"}`} title={typeLabel}>
+      <td className={`px-4 py-3 text-muted-foreground text-2xs font-bold tracking-widest ${isWebPage ? "" : "uppercase"}`} title={typeLabel}>
         {typeLabel}
       </td>
-      <td className="px-4 py-3.5 text-muted-foreground text-xs">
+      <td className="px-4 py-3 text-muted-foreground text-xs">
         {formatDate(doc.uploadedAt, locale)}
       </td>
       {showDetailColumns && (
         <>
-          <td className="px-4 py-3.5 text-muted-foreground tabular-nums text-xs">
+          <td className="px-4 py-3 text-muted-foreground tabular-nums text-xs">
             {doc.cost != null ? `$${doc.cost.toFixed(3)}` : EMPTY_VALUE}
           </td>
-          <td className="px-4 py-3.5 text-muted-foreground tabular-nums text-xs">
+          <td className="px-4 py-3 text-muted-foreground tabular-nums text-xs">
             {processingDurationMs != null ? `${Math.floor(processingDurationMs / 1000)}s` : EMPTY_VALUE}
           </td>
-          <td className="px-4 py-3.5 text-muted-foreground text-xs">
+          <td className="px-4 py-3 text-muted-foreground text-xs">
             {doc.processingFinishedAt ? formatDate(doc.processingFinishedAt, locale) : EMPTY_VALUE}
           </td>
         </>
       )}
-      <td className="px-4 py-3.5">
+      <td className="px-4 py-3">
         <DocumentStatusBadge doc={doc} t={t} />
       </td>
     </tr>
@@ -360,15 +496,16 @@ function DocumentStatusBadge({ doc, t }: { doc: DocumentItem; t: TFunction }) {
 
   if (progress == null) {
     return (
-      <span className={`status-badge ${badge.cls} whitespace-nowrap`} title={title}>
+      <StatusBadge tone={badge.tone} className="whitespace-nowrap" title={title}>
         {badge.label}
-      </span>
+      </StatusBadge>
     );
   }
 
   return (
-    <span
-      className={`status-badge ${badge.cls} relative isolate min-w-[9.25rem] justify-center overflow-hidden whitespace-nowrap`}
+    <StatusBadge
+      tone={badge.tone}
+      className="relative isolate min-w-[9.25rem] justify-center overflow-hidden whitespace-nowrap"
       title={title}
       aria-label={`${badge.label} ${progress}%`}
     >
@@ -384,7 +521,7 @@ function DocumentStatusBadge({ doc, t }: { doc: DocumentItem; t: TFunction }) {
         <span>{badge.label}</span>
         <span className="tabular-nums">{progress}%</span>
       </span>
-    </span>
+    </StatusBadge>
   );
 }
 
@@ -417,12 +554,12 @@ function SortHeader({
         {label}
         {active ? (
           order === "asc" ? (
-            <ArrowUp className="h-3 w-3 text-primary" />
+            <ArrowUp className="h-3.5 w-3.5 text-primary" />
           ) : (
-            <ArrowDown className="h-3 w-3 text-primary" />
+            <ArrowDown className="h-3.5 w-3.5 text-primary" />
           )
         ) : (
-          <ChevronsUpDown className="h-3 w-3 opacity-0 transition-opacity group-hover:opacity-40" />
+          <ChevronsUpDown className="h-3.5 w-3.5 opacity-0 transition-opacity group-hover:opacity-40" />
         )}
       </button>
     </th>
@@ -463,12 +600,12 @@ function LocalSortHeader({
         </span>
         {active && order ? (
           order === "asc" ? (
-            <ArrowUp className="h-3 w-3 text-accent-strong" />
+            <ArrowUp className="h-3.5 w-3.5 text-accent-strong" />
           ) : (
-            <ArrowDown className="h-3 w-3 text-accent-strong" />
+            <ArrowDown className="h-3.5 w-3.5 text-accent-strong" />
           )
         ) : (
-          <ChevronsUpDown className="h-3 w-3 opacity-0 transition-opacity group-hover:opacity-40" />
+          <ChevronsUpDown className="h-3.5 w-3.5 opacity-0 transition-opacity group-hover:opacity-40" />
         )}
       </button>
     </th>
@@ -481,18 +618,18 @@ function DocumentNameCell({
   sourceUri,
 }: {
   fileName: string;
-  isWebPage?: boolean;
-  sourceUri?: string;
+  isWebPage?: boolean | undefined;
+  sourceUri?: string | undefined;
 }) {
   return (
     <div className="flex min-w-0 items-center gap-3">
       <div
         className={`w-8 h-8 rounded-xl flex items-center justify-center shrink-0 ${
-          isWebPage ? "bg-blue-100 dark:bg-blue-900/30" : "bg-surface-sunken"
+          isWebPage ? "bg-primary/10" : "bg-surface-sunken"
         }`}
       >
         {isWebPage ? (
-          <Globe className="h-3.5 w-3.5 text-blue-600 dark:text-blue-400" />
+          <Globe className="h-3.5 w-3.5 text-primary" />
         ) : (
           <File className="h-3.5 w-3.5 text-muted-foreground" />
         )}
@@ -502,7 +639,7 @@ function DocumentNameCell({
           {fileName}
         </span>
         {isWebPage && sourceUri && sourceUri !== fileName && (
-          <span className="block truncate text-[10px] text-muted-foreground" title={sourceUri}>
+          <span className="block truncate text-2xs text-muted-foreground" title={sourceUri}>
             {sourceUri}
           </span>
         )}

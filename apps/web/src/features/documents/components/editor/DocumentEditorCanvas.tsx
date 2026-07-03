@@ -19,8 +19,8 @@ type DocumentEditorCanvasProps = {
   rawTextEditor: boolean;
   readOnly?: boolean;
   saving: boolean;
-  sourceFormat?: string;
-  sourceHref?: string;
+  sourceFormat?: string | undefined;
+  sourceHref?: string | undefined;
   statusLabel: string;
   surfaceMode: EditorSurfaceMode;
   t: TFunction;
@@ -158,7 +158,7 @@ export function DocumentEditorCanvas({
     return (
       <div className="flex min-h-0 flex-1 p-4 sm:p-6">
         <CanvasStateCard tone="error">
-          <div className="rounded-2xl border border-destructive/20 bg-destructive/5 p-4 text-sm text-destructive">
+          <div className="rounded-xl border border-destructive/20 bg-destructive/5 p-4 text-sm text-destructive">
             {error}
           </div>
         </CanvasStateCard>
@@ -226,7 +226,7 @@ export function DocumentEditorCanvas({
       <div className="flex min-h-0 min-w-0 flex-1 flex-col px-4 py-4 sm:px-6 sm:py-5">
         <div className="mx-auto flex min-h-0 min-w-0 w-full max-w-[96rem] flex-1">
           <iframe
-            className="min-h-[68vh] w-full rounded-[20px] border border-border/70 bg-background shadow-[0_24px_90px_hsl(var(--foreground)/0.08)]"
+            className="min-h-[68vh] w-full rounded-xl border border-border/70 bg-background shadow-[0_24px_90px_hsl(var(--foreground)/0.08)]"
             src={sourceHref}
             title={documentName}
           />
@@ -238,7 +238,7 @@ export function DocumentEditorCanvas({
   return (
     <div className="flex min-h-0 min-w-0 flex-1 flex-col px-4 py-4 sm:px-6 sm:py-5">
       <div className={cn('mx-auto flex min-h-0 min-w-0 w-full flex-1', frameWidthClassName(surfaceMode))}>
-        <div className="flex min-h-0 min-w-0 w-full flex-1 flex-col overflow-hidden rounded-[28px] border border-border/70 bg-background/98 shadow-[0_24px_90px_hsl(var(--foreground)/0.08)]">
+        <div className="flex min-h-0 min-w-0 w-full flex-1 flex-col overflow-hidden rounded-xl border border-border/70 bg-background/98 shadow-[0_24px_90px_hsl(var(--foreground)/0.08)]">
           {error ? (
             <div className="border-b border-destructive/20 bg-destructive/5 px-5 py-3 text-sm text-destructive sm:px-6">
               {error}
@@ -374,7 +374,7 @@ function surfaceContentClassName(surfaceMode: EditorSurfaceMode): string {
 function extractCodeLines(markdown: string): string[] {
   const normalized = markdown.replace(/\r\n?/g, '\n');
   const fencedMatch = normalized.match(/^```[^\n]*\n([\s\S]*?)\n```$/);
-  const codeText = fencedMatch ? fencedMatch[1] : normalized;
+  const codeText = fencedMatch ? fencedMatch[1] ?? '' : normalized;
   const lines = codeText.split('\n');
   return lines.length === 1 && lines[0] === '' ? [''] : lines;
 }
@@ -388,7 +388,7 @@ function CanvasStateCard({ children, tone = 'default' }: CanvasStateCardProps) {
   return (
     <div
       className={cn(
-        'mx-auto flex min-h-[62vh] w-full max-w-[74rem] items-center justify-center rounded-[28px] border bg-background/96 p-6 shadow-[0_20px_70px_hsl(var(--foreground)/0.08)]',
+        'mx-auto flex min-h-[62vh] w-full max-w-[74rem] items-center justify-center rounded-xl border bg-background/96 p-6 shadow-[0_20px_70px_hsl(var(--foreground)/0.08)]',
         tone === 'default' ? 'border-border/70' : 'border-destructive/20',
       )}
     >

@@ -1,25 +1,24 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { AlertTriangle, Brain, CheckCircle2, Database, DollarSign, KeyRound, Link2, Server, Wand2 } from 'lucide-react';
+import type { TFunction } from 'i18next';
+import { AlertTriangle, ArrowRight, CheckCircle2, Database, KeyRound, Link2, Server, Wand2 } from 'lucide-react';
 
 import { Button } from '@/shared/components/ui/button';
 import { FeatureErrorBoundary } from '@/shared/components/FeatureErrorBoundary';
 import { useApp } from '@/shared/contexts/app-context';
 import type { AIScopeKind } from '@/shared/types';
 import { AiBindingWizard } from './ai-configuration/AiBindingWizard';
-import { PricingTab } from './PricingTab';
 import {
-  OPTIONAL_PURPOSES,
   purposeLabel,
   recommendAiConfigSection,
   summarizeAiReadiness,
+  type AiCatalogTab,
   type AiConfigSection,
   type AiReadinessSummary,
 } from '@/features/admin/model/aiConfig';
+import { AccountsSection } from './ai-configuration/AccountsSection';
 import { BindingsSection } from './ai-configuration/BindingsSection';
-import { CredentialsSection } from './ai-configuration/CredentialsSection';
 import { ModelsSection } from './ai-configuration/ModelsSection';
-import { PresetsSection } from './ai-configuration/PresetsSection';
 import { ProvidersSection } from './ai-configuration/ProvidersSection';
 import { ScopePicker } from './ai-configuration/ScopePicker';
 import { useAiConfigQueries } from './ai-configuration/useAiConfigQueries';
@@ -31,50 +30,39 @@ type AiConfigurationPanelProps = {
    * Library Hub "Configure AI →" button route here with a scope + section so the
    * panel opens directly on the binding the operator needs to fix.
    */
-  initialScope?: AIScopeKind;
-  initialSection?: AiConfigSection;
+  initialScope?: AIScopeKind | undefined;
+  initialSection?: AiConfigSection | undefined;
   /** Open the guided binding wizard on mount (first-run / cold-start path). */
   openWizardOnMount?: boolean;
 };
 
-const SETUP_SECTIONS = ['bindings', 'credentials', 'presets'] satisfies AiConfigSection[];
-const CATALOG_SECTIONS = ['providers', 'models', 'pricing'] satisfies AiConfigSection[];
+const SETUP_SECTIONS = ['bindings', 'accounts'] satisfies AiConfigSection[];
 const SECTION_ICONS = {
   bindings: Link2,
-  credentials: KeyRound,
-  presets: Brain,
-  providers: Server,
-  models: Database,
-  pricing: DollarSign,
+  accounts: KeyRound,
+  catalog: Database,
 } satisfies Record<AiConfigSection, typeof Link2>;
 
-function sectionLabel(section: AiConfigSection, t: (key: string) => string) {
+function sectionLabel(section: AiConfigSection, t: TFunction) {
   if (section === 'bindings') return t('admin.aiPanel.sections.bindingsTitle');
-  if (section === 'credentials') return t('admin.credentials');
-  if (section === 'presets') return t('admin.modelPresets');
-  if (section === 'providers') return t('admin.providers');
-  if (section === 'pricing') return t('admin.pricing');
-  return t('admin.aiPanel.metrics.visibleModels');
+  if (section === 'accounts') return t('admin.accounts');
+  return t('admin.aiPanel.navigation.catalogLink');
 }
 
 function sectionMetric(section: AiConfigSection, summary: AiReadinessSummary) {
   if (section === 'bindings') return `${summary.executableEffectiveBindings}/${summary.totalPurposes}`;
-  if (section === 'credentials') return String(summary.localCredentialCount);
-  if (section === 'presets') return String(summary.localPresetCount);
-  if (section === 'providers') return String(summary.providerCatalogCount);
-  if (section === 'pricing') return String(summary.priceRuleCount);
+  if (section === 'accounts') return String(summary.localAccountCount);
   return String(summary.visibleModelCount);
 }
 
 function sectionNeedsAttention(section: AiConfigSection, summary: AiReadinessSummary) {
   if (section === 'bindings') return summary.missingPurposes.length > 0;
-  if (section === 'credentials') return summary.activeCredentialCount === 0;
-  if (section === 'presets') return summary.usablePresetCount === 0;
+  if (section === 'accounts') return summary.activeAccountCount === 0;
   return false;
 }
 
 function readinessTone(summary: AiReadinessSummary) {
-  if (summary.activeCredentialCount === 0 || summary.usablePresetCount === 0) {
+  if (summary.activeAccountCount === 0) {
     return 'warning';
   }
   return summary.missingPurposes.length === 0 ? 'ready' : 'warning';
@@ -84,7 +72,7 @@ type ReadinessPanelProps = {
   activeSection: AiConfigSection;
   summary: AiReadinessSummary;
   onOpenRecommendedSection: (section: AiConfigSection) => void;
-  t: (key: string, options?: Record<string, unknown>) => string;
+  t: TFunction;
 };
 
 function AiReadinessPanel({ activeSection, summary, onOpenRecommendedSection, t }: ReadinessPanelProps) {
@@ -95,19 +83,15 @@ function AiReadinessPanel({ activeSection, summary, onOpenRecommendedSection, t 
   const statusTitle =
     tone === 'ready'
       ? t('admin.aiPanel.readiness.readyTitle')
-      : summary.activeCredentialCount === 0
-        ? t('admin.aiPanel.readiness.missingCredentialsTitle')
-        : summary.usablePresetCount === 0
-          ? t('admin.aiPanel.readiness.missingPresetsTitle')
-          : t('admin.aiPanel.readiness.missingBindingsTitle', { count: summary.missingPurposes.length });
+      : summary.activeAccountCount === 0
+        ? t('admin.aiPanel.readiness.missingAccountsTitle')
+        : t('admin.aiPanel.readiness.missingBindingsTitle', { count: summary.missingPurposes.length });
   const statusDetail =
     tone === 'ready'
       ? t('admin.aiPanel.readiness.readyDetail')
-      : summary.activeCredentialCount === 0
-        ? t('admin.aiPanel.readiness.missingCredentialsDetail')
-        : summary.usablePresetCount === 0
-          ? t('admin.aiPanel.readiness.missingPresetsDetail')
-          : t('admin.aiPanel.readiness.missingBindingsDetail', {
+      : summary.activeAccountCount === 0
+        ? t('admin.aiPanel.readiness.missingAccountsDetail')
+        : t('admin.aiPanel.readiness.missingBindingsDetail', {
             purposes: summary.missingPurposes
               .slice(0, 3)
               .map(purpose => purposeLabel(purpose, t))
@@ -115,7 +99,7 @@ function AiReadinessPanel({ activeSection, summary, onOpenRecommendedSection, t 
           });
 
   return (
-    <div className={`rounded-md border p-3 sm:flex sm:items-center sm:justify-between sm:gap-4 ${
+    <div className={`rounded-xl border p-3 shadow-soft sm:flex sm:items-center sm:justify-between sm:gap-4 ${
       tone === 'ready' ? 'border-status-ready/20 bg-status-ready/5' : 'border-status-warning/25 bg-status-warning/5'
     }`}>
       <div className="flex min-w-0 items-start gap-3">
@@ -127,7 +111,7 @@ function AiReadinessPanel({ activeSection, summary, onOpenRecommendedSection, t 
         <div className="min-w-0">
           <div className="flex flex-wrap items-center gap-2">
             <h3 className="text-sm font-bold tracking-tight">{statusTitle}</h3>
-            <span className={`rounded-full px-2 py-0.5 text-[11px] font-bold ${
+            <span className={`rounded-full px-2 py-0.5 text-2xs font-bold ${
               tone === 'ready' ? 'bg-status-ready-bg text-status-ready' : 'bg-status-warning-bg text-status-warning'
             }`}>
               {summary.executableEffectiveBindings}/{summary.totalPurposes}
@@ -155,7 +139,7 @@ type SectionNavigationProps = {
   activeSection: AiConfigSection;
   summary: AiReadinessSummary;
   onSelectSection: (section: AiConfigSection) => void;
-  t: (key: string, options?: Record<string, unknown>) => string;
+  t: TFunction;
 };
 
 function AiSectionNavigation({ activeSection, summary, onSelectSection, t }: SectionNavigationProps) {
@@ -163,6 +147,7 @@ function AiSectionNavigation({ activeSection, summary, onSelectSection, t }: Sec
     const Icon = SECTION_ICONS[section];
     const active = activeSection === section;
     const needsAttention = sectionNeedsAttention(section, summary);
+    const isBindings = section === 'bindings';
 
     return (
       <button
@@ -170,35 +155,24 @@ function AiSectionNavigation({ activeSection, summary, onSelectSection, t }: Sec
         type="button"
         aria-current={active ? 'page' : undefined}
         onClick={() => onSelectSection(section)}
-        className={`flex min-h-[4.5rem] min-w-0 items-start gap-3 rounded-md border p-3 text-left transition sm:min-h-[4rem] lg:min-h-0 ${
+        className={`flex min-h-11 min-w-0 items-center gap-2 rounded-lg border px-3 py-2 text-left transition-colors ${
           active
-            ? 'border-primary bg-primary text-primary-foreground shadow-sm'
-            : 'border-border/70 bg-background hover:border-primary/30 hover:bg-muted/60'
+            ? 'border-primary/30 bg-accent/10 text-foreground ring-1 ring-primary/30 shadow-soft'
+            : 'border-border/70 bg-card text-foreground hover:border-primary/20 hover:bg-muted/60'
         }`}
       >
-        <span className={`mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-md ${
-          active ? 'bg-primary-foreground/15 text-primary-foreground' : 'bg-muted text-muted-foreground'
+        <span className={`flex h-7 w-7 shrink-0 items-center justify-center rounded-md ${
+          active ? 'bg-primary/10 text-primary' : 'bg-muted text-muted-foreground'
         }`}>
           <Icon className="h-4 w-4" />
         </span>
-        <span className="min-w-0 flex-1">
-          <span className="flex min-w-0 items-center justify-between gap-2">
-            <span className="truncate text-sm font-bold">{sectionLabel(section, t)}</span>
-            <span className={`shrink-0 rounded-full px-2 py-0.5 text-[11px] font-bold ${
-              active
-                ? 'bg-primary-foreground/15 text-primary-foreground'
-                : needsAttention
-                  ? 'bg-status-warning-bg text-status-warning'
-                  : 'bg-muted text-muted-foreground'
-            }`}>
-              {sectionMetric(section, summary)}
-            </span>
-          </span>
-          <span className={`mt-1 block text-xs leading-4 ${
-            active ? 'text-primary-foreground/80' : 'text-muted-foreground'
-          }`}>
-            {t(`admin.aiPanel.navigation.descriptions.${section}`)}
-          </span>
+        <span className="min-w-0 flex-1 truncate text-sm font-bold">{sectionLabel(section, t)}</span>
+        <span className={`shrink-0 tabular-nums ${
+          isBindings
+            ? `text-xs font-semibold ${needsAttention ? 'text-status-warning' : 'text-muted-foreground'}`
+            : 'text-xs text-muted-foreground'
+        }`}>
+          {sectionMetric(section, summary)}
         </span>
       </button>
     );
@@ -207,27 +181,87 @@ function AiSectionNavigation({ activeSection, summary, onSelectSection, t }: Sec
   return (
     <nav
       aria-label={t('admin.aiPanel.navigation.label')}
-      className="rounded-md border border-border/70 bg-card p-2 lg:sticky lg:top-3"
+      className="workbench-surface space-y-3 p-3"
     >
-      <div className="space-y-3">
-        <div>
-          <div className="px-1 pb-1 text-[11px] font-bold uppercase tracking-wide text-muted-foreground">
-            {t('admin.aiPanel.navigation.setupGroup')}
-          </div>
-          <div className="grid gap-2 sm:grid-cols-3 lg:grid-cols-1">
-            {SETUP_SECTIONS.map(renderSectionButton)}
-          </div>
+      <div className="space-y-2">
+        <div className="section-label text-muted-foreground">
+          {t('admin.aiPanel.navigation.setupGroup')}
         </div>
-        <div>
-          <div className="px-1 pb-1 text-[11px] font-bold uppercase tracking-wide text-muted-foreground">
-            {t('admin.aiPanel.navigation.catalogGroup')}
-          </div>
-          <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-1">
-            {CATALOG_SECTIONS.map(renderSectionButton)}
-          </div>
+        <div className="grid gap-2 sm:grid-cols-2">
+          {SETUP_SECTIONS.map(renderSectionButton)}
         </div>
       </div>
+      <button
+        type="button"
+        aria-current={activeSection === 'catalog' ? 'page' : undefined}
+        onClick={() => onSelectSection('catalog')}
+        className={`inline-flex items-center gap-1.5 text-sm font-semibold transition-colors ${
+          activeSection === 'catalog' ? 'text-primary' : 'text-muted-foreground hover:text-primary'
+        }`}
+      >
+        {t('admin.aiPanel.navigation.catalogLink')}
+        <ArrowRight className="h-3.5 w-3.5" />
+      </button>
     </nav>
+  );
+}
+
+type CatalogSectionProps = {
+  catalogTab: AiCatalogTab;
+  onCatalogTabChange: (tab: AiCatalogTab) => void;
+  aiConfig: ReturnType<typeof useAiConfigQueries>;
+  activeWorkspaceId: string | undefined;
+  t: TFunction;
+};
+
+function CatalogSection({ catalogTab, onCatalogTabChange, aiConfig, activeWorkspaceId, t }: CatalogSectionProps) {
+  const tabs: Array<{ key: AiCatalogTab; icon: typeof Server; label: string }> = [
+    { key: 'providers', icon: Server, label: t('admin.providers') },
+    { key: 'models', icon: Database, label: t('admin.aiPanel.metrics.visibleModels') },
+  ];
+  return (
+    <div className="flex min-h-0 flex-1 flex-col gap-3">
+      <div className="flex gap-2">
+        {tabs.map(tab => {
+          const Icon = tab.icon;
+          const active = catalogTab === tab.key;
+          return (
+            <button
+              key={tab.key}
+              type="button"
+              aria-current={active ? 'page' : undefined}
+              onClick={() => onCatalogTabChange(tab.key)}
+              className={`inline-flex items-center gap-1.5 rounded-lg border px-3 py-1.5 text-sm font-semibold transition-colors ${
+                active
+                  ? 'border-primary/30 bg-accent/10 text-foreground ring-1 ring-primary/30'
+                  : 'border-border/70 bg-card text-muted-foreground hover:border-primary/20 hover:text-foreground'
+              }`}
+            >
+              <Icon className="h-3.5 w-3.5" />
+              {tab.label}
+            </button>
+          );
+        })}
+      </div>
+      <div className="flex min-h-0 flex-1 flex-col">
+        {catalogTab === 'providers' ? (
+          <ProvidersSection
+            providersState={aiConfig.providersState}
+            models={aiConfig.models}
+            accounts={aiConfig.localAccounts}
+            invalidateAll={aiConfig.invalidateAll}
+          />
+        ) : (
+          <ModelsSection
+            modelsState={aiConfig.modelsState}
+            providers={aiConfig.providers}
+            prices={aiConfig.prices}
+            activeWorkspaceId={activeWorkspaceId}
+            invalidateAll={aiConfig.invalidateAll}
+          />
+        )}
+      </div>
+    </div>
   );
 }
 
@@ -241,8 +275,8 @@ export default function AiConfigurationPanel({
   const { activeWorkspace, activeLibrary } = useApp();
   const [selectedScope, setSelectedScope] = useState<AIScopeKind>(initialScope ?? 'instance');
   const [activeSection, setActiveSection] = useState<AiConfigSection>(initialSection ?? 'bindings');
-  const [credentialAddRequest, setCredentialAddRequest] = useState(0);
-  const [presetAddRequest, setPresetAddRequest] = useState(0);
+  const [catalogTab, setCatalogTab] = useState<AiCatalogTab>('providers');
+  const [accountAddRequest, setAccountAddRequest] = useState(0);
   const [wizardOpen, setWizardOpen] = useState(false);
   // When a deep-link arrives, opt out of the panel's own scope auto-selection
   // so we honor the requested scope (e.g. a library Fix link) instead.
@@ -266,10 +300,8 @@ export default function AiConfigurationPanel({
   const readinessSummary = useMemo(
     () => summarizeAiReadiness({
       selectedScope,
-      availableCredentials: aiConfig.availableCredentials,
-      localCredentials: aiConfig.localCredentials,
-      availablePresets: aiConfig.availablePresets,
-      localPresets: aiConfig.localPresets,
+      availableAccounts: aiConfig.availableAccounts,
+      localAccounts: aiConfig.localAccounts,
       bindingsForScope: aiConfig.bindingsForScope,
       instanceBindings: aiConfig.instanceBindings,
       workspaceBindings: aiConfig.workspaceBindings,
@@ -302,7 +334,7 @@ export default function AiConfigurationPanel({
       return;
     }
     const hasInstanceBaseline =
-      aiConfig.instanceBindings.length > 0 || aiConfig.localCredentials.length > 0 || aiConfig.localPresets.length > 0;
+      aiConfig.instanceBindings.length > 0 || aiConfig.localAccounts.length > 0;
     if (hasInstanceBaseline) {
       autoSelectedScopeRef.current = true;
       return;
@@ -326,26 +358,43 @@ export default function AiConfigurationPanel({
 
   const openRecommendedSection = (section: AiConfigSection) => {
     setActiveSection(section);
-    if (section === 'credentials') {
-      setCredentialAddRequest(request => request + 1);
-    }
-    if (section === 'presets') {
-      setPresetAddRequest(request => request + 1);
+    if (section === 'accounts') {
+      setAccountAddRequest(request => request + 1);
     }
   };
 
   const section = activeSection === 'bindings' ? (
-    <BindingsSection selectedScope={selectedScope} scopeContext={aiConfig.scopeContext} bindingsState={aiConfig.bindingsState} availableCredentials={aiConfig.availableCredentials} availablePresets={aiConfig.availablePresets} localCredentials={aiConfig.localCredentials} localPresets={aiConfig.localPresets} bindingsForScope={aiConfig.bindingsForScope} instanceBindings={aiConfig.instanceBindings} workspaceBindings={aiConfig.workspaceBindings} modelById={aiConfig.modelById} invalidateAll={aiConfig.invalidateAll} />
-  ) : activeSection === 'credentials' ? (
-    <CredentialsSection selectedScope={selectedScope} scopeContext={aiConfig.scopeContext} providers={aiConfig.providers} credentialsState={aiConfig.credentialsState} invalidateAll={aiConfig.invalidateAll} openAddRequest={credentialAddRequest} />
-  ) : activeSection === 'presets' ? (
-    <PresetsSection selectedScope={selectedScope} scopeContext={aiConfig.scopeContext} providers={aiConfig.providers} models={aiConfig.models} presetsState={aiConfig.presetsState} modelById={aiConfig.modelById} invalidateAll={aiConfig.invalidateAll} openAddRequest={presetAddRequest} />
-  ) : activeSection === 'providers' ? (
-    <ProvidersSection providersState={aiConfig.providersState} models={aiConfig.models} credentials={aiConfig.localCredentials} invalidateAll={aiConfig.invalidateAll} />
-  ) : activeSection === 'pricing' ? (
-    <PricingTab t={t} activeWorkspaceId={activeWorkspace?.id} active />
+    <BindingsSection
+      selectedScope={selectedScope}
+      scopeContext={aiConfig.scopeContext}
+      bindingsState={aiConfig.bindingsState}
+      availableAccounts={aiConfig.availableAccounts}
+      localAccounts={aiConfig.localAccounts}
+      models={aiConfig.models}
+      prices={aiConfig.prices}
+      bindingsForScope={aiConfig.bindingsForScope}
+      instanceBindings={aiConfig.instanceBindings}
+      workspaceBindings={aiConfig.workspaceBindings}
+      modelById={aiConfig.modelById}
+      invalidateAll={aiConfig.invalidateAll}
+    />
+  ) : activeSection === 'accounts' ? (
+    <AccountsSection
+      selectedScope={selectedScope}
+      scopeContext={aiConfig.scopeContext}
+      providers={aiConfig.providers}
+      accountsState={aiConfig.accountsState}
+      invalidateAll={aiConfig.invalidateAll}
+      openAddRequest={accountAddRequest}
+    />
   ) : (
-    <ModelsSection modelsState={aiConfig.modelsState} providers={aiConfig.providers} invalidateAll={aiConfig.invalidateAll} />
+    <CatalogSection
+      catalogTab={catalogTab}
+      onCatalogTabChange={setCatalogTab}
+      aiConfig={aiConfig}
+      activeWorkspaceId={activeWorkspace?.id}
+      t={t}
+    />
   );
 
   if (!active) {
@@ -353,26 +402,32 @@ export default function AiConfigurationPanel({
   }
 
   return (
-    <div className="flex flex-1 min-h-0 flex-col gap-4 overflow-auto lg:overflow-visible">
-      <div className="flex flex-col gap-3 xl:flex-row xl:items-center xl:justify-between">
-        <div className="flex items-center gap-3">
-          <h2 className="text-base font-bold tracking-tight">{t('admin.aiPanel.title')}</h2>
+    <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-auto">
+      <div className="workbench-surface p-3">
+        <div className="flex flex-col gap-3 xl:flex-row xl:items-center xl:justify-between">
           <Button type="button" size="sm" onClick={() => setWizardOpen(true)}>
             <Wand2 className="mr-1.5 h-3.5 w-3.5" />
             {t('admin.aiWizard.launch')}
           </Button>
+          <ScopePicker selectedScope={selectedScope} activeWorkspaceName={activeWorkspace?.name} activeLibraryName={activeLibrary?.name} onScopeChange={setSelectedScope} />
         </div>
-        <ScopePicker selectedScope={selectedScope} activeWorkspaceName={activeWorkspace?.name} activeLibraryName={activeLibrary?.name} onScopeChange={setSelectedScope} />
       </div>
       <AiBindingWizard
         open={wizardOpen}
         onOpenChange={setWizardOpen}
-        summary={readinessSummary}
         selectedScope={selectedScope}
+        scopeContext={aiConfig.scopeContext}
         activeWorkspaceName={activeWorkspace?.name}
         activeLibraryName={activeLibrary?.name}
         onScopeChange={setSelectedScope}
-        onOpenSection={openRecommendedSection}
+        availableAccounts={aiConfig.availableAccounts}
+        providers={aiConfig.providers}
+        models={aiConfig.models}
+        prices={aiConfig.prices}
+        bindingsForScope={aiConfig.bindingsForScope}
+        instanceBindings={aiConfig.instanceBindings}
+        workspaceBindings={aiConfig.workspaceBindings}
+        invalidateAll={aiConfig.invalidateAll}
       />
       <AiReadinessPanel
         activeSection={activeSection}
@@ -381,7 +436,7 @@ export default function AiConfigurationPanel({
         onOpenRecommendedSection={openRecommendedSection}
       />
       {readinessSummary.missingOptionalPurposes.length > 0 && (
-        <div className="rounded-md border border-status-warning/25 bg-status-warning/5 p-3 flex items-start gap-3">
+        <div className="flex items-start gap-3 rounded-xl border border-status-warning/25 bg-status-warning/5 p-3 shadow-soft">
           <AlertTriangle className="mt-0.5 h-5 w-5 shrink-0 text-status-warning" />
           <div className="min-w-0">
             <p className="text-sm font-bold text-status-warning">
@@ -397,7 +452,7 @@ export default function AiConfigurationPanel({
           </div>
         </div>
       )}
-      <div className="grid gap-4 lg:flex-1 lg:min-h-0 lg:grid-cols-[18rem_minmax(0,1fr)] lg:items-stretch">
+      <div className="flex min-h-0 flex-1 flex-col gap-3">
         <AiSectionNavigation
           activeSection={activeSection}
           summary={readinessSummary}

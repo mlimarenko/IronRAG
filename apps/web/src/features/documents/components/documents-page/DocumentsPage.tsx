@@ -4,6 +4,8 @@ import { useNavigate } from "react-router-dom";
 
 import { useApp } from "@/shared/contexts/app-context";
 import { useCan } from "@/shared/auth/useCan";
+import { DataView } from "@/shared/components/layout/DataView";
+import { PageShell } from "@/shared/components/layout/PageShell";
 
 import { DocumentsPageHeader } from "@/features/documents/components/DocumentsPageHeader";
 
@@ -82,32 +84,66 @@ export function DocumentsPage() {
   if (!activeLibrary) return <NoLibraryState t={t} />;
 
   return (
-    <div className="flex-1 flex flex-col overflow-hidden">
-      <DocumentsPageHeader
-        activeLibraryName={activeLibrary.name}
-        activeTab={activeTab}
-        canUpload={canUpload}
-        documentsCount={documents.totalCount ?? documents.items.length}
-        fileInputRef={uploadQueue.fileInputRef}
-        folderInputRef={uploadQueue.folderInputRef}
-        handleFileSelect={uploadQueue.handleFileSelect}
-        handleFolderSelect={uploadQueue.handleFolderSelect}
-        hasActiveWebRun={hasActiveWebRun}
-        onRefreshWebRuns={() => void webIngest.refreshWebRuns()}
-        setActiveTab={setActiveTab}
-        setAddLinkOpen={webIngest.setAddLinkOpen}
-        setBoundaryPolicy={webIngest.setBoundaryPolicy}
-        setCrawlMode={webIngest.setCrawlMode}
-        setMaxDepth={webIngest.setMaxDepth}
-        setMaxPages={webIngest.setMaxPages}
-        setSeedUrl={webIngest.setSeedUrl}
-        t={t}
-        webRunsCount={webIngest.webRuns.length}
-        webRunsRefreshing={webIngest.webRunsRefreshing}
-        ingestionReady={activeLibrary.ingestionReady}
-        onOpenAiSettings={() => navigate("/admin/ai")}
-      />
-      <div className="flex-1 flex overflow-hidden">
+    <PageShell
+      bodyClassName="flex flex-col"
+      header={
+        <DocumentsPageHeader
+          activeTab={activeTab}
+          canUpload={canUpload}
+          documentsCount={documents.totalCount ?? documents.items.length}
+          fileInputRef={uploadQueue.fileInputRef}
+          folderInputRef={uploadQueue.folderInputRef}
+          handleFileSelect={uploadQueue.handleFileSelect}
+          handleFolderSelect={uploadQueue.handleFolderSelect}
+          hasActiveWebRun={hasActiveWebRun}
+          onRefreshWebRuns={() => void webIngest.refreshWebRuns()}
+          setActiveTab={setActiveTab}
+          setAddLinkOpen={webIngest.setAddLinkOpen}
+          setBoundaryPolicy={webIngest.setBoundaryPolicy}
+          setCrawlMode={webIngest.setCrawlMode}
+          setMaxDepth={webIngest.setMaxDepth}
+          setMaxPages={webIngest.setMaxPages}
+          setSeedUrl={webIngest.setSeedUrl}
+          t={t}
+          webRunsCount={webIngest.webRuns.length}
+          webRunsRefreshing={webIngest.webRunsRefreshing}
+          ingestionReady={activeLibrary.ingestionReady}
+          onOpenAiSettings={() => navigate("/admin/ai")}
+        />
+      }
+    >
+      <DataView
+        className="flex-1"
+        inspector={
+          activeTab === "documents" && documents.selectedDoc ? (
+            <InspectorSection
+              activateListPollGrace={documents.activateListPollGrace}
+              canEdit={canEdit}
+              canDelete={canDelete}
+              clearSelectedDoc={documents.clearSelectedDoc}
+              errorMessage={documents.errorMessage}
+              documentHintEditable={documentHintEditable}
+              fetchSelectedDetail={documents.fetchSelectedDetail}
+              inspectorLifecycle={documents.inspectorLifecycle}
+              loadFirstPage={documents.loadFirstPage}
+              locale={locale}
+              selectedDoc={documents.selectedDoc}
+              selectionMode={selectionMode}
+              selectDoc={documents.selectDoc}
+              t={t}
+              updateDocumentHintLocally={documents.updateDocumentHintLocally}
+              updateSearchParamState={urlState.updateSearchParamState}
+            />
+          ) : null
+        }
+        inspectorCloseLabel={t("common.close")}
+        inspectorLabel={documents.selectedDoc?.fileName ?? t("documents.title")}
+        inspectorOpen={activeTab === "documents" && documents.selectedDoc != null}
+        showDrawerHeader={false}
+        onInspectorOpenChange={(open) => {
+          if (!open) documents.clearSelectedDoc();
+        }}
+      >
         {activeTab === "documents" ? (
           <div className="flex flex-1 min-w-0 flex-col">
             <DocumentsListSection
@@ -150,26 +186,8 @@ export function DocumentsPage() {
             <WebIngestSection controller={webIngest} t={t} />
           </div>
         )}
-        <InspectorSection
-          activateListPollGrace={documents.activateListPollGrace}
-          canEdit={canEdit}
-          canDelete={canDelete}
-          clearSelectedDoc={documents.clearSelectedDoc}
-          errorMessage={documents.errorMessage}
-          documentHintEditable={documentHintEditable}
-          fetchSelectedDetail={documents.fetchSelectedDetail}
-          inspectorLifecycle={documents.inspectorLifecycle}
-          loadFirstPage={documents.loadFirstPage}
-          locale={locale}
-          selectedDoc={documents.selectedDoc}
-          selectionMode={selectionMode}
-          selectDoc={documents.selectDoc}
-          t={t}
-          updateDocumentHintLocally={documents.updateDocumentHintLocally}
-          updateSearchParamState={urlState.updateSearchParamState}
-        />
-      </div>
+      </DataView>
       <UploadQueueSection controller={uploadQueue} t={t} />
-    </div>
+    </PageShell>
   );
 }

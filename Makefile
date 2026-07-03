@@ -129,7 +129,7 @@ frontend-lint:
 	cd apps/web && npx eslint .
 
 frontend-typecheck:
-	cd apps/web && npx tsc --noEmit
+	cd apps/web && npx tsc -b --noEmit
 
 frontend-test:
 	cd apps/web && npx vitest run
@@ -160,6 +160,17 @@ frontend-size-limit:
 frontend-i18n-audit:
 	cd apps/web && node scripts/i18n-audit.mjs
 
+# Redesign guardrail (.omc/autopilot/design-rules.md R1): no raw Tailwind
+# palette color literals in feature/app code. Status meaning routes through the
+# semantic .status-*/--status-* tokens; the accent routes through --primary. A
+# raw `bg-amber-50`/`text-emerald-600`/... is how pages drifted "slightly
+# different" — a warning was amber on one page and status-warning on another.
+frontend-color-gate:
+	@if grep -rEn '(text|bg|border|ring|from|to|via)-(amber|yellow|orange|emerald|green|teal|lime|red|rose|blue|sky|cyan|violet|purple|indigo|pink|slate|gray|zinc|neutral)-[0-9]' apps/web/src/features apps/web/src/app --include='*.tsx' --include='*.ts'; then \
+		echo 'ERROR: raw Tailwind palette color literal above — use .status-*/--status-* or --primary tokens (see .omc/autopilot/design-rules.md R1)'; \
+		exit 1; \
+	fi
+
 frontend-deadcode:
 	cd apps/web && npx knip --reporter compact
 
@@ -174,7 +185,7 @@ frontend-mocks-regen:
 # eslint.config.js — Sprint 2d's no-restricted-syntax + the typecheck and
 # bundle-budget gates) keep the gate green; the lint pass tolerates the
 # residual fast-refresh / strict-react-hooks warnings tracked separately.
-frontend-check: frontend-lint frontend-typecheck frontend-test frontend-build frontend-bundle-check
+frontend-check: frontend-lint frontend-typecheck frontend-color-gate frontend-test frontend-build frontend-bundle-check
 
 helm-chart-check:
 	scripts/minikube/render-all.sh

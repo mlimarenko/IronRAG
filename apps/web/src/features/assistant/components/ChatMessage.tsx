@@ -19,15 +19,15 @@ import { VerificationChip } from './VerificationChip';
 type ChatMessageProps = {
   t: TFunction;
   message: AssistantMessage;
-  responseMs?: number;
+  responseMs?: number | undefined;
   /** Total distinct evidence sources (segments + entities) backing this answer. */
-  totalSourceCount?: number;
+  totalSourceCount?: number | undefined;
   /** Opens the evidence/citations panel scoped to this message. */
-  onOpenEvidence?: () => void;
+  onOpenEvidence?: (() => void) | undefined;
   /** Opens the debug inspector for this turn (developer mode only). */
-  onInspect?: () => void;
+  onInspect?: (() => void) | undefined;
   /** When true, surfaces the per-message debug affordance. */
-  developerMode?: boolean;
+  developerMode?: boolean | undefined;
 };
 
 type AnswerSourceLink = {
@@ -130,7 +130,7 @@ function activityStatus(
 
 function renderActivityIcon(event: AssistantAgentActivityEvent | undefined) {
   const className = `h-4 w-4 ${
-    event?.type === 'persisting' ? 'text-emerald-600' : 'text-primary'
+    event?.type === 'persisting' ? 'text-status-ready' : 'text-primary'
   }`;
   if (event?.type?.startsWith('tool_call')) return <Wrench className={className} />;
   if (event?.type === 'model_request' || event?.type === 'model_response') {
@@ -173,7 +173,7 @@ function PendingAssistantActivity({
   startedAt,
   t,
 }: {
-  events?: AssistantAgentActivityEvent[];
+  events?: AssistantAgentActivityEvent[] | undefined;
   live?: boolean;
   startedAt: string;
   t: TFunction;
@@ -187,7 +187,7 @@ function PendingAssistantActivity({
 
   const startedAtMs = Date.parse(startedAt);
   const elapsed = Number.isFinite(startedAtMs) ? now - startedAtMs : 0;
-  const latest = events.at(-1);
+  const latest = events[events.length - 1];
   const latestLabel = activityHeadline(latest, t);
   const statusLabel = activityStatus(latest, live, t);
 
@@ -208,7 +208,7 @@ function PendingAssistantActivity({
               <div className="truncate text-sm font-semibold tracking-tight text-foreground">
                 {latestLabel}
               </div>
-              <div className="mt-1 flex items-center gap-1.5 text-[11px] text-muted-foreground">
+              <div className="mt-1 flex items-center gap-1.5 text-2xs text-muted-foreground">
                 <span
                   className={`h-1.5 w-1.5 rounded-full ${
                     live ? 'bg-primary' : 'bg-status-ready'
@@ -217,7 +217,7 @@ function PendingAssistantActivity({
                 <span className="truncate">{statusLabel}</span>
               </div>
             </div>
-            <span className="shrink-0 rounded-md border border-border/70 bg-background/70 px-2 py-1 font-mono text-[11px] tabular-nums text-muted-foreground">
+            <span className="shrink-0 rounded-md border border-border/70 bg-background/70 px-2 py-1 font-mono text-2xs tabular-nums text-muted-foreground">
               {formatElapsed(elapsed)}
             </span>
           </div>
@@ -302,12 +302,12 @@ function CopyAnswerButton({ t, content }: { t: TFunction; content: string }) {
       onClick={handleCopy}
       aria-label={copied ? t('assistant.copied') : t('assistant.copyAnswer')}
       title={copied ? t('assistant.copied') : t('assistant.copyAnswer')}
-      className="inline-flex items-center gap-1 rounded-md border border-border/50 bg-background/60 px-1.5 py-0.5 text-[10px] font-semibold text-muted-foreground transition-colors hover:bg-accent/60 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-1"
+      className="inline-flex items-center gap-1 rounded-md border border-border/50 bg-background/60 px-1.5 py-0.5 text-2xs font-semibold text-muted-foreground transition-colors hover:bg-accent/60 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-1"
     >
       {copied ? (
-        <Check className="h-3 w-3 text-status-ready" aria-hidden="true" />
+        <Check className="h-3.5 w-3.5 text-status-ready" aria-hidden="true" />
       ) : (
-        <Copy className="h-3 w-3" aria-hidden="true" />
+        <Copy className="h-3.5 w-3.5" aria-hidden="true" />
       )}
       <span>{copied ? t('assistant.copied') : t('assistant.copyAnswer')}</span>
     </button>
@@ -342,7 +342,7 @@ function ChatMessageImpl({
     ? 'max-w-[80%]'
     : isPendingAssistant
       ? 'w-full max-w-[560px]'
-      : 'max-w-[80%]';
+      : 'w-full max-w-3xl';
 
   const timestampFormatted = message.timestamp ? formatTimestamp(message.timestamp) : '';
   const showTimestamp = Boolean(timestampFormatted) && !isPendingAssistant;
@@ -352,22 +352,15 @@ function ChatMessageImpl({
     <div className={`flex flex-col gap-0.5 ${isUser ? 'items-end' : 'items-start'} animate-fade-in`}>
       <div
         className={`${messageWidthClass} ${
-          isUser ? 'text-primary-foreground rounded-2xl rounded-br-sm px-4 py-3' : 'space-y-2'
-        }`}
-        style={
           isUser
-            ? {
-                background:
-                  'linear-gradient(135deg, hsl(var(--primary)), hsl(224 76% 42%))',
-                boxShadow: '0 2px 8px -2px hsl(var(--primary) / 0.4)',
-              }
-            : undefined
-        }
+            ? 'rounded-xl rounded-br-sm bg-primary px-4 py-3 text-primary-foreground shadow-soft'
+            : 'space-y-2'
+        }`}
       >
         <div
           className={`text-sm leading-relaxed ${
             !isUser && !isPendingAssistant
-              ? 'bg-card border rounded-2xl rounded-bl-sm px-4 py-3 shadow-soft'
+              ? 'bg-card border rounded-xl rounded-bl-sm px-4 py-3 shadow-soft'
               : ''
           }`}
         >
@@ -385,7 +378,7 @@ function ChatMessageImpl({
               </ReactMarkdown>
               {sourceLinks.length > 0 && (
                 <div className="not-prose mt-3 rounded-lg border border-dashed border-primary/25 bg-primary/[0.03] px-3 py-2.5">
-                  <div className="mb-2 text-[11px] font-semibold uppercase text-muted-foreground">
+                  <div className="mb-2 section-label">
                     {t('assistant.sources')}
                   </div>
                   <div className="flex flex-wrap gap-1.5">
@@ -399,9 +392,9 @@ function ChatMessageImpl({
                         title={link.label}
                       >
                         {link.kind === 'stored_document' ? (
-                          <FileText className="h-3 w-3 shrink-0" />
+                          <FileText className="h-3.5 w-3.5 shrink-0" />
                         ) : (
-                          <ExternalLink className="h-3 w-3 shrink-0" />
+                          <ExternalLink className="h-3.5 w-3.5 shrink-0" />
                         )}
                         <span className="min-w-0 truncate">{link.label}</span>
                       </a>
@@ -412,7 +405,7 @@ function ChatMessageImpl({
                         onClick={onOpenEvidence}
                         className="inline-flex items-center gap-1 rounded-md border border-primary/40 bg-primary/10 px-2 py-1 text-xs font-bold text-primary transition-colors hover:bg-primary/15 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
                       >
-                        <Layers className="h-3 w-3 shrink-0" aria-hidden="true" />
+                        <Layers className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
                         {hiddenSourceCount > 0
                           ? t('assistant.seeAllSources', { count: totalSourceCount ?? 0 })
                           : t('assistant.viewEvidence')}
@@ -435,7 +428,9 @@ function ChatMessageImpl({
         <VerificationChip
           t={t}
           state={vcState}
-          warnings={message.evidence?.verificationWarnings}
+          {...(message.evidence?.verificationWarnings
+            ? { warnings: message.evidence.verificationWarnings }
+            : {})}
           className="mt-1.5"
         />
       )}
@@ -448,9 +443,9 @@ function ChatMessageImpl({
               onClick={onInspect}
               aria-label={t('assistant.inspectTurn')}
               title={t('assistant.inspectTurn')}
-              className="inline-flex items-center gap-1 rounded-md border border-border/50 bg-background/60 px-1.5 py-0.5 text-[10px] font-semibold text-muted-foreground transition-colors hover:bg-accent/60 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-1"
+              className="inline-flex items-center gap-1 rounded-md border border-border/50 bg-background/60 px-1.5 py-0.5 text-2xs font-semibold text-muted-foreground transition-colors hover:bg-accent/60 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-1"
             >
-              <Bug className="h-3 w-3" aria-hidden="true" />
+              <Bug className="h-3.5 w-3.5" aria-hidden="true" />
               <span>{t('assistant.inspectTurn')}</span>
             </button>
           )}
@@ -461,13 +456,13 @@ function ChatMessageImpl({
           {showTimestamp && (
             <time
               dateTime={message.timestamp}
-              className="font-mono text-[10px] tabular-nums text-muted-foreground/60"
+              className="font-mono text-2xs tabular-nums text-muted-foreground/60"
             >
               {t('assistant.messageTimestamp', { time: timestampFormatted })}
             </time>
           )}
           {showLatency && responseMs != null && (
-            <span className="rounded border border-border/50 bg-background/60 px-1.5 py-0.5 font-mono text-[10px] tabular-nums text-muted-foreground/70">
+            <span className="rounded border border-border/50 bg-background/60 px-1.5 py-0.5 font-mono text-2xs tabular-nums text-muted-foreground/70">
               {t('assistant.messageLatency', { duration: formatLatency(responseMs) })}
             </span>
           )}

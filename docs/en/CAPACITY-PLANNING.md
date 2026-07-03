@@ -114,43 +114,20 @@ derives the API count from `api.replicaCount + 1` and the worker count from
 Scale-out is safe at any time: workers claim queued jobs with
 `SELECT … FOR UPDATE SKIP LOCKED` under per-library, per-workspace and global
 concurrency caps, so two workers never pick up the same job and no library is
-over-subscribed. The default queue caps are:
+over-subscribed. The default caps are deliberately conservative:
 
 ```text
-IRONRAG_INGESTION_MAX_PARALLEL_JOBS_GLOBAL=16
-IRONRAG_INGESTION_MAX_PARALLEL_JOBS_PER_WORKSPACE=8
-IRONRAG_INGESTION_MAX_PARALLEL_JOBS_PER_LIBRARY=4
+IRONRAG_INGESTION_MAX_PARALLEL_JOBS_GLOBAL=4
+IRONRAG_INGESTION_MAX_PARALLEL_JOBS_PER_WORKSPACE=2
+IRONRAG_INGESTION_MAX_PARALLEL_JOBS_PER_LIBRARY=1
 ```
 
-On Helm, set the same ceilings with
-`app.ingestionMaxParallelJobsGlobal`,
-`app.ingestionMaxParallelJobsPerWorkspace`, and
-`app.ingestionMaxParallelJobsPerLibrary`.
-
-Those are deployment-wide ceilings, not a guarantee that one worker process can
-run 16 jobs at once. Each worker also applies a memory-derived local claim cap
-from its cgroup soft limit before it asks Postgres for more canonical ingest
-jobs. This keeps memory-heavy extraction or graph-merge jobs from stacking in
-one process on a swapless host. Raising the ingest caps is useful only when the
-host, worker memory limit, worker replica count, database connection budget, and
-provider concurrency budget are sized together.
-
-For a 16 GiB host that should keep the default `16 / 8 / 4` queue caps busy,
-prefer several moderate workers over one very large worker. A typical starting
-point is:
-
-```bash
-IRONRAG_WORKER_REPLICAS=4 \
-  IRONRAG_WORKER_MEMORY_LIMIT=2560M \
-  IRONRAG_DATABASE_MAX_CONNECTIONS=50 \
-  docker compose up -d
-```
-
-With those values, each worker has enough memory and DB pool headroom to lease
-roughly four jobs, while the database queue still enforces 16 globally, 8 per
-workspace, and 4 per library. If the visible leased count stops below 16, check
-whether all available queued jobs are in one workspace or library before raising
-caps.
+Each worker also applies a memory-derived local claim cap from its cgroup soft
+limit before it asks Postgres for more canonical ingest jobs. This keeps
+memory-heavy extraction or graph-merge jobs from stacking in one process on a
+swapless host. Raising `IRONRAG_WORKER_REPLICAS` or the ingest caps is useful
+only when the host, worker memory limit, database connection budget, and
+provider concurrency budget are raised together.
 
 Each worker keeps its own `IRONRAG_WORKER_MEMORY_LIMIT` budget, so size the
 host for `replicas × worker memory` on top of the database and backend.

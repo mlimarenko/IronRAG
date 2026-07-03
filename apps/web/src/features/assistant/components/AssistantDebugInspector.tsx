@@ -55,12 +55,12 @@ type ContextTranscriptEntry = {
   key: string;
   role: string;
   phase: ContextTranscriptPhase;
-  content?: string | null;
-  toolCallId?: string | null;
-  toolName?: string | null;
-  toolCalls?: ContextToolCallPreview[];
+  content?: string | null | undefined;
+  toolCallId?: string | null | undefined;
+  toolName?: string | null | undefined;
+  toolCalls?: ContextToolCallPreview[] | undefined;
   resultJson?: unknown;
-  isError?: boolean;
+  isError?: boolean | undefined;
 };
 
 type ContextTranscriptSection = {
@@ -76,7 +76,7 @@ type AssistantDebugInspectorProps = {
   loading: boolean;
   error: string | null;
   evidence: EvidenceBundle | null;
-  turnWallClockMs?: number;
+  turnWallClockMs?: number | undefined;
   onClose: () => void;
   onWidthChange: (width: number) => void;
 };
@@ -351,12 +351,12 @@ export function AssistantDebugInspector({
                 {t('assistant.debugInspectorTitle')}
               </h3>
               {snapshot?.agentLoop && (
-                <span className="shrink-0 rounded-md border border-border/70 bg-background px-1.5 py-0.5 font-mono text-[10px] text-muted-foreground">
+                <span className="shrink-0 rounded-md border border-border/70 bg-background px-1.5 py-0.5 font-mono text-2xs text-muted-foreground">
                   {t('assistant.agentLoop')}
                 </span>
               )}
             </div>
-            <div className="mt-0.5 truncate font-mono text-[10px] text-muted-foreground">
+            <div className="mt-0.5 truncate font-mono text-2xs text-muted-foreground">
               {snapshot?.executionId ?? t('assistant.debugInspectorNoContext')}
             </div>
           </div>
@@ -402,9 +402,9 @@ export function AssistantDebugInspector({
           {!loading && !error && (snapshot || summary) && (
             <div className="border-b border-border/70 bg-surface-sunken px-4 py-3">
               {snapshot?.question && (
-                <div className="mb-3 rounded-md border border-border/70 bg-card px-3 py-2 text-[11px]">
-                  <div className="mb-1 flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
-                    <MessageSquare className="h-3 w-3" />
+                <div className="mb-3 rounded-md border border-border/70 bg-card px-3 py-2 text-2xs">
+                  <div className="mb-1 flex items-center gap-1.5 section-label">
+                    <MessageSquare className="h-3.5 w-3.5" />
                     {t('assistant.debugQuestion')}
                   </div>
                   <Tooltip>
@@ -417,7 +417,7 @@ export function AssistantDebugInspector({
                   </Tooltip>
                 </div>
               )}
-              <div className="grid grid-cols-2 gap-2 text-[11px] sm:grid-cols-4">
+              <div className="grid grid-cols-2 gap-2 text-2xs sm:grid-cols-4">
                 {(Number.isFinite(turnWallClockMs) && (turnWallClockMs ?? 0) > 0 ? true : totalTurnMs > 0) && (
                   <Stat label={t('assistant.debugTotalTime')} value={formatDuration(Number.isFinite(turnWallClockMs) && (turnWallClockMs ?? 0) > 0 ? (turnWallClockMs ?? null) : totalTurnMs)} />
                 )}
@@ -460,7 +460,7 @@ export function AssistantDebugInspector({
                   <div className="section-label">{t('assistant.mcpTimelineTitle')}</div>
 
                   {stagesAggregated.length === 0 && iterations.length > 0 && (
-                    <div className="rounded-md border border-status-warning/25 bg-status-warning/5 p-3 text-[11px] leading-relaxed text-status-warning">
+                    <div className="rounded-md border border-status-warning/25 bg-status-warning/5 p-3 text-2xs leading-relaxed text-status-warning">
                       {t('assistant.mcpNoStageTelemetry')}
                     </div>
                   )}
@@ -524,7 +524,7 @@ export function AssistantDebugInspector({
                                 <span className="truncate font-mono text-xs font-semibold">
                                   {iter.modelName}
                                 </span>
-                                <span className="shrink-0 text-[10px] text-muted-foreground">
+                                <span className="shrink-0 text-2xs text-muted-foreground">
                                   @ {iter.providerKind}
                                 </span>
                               </span>
@@ -540,7 +540,7 @@ export function AssistantDebugInspector({
                       >
                         {iter.durationMs != null && iter.durationMs > 0 && (
                           <div className="mt-2">
-                            <div className="mb-1 flex items-center gap-2 text-[10px] tabular-nums text-muted-foreground">
+                            <div className="mb-1 flex items-center gap-2 text-2xs tabular-nums text-muted-foreground">
                               <Tooltip>
                                 <TooltipTrigger asChild>
                                   <span
@@ -560,7 +560,7 @@ export function AssistantDebugInspector({
                           </div>
                         )}
                         {totalTokens != null && (
-                          <div className="mt-2 flex items-center gap-2 rounded-md border border-border/70 bg-background/60 px-2 py-1.5 text-[10px] tabular-nums text-muted-foreground">
+                          <div className="mt-2 flex items-center gap-2 rounded-md border border-border/70 bg-background/60 px-2 py-1.5 text-2xs tabular-nums text-muted-foreground">
                             <span className="font-semibold uppercase tracking-wide">tokens</span>
                             {promptTokens != null && <span>in {promptTokens}</span>}
                             {completionTokens != null && <span>out {completionTokens}</span>}
@@ -587,10 +587,10 @@ export function AssistantDebugInspector({
                         )}
                         {responsePreview && (
                           <details className="mt-2">
-                            <summary className="cursor-pointer text-[11px] font-medium text-muted-foreground hover:text-foreground">
+                            <summary className="cursor-pointer text-2xs font-medium text-muted-foreground hover:text-foreground">
                               {t('assistant.mcpIterationResponse')}
                             </summary>
-                            <pre className="mt-1.5 max-h-40 overflow-auto rounded border border-border/40 bg-background p-2 font-mono text-[10px] leading-relaxed [overflow-wrap:anywhere] whitespace-pre-wrap">
+                            <pre className="mt-1.5 max-h-40 overflow-auto rounded border border-border/40 bg-background p-2 font-mono text-2xs leading-relaxed [overflow-wrap:anywhere] whitespace-pre-wrap">
                               {iter.responseText}
                             </pre>
                           </details>
@@ -728,7 +728,7 @@ function AgentLoopSummary({
       <div className="grid grid-cols-2 gap-px bg-border/40">
         {fields.map((field) => (
           <div key={field.label} className="flex flex-col gap-0.5 bg-card px-3 py-2">
-            <span className="text-[10px] uppercase tracking-wide text-muted-foreground">
+            <span className="section-label">
               {field.label}
             </span>
             <span className="font-mono text-xs font-semibold tabular-nums">{field.value}</span>
@@ -741,8 +741,10 @@ function AgentLoopSummary({
 
 const SPAN_COLORS = ['#6366f1', '#0ea5e9', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6', '#14b8a6'];
 
-function spanColor(index: number) {
-  return SPAN_COLORS[index % SPAN_COLORS.length];
+function spanColor(index: number): string {
+  // index % SPAN_COLORS.length is always a valid in-bounds index into the
+  // non-empty SPAN_COLORS array; noUncheckedIndexedAccess can't prove that.
+  return SPAN_COLORS[index % SPAN_COLORS.length]!;
 }
 
 function shareOf(ms: number, totalMs: number) {
@@ -755,9 +757,9 @@ type ShareSegment = {
   ms: number;
   color: string;
   /** Human-readable description for the tooltip (falls back to `key`). */
-  tip?: string;
+  tip?: string | undefined;
   /** Repeat-call count, surfaced as an `x{n}` badge when > 1. */
-  calls?: number;
+  calls?: number | undefined;
 };
 
 /** Rich hover card for one stage: bold label + monospace duration · share. */
@@ -765,7 +767,7 @@ function StageTooltipContent({ segment, share }: { segment: ShareSegment; share:
   return (
     <TooltipContent>
       <div className="font-semibold text-popover-foreground">{segment.tip ?? segment.key}</div>
-      <div className="mt-0.5 font-mono text-[11px] tabular-nums text-muted-foreground">
+      <div className="mt-0.5 font-mono text-2xs tabular-nums text-muted-foreground">
         {formatDuration(segment.ms)}
         {' · '}
         {share}%
@@ -816,12 +818,12 @@ function StageLegend({ segments }: { segments: ShareSegment[] }) {
               className="flex cursor-default items-center gap-1.5 rounded outline-none transition-opacity hover:opacity-80 focus-visible:ring-1 focus-visible:ring-ring"
             >
               <span className="h-2 w-2 shrink-0 rounded-full" style={{ backgroundColor: seg.color }} />
-              <code className="font-mono text-[11px] font-semibold text-foreground">{seg.key}</code>
-              <span className="font-mono text-[10px] tabular-nums text-muted-foreground">
+              <code className="font-mono text-2xs font-semibold text-foreground">{seg.key}</code>
+              <span className="font-mono text-2xs tabular-nums text-muted-foreground">
                 {formatDuration(seg.ms)}
               </span>
               {seg.calls && seg.calls > 1 ? (
-                <span className="rounded bg-primary/10 px-1 font-mono text-[9px] font-bold tabular-nums text-primary">
+                <span className="rounded bg-primary/10 px-1 font-mono text-2xs font-bold tabular-nums text-primary">
                   x{seg.calls}
                 </span>
               ) : null}
@@ -872,7 +874,7 @@ function ToolCallRow({
   t: TFunction;
   toolCall: ToolCallDebug;
   maxIterationSpanMs: number;
-  childExecutionId?: string;
+  childExecutionId?: string | undefined;
 }) {
   const [expanded, setExpanded] = useState(false);
   const canDrill = Boolean(childExecutionId);
@@ -884,7 +886,7 @@ function ToolCallRow({
     : undefined;
   return (
     <article
-      className={`rounded-md border px-2 py-1.5 text-[11px] ${
+      className={`rounded-md border px-2 py-1.5 text-2xs ${
         toolCall.isError
           ? 'border-status-failed/30 bg-status-failed/5'
           : 'border-border/70 bg-background/60'
@@ -906,13 +908,13 @@ function ToolCallRow({
             )}
           </button>
         ) : toolCall.isError ? (
-          <AlertCircle className="h-3 w-3 shrink-0 text-status-failed" />
+          <AlertCircle className="h-3.5 w-3.5 shrink-0 text-status-failed" />
         ) : (
-          <Wrench className="h-3 w-3 shrink-0 text-primary" />
+          <Wrench className="h-3.5 w-3.5 shrink-0 text-primary" />
         )}
         <Tooltip>
           <TooltipTrigger asChild>
-            <code className="cursor-default truncate font-mono text-[11px] font-bold">
+            <code className="cursor-default truncate font-mono text-2xs font-bold">
               {toolCall.name}
             </code>
           </TooltipTrigger>
@@ -923,7 +925,7 @@ function ToolCallRow({
             <TooltipTrigger asChild>
               <span
                 tabIndex={0}
-                className="ml-auto shrink-0 cursor-default font-mono text-[10px] tabular-nums text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring rounded"
+                className="ml-auto shrink-0 cursor-default font-mono text-2xs tabular-nums text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring rounded"
               >
                 {t('assistant.mcpToolWait')} {formatDuration(toolCall.durationMs)}
               </span>
@@ -968,15 +970,15 @@ function ChildExecutionDrilldown({ t, executionId }: { t: TFunction; executionId
   });
   if (isLoading) {
     return (
-      <div className="mt-2 flex items-center gap-2 rounded-md border border-border/60 bg-background/40 px-2 py-2 text-[10px] text-muted-foreground">
-        <Loader2 className="h-3 w-3 animate-spin text-primary/70" />
+      <div className="mt-2 flex items-center gap-2 rounded-md border border-border/60 bg-background/40 px-2 py-2 text-2xs text-muted-foreground">
+        <Loader2 className="h-3.5 w-3.5 animate-spin text-primary/70" />
         {t('assistant.debugInspectorLoading')}
       </div>
     );
   }
   if (isError || !data) {
     return (
-      <div className="mt-2 rounded-md border border-status-failed/30 bg-status-failed/5 px-2 py-2 text-[10px] text-status-failed">
+      <div className="mt-2 rounded-md border border-status-failed/30 bg-status-failed/5 px-2 py-2 text-2xs text-status-failed">
         {t('assistant.llmContextUnavailable')}
       </div>
     );
@@ -987,8 +989,8 @@ function ChildExecutionDrilldown({ t, executionId }: { t: TFunction; executionId
   }));
   return (
     <div className="mt-2 border-l-2 border-primary/40 bg-card/60 ml-1 pl-3 py-2 rounded-r-md">
-      <div className="mb-1.5 flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
-        <Layers className="h-3 w-3" />
+      <div className="mb-1.5 flex items-center gap-1.5 section-label">
+        <Layers className="h-3.5 w-3.5" />
         {t('assistant.mcpChildExecution')}
       </div>
       {stages.length > 0 ? (
@@ -1001,7 +1003,7 @@ function ChildExecutionDrilldown({ t, executionId }: { t: TFunction; executionId
           }))}
         />
       ) : (
-        <div className="text-[10px] text-muted-foreground">{t('assistant.mcpNoStageTelemetry')}</div>
+        <div className="text-2xs text-muted-foreground">{t('assistant.mcpNoStageTelemetry')}</div>
       )}
       {childContext?.spans && childContext.spans.length > 0 && (
         <div className="mt-2">
@@ -1083,10 +1085,10 @@ function SpansSection({ t, spans }: { t: TFunction; spans: TurnSpanView[] }) {
                   className="h-2 w-2 shrink-0 rounded-full"
                   style={{ backgroundColor: spanKindColor(kind) }}
                 />
-                <span className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
+                <span className="section-label">
                   {spanGroupLabel(t, kind)}
                 </span>
-                <span className="ml-auto shrink-0 font-mono text-[10px] tabular-nums text-muted-foreground">
+                <span className="ml-auto shrink-0 font-mono text-2xs tabular-nums text-muted-foreground">
                   {groupSpans.length}
                 </span>
               </div>
@@ -1101,18 +1103,18 @@ function SpansSection({ t, spans }: { t: TFunction; spans: TurnSpanView[] }) {
                     <div className="flex items-center gap-2">
                       <Tooltip>
                         <TooltipTrigger asChild>
-                          <code className="cursor-default truncate font-mono text-[11px] font-semibold">
+                          <code className="cursor-default truncate font-mono text-2xs font-semibold">
                             {span.name}
                           </code>
                         </TooltipTrigger>
                         <TooltipContent>{spanTooltipText}</TooltipContent>
                       </Tooltip>
                       {span.rows != null && (
-                        <span className="shrink-0 text-[10px] tabular-nums text-muted-foreground">
+                        <span className="shrink-0 text-2xs tabular-nums text-muted-foreground">
                           {t('assistant.mcpSpansRows', { count: span.rows })}
                         </span>
                       )}
-                      <span className="ml-auto shrink-0 font-mono text-[10px] tabular-nums text-muted-foreground">
+                      <span className="ml-auto shrink-0 font-mono text-2xs tabular-nums text-muted-foreground">
                         {formatDuration(span.durationMs)}
                       </span>
                     </div>
@@ -1123,7 +1125,7 @@ function SpansSection({ t, spans }: { t: TFunction; spans: TurnSpanView[] }) {
                 );
               })}
               {hidden > 0 && (
-                <div className="text-[10px] text-muted-foreground">
+                <div className="text-2xs text-muted-foreground">
                   {t('assistant.mcpSpanGroupMore', { count: hidden })}
                 </div>
               )}
@@ -1138,7 +1140,7 @@ function SpansSection({ t, spans }: { t: TFunction; spans: TurnSpanView[] }) {
 function Stat({ label, value }: { label: string; value: number | string }) {
   return (
     <div className="flex flex-col gap-0.5 rounded-md border border-border/60 bg-card px-2 py-1.5">
-      <span className="text-[10px] uppercase tracking-wide text-muted-foreground">{label}</span>
+      <span className="section-label">{label}</span>
       <span className="font-mono text-sm font-semibold tabular-nums">{value}</span>
     </div>
   );
@@ -1163,7 +1165,7 @@ function InspectorTab({
       type="button"
       onClick={onClick}
       aria-pressed={active}
-      className={`flex min-w-0 items-center justify-start gap-1.5 rounded-md px-2 py-1.5 text-[11px] font-semibold transition-colors ${
+      className={`flex min-w-0 items-center justify-start gap-1.5 rounded-md px-2 py-1.5 text-2xs font-semibold transition-colors ${
         active
           ? 'bg-card text-foreground shadow-sm ring-1 ring-border/70'
           : 'text-muted-foreground hover:bg-card/70 hover:text-foreground'
@@ -1171,7 +1173,7 @@ function InspectorTab({
     >
       <span className="shrink-0">{icon}</span>
       <span className="truncate">{label}</span>
-      <span className="shrink-0 rounded bg-muted px-1 font-mono text-[10px] tabular-nums text-muted-foreground">
+      <span className="shrink-0 rounded bg-muted px-1 font-mono text-2xs tabular-nums text-muted-foreground">
         {count}
       </span>
     </button>
@@ -1196,7 +1198,7 @@ function ContextTranscriptCard({
     >
       <header className="mb-1 flex min-w-0 items-center gap-2">
         <span
-          className={`rounded px-1.5 py-0.5 text-[10px] font-semibold ${
+          className={`rounded px-1.5 py-0.5 text-2xs font-semibold ${
             entry.role === 'tool'
               ? entry.isError
                 ? 'bg-status-failed/10 text-status-failed'
@@ -1209,7 +1211,7 @@ function ContextTranscriptCard({
         {entry.toolName && (
           <Tooltip>
             <TooltipTrigger asChild>
-              <code className="truncate font-mono text-[10px] text-muted-foreground">
+              <code className="truncate font-mono text-2xs text-muted-foreground">
                 {entry.toolName}
               </code>
             </TooltipTrigger>
@@ -1217,13 +1219,13 @@ function ContextTranscriptCard({
           </Tooltip>
         )}
         {entry.toolCallId && (
-          <span className="ml-auto truncate font-mono text-[10px] text-muted-foreground">
+          <span className="ml-auto truncate font-mono text-2xs text-muted-foreground">
             {t('assistant.toolCallIdLabel')}: {entry.toolCallId}
           </span>
         )}
       </header>
       {entry.content && (
-        <pre className={`${contentHeightClass} overflow-auto whitespace-pre-wrap break-words font-mono text-[10px] leading-relaxed text-foreground/80`}>
+        <pre className={`${contentHeightClass} overflow-auto whitespace-pre-wrap break-words font-mono text-2xs leading-relaxed text-foreground/80`}>
           {entry.content}
         </pre>
       )}
@@ -1232,21 +1234,21 @@ function ContextTranscriptCard({
           {entry.toolCalls.map((toolCall, index) => (
             <div
               key={`${toolCall.id || toolCall.name}-${index}`}
-              className={`rounded border p-2 font-mono text-[10px] ${
+              className={`rounded border p-2 font-mono text-2xs ${
                 toolCall.isError
                   ? 'border-status-failed/30 bg-status-failed/5 text-status-failed'
                   : 'border-status-warning/30 bg-status-warning/5 text-status-warning'
               }`}
             >
               <div className="mb-1 flex min-w-0 items-center gap-2">
-                <Wrench className="h-3 w-3 shrink-0" />
+                <Wrench className="h-3.5 w-3.5 shrink-0" />
                 <Tooltip>
                   <TooltipTrigger asChild>
                     <code className="truncate font-bold">{toolCall.name}</code>
                   </TooltipTrigger>
                   <TooltipContent>{toolCall.name}</TooltipContent>
                 </Tooltip>
-                <span className="ml-auto truncate text-[9px] opacity-75">
+                <span className="ml-auto truncate text-2xs opacity-75">
                   {toolCall.id}
                 </span>
               </div>
@@ -1325,10 +1327,10 @@ function JsonDetailsContent({
       open={isOpen}
       onToggle={(event) => setIsOpen(event.currentTarget.open)}
     >
-      <summary className="cursor-pointer text-[10px] font-semibold uppercase tracking-wide text-muted-foreground hover:text-foreground">
+      <summary className="cursor-pointer section-label hover:text-foreground">
         {label}
       </summary>
-      <pre className="mt-1 max-h-40 overflow-auto rounded border border-border/40 bg-background p-2 font-mono text-[10px] leading-relaxed [overflow-wrap:anywhere] whitespace-pre-wrap">
+      <pre className="mt-1 max-h-40 overflow-auto rounded border border-border/40 bg-background p-2 font-mono text-2xs leading-relaxed [overflow-wrap:anywhere] whitespace-pre-wrap">
         {formatted}
       </pre>
     </details>
@@ -1351,7 +1353,7 @@ function RawJsonBlock({ icon, title, value }: { icon: ReactNode; title: string; 
         <span className="text-muted-foreground">{icon}</span>
         {title}
       </summary>
-      <pre className="max-h-72 overflow-auto border-t border-border/60 p-3 font-mono text-[10px] leading-relaxed whitespace-pre-wrap [overflow-wrap:anywhere]">
+      <pre className="max-h-72 overflow-auto border-t border-border/60 p-3 font-mono text-2xs leading-relaxed whitespace-pre-wrap [overflow-wrap:anywhere]">
         {stringifyJson(value)}
       </pre>
     </details>
@@ -1376,7 +1378,7 @@ function TimelineStep({ icon, tone, order, title, meta, children }: TimelineStep
   return (
     <div className="relative pl-8">
       <span
-        className={`absolute left-0 top-0 flex h-6 min-w-6 items-center justify-center rounded-full border px-1 ${toneClasses[tone]} text-[10px] font-bold tabular-nums`}
+        className={`absolute left-0 top-0 flex h-6 min-w-6 items-center justify-center rounded-full border px-1 ${toneClasses[tone]} text-2xs font-bold tabular-nums`}
       >
         {order}
       </span>
@@ -1386,7 +1388,7 @@ function TimelineStep({ icon, tone, order, title, meta, children }: TimelineStep
           <div className="min-w-0 flex-1 truncate text-sm font-semibold">{title}</div>
         </header>
         {meta && (
-          <div className="mt-1 text-[10px] tabular-nums text-muted-foreground">{meta}</div>
+          <div className="mt-1 text-2xs tabular-nums text-muted-foreground">{meta}</div>
         )}
         {children}
       </div>

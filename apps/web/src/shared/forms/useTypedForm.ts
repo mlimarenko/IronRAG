@@ -1,11 +1,9 @@
 import { zodResolver } from "@hookform/resolvers/zod";
-import { useCallback } from "react";
+import { useCallback, type BaseSyntheticEvent } from "react";
 import {
   useForm,
-  type BaseSyntheticEvent,
   type DefaultValues,
   type FieldValues,
-  type Resolver,
   type UseFormProps,
   type UseFormReturn,
 } from "react-hook-form";
@@ -63,11 +61,9 @@ export function useTypedForm<TSchema extends z.ZodType>({
 }: UseTypedFormOptions<TSchema>): TypedFormReturn<TSchema> {
   const form = useForm<FormInput<TSchema>, unknown, FormValues<TSchema>>({
     ...options,
-    resolver: zodResolver(schema) as Resolver<
-      FormInput<TSchema>,
-      unknown,
-      FormValues<TSchema>
-    >,
+    resolver: zodResolver(
+      schema as z.ZodType<FormValues<TSchema>, FormInput<TSchema>>,
+    ),
   });
   const { handleSubmit } = form;
 

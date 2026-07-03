@@ -348,7 +348,8 @@ fn actual_contract_exposes_canonical_session_and_admin_support_routes() {
     assert!(contract.contains("/v1/iam/session/login"));
     assert!(contract.contains("/v1/iam/session/logout"));
     assert!(contract.contains("/v1/iam/grants"));
-    assert!(contract.contains("/v1/ai/model-presets"));
+    assert!(contract.contains("/v1/ai/accounts"));
+    assert!(contract.contains("/v1/ai/bindings"));
     assert!(contract.contains("/v1/query/sessions"));
 }
 

@@ -23,14 +23,10 @@ import { errorMessage } from '@/shared/lib/errorMessage';
 import { knowledgeApi, queries } from '@/shared/api';
 import { Button } from '@/shared/components/ui/button';
 import { Input } from '@/shared/components/ui/input';
+import { PageHeader } from '@/shared/components/layout/PageHeader';
+import { PageShell } from '@/shared/components/layout/PageShell';
+import { WorkbenchEmptyState } from '@/shared/components/layout/WorkbenchEmptyState';
 import {
-  Tooltip,
-  TooltipContent,
-  TooltipProvider,
-  TooltipTrigger,
-} from '@/shared/components/ui/tooltip';
-import {
-  GRAPH_LAYOUT_OPTIONS,
   GRAPH_EDGE_DENSITY_TOGGLE_MAX_EDGES,
   GRAPH_EDGE_RENDER_CAP,
   DEFAULT_GRAPH_LAYOUT,
@@ -43,33 +39,23 @@ import {
   FileText,
   Share2,
   AlertTriangle,
-  PieChart,
-  Rows3,
-  Network,
-  CircleDashed,
-  Orbit,
   Maximize2,
+  Sparkles,
 } from 'lucide-react';
 import type { GraphEdge, GraphMetadata, GraphNode, GraphStatus } from '@/shared/types';
 import { GraphInspector } from '@/features/graph/components/GraphInspector';
+import { GraphLayoutPicker } from '@/features/graph/components/GraphLayoutPicker';
 import { GraphLegend } from '@/features/graph/components/GraphLegend';
+import { StatusBadge } from '@/shared/components/StatusBadge';
 import { buildTypeLegend, subtypeFilterKey } from '@/features/graph/model/typeLegend';
 import { useGraphAdjacency, type GraphAdjacencyIndex } from '@/features/graph/hooks/useGraphAdjacency';
 
 const SigmaGraph = lazy(() => import('@/features/graph/components/SigmaGraph'));
 
-const GRAPH_LAYOUT_ICONS = {
-  sectors: PieChart,
-  bands: Rows3,
-  components: Network,
-  rings: CircleDashed,
-  clusters: Orbit,
-  hubs: Network,
-  sources: FileText,
-  flow: Share2,
-  radial: CircleDashed,
-  circlepack: Orbit,
-} as const;
+function defaultLegendOpen(): boolean {
+  if (typeof window === 'undefined') return true;
+  return window.matchMedia('(min-width: 768px)').matches;
+}
 
 type GraphInspectorDetailProps = {
   t: ReturnType<typeof useTranslation>['t'];
@@ -251,7 +237,7 @@ export default function GraphPage() {
   // is drawn for smoothness; this toggle raises the sample density without
   // asking Firefox to paint the entire edge set every frame.
   const [showDenseEdges, setShowDenseEdges] = useState(false);
-  const [legendOpen, setLegendOpen] = useState(true);
+  const [legendOpen, setLegendOpen] = useState(defaultLegendOpen);
   const [expandedSubtypeGroups, setExpandedSubtypeGroups] = useState<Set<string>>(new Set());
   const [focusedNeighborhoodId, setFocusedNeighborhoodId] = useState<string | null>(null);
 
@@ -422,146 +408,47 @@ export default function GraphPage() {
 
   const visibleNodeCount = allNodes.length - hiddenIds.size;
 
-  const activeLayoutOption =
-    GRAPH_LAYOUT_OPTIONS.find((option) => option.id === layout) ?? GRAPH_LAYOUT_OPTIONS[0];
   const recommendedLayout = normalizeRecommendedGraphLayout(graphMeta?.recommendedLayout);
 
   const typeLegend = useMemo(() => buildTypeLegend(allNodes), [allNodes]);
 
   if (!activeLibrary) {
     return (
-      <div className="flex-1 flex flex-col">
-        <div className="page-header">
-          <h1 className="text-lg font-bold tracking-tight">{t('graph.title')}</h1>
-        </div>
-        <div className="empty-state flex-1">
-          <div className="w-14 h-14 rounded-2xl bg-muted flex items-center justify-center mb-4">
-            <Share2 className="h-7 w-7 text-muted-foreground" />
-          </div>
-          <h2 className="text-base font-bold tracking-tight">{t('graph.noLibrary')}</h2>
-          <p className="text-sm text-muted-foreground mt-2">{t('graph.noLibraryDesc')}</p>
-        </div>
-      </div>
+      <PageShell
+        header={<PageHeader title={t('graph.title')} />}
+        bodyClassName="empty-state"
+      >
+        <WorkbenchEmptyState
+          icon={<Share2 className="h-7 w-7 text-muted-foreground" />}
+          title={t('graph.noLibrary')}
+          description={t('graph.noLibraryDesc')}
+        />
+      </PageShell>
     );
   }
 
   return (
-    <div className="flex-1 min-h-0 flex flex-col overflow-hidden">
+    <PageShell
+      header={<PageHeader title={t('graph.title')} description={t('graph.subtitle')} />}
+      bodyClassName="flex flex-col overflow-hidden p-3 sm:p-4"
+    >
       {/* Toolbar */}
       <div
         role="toolbar"
         aria-label={t('graph.toolbar')}
-        className="min-h-[3rem] overflow-x-auto overflow-y-hidden border-b px-4 py-1.5 flex items-center gap-2 whitespace-nowrap"
-        style={{
-          background: 'linear-gradient(180deg, hsl(var(--card)), hsl(var(--background)))',
-        }}
+        className="relative z-20 flex min-h-12 flex-col items-stretch gap-3 overflow-visible workbench-surface px-3 py-2 sm:flex-row sm:items-center"
       >
-        <div className="relative w-[13rem] shrink-0">
-          <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground" />
+        <div className="relative w-full shrink-0 sm:w-[16rem]">
+          <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
           <Input
-            className="h-8 pl-8 text-xs"
+            className="h-9 rounded-lg pl-9 text-sm"
             placeholder={t('graph.searchPlaceholder')}
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
           />
         </div>
 
-        <TooltipProvider delayDuration={180}>
-          <div className="flex shrink-0 items-center gap-2">
-            <div className="flex items-center gap-1 rounded-xl border border-border/60 bg-card/80 p-0.5 shadow-soft">
-              {GRAPH_LAYOUT_OPTIONS.map((option) => {
-                const isActive = layout === option.id;
-                const Icon = GRAPH_LAYOUT_ICONS[option.iconKey];
-                return (
-                  <Tooltip key={option.id}>
-                    <TooltipTrigger asChild>
-                      <button
-                        type="button"
-                        onClick={() => setLayout(option.id)}
-                        className={`flex h-7 w-7 items-center justify-center rounded-lg transition-all ${
-                          isActive
-                            ? 'bg-primary text-primary-foreground shadow-sm'
-                            : 'text-muted-foreground hover:bg-muted hover:text-foreground'
-                        }`}
-                        aria-label={t(option.labelKey)}
-                        aria-pressed={isActive}
-                      >
-                        <Icon className="h-4 w-4" />
-                      </button>
-                    </TooltipTrigger>
-                    <TooltipContent side="bottom" align="center" className="max-w-64">
-                      <div className="text-xs font-semibold">{t(option.labelKey)}</div>
-                      <div className="mt-1 text-xs leading-snug text-muted-foreground">
-                        {t(option.descriptionKey)}
-                      </div>
-                    </TooltipContent>
-                  </Tooltip>
-                );
-              })}
-            </div>
-            <Tooltip>
-              <TooltipTrigger asChild>
-                <div className="flex min-w-0 max-w-[120px] cursor-help items-center xl:max-w-[180px]">
-                  <span className="truncate text-xs font-semibold text-foreground">
-                    {t(activeLayoutOption.labelKey)}
-                  </span>
-                </div>
-              </TooltipTrigger>
-              <TooltipContent side="bottom" align="start" className="max-w-64">
-                <div className="text-xs leading-snug">{t(activeLayoutOption.descriptionKey)}</div>
-              </TooltipContent>
-            </Tooltip>
-          </div>
-        </TooltipProvider>
-
-        {recommendedLayout && layout !== recommendedLayout && (
-          <button
-            type="button"
-            onClick={() => setLayout(recommendedLayout)}
-            className="inline-flex h-8 shrink-0 items-center gap-1.5 rounded-full border border-amber-300/70 bg-amber-50/90 px-3 text-xs font-medium text-amber-950 shadow-sm transition-colors hover:bg-amber-100"
-          >
-            <AlertTriangle className="h-3.5 w-3.5 text-amber-600" />
-            <span className="text-muted-foreground">{t('graph.recommended')}</span>
-            <span className="font-semibold text-primary">
-              {t(`graph.layouts.${recommendedLayout}`)}
-            </span>
-          </button>
-        )}
-
-        {/* Fit-to-view button — always visible when graph has nodes */}
-        {allNodes.length > 0 && (
-          <button
-            type="button"
-            aria-label={t('graph.zoomToFit')}
-            title={t('graph.zoomToFit')}
-            className="h-7 w-7 flex items-center justify-center rounded-lg text-muted-foreground hover:bg-muted hover:text-foreground transition-all duration-200"
-            onClick={() => fitViewRef.current?.()}
-          >
-            <Maximize2 className="h-3.5 w-3.5" />
-          </button>
-        )}
-
-        {/* Show-all-edges toggle — only when the edge count is capped */}
-        {(graphMeta?.edgeCount ?? 0) > GRAPH_EDGE_RENDER_CAP &&
-          (graphMeta?.edgeCount ?? 0) <= GRAPH_EDGE_DENSITY_TOGGLE_MAX_EDGES && (
-          <button
-            type="button"
-            data-perf-id="edge-density-toggle"
-            aria-label={showDenseEdges ? t('graph.showSampledEdges') : t('graph.showDenseEdges')}
-            aria-pressed={showDenseEdges}
-            title={showDenseEdges ? t('graph.showSampledEdgesHint') : t('graph.showDenseEdgesHint')}
-            className={`h-7 w-7 flex items-center justify-center rounded-lg transition-all duration-200 ${
-              showDenseEdges
-                ? 'bg-primary/15 text-primary'
-                : 'text-muted-foreground hover:bg-muted hover:text-foreground'
-            }`}
-            onClick={() => setShowDenseEdges((v) => !v)}
-          >
-            <Share2 className="h-3.5 w-3.5" />
-          </button>
-        )}
-
-        <div className="ml-auto flex items-center gap-3 text-xs text-muted-foreground">
+        <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
           <span className="tabular-nums font-semibold">
             {graphMeta?.nodeCount ?? 0} {t('graph.nodes')}
           </span>
@@ -573,23 +460,93 @@ export default function GraphPage() {
               {graphMeta!.hiddenDisconnectedCount} {t('graph.hidden')}
             </span>
           )}
-          <span
-            className={`status-badge ${
+          <StatusBadge
+            tone={
               graphStatus === 'ready'
-                ? 'status-ready'
+                ? 'ready'
                 : graphStatus === 'partial'
-                  ? 'status-warning'
+                  ? 'warning'
                   : graphStatus === 'failed'
-                    ? 'status-failed'
-                    : 'status-processing'
-            }`}
+                    ? 'failed'
+                    : 'processing'
+            }
           >
             {t(`graph.statusLabels.${graphStatus}`)}
+          </StatusBadge>
+        </div>
+
+        <div aria-hidden="true" className="hidden h-8 w-px shrink-0 bg-border md:block" />
+
+        <div className="flex w-full shrink-0 items-center gap-2 sm:w-auto">
+          <span className="hidden section-label lg:inline">
+            {t('graph.layoutControls')}
           </span>
+          <GraphLayoutPicker
+            value={layout}
+            recommended={recommendedLayout}
+            onChange={setLayout}
+            t={t}
+          />
+        </div>
+
+        {recommendedLayout && layout !== recommendedLayout && (
+          <button
+            type="button"
+            onClick={() => setLayout(recommendedLayout)}
+            className="inline-flex h-8 shrink-0 items-center gap-1.5 rounded-lg border bg-card px-2.5 text-xs font-medium text-muted-foreground shadow-soft transition-colors hover:bg-muted/60"
+          >
+            <Sparkles className="h-3.5 w-3.5 text-primary" />
+            <span>{t('graph.recommended')}</span>
+            <span className="font-semibold text-primary">
+              {t(`graph.layouts.${recommendedLayout}`)}
+            </span>
+          </button>
+        )}
+
+        <div className="flex w-full shrink-0 items-center justify-between gap-2 sm:ml-auto sm:w-auto sm:justify-start">
+          <span className="hidden section-label lg:inline">
+            {t('graph.viewControls')}
+          </span>
+          <span className="text-xs font-semibold tabular-nums text-muted-foreground">
+            {visibleNodeCount} / {allNodes.length} {t('graph.nodes')}
+          </span>
+
+          {/* Fit-to-view button — always visible when graph has nodes */}
+          {allNodes.length > 0 && (
+            <button
+              type="button"
+              aria-label={t('graph.zoomToFit')}
+              title={t('graph.zoomToFit')}
+              className="flex h-9 w-9 items-center justify-center rounded-lg text-muted-foreground transition-all duration-200 hover:bg-muted hover:text-foreground"
+              onClick={() => fitViewRef.current?.()}
+            >
+              <Maximize2 className="h-3.5 w-3.5" />
+            </button>
+          )}
+
+          {/* Show-all-edges toggle — only when the edge count is capped */}
+          {(graphMeta?.edgeCount ?? 0) > GRAPH_EDGE_RENDER_CAP &&
+            (graphMeta?.edgeCount ?? 0) <= GRAPH_EDGE_DENSITY_TOGGLE_MAX_EDGES && (
+            <button
+              type="button"
+              data-perf-id="edge-density-toggle"
+              aria-label={showDenseEdges ? t('graph.showSampledEdges') : t('graph.showDenseEdges')}
+              aria-pressed={showDenseEdges}
+              title={showDenseEdges ? t('graph.showSampledEdgesHint') : t('graph.showDenseEdgesHint')}
+              className={`h-7 w-7 flex items-center justify-center rounded-lg transition-all duration-200 ${
+                showDenseEdges
+                  ? 'bg-primary text-primary-foreground shadow-soft'
+                  : 'text-muted-foreground hover:bg-muted hover:text-foreground'
+              }`}
+              onClick={() => setShowDenseEdges((v) => !v)}
+            >
+              <Share2 className="h-3.5 w-3.5" />
+            </button>
+          )}
         </div>
       </div>
 
-      <div className="flex-1 min-h-0 relative overflow-hidden">
+      <div className="relative mt-3 min-h-0 flex-1 overflow-hidden workbench-surface">
         <div className="absolute inset-0">
           {graphStatus === 'building' || graphStatus === 'rebuilding' ? (
             <div className="absolute inset-0 flex flex-col items-center justify-center bg-surface-sunken">
@@ -603,33 +560,28 @@ export default function GraphPage() {
             </div>
           ) : loadError ? (
             <div className="absolute inset-0 flex flex-col items-center justify-center bg-surface-sunken">
-              <div className="w-14 h-14 rounded-2xl bg-muted flex items-center justify-center mb-4">
-                <AlertTriangle className="h-7 w-7 text-status-failed" />
-              </div>
-              <h2 className="text-base font-bold tracking-tight">{t('graph.failedToLoad')}</h2>
-              <p className="text-sm text-muted-foreground mt-2 max-w-sm text-center">{loadError}</p>
+              <WorkbenchEmptyState
+                icon={<AlertTriangle className="h-7 w-7 text-status-failed" />}
+                title={t('graph.failedToLoad')}
+                description={loadError}
+              />
             </div>
           ) : visibleNodeCount === 0 ? (
             <div className="absolute inset-0 flex flex-col items-center justify-center bg-surface-sunken">
-              <div className="w-14 h-14 rounded-2xl bg-muted flex items-center justify-center mb-4">
-                <Share2 className="h-7 w-7 text-muted-foreground" />
-              </div>
-              <h2 className="text-base font-bold tracking-tight">
-                {allNodes.length === 0 ? t('graph.noGraph') : t('graph.noMatchingNodes')}
-              </h2>
-              <p className="text-sm text-muted-foreground mt-2 max-w-sm text-center">
-                {allNodes.length === 0 ? t('graph.noGraphDesc') : t('graph.noMatchingNodesDesc')}
-              </p>
-              {allNodes.length === 0 && (
-                <Button
-                  variant="outline"
-                  size="sm"
-                  className="mt-4"
-                  onClick={() => navigate('/documents')}
-                >
-                  <FileText className="h-3.5 w-3.5 mr-1.5" /> {t('graph.goToDocuments')}
-                </Button>
-              )}
+              <WorkbenchEmptyState
+                icon={<Share2 className="h-7 w-7 text-muted-foreground" />}
+                title={allNodes.length === 0 ? t('graph.noGraph') : t('graph.noMatchingNodes')}
+                description={
+                  allNodes.length === 0 ? t('graph.noGraphDesc') : t('graph.noMatchingNodesDesc')
+                }
+                action={
+                  allNodes.length === 0 ? (
+                    <Button variant="outline" size="sm" onClick={() => navigate('/documents')}>
+                      <FileText className="h-3.5 w-3.5 mr-1.5" /> {t('graph.goToDocuments')}
+                    </Button>
+                  ) : undefined
+                }
+              />
             </div>
           ) : (
             <Suspense
@@ -705,6 +657,6 @@ export default function GraphPage() {
           </GraphInspectorErrorBoundary>
         )}
       </div>
-    </div>
+    </PageShell>
   );
 }
