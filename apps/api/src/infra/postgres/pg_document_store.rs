@@ -282,7 +282,7 @@ impl PgDocumentStore {
         &self,
         row: &KnowledgeTechnicalFactRow,
     ) -> anyhow::Result<KnowledgeTechnicalFactRow> {
-        sqlx::query_as::<_, KnowledgeTechnicalFactRow>(&format!(
+        sqlx::query_as::<_, KnowledgeTechnicalFactRow>(sqlx::AssertSqlSafe(format!(
             "INSERT INTO knowledge_technical_fact (
                 fact_id, workspace_id, library_id, document_id, revision_id, fact_kind,
                 canonical_value_text, canonical_value_exact, canonical_value_json, display_value,
@@ -290,7 +290,7 @@ impl PgDocumentStore {
                 extraction_kind, conflict_group_id, created_at, updated_at
              ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
              RETURNING {TECHNICAL_FACT_COLUMNS}"
-        ))
+        )))
         .bind(row.fact_id)
         .bind(row.workspace_id)
         .bind(row.library_id)
@@ -321,7 +321,7 @@ impl DocumentStore for PgDocumentStore {
         &self,
         row: &KnowledgeDocumentRow,
     ) -> anyhow::Result<KnowledgeDocumentRow> {
-        sqlx::query_as::<_, KnowledgeDocumentRow>(&format!(
+        sqlx::query_as::<_, KnowledgeDocumentRow>(sqlx::AssertSqlSafe(format!(
             "INSERT INTO knowledge_document (
                 document_id, workspace_id, library_id, external_key, file_name, title,
                 document_state, active_revision_id, readable_revision_id, latest_revision_no,
@@ -343,7 +343,7 @@ impl DocumentStore for PgDocumentStore {
                 updated_at = EXCLUDED.updated_at,
                 deleted_at = EXCLUDED.deleted_at
              RETURNING {DOCUMENT_COLUMNS}"
-        ))
+        )))
         .bind(row.document_id)
         .bind(row.workspace_id)
         .bind(row.library_id)
@@ -368,9 +368,9 @@ impl DocumentStore for PgDocumentStore {
         &self,
         document_id: Uuid,
     ) -> anyhow::Result<Option<KnowledgeDocumentRow>> {
-        sqlx::query_as::<_, KnowledgeDocumentRow>(&format!(
+        sqlx::query_as::<_, KnowledgeDocumentRow>(sqlx::AssertSqlSafe(format!(
             "SELECT {DOCUMENT_COLUMNS} FROM knowledge_document WHERE document_id = $1 LIMIT 1"
-        ))
+        )))
         .bind(document_id)
         .fetch_optional(&self.pool)
         .await
@@ -383,12 +383,12 @@ impl DocumentStore for PgDocumentStore {
         library_id: Uuid,
         external_key: &str,
     ) -> anyhow::Result<Option<KnowledgeDocumentRow>> {
-        sqlx::query_as::<_, KnowledgeDocumentRow>(&format!(
+        sqlx::query_as::<_, KnowledgeDocumentRow>(sqlx::AssertSqlSafe(format!(
             "SELECT {DOCUMENT_COLUMNS}
              FROM knowledge_document
              WHERE workspace_id = $1 AND library_id = $2 AND external_key = $3
              LIMIT 1"
-        ))
+        )))
         .bind(workspace_id)
         .bind(library_id)
         .bind(external_key)
@@ -403,14 +403,14 @@ impl DocumentStore for PgDocumentStore {
         library_id: Uuid,
         include_deleted: bool,
     ) -> anyhow::Result<Vec<KnowledgeDocumentRow>> {
-        sqlx::query_as::<_, KnowledgeDocumentRow>(&format!(
+        sqlx::query_as::<_, KnowledgeDocumentRow>(sqlx::AssertSqlSafe(format!(
             "SELECT {DOCUMENT_COLUMNS}
              FROM knowledge_document
              WHERE workspace_id = $1
                AND library_id = $2
                AND ($3 OR document_state <> 'deleted')
              ORDER BY updated_at DESC, document_id DESC"
-        ))
+        )))
         .bind(workspace_id)
         .bind(library_id)
         .bind(include_deleted)
@@ -426,12 +426,12 @@ impl DocumentStore for PgDocumentStore {
         if document_ids.is_empty() {
             return Ok(Vec::new());
         }
-        sqlx::query_as::<_, KnowledgeDocumentRow>(&format!(
+        sqlx::query_as::<_, KnowledgeDocumentRow>(sqlx::AssertSqlSafe(format!(
             "SELECT {DOCUMENT_COLUMNS}
              FROM knowledge_document
              WHERE document_id = ANY($1) AND document_state <> 'deleted'
              ORDER BY updated_at DESC, document_id DESC"
-        ))
+        )))
         .bind(document_ids)
         .fetch_all(&self.pool)
         .await
@@ -448,7 +448,7 @@ impl DocumentStore for PgDocumentStore {
         title: Option<&str>,
         deleted_at: Option<DateTime<Utc>>,
     ) -> anyhow::Result<Option<KnowledgeDocumentRow>> {
-        sqlx::query_as::<_, KnowledgeDocumentRow>(&format!(
+        sqlx::query_as::<_, KnowledgeDocumentRow>(sqlx::AssertSqlSafe(format!(
             "UPDATE knowledge_document SET
                 document_state = $2,
                 active_revision_id = $3,
@@ -459,7 +459,7 @@ impl DocumentStore for PgDocumentStore {
                 deleted_at = $7
              WHERE document_id = $1
              RETURNING {DOCUMENT_COLUMNS}"
-        ))
+        )))
         .bind(document_id)
         .bind(document_state)
         .bind(active_revision_id)
@@ -476,7 +476,7 @@ impl DocumentStore for PgDocumentStore {
         &self,
         row: &KnowledgeRevisionRow,
     ) -> anyhow::Result<KnowledgeRevisionRow> {
-        sqlx::query_as::<_, KnowledgeRevisionRow>(&format!(
+        sqlx::query_as::<_, KnowledgeRevisionRow>(sqlx::AssertSqlSafe(format!(
             "INSERT INTO knowledge_revision (
                 revision_id, workspace_id, library_id, document_id, revision_number,
                 revision_state, revision_kind, storage_ref, source_uri, document_hint, mime_type,
@@ -509,7 +509,7 @@ impl DocumentStore for PgDocumentStore {
                 graph_ready_at = EXCLUDED.graph_ready_at,
                 superseded_by_revision_id = EXCLUDED.superseded_by_revision_id
              RETURNING {REVISION_COLUMNS}"
-        ))
+        )))
         .bind(row.revision_id)
         .bind(row.workspace_id)
         .bind(row.library_id)
@@ -545,11 +545,11 @@ impl DocumentStore for PgDocumentStore {
         revision_id: Uuid,
         document_hint: Option<&str>,
     ) -> anyhow::Result<Option<KnowledgeRevisionRow>> {
-        sqlx::query_as::<_, KnowledgeRevisionRow>(&format!(
+        sqlx::query_as::<_, KnowledgeRevisionRow>(sqlx::AssertSqlSafe(format!(
             "UPDATE knowledge_revision SET document_hint = $2
              WHERE revision_id = $1
              RETURNING {REVISION_COLUMNS}"
-        ))
+        )))
         .bind(revision_id)
         .bind(document_hint)
         .fetch_optional(&self.pool)
@@ -561,9 +561,9 @@ impl DocumentStore for PgDocumentStore {
         &self,
         revision_id: Uuid,
     ) -> anyhow::Result<Option<KnowledgeRevisionRow>> {
-        sqlx::query_as::<_, KnowledgeRevisionRow>(&format!(
+        sqlx::query_as::<_, KnowledgeRevisionRow>(sqlx::AssertSqlSafe(format!(
             "SELECT {REVISION_COLUMNS} FROM knowledge_revision WHERE revision_id = $1 LIMIT 1"
-        ))
+        )))
         .bind(revision_id)
         .fetch_optional(&self.pool)
         .await
@@ -577,11 +577,11 @@ impl DocumentStore for PgDocumentStore {
         if revision_ids.is_empty() {
             return Ok(Vec::new());
         }
-        sqlx::query_as::<_, KnowledgeRevisionRow>(&format!(
+        sqlx::query_as::<_, KnowledgeRevisionRow>(sqlx::AssertSqlSafe(format!(
             "SELECT {REVISION_COLUMNS}
              FROM knowledge_revision
              WHERE revision_id = ANY($1)"
-        ))
+        )))
         .bind(revision_ids)
         .fetch_all(&self.pool)
         .await
@@ -592,12 +592,12 @@ impl DocumentStore for PgDocumentStore {
         &self,
         document_id: Uuid,
     ) -> anyhow::Result<Vec<KnowledgeRevisionRow>> {
-        sqlx::query_as::<_, KnowledgeRevisionRow>(&format!(
+        sqlx::query_as::<_, KnowledgeRevisionRow>(sqlx::AssertSqlSafe(format!(
             "SELECT {REVISION_COLUMNS}
              FROM knowledge_revision
              WHERE document_id = $1
              ORDER BY revision_number DESC, revision_id DESC"
-        ))
+        )))
         .bind(document_id)
         .fetch_all(&self.pool)
         .await
@@ -673,7 +673,7 @@ impl DocumentStore for PgDocumentStore {
                 "SELECT DISTINCT revision_id FROM {} WHERE library_id = $1 AND revision_id = ANY($2) AND vector_kind = $3",
                 quote_relation_name(&relation_name)
             );
-            let rows = sqlx::query_as::<_, (Uuid,)>(&sql)
+            let rows = sqlx::query_as::<_, (Uuid,)>(sqlx::AssertSqlSafe(&*sql))
                 .bind(library_id)
                 .bind(&ready_revision_ids)
                 .bind(KNOWLEDGE_CHUNK_VECTOR_KIND)
@@ -702,7 +702,7 @@ impl DocumentStore for PgDocumentStore {
         graph_ready_at: Option<DateTime<Utc>>,
         superseded_by_revision_id: Option<Uuid>,
     ) -> anyhow::Result<Option<KnowledgeRevisionRow>> {
-        sqlx::query_as::<_, KnowledgeRevisionRow>(&format!(
+        sqlx::query_as::<_, KnowledgeRevisionRow>(sqlx::AssertSqlSafe(format!(
             "UPDATE knowledge_revision SET
                 text_state = $2,
                 vector_state = $3,
@@ -713,7 +713,7 @@ impl DocumentStore for PgDocumentStore {
                 superseded_by_revision_id = $8
              WHERE revision_id = $1
              RETURNING {REVISION_COLUMNS}"
-        ))
+        )))
         .bind(revision_id)
         .bind(text_state)
         .bind(vector_state)
@@ -735,7 +735,7 @@ impl DocumentStore for PgDocumentStore {
         text_state: &str,
         text_readable_at: Option<DateTime<Utc>>,
     ) -> anyhow::Result<Option<KnowledgeRevisionRow>> {
-        sqlx::query_as::<_, KnowledgeRevisionRow>(&format!(
+        sqlx::query_as::<_, KnowledgeRevisionRow>(sqlx::AssertSqlSafe(format!(
             "UPDATE knowledge_revision SET
                 normalized_text = $2,
                 text_checksum = $3,
@@ -743,7 +743,7 @@ impl DocumentStore for PgDocumentStore {
                 text_readable_at = $5
              WHERE revision_id = $1
              RETURNING {REVISION_COLUMNS}"
-        ))
+        )))
         .bind(revision_id)
         .bind(normalized_text)
         .bind(text_checksum)
@@ -759,11 +759,11 @@ impl DocumentStore for PgDocumentStore {
         revision_id: Uuid,
         image_checksum: Option<&str>,
     ) -> anyhow::Result<Option<KnowledgeRevisionRow>> {
-        sqlx::query_as::<_, KnowledgeRevisionRow>(&format!(
+        sqlx::query_as::<_, KnowledgeRevisionRow>(sqlx::AssertSqlSafe(format!(
             "UPDATE knowledge_revision SET image_checksum = $2
              WHERE revision_id = $1
              RETURNING {REVISION_COLUMNS}"
-        ))
+        )))
         .bind(revision_id)
         .bind(image_checksum)
         .fetch_optional(&self.pool)
@@ -776,11 +776,11 @@ impl DocumentStore for PgDocumentStore {
         revision_id: Uuid,
         storage_ref: Option<&str>,
     ) -> anyhow::Result<Option<KnowledgeRevisionRow>> {
-        sqlx::query_as::<_, KnowledgeRevisionRow>(&format!(
+        sqlx::query_as::<_, KnowledgeRevisionRow>(sqlx::AssertSqlSafe(format!(
             "UPDATE knowledge_revision SET storage_ref = $2
              WHERE revision_id = $1
              RETURNING {REVISION_COLUMNS}"
-        ))
+        )))
         .bind(revision_id)
         .bind(storage_ref)
         .fetch_optional(&self.pool)
@@ -789,7 +789,7 @@ impl DocumentStore for PgDocumentStore {
     }
 
     async fn upsert_chunk(&self, row: &KnowledgeChunkRow) -> anyhow::Result<KnowledgeChunkRow> {
-        sqlx::query_as::<_, KnowledgeChunkRow>(&format!(
+        sqlx::query_as::<_, KnowledgeChunkRow>(sqlx::AssertSqlSafe(format!(
             "INSERT INTO knowledge_chunk (
                 chunk_id, workspace_id, library_id, document_id, revision_id, chunk_index,
                 chunk_kind, content_text, normalized_text, span_start, span_end, token_count,
@@ -817,7 +817,7 @@ impl DocumentStore for PgDocumentStore {
                 occurred_at = EXCLUDED.occurred_at,
                 occurred_until = EXCLUDED.occurred_until
              RETURNING {CHUNK_COLUMNS}"
-        ))
+        )))
         .bind(row.chunk_id)
         .bind(row.workspace_id)
         .bind(row.library_id)
@@ -867,13 +867,13 @@ impl DocumentStore for PgDocumentStore {
         &self,
         library_id: Uuid,
     ) -> anyhow::Result<Vec<KnowledgeChunkRow>> {
-        sqlx::query_as::<_, KnowledgeChunkRow>(&format!(
+        sqlx::query_as::<_, KnowledgeChunkRow>(sqlx::AssertSqlSafe(format!(
             "SELECT {CHUNK_COLUMNS}
              FROM knowledge_chunk
              WHERE library_id = $1 AND raptor_level IS NULL
              ORDER BY chunk_index ASC, chunk_id ASC
              LIMIT 10000"
-        ))
+        )))
         .bind(library_id)
         .fetch_all(&self.pool)
         .await
@@ -889,7 +889,7 @@ impl DocumentStore for PgDocumentStore {
         if limit == 0 || revision_ids.is_empty() {
             return Ok(Vec::new());
         }
-        sqlx::query_as::<_, KnowledgeChunkRow>(&format!(
+        sqlx::query_as::<_, KnowledgeChunkRow>(sqlx::AssertSqlSafe(format!(
             "WITH ranked_revisions AS (
                SELECT revision_id, min(input_rank) AS input_rank
                FROM unnest($2::uuid[]) WITH ORDINALITY AS r(revision_id, input_rank)
@@ -911,7 +911,7 @@ impl DocumentStore for PgDocumentStore {
              ) c
              ORDER BY c.input_rank ASC, c.chunk_index ASC, c.chunk_id ASC
              LIMIT $3"
-        ))
+        )))
         .bind(library_id)
         .bind(revision_ids)
         .bind(limit_i64(limit))
@@ -924,12 +924,12 @@ impl DocumentStore for PgDocumentStore {
         &self,
         revision_id: Uuid,
     ) -> anyhow::Result<Vec<KnowledgeChunkRow>> {
-        sqlx::query_as::<_, KnowledgeChunkRow>(&format!(
+        sqlx::query_as::<_, KnowledgeChunkRow>(sqlx::AssertSqlSafe(format!(
             "SELECT {CHUNK_COLUMNS}
              FROM knowledge_chunk
              WHERE revision_id = $1
              ORDER BY chunk_index ASC, chunk_id ASC"
-        ))
+        )))
         .bind(revision_id)
         .fetch_all(&self.pool)
         .await
@@ -944,13 +944,13 @@ impl DocumentStore for PgDocumentStore {
         if limit == 0 {
             return Ok(Vec::new());
         }
-        sqlx::query_as::<_, KnowledgeChunkRow>(&format!(
+        sqlx::query_as::<_, KnowledgeChunkRow>(sqlx::AssertSqlSafe(format!(
             "SELECT {CHUNK_COLUMNS}
              FROM knowledge_chunk
              WHERE revision_id = $1
              ORDER BY chunk_index ASC, chunk_id ASC
              LIMIT $2"
-        ))
+        )))
         .bind(revision_id)
         .bind(limit_i64(limit))
         .fetch_all(&self.pool)
@@ -982,7 +982,7 @@ impl DocumentStore for PgDocumentStore {
         if terms.is_empty() {
             return Ok(Vec::new());
         }
-        sqlx::query_as::<_, KnowledgeChunkRow>(&format!(
+        sqlx::query_as::<_, KnowledgeChunkRow>(sqlx::AssertSqlSafe(format!(
             "SELECT {CHUNK_COLUMNS}
              FROM knowledge_chunk c
              CROSS JOIN LATERAL (
@@ -1014,7 +1014,7 @@ impl DocumentStore for PgDocumentStore {
                       c.chunk_index ASC,
                       c.chunk_id ASC
              LIMIT $3"
-        ))
+        )))
         .bind(revision_id)
         .bind(&terms)
         .bind(limit_i64(limit))
@@ -1036,7 +1036,7 @@ impl DocumentStore for PgDocumentStore {
         if terms.is_empty() {
             return Ok(Vec::new());
         }
-        sqlx::query_as::<_, KnowledgeChunkRow>(&format!(
+        sqlx::query_as::<_, KnowledgeChunkRow>(sqlx::AssertSqlSafe(format!(
             "WITH requested AS (
                SELECT revision_id, MIN(ordinal)::integer AS ordinal
                FROM unnest($1::uuid[]) WITH ORDINALITY AS request(revision_id, ordinal)
@@ -1086,7 +1086,7 @@ impl DocumentStore for PgDocumentStore {
                       match_score DESC,
                       chunk_index ASC,
                       chunk_id ASC"
-        ))
+        )))
         .bind(revision_ids)
         .bind(&terms)
         .bind(limit_i64(limit))
@@ -1104,13 +1104,13 @@ impl DocumentStore for PgDocumentStore {
         if max_chunk_index < min_chunk_index {
             return Ok(Vec::new());
         }
-        sqlx::query_as::<_, KnowledgeChunkRow>(&format!(
+        sqlx::query_as::<_, KnowledgeChunkRow>(sqlx::AssertSqlSafe(format!(
             "SELECT {CHUNK_COLUMNS}
              FROM knowledge_chunk
              WHERE revision_id = $1 AND chunk_index BETWEEN $2 AND $3
              ORDER BY chunk_index ASC, chunk_id ASC
              LIMIT $4"
-        ))
+        )))
         .bind(revision_id)
         .bind(min_chunk_index)
         .bind(max_chunk_index)
@@ -1131,7 +1131,7 @@ impl DocumentStore for PgDocumentStore {
         }
         let min_indexes = normalized_windows.iter().map(|(min, _)| *min).collect::<Vec<_>>();
         let max_indexes = normalized_windows.iter().map(|(_, max)| *max).collect::<Vec<_>>();
-        sqlx::query_as::<_, KnowledgeChunkRow>(&format!(
+        sqlx::query_as::<_, KnowledgeChunkRow>(sqlx::AssertSqlSafe(format!(
             "SELECT {CHUNK_COLUMNS}
              FROM knowledge_chunk c
              WHERE c.revision_id = $1
@@ -1142,7 +1142,7 @@ impl DocumentStore for PgDocumentStore {
                )
              ORDER BY c.chunk_index ASC, c.chunk_id ASC
              LIMIT $4"
-        ))
+        )))
         .bind(revision_id)
         .bind(&min_indexes)
         .bind(&max_indexes)
@@ -1164,7 +1164,7 @@ impl DocumentStore for PgDocumentStore {
             windows.iter().map(|(revision_id, _, _)| *revision_id).collect::<Vec<_>>();
         let min_indexes = windows.iter().map(|(_, min, _)| *min).collect::<Vec<_>>();
         let max_indexes = windows.iter().map(|(_, _, max)| *max).collect::<Vec<_>>();
-        sqlx::query_as::<_, KnowledgeChunkRow>(&format!(
+        sqlx::query_as::<_, KnowledgeChunkRow>(sqlx::AssertSqlSafe(format!(
             "WITH requested_windows AS (
                SELECT revision_id, min_index, max_index, ordinal::integer AS ordinal
                FROM unnest($1::uuid[], $2::int4[], $3::int4[]) WITH ORDINALITY
@@ -1195,7 +1195,7 @@ impl DocumentStore for PgDocumentStore {
              FROM ranked c
              WHERE revision_rank <= $4
              ORDER BY ordinal ASC, chunk_index ASC, chunk_id ASC"
-        ))
+        )))
         .bind(&revision_ids)
         .bind(&min_indexes)
         .bind(&max_indexes)
@@ -1213,7 +1213,7 @@ impl DocumentStore for PgDocumentStore {
         if limit == 0 {
             return Ok(Vec::new());
         }
-        sqlx::query_as::<_, KnowledgeChunkRow>(&format!(
+        sqlx::query_as::<_, KnowledgeChunkRow>(sqlx::AssertSqlSafe(format!(
             "SELECT {CHUNK_COLUMNS}
              FROM (
                SELECT *
@@ -1223,7 +1223,7 @@ impl DocumentStore for PgDocumentStore {
                LIMIT $2
              ) c
              ORDER BY chunk_index ASC, chunk_id ASC"
-        ))
+        )))
         .bind(revision_id)
         .bind(limit_i64(limit))
         .fetch_all(&self.pool)
@@ -1244,7 +1244,7 @@ impl DocumentStore for PgDocumentStore {
         }
         let temporal_start_iso = temporal_start.map(|value| value.to_rfc3339());
         let temporal_end_iso = temporal_end.map(|value| value.to_rfc3339());
-        sqlx::query_as::<_, KnowledgeStructuredBlockRow>(&format!(
+        sqlx::query_as::<_, KnowledgeStructuredBlockRow>(sqlx::AssertSqlSafe(format!(
             "SELECT {STRUCTURED_BLOCK_COLUMNS}
              FROM knowledge_structured_block
              CROSS JOIN LATERAL (
@@ -1266,7 +1266,7 @@ impl DocumentStore for PgDocumentStore {
                )
              ORDER BY ordinal ASC, block_id ASC
              LIMIT $2"
-        ))
+        )))
         .bind(revision_id)
         .bind(limit_i64(limit))
         .bind(temporal_start_iso)
@@ -1292,7 +1292,7 @@ impl DocumentStore for PgDocumentStore {
         }
         let temporal_start_iso = temporal_start.map(|value| value.to_rfc3339());
         let temporal_end_iso = temporal_end.map(|value| value.to_rfc3339());
-        sqlx::query_as::<_, KnowledgeStructuredBlockRow>(&format!(
+        sqlx::query_as::<_, KnowledgeStructuredBlockRow>(sqlx::AssertSqlSafe(format!(
             "SELECT {STRUCTURED_BLOCK_COLUMNS}
              FROM (
                SELECT *
@@ -1318,7 +1318,7 @@ impl DocumentStore for PgDocumentStore {
                LIMIT $2
              ) block
              ORDER BY ordinal ASC, block_id ASC"
-        ))
+        )))
         .bind(revision_id)
         .bind(limit_i64(limit))
         .bind(temporal_start_iso)
@@ -1332,9 +1332,9 @@ impl DocumentStore for PgDocumentStore {
     }
 
     async fn get_chunk(&self, chunk_id: Uuid) -> anyhow::Result<Option<KnowledgeChunkRow>> {
-        sqlx::query_as::<_, KnowledgeChunkRow>(&format!(
+        sqlx::query_as::<_, KnowledgeChunkRow>(sqlx::AssertSqlSafe(format!(
             "SELECT {CHUNK_COLUMNS} FROM knowledge_chunk WHERE chunk_id = $1 LIMIT 1"
-        ))
+        )))
         .bind(chunk_id)
         .fetch_optional(&self.pool)
         .await
@@ -1348,12 +1348,12 @@ impl DocumentStore for PgDocumentStore {
         if chunk_ids.is_empty() {
             return Ok(Vec::new());
         }
-        sqlx::query_as::<_, KnowledgeChunkRow>(&format!(
+        sqlx::query_as::<_, KnowledgeChunkRow>(sqlx::AssertSqlSafe(format!(
             "SELECT {CHUNK_COLUMNS}
              FROM knowledge_chunk
              WHERE chunk_id = ANY($1)
              ORDER BY chunk_id ASC"
-        ))
+        )))
         .bind(chunk_ids)
         .fetch_all(&self.pool)
         .await
@@ -1371,7 +1371,7 @@ impl DocumentStore for PgDocumentStore {
             return Ok(Vec::new());
         }
         let min_terms = i32::try_from(terms.len().clamp(1, 3)).unwrap_or(i32::MAX);
-        sqlx::query_as::<_, KnowledgeChunkRow>(&format!(
+        sqlx::query_as::<_, KnowledgeChunkRow>(sqlx::AssertSqlSafe(format!(
             "SELECT {CHUNK_COLUMNS}
              FROM knowledge_chunk c
              CROSS JOIN LATERAL (
@@ -1402,7 +1402,7 @@ impl DocumentStore for PgDocumentStore {
              c.chunk_index ASC,
              c.chunk_id ASC
              LIMIT $7"
-        ))
+        )))
         .bind(library_id)
         .bind(&terms)
         .bind(min_terms)
@@ -1425,7 +1425,7 @@ impl DocumentStore for PgDocumentStore {
         if terms.is_empty() || limit == 0 {
             return Ok(Vec::new());
         }
-        sqlx::query_as::<_, KnowledgeChunkRow>(&format!(
+        sqlx::query_as::<_, KnowledgeChunkRow>(sqlx::AssertSqlSafe(format!(
             "SELECT {CHUNK_COLUMNS}
              FROM knowledge_chunk c
              CROSS JOIN LATERAL (
@@ -1471,7 +1471,7 @@ impl DocumentStore for PgDocumentStore {
              c.chunk_index ASC,
              c.chunk_id ASC
              LIMIT $3"
-        ))
+        )))
         .bind(library_id)
         .bind(&terms)
         .bind(limit_i64(limit))
@@ -1484,11 +1484,11 @@ impl DocumentStore for PgDocumentStore {
         &self,
         revision_id: Uuid,
     ) -> anyhow::Result<Vec<KnowledgeChunkRow>> {
-        sqlx::query_as::<_, KnowledgeChunkRow>(&format!(
+        sqlx::query_as::<_, KnowledgeChunkRow>(sqlx::AssertSqlSafe(format!(
             "DELETE FROM knowledge_chunk
              WHERE revision_id = $1
              RETURNING {CHUNK_COLUMNS}"
-        ))
+        )))
         .bind(revision_id)
         .fetch_all(&self.pool)
         .await
@@ -1499,7 +1499,7 @@ impl DocumentStore for PgDocumentStore {
         &self,
         row: &KnowledgeStructuredRevisionRow,
     ) -> anyhow::Result<KnowledgeStructuredRevisionRow> {
-        sqlx::query_as::<_, KnowledgeStructuredRevisionRow>(&format!(
+        sqlx::query_as::<_, KnowledgeStructuredRevisionRow>(sqlx::AssertSqlSafe(format!(
             "INSERT INTO knowledge_structured_revision (
                 revision_id, workspace_id, library_id, document_id, preparation_state,
                 normalization_profile, source_format, language_code, block_count, chunk_count,
@@ -1517,7 +1517,7 @@ impl DocumentStore for PgDocumentStore {
                 prepared_at = EXCLUDED.prepared_at,
                 updated_at = EXCLUDED.updated_at
              RETURNING {STRUCTURED_REVISION_COLUMNS}"
-        ))
+        )))
         .bind(row.revision_id)
         .bind(row.workspace_id)
         .bind(row.library_id)
@@ -1541,12 +1541,12 @@ impl DocumentStore for PgDocumentStore {
         &self,
         revision_id: Uuid,
     ) -> anyhow::Result<Option<KnowledgeStructuredRevisionRow>> {
-        sqlx::query_as::<_, KnowledgeStructuredRevisionRow>(&format!(
+        sqlx::query_as::<_, KnowledgeStructuredRevisionRow>(sqlx::AssertSqlSafe(format!(
             "SELECT {STRUCTURED_REVISION_COLUMNS}
              FROM knowledge_structured_revision
              WHERE revision_id = $1
              LIMIT 1"
-        ))
+        )))
         .bind(revision_id)
         .fetch_optional(&self.pool)
         .await
@@ -1576,11 +1576,11 @@ impl DocumentStore for PgDocumentStore {
         if revision_ids.is_empty() {
             return Ok(Vec::new());
         }
-        sqlx::query_as::<_, KnowledgeStructuredRevisionRow>(&format!(
+        sqlx::query_as::<_, KnowledgeStructuredRevisionRow>(sqlx::AssertSqlSafe(format!(
             "SELECT {STRUCTURED_REVISION_COLUMNS}
              FROM knowledge_structured_revision
              WHERE revision_id = ANY($1)"
-        ))
+        )))
         .bind(revision_ids)
         .fetch_all(&self.pool)
         .await
@@ -1591,12 +1591,12 @@ impl DocumentStore for PgDocumentStore {
         &self,
         document_id: Uuid,
     ) -> anyhow::Result<Vec<KnowledgeStructuredRevisionRow>> {
-        sqlx::query_as::<_, KnowledgeStructuredRevisionRow>(&format!(
+        sqlx::query_as::<_, KnowledgeStructuredRevisionRow>(sqlx::AssertSqlSafe(format!(
             "SELECT {STRUCTURED_REVISION_COLUMNS}
              FROM knowledge_structured_revision
              WHERE document_id = $1
              ORDER BY prepared_at DESC, revision_id DESC"
-        ))
+        )))
         .bind(document_id)
         .fetch_all(&self.pool)
         .await
@@ -1619,12 +1619,12 @@ impl DocumentStore for PgDocumentStore {
         &self,
         revision_id: Uuid,
     ) -> anyhow::Result<Vec<KnowledgeStructuredBlockRow>> {
-        sqlx::query_as::<_, KnowledgeStructuredBlockRow>(&format!(
+        sqlx::query_as::<_, KnowledgeStructuredBlockRow>(sqlx::AssertSqlSafe(format!(
             "SELECT {STRUCTURED_BLOCK_COLUMNS}
              FROM knowledge_structured_block
              WHERE revision_id = $1
              ORDER BY ordinal ASC, block_id ASC"
-        ))
+        )))
         .bind(revision_id)
         .fetch_all(&self.pool)
         .await
@@ -1644,13 +1644,13 @@ impl DocumentStore for PgDocumentStore {
         .fetch_one(&self.pool)
         .await
         .context("failed to count structured blocks by revision")?;
-        let page = sqlx::query_as::<_, KnowledgeStructuredBlockRow>(&format!(
+        let page = sqlx::query_as::<_, KnowledgeStructuredBlockRow>(sqlx::AssertSqlSafe(format!(
             "SELECT {STRUCTURED_BLOCK_COLUMNS}
              FROM knowledge_structured_block
              WHERE revision_id = $1
              ORDER BY ordinal ASC, block_id ASC
              LIMIT $2 OFFSET $3"
-        ))
+        )))
         .bind(revision_id)
         .bind(limit_i64(limit))
         .bind(limit_i64(offset))
@@ -1684,12 +1684,12 @@ impl DocumentStore for PgDocumentStore {
         if block_ids.is_empty() {
             return Ok(Vec::new());
         }
-        sqlx::query_as::<_, KnowledgeStructuredBlockRow>(&format!(
+        sqlx::query_as::<_, KnowledgeStructuredBlockRow>(sqlx::AssertSqlSafe(format!(
             "SELECT {STRUCTURED_BLOCK_COLUMNS}
              FROM knowledge_structured_block
              WHERE block_id = ANY($1)
              ORDER BY ordinal ASC, block_id ASC"
-        ))
+        )))
         .bind(block_ids)
         .fetch_all(&self.pool)
         .await
@@ -1722,12 +1722,12 @@ impl DocumentStore for PgDocumentStore {
         &self,
         revision_id: Uuid,
     ) -> anyhow::Result<Vec<KnowledgeTechnicalFactRow>> {
-        sqlx::query_as::<_, KnowledgeTechnicalFactRow>(&format!(
+        sqlx::query_as::<_, KnowledgeTechnicalFactRow>(sqlx::AssertSqlSafe(format!(
             "SELECT {TECHNICAL_FACT_COLUMNS}
              FROM knowledge_technical_fact
              WHERE revision_id = $1
              ORDER BY fact_kind ASC, fact_id ASC"
-        ))
+        )))
         .bind(revision_id)
         .fetch_all(&self.pool)
         .await
@@ -1752,12 +1752,12 @@ impl DocumentStore for PgDocumentStore {
         if fact_ids.is_empty() {
             return Ok(Vec::new());
         }
-        sqlx::query_as::<_, KnowledgeTechnicalFactRow>(&format!(
+        sqlx::query_as::<_, KnowledgeTechnicalFactRow>(sqlx::AssertSqlSafe(format!(
             "SELECT {TECHNICAL_FACT_COLUMNS}
              FROM knowledge_technical_fact
              WHERE fact_id = ANY($1)
              ORDER BY fact_kind ASC, fact_id ASC"
-        ))
+        )))
         .bind(fact_ids)
         .fetch_all(&self.pool)
         .await
@@ -1771,12 +1771,12 @@ impl DocumentStore for PgDocumentStore {
         if chunk_ids.is_empty() {
             return Ok(Vec::new());
         }
-        sqlx::query_as::<_, KnowledgeTechnicalFactRow>(&format!(
+        sqlx::query_as::<_, KnowledgeTechnicalFactRow>(sqlx::AssertSqlSafe(format!(
             "SELECT {TECHNICAL_FACT_COLUMNS}
              FROM knowledge_technical_fact
              WHERE support_chunk_ids && $1::uuid[]
              ORDER BY fact_kind ASC, fact_id ASC"
-        ))
+        )))
         .bind(chunk_ids)
         .fetch_all(&self.pool)
         .await
@@ -1787,12 +1787,12 @@ impl DocumentStore for PgDocumentStore {
         &self,
         document_id: Uuid,
     ) -> anyhow::Result<Vec<KnowledgeTechnicalFactRow>> {
-        sqlx::query_as::<_, KnowledgeTechnicalFactRow>(&format!(
+        sqlx::query_as::<_, KnowledgeTechnicalFactRow>(sqlx::AssertSqlSafe(format!(
             "SELECT {TECHNICAL_FACT_COLUMNS}
              FROM knowledge_technical_fact
              WHERE document_id = $1
              ORDER BY revision_id DESC, fact_kind ASC, fact_id ASC"
-        ))
+        )))
         .bind(document_id)
         .fetch_all(&self.pool)
         .await
@@ -1803,11 +1803,11 @@ impl DocumentStore for PgDocumentStore {
         &self,
         revision_id: Uuid,
     ) -> anyhow::Result<Vec<KnowledgeTechnicalFactRow>> {
-        sqlx::query_as::<_, KnowledgeTechnicalFactRow>(&format!(
+        sqlx::query_as::<_, KnowledgeTechnicalFactRow>(sqlx::AssertSqlSafe(format!(
             "DELETE FROM knowledge_technical_fact
              WHERE revision_id = $1
              RETURNING {TECHNICAL_FACT_COLUMNS}"
-        ))
+        )))
         .bind(revision_id)
         .fetch_all(&self.pool)
         .await

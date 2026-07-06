@@ -1990,7 +1990,7 @@ pub async fn list_document_page_rows(
     // finishes in 3 ms. Re-planning per call costs a few hundred µs
     // and keeps latency deterministic.
     let (cursor_ts, cursor_id) = cursor.unzip();
-    let mut query = sqlx::query_as::<_, ContentDocumentListRow>(&sql)
+    let mut query = sqlx::query_as::<_, ContentDocumentListRow>(sqlx::AssertSqlSafe(&*sql))
         .persistent(false)
         .bind(library_id)
         .bind(include_deleted)
@@ -2084,7 +2084,7 @@ pub async fn aggregate_document_list_status_counts(
             count(*) filter (where derived_status = 'canceled')::bigint as canceled
         from joined"
     );
-    sqlx::query_as::<_, DocumentListStatusCountsRow>(&sql)
+    sqlx::query_as::<_, DocumentListStatusCountsRow>(sqlx::AssertSqlSafe(&*sql))
         .bind(library_id)
         .bind(include_deleted)
         .bind(search_pattern)

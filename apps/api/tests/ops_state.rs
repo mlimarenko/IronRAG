@@ -45,11 +45,11 @@ impl TempPostgresDatabase {
             .context("failed to connect admin postgres for ops_state test")?;
 
         terminate_database_connections(&admin_pool, &name).await?;
-        sqlx::query(&format!("drop database if exists \"{name}\""))
+        sqlx::query(sqlx::AssertSqlSafe(format!("drop database if exists \"{name}\"")))
             .execute(&admin_pool)
             .await
             .with_context(|| format!("failed to drop stale ops_state database {name}"))?;
-        sqlx::query(&format!("create database \"{name}\""))
+        sqlx::query(sqlx::AssertSqlSafe(format!("create database \"{name}\"")))
             .execute(&admin_pool)
             .await
             .with_context(|| format!("failed to create ops_state database {name}"))?;
@@ -69,7 +69,7 @@ impl TempPostgresDatabase {
             .await
             .context("failed to reconnect admin postgres for ops_state cleanup")?;
         terminate_database_connections(&admin_pool, &self.name).await?;
-        sqlx::query(&format!("drop database if exists \"{}\"", self.name))
+        sqlx::query(sqlx::AssertSqlSafe(format!("drop database if exists \"{}\"", self.name)))
             .execute(&admin_pool)
             .await
             .with_context(|| format!("failed to drop ops_state database {}", self.name))?;

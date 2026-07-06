@@ -2,6 +2,26 @@
 
 ## Unreleased
 
+## 0.5.7 — 2026-07-06
+
+### Added
+
+- **The admin ingest queue supports bulk recovery actions.** Operators can
+  select visible queue rows and apply retry/requeue, pause, resume, or cancel
+  from a contextual actions bar. The backend returns per-job results with
+  stable reason codes, and the UI keeps skipped or failed rows selected for
+  follow-up.
+
+### Fixed
+
+- **The admin ingest queue keeps its constrained table layout for large result sets.** The queue now preserves the shared table width, internal scrolling, and footer pagination as row counts grow.
+
+- **Stale job-level queue leases are recoverable.** Ingest jobs now store
+  queue lease metadata when claimed, workers must match that lease before
+  creating an attempt, and recovery requeues stale leased jobs that no longer
+  have an active attempt. Completed and canceled jobs remain terminal and are
+  not requeued from the queue surface.
+
 ## 0.5.6 — 2026-07-03
 
 ### Changed

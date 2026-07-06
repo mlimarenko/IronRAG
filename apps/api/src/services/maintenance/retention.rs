@@ -106,8 +106,11 @@ async fn sweep_batched(
 
     let mut report = RetentionReport::default();
     loop {
-        let removed: i64 =
-            sqlx::query_scalar(&sql).bind(secs).bind(BATCH_SIZE).fetch_one(pool).await?;
+        let removed: i64 = sqlx::query_scalar(sqlx::AssertSqlSafe(&*sql))
+            .bind(secs)
+            .bind(BATCH_SIZE)
+            .fetch_one(pool)
+            .await?;
         if removed == 0 {
             return Ok(report);
         }

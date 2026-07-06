@@ -71,11 +71,11 @@ impl TempDatabase {
             .context("failed to connect bootstrap test admin postgres")?;
 
         terminate_database_connections(&admin_pool, &database_name).await?;
-        sqlx::query(&format!("drop database if exists \"{database_name}\""))
+        sqlx::query(sqlx::AssertSqlSafe(format!("drop database if exists \"{database_name}\"")))
             .execute(&admin_pool)
             .await
             .with_context(|| format!("failed to drop stale test database {database_name}"))?;
-        sqlx::query(&format!("create database \"{database_name}\""))
+        sqlx::query(sqlx::AssertSqlSafe(format!("create database \"{database_name}\"")))
             .execute(&admin_pool)
             .await
             .with_context(|| format!("failed to create test database {database_name}"))?;
@@ -95,7 +95,7 @@ impl TempDatabase {
             .await
             .context("failed to reconnect bootstrap test admin postgres for cleanup")?;
         terminate_database_connections(&admin_pool, &self.name).await?;
-        sqlx::query(&format!("drop database if exists \"{}\"", self.name))
+        sqlx::query(sqlx::AssertSqlSafe(format!("drop database if exists \"{}\"", self.name)))
             .execute(&admin_pool)
             .await
             .with_context(|| format!("failed to drop test database {}", self.name))?;
@@ -247,7 +247,7 @@ async fn terminate_database_connections(postgres: &PgPool, database_name: &str) 
 }
 
 async fn scalar_count(postgres: &PgPool, table_name: &str) -> Result<i64> {
-    sqlx::query_scalar::<_, i64>(&format!("select count(*) from {table_name}"))
+    sqlx::query_scalar::<_, i64>(sqlx::AssertSqlSafe(format!("select count(*) from {table_name}")))
         .fetch_one(postgres)
         .await
         .with_context(|| format!("failed to count rows in {table_name}"))
@@ -275,6 +275,8 @@ fn migrator_with_versions(source: &Migrator, min_version: i64, max_version: i64)
         ignore_missing: false,
         locking: true,
         no_tx: false,
+        table_name: Cow::Borrowed("_sqlx_migrations"),
+        create_schemas: Cow::Borrowed(&[]),
     }
 }
 

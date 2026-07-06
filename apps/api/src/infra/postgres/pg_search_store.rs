@@ -360,7 +360,7 @@ impl PgSearchStore {
         let storage = PgVectorStorage::for_dim(dim);
         let dim = checked_dim_i32(dim)?;
         let embedding_type = storage.column_type(dim);
-        sqlx::query(&format!(
+        sqlx::query(sqlx::AssertSqlSafe(format!(
             "create table if not exists {relation} (
                 key text primary key,
                 vector_id uuid not null,
@@ -377,7 +377,7 @@ impl PgSearchStore {
                 occurred_at timestamptz,
                 occurred_until timestamptz
             )"
-        ))
+        )))
         .execute(&self.pool)
         .await
         .with_context(|| format!("failed to create chunk vector relation {relation_name}"))?;
@@ -398,7 +398,7 @@ impl PgSearchStore {
         let storage = PgVectorStorage::for_dim(dim);
         let dim = checked_dim_i32(dim)?;
         let embedding_type = storage.column_type(dim);
-        sqlx::query(&format!(
+        sqlx::query(sqlx::AssertSqlSafe(format!(
             "create table if not exists {relation} (
                 key text primary key,
                 vector_id uuid not null,
@@ -412,7 +412,7 @@ impl PgSearchStore {
                 freshness_generation bigint not null,
                 created_at timestamptz not null
             )"
-        ))
+        )))
         .execute(&self.pool)
         .await
         .with_context(|| format!("failed to create entity vector relation {relation_name}"))?;
@@ -431,25 +431,27 @@ impl PgSearchStore {
     ) -> anyhow::Result<()> {
         let relation = quote_identifier(relation_name)?;
         let lane_idx = quote_identifier(&format!("{relation_name}_lane_idx"))?;
-        sqlx::query(&format!(
+        sqlx::query(sqlx::AssertSqlSafe(format!(
             "create index if not exists {lane_idx}
              on {relation} (library_id, embedding_model_key, vector_kind)"
-        ))
+        )))
         .execute(&self.pool)
         .await
         .with_context(|| format!("failed to create lane index on {relation_name}"))?;
 
         let id_idx = quote_identifier(&format!("{relation_name}_{id_column}_idx"))?;
-        sqlx::query(&format!("create index if not exists {id_idx} on {relation} ({id_column})"))
-            .execute(&self.pool)
-            .await
-            .with_context(|| format!("failed to create id index on {relation_name}"))?;
+        sqlx::query(sqlx::AssertSqlSafe(format!(
+            "create index if not exists {id_idx} on {relation} ({id_column})"
+        )))
+        .execute(&self.pool)
+        .await
+        .with_context(|| format!("failed to create id index on {relation_name}"))?;
 
         if let Some(extra_column) = extra_column {
             let extra_idx = quote_identifier(&format!("{relation_name}_{extra_column}_idx"))?;
-            sqlx::query(&format!(
+            sqlx::query(sqlx::AssertSqlSafe(format!(
                 "create index if not exists {extra_idx} on {relation} ({extra_column})"
-            ))
+            )))
             .execute(&self.pool)
             .await
             .with_context(|| format!("failed to create extra index on {relation_name}"))?;
@@ -466,23 +468,22 @@ impl PgSearchStore {
     ) -> anyhow::Result<()> {
         let relation = quote_identifier(relation_name)?;
         let hnsw_idx = quote_identifier(&format!("{relation_name}_hnsw"))?;
-        let row_count =
-            sqlx::query_scalar::<_, i64>(&format!("select count(*)::bigint from {relation}"))
-                .fetch_one(&self.pool)
-                .await
-                .with_context(|| {
-                    format!("failed to count rows in {relation_name} for HNSW sizing")
-                })?;
+        let row_count = sqlx::query_scalar::<_, i64>(sqlx::AssertSqlSafe(format!(
+            "select count(*)::bigint from {relation}"
+        )))
+        .fetch_one(&self.pool)
+        .await
+        .with_context(|| format!("failed to count rows in {relation_name} for HNSW sizing"))?;
         let row_count = u64::try_from(row_count).context("negative vector shard row count")?;
         let params = pg_hnsw_index_params(row_count, dim, storage)?;
         let ops = storage.cosine_ops();
-        sqlx::query(&format!(
+        sqlx::query(sqlx::AssertSqlSafe(format!(
             "create index if not exists {hnsw_idx}
              on {relation} using hnsw (embedding {ops})
              with (m = {m}, ef_construction = {ef_construction})",
             m = params.m,
             ef_construction = params.ef_construction
-        ))
+        )))
         .execute(&self.pool)
         .await
         .with_context(|| format!("failed to create HNSW index on {relation_name}"))?;
@@ -575,13 +576,13 @@ impl PgSearchStore {
         embedding_model_key: &str,
     ) -> anyhow::Result<()> {
         let relation = quote_identifier(relation_name)?;
-        let row_count = sqlx::query_scalar::<_, i64>(&format!(
+        let row_count = sqlx::query_scalar::<_, i64>(sqlx::AssertSqlSafe(format!(
             "select count(*)::bigint
              from {relation}
              where library_id = $1
                and vector_kind = $2
                and embedding_model_key = $3"
-        ))
+        )))
         .bind(library_id)
         .bind(vector_kind)
         .bind(embedding_model_key)
@@ -616,7 +617,7 @@ impl PgSearchStore {
         let vector_literal = pgvector_literal(&row.vector)?;
         let storage = PgVectorStorage::for_dim(u64::try_from(row.dimensions)?);
         let cast_type = storage.cast_type();
-        let row = sqlx::query_as::<_, PgChunkVectorRow>(&format!(
+        let row = sqlx::query_as::<_, PgChunkVectorRow>(sqlx::AssertSqlSafe(format!(
             "insert into {relation} (
                 key, vector_id, workspace_id, library_id, chunk_id, revision_id,
                 embedding_model_key, vector_kind, dimensions, embedding,
@@ -637,7 +638,7 @@ impl PgSearchStore {
              returning key, vector_id, workspace_id, library_id, chunk_id, revision_id,
                 embedding_model_key, vector_kind, dimensions, embedding::text as vector_text,
                 freshness_generation, created_at, occurred_at, occurred_until"
-        ))
+        )))
         .bind(row.vector_id.to_string())
         .bind(row.vector_id)
         .bind(row.workspace_id)
@@ -667,7 +668,7 @@ impl PgSearchStore {
         let vector_literal = pgvector_literal(&row.vector)?;
         let storage = PgVectorStorage::for_dim(u64::try_from(row.dimensions)?);
         let cast_type = storage.cast_type();
-        let row = sqlx::query_as::<_, PgEntityVectorRow>(&format!(
+        let row = sqlx::query_as::<_, PgEntityVectorRow>(sqlx::AssertSqlSafe(format!(
             "insert into {relation} (
                 key, vector_id, workspace_id, library_id, entity_id, embedding_model_key,
                 vector_kind, dimensions, embedding, freshness_generation, created_at
@@ -684,7 +685,7 @@ impl PgSearchStore {
              returning key, vector_id, workspace_id, library_id, entity_id,
                 embedding_model_key, vector_kind, dimensions, embedding::text as vector_text,
                 freshness_generation, created_at"
-        ))
+        )))
         .bind(row.vector_id.to_string())
         .bind(row.vector_id)
         .bind(row.workspace_id)
@@ -724,7 +725,7 @@ impl PgSearchStore {
         title_ngram_terms: &[String],
         title_soft_raw_enabled: bool,
     ) -> anyhow::Result<Vec<KnowledgeChunkSearchRow>> {
-        let rows = sqlx::query_as::<_, PgChunkSearchRow>(sql)
+        let rows = sqlx::query_as::<_, PgChunkSearchRow>(sqlx::AssertSqlSafe(sql))
             .bind(library_id)
             .bind(fts_input)
             .bind(limit.max(1).saturating_mul(4).max(48) as i64)
@@ -854,7 +855,7 @@ impl SearchStore for PgSearchStore {
     ) -> anyhow::Result<Option<KnowledgeChunkVectorRow>> {
         for relation_name in self.list_vector_relations(CHUNK_VECTOR_RELATION_PREFIX).await? {
             let relation = quote_identifier(&relation_name)?;
-            let row = sqlx::query_as::<_, PgChunkVectorRow>(&format!(
+            let row = sqlx::query_as::<_, PgChunkVectorRow>(sqlx::AssertSqlSafe(format!(
                 "delete from {relation}
                  where key in (
                     select key from {relation}
@@ -867,7 +868,7 @@ impl SearchStore for PgSearchStore {
                  returning key, vector_id, workspace_id, library_id, chunk_id, revision_id,
                     embedding_model_key, vector_kind, dimensions, embedding::text as vector_text,
                     freshness_generation, created_at, occurred_at, occurred_until"
-            ))
+            )))
             .bind(chunk_id)
             .bind(embedding_model_key)
             .bind(freshness_generation)
@@ -930,7 +931,7 @@ impl SearchStore for PgSearchStore {
         let mut total = 0_u64;
         for relation_name in self.list_vector_relations(CHUNK_VECTOR_RELATION_PREFIX).await? {
             let relation = quote_identifier(&relation_name)?;
-            let result = sqlx::query(&format!("delete from {relation}"))
+            let result = sqlx::query(sqlx::AssertSqlSafe(format!("delete from {relation}")))
                 .execute(&self.pool)
                 .await
                 .with_context(|| format!("failed to delete rows from {relation_name}"))?;
@@ -949,14 +950,14 @@ impl SearchStore for PgSearchStore {
         let mut rows = Vec::new();
         for relation_name in self.list_vector_relations(CHUNK_VECTOR_RELATION_PREFIX).await? {
             let relation = quote_identifier(&relation_name)?;
-            let pg_rows = sqlx::query_as::<_, PgChunkVectorRow>(&format!(
+            let pg_rows = sqlx::query_as::<_, PgChunkVectorRow>(sqlx::AssertSqlSafe(format!(
                 "select key, vector_id, workspace_id, library_id, chunk_id, revision_id,
                     embedding_model_key, vector_kind, dimensions, embedding::text as vector_text,
                     freshness_generation, created_at, occurred_at, occurred_until
                  from {relation}
                  where chunk_id = $1
                  order by freshness_generation desc, created_at desc"
-            ))
+            )))
             .bind(chunk_id)
             .fetch_all(&self.pool)
             .await
@@ -986,7 +987,7 @@ impl SearchStore for PgSearchStore {
         let mut rows = Vec::new();
         for relation_name in self.list_vector_relations(CHUNK_VECTOR_RELATION_PREFIX).await? {
             let relation = quote_identifier(&relation_name)?;
-            let pg_rows = sqlx::query_as::<_, PgChunkVectorRow>(&format!(
+            let pg_rows = sqlx::query_as::<_, PgChunkVectorRow>(sqlx::AssertSqlSafe(format!(
                 "select key, vector_id, workspace_id, library_id, chunk_id, revision_id,
                     embedding_model_key, vector_kind, dimensions, embedding::text as vector_text,
                     freshness_generation, created_at, occurred_at, occurred_until
@@ -995,7 +996,7 @@ impl SearchStore for PgSearchStore {
                    and embedding_model_key = $2
                    and vector_kind = $3
                  order by chunk_id asc, freshness_generation desc, created_at desc"
-            ))
+            )))
             .bind(chunk_ids)
             .bind(embedding_model_key)
             .bind(vector_kind)
@@ -1025,14 +1026,14 @@ impl SearchStore for PgSearchStore {
         let mut total = 0_i64;
         for relation_name in self.list_vector_relations(CHUNK_VECTOR_RELATION_PREFIX).await? {
             let relation = quote_identifier(&relation_name)?;
-            let count = sqlx::query_scalar::<_, i64>(&format!(
+            let count = sqlx::query_scalar::<_, i64>(sqlx::AssertSqlSafe(format!(
                 "select count(*)::bigint
                  from {relation}
                  where revision_id = $1
                    and embedding_model_key = $2
                    and vector_kind = $3
                    and freshness_generation = $4"
-            ))
+            )))
             .bind(revision_id)
             .bind(embedding_model_key)
             .bind(vector_kind)
@@ -1110,7 +1111,7 @@ impl SearchStore for PgSearchStore {
     ) -> anyhow::Result<Option<KnowledgeEntityVectorRow>> {
         for relation_name in self.list_vector_relations(ENTITY_VECTOR_RELATION_PREFIX).await? {
             let relation = quote_identifier(&relation_name)?;
-            let row = sqlx::query_as::<_, PgEntityVectorRow>(&format!(
+            let row = sqlx::query_as::<_, PgEntityVectorRow>(sqlx::AssertSqlSafe(format!(
                 "delete from {relation}
                  where key in (
                     select key from {relation}
@@ -1123,7 +1124,7 @@ impl SearchStore for PgSearchStore {
                  returning key, vector_id, workspace_id, library_id, entity_id,
                     embedding_model_key, vector_kind, dimensions, embedding::text as vector_text,
                     freshness_generation, created_at"
-            ))
+            )))
             .bind(entity_id)
             .bind(embedding_model_key)
             .bind(freshness_generation)
@@ -1153,7 +1154,7 @@ impl SearchStore for PgSearchStore {
         let mut total = 0_u64;
         for relation_name in self.list_vector_relations(ENTITY_VECTOR_RELATION_PREFIX).await? {
             let relation = quote_identifier(&relation_name)?;
-            let result = sqlx::query(&format!("delete from {relation}"))
+            let result = sqlx::query(sqlx::AssertSqlSafe(format!("delete from {relation}")))
                 .execute(&self.pool)
                 .await
                 .with_context(|| format!("failed to delete rows from {relation_name}"))?;
@@ -1172,7 +1173,7 @@ impl SearchStore for PgSearchStore {
         let mut rows = Vec::new();
         for relation_name in self.list_vector_relations(ENTITY_VECTOR_RELATION_PREFIX).await? {
             let relation = quote_identifier(&relation_name)?;
-            let pg_rows = sqlx::query_as::<_, PgEntityVectorRow>(&format!(
+            let pg_rows = sqlx::query_as::<_, PgEntityVectorRow>(sqlx::AssertSqlSafe(format!(
                 "select key, vector_id, workspace_id, library_id, entity_id,
                     embedding_model_key, vector_kind, dimensions, embedding::text as vector_text,
                     freshness_generation, created_at
@@ -1180,7 +1181,7 @@ impl SearchStore for PgSearchStore {
                  where entity_id = $1
                  order by freshness_generation desc, created_at desc
                  limit 1000"
-            ))
+            )))
             .bind(entity_id)
             .fetch_all(&self.pool)
             .await
@@ -1318,13 +1319,14 @@ impl SearchStore for PgSearchStore {
             &prefix_sql,
             |row: &KnowledgeStructuredBlockSearchRow| row.block_id,
             |sql, fts_input| async move {
-                let rows = sqlx::query_as::<_, PgStructuredBlockSearchRow>(&sql)
-                    .bind(library_id)
-                    .bind(fts_input)
-                    .bind(limit.max(1) as i64)
-                    .fetch_all(&self.pool)
-                    .await
-                    .context("failed to search structured blocks")?;
+                let rows =
+                    sqlx::query_as::<_, PgStructuredBlockSearchRow>(sqlx::AssertSqlSafe(&*sql))
+                        .bind(library_id)
+                        .bind(fts_input)
+                        .bind(limit.max(1) as i64)
+                        .fetch_all(&self.pool)
+                        .await
+                        .context("failed to search structured blocks")?;
                 Ok(rows
                     .into_iter()
                     .map(|row| KnowledgeStructuredBlockSearchRow {
@@ -1386,14 +1388,15 @@ impl SearchStore for PgSearchStore {
             |sql, fts_input| {
                 let query_exact = query_exact.clone();
                 async move {
-                    let rows = sqlx::query_as::<_, PgTechnicalFactSearchRow>(&sql)
-                        .bind(library_id)
-                        .bind(fts_input)
-                        .bind(query_exact)
-                        .bind(limit.max(1) as i64)
-                        .fetch_all(&self.pool)
-                        .await
-                        .context("failed to search technical facts")?;
+                    let rows =
+                        sqlx::query_as::<_, PgTechnicalFactSearchRow>(sqlx::AssertSqlSafe(&*sql))
+                            .bind(library_id)
+                            .bind(fts_input)
+                            .bind(query_exact)
+                            .bind(limit.max(1) as i64)
+                            .fetch_all(&self.pool)
+                            .await
+                            .context("failed to search technical facts")?;
                     Ok(rows
                         .into_iter()
                         .map(|row| KnowledgeTechnicalFactSearchRow {
@@ -1442,7 +1445,7 @@ impl SearchStore for PgSearchStore {
             &prefix_sql,
             |row: &KnowledgeEntitySearchRow| row.entity_id,
             |sql, fts_input| async move {
-                let rows = sqlx::query_as::<_, PgEntitySearchRow>(&sql)
+                let rows = sqlx::query_as::<_, PgEntitySearchRow>(sqlx::AssertSqlSafe(&*sql))
                     .bind(library_id)
                     .bind(fts_input)
                     .bind(limit.max(1) as i64)
@@ -1493,7 +1496,7 @@ impl SearchStore for PgSearchStore {
             &prefix_sql,
             |row: &KnowledgeRelationSearchRow| row.relation_id,
             |sql, fts_input| async move {
-                let rows = sqlx::query_as::<_, PgRelationSearchRow>(&sql)
+                let rows = sqlx::query_as::<_, PgRelationSearchRow>(sqlx::AssertSqlSafe(&*sql))
                     .bind(library_id)
                     .bind(fts_input)
                     .bind(limit.max(1) as i64)
@@ -1547,8 +1550,10 @@ impl SearchStore for PgSearchStore {
         let cast_type = storage.cast_type();
         let ef_search = pg_hnsw_ef_search(n_probe);
         let mut tx = self.pool.begin().await?;
-        sqlx::query(&format!("set local hnsw.ef_search = {ef_search}")).execute(&mut *tx).await?;
-        let rows = sqlx::query_as::<_, PgChunkVectorSearchRow>(&format!(
+        sqlx::query(sqlx::AssertSqlSafe(format!("set local hnsw.ef_search = {ef_search}")))
+            .execute(&mut *tx)
+            .await?;
+        let rows = sqlx::query_as::<_, PgChunkVectorSearchRow>(sqlx::AssertSqlSafe(format!(
             "select vector_id, workspace_id, library_id, chunk_id, revision_id,
                 embedding_model_key, vector_kind, freshness_generation,
                 (1.0 - (embedding <=> $3::{cast_type}))::double precision as score
@@ -1562,7 +1567,7 @@ impl SearchStore for PgSearchStore {
                         and ($5::timestamptz is null or occurred_at <= $5)))
              order by embedding <=> $3::{cast_type}, chunk_id asc
              limit $7"
-        ))
+        )))
         .bind(library_id)
         .bind(embedding_model_key)
         .bind(query_literal)
@@ -1618,8 +1623,10 @@ impl SearchStore for PgSearchStore {
         let cast_type = storage.cast_type();
         let ef_search = pg_hnsw_ef_search(n_probe);
         let mut tx = self.pool.begin().await?;
-        sqlx::query(&format!("set local hnsw.ef_search = {ef_search}")).execute(&mut *tx).await?;
-        let rows = sqlx::query_as::<_, PgEntityVectorSearchRow>(&format!(
+        sqlx::query(sqlx::AssertSqlSafe(format!("set local hnsw.ef_search = {ef_search}")))
+            .execute(&mut *tx)
+            .await?;
+        let rows = sqlx::query_as::<_, PgEntityVectorSearchRow>(sqlx::AssertSqlSafe(format!(
             "select vector_id, workspace_id, library_id, entity_id,
                 embedding_model_key, vector_kind, freshness_generation,
                 (1.0 - (embedding <=> $3::{cast_type}))::double precision as score
@@ -1629,7 +1636,7 @@ impl SearchStore for PgSearchStore {
                and vector_kind = $4
              order by embedding <=> $3::{cast_type}, entity_id asc
              limit $5"
-        ))
+        )))
         .bind(library_id)
         .bind(embedding_model_key)
         .bind(query_literal)
@@ -1664,11 +1671,12 @@ async fn delete_from_vector_relations(
     let mut total = 0_u64;
     for relation_name in relation_names {
         let relation = quote_identifier(relation_name)?;
-        let result = sqlx::query(&format!("delete from {relation} where {predicate}"))
-            .bind(id)
-            .execute(pool)
-            .await
-            .with_context(|| format!("failed to delete rows from {relation_name}"))?;
+        let result =
+            sqlx::query(sqlx::AssertSqlSafe(format!("delete from {relation} where {predicate}")))
+                .bind(id)
+                .execute(pool)
+                .await
+                .with_context(|| format!("failed to delete rows from {relation_name}"))?;
         total = total
             .checked_add(result.rows_affected())
             .context("deleted vector count overflowed u64")?;

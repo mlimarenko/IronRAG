@@ -2,7 +2,7 @@
 
 import { type Client, formDataBodySerializer, type Options as Options2, type RequestResult, type TDataShape } from './client';
 import { client } from './client.gen';
-import type { AppendContentDocumentData, AppendContentDocumentErrors, AppendContentDocumentResponses, BatchCancelContentDocumentsData, BatchCancelContentDocumentsErrors, BatchCancelContentDocumentsResponses, BatchDeleteContentDocumentsData, BatchDeleteContentDocumentsErrors, BatchDeleteContentDocumentsResponses, BatchReprocessContentDocumentsData, BatchReprocessContentDocumentsErrors, BatchReprocessContentDocumentsResponses, CancelContentWebIngestRunData, CancelContentWebIngestRunErrors, CancelContentWebIngestRunResponses, CancelIngestQueueJobData, CancelIngestQueueJobErrors, CancelIngestQueueJobResponses, CreateAiAccountData, CreateAiAccountErrors, CreateAiAccountResponses, CreateAiLibraryBindingData, CreateAiLibraryBindingErrors, CreateAiLibraryBindingResponses, CreateAiModelData, CreateAiModelErrors, CreateAiModelResponses, CreateAiPriceOverrideData, CreateAiPriceOverrideErrors, CreateAiPriceOverrideResponses, CreateAiProviderData, CreateAiProviderErrors, CreateAiProviderResponses, CreateCatalogLibraryData, CreateCatalogLibraryErrors, CreateCatalogLibraryResponses, CreateCatalogWorkspaceData, CreateCatalogWorkspaceErrors, CreateCatalogWorkspaceResponses, CreateContentDocumentData, CreateContentDocumentErrors, CreateContentDocumentResponses, CreateContentMutationData, CreateContentMutationErrors, CreateContentMutationResponses, CreateContentWebIngestRunData, CreateContentWebIngestRunErrors, CreateContentWebIngestRunResponses, CreateIamGrantData, CreateIamGrantErrors, CreateIamGrantResponses, CreateIamUserData, CreateIamUserErrors, CreateIamUserResponses, CreateQuerySessionData, CreateQuerySessionErrors, CreateQuerySessionResponses, CreateQuerySessionTurnData, CreateQuerySessionTurnErrors, CreateQuerySessionTurnResponses, CreateWebhookSubscriptionData, CreateWebhookSubscriptionErrors, CreateWebhookSubscriptionResponses, DeleteAiAccountData, DeleteAiAccountErrors, DeleteAiAccountResponses, DeleteAiLibraryBindingData, DeleteAiLibraryBindingErrors, DeleteAiLibraryBindingResponses, DeleteAiModelData, DeleteAiModelErrors, DeleteAiModelResponses, DeleteAiPriceOverrideData, DeleteAiPriceOverrideErrors, DeleteAiPriceOverrideResponses, DeleteAiProviderData, DeleteAiProviderErrors, DeleteAiProviderResponses, DeleteCatalogLibraryData, DeleteCatalogLibraryErrors, DeleteCatalogLibraryResponses, DeleteCatalogWorkspaceData, DeleteCatalogWorkspaceErrors, DeleteCatalogWorkspaceResponses, DeleteContentDocumentData, DeleteContentDocumentErrors, DeleteContentDocumentResponses, DeleteIamTokenData, DeleteIamTokenErrors, DeleteIamTokenResponses, DeleteWebhookSubscriptionData, DeleteWebhookSubscriptionErrors, DeleteWebhookSubscriptionResponses, EditContentDocumentData, EditContentDocumentErrors, EditContentDocumentResponses, ExportLibrarySnapshotData, ExportLibrarySnapshotErrors, ExportLibrarySnapshotResponses, ExportWorkspaceSnapshotData, ExportWorkspaceSnapshotErrors, ExportWorkspaceSnapshotResponses, GetAdminSurfaceData, GetAdminSurfaceErrors, GetAdminSurfaceResponses, GetAssistantSystemPromptData, GetAssistantSystemPromptErrors, GetAssistantSystemPromptResponses, GetAsyncOperationData, GetAsyncOperationErrors, GetAsyncOperationResponses, GetBillingExecutionCostData, GetBillingExecutionCostErrors, GetBillingExecutionCostResponses, GetBootstrapStatusData, GetBootstrapStatusResponses, GetCatalogLibraryData, GetCatalogLibraryErrors, GetCatalogLibraryResponses, GetCatalogLibraryRetrievalConfigData, GetCatalogLibraryRetrievalConfigErrors, GetCatalogLibraryRetrievalConfigResponses, GetCatalogWorkspaceData, GetCatalogWorkspaceErrors, GetCatalogWorkspaceResponses, GetContentDocumentData, GetContentDocumentErrors, GetContentDocumentHeadData, GetContentDocumentHeadErrors, GetContentDocumentHeadResponses, GetContentDocumentResponses, GetContentDocumentSourceData, GetContentDocumentSourceErrors, GetContentDocumentSourceResponses, GetContentMutationData, GetContentMutationErrors, GetContentMutationResponses, GetContentWebIngestRunData, GetContentWebIngestRunErrors, GetContentWebIngestRunResponses, GetHealthData, GetHealthResponses, GetIamMeData, GetIamMeErrors, GetIamMeResponses, GetIamSessionData, GetIamSessionErrors, GetIamSessionResponses, GetIamUserAccessData, GetIamUserAccessErrors, GetIamUserAccessResponses, GetIngestAttemptData, GetIngestAttemptErrors, GetIngestAttemptResponses, GetIngestJobData, GetIngestJobErrors, GetIngestJobResponses, GetKnowledgeContextBundleData, GetKnowledgeContextBundleErrors, GetKnowledgeContextBundleResponses, GetKnowledgeDocumentData, GetKnowledgeDocumentErrors, GetKnowledgeDocumentResponses, GetKnowledgeEntityData, GetKnowledgeEntityErrors, GetKnowledgeEntityResponses, GetKnowledgeGraphWorkbenchData, GetKnowledgeGraphWorkbenchErrors, GetKnowledgeGraphWorkbenchResponses, GetKnowledgeLibrarySummaryData, GetKnowledgeLibrarySummaryErrors, GetKnowledgeLibrarySummaryResponses, GetKnowledgeRelationData, GetKnowledgeRelationErrors, GetKnowledgeRelationResponses, GetLibraryCostSummaryData, GetLibraryCostSummaryErrors, GetLibraryCostSummaryResponses, GetLibraryDashboardData, GetLibraryDashboardErrors, GetLibraryDashboardResponses, GetLibraryStateData, GetLibraryStateErrors, GetLibraryStateResponses, GetMcpCapabilitiesData, GetMcpCapabilitiesErrors, GetMcpCapabilitiesResponses, GetMcpDiagnosticsCapabilitiesData, GetMcpDiagnosticsCapabilitiesErrors, GetMcpDiagnosticsCapabilitiesResponses, GetOpenApiContractData, GetOpenApiContractResponses, GetQueryExecutionData, GetQueryExecutionErrors, GetQueryExecutionLlmContextData, GetQueryExecutionLlmContextErrors, GetQueryExecutionLlmContextResponses, GetQueryExecutionResponses, GetQuerySessionData, GetQuerySessionErrors, GetQuerySessionResponses, GetReadinessData, GetReadinessErrors, GetReadinessResponses, GetReleaseUpdateData, GetReleaseUpdateResponses, GetRuntimeExecutionData, GetRuntimeExecutionErrors, GetRuntimeExecutionResponses, GetRuntimeExecutionTraceData, GetRuntimeExecutionTraceErrors, GetRuntimeExecutionTraceResponses, GetVersionData, GetVersionResponses, GetWebhookSubscriptionData, GetWebhookSubscriptionErrors, GetWebhookSubscriptionResponses, GetWorkspaceCostSummaryData, GetWorkspaceCostSummaryErrors, GetWorkspaceCostSummaryResponses, ImportLibrarySnapshotData, ImportLibrarySnapshotErrors, ImportLibrarySnapshotResponses, ImportWorkspaceSnapshotData, ImportWorkspaceSnapshotErrors, ImportWorkspaceSnapshotResponses, ListAiAccountsData, ListAiAccountsErrors, ListAiAccountsResponses, ListAiLibraryBindingsData, ListAiLibraryBindingsErrors, ListAiLibraryBindingsResponses, ListAiModelsData, ListAiModelsErrors, ListAiModelsResponses, ListAiPricesData, ListAiPricesErrors, ListAiPricesResponses, ListAiProvidersData, ListAiProvidersErrors, ListAiProvidersResponses, ListAuditEventsData, ListAuditEventsErrors, ListAuditEventsResponses, ListBillingChargesData, ListBillingChargesErrors, ListBillingChargesResponses, ListBillingLibraryDocumentCostsData, ListBillingLibraryDocumentCostsErrors, ListBillingLibraryDocumentCostsResponses, ListBillingProviderCallsData, ListBillingProviderCallsErrors, ListBillingProviderCallsResponses, ListCatalogLibrariesData, ListCatalogLibrariesErrors, ListCatalogLibrariesResponses, ListCatalogWorkspacesData, ListCatalogWorkspacesErrors, ListCatalogWorkspacesResponses, ListChunksData, ListChunksErrors, ListChunksResponses, ListContentDocumentsData, ListContentDocumentsErrors, ListContentDocumentsResponses, ListContentMutationsData, ListContentMutationsErrors, ListContentMutationsResponses, ListContentPreparedSegmentsData, ListContentPreparedSegmentsErrors, ListContentPreparedSegmentsResponses, ListContentRevisionsData, ListContentRevisionsErrors, ListContentRevisionsResponses, ListContentTechnicalFactsData, ListContentTechnicalFactsErrors, ListContentTechnicalFactsResponses, ListContentWebIngestRunPagesData, ListContentWebIngestRunPagesErrors, ListContentWebIngestRunPagesResponses, ListContentWebIngestRunsData, ListContentWebIngestRunsErrors, ListContentWebIngestRunsResponses, ListIamGrantsData, ListIamGrantsErrors, ListIamGrantsResponses, ListIamTokensData, ListIamTokensErrors, ListIamTokensResponses, ListIamUsersData, ListIamUsersErrors, ListIamUsersResponses, ListIngestJobsData, ListIngestJobsErrors, ListIngestJobsResponses, ListIngestQueueData, ListIngestQueueErrors, ListIngestQueueResponses, ListIngestStageEventsData, ListIngestStageEventsErrors, ListIngestStageEventsResponses, ListKnowledgeContextBundlesData, ListKnowledgeContextBundlesErrors, ListKnowledgeContextBundlesResponses, ListKnowledgeDocumentsData, ListKnowledgeDocumentsErrors, ListKnowledgeDocumentsResponses, ListKnowledgeLibraryGenerationsData, ListKnowledgeLibraryGenerationsErrors, ListKnowledgeLibraryGenerationsResponses, ListQuerySessionsData, ListQuerySessionsErrors, ListQuerySessionsResponses, ListWebhookDeliveryAttemptsData, ListWebhookDeliveryAttemptsErrors, ListWebhookDeliveryAttemptsResponses, ListWebhookSubscriptionsData, ListWebhookSubscriptionsErrors, ListWebhookSubscriptionsResponses, LoginIamSessionData, LoginIamSessionErrors, LoginIamSessionResponses, LogoutIamSessionData, LogoutIamSessionErrors, LogoutIamSessionResponses, MintIamTokenData, MintIamTokenErrors, MintIamTokenResponses, MoveIngestQueueJobData, MoveIngestQueueJobErrors, MoveIngestQueueJobResponses, PatchContentDocumentMetadataData, PatchContentDocumentMetadataErrors, PatchContentDocumentMetadataResponses, PauseIngestQueueJobData, PauseIngestQueueJobErrors, PauseIngestQueueJobResponses, PostBootstrapSetupData, PostBootstrapSetupErrors, PostBootstrapSetupResponses, PostMcpDiagnosticsRequestData, PostMcpDiagnosticsRequestErrors, PostMcpDiagnosticsRequestResponses, PostMcpRequestData, PostMcpRequestErrors, PostMcpRequestResponses, ReplaceContentDocumentData, ReplaceContentDocumentErrors, ReplaceContentDocumentResponses, ReprocessContentDocumentData, ReprocessContentDocumentErrors, ReprocessContentDocumentResponses, ResolveIamSessionData, ResolveIamSessionResponses, ResumeIngestQueueJobData, ResumeIngestQueueJobErrors, ResumeIngestQueueJobResponses, RevokeIamGrantData, RevokeIamGrantErrors, RevokeIamGrantResponses, RevokeIamTokenData, RevokeIamTokenErrors, RevokeIamTokenResponses, SearchDocumentsData, SearchDocumentsErrors, SearchDocumentsResponses, SearchKnowledgeDocumentsData, SearchKnowledgeDocumentsErrors, SearchKnowledgeDocumentsResponses, SetIamUserAccessData, SetIamUserAccessErrors, SetIamUserAccessResponses, SetIamUserRoleData, SetIamUserRoleErrors, SetIamUserRoleResponses, UpdateAiAccountData, UpdateAiAccountErrors, UpdateAiAccountResponses, UpdateAiLibraryBindingData, UpdateAiLibraryBindingErrors, UpdateAiLibraryBindingResponses, UpdateAiModelData, UpdateAiModelErrors, UpdateAiModelResponses, UpdateAiPriceOverrideData, UpdateAiPriceOverrideErrors, UpdateAiPriceOverrideResponses, UpdateAiProviderData, UpdateAiProviderErrors, UpdateAiProviderResponses, UpdateCatalogLibraryData, UpdateCatalogLibraryErrors, UpdateCatalogLibraryRecognitionPolicyData, UpdateCatalogLibraryRecognitionPolicyErrors, UpdateCatalogLibraryRecognitionPolicyResponses, UpdateCatalogLibraryResponses, UpdateCatalogLibraryRetrievalConfigData, UpdateCatalogLibraryRetrievalConfigErrors, UpdateCatalogLibraryRetrievalConfigResponses, UpdateCatalogLibraryWebIngestPolicyData, UpdateCatalogLibraryWebIngestPolicyErrors, UpdateCatalogLibraryWebIngestPolicyResponses, UpdateWebhookSubscriptionData, UpdateWebhookSubscriptionErrors, UpdateWebhookSubscriptionResponses, UploadContentDocumentData, UploadContentDocumentErrors, UploadContentDocumentResponses, ValidateAiLibraryBindingData, ValidateAiLibraryBindingErrors, ValidateAiLibraryBindingResponses } from './types.gen';
+import type { AppendContentDocumentData, AppendContentDocumentErrors, AppendContentDocumentResponses, BatchCancelContentDocumentsData, BatchCancelContentDocumentsErrors, BatchCancelContentDocumentsResponses, BatchDeleteContentDocumentsData, BatchDeleteContentDocumentsErrors, BatchDeleteContentDocumentsResponses, BatchReprocessContentDocumentsData, BatchReprocessContentDocumentsErrors, BatchReprocessContentDocumentsResponses, BulkIngestQueueActionData, BulkIngestQueueActionErrors, BulkIngestQueueActionResponses, CancelContentWebIngestRunData, CancelContentWebIngestRunErrors, CancelContentWebIngestRunResponses, CancelIngestQueueJobData, CancelIngestQueueJobErrors, CancelIngestQueueJobResponses, CreateAiAccountData, CreateAiAccountErrors, CreateAiAccountResponses, CreateAiLibraryBindingData, CreateAiLibraryBindingErrors, CreateAiLibraryBindingResponses, CreateAiModelData, CreateAiModelErrors, CreateAiModelResponses, CreateAiPriceOverrideData, CreateAiPriceOverrideErrors, CreateAiPriceOverrideResponses, CreateAiProviderData, CreateAiProviderErrors, CreateAiProviderResponses, CreateCatalogLibraryData, CreateCatalogLibraryErrors, CreateCatalogLibraryResponses, CreateCatalogWorkspaceData, CreateCatalogWorkspaceErrors, CreateCatalogWorkspaceResponses, CreateContentDocumentData, CreateContentDocumentErrors, CreateContentDocumentResponses, CreateContentMutationData, CreateContentMutationErrors, CreateContentMutationResponses, CreateContentWebIngestRunData, CreateContentWebIngestRunErrors, CreateContentWebIngestRunResponses, CreateIamGrantData, CreateIamGrantErrors, CreateIamGrantResponses, CreateIamUserData, CreateIamUserErrors, CreateIamUserResponses, CreateQuerySessionData, CreateQuerySessionErrors, CreateQuerySessionResponses, CreateQuerySessionTurnData, CreateQuerySessionTurnErrors, CreateQuerySessionTurnResponses, CreateWebhookSubscriptionData, CreateWebhookSubscriptionErrors, CreateWebhookSubscriptionResponses, DeleteAiAccountData, DeleteAiAccountErrors, DeleteAiAccountResponses, DeleteAiLibraryBindingData, DeleteAiLibraryBindingErrors, DeleteAiLibraryBindingResponses, DeleteAiModelData, DeleteAiModelErrors, DeleteAiModelResponses, DeleteAiPriceOverrideData, DeleteAiPriceOverrideErrors, DeleteAiPriceOverrideResponses, DeleteAiProviderData, DeleteAiProviderErrors, DeleteAiProviderResponses, DeleteCatalogLibraryData, DeleteCatalogLibraryErrors, DeleteCatalogLibraryResponses, DeleteCatalogWorkspaceData, DeleteCatalogWorkspaceErrors, DeleteCatalogWorkspaceResponses, DeleteContentDocumentData, DeleteContentDocumentErrors, DeleteContentDocumentResponses, DeleteIamTokenData, DeleteIamTokenErrors, DeleteIamTokenResponses, DeleteWebhookSubscriptionData, DeleteWebhookSubscriptionErrors, DeleteWebhookSubscriptionResponses, EditContentDocumentData, EditContentDocumentErrors, EditContentDocumentResponses, ExportLibrarySnapshotData, ExportLibrarySnapshotErrors, ExportLibrarySnapshotResponses, ExportWorkspaceSnapshotData, ExportWorkspaceSnapshotErrors, ExportWorkspaceSnapshotResponses, GetAdminSurfaceData, GetAdminSurfaceErrors, GetAdminSurfaceResponses, GetAssistantSystemPromptData, GetAssistantSystemPromptErrors, GetAssistantSystemPromptResponses, GetAsyncOperationData, GetAsyncOperationErrors, GetAsyncOperationResponses, GetBillingExecutionCostData, GetBillingExecutionCostErrors, GetBillingExecutionCostResponses, GetBootstrapStatusData, GetBootstrapStatusResponses, GetCatalogLibraryData, GetCatalogLibraryErrors, GetCatalogLibraryResponses, GetCatalogLibraryRetrievalConfigData, GetCatalogLibraryRetrievalConfigErrors, GetCatalogLibraryRetrievalConfigResponses, GetCatalogWorkspaceData, GetCatalogWorkspaceErrors, GetCatalogWorkspaceResponses, GetContentDocumentData, GetContentDocumentErrors, GetContentDocumentHeadData, GetContentDocumentHeadErrors, GetContentDocumentHeadResponses, GetContentDocumentResponses, GetContentDocumentSourceData, GetContentDocumentSourceErrors, GetContentDocumentSourceResponses, GetContentMutationData, GetContentMutationErrors, GetContentMutationResponses, GetContentWebIngestRunData, GetContentWebIngestRunErrors, GetContentWebIngestRunResponses, GetHealthData, GetHealthResponses, GetIamMeData, GetIamMeErrors, GetIamMeResponses, GetIamSessionData, GetIamSessionErrors, GetIamSessionResponses, GetIamUserAccessData, GetIamUserAccessErrors, GetIamUserAccessResponses, GetIngestAttemptData, GetIngestAttemptErrors, GetIngestAttemptResponses, GetIngestJobData, GetIngestJobErrors, GetIngestJobResponses, GetKnowledgeContextBundleData, GetKnowledgeContextBundleErrors, GetKnowledgeContextBundleResponses, GetKnowledgeDocumentData, GetKnowledgeDocumentErrors, GetKnowledgeDocumentResponses, GetKnowledgeEntityData, GetKnowledgeEntityErrors, GetKnowledgeEntityResponses, GetKnowledgeGraphWorkbenchData, GetKnowledgeGraphWorkbenchErrors, GetKnowledgeGraphWorkbenchResponses, GetKnowledgeLibrarySummaryData, GetKnowledgeLibrarySummaryErrors, GetKnowledgeLibrarySummaryResponses, GetKnowledgeRelationData, GetKnowledgeRelationErrors, GetKnowledgeRelationResponses, GetLibraryCostSummaryData, GetLibraryCostSummaryErrors, GetLibraryCostSummaryResponses, GetLibraryDashboardData, GetLibraryDashboardErrors, GetLibraryDashboardResponses, GetLibraryStateData, GetLibraryStateErrors, GetLibraryStateResponses, GetMcpCapabilitiesData, GetMcpCapabilitiesErrors, GetMcpCapabilitiesResponses, GetMcpDiagnosticsCapabilitiesData, GetMcpDiagnosticsCapabilitiesErrors, GetMcpDiagnosticsCapabilitiesResponses, GetOpenApiContractData, GetOpenApiContractResponses, GetQueryExecutionData, GetQueryExecutionErrors, GetQueryExecutionLlmContextData, GetQueryExecutionLlmContextErrors, GetQueryExecutionLlmContextResponses, GetQueryExecutionResponses, GetQuerySessionData, GetQuerySessionErrors, GetQuerySessionResponses, GetReadinessData, GetReadinessErrors, GetReadinessResponses, GetReleaseUpdateData, GetReleaseUpdateResponses, GetRuntimeExecutionData, GetRuntimeExecutionErrors, GetRuntimeExecutionResponses, GetRuntimeExecutionTraceData, GetRuntimeExecutionTraceErrors, GetRuntimeExecutionTraceResponses, GetVersionData, GetVersionResponses, GetWebhookSubscriptionData, GetWebhookSubscriptionErrors, GetWebhookSubscriptionResponses, GetWorkspaceCostSummaryData, GetWorkspaceCostSummaryErrors, GetWorkspaceCostSummaryResponses, ImportLibrarySnapshotData, ImportLibrarySnapshotErrors, ImportLibrarySnapshotResponses, ImportWorkspaceSnapshotData, ImportWorkspaceSnapshotErrors, ImportWorkspaceSnapshotResponses, ListAiAccountsData, ListAiAccountsErrors, ListAiAccountsResponses, ListAiLibraryBindingsData, ListAiLibraryBindingsErrors, ListAiLibraryBindingsResponses, ListAiModelsData, ListAiModelsErrors, ListAiModelsResponses, ListAiPricesData, ListAiPricesErrors, ListAiPricesResponses, ListAiProvidersData, ListAiProvidersErrors, ListAiProvidersResponses, ListAuditEventsData, ListAuditEventsErrors, ListAuditEventsResponses, ListBillingChargesData, ListBillingChargesErrors, ListBillingChargesResponses, ListBillingLibraryDocumentCostsData, ListBillingLibraryDocumentCostsErrors, ListBillingLibraryDocumentCostsResponses, ListBillingProviderCallsData, ListBillingProviderCallsErrors, ListBillingProviderCallsResponses, ListCatalogLibrariesData, ListCatalogLibrariesErrors, ListCatalogLibrariesResponses, ListCatalogWorkspacesData, ListCatalogWorkspacesErrors, ListCatalogWorkspacesResponses, ListChunksData, ListChunksErrors, ListChunksResponses, ListContentDocumentsData, ListContentDocumentsErrors, ListContentDocumentsResponses, ListContentMutationsData, ListContentMutationsErrors, ListContentMutationsResponses, ListContentPreparedSegmentsData, ListContentPreparedSegmentsErrors, ListContentPreparedSegmentsResponses, ListContentRevisionsData, ListContentRevisionsErrors, ListContentRevisionsResponses, ListContentTechnicalFactsData, ListContentTechnicalFactsErrors, ListContentTechnicalFactsResponses, ListContentWebIngestRunPagesData, ListContentWebIngestRunPagesErrors, ListContentWebIngestRunPagesResponses, ListContentWebIngestRunsData, ListContentWebIngestRunsErrors, ListContentWebIngestRunsResponses, ListIamGrantsData, ListIamGrantsErrors, ListIamGrantsResponses, ListIamTokensData, ListIamTokensErrors, ListIamTokensResponses, ListIamUsersData, ListIamUsersErrors, ListIamUsersResponses, ListIngestJobsData, ListIngestJobsErrors, ListIngestJobsResponses, ListIngestQueueData, ListIngestQueueErrors, ListIngestQueueResponses, ListIngestStageEventsData, ListIngestStageEventsErrors, ListIngestStageEventsResponses, ListKnowledgeContextBundlesData, ListKnowledgeContextBundlesErrors, ListKnowledgeContextBundlesResponses, ListKnowledgeDocumentsData, ListKnowledgeDocumentsErrors, ListKnowledgeDocumentsResponses, ListKnowledgeLibraryGenerationsData, ListKnowledgeLibraryGenerationsErrors, ListKnowledgeLibraryGenerationsResponses, ListQuerySessionsData, ListQuerySessionsErrors, ListQuerySessionsResponses, ListWebhookDeliveryAttemptsData, ListWebhookDeliveryAttemptsErrors, ListWebhookDeliveryAttemptsResponses, ListWebhookSubscriptionsData, ListWebhookSubscriptionsErrors, ListWebhookSubscriptionsResponses, LoginIamSessionData, LoginIamSessionErrors, LoginIamSessionResponses, LogoutIamSessionData, LogoutIamSessionErrors, LogoutIamSessionResponses, MintIamTokenData, MintIamTokenErrors, MintIamTokenResponses, MoveIngestQueueJobData, MoveIngestQueueJobErrors, MoveIngestQueueJobResponses, PatchContentDocumentMetadataData, PatchContentDocumentMetadataErrors, PatchContentDocumentMetadataResponses, PauseIngestQueueJobData, PauseIngestQueueJobErrors, PauseIngestQueueJobResponses, PostBootstrapSetupData, PostBootstrapSetupErrors, PostBootstrapSetupResponses, PostMcpDiagnosticsRequestData, PostMcpDiagnosticsRequestErrors, PostMcpDiagnosticsRequestResponses, PostMcpRequestData, PostMcpRequestErrors, PostMcpRequestResponses, ReplaceContentDocumentData, ReplaceContentDocumentErrors, ReplaceContentDocumentResponses, ReprocessContentDocumentData, ReprocessContentDocumentErrors, ReprocessContentDocumentResponses, ResolveIamSessionData, ResolveIamSessionResponses, ResumeIngestQueueJobData, ResumeIngestQueueJobErrors, ResumeIngestQueueJobResponses, RetryIngestQueueJobData, RetryIngestQueueJobErrors, RetryIngestQueueJobResponses, RevokeIamGrantData, RevokeIamGrantErrors, RevokeIamGrantResponses, RevokeIamTokenData, RevokeIamTokenErrors, RevokeIamTokenResponses, SearchDocumentsData, SearchDocumentsErrors, SearchDocumentsResponses, SearchKnowledgeDocumentsData, SearchKnowledgeDocumentsErrors, SearchKnowledgeDocumentsResponses, SetIamUserAccessData, SetIamUserAccessErrors, SetIamUserAccessResponses, SetIamUserRoleData, SetIamUserRoleErrors, SetIamUserRoleResponses, UpdateAiAccountData, UpdateAiAccountErrors, UpdateAiAccountResponses, UpdateAiLibraryBindingData, UpdateAiLibraryBindingErrors, UpdateAiLibraryBindingResponses, UpdateAiModelData, UpdateAiModelErrors, UpdateAiModelResponses, UpdateAiPriceOverrideData, UpdateAiPriceOverrideErrors, UpdateAiPriceOverrideResponses, UpdateAiProviderData, UpdateAiProviderErrors, UpdateAiProviderResponses, UpdateCatalogLibraryData, UpdateCatalogLibraryErrors, UpdateCatalogLibraryRecognitionPolicyData, UpdateCatalogLibraryRecognitionPolicyErrors, UpdateCatalogLibraryRecognitionPolicyResponses, UpdateCatalogLibraryResponses, UpdateCatalogLibraryRetrievalConfigData, UpdateCatalogLibraryRetrievalConfigErrors, UpdateCatalogLibraryRetrievalConfigResponses, UpdateCatalogLibraryWebIngestPolicyData, UpdateCatalogLibraryWebIngestPolicyErrors, UpdateCatalogLibraryWebIngestPolicyResponses, UpdateWebhookSubscriptionData, UpdateWebhookSubscriptionErrors, UpdateWebhookSubscriptionResponses, UploadContentDocumentData, UploadContentDocumentErrors, UploadContentDocumentResponses, ValidateAiLibraryBindingData, ValidateAiLibraryBindingErrors, ValidateAiLibraryBindingResponses } from './types.gen';
 
 export type Options<TData extends TDataShape = TDataShape, ThrowOnError extends boolean = boolean, TResponse = unknown> = Options2<TData, ThrowOnError, TResponse> & {
     /**
@@ -46,7 +46,6 @@ export class Ai {
             ...options
         });
     }
-    
     /**
      * Create ai account.
      *
@@ -63,7 +62,6 @@ export class Ai {
             }
         });
     }
-    
     /**
      * Delete ai account.
      *
@@ -76,7 +74,7 @@ export class Ai {
             ...options
         });
     }
-    
+
     /**
      * Update ai account.
      *
@@ -93,7 +91,7 @@ export class Ai {
             }
         });
     }
-    
+
     /**
      * List ai library bindings.
      *
@@ -106,7 +104,7 @@ export class Ai {
             ...options
         });
     }
-    
+
     /**
      * Create ai library binding.
      *
@@ -123,7 +121,7 @@ export class Ai {
             }
         });
     }
-    
+
     /**
      * Delete ai library binding.
      *
@@ -136,7 +134,7 @@ export class Ai {
             ...options
         });
     }
-    
+
     /**
      * Update ai library binding.
      *
@@ -153,7 +151,7 @@ export class Ai {
             }
         });
     }
-    
+
     /**
      * Validate ai library binding.
      *
@@ -166,7 +164,7 @@ export class Ai {
             ...options
         });
     }
-    
+
     /**
      * List ai models.
      *
@@ -179,7 +177,7 @@ export class Ai {
             ...options
         });
     }
-    
+
     /**
      * Create ai model.
      *
@@ -196,7 +194,7 @@ export class Ai {
             }
         });
     }
-    
+
     /**
      * Delete ai model.
      *
@@ -209,7 +207,7 @@ export class Ai {
             ...options
         });
     }
-    
+
     /**
      * Update ai model.
      *
@@ -226,7 +224,7 @@ export class Ai {
             }
         });
     }
-    
+
     /**
      * List ai prices.
      *
@@ -239,7 +237,7 @@ export class Ai {
             ...options
         });
     }
-    
+
     /**
      * Create ai price override.
      *
@@ -256,7 +254,7 @@ export class Ai {
             }
         });
     }
-    
+
     /**
      * Delete ai price override.
      *
@@ -269,7 +267,7 @@ export class Ai {
             ...options
         });
     }
-    
+
     /**
      * Update ai price override.
      *
@@ -286,7 +284,7 @@ export class Ai {
             }
         });
     }
-    
+
     /**
      * List ai providers.
      *
@@ -299,7 +297,7 @@ export class Ai {
             ...options
         });
     }
-    
+
     /**
      * Create ai provider.
      *
@@ -316,7 +314,7 @@ export class Ai {
             }
         });
     }
-    
+
     /**
      * Delete ai provider.
      *
@@ -329,7 +327,7 @@ export class Ai {
             ...options
         });
     }
-    
+
     /**
      * Update ai provider.
      *
@@ -376,7 +374,7 @@ export class Billing {
             ...options
         });
     }
-    
+
     /**
      * List billing charges.
      *
@@ -389,7 +387,7 @@ export class Billing {
             ...options
         });
     }
-    
+
     /**
      * List billing provider calls.
      *
@@ -402,7 +400,7 @@ export class Billing {
             ...options
         });
     }
-    
+
     /**
      * Get library cost summary.
      *
@@ -415,7 +413,7 @@ export class Billing {
             ...options
         });
     }
-    
+
     /**
      * List billing library document costs.
      *
@@ -428,7 +426,7 @@ export class Billing {
             ...options
         });
     }
-    
+
     /**
      * Get workspace cost summary.
      *
@@ -456,7 +454,7 @@ export class Catalog {
             ...options
         });
     }
-    
+
     /**
      * Update catalog library.
      *
@@ -473,7 +471,7 @@ export class Catalog {
             }
         });
     }
-    
+
     /**
      * Update catalog library recognition policy.
      *
@@ -490,7 +488,7 @@ export class Catalog {
             }
         });
     }
-    
+
     /**
      * Get catalog library retrieval config.
      *
@@ -503,7 +501,7 @@ export class Catalog {
             ...options
         });
     }
-    
+
     /**
      * Update catalog library retrieval config.
      *
@@ -520,7 +518,7 @@ export class Catalog {
             }
         });
     }
-    
+
     /**
      * Update catalog library web ingest policy.
      *
@@ -537,7 +535,7 @@ export class Catalog {
             }
         });
     }
-    
+
     /**
      * List catalog workspaces.
      *
@@ -550,7 +548,7 @@ export class Catalog {
             ...options
         });
     }
-    
+
     /**
      * Create catalog workspace.
      *
@@ -567,7 +565,7 @@ export class Catalog {
             }
         });
     }
-    
+
     /**
      * Delete catalog workspace.
      *
@@ -580,7 +578,7 @@ export class Catalog {
             ...options
         });
     }
-    
+
     /**
      * Get catalog workspace.
      *
@@ -593,7 +591,7 @@ export class Catalog {
             ...options
         });
     }
-    
+
     /**
      * List catalog libraries.
      *
@@ -606,7 +604,7 @@ export class Catalog {
             ...options
         });
     }
-    
+
     /**
      * Create catalog library.
      *
@@ -623,7 +621,7 @@ export class Catalog {
             }
         });
     }
-    
+
     /**
      * Delete catalog library.
      *
@@ -653,7 +651,7 @@ export class Content {
             ...options
         });
     }
-    
+
     /**
      * Restores a workspace from a plain-tar snapshot body, provisioning one fresh
      * library per embedded archive.
@@ -671,7 +669,7 @@ export class Content {
             }
         });
     }
-    
+
     /**
      * List chunks.
      *
@@ -684,7 +682,7 @@ export class Content {
             ...options
         });
     }
-    
+
     /**
      * Canonical slim paginated document list.
      *
@@ -700,7 +698,7 @@ export class Content {
             ...options
         });
     }
-    
+
     /**
      * Create content document.
      *
@@ -717,7 +715,7 @@ export class Content {
             }
         });
     }
-    
+
     /**
      * Batch cancel content documents.
      *
@@ -734,7 +732,7 @@ export class Content {
             }
         });
     }
-    
+
     /**
      * Batch delete content documents.
      *
@@ -751,7 +749,7 @@ export class Content {
             }
         });
     }
-    
+
     /**
      * Canonical async batch-reprocess handler.
      *
@@ -776,7 +774,7 @@ export class Content {
             }
         });
     }
-    
+
     /**
      * Upload content document.
      *
@@ -794,7 +792,7 @@ export class Content {
             }
         });
     }
-    
+
     /**
      * Delete content document.
      *
@@ -807,7 +805,7 @@ export class Content {
             ...options
         });
     }
-    
+
     /**
      * Get content document.
      *
@@ -820,7 +818,7 @@ export class Content {
             ...options
         });
     }
-    
+
     /**
      * Patch content document metadata.
      *
@@ -837,7 +835,7 @@ export class Content {
             }
         });
     }
-    
+
     /**
      * Append content document.
      *
@@ -854,7 +852,7 @@ export class Content {
             }
         });
     }
-    
+
     /**
      * Edit content document.
      *
@@ -871,7 +869,7 @@ export class Content {
             }
         });
     }
-    
+
     /**
      * Get content document head.
      *
@@ -884,7 +882,7 @@ export class Content {
             ...options
         });
     }
-    
+
     /**
      * List content prepared segments.
      *
@@ -897,7 +895,7 @@ export class Content {
             ...options
         });
     }
-    
+
     /**
      * Replace content document.
      *
@@ -915,7 +913,7 @@ export class Content {
             }
         });
     }
-    
+
     /**
      * Reprocess content document.
      *
@@ -932,7 +930,7 @@ export class Content {
             }
         });
     }
-    
+
     /**
      * List content revisions.
      *
@@ -945,7 +943,7 @@ export class Content {
             ...options
         });
     }
-    
+
     /**
      * Get content document source.
      *
@@ -958,7 +956,7 @@ export class Content {
             ...options
         });
     }
-    
+
     /**
      * List content technical facts.
      *
@@ -971,7 +969,7 @@ export class Content {
             ...options
         });
     }
-    
+
     /**
      * Streams a library snapshot as `application/zstd` (tar.zst).
      *
@@ -984,7 +982,7 @@ export class Content {
             ...options
         });
     }
-    
+
     /**
      * Restores a library from a tar.zst snapshot body.
      *
@@ -1001,7 +999,7 @@ export class Content {
             }
         });
     }
-    
+
     /**
      * List content mutations.
      *
@@ -1014,7 +1012,7 @@ export class Content {
             ...options
         });
     }
-    
+
     /**
      * Create content mutation.
      *
@@ -1031,7 +1029,7 @@ export class Content {
             }
         });
     }
-    
+
     /**
      * Get content mutation.
      *
@@ -1044,7 +1042,7 @@ export class Content {
             ...options
         });
     }
-    
+
     /**
      * List content web ingest runs.
      *
@@ -1057,7 +1055,7 @@ export class Content {
             ...options
         });
     }
-    
+
     /**
      * Create content web ingest run.
      *
@@ -1074,7 +1072,7 @@ export class Content {
             }
         });
     }
-    
+
     /**
      * Get content web ingest run.
      *
@@ -1087,7 +1085,7 @@ export class Content {
             ...options
         });
     }
-    
+
     /**
      * Cancel content web ingest run.
      *
@@ -1100,7 +1098,7 @@ export class Content {
             ...options
         });
     }
-    
+
     /**
      * List content web ingest run pages.
      *
@@ -1124,7 +1122,7 @@ export class System {
     public static getHealth<ThrowOnError extends boolean = false>(options?: Options<GetHealthData, ThrowOnError>): RequestResult<GetHealthResponses, unknown, ThrowOnError> {
         return (options?.client ?? client).get<GetHealthResponses, unknown, ThrowOnError>({ url: '/v1/health', ...options });
     }
-    
+
     /**
      * Download the OpenAPI contract.
      *
@@ -1133,7 +1131,7 @@ export class System {
     public static getOpenApiContract<ThrowOnError extends boolean = false>(options?: Options<GetOpenApiContractData, ThrowOnError>): RequestResult<GetOpenApiContractResponses, unknown, ThrowOnError> {
         return (options?.client ?? client).get<GetOpenApiContractResponses, unknown, ThrowOnError>({ url: '/v1/openapi/ironrag.openapi.yaml', ...options });
     }
-    
+
     /**
      * Check backend readiness.
      *
@@ -1142,7 +1140,7 @@ export class System {
     public static getReadiness<ThrowOnError extends boolean = false>(options?: Options<GetReadinessData, ThrowOnError>): RequestResult<GetReadinessResponses, GetReadinessErrors, ThrowOnError> {
         return (options?.client ?? client).get<GetReadinessResponses, GetReadinessErrors, ThrowOnError>({ url: '/v1/ready', ...options });
     }
-    
+
     /**
      * Get running service version.
      *
@@ -1151,7 +1149,7 @@ export class System {
     public static getVersion<ThrowOnError extends boolean = false>(options?: Options<GetVersionData, ThrowOnError>): RequestResult<GetVersionResponses, unknown, ThrowOnError> {
         return (options?.client ?? client).get<GetVersionResponses, unknown, ThrowOnError>({ url: '/v1/version', ...options });
     }
-    
+
     /**
      * Check for an available release update.
      *
@@ -1178,7 +1176,7 @@ export class Iam {
             }
         });
     }
-    
+
     /**
      * Get bootstrap status.
      *
@@ -1187,7 +1185,7 @@ export class Iam {
     public static getBootstrapStatus<ThrowOnError extends boolean = false>(options?: Options<GetBootstrapStatusData, ThrowOnError>): RequestResult<GetBootstrapStatusResponses, unknown, ThrowOnError> {
         return (options?.client ?? client).get<GetBootstrapStatusResponses, unknown, ThrowOnError>({ url: '/v1/iam/bootstrap/status', ...options });
     }
-    
+
     /**
      * List iam grants.
      *
@@ -1200,7 +1198,7 @@ export class Iam {
             ...options
         });
     }
-    
+
     /**
      * Create iam grant.
      *
@@ -1217,7 +1215,7 @@ export class Iam {
             }
         });
     }
-    
+
     /**
      * Revoke iam grant.
      *
@@ -1230,7 +1228,7 @@ export class Iam {
             ...options
         });
     }
-    
+
     /**
      * Get iam me.
      *
@@ -1243,7 +1241,7 @@ export class Iam {
             ...options
         });
     }
-    
+
     /**
      * Get iam session.
      *
@@ -1256,7 +1254,7 @@ export class Iam {
             ...options
         });
     }
-    
+
     /**
      * Login iam session.
      *
@@ -1272,7 +1270,7 @@ export class Iam {
             }
         });
     }
-    
+
     /**
      * Logout iam session.
      *
@@ -1285,7 +1283,7 @@ export class Iam {
             ...options
         });
     }
-    
+
     /**
      * Resolve iam session.
      *
@@ -1294,7 +1292,7 @@ export class Iam {
     public static resolveIamSession<ThrowOnError extends boolean = false>(options?: Options<ResolveIamSessionData, ThrowOnError>): RequestResult<ResolveIamSessionResponses, unknown, ThrowOnError> {
         return (options?.client ?? client).get<ResolveIamSessionResponses, unknown, ThrowOnError>({ url: '/v1/iam/session/resolve', ...options });
     }
-    
+
     /**
      * List iam tokens.
      *
@@ -1307,7 +1305,7 @@ export class Iam {
             ...options
         });
     }
-    
+
     /**
      * Mint iam token.
      *
@@ -1324,7 +1322,7 @@ export class Iam {
             }
         });
     }
-    
+
     /**
      * Delete iam token.
      *
@@ -1337,7 +1335,7 @@ export class Iam {
             ...options
         });
     }
-    
+
     /**
      * Revoke iam token.
      *
@@ -1350,7 +1348,7 @@ export class Iam {
             ...options
         });
     }
-    
+
     /**
      * List iam users.
      *
@@ -1363,7 +1361,7 @@ export class Iam {
             ...options
         });
     }
-    
+
     /**
      * Create iam user.
      *
@@ -1380,7 +1378,7 @@ export class Iam {
             }
         });
     }
-    
+
     /**
      * Get iam user access.
      *
@@ -1393,7 +1391,7 @@ export class Iam {
             ...options
         });
     }
-    
+
     /**
      * Set iam user access.
      *
@@ -1410,7 +1408,7 @@ export class Iam {
             }
         });
     }
-    
+
     /**
      * Set iam user role.
      *
@@ -1442,7 +1440,7 @@ export class Ingest {
             ...options
         });
     }
-    
+
     /**
      * List ingest stage events.
      *
@@ -1455,7 +1453,7 @@ export class Ingest {
             ...options
         });
     }
-    
+
     /**
      * List ingest jobs.
      *
@@ -1468,7 +1466,7 @@ export class Ingest {
             ...options
         });
     }
-    
+
     /**
      * Get ingest job.
      *
@@ -1496,7 +1494,7 @@ export class Knowledge {
             ...options
         });
     }
-    
+
     /**
      * List knowledge context bundles.
      *
@@ -1509,7 +1507,7 @@ export class Knowledge {
             ...options
         });
     }
-    
+
     /**
      * List knowledge documents.
      *
@@ -1522,7 +1520,7 @@ export class Knowledge {
             ...options
         });
     }
-    
+
     /**
      * Get knowledge document.
      *
@@ -1535,7 +1533,7 @@ export class Knowledge {
             ...options
         });
     }
-    
+
     /**
      * Get knowledge entity.
      *
@@ -1548,7 +1546,7 @@ export class Knowledge {
             ...options
         });
     }
-    
+
     /**
      * List knowledge library generations.
      *
@@ -1561,7 +1559,7 @@ export class Knowledge {
             ...options
         });
     }
-    
+
     /**
      * Get knowledge graph workbench.
      *
@@ -1574,7 +1572,7 @@ export class Knowledge {
             ...options
         });
     }
-    
+
     /**
      * Get knowledge relation.
      *
@@ -1587,7 +1585,7 @@ export class Knowledge {
             ...options
         });
     }
-    
+
     /**
      * Get knowledge library summary.
      *
@@ -1615,7 +1613,7 @@ export class Search {
             ...options
         });
     }
-    
+
     /**
      * Search documents.
      *
@@ -1647,7 +1645,7 @@ export class Automation {
             }
         });
     }
-    
+
     /**
      * List answer MCP capabilities for the caller.
      *
@@ -1660,7 +1658,7 @@ export class Automation {
             ...options
         });
     }
-    
+
     /**
      * Execute diagnostics MCP JSON-RPC.
      *
@@ -1677,7 +1675,7 @@ export class Automation {
             }
         });
     }
-    
+
     /**
      * List diagnostics MCP capabilities for the caller.
      *
@@ -1705,7 +1703,24 @@ export class Ops {
             ...options
         });
     }
-    
+
+    /**
+     * Bulk ingest queue action.
+     *
+     * Reads or controls ingest runtime state. Operators use these endpoints to inspect queued work, attempts, stage events, and document-processing failures. Call it to create work or submit a command. Some commands complete synchronously, while ingest, mutation, and runtime work can continue asynchronously.
+     */
+    public static bulkIngestQueueAction<ThrowOnError extends boolean = false>(options: Options<BulkIngestQueueActionData, ThrowOnError>): RequestResult<BulkIngestQueueActionResponses, BulkIngestQueueActionErrors, ThrowOnError> {
+        return (options.client ?? client).post<BulkIngestQueueActionResponses, BulkIngestQueueActionErrors, ThrowOnError>({
+            security: [{ scheme: 'bearer', type: 'http' }],
+            url: '/v1/ops/ingest-queue/bulk',
+            ...options,
+            headers: {
+                'Content-Type': 'application/json',
+                ...options.headers
+            }
+        });
+    }
+
     /**
      * Cancel ingest queue job.
      *
@@ -1718,7 +1733,7 @@ export class Ops {
             ...options
         });
     }
-    
+
     /**
      * Move ingest queue job.
      *
@@ -1735,7 +1750,7 @@ export class Ops {
             }
         });
     }
-    
+
     /**
      * Pause ingest queue job.
      *
@@ -1748,7 +1763,7 @@ export class Ops {
             ...options
         });
     }
-    
+
     /**
      * Resume ingest queue job.
      *
@@ -1761,7 +1776,20 @@ export class Ops {
             ...options
         });
     }
-    
+
+    /**
+     * Retry ingest queue job.
+     *
+     * Reads or controls ingest runtime state. Operators use these endpoints to inspect queued work, attempts, stage events, and document-processing failures. Call it to create work or submit a command. Some commands complete synchronously, while ingest, mutation, and runtime work can continue asynchronously.
+     */
+    public static retryIngestQueueJob<ThrowOnError extends boolean = false>(options: Options<RetryIngestQueueJobData, ThrowOnError>): RequestResult<RetryIngestQueueJobResponses, RetryIngestQueueJobErrors, ThrowOnError> {
+        return (options.client ?? client).post<RetryIngestQueueJobResponses, RetryIngestQueueJobErrors, ThrowOnError>({
+            security: [{ scheme: 'bearer', type: 'http' }],
+            url: '/v1/ops/ingest-queue/jobs/{jobId}/retry',
+            ...options
+        });
+    }
+
     /**
      * Get library state.
      *
@@ -1774,7 +1802,7 @@ export class Ops {
             ...options
         });
     }
-    
+
     /**
      * Get library dashboard.
      *
@@ -1787,7 +1815,7 @@ export class Ops {
             ...options
         });
     }
-    
+
     /**
      * Get async operation.
      *
@@ -1815,7 +1843,7 @@ export class Query {
             ...options
         });
     }
-    
+
     /**
      * Inspect one assistant execution.
      *
@@ -1828,7 +1856,7 @@ export class Query {
             ...options
         });
     }
-    
+
     /**
      * Inspect captured LLM context for one execution.
      *
@@ -1841,7 +1869,7 @@ export class Query {
             ...options
         });
     }
-    
+
     /**
      * List assistant sessions for one library.
      *
@@ -1854,7 +1882,7 @@ export class Query {
             ...options
         });
     }
-    
+
     /**
      * Create an assistant session.
      *
@@ -1871,7 +1899,7 @@ export class Query {
             }
         });
     }
-    
+
     /**
      * Load one assistant session with turns.
      *
@@ -1884,7 +1912,7 @@ export class Query {
             ...options
         });
     }
-    
+
     /**
      * Run one UI assistant turn.
      *
@@ -1916,7 +1944,7 @@ export class Runtime {
             ...options
         });
     }
-    
+
     /**
      * Get runtime execution trace.
      *
@@ -1944,7 +1972,7 @@ export class Webhooks {
             ...options
         });
     }
-    
+
     /**
      * Create webhook subscription.
      *
@@ -1961,7 +1989,7 @@ export class Webhooks {
             }
         });
     }
-    
+
     /**
      * Delete webhook subscription.
      *
@@ -1974,7 +2002,7 @@ export class Webhooks {
             ...options
         });
     }
-    
+
     /**
      * Get webhook subscription.
      *
@@ -1987,7 +2015,7 @@ export class Webhooks {
             ...options
         });
     }
-    
+
     /**
      * Update webhook subscription.
      *
@@ -2004,7 +2032,7 @@ export class Webhooks {
             }
         });
     }
-    
+
     /**
      * List webhook delivery attempts.
      *

@@ -28,6 +28,7 @@ use crate::{
     app::state::AppState,
     infra::repositories::{content_repository, ingest_repository},
     integrations::docling,
+    interfaces::http::router_support::ApiError,
     services::{
         content::service::{
             GRAPH_STATE_DEGRADED, MaterializeRevisionGraphCandidatesCommand, PromoteHeadCommand,
@@ -516,6 +517,10 @@ async fn execute_canonical_ingest_job(
     cancellation_token: CancellationToken,
 ) -> anyhow::Result<()> {
     let job_id = job.id;
+    let expected_queue_lease_token = job
+        .queue_lease_token
+        .clone()
+        .context("claimed canonical ingest job is missing queue lease token")?;
     let initial_stage = match job.job_kind.as_str() {
         "content_mutation" => INGEST_STAGE_EXTRACT_CONTENT.to_string(),
         "web_discovery" => INGEST_STAGE_WEB_DISCOVERY.to_string(),
@@ -524,7 +529,7 @@ async fn execute_canonical_ingest_job(
         other => anyhow::bail!("unsupported canonical ingest job kind {other}"),
     };
 
-    let attempt = state
+    let attempt = match state
         .canonical_services
         .ingest
         .lease_attempt(
@@ -533,12 +538,25 @@ async fn execute_canonical_ingest_job(
                 job_id,
                 worker_principal_id: None,
                 lease_token: Some(format!("worker-{worker_id}-{}", Uuid::now_v7())),
+                expected_queue_lease_token: Some(expected_queue_lease_token),
                 knowledge_generation_id: None,
                 current_stage: Some(initial_stage.clone()),
             },
         )
         .await
-        .context("failed to lease canonical ingest attempt")?;
+    {
+        Ok(attempt) => attempt,
+        Err(ApiError::Conflict(message)) => {
+            warn!(
+                %worker_id,
+                %job_id,
+                %message,
+                "queue lease moved before canonical ingest attempt creation",
+            );
+            return Ok(());
+        }
+        Err(error) => return Err(error).context("failed to lease canonical ingest attempt"),
+    };
 
     let attempt_id = attempt.id;
 

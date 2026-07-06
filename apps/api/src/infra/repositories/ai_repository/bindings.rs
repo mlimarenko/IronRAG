@@ -63,14 +63,14 @@ pub async fn list_bindings_exact(
     workspace_id: Option<Uuid>,
     library_id: Option<Uuid>,
 ) -> Result<Vec<AiBindingRow>, sqlx::Error> {
-    sqlx::query_as::<_, AiBindingRow>(&format!(
+    sqlx::query_as::<_, AiBindingRow>(sqlx::AssertSqlSafe(format!(
         "select {BINDING_COLUMNS}
          from ai_binding
          where scope_kind = $1::ai_scope_kind
            and workspace_id is not distinct from $2
            and library_id is not distinct from $3
          order by created_at desc, id desc",
-    ))
+    )))
     .bind(scope_kind)
     .bind(workspace_id)
     .bind(library_id)
@@ -128,11 +128,11 @@ pub async fn get_binding_by_id(
     postgres: &PgPool,
     binding_id: Uuid,
 ) -> Result<Option<AiBindingRow>, sqlx::Error> {
-    sqlx::query_as::<_, AiBindingRow>(&format!(
+    sqlx::query_as::<_, AiBindingRow>(sqlx::AssertSqlSafe(format!(
         "select {BINDING_COLUMNS}
          from ai_binding
          where id = $1",
-    ))
+    )))
     .bind(binding_id)
     .fetch_optional(postgres)
     .await
@@ -260,7 +260,7 @@ pub async fn create_binding(
     extra_parameters_json: Value,
     updated_by_principal_id: Option<Uuid>,
 ) -> Result<AiBindingRow, sqlx::Error> {
-    sqlx::query_as::<_, AiBindingRow>(&format!(
+    sqlx::query_as::<_, AiBindingRow>(sqlx::AssertSqlSafe(format!(
         "insert into ai_binding (
             id,
             scope_kind,
@@ -284,7 +284,7 @@ pub async fn create_binding(
             'active', $13, now(), now()
         )
         returning {BINDING_COLUMNS}",
-    ))
+    )))
     .bind(Uuid::now_v7())
     .bind(scope_kind)
     .bind(workspace_id)
@@ -316,7 +316,7 @@ pub async fn update_binding(
     binding_state: &str,
     updated_by_principal_id: Option<Uuid>,
 ) -> Result<Option<AiBindingRow>, sqlx::Error> {
-    sqlx::query_as::<_, AiBindingRow>(&format!(
+    sqlx::query_as::<_, AiBindingRow>(sqlx::AssertSqlSafe(format!(
         "update ai_binding
          set account_id = $2,
              model_catalog_id = $3,
@@ -330,7 +330,7 @@ pub async fn update_binding(
              updated_at = now()
          where id = $1
          returning {BINDING_COLUMNS}",
-    ))
+    )))
     .bind(binding_id)
     .bind(account_id)
     .bind(model_catalog_id)

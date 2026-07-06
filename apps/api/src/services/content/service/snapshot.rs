@@ -1384,7 +1384,7 @@ where
 
     let mut counts = Vec::<(String, u64)>::new();
     for (table, query) in queries {
-        let rows: Vec<serde_json::Value> = sqlx::query_scalar(&query)
+        let rows: Vec<serde_json::Value> = sqlx::query_scalar(sqlx::AssertSqlSafe(&*query))
             .bind(workspace_id)
             .bind(library_id)
             .fetch_all(pool)
@@ -1419,7 +1419,7 @@ where
     W: AsyncWrite + Unpin + Send + Sync,
 {
     let query = build_pg_select(table)?;
-    let mut stream = sqlx::query(&query).bind(library_id).fetch(pool);
+    let mut stream = sqlx::query(sqlx::AssertSqlSafe(&*query)).bind(library_id).fetch(pool);
     let mut buffer: Vec<u8> = Vec::with_capacity(CHUNK_BYTES_SOFT_CAP + 1024);
     let mut part_no: u32 = 0;
     let mut row_count: u64 = 0;
@@ -2100,7 +2100,7 @@ async fn analyze_imported_postgres_tables(
         validate_snapshot_pg_table_name(table)?;
         let table = quote_pg_identifier(table)?;
         let statement = format!("ANALYZE {table}");
-        sqlx::query(&statement)
+        sqlx::query(sqlx::AssertSqlSafe(&*statement))
             .execute(pool)
             .await
             .with_context(|| format!("analyze imported snapshot table `{table}`"))?;
@@ -2784,7 +2784,7 @@ async fn clear_library_postgres_footprint(
             }
             _ => format!("DELETE FROM {table} WHERE library_id = $1"),
         };
-        sqlx::query(&sql)
+        sqlx::query(sqlx::AssertSqlSafe(&*sql))
             .bind(library_id)
             .execute(&mut **tx)
             .await
@@ -2813,7 +2813,7 @@ async fn clear_pg_vector_relations_for_library(
             bail!("vector manifest relation `{relation_name}` is not a vector relation");
         }
         let relation = quote_pg_identifier(&relation_name)?;
-        sqlx::query(&format!("DELETE FROM {relation} WHERE library_id = $1"))
+        sqlx::query(sqlx::AssertSqlSafe(format!("DELETE FROM {relation} WHERE library_id = $1")))
             .bind(library_id)
             .execute(&mut **tx)
             .await
@@ -2876,7 +2876,7 @@ async fn postgres_library_has_restore_footprint(
         return Ok(false);
     }
     let sql = format!("SELECT {}", clauses.join(" OR "));
-    let has_footprint = sqlx::query_scalar::<_, bool>(&sql)
+    let has_footprint = sqlx::query_scalar::<_, bool>(sqlx::AssertSqlSafe(&*sql))
         .bind(library_id)
         .fetch_one(&mut **tx)
         .await
@@ -3033,7 +3033,7 @@ async fn insert_pg_rows_bulk(
             "INSERT INTO {table} SELECT * FROM jsonb_populate_recordset(null::{table}, $1){on_conflict}"
         )
     };
-    sqlx::query(&sql)
+    sqlx::query(sqlx::AssertSqlSafe(&*sql))
         .bind(&payload)
         .execute(&mut **tx)
         .await
@@ -3370,7 +3370,7 @@ async fn insert_pg_vector_rows_bulk_once(
     let storage = PgVectorStorage::for_dim(dim);
     let cast_type = storage.cast_type();
     if is_chunk_vector_relation_name(relation_name) {
-        sqlx::query(&format!(
+        sqlx::query(sqlx::AssertSqlSafe(format!(
             "WITH rows AS MATERIALIZED (
                 SELECT DISTINCT ON (key)
                     key, vector_id, workspace_id, library_id, chunk_id, revision_id,
@@ -3412,14 +3412,14 @@ async fn insert_pg_vector_rows_bulk_once(
                            is_default = true,
                            promoted = false
              "
-        ))
+        )))
         .bind(payload)
         .bind(relation_name)
         .execute(&mut **tx)
         .await
         .with_context(|| format!("bulk insert {count} chunk vectors into {relation_name}"))?;
     } else {
-        sqlx::query(&format!(
+        sqlx::query(sqlx::AssertSqlSafe(format!(
             "WITH rows AS MATERIALIZED (
                 SELECT DISTINCT ON (key)
                     key, vector_id, workspace_id, library_id, entity_id,
@@ -3460,14 +3460,14 @@ async fn insert_pg_vector_rows_bulk_once(
                            is_default = true,
                            promoted = false
              "
-        ))
+        )))
         .bind(payload)
         .bind(relation_name)
         .execute(&mut **tx)
         .await
         .with_context(|| format!("bulk insert {count} entity vectors into {relation_name}"))?;
     }
-    sqlx::query(&format!(
+    sqlx::query(sqlx::AssertSqlSafe(format!(
         "UPDATE knowledge_vector_relation_manifest m
          SET row_count = (
             SELECT count(*)::bigint
@@ -3478,7 +3478,7 @@ async fn insert_pg_vector_rows_bulk_once(
               AND v.embedding_model_key = m.embedding_model_key
          )
          WHERE m.relation_name = $1"
-    ))
+    )))
     .bind(relation_name)
     .execute(&mut **tx)
     .await
@@ -3496,7 +3496,7 @@ async fn ensure_pg_vector_relation(
     let dim = checked_vector_dim_i32(dim)?;
     let embedding_type = storage.column_type(dim);
     if is_chunk_vector_relation_name(relation_name) {
-        sqlx::query(&format!(
+        sqlx::query(sqlx::AssertSqlSafe(format!(
             "CREATE TABLE IF NOT EXISTS {relation} (
                 key text primary key,
                 vector_id uuid not null,
@@ -3513,7 +3513,7 @@ async fn ensure_pg_vector_relation(
                 occurred_at timestamptz,
                 occurred_until timestamptz
             )"
-        ))
+        )))
         .execute(&mut **tx)
         .await
         .with_context(|| format!("create vector relation {relation_name}"))?;
@@ -3527,7 +3527,7 @@ async fn ensure_pg_vector_relation(
         )
         .await?;
     } else {
-        sqlx::query(&format!(
+        sqlx::query(sqlx::AssertSqlSafe(format!(
             "CREATE TABLE IF NOT EXISTS {relation} (
                 key text primary key,
                 vector_id uuid not null,
@@ -3541,7 +3541,7 @@ async fn ensure_pg_vector_relation(
                 freshness_generation bigint not null,
                 created_at timestamptz not null
             )"
-        ))
+        )))
         .execute(&mut **tx)
         .await
         .with_context(|| format!("create vector relation {relation_name}"))?;
@@ -3561,25 +3561,27 @@ async fn ensure_pg_vector_relation_indexes(
 ) -> anyhow::Result<()> {
     let relation = quote_pg_identifier(relation_name)?;
     let lane_idx = quote_pg_identifier(&format!("{relation_name}_lane_idx"))?;
-    sqlx::query(&format!(
+    sqlx::query(sqlx::AssertSqlSafe(format!(
         "CREATE INDEX IF NOT EXISTS {lane_idx}
          ON {relation} (library_id, embedding_model_key, vector_kind)"
-    ))
+    )))
     .execute(&mut **tx)
     .await
     .with_context(|| format!("create lane index on {relation_name}"))?;
 
     let id_idx = quote_pg_identifier(&format!("{relation_name}_{id_column}_idx"))?;
-    sqlx::query(&format!("CREATE INDEX IF NOT EXISTS {id_idx} ON {relation} ({id_column})"))
-        .execute(&mut **tx)
-        .await
-        .with_context(|| format!("create id index on {relation_name}"))?;
+    sqlx::query(sqlx::AssertSqlSafe(format!(
+        "CREATE INDEX IF NOT EXISTS {id_idx} ON {relation} ({id_column})"
+    )))
+    .execute(&mut **tx)
+    .await
+    .with_context(|| format!("create id index on {relation_name}"))?;
 
     if let Some(extra_column) = extra_column {
         let extra_idx = quote_pg_identifier(&format!("{relation_name}_{extra_column}_idx"))?;
-        sqlx::query(&format!(
+        sqlx::query(sqlx::AssertSqlSafe(format!(
             "CREATE INDEX IF NOT EXISTS {extra_idx} ON {relation} ({extra_column})"
-        ))
+        )))
         .execute(&mut **tx)
         .await
         .with_context(|| format!("create extra index on {relation_name}"))?;
@@ -3596,21 +3598,22 @@ async fn ensure_pg_vector_relation_hnsw_index(
 ) -> anyhow::Result<()> {
     let relation = quote_pg_identifier(relation_name)?;
     let hnsw_idx = quote_pg_identifier(&format!("{relation_name}_hnsw"))?;
-    let row_count =
-        sqlx::query_scalar::<_, i64>(&format!("SELECT count(*)::bigint FROM {relation}"))
-            .fetch_one(&mut **tx)
-            .await
-            .with_context(|| format!("count vector rows in {relation_name} for HNSW sizing"))?;
+    let row_count = sqlx::query_scalar::<_, i64>(sqlx::AssertSqlSafe(format!(
+        "SELECT count(*)::bigint FROM {relation}"
+    )))
+    .fetch_one(&mut **tx)
+    .await
+    .with_context(|| format!("count vector rows in {relation_name} for HNSW sizing"))?;
     let row_count = u64::try_from(row_count).context("negative vector shard row count")?;
     let params = pg_hnsw_index_params(row_count, dim, storage)?;
     let ops = storage.cosine_ops();
-    sqlx::query(&format!(
+    sqlx::query(sqlx::AssertSqlSafe(format!(
         "CREATE INDEX IF NOT EXISTS {hnsw_idx}
          ON {relation} USING hnsw (embedding {ops})
          WITH (m = {m}, ef_construction = {ef_construction})",
         m = params.m,
         ef_construction = params.ef_construction
-    ))
+    )))
     .execute(&mut **tx)
     .await
     .with_context(|| format!("create HNSW index on {relation_name}"))?;

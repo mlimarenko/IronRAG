@@ -26,10 +26,12 @@ import type {
   CatalogWorkspaceResponse,
   CreateAiAccountRequest as GeneratedCreateAccountRequest,
   CreateAiBindingRequest as GeneratedCreateBindingRequest,
+  BulkIngestQueueActionResponse,
   CreateModelCatalogRequest as GeneratedCreateModelRequest,
   CreateProviderCatalogRequest as GeneratedCreateProviderRequest,
   CreateWorkspacePriceOverrideRequest as GeneratedCreatePriceOverrideRequest,
   IngestQueueMoveDirection,
+  IngestQueueBulkAction,
   IngestQueueResponse,
   ModelAvailabilityState,
   ModelCatalogEntryResponse,
@@ -72,6 +74,7 @@ export type {
   CatalogLibraryResponse,
   CatalogWorkspaceResponse,
   IngestQueueMoveDirection,
+  IngestQueueBulkAction,
   IngestQueueResponse,
   WebIngestPattern,
   WebIngestUrlFilter,
@@ -380,6 +383,14 @@ export const adminApi = {
   moveIngestQueueJob: (jobId: string, direction: IngestQueueMoveDirection) =>
     Ops.moveIngestQueueJob({ path: { jobId }, body: { direction } }).then(
       (result) => unwrap<IngestQueueResponse>(result),
+    ),
+  retryIngestQueueJob: (jobId: string) =>
+    Ops.retryIngestQueueJob({ path: { jobId } }).then((result) =>
+      unwrap<IngestQueueResponse>(result),
+    ),
+  bulkIngestQueueAction: (action: IngestQueueBulkAction, jobIds: string[]) =>
+    Ops.bulkIngestQueueAction({ body: { action, jobIds } }).then((result) =>
+      unwrap<BulkIngestQueueActionResponse>(result),
     ),
   pauseIngestQueueJob: (jobId: string) =>
     Ops.pauseIngestQueueJob({ path: { jobId } }).then((result) =>

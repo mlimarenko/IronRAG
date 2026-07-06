@@ -53,11 +53,11 @@ impl TempPostgresDatabase {
             .context("failed to connect to postgres admin database")?;
 
         terminate_database_connections(&admin_pool, &name).await?;
-        sqlx::query(&format!("drop database if exists \"{name}\""))
+        sqlx::query(sqlx::AssertSqlSafe(format!("drop database if exists \"{name}\"")))
             .execute(&admin_pool)
             .await
             .with_context(|| format!("failed to drop stale query grounding database {name}"))?;
-        sqlx::query(&format!("create database \"{name}\""))
+        sqlx::query(sqlx::AssertSqlSafe(format!("create database \"{name}\"")))
             .execute(&admin_pool)
             .await
             .with_context(|| format!("failed to create query grounding database {name}"))?;
@@ -73,7 +73,7 @@ impl TempPostgresDatabase {
             .await
             .context("failed to reconnect postgres admin database for cleanup")?;
         terminate_database_connections(&admin_pool, &self.name).await?;
-        sqlx::query(&format!("drop database if exists \"{}\"", self.name))
+        sqlx::query(sqlx::AssertSqlSafe(format!("drop database if exists \"{}\"", self.name)))
             .execute(&admin_pool)
             .await
             .with_context(|| format!("failed to drop query grounding database {}", self.name))?;

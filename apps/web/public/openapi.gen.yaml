@@ -5,7 +5,7 @@ info:
   license:
     name: MIT
     identifier: MIT
-  version: 0.5.6
+  version: 0.5.7
 servers:
 - url: /
   description: Same origin (paths include /v1)
@@ -26,12 +26,135 @@ paths:
                 $ref: '#/components/schemas/AdminSurface'
         '401':
           description: Caller is not authenticated
+  /v1/ai/accounts:
+    get:
+      tags:
+      - ai
+      summary: List ai accounts.
+      description: Manages stored AI provider accounts used by runtime bindings. Use these endpoints from the admin UI or automation when registering, rotating, or listing provider secrets without exposing secret material in responses. Call it for paginated or filtered table views. Prefer server-side filters and cursors over fetching broad result sets into the client.
+      operationId: listAiAccounts
+      parameters:
+      - name: scopeKind
+        in: query
+        required: false
+        schema:
+          $ref: '#/components/schemas/AiScopeKind'
+      - name: workspaceId
+        in: query
+        required: false
+        schema:
+          type: string
+          format: uuid
+      - name: libraryId
+        in: query
+        required: false
+        schema:
+          type: string
+          format: uuid
+      responses:
+        '200':
+          description: Visible AI accounts for the requested scope
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/AiAccountResponse'
+        '401':
+          description: Caller is not authenticated
+        '403':
+          description: Caller is not authorized for the requested scope
+    post:
+      tags:
+      - ai
+      summary: Create ai account.
+      description: Manages stored AI provider accounts used by runtime bindings. Use these endpoints from the admin UI or automation when registering, rotating, or listing provider secrets without exposing secret material in responses. Call it to create work or submit a command. Some commands complete synchronously, while ingest, mutation, and runtime work can continue asynchronously.
+      operationId: createAiAccount
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateAiAccountRequest'
+        required: true
+      responses:
+        '200':
+          description: Newly created AI account
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AiAccountResponse'
+        '401':
+          description: Caller is not authenticated
+        '403':
+          description: Caller cannot administer accounts in the requested scope
+  /v1/ai/accounts/{accountId}:
+    put:
+      tags:
+      - ai
+      summary: Update ai account.
+      description: Manages stored AI provider accounts used by runtime bindings. Use these endpoints from the admin UI or automation when registering, rotating, or listing provider secrets without exposing secret material in responses. Call it to replace or partially update server-owned configuration. The request body is validated before changes are persisted.
+      operationId: updateAiAccount
+      parameters:
+      - name: accountId
+        in: path
+        description: AI account identifier
+        required: true
+        schema:
+          type: string
+          format: uuid
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateAiAccountRequest'
+        required: true
+      responses:
+        '200':
+          description: Updated AI account
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AiAccountResponse'
+        '401':
+          description: Caller is not authenticated
+        '403':
+          description: Caller cannot administer accounts in the account's scope
+        '404':
+          description: Account not found
+    delete:
+      tags:
+      - ai
+      summary: Delete ai account.
+      description: Manages stored AI provider accounts used by runtime bindings. Use these endpoints from the admin UI or automation when registering, rotating, or listing provider secrets without exposing secret material in responses. Call it to remove or revoke a resource. Destructive operations are authorized, audited, and may return an asynchronous operation when cleanup continues in the background.
+      operationId: deleteAiAccount
+      parameters:
+      - name: accountId
+        in: path
+        description: AI account identifier
+        required: true
+        schema:
+          type: string
+          format: uuid
+      responses:
+        '200':
+          description: Empty acknowledgement payload
+          content:
+            application/json:
+              schema: {}
+        '401':
+          description: Caller is not authenticated
+        '403':
+          description: Caller cannot administer accounts in the account's scope
+        '404':
+          description: Account not found
+        '409':
+          description: Account is still referenced
   /v1/ai/bindings:
     get:
       tags:
       - ai
       summary: List ai library bindings.
-      description: Manages library-level AI runtime bindings. Bindings decide which configured provider/model handles embedding, query answering, graph extraction, and other AI purposes for one library. Call it for paginated or filtered table views. Prefer server-side filters and cursors over fetching broad result sets into the client.
+      description: Manages library-level AI runtime bindings. A binding assigns an account and model to a purpose (embedding, query answering, graph extraction, and other AI purposes) for one library, with tuning parameters (system prompt, temperature, top-p, output token budget) stored inline. Call it for paginated or filtered table views. Prefer server-side filters and cursors over fetching broad result sets into the client.
       operationId: listAiLibraryBindings
       parameters:
       - name: scopeKind
@@ -53,13 +176,13 @@ paths:
           format: uuid
       responses:
         '200':
-          description: Binding assignments for the requested scope
+          description: Bindings for the requested scope
           content:
             application/json:
               schema:
                 type: array
                 items:
-                  $ref: '#/components/schemas/AiBindingAssignmentResponse'
+                  $ref: '#/components/schemas/AiBindingResponse'
         '400':
           description: scopeKind query parameter is required
         '401':
@@ -70,21 +193,21 @@ paths:
       tags:
       - ai
       summary: Create ai library binding.
-      description: Manages library-level AI runtime bindings. Bindings decide which configured provider/model handles embedding, query answering, graph extraction, and other AI purposes for one library. Call it to create work or submit a command. Some commands complete synchronously, while ingest, mutation, and runtime work can continue asynchronously.
+      description: Manages library-level AI runtime bindings. A binding assigns an account and model to a purpose (embedding, query answering, graph extraction, and other AI purposes) for one library, with tuning parameters (system prompt, temperature, top-p, output token budget) stored inline. Call it to create work or submit a command. Some commands complete synchronously, while ingest, mutation, and runtime work can continue asynchronously.
       operationId: createAiLibraryBinding
       requestBody:
         content:
           application/json:
             schema:
-              $ref: '#/components/schemas/CreateBindingAssignmentRequest'
+              $ref: '#/components/schemas/CreateAiBindingRequest'
         required: true
       responses:
         '200':
-          description: Newly created binding assignment
+          description: Newly created binding
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/AiBindingAssignmentResponse'
+                $ref: '#/components/schemas/AiBindingResponse'
         '401':
           description: Caller is not authenticated
         '403':
@@ -94,12 +217,12 @@ paths:
       tags:
       - ai
       summary: Update ai library binding.
-      description: Manages library-level AI runtime bindings. Bindings decide which configured provider/model handles embedding, query answering, graph extraction, and other AI purposes for one library. Call it to replace or partially update server-owned configuration. The request body is validated before changes are persisted.
+      description: Manages library-level AI runtime bindings. A binding assigns an account and model to a purpose (embedding, query answering, graph extraction, and other AI purposes) for one library, with tuning parameters (system prompt, temperature, top-p, output token budget) stored inline. Call it to replace or partially update server-owned configuration. The request body is validated before changes are persisted.
       operationId: updateAiLibraryBinding
       parameters:
       - name: bindingId
         in: path
-        description: Binding assignment identifier
+        description: Binding identifier
         required: true
         schema:
           type: string
@@ -108,15 +231,15 @@ paths:
         content:
           application/json:
             schema:
-              $ref: '#/components/schemas/UpdateBindingAssignmentRequest'
+              $ref: '#/components/schemas/UpdateAiBindingRequest'
         required: true
       responses:
         '200':
-          description: Updated binding assignment
+          description: Updated binding
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/AiBindingAssignmentResponse'
+                $ref: '#/components/schemas/AiBindingResponse'
         '401':
           description: Caller is not authenticated
         '403':
@@ -127,12 +250,12 @@ paths:
       tags:
       - ai
       summary: Delete ai library binding.
-      description: Manages library-level AI runtime bindings. Bindings decide which configured provider/model handles embedding, query answering, graph extraction, and other AI purposes for one library. Call it to remove or revoke a resource. Destructive operations are authorized, audited, and may return an asynchronous operation when cleanup continues in the background.
+      description: Manages library-level AI runtime bindings. A binding assigns an account and model to a purpose (embedding, query answering, graph extraction, and other AI purposes) for one library, with tuning parameters (system prompt, temperature, top-p, output token budget) stored inline. Call it to remove or revoke a resource. Destructive operations are authorized, audited, and may return an asynchronous operation when cleanup continues in the background.
       operationId: deleteAiLibraryBinding
       parameters:
       - name: bindingId
         in: path
-        description: Binding assignment identifier
+        description: Binding identifier
         required: true
         schema:
           type: string
@@ -154,12 +277,12 @@ paths:
       tags:
       - ai
       summary: Validate ai library binding.
-      description: Manages library-level AI runtime bindings. Bindings decide which configured provider/model handles embedding, query answering, graph extraction, and other AI purposes for one library. Call it to create work or submit a command. Some commands complete synchronously, while ingest, mutation, and runtime work can continue asynchronously.
+      description: Manages library-level AI runtime bindings. A binding assigns an account and model to a purpose (embedding, query answering, graph extraction, and other AI purposes) for one library, with tuning parameters (system prompt, temperature, top-p, output token budget) stored inline. Call it to create work or submit a command. Some commands complete synchronously, while ingest, mutation, and runtime work can continue asynchronously.
       operationId: validateAiLibraryBinding
       parameters:
       - name: bindingId
         in: path
-        description: Binding assignment identifier
+        description: Binding identifier
         required: true
         schema:
           type: string
@@ -177,252 +300,6 @@ paths:
           description: Caller cannot validate bindings in the binding's scope
         '404':
           description: Binding not found
-  /v1/ai/credentials:
-    get:
-      tags:
-      - ai
-      summary: List ai credentials.
-      description: Manages stored AI provider credentials used by runtime bindings. Use these endpoints from the admin UI or automation when registering, rotating, or listing provider secrets without exposing secret material in responses. Call it for paginated or filtered table views. Prefer server-side filters and cursors over fetching broad result sets into the client.
-      operationId: listAiCredentials
-      parameters:
-      - name: scopeKind
-        in: query
-        required: false
-        schema:
-          $ref: '#/components/schemas/AiScopeKind'
-      - name: workspaceId
-        in: query
-        required: false
-        schema:
-          type: string
-          format: uuid
-      - name: libraryId
-        in: query
-        required: false
-        schema:
-          type: string
-          format: uuid
-      responses:
-        '200':
-          description: Visible provider credentials for the requested scope
-          content:
-            application/json:
-              schema:
-                type: array
-                items:
-                  $ref: '#/components/schemas/ProviderCredentialResponse'
-        '401':
-          description: Caller is not authenticated
-        '403':
-          description: Caller is not authorized for the requested scope
-    post:
-      tags:
-      - ai
-      summary: Create ai credential.
-      description: Manages stored AI provider credentials used by runtime bindings. Use these endpoints from the admin UI or automation when registering, rotating, or listing provider secrets without exposing secret material in responses. Call it to create work or submit a command. Some commands complete synchronously, while ingest, mutation, and runtime work can continue asynchronously.
-      operationId: createAiCredential
-      requestBody:
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/CreateProviderCredentialRequest'
-        required: true
-      responses:
-        '200':
-          description: Newly created provider credential
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ProviderCredentialResponse'
-        '401':
-          description: Caller is not authenticated
-        '403':
-          description: Caller cannot administer credentials in the requested scope
-  /v1/ai/credentials/{credentialId}:
-    put:
-      tags:
-      - ai
-      summary: Update ai credential.
-      description: Manages stored AI provider credentials used by runtime bindings. Use these endpoints from the admin UI or automation when registering, rotating, or listing provider secrets without exposing secret material in responses. Call it to replace or partially update server-owned configuration. The request body is validated before changes are persisted.
-      operationId: updateAiCredential
-      parameters:
-      - name: credentialId
-        in: path
-        description: Provider credential identifier
-        required: true
-        schema:
-          type: string
-          format: uuid
-      requestBody:
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/UpdateProviderCredentialRequest'
-        required: true
-      responses:
-        '200':
-          description: Updated provider credential
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ProviderCredentialResponse'
-        '401':
-          description: Caller is not authenticated
-        '403':
-          description: Caller cannot administer credentials in the credential's scope
-        '404':
-          description: Credential not found
-    delete:
-      tags:
-      - ai
-      summary: Delete ai credential.
-      description: Manages stored AI provider credentials used by runtime bindings. Use these endpoints from the admin UI or automation when registering, rotating, or listing provider secrets without exposing secret material in responses. Call it to remove or revoke a resource. Destructive operations are authorized, audited, and may return an asynchronous operation when cleanup continues in the background.
-      operationId: deleteAiCredential
-      parameters:
-      - name: credentialId
-        in: path
-        description: Provider credential identifier
-        required: true
-        schema:
-          type: string
-          format: uuid
-      responses:
-        '200':
-          description: Empty acknowledgement payload
-          content:
-            application/json:
-              schema: {}
-        '401':
-          description: Caller is not authenticated
-        '403':
-          description: Caller cannot administer credentials in the credential's scope
-        '404':
-          description: Credential not found
-        '409':
-          description: Credential is still referenced
-  /v1/ai/model-presets:
-    get:
-      tags:
-      - ai
-      summary: List ai model presets.
-      description: Manages reusable AI model presets. Presets group provider, model, capability, and tuning metadata so operators can assign consistent runtime behavior to libraries. Call it for paginated or filtered table views. Prefer server-side filters and cursors over fetching broad result sets into the client.
-      operationId: listAiModelPresets
-      parameters:
-      - name: scopeKind
-        in: query
-        required: false
-        schema:
-          $ref: '#/components/schemas/AiScopeKind'
-      - name: workspaceId
-        in: query
-        required: false
-        schema:
-          type: string
-          format: uuid
-      - name: libraryId
-        in: query
-        required: false
-        schema:
-          type: string
-          format: uuid
-      responses:
-        '200':
-          description: Visible model presets for the requested scope
-          content:
-            application/json:
-              schema:
-                type: array
-                items:
-                  $ref: '#/components/schemas/ModelPresetResponse'
-        '401':
-          description: Caller is not authenticated
-        '403':
-          description: Caller is not authorized for the requested scope
-    post:
-      tags:
-      - ai
-      summary: Create ai model preset.
-      description: Manages reusable AI model presets. Presets group provider, model, capability, and tuning metadata so operators can assign consistent runtime behavior to libraries. Call it to create work or submit a command. Some commands complete synchronously, while ingest, mutation, and runtime work can continue asynchronously.
-      operationId: createAiModelPreset
-      requestBody:
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/CreateModelPresetRequest'
-        required: true
-      responses:
-        '200':
-          description: Newly created model preset
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ModelPresetResponse'
-        '401':
-          description: Caller is not authenticated
-        '403':
-          description: Caller cannot administer presets in the requested scope
-  /v1/ai/model-presets/{presetId}:
-    put:
-      tags:
-      - ai
-      summary: Update ai model preset.
-      description: Manages reusable AI model presets. Presets group provider, model, capability, and tuning metadata so operators can assign consistent runtime behavior to libraries. Call it to replace or partially update server-owned configuration. The request body is validated before changes are persisted.
-      operationId: updateAiModelPreset
-      parameters:
-      - name: presetId
-        in: path
-        description: Model preset identifier
-        required: true
-        schema:
-          type: string
-          format: uuid
-      requestBody:
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/UpdateModelPresetRequest'
-        required: true
-      responses:
-        '200':
-          description: Updated model preset
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ModelPresetResponse'
-        '401':
-          description: Caller is not authenticated
-        '403':
-          description: Caller cannot administer presets in the preset's scope
-        '404':
-          description: Preset not found
-    delete:
-      tags:
-      - ai
-      summary: Delete ai model preset.
-      description: Manages reusable AI model presets. Presets group provider, model, capability, and tuning metadata so operators can assign consistent runtime behavior to libraries. Call it to remove or revoke a resource. Destructive operations are authorized, audited, and may return an asynchronous operation when cleanup continues in the background.
-      operationId: deleteAiModelPreset
-      parameters:
-      - name: presetId
-        in: path
-        description: Model preset identifier
-        required: true
-        schema:
-          type: string
-          format: uuid
-      responses:
-        '200':
-          description: Empty acknowledgement payload
-          content:
-            application/json:
-              schema: {}
-        '401':
-          description: Caller is not authenticated
-        '403':
-          description: Caller cannot administer presets in the preset's scope
-        '404':
-          description: Preset not found
-        '409':
-          description: Preset is still referenced
   /v1/ai/models:
     get:
       tags:
@@ -449,7 +326,7 @@ paths:
         schema:
           type: string
           format: uuid
-      - name: credentialId
+      - name: accountId
         in: query
         required: false
         schema:
@@ -3463,6 +3340,28 @@ paths:
           description: Caller is not authenticated
         '403':
           description: Caller is not authorized to read operations
+  /v1/ops/ingest-queue/bulk:
+    post:
+      tags:
+      - ops
+      summary: Bulk ingest queue action.
+      description: Reads or controls ingest runtime state. Operators use these endpoints to inspect queued work, attempts, stage events, and document-processing failures. Call it to create work or submit a command. Some commands complete synchronously, while ingest, mutation, and runtime work can continue asynchronously.
+      operationId: bulkIngestQueueAction
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BulkIngestQueueActionRequest'
+        required: true
+      responses:
+        '200':
+          description: Bulk action result and refreshed active ingest queue
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BulkIngestQueueActionResponse'
+        '401':
+          description: Caller is not authenticated
   /v1/ops/ingest-queue/jobs/{jobId}/cancel:
     post:
       tags:
@@ -3583,6 +3482,36 @@ paths:
                 $ref: '#/components/schemas/IngestQueueResponse'
         '400':
           description: Job is not paused
+        '401':
+          description: Caller is not authenticated
+        '403':
+          description: Caller cannot mutate the job's library
+        '404':
+          description: Job not found
+  /v1/ops/ingest-queue/jobs/{jobId}/retry:
+    post:
+      tags:
+      - ops
+      summary: Retry ingest queue job.
+      description: Reads or controls ingest runtime state. Operators use these endpoints to inspect queued work, attempts, stage events, and document-processing failures. Call it to create work or submit a command. Some commands complete synchronously, while ingest, mutation, and runtime work can continue asynchronously.
+      operationId: retryIngestQueueJob
+      parameters:
+      - name: jobId
+        in: path
+        description: Queued, paused, or stale leased ingest job identifier
+        required: true
+        schema:
+          type: string
+          format: uuid
+      responses:
+        '200':
+          description: Updated active ingest queue
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/IngestQueueResponse'
+        '400':
+          description: Job cannot be requeued from the ingest queue
         '401':
           description: Caller is not authenticated
         '403':
@@ -4325,36 +4254,47 @@ components:
       - no_progress
       - tool_error
       - provider_error
-    AiBindingAssignmentResponse:
+    AiAccountResponse:
       type: object
       required:
       - id
       - scopeKind
-      - bindingPurpose
-      - providerCredentialId
-      - modelPresetId
-      - bindingState
+      - providerCatalogId
+      - label
+      - apiKeySummary
+      - credentialState
+      - createdAt
+      - updatedAt
       properties:
-        bindingPurpose:
-          $ref: '#/components/schemas/AiBindingPurpose'
-        bindingState:
+        apiKeySummary:
+          type: string
+        baseUrl:
+          type:
+          - string
+          - 'null'
+        createdAt:
+          type: string
+          format: date-time
+        credentialState:
           type: string
         id:
           type: string
           format: uuid
+        label:
+          type: string
         libraryId:
           type:
           - string
           - 'null'
           format: uuid
-        modelPresetId:
-          type: string
-          format: uuid
-        providerCredentialId:
+        providerCatalogId:
           type: string
           format: uuid
         scopeKind:
           $ref: '#/components/schemas/AiScopeKind'
+        updatedAt:
+          type: string
+          format: date-time
         workspaceId:
           type:
           - string
@@ -4371,6 +4311,62 @@ components:
       - query_answer
       - vision
       - agent
+    AiBindingResponse:
+      type: object
+      required:
+      - id
+      - scopeKind
+      - bindingPurpose
+      - accountId
+      - modelCatalogId
+      - extraParametersJson
+      - bindingState
+      properties:
+        accountId:
+          type: string
+          format: uuid
+        bindingPurpose:
+          $ref: '#/components/schemas/AiBindingPurpose'
+        bindingState:
+          type: string
+        extraParametersJson: {}
+        id:
+          type: string
+          format: uuid
+        libraryId:
+          type:
+          - string
+          - 'null'
+          format: uuid
+        maxOutputTokensOverride:
+          type:
+          - integer
+          - 'null'
+          format: int32
+        modelCatalogId:
+          type: string
+          format: uuid
+        scopeKind:
+          $ref: '#/components/schemas/AiScopeKind'
+        systemPrompt:
+          type:
+          - string
+          - 'null'
+        temperature:
+          type:
+          - number
+          - 'null'
+          format: double
+        topP:
+          type:
+          - number
+          - 'null'
+          format: double
+        workspaceId:
+          type:
+          - string
+          - 'null'
+          format: uuid
     AiScopeKind:
       type: string
       enum:
@@ -5591,12 +5587,12 @@ components:
     BootstrapAiSetup:
       type: object
       required:
-      - presetBundles
+      - bindingBundles
       properties:
-        presetBundles:
+        bindingBundles:
           type: array
           items:
-            $ref: '#/components/schemas/BootstrapProviderPresetBundle'
+            $ref: '#/components/schemas/BootstrapProviderBindingBundle'
     BootstrapBindingPurpose:
       type: string
       enum:
@@ -5613,13 +5609,12 @@ components:
       enum:
       - missing
       - env
-    BootstrapProviderPreset:
+    BootstrapProviderBinding:
       type: object
       required:
       - bindingPurpose
       - modelCatalogId
       - modelName
-      - presetName
       properties:
         bindingPurpose:
           $ref: '#/components/schemas/BootstrapBindingPurpose'
@@ -5632,8 +5627,6 @@ components:
           type: string
           format: uuid
         modelName:
-          type: string
-        presetName:
           type: string
         systemPrompt:
           type:
@@ -5649,7 +5642,7 @@ components:
           - number
           - 'null'
           format: double
-    BootstrapProviderPresetBundle:
+    BootstrapProviderBindingBundle:
       type: object
       required:
       - providerCatalogId
@@ -5664,7 +5657,7 @@ components:
       - capabilities
       - runtime
       - uiHints
-      - presets
+      - bindings
       properties:
         apiKeyRequired:
           type: boolean
@@ -5672,6 +5665,10 @@ components:
           $ref: '#/components/schemas/ProviderBaseUrlPolicy'
         baseUrlRequired:
           type: boolean
+        bindings:
+          type: array
+          items:
+            $ref: '#/components/schemas/BootstrapProviderBinding'
         capabilities:
           $ref: '#/components/schemas/ProviderCapabilities'
         credentialPolicy:
@@ -5686,10 +5683,6 @@ components:
           type: string
         modelDiscovery:
           $ref: '#/components/schemas/ProviderModelDiscovery'
-        presets:
-          type: array
-          items:
-            $ref: '#/components/schemas/BootstrapProviderPreset'
         providerCatalogId:
           type: string
           format: uuid
@@ -5742,6 +5735,31 @@ components:
           - $ref: '#/components/schemas/BootstrapAiSetup'
         setupRequired:
           type: boolean
+    BulkIngestQueueActionRequest:
+      type: object
+      required:
+      - action
+      - jobIds
+      properties:
+        action:
+          $ref: '#/components/schemas/IngestQueueBulkAction'
+        jobIds:
+          type: array
+          items:
+            type: string
+            format: uuid
+    BulkIngestQueueActionResponse:
+      type: object
+      required:
+      - queue
+      - results
+      properties:
+        queue:
+          $ref: '#/components/schemas/IngestQueueResponse'
+        results:
+          type: array
+          items:
+            $ref: '#/components/schemas/IngestQueueBulkResultItem'
     CapabilityGate:
       type: object
       required:
@@ -6460,29 +6478,81 @@ components:
       enum:
       - stored_document
       - external_url
-    CreateBindingAssignmentRequest:
+    CreateAiAccountRequest:
       type: object
       required:
       - scopeKind
-      - bindingPurpose
-      - providerCredentialId
-      - modelPresetId
+      - providerCatalogId
+      - label
       properties:
-        bindingPurpose:
-          $ref: '#/components/schemas/AiBindingPurpose'
+        apiKey:
+          type:
+          - string
+          - 'null'
+        baseUrl:
+          type:
+          - string
+          - 'null'
+        label:
+          type: string
         libraryId:
           type:
           - string
           - 'null'
           format: uuid
-        modelPresetId:
-          type: string
-          format: uuid
-        providerCredentialId:
+        providerCatalogId:
           type: string
           format: uuid
         scopeKind:
           $ref: '#/components/schemas/AiScopeKind'
+        workspaceId:
+          type:
+          - string
+          - 'null'
+          format: uuid
+    CreateAiBindingRequest:
+      type: object
+      required:
+      - scopeKind
+      - bindingPurpose
+      - accountId
+      - modelCatalogId
+      properties:
+        accountId:
+          type: string
+          format: uuid
+        bindingPurpose:
+          $ref: '#/components/schemas/AiBindingPurpose'
+        extraParametersJson: {}
+        libraryId:
+          type:
+          - string
+          - 'null'
+          format: uuid
+        maxOutputTokensOverride:
+          type:
+          - integer
+          - 'null'
+          format: int32
+        modelCatalogId:
+          type: string
+          format: uuid
+        scopeKind:
+          $ref: '#/components/schemas/AiScopeKind'
+        systemPrompt:
+          type:
+          - string
+          - 'null'
+        temperature:
+          type:
+          - number
+          - 'null'
+          format: double
+        topP:
+          type:
+          - number
+          - 'null'
+          format: double
         workspaceId:
           type:
           - string
@@ -6648,50 +6718,6 @@ components:
         providerCatalogId:
           type: string
           format: uuid
-    CreateModelPresetRequest:
-      type: object
-      required:
-      - scopeKind
-      - modelCatalogId
-      - presetName
-      properties:
-        extraParametersJson: {}
-        libraryId:
-          type:
-          - string
-          - 'null'
-          format: uuid
-        maxOutputTokensOverride:
-          type:
-          - integer
-          - 'null'
-          format: int32
-        modelCatalogId:
-          type: string
-          format: uuid
-        presetName:
-          type: string
-        scopeKind:
-          $ref: '#/components/schemas/AiScopeKind'
-        systemPrompt:
-          type:
-          - string
-          - 'null'
-        temperature:
-          type:
-          - number
-          - 'null'
-          format: double
-        topP:
-          type:
-          - number
-          - 'null'
-          format: double
-        workspaceId:
-          type:
-          - string
-          - 'null'
-          format: uuid
     CreateMutationRequest:
       type: object
       required:
@@ -6774,38 +6800,6 @@ components:
           type: string
         providerKind:
           type: string
-    CreateProviderCredentialRequest:
-      type: object
-      required:
-      - scopeKind
-      - providerCatalogId
-      - label
-      properties:
-        apiKey:
-          type:
-          - string
-          - 'null'
-        baseUrl:
-          type:
-          - string
-          - 'null'
-        label:
-          type: string
-        libraryId:
-          type:
-          - string
-          - 'null'
-          format: uuid
-        providerCatalogId:
-          type: string
-          format: uuid
-        scopeKind:
-          $ref: '#/components/schemas/AiScopeKind'
-        workspaceId:
-          type:
-          - string
-          - 'null'
-          format: uuid
     CreateSessionRequest:
       type: object
       required:
@@ -8065,6 +8059,38 @@ components:
           - $ref: '#/components/schemas/IngestAttempt'
         readiness:
           $ref: '#/components/schemas/IngestReadinessResponse'
+    IngestQueueBulkAction:
+      type: string
+      enum:
+      - retry_requeue
+      - pause
+      - resume
+      - cancel
+    IngestQueueBulkResultItem:
+      type: object
+      required:
+      - jobId
+      - status
+      properties:
+        jobId:
+          type: string
+          format: uuid
+        message:
+          type:
+          - string
+          - 'null'
+        reasonCode:
+          type:
+          - string
+          - 'null'
+        status:
+          $ref: '#/components/schemas/IngestQueueBulkResultStatus'
+    IngestQueueBulkResultStatus:
+      type: string
+      enum:
+      - applied
+      - skipped
+      - failed
     IngestQueueItemResponse:
       type: object
       required:
@@ -8078,6 +8104,11 @@ components:
       - queueState
       - queuedAt
       - availableAt
+      - canRetryRequeue
+      - canPause
+      - canResume
+      - canCancel
+      - hasStaleQueueLease
       properties:
         attemptId:
           type:
@@ -8096,6 +8127,14 @@ components:
         availableAt:
           type: string
           format: date-time
+        canCancel:
+          type: boolean
+        canPause:
+          type: boolean
+        canResume:
+          type: boolean
+        canRetryRequeue:
+          type: boolean
         currentStage:
           type:
           - string
@@ -8115,6 +8154,8 @@ components:
           type:
           - string
           - 'null'
+        hasStaleQueueLease:
+          type: boolean
         heartbeatAt:
           type:
           - string
@@ -9996,7 +10037,7 @@ components:
       - lifecycleState
       - allowedBindingPurposes
       - availabilityState
-      - availableCredentialIds
+      - availableAccountIds
       properties:
         allowedBindingPurposes:
           type: array
@@ -10004,7 +10045,7 @@ components:
             $ref: '#/components/schemas/AiBindingPurpose'
         availabilityState:
           $ref: '#/components/schemas/ModelAvailabilityState'
-        availableCredentialIds:
+        availableAccountIds:
           type: array
           items:
             type: string
@@ -10032,63 +10073,6 @@ components:
           type: string
         providerCatalogId:
           type: string
-          format: uuid
-    ModelPresetResponse:
-      type: object
-      required:
-      - id
-      - scopeKind
-      - modelCatalogId
-      - presetName
-      - extraParametersJson
-      - createdAt
-      - updatedAt
-      properties:
-        createdAt:
-          type: string
-          format: date-time
-        extraParametersJson: {}
-        id:
-          type: string
-          format: uuid
-        libraryId:
-          type:
-          - string
-          - 'null'
-          format: uuid
-        maxOutputTokensOverride:
-          type:
-          - integer
-          - 'null'
-          format: int32
-        modelCatalogId:
-          type: string
-          format: uuid
-        presetName:
-          type: string
-        scopeKind:
-          $ref: '#/components/schemas/AiScopeKind'
-        systemPrompt:
-          type:
-          - string
-          - 'null'
-        temperature:
-          type:
-          - number
-          - 'null'
-          format: double
-        topP:
-          type:
-          - number
-          - 'null'
-          format: double
-        updatedAt:
-          type: string
-          format: date-time
-        workspaceId:
-          type:
-          - string
-          - 'null'
           format: uuid
     MoveIngestQueueJobRequest:
       type: object
@@ -10635,52 +10619,6 @@ components:
           type: boolean
         validationMode:
           $ref: '#/components/schemas/ProviderCredentialValidationMode'
-    ProviderCredentialResponse:
-      type: object
-      required:
-      - id
-      - scopeKind
-      - providerCatalogId
-      - label
-      - apiKeySummary
-      - credentialState
-      - createdAt
-      - updatedAt
-      properties:
-        apiKeySummary:
-          type: string
-        baseUrl:
-          type:
-          - string
-          - 'null'
-        createdAt:
-          type: string
-          format: date-time
-        credentialState:
-          type: string
-        id:
-          type: string
-          format: uuid
-        label:
-          type: string
-        libraryId:
-          type:
-          - string
-          - 'null'
-          format: uuid
-        providerCatalogId:
-          type: string
-          format: uuid
-        scopeKind:
-          $ref: '#/components/schemas/AiScopeKind'
-        updatedAt:
-          type: string
-          format: date-time
-        workspaceId:
-          type:
-          - string
-          - 'null'
-          format: uuid
     ProviderCredentialValidationMode:
       type: string
       enum:
@@ -12163,21 +12101,59 @@ components:
       enum:
       - en
       - ru
-    UpdateBindingAssignmentRequest:
+    UpdateAiAccountRequest:
       type: object
       required:
-      - providerCredentialId
-      - modelPresetId
+      - label
+      - credentialState
+      properties:
+        apiKey:
+          type:
+          - string
+          - 'null'
+        baseUrl:
+          type:
+          - string
+          - 'null'
+        credentialState:
+          type: string
+        label:
+          type: string
+    UpdateAiBindingRequest:
+      type: object
+      required:
+      - accountId
+      - modelCatalogId
       - bindingState
       properties:
+        accountId:
+          type: string
+          format: uuid
         bindingState:
           type: string
-        modelPresetId:
+        extraParametersJson: {}
+        maxOutputTokensOverride:
+          type:
+          - integer
+          - 'null'
+          format: int32
+        modelCatalogId:
           type: string
           format: uuid
-        providerCredentialId:
-          type: string
-          format: uuid
+        systemPrompt:
+          type:
+          - string
+          - 'null'
+        temperature:
+          type:
+          - number
+          - 'null'
+          format: double
+        topP:
+          type:
+          - number
+          - 'null'
+          format: double
     UpdateCatalogLibraryRequest:
       type: object
       required:
@@ -12258,33 +12234,6 @@ components:
         providerCatalogId:
           type: string
           format: uuid
-    UpdateModelPresetRequest:
-      type: object
-      required:
-      - presetName
-      properties:
-        extraParametersJson: {}
-        maxOutputTokensOverride:
-          type:
-          - integer
-          - 'null'
-          format: int32
-        presetName:
-          type: string
-        systemPrompt:
-          type:
-          - string
-          - 'null'
-        temperature:
-          type:
-          - number
-          - 'null'
-          format: double
-        topP:
-          type:
-          - number
-          - 'null'
-          format: double
     UpdateProviderCatalogRequest:
       type: object
       required:
@@ -12305,24 +12254,6 @@ components:
         lifecycleState:
           type: string
         providerKind:
-          type: string
-    UpdateProviderCredentialRequest:
-      type: object
-      required:
-      - label
-      - credentialState
-      properties:
-        apiKey:
-          type:
-          - string
-          - 'null'
-        baseUrl:
-          type:
-          - string
-          - 'null'
-        credentialState:
-          type: string
-        label:
           type: string
     UpdateSubscriptionRequest:
       type: object

@@ -289,11 +289,13 @@ pub async fn list_admitted_runtime_graph_nodes_by_library(
     library_id: Uuid,
     projection_version: i64,
 ) -> Result<Vec<RuntimeGraphNodeRow>, sqlx::Error> {
-    sqlx::query_as::<_, RuntimeGraphNodeRow>(&admitted_runtime_graph_nodes_query(""))
-        .bind(library_id)
-        .bind(projection_version)
-        .fetch_all(pool)
-        .await
+    sqlx::query_as::<_, RuntimeGraphNodeRow>(sqlx::AssertSqlSafe(
+        admitted_runtime_graph_nodes_query(""),
+    ))
+    .bind(library_id)
+    .bind(projection_version)
+    .fetch_all(pool)
+    .await
 }
 
 /// Counts admitted non-document runtime graph nodes for one projection version.
@@ -469,8 +471,8 @@ pub async fn list_admitted_runtime_graph_nodes_by_ids(
         return Ok(Vec::new());
     }
 
-    sqlx::query_as::<_, RuntimeGraphNodeRow>(&admitted_runtime_graph_nodes_query(
-        "and node.id = any($3)",
+    sqlx::query_as::<_, RuntimeGraphNodeRow>(sqlx::AssertSqlSafe(
+        admitted_runtime_graph_nodes_query("and node.id = any($3)"),
     ))
     .bind(library_id)
     .bind(projection_version)
@@ -1602,7 +1604,7 @@ async fn recalculate_runtime_graph_support_counts_by_ids(
 
     let mut rows_affected = 0_u64;
     for batch in target_ids.chunks(SUPPORT_COUNT_RECALCULATION_BATCH_SIZE) {
-        let result = sqlx::query(sql)
+        let result = sqlx::query(sqlx::AssertSqlSafe(sql))
             .bind(library_id)
             .bind(projection_version)
             .bind(batch)
@@ -1995,7 +1997,7 @@ pub async fn search_runtime_graph_evidence_by_text(
          limit $4"
     );
 
-    let mut query = sqlx::query_as::<_, RuntimeGraphEvidenceRow>(&sql)
+    let mut query = sqlx::query_as::<_, RuntimeGraphEvidenceRow>(sqlx::AssertSqlSafe(&*sql))
         .bind(library_id)
         .bind(search_queries)
         .bind(literal_queries)
@@ -2991,11 +2993,13 @@ pub async fn count_admitted_runtime_graph_projection(
     library_id: Uuid,
     projection_version: i64,
 ) -> Result<RuntimeGraphProjectionCountsRow, sqlx::Error> {
-    sqlx::query_as::<_, RuntimeGraphProjectionCountsRow>(&admitted_runtime_graph_counts_query())
-        .bind(library_id)
-        .bind(projection_version)
-        .fetch_one(pool)
-        .await
+    sqlx::query_as::<_, RuntimeGraphProjectionCountsRow>(sqlx::AssertSqlSafe(
+        admitted_runtime_graph_counts_query(),
+    ))
+    .bind(library_id)
+    .bind(projection_version)
+    .fetch_one(pool)
+    .await
 }
 
 fn admitted_runtime_graph_nodes_query(extra_filter: &str) -> String {

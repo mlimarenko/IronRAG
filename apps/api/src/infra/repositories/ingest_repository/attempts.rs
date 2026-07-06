@@ -2,6 +2,8 @@ use chrono::{DateTime, Utc};
 use sqlx::{FromRow, PgPool};
 use uuid::Uuid;
 
+use super::jobs::UpdateIngestJob;
+
 #[derive(Debug, Clone, FromRow)]
 pub struct IngestAttemptRow {
     pub id: Uuid,
@@ -134,6 +136,116 @@ pub async fn create_ingest_attempt(
     .bind(input.retryable)
     .fetch_one(postgres)
     .await
+}
+
+pub async fn create_ingest_attempt_for_queue_lease(
+    postgres: &PgPool,
+    input: &NewIngestAttempt,
+    expected_queue_lease_token: &str,
+) -> Result<Option<IngestAttemptRow>, sqlx::Error> {
+    let mut tx = postgres.begin().await?;
+    let target_job = sqlx::query_scalar::<_, Uuid>(
+        "select id
+         from ingest_job
+         where id = $1
+           and queue_state = 'leased'
+           and queue_lease_token = $2
+         for update",
+    )
+    .bind(input.job_id)
+    .bind(expected_queue_lease_token)
+    .fetch_optional(&mut *tx)
+    .await?;
+    if target_job.is_none() {
+        tx.commit().await?;
+        return Ok(None);
+    }
+
+    let next_attempt_number = sqlx::query_scalar::<_, i32>(
+        "select coalesce(max(attempt_number), 0) + 1
+         from ingest_attempt
+         where job_id = $1",
+    )
+    .bind(input.job_id)
+    .fetch_one(&mut *tx)
+    .await?;
+
+    let attempt = sqlx::query_as::<_, IngestAttemptRow>(
+        "insert into ingest_attempt (
+            id,
+            job_id,
+            attempt_number,
+            worker_principal_id,
+            lease_token,
+            knowledge_generation_id,
+            attempt_state,
+            current_stage,
+            started_at,
+            heartbeat_at,
+            finished_at,
+            failure_class,
+            failure_code,
+            failure_message,
+            progress_percent,
+            retryable
+        )
+        values (
+            $1,
+            $2,
+            $3,
+            $4,
+            $5,
+            $6,
+            $7::ingest_attempt_state,
+            $8,
+            coalesce($9, now()),
+            $10,
+            $11,
+            $12,
+            $13,
+            $14,
+            $15,
+            $16
+        )
+        returning
+            id,
+            job_id,
+            attempt_number,
+            worker_principal_id,
+            lease_token,
+            knowledge_generation_id,
+            attempt_state::text as attempt_state,
+            current_stage,
+            started_at,
+            heartbeat_at,
+            finished_at,
+            failure_class,
+            failure_code,
+            failure_message,
+            progress_percent,
+            retryable",
+    )
+    .bind(Uuid::now_v7())
+    .bind(input.job_id)
+    .bind(next_attempt_number)
+    .bind(input.worker_principal_id)
+    .bind(&input.lease_token)
+    .bind(input.knowledge_generation_id)
+    .bind(&input.attempt_state)
+    .bind(&input.current_stage)
+    .bind(input.started_at)
+    .bind(input.heartbeat_at)
+    .bind(input.finished_at)
+    .bind(&input.failure_class)
+    .bind(&input.failure_code)
+    .bind(&input.failure_message)
+    .bind(input.progress_percent)
+    .bind(input.retryable)
+    .fetch_one(&mut *tx)
+    .await?;
+
+    tx.commit().await?;
+    Ok(Some(attempt))
 }
 
 pub async fn get_ingest_attempt_by_id(
@@ -405,6 +517,110 @@ pub async fn finalize_leased_ingest_attempt(
     .bind(input.retryable)
     .fetch_optional(postgres)
     .await
+}
+
+pub async fn finalize_leased_ingest_attempt_and_update_job(
+    postgres: &PgPool,
+    attempt_id: Uuid,
+    attempt_input: &UpdateIngestAttempt,
+    job_input: &UpdateIngestJob,
+) -> Result<Option<IngestAttemptRow>, sqlx::Error> {
+    let mut tx = postgres.begin().await?;
+    let finalized_attempt = sqlx::query_as::<_, IngestAttemptRow>(
+        "update ingest_attempt
+         set worker_principal_id = $2,
+             lease_token = $3,
+             knowledge_generation_id = $4,
+             attempt_state = $5::ingest_attempt_state,
+             current_stage = $6,
+             heartbeat_at = $7,
+             finished_at = $8,
+             failure_class = $9,
+             failure_code = $10,
+             failure_message = $11,
+             progress_percent = $12,
+             retryable = $13
+         where id = $1 and attempt_state = 'leased'
+         returning
+            id,
+            job_id,
+            attempt_number,
+            worker_principal_id,
+            lease_token,
+            knowledge_generation_id,
+            attempt_state::text as attempt_state,
+            current_stage,
+            started_at,
+            heartbeat_at,
+            finished_at,
+            failure_class,
+            failure_code,
+            failure_message,
+            progress_percent,
+            retryable",
+    )
+    .bind(attempt_id)
+    .bind(attempt_input.worker_principal_id)
+    .bind(&attempt_input.lease_token)
+    .bind(attempt_input.knowledge_generation_id)
+    .bind(&attempt_input.attempt_state)
+    .bind(&attempt_input.current_stage)
+    .bind(attempt_input.heartbeat_at)
+    .bind(attempt_input.finished_at)
+    .bind(&attempt_input.failure_class)
+    .bind(&attempt_input.failure_code)
+    .bind(&attempt_input.failure_message)
+    .bind(attempt_input.progress_percent)
+    .bind(attempt_input.retryable)
+    .fetch_optional(&mut *tx)
+    .await?;
+
+    let Some(finalized_attempt) = finalized_attempt else {
+        tx.rollback().await?;
+        return Ok(None);
+    };
+
+    let job_result = sqlx::query(
+        "update ingest_job
+         set mutation_id = $2,
+             connector_id = $3,
+             async_operation_id = $4,
+             knowledge_document_id = $5,
+             knowledge_revision_id = $6,
+             job_kind = $7::ingest_job_kind,
+             queue_state = $8::ingest_queue_state,
+             priority = $9,
+             dedupe_key = $10,
+             available_at = $11,
+             completed_at = $12,
+             queue_leased_at = case when $8::ingest_queue_state = 'leased' then queue_leased_at else null end,
+             queue_lease_token = case when $8::ingest_queue_state = 'leased' then queue_lease_token else null end,
+             queue_lease_owner = case when $8::ingest_queue_state = 'leased' then queue_lease_owner else null end
+         where id = $1
+           and queue_state = 'leased'",
+    )
+    .bind(finalized_attempt.job_id)
+    .bind(job_input.mutation_id)
+    .bind(job_input.connector_id)
+    .bind(job_input.async_operation_id)
+    .bind(job_input.knowledge_document_id)
+    .bind(job_input.knowledge_revision_id)
+    .bind(&job_input.job_kind)
+    .bind(&job_input.queue_state)
+    .bind(job_input.priority)
+    .bind(&job_input.dedupe_key)
+    .bind(job_input.available_at)
+    .bind(job_input.completed_at)
+    .execute(&mut *tx)
+    .await?;
+
+    if job_result.rows_affected() == 0 {
+        tx.rollback().await?;
+        return Ok(None);
+    }
+
+    tx.commit().await?;
+    Ok(Some(finalized_attempt))
 }
 
 pub async fn touch_attempt_heartbeat(

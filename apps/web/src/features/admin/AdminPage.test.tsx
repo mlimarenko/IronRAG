@@ -38,6 +38,8 @@ const {
     listPrices: vi.fn(),
     listAuditEvents: vi.fn(),
     listIngestQueue: vi.fn(),
+    bulkIngestQueueAction: vi.fn(),
+    retryIngestQueueJob: vi.fn(),
     listIngestStageEvents: vi.fn(),
     updateLibraryMcpSettings: vi.fn(),
   },
@@ -176,6 +178,36 @@ vi.mock("@/features/admin/components/AiConfigurationPanel", () => ({
   default: () => <div data-testid="ai-panel">AI panel</div>,
 }));
 
+const makeQueueJob = (overrides: Record<string, unknown> = {}) => ({
+  jobId: "job-1",
+  workspaceId: "ws-1",
+  workspaceName: "Workspace 1",
+  libraryId: "library-1",
+  libraryName: "Library 1",
+  documentId: "doc-1",
+  documentName: "Queue Document 001",
+  jobKind: "content_mutation",
+  queueState: "queued",
+  queuePosition: 1,
+  queuedAt: "2026-05-14T00:00:00Z",
+  availableAt: "2026-05-14T00:00:00Z",
+  attemptId: null,
+  attemptState: null,
+  startedAt: null,
+  heartbeatAt: null,
+  currentStage: null,
+  progressPercent: null,
+  attemptNumber: null,
+  failureCode: null,
+  failureMessage: null,
+  canRetryRequeue: true,
+  canPause: true,
+  canResume: false,
+  canCancel: true,
+  hasStaleQueueLease: false,
+  ...overrides,
+});
+
 const ADMIN_USER = {
   user: { id: "u-1", login: "admin", displayName: "Admin", accessLabel: "Admin", role: "admin" as const },
   activeWorkspace: { id: "ws-1", name: "Workspace 1" },
@@ -249,6 +281,8 @@ describe("AdminPage routing", () => {
       summary: { running: 0, queued: 0, paused: 0, total: 0 },
       items: [],
     });
+    adminApiMock.bulkIngestQueueAction.mockReset();
+    adminApiMock.retryIngestQueueJob.mockReset();
     adminApiMock.listIngestStageEvents.mockResolvedValue({ stages: [] });
     dashboardApiMock.getLibraryState.mockResolvedValue({
       state: {
@@ -335,6 +369,88 @@ describe("AdminPage routing", () => {
     // duplicate blurb was removed when admin pages adopted the shared header).
     expect(container.textContent).toContain("Queue");
     expect(container.textContent).toContain("Document processing");
+  });
+
+  it("renders only the first queue page and enables pagination for overflow", async () => {
+    const items = Array.from({ length: 51 }, (_, index) => {
+      const ordinal = String(index + 1).padStart(3, "0");
+      return makeQueueJob({
+        jobId: `job-${ordinal}`,
+        documentId: `doc-${ordinal}`,
+        documentName: `Queue Document ${ordinal}`,
+        queuePosition: index + 1,
+      });
+    });
+    adminApiMock.listIngestQueue.mockResolvedValue({
+      summary: { running: 0, queued: 51, paused: 0, total: 51 },
+      items,
+    });
+
+    await renderAt("/admin/queue");
+
+    expect(container.textContent).toContain("Queue Document 001");
+    expect(container.textContent).not.toContain("Queue Document 051");
+    expect(container.textContent).toContain("1–50 of 51");
+    const nextButton = Array.from(container.querySelectorAll("button")).find(
+      (button) => button.textContent?.trim() === "Next",
+    );
+    expect(nextButton).toBeTruthy();
+    expect(nextButton).not.toBeDisabled();
+  });
+
+  it("keeps skipped queue jobs selected after a partial bulk retry response", async () => {
+    const queuedJob = makeQueueJob({
+      jobId: "job-1",
+      documentId: "doc-1",
+      documentName: "Alpha Document",
+      queuePosition: 1,
+    });
+    adminApiMock.listIngestQueue.mockResolvedValue({
+      summary: { running: 0, queued: 1, paused: 0, total: 1 },
+      items: [queuedJob],
+    });
+    adminApiMock.bulkIngestQueueAction.mockResolvedValue({
+      queue: {
+        summary: { running: 0, queued: 1, paused: 0, total: 1 },
+        items: [queuedJob],
+      },
+      results: [
+        {
+          jobId: "job-1",
+          status: "skipped",
+          reasonCode: "lease_not_stale",
+          message: "Job was not changed",
+        },
+      ],
+    });
+
+    await renderAt("/admin/queue");
+    expect(container.textContent).toContain("Alpha Document");
+
+    const clickButton = async (label: string) => {
+      const button = Array.from(container.querySelectorAll("button")).find((candidate) =>
+        candidate.textContent?.includes(label),
+      );
+      expect(button, `button ${label}`).toBeTruthy();
+      await act(async () => {
+        button?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      });
+      await flush();
+    };
+
+    await clickButton("Select");
+    const checkbox = container.querySelector(
+      'button[role="checkbox"][aria-label="Select Alpha Document"]',
+    );
+    expect(checkbox).toBeTruthy();
+    await act(async () => {
+      checkbox?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    await flush();
+
+    await clickButton("Retry/requeue 1");
+    expect(adminApiMock.bulkIngestQueueAction).toHaveBeenCalledWith("retry_requeue", ["job-1"]);
+    expect(container.textContent).toContain("1 job selected");
   });
 
   it("renders the users surface at /admin/users for an admin", async () => {

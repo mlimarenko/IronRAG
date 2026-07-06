@@ -51,6 +51,7 @@ const INGEST_RETRY_BACKOFF_BASE_SECONDS: i64 = 15;
 /// Upper bound on the computed backoff so a late attempt cannot push a job
 /// arbitrarily far into the future.
 const INGEST_RETRY_BACKOFF_MAX_SECONDS: i64 = 600;
+pub(crate) const QUEUE_STALE_LEASE_SECONDS: i64 = 60;
 
 /// Exponential backoff for the next retry of a job whose current attempt
 /// (`attempt_number`, 1-based) just failed retryably. Attempt 1 → base, attempt
@@ -321,6 +322,7 @@ pub struct LeaseAttemptCommand {
     pub job_id: Uuid,
     pub worker_principal_id: Option<Uuid>,
     pub lease_token: Option<String>,
+    pub expected_queue_lease_token: Option<String>,
     pub knowledge_generation_id: Option<Uuid>,
     pub current_stage: Option<String>,
 }
@@ -624,56 +626,77 @@ impl IngestService {
                 .await
                 .map_err(|e| ApiError::internal_with_log(e, "internal"))?
                 .ok_or_else(|| ApiError::resource_not_found("ingest_job", command.job_id))?;
-        let latest_attempt = ingest_repository::get_latest_ingest_attempt_by_job(
-            &state.persistence.postgres,
-            command.job_id,
-        )
-        .await
-        .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
-        let next_attempt_number = latest_attempt.as_ref().map_or(1, |row| row.attempt_number + 1);
+        let new_attempt = NewIngestAttempt {
+            job_id: job.id,
+            attempt_number: 0,
+            worker_principal_id: command.worker_principal_id,
+            lease_token: command.lease_token,
+            knowledge_generation_id: command.knowledge_generation_id,
+            attempt_state: "leased".to_string(),
+            current_stage,
+            started_at: None,
+            heartbeat_at: Some(Utc::now()),
+            finished_at: None,
+            failure_class: None,
+            failure_code: None,
+            failure_message: None,
+            progress_percent: 0,
+            retryable: false,
+        };
 
-        let attempt = ingest_repository::create_ingest_attempt(
-            &state.persistence.postgres,
-            &NewIngestAttempt {
-                job_id: job.id,
-                attempt_number: next_attempt_number,
-                worker_principal_id: command.worker_principal_id,
-                lease_token: command.lease_token,
-                knowledge_generation_id: command.knowledge_generation_id,
-                attempt_state: "leased".to_string(),
-                current_stage,
-                started_at: None,
-                heartbeat_at: Some(Utc::now()),
-                finished_at: None,
-                failure_class: None,
-                failure_code: None,
-                failure_message: None,
-                progress_percent: 0,
-                retryable: false,
-            },
-        )
-        .await
-        .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
+        let attempt = if let Some(expected_queue_lease_token) = command.expected_queue_lease_token {
+            ingest_repository::create_ingest_attempt_for_queue_lease(
+                &state.persistence.postgres,
+                &new_attempt,
+                &expected_queue_lease_token,
+            )
+            .await
+            .map_err(|e| ApiError::internal_with_log(e, "internal"))?
+            .ok_or_else(|| {
+                ApiError::Conflict(format!(
+                    "ingest job {} queue lease changed before attempt creation",
+                    job.id
+                ))
+            })?
+        } else {
+            let latest_attempt = ingest_repository::get_latest_ingest_attempt_by_job(
+                &state.persistence.postgres,
+                command.job_id,
+            )
+            .await
+            .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
+            let next_attempt_number =
+                latest_attempt.as_ref().map_or(1, |row| row.attempt_number + 1);
+            let mut fallback_attempt = new_attempt;
+            fallback_attempt.attempt_number = next_attempt_number;
+            let attempt = ingest_repository::create_ingest_attempt(
+                &state.persistence.postgres,
+                &fallback_attempt,
+            )
+            .await
+            .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
 
-        let _ = ingest_repository::update_ingest_job(
-            &state.persistence.postgres,
-            job.id,
-            &UpdateIngestJob {
-                mutation_id: job.mutation_id,
-                connector_id: job.connector_id,
-                async_operation_id: job.async_operation_id,
-                knowledge_document_id: job.knowledge_document_id,
-                knowledge_revision_id: job.knowledge_revision_id,
-                job_kind: job.job_kind,
-                queue_state: "leased".to_string(),
-                priority: job.priority,
-                dedupe_key: job.dedupe_key,
-                available_at: job.available_at,
-                completed_at: job.completed_at,
-            },
-        )
-        .await
-        .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
+            let _ = ingest_repository::update_ingest_job(
+                &state.persistence.postgres,
+                job.id,
+                &UpdateIngestJob {
+                    mutation_id: job.mutation_id,
+                    connector_id: job.connector_id,
+                    async_operation_id: job.async_operation_id,
+                    knowledge_document_id: job.knowledge_document_id,
+                    knowledge_revision_id: job.knowledge_revision_id,
+                    job_kind: job.job_kind,
+                    queue_state: "leased".to_string(),
+                    priority: job.priority,
+                    dedupe_key: job.dedupe_key,
+                    available_at: job.available_at,
+                    completed_at: job.completed_at,
+                },
+            )
+            .await
+            .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
+            attempt
+        };
 
         update_linked_async_operation(state, job.async_operation_id, "processing", None, None)
             .await?;
@@ -782,7 +805,14 @@ impl IngestService {
             command.failure_message.clone().or(attempt.failure_message.clone())
         };
 
-        let row = ingest_repository::finalize_leased_ingest_attempt(
+        let next_queue_state =
+            next_job_queue_state_after_finalize(&command.attempt_state, effective_retryable);
+        let completed_at = if next_queue_state == "completed" || next_queue_state == "failed" {
+            Some(Utc::now())
+        } else {
+            None
+        };
+        let row = ingest_repository::finalize_leased_ingest_attempt_and_update_job(
             &state.persistence.postgres,
             command.attempt_id,
             &UpdateIngestAttempt {
@@ -805,25 +835,6 @@ impl IngestService {
                 },
                 retryable: effective_retryable,
             },
-        )
-        .await
-        .map_err(|e| ApiError::internal_with_log(e, "internal"))?
-        .ok_or_else(|| {
-            ApiError::Conflict(format!(
-                "ingest attempt {} lost its lease before finalization",
-                command.attempt_id
-            ))
-        })?;
-        let next_queue_state =
-            next_job_queue_state_after_finalize(&command.attempt_state, effective_retryable);
-        let completed_at = if next_queue_state == "completed" || next_queue_state == "failed" {
-            Some(Utc::now())
-        } else {
-            None
-        };
-        let _ = ingest_repository::update_ingest_job(
-            &state.persistence.postgres,
-            job.id,
             &UpdateIngestJob {
                 mutation_id: job.mutation_id,
                 connector_id: job.connector_id,
@@ -843,7 +854,13 @@ impl IngestService {
             },
         )
         .await
-        .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
+        .map_err(|e| ApiError::internal_with_log(e, "internal"))?
+        .ok_or_else(|| {
+            ApiError::Conflict(format!(
+                "ingest attempt {} or job {} lost its lease before finalization",
+                command.attempt_id, job.id
+            ))
+        })?;
 
         let operation_status = match next_queue_state {
             "completed" => ASYNC_OP_STATUS_READY,
@@ -878,26 +895,26 @@ impl IngestService {
             .await
             .map_err(|e| ApiError::internal_with_log(e, "internal"))?
             .ok_or_else(|| ApiError::resource_not_found("ingest_job", job_id))?;
-        let row = ingest_repository::update_ingest_job(
+        if matches!(existing.queue_state.as_str(), "completed" | "canceled" | "failed") {
+            return Err(ApiError::BadRequest(
+                "Completed, canceled, and failed jobs cannot be requeued from the ingest queue"
+                    .to_string(),
+            ));
+        }
+        let row = ingest_repository::retry_or_requeue_ingest_job(
             &state.persistence.postgres,
             job_id,
-            &UpdateIngestJob {
-                mutation_id: existing.mutation_id,
-                connector_id: existing.connector_id,
-                async_operation_id: existing.async_operation_id,
-                knowledge_document_id: existing.knowledge_document_id,
-                knowledge_revision_id: existing.knowledge_revision_id,
-                job_kind: existing.job_kind,
-                queue_state: "queued".to_string(),
-                priority: existing.priority,
-                dedupe_key: existing.dedupe_key,
-                available_at: available_at.unwrap_or_else(Utc::now),
-                completed_at: None,
-            },
+            chrono::Duration::seconds(QUEUE_STALE_LEASE_SECONDS),
+            available_at.unwrap_or_else(Utc::now),
         )
         .await
         .map_err(|e| ApiError::internal_with_log(e, "internal"))?
-        .ok_or_else(|| ApiError::resource_not_found("ingest_job", job_id))?;
+        .ok_or_else(|| {
+            ApiError::BadRequest(
+                "Only queued, paused, or stale leased jobs with no active attempt can be requeued"
+                    .to_string(),
+            )
+        })?;
         update_linked_async_operation(state, row.async_operation_id, "accepted", None, None)
             .await?;
         Ok(map_job_row(row))

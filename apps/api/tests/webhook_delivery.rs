@@ -59,8 +59,12 @@ impl TempDatabase {
             .await
             .context("admin connect for webhook_delivery")?;
         terminate_connections(&admin, &name).await?;
-        sqlx::query(&format!("drop database if exists \"{name}\"")).execute(&admin).await?;
-        sqlx::query(&format!("create database \"{name}\"")).execute(&admin).await?;
+        sqlx::query(sqlx::AssertSqlSafe(format!("drop database if exists \"{name}\"")))
+            .execute(&admin)
+            .await?;
+        sqlx::query(sqlx::AssertSqlSafe(format!("create database \"{name}\"")))
+            .execute(&admin)
+            .await?;
         admin.close().await;
         Ok(Self { name: name.clone(), admin_url, database_url: replace_db_name(base, &name)? })
     }
@@ -72,7 +76,9 @@ impl TempDatabase {
             .await
             .context("admin reconnect for webhook_delivery cleanup")?;
         terminate_connections(&admin, &self.name).await?;
-        sqlx::query(&format!("drop database if exists \"{}\"", self.name)).execute(&admin).await?;
+        sqlx::query(sqlx::AssertSqlSafe(format!("drop database if exists \"{}\"", self.name)))
+            .execute(&admin)
+            .await?;
         admin.close().await;
         Ok(())
     }

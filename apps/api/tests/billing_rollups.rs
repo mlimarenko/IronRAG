@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use rust_decimal::Decimal;
-use sqlx::{PgPool, postgres::PgPoolOptions};
+use sqlx::{AssertSqlSafe, PgPool, postgres::PgPoolOptions};
 use uuid::Uuid;
 
 use ironrag_backend::{
@@ -12,7 +12,7 @@ use ironrag_backend::{
     },
     services::{
         catalog_service::{CreateLibraryCommand, CreateWorkspaceCommand},
-        ingest::service::{AdmitIngestJobCommand, LeaseAttemptCommand},
+        ingest::service::{AdmitIngestJobCommand, INGEST_STAGE_EMBED_CHUNK, LeaseAttemptCommand},
         ops::billing::{
             CaptureExecutionBillingCommand, CaptureIngestAttemptBillingCommand,
             CaptureQueryExecutionBillingCommand,
@@ -37,11 +37,11 @@ impl TempDatabase {
             .context("failed to connect admin postgres for billing_rollups test")?;
 
         terminate_database_connections(&admin_pool, &database_name).await?;
-        sqlx::query(&format!("drop database if exists \"{database_name}\""))
+        sqlx::query(AssertSqlSafe(format!("drop database if exists \"{database_name}\"")))
             .execute(&admin_pool)
             .await
             .with_context(|| format!("failed to drop stale test database {database_name}"))?;
-        sqlx::query(&format!("create database \"{database_name}\""))
+        sqlx::query(AssertSqlSafe(format!("create database \"{database_name}\"")))
             .execute(&admin_pool)
             .await
             .with_context(|| format!("failed to create test database {database_name}"))?;
@@ -61,7 +61,7 @@ impl TempDatabase {
             .await
             .context("failed to reconnect admin postgres for billing_rollups cleanup")?;
         terminate_database_connections(&admin_pool, &self.name).await?;
-        sqlx::query(&format!("drop database if exists \"{}\"", self.name))
+        sqlx::query(AssertSqlSafe(format!("drop database if exists \"{}\"", self.name)))
             .execute(&admin_pool)
             .await
             .with_context(|| format!("failed to drop test database {}", self.name))?;
@@ -76,7 +76,9 @@ struct BillingRollupsFixture {
     workspace_id: Uuid,
     library_id: Uuid,
     query_execution_id: Uuid,
+    query_plan_runtime_execution_id: Uuid,
     query_runtime_execution_id: Uuid,
+    query_rerank_runtime_execution_id: Uuid,
     ingest_attempt_id: Uuid,
 }
 
@@ -153,29 +155,40 @@ impl BillingRollupsFixture {
         .await
         .context("failed to create query request turn")?;
         let execution_id = Uuid::now_v7();
-        let runtime_execution_id = Uuid::now_v7();
-        runtime_repository::create_runtime_execution(
-            &state.persistence.postgres,
-            &runtime_repository::NewRuntimeExecution {
-                id: runtime_execution_id,
-                owner_kind: RuntimeExecutionOwnerKind::QueryExecution.as_str(),
-                owner_id: execution_id,
-                task_kind: RuntimeTaskKind::QueryAnswer.as_str(),
-                surface_kind: "rest",
-                contract_name: "query_answer",
-                contract_version: "1",
-                lifecycle_state: RuntimeLifecycleState::Running.as_str(),
-                active_stage: None,
-                turn_budget: 4,
-                turn_count: 1,
-                parallel_action_limit: 1,
-                failure_code: None,
-                failure_summary_redacted: None,
-                parent_execution_id: None,
-            },
-        )
-        .await
-        .context("failed to create billing runtime execution")?;
+        let query_plan_runtime_execution_id = Uuid::now_v7();
+        let query_runtime_execution_id = Uuid::now_v7();
+        let query_rerank_runtime_execution_id = Uuid::now_v7();
+
+        for (runtime_execution_id, task_kind, contract_name) in [
+            (query_plan_runtime_execution_id, RuntimeTaskKind::QueryPlan, "query_plan"),
+            (query_runtime_execution_id, RuntimeTaskKind::QueryAnswer, "query_answer"),
+            (query_rerank_runtime_execution_id, RuntimeTaskKind::QueryRerank, "query_rerank"),
+        ] {
+            runtime_repository::create_runtime_execution(
+                &state.persistence.postgres,
+                &runtime_repository::NewRuntimeExecution {
+                    id: runtime_execution_id,
+                    owner_kind: RuntimeExecutionOwnerKind::QueryExecution.as_str(),
+                    owner_id: execution_id,
+                    task_kind: task_kind.as_str(),
+                    surface_kind: "rest",
+                    contract_name,
+                    contract_version: "1",
+                    lifecycle_state: RuntimeLifecycleState::Running.as_str(),
+                    active_stage: None,
+                    turn_budget: 4,
+                    turn_count: 1,
+                    parallel_action_limit: 1,
+                    failure_code: None,
+                    failure_summary_redacted: None,
+                    parent_execution_id: None,
+                },
+            )
+            .await
+            .with_context(|| {
+                format!("failed to create {contract_name} billing runtime execution")
+            })?;
+        }
         let query_execution = query_repository::create_execution(
             &state.persistence.postgres,
             &query_repository::NewQueryExecution {
@@ -187,7 +200,7 @@ impl BillingRollupsFixture {
                 request_turn_id: Some(request_turn.id),
                 response_turn_id: None,
                 binding_id: None,
-                runtime_execution_id,
+                runtime_execution_id: query_runtime_execution_id,
                 query_text: "How much did this execution cost?",
                 failure_code: None,
             },
@@ -225,8 +238,9 @@ impl BillingRollupsFixture {
                     job_id: ingest_job.id,
                     worker_principal_id: None,
                     lease_token: Some("billing-rollup-lease".to_string()),
+                    expected_queue_lease_token: None,
                     knowledge_generation_id: None,
-                    current_stage: Some("embedding_chunks".to_string()),
+                    current_stage: Some(INGEST_STAGE_EMBED_CHUNK.to_string()),
                 },
             )
             .await
@@ -238,7 +252,9 @@ impl BillingRollupsFixture {
             workspace_id: workspace.id,
             library_id: library.id,
             query_execution_id: query_execution.id,
-            query_runtime_execution_id: runtime_execution_id,
+            query_plan_runtime_execution_id,
+            query_runtime_execution_id,
+            query_rerank_runtime_execution_id,
             ingest_attempt_id: ingest_attempt.id,
         })
     }
@@ -301,7 +317,7 @@ async fn canonical_billing_rollups_cover_query_and_ingest_executions() -> Result
                     library_id: fixture.library_id,
                     owning_execution_kind: "query_execution".to_string(),
                     owning_execution_id: fixture.query_execution_id,
-                    runtime_execution_id: Some(fixture.query_runtime_execution_id),
+                    runtime_execution_id: Some(fixture.query_plan_runtime_execution_id),
                     runtime_task_kind: Some(RuntimeTaskKind::QueryPlan),
                     binding_id: None,
                     provider_kind: "openai".to_string(),
@@ -337,7 +353,7 @@ async fn canonical_billing_rollups_cover_query_and_ingest_executions() -> Result
             .context("failed to capture query answer billing")?
             .context("query execution cost should be priced")?;
         assert_eq!(query_cost.currency_code, "USD");
-        assert_eq!(query_cost.total_cost, Decimal::new(25, 3));
+        assert_eq!(query_cost.total_cost, Decimal::new(20, 3));
         assert_eq!(query_cost.provider_call_count, 2);
 
         let query_rollup = billing
@@ -348,7 +364,7 @@ async fn canonical_billing_rollups_cover_query_and_ingest_executions() -> Result
                     library_id: fixture.library_id,
                     owning_execution_kind: "query_execution".to_string(),
                     owning_execution_id: fixture.query_execution_id,
-                    runtime_execution_id: Some(fixture.query_runtime_execution_id),
+                    runtime_execution_id: Some(fixture.query_rerank_runtime_execution_id),
                     runtime_task_kind: Some(RuntimeTaskKind::QueryRerank),
                     binding_id: None,
                     provider_kind: "openai".to_string(),
@@ -363,7 +379,7 @@ async fn canonical_billing_rollups_cover_query_and_ingest_executions() -> Result
             .await
             .context("failed to capture rerank billing")?
             .context("query execution cost should stay priced")?;
-        assert_eq!(query_rollup.total_cost, Decimal::new(255, 4));
+        assert_eq!(query_rollup.total_cost, Decimal::new(208, 4));
         assert_eq!(query_rollup.provider_call_count, 3);
 
         let ingest_cost = billing
@@ -376,7 +392,7 @@ async fn canonical_billing_rollups_cover_query_and_ingest_executions() -> Result
                     binding_id: None,
                     provider_kind: "openai".to_string(),
                     model_name: "text-embedding-3-large".to_string(),
-                    call_kind: "embed_chunk_batch".to_string(),
+                    call_kind: "embed_chunk".to_string(),
                     usage_json: serde_json::json!({
                         "prompt_tokens": 12000,
                         "total_tokens": 12000,
@@ -412,7 +428,7 @@ async fn canonical_billing_rollups_cover_query_and_ingest_executions() -> Result
         assert!(provider_calls.iter().any(|row| row.call_kind == "query_planning"));
         assert!(provider_calls.iter().any(|row| row.call_kind == "query_answer"));
         assert!(provider_calls.iter().any(|row| row.call_kind == "query_rerank"));
-        assert!(provider_calls.iter().any(|row| row.call_kind == "embed_chunk_batch"));
+        assert!(provider_calls.iter().any(|row| row.call_kind == "embed_chunk"));
 
         let mut charges = billing
             .list_execution_charges(&fixture.state, "query_execution", fixture.query_execution_id)
@@ -451,7 +467,7 @@ async fn canonical_billing_rollups_cover_query_and_ingest_executions() -> Result
             .get_execution_cost(&fixture.state, "query_execution", fixture.query_execution_id)
             .await
             .context("failed to load stored query execution cost")?;
-        assert_eq!(stored_query_cost.total_cost, Decimal::new(255, 4));
+        assert_eq!(stored_query_cost.total_cost, Decimal::new(208, 4));
         assert_eq!(stored_query_cost.provider_call_count, 3);
 
         let stored_ingest_cost = billing

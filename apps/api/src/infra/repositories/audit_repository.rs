@@ -185,7 +185,7 @@ pub async fn list_audit_events(
 }
 
 fn push_list_audit_event_filters(
-    builder: &mut QueryBuilder<'_, Postgres>,
+    builder: &mut QueryBuilder<Postgres>,
     query: &ListAuditEventsQuery,
 ) {
     if let Some(actor_principal_id) = query.actor_principal_id {
@@ -336,7 +336,7 @@ fn push_list_audit_event_filters(
 }
 
 fn push_exact_subject_filter(
-    builder: &mut QueryBuilder<'_, Postgres>,
+    builder: &mut QueryBuilder<Postgres>,
     subject_kind: &'static str,
     subject_id: Uuid,
 ) {

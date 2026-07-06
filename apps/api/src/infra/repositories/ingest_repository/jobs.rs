@@ -19,6 +19,12 @@ pub struct IngestJobRow {
     pub queued_at: DateTime<Utc>,
     pub available_at: DateTime<Utc>,
     pub completed_at: Option<DateTime<Utc>>,
+    #[sqlx(default)]
+    pub queue_leased_at: Option<DateTime<Utc>>,
+    #[sqlx(default)]
+    pub queue_lease_token: Option<String>,
+    #[sqlx(default)]
+    pub queue_lease_owner: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -71,6 +77,9 @@ pub struct IngestQueueItemRow {
     pub queued_at: DateTime<Utc>,
     pub available_at: DateTime<Utc>,
     pub completed_at: Option<DateTime<Utc>>,
+    pub queue_leased_at: Option<DateTime<Utc>>,
+    pub queue_lease_token: Option<String>,
+    pub queue_lease_owner: Option<String>,
     pub attempt_id: Option<Uuid>,
     pub attempt_number: Option<i32>,
     pub attempt_state: Option<String>,
@@ -186,7 +195,10 @@ pub async fn get_ingest_job_by_id(
             dedupe_key,
             queued_at,
             available_at,
-            completed_at
+            completed_at,
+            queue_leased_at,
+            queue_lease_token,
+            queue_lease_owner
          from ingest_job
          where id = $1",
     )
@@ -216,7 +228,10 @@ pub async fn get_ingest_job_by_dedupe_key(
             dedupe_key,
             queued_at,
             available_at,
-            completed_at
+            completed_at,
+            queue_leased_at,
+            queue_lease_token,
+            queue_lease_owner
          from ingest_job
          where library_id = $1
            and dedupe_key = $2
@@ -545,7 +560,10 @@ pub async fn update_ingest_job(
              priority = $9,
              dedupe_key = $10,
              available_at = $11,
-             completed_at = $12
+             completed_at = $12,
+             queue_leased_at = case when $8::ingest_queue_state = 'leased' then queue_leased_at else null end,
+             queue_lease_token = case when $8::ingest_queue_state = 'leased' then queue_lease_token else null end,
+             queue_lease_owner = case when $8::ingest_queue_state = 'leased' then queue_lease_owner else null end
          where id = $1
          returning
             id,
@@ -582,6 +600,8 @@ pub async fn update_ingest_job(
 
 pub async fn claim_next_queued_ingest_job(
     postgres: &PgPool,
+    queue_lease_token: &str,
+    queue_lease_owner: &str,
     max_jobs_per_library: i64,
     max_jobs_per_workspace: i64,
     max_jobs_global: i64,
@@ -598,7 +618,12 @@ pub async fn claim_next_queued_ingest_job(
     // `queue_rank` is the operator-visible order. Fairness and priority remain
     // deterministic tie-breakers, but they must not contradict the queue shown
     // in the administration UI.
-    sqlx::query_as::<_, IngestJobRow>(
+    let mut tx = postgres.begin().await?;
+    sqlx::query("select pg_advisory_xact_lock(hashtextextended('ingest.queue.claim', 0))")
+        .execute(&mut *tx)
+        .await?;
+
+    let claimed = sqlx::query_as::<_, IngestJobRow>(
         "with active_leases as (
              select j.id, j.library_id, j.workspace_id
              from ingest_job j
@@ -610,21 +635,24 @@ pub async fn claim_next_queued_ingest_job(
              group by library_id
          )
          update ingest_job
-         set queue_state = 'leased'::ingest_queue_state
+         set queue_state = 'leased'::ingest_queue_state,
+             queue_leased_at = now(),
+             queue_lease_token = $1,
+             queue_lease_owner = $2
          where id = (
              select j.id from ingest_job j
              left join library_running lr on lr.library_id = j.library_id
              where j.queue_state = 'queued'
                and j.available_at <= now()
-               and (select count(*) from active_leases) < $3::bigint
+               and (select count(*) from active_leases) < $5::bigint
                and (
                    select count(*) from active_leases al
                    where al.workspace_id = j.workspace_id
-               ) < $2::bigint
+               ) < $4::bigint
                and (
                    select count(*) from active_leases al
                    where al.library_id = j.library_id
-               ) < $1::bigint
+               ) < $3::bigint
              order by
                  j.queue_rank asc,
                  j.priority asc,
@@ -650,13 +678,20 @@ pub async fn claim_next_queued_ingest_job(
             dedupe_key,
             queued_at,
             available_at,
-            completed_at",
+            completed_at,
+            queue_leased_at,
+            queue_lease_token,
+            queue_lease_owner",
     )
+    .bind(queue_lease_token)
+    .bind(queue_lease_owner)
     .bind(max_jobs_per_library)
     .bind(max_jobs_per_workspace)
     .bind(max_jobs_global)
-    .fetch_optional(postgres)
-    .await
+    .fetch_optional(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(claimed)
 }
 
 pub async fn list_active_ingest_queue(
@@ -709,6 +744,9 @@ pub async fn list_active_ingest_queue(
              j.queued_at,
              j.available_at,
              j.completed_at,
+             j.queue_leased_at,
+             j.queue_lease_token,
+             j.queue_lease_owner,
              attempt.id as attempt_id,
              attempt.attempt_number,
              attempt.attempt_state::text as attempt_state,
@@ -838,7 +876,10 @@ pub async fn pause_ingest_job(postgres: &PgPool, job_id: Uuid) -> Result<Option<
     let result = sqlx::query(
         "update ingest_job
          set queue_state = 'paused'::ingest_queue_state,
-             available_at = now()
+             available_at = now(),
+             queue_leased_at = null,
+             queue_lease_token = null,
+             queue_lease_owner = null
          where id = $1
            and queue_state in ('queued', 'leased')
            and completed_at is null",
@@ -856,7 +897,10 @@ pub async fn resume_ingest_job(postgres: &PgPool, job_id: Uuid) -> Result<Option
         "update ingest_job
          set queue_state = 'queued'::ingest_queue_state,
              available_at = now(),
-             completed_at = null
+             completed_at = null,
+             queue_leased_at = null,
+             queue_lease_token = null,
+             queue_lease_owner = null
          where id = $1
            and queue_state = 'paused'
            and completed_at is null
@@ -872,6 +916,82 @@ pub async fn resume_ingest_job(postgres: &PgPool, job_id: Uuid) -> Result<Option
     .await?;
     tx.commit().await?;
     if result.rows_affected() == 0 { Ok(None) } else { Ok(Some(())) }
+}
+
+pub async fn retry_or_requeue_ingest_job(
+    postgres: &PgPool,
+    job_id: Uuid,
+    stale_threshold: chrono::Duration,
+    available_at: DateTime<Utc>,
+) -> Result<Option<IngestJobRow>, sqlx::Error> {
+    let cutoff = Utc::now() - stale_threshold;
+    let mut tx = postgres.begin().await?;
+    let target = sqlx::query_scalar::<_, Uuid>(
+        "select id
+         from ingest_job
+         where id = $1
+           and queue_state in ('queued', 'paused', 'leased')
+         for update",
+    )
+    .bind(job_id)
+    .fetch_optional(&mut *tx)
+    .await?;
+
+    if target.is_none() {
+        tx.commit().await?;
+        return Ok(None);
+    }
+
+    let row = sqlx::query_as::<_, IngestJobRow>(
+        "update ingest_job j
+         set queue_state = 'queued'::ingest_queue_state,
+             available_at = $3,
+             completed_at = null,
+             queue_leased_at = null,
+             queue_lease_token = null,
+             queue_lease_owner = null
+         where j.id = $1
+           and j.queue_state in ('queued', 'paused', 'leased')
+           and (
+               j.queue_state in ('queued', 'paused')
+               or (
+                   j.queue_state = 'leased'
+                   and coalesce(j.queue_leased_at, j.queued_at) < $2
+                   and not exists (
+                       select 1
+                       from ingest_attempt active_attempt
+                       where active_attempt.job_id = j.id
+                         and active_attempt.attempt_state in ('leased', 'running')
+                   )
+               )
+           )
+         returning
+            id,
+            workspace_id,
+            library_id,
+            mutation_id,
+            connector_id,
+            async_operation_id,
+            knowledge_document_id,
+            knowledge_revision_id,
+            job_kind::text as job_kind,
+            queue_state::text as queue_state,
+            priority,
+            dedupe_key,
+            queued_at,
+            available_at,
+            completed_at,
+            queue_leased_at,
+            queue_lease_token,
+            queue_lease_owner",
+    )
+    .bind(job_id)
+    .bind(cutoff)
+    .bind(available_at)
+    .fetch_optional(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(row)
 }
 
 pub async fn cancel_ingest_job(postgres: &PgPool, job_id: Uuid) -> Result<u64, sqlx::Error> {
@@ -893,7 +1013,11 @@ pub async fn cancel_ingest_job(postgres: &PgPool, job_id: Uuid) -> Result<u64, s
                AND attempt_state IN ('leased', 'running')
          )
          UPDATE ingest_job
-         SET queue_state = 'canceled', completed_at = now()
+         SET queue_state = 'canceled',
+             completed_at = now(),
+             queue_leased_at = null,
+             queue_lease_token = null,
+             queue_lease_owner = null
          WHERE id IN (SELECT id FROM target_job)",
     )
     .bind(job_id)
@@ -928,39 +1052,90 @@ pub async fn recover_stale_canonical_leases(
     //      with multi-hour heartbeat staleness pinned to jobs that
     //      completed hours earlier).
     //
-    // Both branches write through `retryable = true` so operator
-    // tooling that surfaces stalled documents still treats them as
-    // recoverable; orphaned-attempt rows inherit that flag too but
-    // their underlying job is already finalised so no retry runs.
-    let result = sqlx::query(
-        "with stale_attempts as (
-             select a.id as attempt_id, a.job_id, j.queue_state::text as job_state
+    // Recovery marks stale leased attempts with the canonical stale-heartbeat
+    // failure metadata. Leased jobs are requeued only after the active-attempt
+    // guard is rechecked in the same transaction.
+    let mut tx = postgres.begin().await?;
+    let locked_job_ids = sqlx::query_scalar::<_, Uuid>(
+        "select j.id
+         from ingest_job j
+         where exists (
+             select 1
              from ingest_attempt a
-             join ingest_job j on j.id = a.job_id
-             where a.attempt_state = 'leased'
+             where a.job_id = j.id
+               and a.attempt_state = 'leased'
                and a.heartbeat_at < $1
                and j.queue_state in ('leased', 'completed', 'failed', 'canceled')
-         ),
-         failed_attempts as (
-             update ingest_attempt
-             set attempt_state = 'failed',
-                 failure_class = 'lease_expired',
-                 failure_code = 'stale_heartbeat',
-                 failure_message = 'Attempt heartbeat expired before processing finished',
-                 finished_at = now(),
-                 retryable = true
-             where id in (select attempt_id from stale_attempts)
          )
-         update ingest_job
-         set queue_state = 'queued',
-             available_at = now()
-         where id in (
-             select job_id from stale_attempts where job_state = 'leased'
-         )",
+         or (
+             j.queue_state = 'leased'
+             and coalesce(j.queue_leased_at, j.queued_at) < $1
+         )
+         for update of j",
     )
     .bind(cutoff)
-    .execute(postgres)
+    .fetch_all(&mut *tx)
     .await?;
+
+    if locked_job_ids.is_empty() {
+        tx.commit().await?;
+        return Ok(0);
+    }
+
+    sqlx::query(
+        "update ingest_attempt a
+         set attempt_state = 'failed',
+             failure_class = 'lease_expired',
+             failure_code = 'stale_heartbeat',
+             failure_message = 'Attempt heartbeat expired before processing finished',
+             finished_at = now(),
+             retryable = true
+         where a.job_id = any($2)
+           and a.attempt_state = 'leased'
+           and a.heartbeat_at < $1
+           and exists (
+               select 1
+               from ingest_job j
+               where j.id = a.job_id
+                 and j.queue_state in ('leased', 'completed', 'failed', 'canceled')
+           )",
+    )
+    .bind(cutoff)
+    .bind(&locked_job_ids)
+    .execute(&mut *tx)
+    .await?;
+
+    let result = sqlx::query(
+        "update ingest_job j
+         set queue_state = 'queued',
+             available_at = now(),
+             queue_leased_at = null,
+             queue_lease_token = null,
+             queue_lease_owner = null
+         where j.id = any($2)
+           and j.queue_state = 'leased'
+           and (
+               coalesce(j.queue_leased_at, j.queued_at) < $1
+               or exists (
+                   select 1
+                   from ingest_attempt stale_attempt
+                   where stale_attempt.job_id = j.id
+                     and stale_attempt.attempt_state = 'failed'
+                     and stale_attempt.heartbeat_at < $1
+               )
+           )
+           and not exists (
+               select 1
+               from ingest_attempt active_attempt
+               where active_attempt.job_id = j.id
+                 and active_attempt.attempt_state in ('leased', 'running')
+           )",
+    )
+    .bind(cutoff)
+    .bind(&locked_job_ids)
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
     Ok(result.rows_affected())
 }
 
@@ -1016,7 +1191,11 @@ where
                AND attempt_state IN ('leased', 'running')
          )
          UPDATE ingest_job
-         SET queue_state = 'canceled', completed_at = now()
+         SET queue_state = 'canceled',
+             completed_at = now(),
+             queue_leased_at = null,
+             queue_lease_token = null,
+             queue_lease_owner = null
          WHERE id IN (SELECT id FROM target_jobs)",
     )
     .bind(document_id)

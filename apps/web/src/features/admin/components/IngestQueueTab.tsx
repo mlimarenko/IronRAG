@@ -21,6 +21,8 @@ import { useNavigate } from "react-router-dom";
 import { toast } from "sonner";
 import { adminApi, queries } from "@/shared/api";
 import type {
+  BulkIngestQueueActionResponse,
+  IngestQueueBulkAction,
   IngestQueueItemResponse,
   IngestQueueMoveDirection,
   IngestQueueResponse,
@@ -117,11 +119,19 @@ function canMove(item: IngestQueueItemResponse): boolean {
 }
 
 function canPause(item: IngestQueueItemResponse): boolean {
-  return item.queueState === "queued" || item.queueState === "leased";
+  return item.canPause;
 }
 
 function canResume(item: IngestQueueItemResponse): boolean {
-  return item.queueState === "paused" && !isPausing(item);
+  return item.canResume;
+}
+
+function canRetryRequeue(item: IngestQueueItemResponse): boolean {
+  return item.canRetryRequeue;
+}
+
+function canCancel(item: IngestQueueItemResponse): boolean {
+  return item.canCancel;
 }
 
 function progressValue(item: IngestQueueItemResponse): number {
@@ -182,20 +192,6 @@ function sortScopeOptions(options: QueueScopeOption[]): QueueScopeOption[] {
       sensitivity: "base",
     }),
   );
-}
-
-async function runQueueJobCommand(
-  jobIds: string[],
-  command: (jobId: string) => Promise<IngestQueueResponse>,
-): Promise<IngestQueueResponse> {
-  let latestQueue: IngestQueueResponse | null = null;
-  for (const jobId of jobIds) {
-    latestQueue = await command(jobId);
-  }
-  if (!latestQueue) {
-    throw new Error("No ingest queue jobs selected");
-  }
-  return latestQueue;
 }
 
 export function IngestQueueTab({
@@ -285,49 +281,44 @@ export function IngestQueueTab({
     },
   });
 
-  const bulkCancelMutation = useMutation({
-    mutationFn: (jobIds: string[]) =>
-      runQueueJobCommand(jobIds, (jobId) => adminApi.cancelIngestQueueJob(jobId)),
-    onSuccess: (queue) => {
-      applyQueue(queue);
-      setSelectedJobIds(new Set());
-      setSelectionMode(false);
-      toast.success(
-        t("admin.queueBulkCancelSuccess", { count: selectedJobIds.size }),
+  const bulkQueueMutation = useMutation({
+    mutationFn: ({
+      action,
+      jobIds,
+    }: {
+      action: IngestQueueBulkAction;
+      jobIds: string[];
+    }) => adminApi.bulkIngestQueueAction(action, jobIds),
+    onSuccess: (
+      response: BulkIngestQueueActionResponse,
+      variables: { action: IngestQueueBulkAction; jobIds: string[] },
+    ) => {
+      applyQueue(response.queue);
+      const submitted = new Set(variables.jobIds);
+      const retained = new Set(
+        Array.from(selectedJobIds).filter((jobId) => !submitted.has(jobId)),
       );
+      for (const jobId of
+        response.results
+          .filter((result) => result.status !== "applied")
+          .map((result) => result.jobId)
+      ) {
+        retained.add(jobId);
+      }
+      setSelectedJobIds(retained);
+      setSelectionMode(retained.size > 0);
+      const applied = response.results.filter((result) => result.status === "applied").length;
+      const notApplied = response.results.length - applied;
+      if (notApplied > 0) {
+        toast.warning(
+          t("admin.queueBulkPartial", { applied, notApplied }),
+        );
+      } else {
+        toast.success(t("admin.queueBulkSuccess", { count: applied }));
+      }
     },
     onError: (error) => {
-      toast.error(errorMessage(error, t("admin.queueBulkCancelFailed")));
-    },
-  });
-
-  const bulkPauseMutation = useMutation({
-    mutationFn: (jobIds: string[]) =>
-      runQueueJobCommand(jobIds, (jobId) => adminApi.pauseIngestQueueJob(jobId)),
-    onSuccess: (queue) => {
-      applyQueue(queue);
-      setSelectedJobIds(new Set());
-      toast.success(
-        t("admin.queueBulkPauseSuccess", { count: selectedJobIds.size }),
-      );
-    },
-    onError: (error) => {
-      toast.error(errorMessage(error, t("admin.queueBulkPauseFailed")));
-    },
-  });
-
-  const bulkResumeMutation = useMutation({
-    mutationFn: (jobIds: string[]) =>
-      runQueueJobCommand(jobIds, (jobId) => adminApi.resumeIngestQueueJob(jobId)),
-    onSuccess: (queue) => {
-      applyQueue(queue);
-      setSelectedJobIds(new Set());
-      toast.success(
-        t("admin.queueBulkResumeSuccess", { count: selectedJobIds.size }),
-      );
-    },
-    onError: (error) => {
-      toast.error(errorMessage(error, t("admin.queueBulkResumeFailed")));
+      toast.error(errorMessage(error, t("admin.queueBulkActionFailed")));
     },
   });
 
@@ -437,8 +428,10 @@ export function IngestQueueTab({
     () => filteredItems.filter((item) => selectedJobIds.has(item.jobId)),
     [filteredItems, selectedJobIds],
   );
+  const retryableSelectedItems = selectedItems.filter(canRetryRequeue);
   const pausableSelectedItems = selectedItems.filter(canPause);
   const resumableSelectedItems = selectedItems.filter(canResume);
+  const cancelableSelectedItems = selectedItems.filter(canCancel);
   const allVisibleSelected =
     pagedItems.length > 0 &&
     pagedItems.every((item) => selectedJobIds.has(item.jobId));
@@ -497,8 +490,7 @@ export function IngestQueueTab({
   const cancelingJobId = cancelMutation.variables;
   const pausingJobId = pauseMutation.variables;
   const resumingJobId = resumeMutation.variables;
-  const bulkActionPending =
-    bulkCancelMutation.isPending || bulkPauseMutation.isPending || bulkResumeMutation.isPending;
+  const bulkActionPending = bulkQueueMutation.isPending;
 
   const cancelSelection = () => {
     setSelectionMode(false);
@@ -560,6 +552,17 @@ export function IngestQueueTab({
           onSelect: () => pauseMutation.mutate(item.jobId),
         },
     {
+      key: "retry-requeue",
+      label: t("admin.queueRetryRequeueJob"),
+      icon: <RefreshCw className="h-3.5 w-3.5" />,
+      disabled: !canRetryRequeue(item),
+      onSelect: () => {
+        void adminApi.retryIngestQueueJob(item.jobId).then(applyQueue).catch((error) => {
+          toast.error(errorMessage(error, t("admin.queueRetryRequeueFailed")));
+        });
+      },
+    },
+    {
       key: "documents",
       label: t("admin.queueOpenDocuments"),
       icon: <ExternalLink className="h-3.5 w-3.5" />,
@@ -569,7 +572,7 @@ export function IngestQueueTab({
       key: "cancel",
       label: t("admin.queueCancelJob"),
       icon: <Square className={`h-3.5 w-3.5 ${cancelingJobId === item.jobId ? "animate-pulse" : ""}`} />,
-      disabled: cancelMutation.isPending,
+      disabled: !canCancel(item) || cancelMutation.isPending,
       onSelect: () => cancelMutation.mutate(item.jobId),
       destructive: true,
     },
@@ -773,7 +776,7 @@ export function IngestQueueTab({
           </InspectorPanel>
         }
       >
-        <div className="flex min-w-0 flex-1 flex-col">
+        <div className="flex min-h-0 min-w-0 flex-1 flex-col">
           <div className="grid shrink-0 grid-cols-1 gap-2 border-b bg-surface-sunken/50 px-6 py-3 lg:grid-cols-[minmax(220px,1.3fr)_minmax(180px,0.8fr)_minmax(200px,0.9fr)_minmax(220px,1fr)_auto] lg:items-center">
             <div className="relative min-w-0">
               <Search className="absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
@@ -1179,24 +1182,34 @@ export function IngestQueueTab({
                     <>
                       <QueueBulkBar
                         bulkActionPending={bulkActionPending}
-                        cancelCount={selectedItems.length}
+                        cancelCount={cancelableSelectedItems.length}
                         onCancel={() =>
-                          bulkCancelMutation.mutate(
-                            selectedItems.map((item) => item.jobId),
-                          )
+                          bulkQueueMutation.mutate({
+                            action: "cancel",
+                            jobIds: cancelableSelectedItems.map((item) => item.jobId),
+                          })
                         }
                         onClear={() => setSelectedJobIds(new Set())}
                         onPause={() =>
-                          bulkPauseMutation.mutate(
-                            pausableSelectedItems.map((item) => item.jobId),
-                          )
+                          bulkQueueMutation.mutate({
+                            action: "pause",
+                            jobIds: pausableSelectedItems.map((item) => item.jobId),
+                          })
+                        }
+                        onRetryRequeue={() =>
+                          bulkQueueMutation.mutate({
+                            action: "retry_requeue",
+                            jobIds: retryableSelectedItems.map((item) => item.jobId),
+                          })
                         }
                         onResume={() =>
-                          bulkResumeMutation.mutate(
-                            resumableSelectedItems.map((item) => item.jobId),
-                          )
+                          bulkQueueMutation.mutate({
+                            action: "resume",
+                            jobIds: resumableSelectedItems.map((item) => item.jobId),
+                          })
                         }
                         pauseCount={pausableSelectedItems.length}
+                        retryRequeueCount={retryableSelectedItems.length}
                         resumeCount={resumableSelectedItems.length}
                         selectedCount={selectedItems.length}
                         t={t}
@@ -1344,8 +1357,10 @@ type QueueBulkBarProps = {
   onCancel: () => void;
   onClear: () => void;
   onPause: () => void;
+  onRetryRequeue: () => void;
   onResume: () => void;
   pauseCount: number;
+  retryRequeueCount: number;
   resumeCount: number;
   selectedCount: number;
   t: TFunction;
@@ -1357,8 +1372,10 @@ function QueueBulkBar({
   onCancel,
   onClear,
   onPause,
+  onRetryRequeue,
   onResume,
   pauseCount,
+  retryRequeueCount,
   resumeCount,
   selectedCount,
   t,
@@ -1370,6 +1387,16 @@ function QueueBulkBar({
         <span className="mr-auto text-xs font-semibold text-primary tabular-nums">
           {t("admin.queueSelected", { count: selectedCount })}
         </span>
+        <Button
+          className="h-8 text-xs"
+          disabled={retryRequeueCount <= 0 || bulkActionPending}
+          onClick={onRetryRequeue}
+          size="sm"
+          variant="outline"
+        >
+          <RefreshCw className="mr-1.5 h-3.5 w-3.5" />
+          {t("admin.queueRetryRequeueSelected", { count: retryRequeueCount })}
+        </Button>
         <Button
           className="h-8 text-xs"
           disabled={pauseCount <= 0 || bulkActionPending}

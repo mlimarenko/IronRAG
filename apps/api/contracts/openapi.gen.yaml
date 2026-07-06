@@ -5,7 +5,7 @@ info:
   license:
     name: MIT
     identifier: MIT
-  version: 0.5.6
+  version: 0.5.7
 servers:
 - url: /
   description: Same origin (paths include /v1)
@@ -3340,6 +3340,28 @@ paths:
           description: Caller is not authenticated
         '403':
           description: Caller is not authorized to read operations
+  /v1/ops/ingest-queue/bulk:
+    post:
+      tags:
+      - ops
+      summary: Bulk ingest queue action.
+      description: Reads or controls ingest runtime state. Operators use these endpoints to inspect queued work, attempts, stage events, and document-processing failures. Call it to create work or submit a command. Some commands complete synchronously, while ingest, mutation, and runtime work can continue asynchronously.
+      operationId: bulkIngestQueueAction
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BulkIngestQueueActionRequest'
+        required: true
+      responses:
+        '200':
+          description: Bulk action result and refreshed active ingest queue
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BulkIngestQueueActionResponse'
+        '401':
+          description: Caller is not authenticated
   /v1/ops/ingest-queue/jobs/{jobId}/cancel:
     post:
       tags:
@@ -3460,6 +3482,36 @@ paths:
                 $ref: '#/components/schemas/IngestQueueResponse'
         '400':
           description: Job is not paused
+        '401':
+          description: Caller is not authenticated
+        '403':
+          description: Caller cannot mutate the job's library
+        '404':
+          description: Job not found
+  /v1/ops/ingest-queue/jobs/{jobId}/retry:
+    post:
+      tags:
+      - ops
+      summary: Retry ingest queue job.
+      description: Reads or controls ingest runtime state. Operators use these endpoints to inspect queued work, attempts, stage events, and document-processing failures. Call it to create work or submit a command. Some commands complete synchronously, while ingest, mutation, and runtime work can continue asynchronously.
+      operationId: retryIngestQueueJob
+      parameters:
+      - name: jobId
+        in: path
+        description: Queued, paused, or stale leased ingest job identifier
+        required: true
+        schema:
+          type: string
+          format: uuid
+      responses:
+        '200':
+          description: Updated active ingest queue
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/IngestQueueResponse'
+        '400':
+          description: Job cannot be requeued from the ingest queue
         '401':
           description: Caller is not authenticated
         '403':
@@ -5683,6 +5735,31 @@ components:
           - $ref: '#/components/schemas/BootstrapAiSetup'
         setupRequired:
           type: boolean
+    BulkIngestQueueActionRequest:
+      type: object
+      required:
+      - action
+      - jobIds
+      properties:
+        action:
+          $ref: '#/components/schemas/IngestQueueBulkAction'
+        jobIds:
+          type: array
+          items:
+            type: string
+            format: uuid
+    BulkIngestQueueActionResponse:
+      type: object
+      required:
+      - queue
+      - results
+      properties:
+        queue:
+          $ref: '#/components/schemas/IngestQueueResponse'
+        results:
+          type: array
+          items:
+            $ref: '#/components/schemas/IngestQueueBulkResultItem'
     CapabilityGate:
       type: object
       required:
@@ -7982,6 +8059,38 @@ components:
           - $ref: '#/components/schemas/IngestAttempt'
         readiness:
           $ref: '#/components/schemas/IngestReadinessResponse'
+    IngestQueueBulkAction:
+      type: string
+      enum:
+      - retry_requeue
+      - pause
+      - resume
+      - cancel
+    IngestQueueBulkResultItem:
+      type: object
+      required:
+      - jobId
+      - status
+      properties:
+        jobId:
+          type: string
+          format: uuid
+        message:
+          type:
+          - string
+          - 'null'
+        reasonCode:
+          type:
+          - string
+          - 'null'
+        status:
+          $ref: '#/components/schemas/IngestQueueBulkResultStatus'
+    IngestQueueBulkResultStatus:
+      type: string
+      enum:
+      - applied
+      - skipped
+      - failed
     IngestQueueItemResponse:
       type: object
       required:
@@ -7995,6 +8104,11 @@ components:
       - queueState
       - queuedAt
       - availableAt
+      - canRetryRequeue
+      - canPause
+      - canResume
+      - canCancel
+      - hasStaleQueueLease
       properties:
         attemptId:
           type:
@@ -8013,6 +8127,14 @@ components:
         availableAt:
           type: string
           format: date-time
+        canCancel:
+          type: boolean
+        canPause:
+          type: boolean
+        canResume:
+          type: boolean
+        canRetryRequeue:
+          type: boolean
         currentStage:
           type:
           - string
@@ -8032,6 +8154,8 @@ components:
           type:
           - string
           - 'null'
+        hasStaleQueueLease:
+          type: boolean
         heartbeatAt:
           type:
           - string

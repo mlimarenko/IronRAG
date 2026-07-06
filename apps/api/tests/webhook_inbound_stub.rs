@@ -49,8 +49,12 @@ impl TempDatabase {
             .await
             .context("connect admin postgres")?;
         terminate_connections(&admin_pool, &name).await?;
-        sqlx::query(&format!("drop database if exists \"{name}\"")).execute(&admin_pool).await?;
-        sqlx::query(&format!("create database \"{name}\"")).execute(&admin_pool).await?;
+        sqlx::query(sqlx::AssertSqlSafe(format!("drop database if exists \"{name}\"")))
+            .execute(&admin_pool)
+            .await?;
+        sqlx::query(sqlx::AssertSqlSafe(format!("create database \"{name}\"")))
+            .execute(&admin_pool)
+            .await?;
         admin_pool.close().await;
         Ok(Self { name: name.clone(), admin_url, database_url: replace_db(base_url, &name)? })
     }
@@ -58,7 +62,7 @@ impl TempDatabase {
     async fn drop(self) -> Result<()> {
         let admin_pool = PgPoolOptions::new().max_connections(1).connect(&self.admin_url).await?;
         terminate_connections(&admin_pool, &self.name).await?;
-        sqlx::query(&format!("drop database if exists \"{}\"", self.name))
+        sqlx::query(sqlx::AssertSqlSafe(format!("drop database if exists \"{}\"", self.name)))
             .execute(&admin_pool)
             .await?;
         admin_pool.close().await;

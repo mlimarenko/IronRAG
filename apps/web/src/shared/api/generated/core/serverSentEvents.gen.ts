@@ -116,13 +116,13 @@ export function createSseClient<TData = unknown>({
       }
 
       try {
-        const requestInit = {
+        const requestInit: RequestInit = {
           redirect: 'follow',
           ...options,
-          body: options.serializedBody,
           headers,
           signal,
-        } as RequestInit;
+          ...(options.serializedBody !== undefined ? { body: options.serializedBody } : {}),
+        };
         let request = new Request(url, requestInit);
         if (onRequest) {
           request = await onRequest(url, requestInit);

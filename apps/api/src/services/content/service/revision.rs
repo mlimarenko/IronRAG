@@ -1002,6 +1002,7 @@ impl ContentService {
                     job_id: context.job_id,
                     worker_principal_id: None,
                     lease_token: Some(format!("inline-{}", Uuid::now_v7())),
+                    expected_queue_lease_token: None,
                     knowledge_generation_id: None,
                     current_stage: Some(INGEST_STAGE_EXTRACT_CONTENT.to_string()),
                 },

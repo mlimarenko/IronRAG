@@ -6,6 +6,7 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::services::ingest::service::QUEUE_STALE_LEASE_SECONDS;
 use crate::{
     app::state::AppState,
     domains::{
@@ -124,6 +125,11 @@ pub struct IngestQueueItemResponse {
     pub attempt_number: Option<i32>,
     pub failure_code: Option<String>,
     pub failure_message: Option<String>,
+    pub can_retry_requeue: bool,
+    pub can_pause: bool,
+    pub can_resume: bool,
+    pub can_cancel: bool,
+    pub has_stale_queue_lease: bool,
 }
 
 #[derive(Debug, Serialize, utoipa::ToSchema)]
@@ -148,13 +154,55 @@ pub enum IngestQueueMoveDirection {
     Bottom,
 }
 
+#[derive(Debug, Clone, Copy, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum IngestQueueBulkAction {
+    RetryRequeue,
+    Pause,
+    Resume,
+    Cancel,
+}
+
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct BulkIngestQueueActionRequest {
+    pub action: IngestQueueBulkAction,
+    pub job_ids: Vec<Uuid>,
+}
+
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum IngestQueueBulkResultStatus {
+    Applied,
+    Skipped,
+    Failed,
+}
+
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct IngestQueueBulkResultItem {
+    pub job_id: Uuid,
+    pub status: IngestQueueBulkResultStatus,
+    pub reason_code: Option<String>,
+    pub message: Option<String>,
+}
+
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct BulkIngestQueueActionResponse {
+    pub queue: IngestQueueResponse,
+    pub results: Vec<IngestQueueBulkResultItem>,
+}
+
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/ops/operations/{operation_id}", get(get_async_operation))
         .route("/ops/libraries/{library_id}", get(get_library_state))
         .route("/ops/libraries/{library_id}/dashboard", get(get_library_dashboard))
         .route("/ops/ingest-queue", get(list_ingest_queue))
+        .route("/ops/ingest-queue/bulk", post(bulk_ingest_queue_action))
         .route("/ops/ingest-queue/jobs/{job_id}/move", post(move_ingest_queue_job))
+        .route("/ops/ingest-queue/jobs/{job_id}/retry", post(retry_ingest_queue_job))
         .route("/ops/ingest-queue/jobs/{job_id}/pause", post(pause_ingest_queue_job))
         .route("/ops/ingest-queue/jobs/{job_id}/resume", post(resume_ingest_queue_job))
         .route("/ops/ingest-queue/jobs/{job_id}/cancel", post(cancel_ingest_queue_job))
@@ -382,6 +430,177 @@ pub async fn move_ingest_queue_job(
         Query(IngestQueueQuery { workspace_id: None, library_id: None }),
     )
     .await
+}
+
+#[utoipa::path(
+    post,
+    path = "/v1/ops/ingest-queue/jobs/{jobId}/retry",
+    tag = "ops",
+    operation_id = "retryIngestQueueJob",
+    params(("jobId" = uuid::Uuid, Path, description = "Queued, paused, or stale leased ingest job identifier")),
+    responses(
+        (status = 200, description = "Updated active ingest queue", body = IngestQueueResponse),
+        (status = 400, description = "Job cannot be requeued from the ingest queue"),
+        (status = 401, description = "Caller is not authenticated"),
+        (status = 403, description = "Caller cannot mutate the job's library"),
+        (status = 404, description = "Job not found"),
+    ),
+)]
+#[tracing::instrument(level = "info", name = "http.retry_ingest_queue_job", skip_all, fields(job_id = %job_id))]
+pub async fn retry_ingest_queue_job(
+    auth: AuthContext,
+    State(state): State<AppState>,
+    Path(job_id): Path<Uuid>,
+) -> Result<Json<IngestQueueResponse>, ApiError> {
+    let job = state.canonical_services.ingest.get_job(&state, job_id).await?;
+    authorize_library_permission(&auth, job.workspace_id, job.library_id, POLICY_LIBRARY_WRITE)?;
+    state.canonical_services.ingest.retry_job(&state, job_id, None).await?;
+    list_ingest_queue(
+        auth,
+        State(state),
+        Query(IngestQueueQuery { workspace_id: None, library_id: None }),
+    )
+    .await
+}
+
+#[utoipa::path(
+    post,
+    path = "/v1/ops/ingest-queue/bulk",
+    tag = "ops",
+    operation_id = "bulkIngestQueueAction",
+    request_body = BulkIngestQueueActionRequest,
+    responses(
+        (status = 200, description = "Bulk action result and refreshed active ingest queue", body = BulkIngestQueueActionResponse),
+        (status = 401, description = "Caller is not authenticated"),
+    ),
+)]
+#[tracing::instrument(level = "info", name = "http.bulk_ingest_queue_action", skip_all, fields(action = ?payload.action, selected = payload.job_ids.len()))]
+pub async fn bulk_ingest_queue_action(
+    auth: AuthContext,
+    State(state): State<AppState>,
+    Json(payload): Json<BulkIngestQueueActionRequest>,
+) -> Result<Json<BulkIngestQueueActionResponse>, ApiError> {
+    auth.require_any_scope(POLICY_USAGE_READ)?;
+    let mut results = Vec::with_capacity(payload.job_ids.len());
+    for job_id in payload.job_ids {
+        let result = apply_bulk_queue_action(&auth, &state, payload.action, job_id).await;
+        results.push(result);
+    }
+    let queue = list_ingest_queue(
+        auth,
+        State(state),
+        Query(IngestQueueQuery { workspace_id: None, library_id: None }),
+    )
+    .await?
+    .0;
+    Ok(Json(BulkIngestQueueActionResponse { queue, results }))
+}
+
+async fn apply_bulk_queue_action(
+    auth: &AuthContext,
+    state: &AppState,
+    action: IngestQueueBulkAction,
+    job_id: Uuid,
+) -> IngestQueueBulkResultItem {
+    let job = match state.canonical_services.ingest.get_job(state, job_id).await {
+        Ok(job) => job,
+        Err(ApiError::NotFound(_)) => {
+            return bulk_result(
+                job_id,
+                IngestQueueBulkResultStatus::Failed,
+                Some("not_found"),
+                Some("Job was not found".to_string()),
+            );
+        }
+        Err(error) => {
+            return bulk_result(
+                job_id,
+                IngestQueueBulkResultStatus::Failed,
+                Some("load_failed"),
+                Some(error.to_string()),
+            );
+        }
+    };
+
+    if authorize_library_permission(auth, job.workspace_id, job.library_id, POLICY_LIBRARY_WRITE)
+        .is_err()
+    {
+        return bulk_result(
+            job_id,
+            IngestQueueBulkResultStatus::Failed,
+            Some("forbidden"),
+            Some("Caller cannot mutate this job's library".to_string()),
+        );
+    }
+
+    let action_result = match action {
+        IngestQueueBulkAction::RetryRequeue => {
+            state.canonical_services.ingest.retry_job(state, job_id, None).await.map(|_| ())
+        }
+        IngestQueueBulkAction::Pause => {
+            state.canonical_services.ingest.pause_job(state, job_id).await
+        }
+        IngestQueueBulkAction::Resume => {
+            state.canonical_services.ingest.resume_job(state, job_id).await
+        }
+        IngestQueueBulkAction::Cancel => {
+            ingest_repository::cancel_ingest_job(&state.persistence.postgres, job_id)
+                .await
+                .map_err(|error| ApiError::internal_with_log(error, "internal"))
+                .and_then(|changed| {
+                    if changed == 0 {
+                        Err(ApiError::BadRequest(
+                            "Only queued, running, or paused jobs can be canceled".to_string(),
+                        ))
+                    } else {
+                        Ok(())
+                    }
+                })
+        }
+    };
+
+    match action_result {
+        Ok(_) => bulk_result(job_id, IngestQueueBulkResultStatus::Applied, None, None),
+        Err(ApiError::BadRequest(message)) | Err(ApiError::Conflict(message)) => bulk_result(
+            job_id,
+            IngestQueueBulkResultStatus::Skipped,
+            Some(ineligible_reason_code(action, job.queue_state.as_str())),
+            Some(message),
+        ),
+        Err(error) => bulk_result(
+            job_id,
+            IngestQueueBulkResultStatus::Failed,
+            Some("mutation_failed"),
+            Some(error.to_string()),
+        ),
+    }
+}
+
+fn bulk_result(
+    job_id: Uuid,
+    status: IngestQueueBulkResultStatus,
+    reason_code: Option<&str>,
+    message: Option<String>,
+) -> IngestQueueBulkResultItem {
+    IngestQueueBulkResultItem {
+        job_id,
+        status,
+        reason_code: reason_code.map(str::to_string),
+        message,
+    }
+}
+
+fn ineligible_reason_code(action: IngestQueueBulkAction, queue_state: &str) -> &'static str {
+    match (action, queue_state) {
+        (_, "completed") => "terminal_completed",
+        (_, "canceled") => "terminal_canceled",
+        (IngestQueueBulkAction::RetryRequeue, "failed") => "terminal_failed",
+        (IngestQueueBulkAction::RetryRequeue, "leased") => "lease_not_stale",
+        (IngestQueueBulkAction::Pause, _) => "not_pausable",
+        (IngestQueueBulkAction::Resume, _) => "not_resumable",
+        (IngestQueueBulkAction::Cancel, _) => "not_cancelable",
+        _ => "not_eligible",
+    }
 }
 
 #[utoipa::path(
@@ -985,6 +1204,20 @@ fn map_contract_web_pattern(
 }
 
 fn map_ingest_queue_item(row: ingest_repository::IngestQueueItemRow) -> IngestQueueItemResponse {
+    let has_active_attempt =
+        row.attempt_state.as_deref().is_some_and(|state| state == "leased" || state == "running");
+    let cutoff = chrono::Utc::now() - chrono::Duration::seconds(QUEUE_STALE_LEASE_SECONDS);
+    let lease_started_at = row.queue_leased_at.unwrap_or(row.queued_at);
+    let has_stale_queue_lease =
+        row.queue_state == "leased" && lease_started_at < cutoff && !has_active_attempt;
+    let can_retry_requeue = match row.queue_state.as_str() {
+        "queued" | "paused" => true,
+        "leased" => has_stale_queue_lease,
+        _ => false,
+    };
+    let can_pause = row.queue_state == "queued" || row.queue_state == "leased";
+    let can_resume = row.queue_state == "paused" && !has_active_attempt;
+    let can_cancel = matches!(row.queue_state.as_str(), "queued" | "leased" | "paused");
     IngestQueueItemResponse {
         job_id: row.job_id,
         workspace_id: row.workspace_id,
@@ -1007,6 +1240,11 @@ fn map_ingest_queue_item(row: ingest_repository::IngestQueueItemRow) -> IngestQu
         attempt_number: row.attempt_number,
         failure_code: row.failure_code,
         failure_message: row.failure_message,
+        can_retry_requeue,
+        can_pause,
+        can_resume,
+        can_cancel,
+        has_stale_queue_lease,
     }
 }
 

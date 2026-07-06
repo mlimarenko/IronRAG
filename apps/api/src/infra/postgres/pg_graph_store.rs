@@ -325,7 +325,7 @@ impl GraphStore for PgGraphStore {
             )
             select to_jsonb(row) from ({ENTITY_CANDIDATE_ROW_SQL} from upserted) row"
         );
-        let row = sqlx::query_scalar::<_, serde_json::Value>(&sql)
+        let row = sqlx::query_scalar::<_, serde_json::Value>(sqlx::AssertSqlSafe(&*sql))
             .bind(input.candidate_id)
             .bind(input.workspace_id)
             .bind(input.library_id)
@@ -368,7 +368,7 @@ impl GraphStore for PgGraphStore {
                    where revision_id = $1
                    order by created_at asc, candidate_id asc) row"
         );
-        let rows = sqlx::query_scalar::<_, serde_json::Value>(&sql)
+        let rows = sqlx::query_scalar::<_, serde_json::Value>(sqlx::AssertSqlSafe(&*sql))
             .bind(revision_id)
             .fetch_all(&self.pool)
             .await
@@ -387,7 +387,7 @@ impl GraphStore for PgGraphStore {
                    where library_id = $1
                    order by created_at asc, candidate_id asc) row"
         );
-        let rows = sqlx::query_scalar::<_, serde_json::Value>(&sql)
+        let rows = sqlx::query_scalar::<_, serde_json::Value>(sqlx::AssertSqlSafe(&*sql))
             .bind(library_id)
             .fetch_all(&self.pool)
             .await
@@ -410,7 +410,7 @@ impl GraphStore for PgGraphStore {
                   from deleted
                   order by created_at asc, candidate_id asc) row"
         );
-        let rows = sqlx::query_scalar::<_, serde_json::Value>(&sql)
+        let rows = sqlx::query_scalar::<_, serde_json::Value>(sqlx::AssertSqlSafe(&*sql))
             .bind(revision_id)
             .fetch_all(&self.pool)
             .await
@@ -433,7 +433,7 @@ impl GraphStore for PgGraphStore {
                   from deleted
                   order by created_at asc, candidate_id asc) row"
         );
-        let rows = sqlx::query_scalar::<_, serde_json::Value>(&sql)
+        let rows = sqlx::query_scalar::<_, serde_json::Value>(sqlx::AssertSqlSafe(&*sql))
             .bind(library_id)
             .fetch_all(&self.pool)
             .await
@@ -475,7 +475,7 @@ impl GraphStore for PgGraphStore {
             )
             select to_jsonb(row) from ({RELATION_CANDIDATE_ROW_SQL} from upserted) row"
         );
-        let row = sqlx::query_scalar::<_, serde_json::Value>(&sql)
+        let row = sqlx::query_scalar::<_, serde_json::Value>(sqlx::AssertSqlSafe(&*sql))
             .bind(input.candidate_id)
             .bind(input.workspace_id)
             .bind(input.library_id)
@@ -520,7 +520,7 @@ impl GraphStore for PgGraphStore {
                    where revision_id = $1
                    order by created_at asc, candidate_id asc) row"
         );
-        let rows = sqlx::query_scalar::<_, serde_json::Value>(&sql)
+        let rows = sqlx::query_scalar::<_, serde_json::Value>(sqlx::AssertSqlSafe(&*sql))
             .bind(revision_id)
             .fetch_all(&self.pool)
             .await
@@ -539,7 +539,7 @@ impl GraphStore for PgGraphStore {
                    where library_id = $1
                    order by created_at asc, candidate_id asc) row"
         );
-        let rows = sqlx::query_scalar::<_, serde_json::Value>(&sql)
+        let rows = sqlx::query_scalar::<_, serde_json::Value>(sqlx::AssertSqlSafe(&*sql))
             .bind(library_id)
             .fetch_all(&self.pool)
             .await
@@ -562,7 +562,7 @@ impl GraphStore for PgGraphStore {
                   from deleted
                   order by created_at asc, candidate_id asc) row"
         );
-        let rows = sqlx::query_scalar::<_, serde_json::Value>(&sql)
+        let rows = sqlx::query_scalar::<_, serde_json::Value>(sqlx::AssertSqlSafe(&*sql))
             .bind(revision_id)
             .fetch_all(&self.pool)
             .await
@@ -585,7 +585,7 @@ impl GraphStore for PgGraphStore {
                   from deleted
                   order by created_at asc, candidate_id asc) row"
         );
-        let rows = sqlx::query_scalar::<_, serde_json::Value>(&sql)
+        let rows = sqlx::query_scalar::<_, serde_json::Value>(sqlx::AssertSqlSafe(&*sql))
             .bind(library_id)
             .fetch_all(&self.pool)
             .await
@@ -1090,7 +1090,7 @@ impl GraphStore for PgGraphStore {
             )
             select to_jsonb(row) from ({ENTITY_ROW_SQL} from upserted) row"
         );
-        let row = sqlx::query_scalar::<_, serde_json::Value>(&sql)
+        let row = sqlx::query_scalar::<_, serde_json::Value>(sqlx::AssertSqlSafe(&*sql))
             .bind(input.entity_id)
             .bind(input.workspace_id)
             .bind(input.library_id)
@@ -1133,7 +1133,7 @@ impl GraphStore for PgGraphStore {
                    where entity_id = $1
                    limit 1) row"
         );
-        let row = sqlx::query_scalar::<_, serde_json::Value>(&sql)
+        let row = sqlx::query_scalar::<_, serde_json::Value>(sqlx::AssertSqlSafe(&*sql))
             .bind(entity_id)
             .fetch_optional(&self.pool)
             .await
@@ -1154,7 +1154,7 @@ impl GraphStore for PgGraphStore {
                    order by updated_at desc, entity_id desc
                    limit 1) row"
         );
-        let row = sqlx::query_scalar::<_, serde_json::Value>(&sql)
+        let row = sqlx::query_scalar::<_, serde_json::Value>(sqlx::AssertSqlSafe(&*sql))
             .bind(library_id)
             .bind(canonical_label)
             .fetch_optional(&self.pool)
@@ -1175,7 +1175,7 @@ impl GraphStore for PgGraphStore {
                    order by support_count desc, updated_at desc, entity_id desc
                    limit 5000) row"
         );
-        let rows = sqlx::query_scalar::<_, serde_json::Value>(&sql)
+        let rows = sqlx::query_scalar::<_, serde_json::Value>(sqlx::AssertSqlSafe(&*sql))
             .bind(library_id)
             .fetch_all(&self.pool)
             .await
@@ -1212,7 +1212,7 @@ impl GraphStore for PgGraphStore {
             )
             select to_jsonb(row) from ({RELATION_ROW_SQL} from upserted) row"
         );
-        let row = sqlx::query_scalar::<_, serde_json::Value>(&sql)
+        let row = sqlx::query_scalar::<_, serde_json::Value>(sqlx::AssertSqlSafe(&*sql))
             .bind(input.relation_id)
             .bind(input.workspace_id)
             .bind(input.library_id)
@@ -1272,7 +1272,7 @@ impl GraphStore for PgGraphStore {
                    where relation_id = $1
                    limit 1) row"
         );
-        let row = sqlx::query_scalar::<_, serde_json::Value>(&sql)
+        let row = sqlx::query_scalar::<_, serde_json::Value>(sqlx::AssertSqlSafe(&*sql))
             .bind(relation_id)
             .fetch_optional(&self.pool)
             .await
@@ -1293,7 +1293,7 @@ impl GraphStore for PgGraphStore {
                    order by updated_at desc, relation_id desc
                    limit 1) row"
         );
-        let row = sqlx::query_scalar::<_, serde_json::Value>(&sql)
+        let row = sqlx::query_scalar::<_, serde_json::Value>(sqlx::AssertSqlSafe(&*sql))
             .bind(library_id)
             .bind(normalized_assertion)
             .fetch_optional(&self.pool)
@@ -1313,7 +1313,7 @@ impl GraphStore for PgGraphStore {
                    where library_id = $1
                    order by support_count desc, updated_at desc, relation_id desc) row"
         );
-        let rows = sqlx::query_scalar::<_, serde_json::Value>(&sql)
+        let rows = sqlx::query_scalar::<_, serde_json::Value>(sqlx::AssertSqlSafe(&*sql))
             .bind(library_id)
             .fetch_all(&self.pool)
             .await
@@ -1398,7 +1398,7 @@ impl GraphStore for PgGraphStore {
             )
             select to_jsonb(row) from ({EVIDENCE_ROW_SQL} from upserted) row"
         );
-        let row = sqlx::query_scalar::<_, serde_json::Value>(&sql)
+        let row = sqlx::query_scalar::<_, serde_json::Value>(sqlx::AssertSqlSafe(&*sql))
             .bind(input.evidence_id)
             .bind(input.workspace_id)
             .bind(input.library_id)

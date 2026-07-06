@@ -262,10 +262,11 @@ async fn delete_edges_in_tx(
     table: &'static str,
     bundle_id: Uuid,
 ) -> anyhow::Result<u64> {
-    let result = sqlx::query(&format!("delete from {table} where bundle_id = $1"))
-        .bind(bundle_id)
-        .execute(&mut **tx)
-        .await?;
+    let result =
+        sqlx::query(sqlx::AssertSqlSafe(format!("delete from {table} where bundle_id = $1")))
+            .bind(bundle_id)
+            .execute(&mut **tx)
+            .await?;
     Ok(result.rows_affected())
 }
 

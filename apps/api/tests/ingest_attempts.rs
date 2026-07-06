@@ -3,22 +3,25 @@ mod web_ingest_support;
 
 use anyhow::{Context, Result};
 use chrono::{Duration, Utc};
-use sqlx::{PgPool, postgres::PgPoolOptions};
+use sqlx::{AssertSqlSafe, PgPool, postgres::PgPoolOptions};
 use uuid::Uuid;
 
 use ironrag_backend::{
     app::{config::Settings, state::AppState},
-    infra::persistence::Persistence,
+    infra::{
+        persistence::Persistence,
+        repositories::ingest_repository::{self, NewWebDiscoveredPage},
+    },
     services::{
         catalog_service::{CreateLibraryCommand, CreateWorkspaceCommand},
         content::service::{CreateDocumentCommand, CreateRevisionCommand, PromoteHeadCommand},
         ingest::service::{
-            AdmitIngestJobCommand, FinalizeAttemptCommand, LeaseAttemptCommand,
+            AdmitIngestJobCommand, FinalizeAttemptCommand, INGEST_STAGE_CHUNK_CONTENT,
+            INGEST_STAGE_EXTRACT_CONTENT, INGEST_STAGE_FINALIZING, LeaseAttemptCommand,
             RecordStageEventCommand,
         },
         ingest::web::CreateWebIngestRunCommand,
         knowledge::service::CreateKnowledgeRevisionCommand,
-        ops::service::CreateAsyncOperationCommand,
     },
 };
 
@@ -39,11 +42,11 @@ impl TempDatabase {
             .context("failed to connect admin postgres for ingest_attempts test")?;
 
         terminate_database_connections(&admin_pool, &database_name).await?;
-        sqlx::query(&format!("drop database if exists \"{database_name}\""))
+        sqlx::query(AssertSqlSafe(format!("drop database if exists \"{database_name}\"")))
             .execute(&admin_pool)
             .await
             .with_context(|| format!("failed to drop stale test database {database_name}"))?;
-        sqlx::query(&format!("create database \"{database_name}\""))
+        sqlx::query(AssertSqlSafe(format!("create database \"{database_name}\"")))
             .execute(&admin_pool)
             .await
             .with_context(|| format!("failed to create test database {database_name}"))?;
@@ -63,7 +66,7 @@ impl TempDatabase {
             .await
             .context("failed to reconnect admin postgres for ingest_attempts cleanup")?;
         terminate_database_connections(&admin_pool, &self.name).await?;
-        sqlx::query(&format!("drop database if exists \"{}\"", self.name))
+        sqlx::query(AssertSqlSafe(format!("drop database if exists \"{}\"", self.name)))
             .execute(&admin_pool)
             .await
             .with_context(|| format!("failed to drop test database {}", self.name))?;
@@ -94,10 +97,10 @@ impl IngestAttemptsFixture {
             .await
             .context("failed to connect ingest_attempts postgres")?;
 
-        sqlx::raw_sql(include_str!("../migrations/0001_init.sql"))
-            .execute(&postgres)
+        sqlx::migrate!("./migrations")
+            .run(&postgres)
             .await
-            .context("failed to apply canonical 0001_init.sql for ingest_attempts test")?;
+            .context("failed to apply canonical baseline migrations for ingest_attempts")?;
 
         let redis = redis::Client::open(settings.redis_url.clone())
             .context("failed to create redis client for ingest_attempts test state")?;
@@ -278,29 +281,7 @@ async fn canonical_ingest_attempts_preserve_queue_state_retry_and_stage_ordering
     let result = async {
         let ingest = &fixture.state.canonical_services.ingest;
         let dedupe_key = format!("ingest-job-{}", Uuid::now_v7());
-        let mutation_id = Some(Uuid::now_v7());
-        let async_operation = fixture
-            .state
-            .canonical_services
-            .ops
-            .create_async_operation(
-                &fixture.state,
-                CreateAsyncOperationCommand {
-                    workspace_id: fixture.workspace_id,
-                    library_id: Some(fixture.library_id),
-                    operation_kind: "content_mutation".to_string(),
-                    surface_kind: "rest".to_string(),
-                    requested_by_principal_id: None,
-                    status: "accepted".to_string(),
-                    subject_kind: "knowledge_revision".to_string(),
-                    subject_id: Some(fixture.revision_id),
-                    parent_async_operation_id: None,
-                    completed_at: None,
-                    failure_code: None,
-                },
-            )
-            .await
-            .context("failed to create async operation for ingest attempts")?;
+        let mutation_id = None;
 
         let job = ingest
             .admit_job(
@@ -310,7 +291,7 @@ async fn canonical_ingest_attempts_preserve_queue_state_retry_and_stage_ordering
                     library_id: fixture.library_id,
                     mutation_id,
                     connector_id: None,
-                    async_operation_id: Some(async_operation.id),
+                    async_operation_id: None,
                     knowledge_document_id: Some(fixture.document_id),
                     knowledge_revision_id: Some(fixture.revision_id),
                     job_kind: "content_mutation".to_string(),
@@ -324,7 +305,7 @@ async fn canonical_ingest_attempts_preserve_queue_state_retry_and_stage_ordering
         assert_eq!(job.queue_state, "queued");
         assert_eq!(job.priority, 100);
         assert_eq!(job.mutation_id, mutation_id);
-        assert_eq!(job.async_operation_id, Some(async_operation.id));
+        assert_eq!(job.async_operation_id, None);
         assert_eq!(job.knowledge_document_id, Some(fixture.document_id));
         assert_eq!(job.knowledge_revision_id, Some(fixture.revision_id));
 
@@ -333,10 +314,6 @@ async fn canonical_ingest_attempts_preserve_queue_state_retry_and_stage_ordering
             .await
             .context("failed to load admitted ingest job handle")?;
         assert_eq!(admitted_handle.job.id, job.id);
-        assert_eq!(
-            admitted_handle.async_operation.as_ref().map(|operation| operation.status.as_str()),
-            Some("accepted")
-        );
 
         let deduped = ingest
             .admit_job(
@@ -346,7 +323,7 @@ async fn canonical_ingest_attempts_preserve_queue_state_retry_and_stage_ordering
                     library_id: fixture.library_id,
                     mutation_id,
                     connector_id: None,
-                    async_operation_id: Some(async_operation.id),
+                    async_operation_id: None,
                     knowledge_document_id: Some(fixture.document_id),
                     knowledge_revision_id: Some(fixture.revision_id),
                     job_kind: "content_mutation".to_string(),
@@ -359,22 +336,39 @@ async fn canonical_ingest_attempts_preserve_queue_state_retry_and_stage_ordering
             .context("failed to re-admit deduped ingest job")?;
         assert_eq!(deduped.id, job.id);
 
-        let worker_a = Uuid::now_v7();
+        let queue_claim_token_a = format!("ingest-attempts-claim-a-{}", Uuid::now_v7().simple());
+        let claimed_first_job = ingest_repository::claim_next_queued_ingest_job(
+            &fixture.state.persistence.postgres,
+            &queue_claim_token_a,
+            "ingest-attempts-test",
+            10,
+            10,
+            10,
+        )
+        .await
+        .context("failed to claim first ingest job")?
+        .context("expected to claim first ingest job")?;
+        assert_eq!(claimed_first_job.id, job.id);
+        let first_queue_lease_token = claimed_first_job
+            .queue_lease_token
+            .context("claimed first ingest job missing queue lease token")?;
+
         let first_attempt = ingest
             .lease_attempt(
                 &fixture.state,
                 LeaseAttemptCommand {
                     job_id: job.id,
-                    worker_principal_id: Some(worker_a),
+                    worker_principal_id: None,
                     lease_token: Some("lease-a".to_string()),
+                    expected_queue_lease_token: Some(first_queue_lease_token),
                     knowledge_generation_id: Some(fixture.generation_id),
-                    current_stage: Some("queued".to_string()),
+                    current_stage: Some(INGEST_STAGE_EXTRACT_CONTENT.to_string()),
                 },
             )
             .await
             .context("failed to lease first attempt")?;
         assert_eq!(first_attempt.attempt_number, 1);
-        assert_eq!(first_attempt.worker_principal_id, Some(worker_a));
+        assert_eq!(first_attempt.worker_principal_id, None);
         assert_eq!(first_attempt.attempt_state, "leased");
         assert_eq!(first_attempt.knowledge_generation_id, Some(fixture.generation_id));
 
@@ -384,10 +378,6 @@ async fn canonical_ingest_attempts_preserve_queue_state_retry_and_stage_ordering
             .context("failed to load leased attempt handle")?;
         assert_eq!(leased_handle.job.id, job.id);
         assert_eq!(leased_handle.attempt.knowledge_generation_id, Some(fixture.generation_id));
-        assert_eq!(
-            leased_handle.async_operation.as_ref().map(|operation| operation.status.as_str()),
-            Some("processing")
-        );
 
         let _ = ingest
             .heartbeat_attempt(
@@ -395,16 +385,16 @@ async fn canonical_ingest_attempts_preserve_queue_state_retry_and_stage_ordering
                 ironrag_backend::services::ingest::service::HeartbeatAttemptCommand {
                     attempt_id: first_attempt.id,
                     knowledge_generation_id: Some(fixture.generation_id),
-                    current_stage: Some("extracting".to_string()),
+                    current_stage: Some(INGEST_STAGE_CHUNK_CONTENT.to_string()),
                 },
             )
             .await
             .context("failed to heartbeat first attempt")?;
 
         for (stage_name, stage_state, message) in [
-            ("queued", "started", Some("job admitted")),
-            ("extracting", "started", Some("worker started extraction")),
-            ("extracting", "failed", Some("lease lost before completion")),
+            (INGEST_STAGE_EXTRACT_CONTENT, "started", Some("job admitted")),
+            (INGEST_STAGE_CHUNK_CONTENT, "started", Some("worker started chunking")),
+            (INGEST_STAGE_CHUNK_CONTENT, "failed", Some("lease lost before completion")),
         ] {
             let _ = ingest
                 .record_stage_event(
@@ -438,8 +428,8 @@ async fn canonical_ingest_attempts_preserve_queue_state_retry_and_stage_ordering
         assert_eq!(stages[0].ordinal, 1);
         assert_eq!(stages[1].ordinal, 2);
         assert_eq!(stages[2].ordinal, 3);
-        assert_eq!(stages[0].stage_name, "queued");
-        assert_eq!(stages[1].stage_name, "extracting");
+        assert_eq!(stages[0].stage_name, INGEST_STAGE_EXTRACT_CONTENT);
+        assert_eq!(stages[1].stage_name, INGEST_STAGE_CHUNK_CONTENT);
         assert_eq!(stages[2].stage_state, "failed");
 
         let first_attempt = ingest
@@ -449,7 +439,7 @@ async fn canonical_ingest_attempts_preserve_queue_state_retry_and_stage_ordering
                     attempt_id: first_attempt.id,
                     knowledge_generation_id: Some(fixture.generation_id),
                     attempt_state: "failed".to_string(),
-                    current_stage: Some("extracting".to_string()),
+                    current_stage: Some(INGEST_STAGE_CHUNK_CONTENT.to_string()),
                     failure_class: Some("lease_lost".to_string()),
                     failure_code: Some("lease_lost".to_string()),
                     failure_message: Some("lease lost during extraction".to_string()),
@@ -468,14 +458,40 @@ async fn canonical_ingest_attempts_preserve_queue_state_retry_and_stage_ordering
         assert_eq!(queued_job.knowledge_document_id, Some(fixture.document_id));
         assert_eq!(queued_job.knowledge_revision_id, Some(fixture.revision_id));
 
+        sqlx::query("update ingest_job set available_at = now() where id = $1")
+            .bind(job.id)
+            .execute(&fixture.state.persistence.postgres)
+            .await
+            .context("failed to make requeued ingest job immediately claimable")?;
+        let queued_job = ingest
+            .get_job(&fixture.state, job.id)
+            .await
+            .context("failed to reload requeued ingest job after availability update")?;
+        assert_eq!(queued_job.queue_state, "queued");
+        assert!(queued_job.available_at <= Utc::now());
+
         let reaccepted_handle = ingest
             .get_job_handle(&fixture.state, job.id)
             .await
             .context("failed to reload requeued ingest job handle")?;
-        assert_eq!(
-            reaccepted_handle.async_operation.as_ref().map(|operation| operation.status.as_str()),
-            Some("accepted")
-        );
+        assert_eq!(reaccepted_handle.job.queue_state, "queued");
+
+        let queue_claim_token_b = format!("ingest-attempts-claim-b-{}", Uuid::now_v7().simple());
+        let claimed_second_job = ingest_repository::claim_next_queued_ingest_job(
+            &fixture.state.persistence.postgres,
+            &queue_claim_token_b,
+            "ingest-attempts-test",
+            10,
+            10,
+            10,
+        )
+        .await
+        .context("failed to claim second ingest job")?
+        .context("expected to claim second ingest job")?;
+        assert_eq!(claimed_second_job.id, job.id);
+        let second_queue_lease_token = claimed_second_job
+            .queue_lease_token
+            .context("claimed second ingest job missing queue lease token")?;
 
         let worker_b = Uuid::now_v7();
         let second_attempt = ingest
@@ -483,16 +499,17 @@ async fn canonical_ingest_attempts_preserve_queue_state_retry_and_stage_ordering
                 &fixture.state,
                 LeaseAttemptCommand {
                     job_id: job.id,
-                    worker_principal_id: Some(worker_b),
+                    worker_principal_id: None,
                     lease_token: Some("lease-b".to_string()),
+                    expected_queue_lease_token: Some(second_queue_lease_token),
                     knowledge_generation_id: Some(fixture.generation_id),
-                    current_stage: Some("extracting".to_string()),
+                    current_stage: Some(INGEST_STAGE_EXTRACT_CONTENT.to_string()),
                 },
             )
             .await
             .context("failed to lease second attempt")?;
         assert_eq!(second_attempt.attempt_number, 2);
-        assert_eq!(second_attempt.worker_principal_id, Some(worker_b));
+        assert_eq!(second_attempt.worker_principal_id, None);
         assert_eq!(second_attempt.knowledge_generation_id, Some(fixture.generation_id));
 
         let _ = ingest
@@ -500,7 +517,7 @@ async fn canonical_ingest_attempts_preserve_queue_state_retry_and_stage_ordering
                 &fixture.state,
                 RecordStageEventCommand {
                     attempt_id: second_attempt.id,
-                    stage_name: "extracting".to_string(),
+                    stage_name: INGEST_STAGE_EXTRACT_CONTENT.to_string(),
                     stage_state: "completed".to_string(),
                     message: Some("retry worker completed extraction".to_string()),
                     details_json: serde_json::json!({ "worker": worker_b }),
@@ -525,7 +542,7 @@ async fn canonical_ingest_attempts_preserve_queue_state_retry_and_stage_ordering
                     attempt_id: second_attempt.id,
                     knowledge_generation_id: Some(fixture.generation_id),
                     attempt_state: "succeeded".to_string(),
-                    current_stage: Some("finalizing".to_string()),
+                    current_stage: Some(INGEST_STAGE_FINALIZING.to_string()),
                     failure_class: None,
                     failure_code: None,
                     failure_message: None,
@@ -535,7 +552,7 @@ async fn canonical_ingest_attempts_preserve_queue_state_retry_and_stage_ordering
             .await
             .context("failed to finalize successful retry attempt")?;
         assert_eq!(second_attempt.attempt_state, "succeeded");
-        assert_eq!(second_attempt.worker_principal_id, Some(worker_b));
+        assert_eq!(second_attempt.worker_principal_id, None);
         assert!(second_attempt.finished_at.is_some());
 
         let attempts = ingest
@@ -543,9 +560,9 @@ async fn canonical_ingest_attempts_preserve_queue_state_retry_and_stage_ordering
             .await
             .context("failed to list attempts")?;
         assert_eq!(attempts.len(), 2);
-        assert_eq!(attempts[0].attempt_number, 2);
-        assert_eq!(attempts[1].attempt_number, 1);
-        assert_eq!(attempts[1].failure_class.as_deref(), Some("lease_lost"));
+        assert_eq!(attempts[0].attempt_number, 1);
+        assert_eq!(attempts[0].failure_class.as_deref(), Some("lease_lost"));
+        assert_eq!(attempts[1].attempt_number, 2);
 
         let completed_job = ingest.get_job(&fixture.state, job.id).await?;
         assert_eq!(completed_job.queue_state, "completed");
@@ -557,32 +574,12 @@ async fn canonical_ingest_attempts_preserve_queue_state_retry_and_stage_ordering
             .get_attempt_handle(&fixture.state, second_attempt.id)
             .await
             .context("failed to load completed attempt handle")?;
-        assert_eq!(
-            completed_handle.async_operation.as_ref().map(|operation| operation.status.as_str()),
-            Some("ready")
-        );
-        assert!(completed_handle
-            .async_operation
-            .as_ref()
-            .and_then(|operation| operation.completed_at)
-            .is_some());
         assert_eq!(completed_handle.attempt.knowledge_generation_id, Some(fixture.generation_id));
 
-        let requeued = ingest
+        let retry_result = ingest
             .retry_job(&fixture.state, job.id, Some(Utc::now() + Duration::seconds(5)))
-            .await
-            .context("failed to requeue completed job for explicit retry request")?;
-        assert_eq!(requeued.queue_state, "queued");
-        assert!(requeued.available_at > Utc::now());
-
-        let retried_handle = ingest
-            .get_job_handle(&fixture.state, job.id)
-            .await
-            .context("failed to load retried ingest job handle")?;
-        assert_eq!(
-            retried_handle.async_operation.as_ref().map(|operation| operation.status.as_str()),
-            Some("accepted")
-        );
+            .await;
+        assert!(retry_result.is_err(), "completed jobs must not be requeued from the queue");
 
         Ok(())
     }
@@ -617,7 +614,7 @@ async fn canonical_web_ingest_jobs_queue_page_materialization_only_after_discove
                     crawl_filter: web_policy.crawl_filter,
                     materialization_filter: web_policy.materialization_filter,
                     requested_by_principal_id: None,
-                    request_surface: "test".to_string(),
+                    request_surface: "rest".to_string(),
                     idempotency_key: None,
                 },
             )
@@ -633,6 +630,35 @@ async fn canonical_web_ingest_jobs_queue_page_materialization_only_after_discove
             .context("failed to list admitted canonical jobs")?;
         assert_eq!(admitted_jobs.len(), 1);
         assert_eq!(admitted_jobs[0].job_kind, "web_discovery");
+
+        let discovered_page_url = server.url("/recursive/first");
+        ingest_repository::create_web_discovered_page(
+            &fixture.state.persistence.postgres,
+            &NewWebDiscoveredPage {
+                id: Uuid::now_v7(),
+                run_id: run.run_id,
+                discovered_url: Some(discovered_page_url.as_str()),
+                normalized_url: discovered_page_url.as_str(),
+                final_url: Some(discovered_page_url.as_str()),
+                canonical_url: Some(discovered_page_url.as_str()),
+                depth: 1,
+                referrer_candidate_id: None,
+                host_classification: "same_host",
+                candidate_state: "eligible",
+                classification_reason: Some("seed_accepted"),
+                classification_detail: None,
+                content_type: Some("text/html; charset=utf-8"),
+                http_status: Some(200),
+                snapshot_storage_key: None,
+                discovered_at: None,
+                updated_at: None,
+                document_id: None,
+                result_revision_id: None,
+                mutation_item_id: None,
+            },
+        )
+        .await
+        .context("failed to preseed eligible discovered web page")?;
 
         fixture
             .state
@@ -712,14 +738,17 @@ async fn ingest_attempt_emits_stage_events_for_worker_progress() -> Result<()> {
                     job_id: job.id,
                     worker_principal_id: None,
                     lease_token: Some("stage-events-lease".to_string()),
+                    expected_queue_lease_token: None,
                     knowledge_generation_id: Some(fixture.generation_id),
-                    current_stage: Some("queued".to_string()),
+                    current_stage: Some(INGEST_STAGE_EXTRACT_CONTENT.to_string()),
                 },
             )
             .await
             .context("failed to lease stage-events attempt")?;
 
-        for (stage_name, stage_state) in [("queued", "started"), ("extracting", "started")] {
+        for (stage_name, stage_state) in
+            [(INGEST_STAGE_EXTRACT_CONTENT, "started"), (INGEST_STAGE_CHUNK_CONTENT, "started")]
+        {
             let _ = ingest
                 .record_stage_event(
                     &fixture.state,
@@ -754,8 +783,8 @@ async fn ingest_attempt_emits_stage_events_for_worker_progress() -> Result<()> {
             .await
             .context("failed to list emitted stage events")?;
         assert!(events.len() >= 2);
-        assert!(events.iter().any(|event| event.stage_name == "queued"));
-        assert!(events.iter().any(|event| event.stage_name == "extracting"));
+        assert!(events.iter().any(|event| event.stage_name == INGEST_STAGE_EXTRACT_CONTENT));
+        assert!(events.iter().any(|event| event.stage_name == INGEST_STAGE_CHUNK_CONTENT));
         assert!(events.iter().all(|event| event.attempt_id == attempt.id));
 
         Ok(())

@@ -47,6 +47,13 @@ pub(super) async fn fail_canonical_ingest_job(
         return;
     }
 
+    if existing.queue_state == "leased"
+        && existing.queue_lease_owner.as_deref().is_some_and(|owner| owner != worker_id)
+    {
+        // A stale worker must not clobber a newer in-flight run owned by another queue lease.
+        return;
+    }
+
     if existing.queue_state == "queued" {
         // The job has already been requeued for a retry (queued, possibly with a
         // backoff `available_at`). A retryable stage failure finalizes the

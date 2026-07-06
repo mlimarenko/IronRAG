@@ -577,6 +577,16 @@ export type BootstrapStatus = {
     setupRequired: boolean;
 };
 
+export type BulkIngestQueueActionRequest = {
+    action: IngestQueueBulkAction;
+    jobIds: Array<string>;
+};
+
+export type BulkIngestQueueActionResponse = {
+    queue: IngestQueueResponse;
+    results: Array<IngestQueueBulkResultItem>;
+};
+
 export type CapabilityGate = {
     allowed: boolean;
     reason?: string | null;
@@ -1362,16 +1372,32 @@ export type IngestJobResponse = {
     readiness: IngestReadinessResponse;
 };
 
+export type IngestQueueBulkAction = 'retry_requeue' | 'pause' | 'resume' | 'cancel';
+
+export type IngestQueueBulkResultItem = {
+    jobId: string;
+    message?: string | null;
+    reasonCode?: string | null;
+    status: IngestQueueBulkResultStatus;
+};
+
+export type IngestQueueBulkResultStatus = 'applied' | 'skipped' | 'failed';
+
 export type IngestQueueItemResponse = {
     attemptId?: string | null;
     attemptNumber?: number | null;
     attemptState?: string | null;
     availableAt: string;
+    canCancel: boolean;
+    canPause: boolean;
+    canResume: boolean;
+    canRetryRequeue: boolean;
     currentStage?: string | null;
     documentId?: string | null;
     documentName: string;
     failureCode?: string | null;
     failureMessage?: string | null;
+    hasStaleQueueLease: boolean;
     heartbeatAt?: string | null;
     jobId: string;
     jobKind: string;
@@ -6755,6 +6781,29 @@ export type ListIngestQueueResponses = {
 
 export type ListIngestQueueResponse = ListIngestQueueResponses[keyof ListIngestQueueResponses];
 
+export type BulkIngestQueueActionData = {
+    body: BulkIngestQueueActionRequest;
+    path?: never;
+    query?: never;
+    url: '/v1/ops/ingest-queue/bulk';
+};
+
+export type BulkIngestQueueActionErrors = {
+    /**
+     * Caller is not authenticated
+     */
+    401: unknown;
+};
+
+export type BulkIngestQueueActionResponses = {
+    /**
+     * Bulk action result and refreshed active ingest queue
+     */
+    200: BulkIngestQueueActionResponse;
+};
+
+export type BulkIngestQueueActionResponse2 = BulkIngestQueueActionResponses[keyof BulkIngestQueueActionResponses];
+
 export type CancelIngestQueueJobData = {
     body?: never;
     path: {
@@ -6914,6 +6963,46 @@ export type ResumeIngestQueueJobResponses = {
 };
 
 export type ResumeIngestQueueJobResponse = ResumeIngestQueueJobResponses[keyof ResumeIngestQueueJobResponses];
+
+export type RetryIngestQueueJobData = {
+    body?: never;
+    path: {
+        /**
+         * Queued, paused, or stale leased ingest job identifier
+         */
+        jobId: string;
+    };
+    query?: never;
+    url: '/v1/ops/ingest-queue/jobs/{jobId}/retry';
+};
+
+export type RetryIngestQueueJobErrors = {
+    /**
+     * Job cannot be requeued from the ingest queue
+     */
+    400: unknown;
+    /**
+     * Caller is not authenticated
+     */
+    401: unknown;
+    /**
+     * Caller cannot mutate the job's library
+     */
+    403: unknown;
+    /**
+     * Job not found
+     */
+    404: unknown;
+};
+
+export type RetryIngestQueueJobResponses = {
+    /**
+     * Updated active ingest queue
+     */
+    200: IngestQueueResponse;
+};
+
+export type RetryIngestQueueJobResponse = RetryIngestQueueJobResponses[keyof RetryIngestQueueJobResponses];
 
 export type GetLibraryStateData = {
     body?: never;

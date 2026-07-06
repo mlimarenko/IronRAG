@@ -203,8 +203,13 @@ async fn fill_available_job_slots(
             }
         }
         state.worker_runtime.touch().await;
+        let queue_lease_token = format!("queue-{}", Uuid::now_v7());
+        let queue_lease_owner =
+            canonical_worker_id(&state.settings.service_name, *next_worker_index);
         match ingest_repository::claim_next_queued_ingest_job(
             &state.persistence.postgres,
+            &queue_lease_token,
+            &queue_lease_owner,
             library_limit as i64,
             workspace_limit as i64,
             global_limit as i64,
@@ -216,8 +221,7 @@ async fn fill_available_job_slots(
                 let job_id = job.id;
                 let job_kind = job.job_kind.clone();
                 let library_id = job.library_id;
-                let worker_id =
-                    canonical_worker_id(&state.settings.service_name, *next_worker_index);
+                let worker_id = queue_lease_owner;
                 *next_worker_index = next_worker_index.saturating_add(1);
                 info!(
                     %worker_id,
