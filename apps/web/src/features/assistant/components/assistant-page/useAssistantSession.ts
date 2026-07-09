@@ -15,10 +15,12 @@ import {
 import type { TFunction } from 'i18next';
 import { toast } from 'sonner';
 import {
+  mapAssistantTurnToEvidence,
   mapAssistantMessage,
   mapAssistantSession,
 } from '@/features/assistant/model/assistantAdapter';
 import { queryApi, queries } from '@/shared/api';
+import { ApiError } from '@/shared/api/runtime';
 import type {
   AssistantSessionListItem,
   QueryConversation,
@@ -40,6 +42,7 @@ import {
   EMPTY_MESSAGES,
   latestEvidenceFromMessages,
   resolveStateAction,
+  serverTurnDurationMs,
   type RetryableAssistantTurn,
 } from './assistantPageState';
 
@@ -74,7 +77,17 @@ type SendQuestionContext = {
   previousSessions: AssistantSessionListItem[] | undefined;
 };
 
+type LocalPendingTurn = {
+  optimisticSessionId: string | null;
+  pendingMessage: AssistantMessage;
+  questionText: string;
+  requestScope: string;
+  sessionId: string | null;
+  userMessage: AssistantMessage;
+};
+
 const ACTIVE_SESSION_STORAGE_PREFIX = 'ironrag_assistant_active_session';
+const ACTIVE_SESSION_POLL_INTERVAL_MS = 1000;
 
 function activeSessionStorageKey(scopeKey: string | null): string | null {
   return scopeKey ? `${ACTIVE_SESSION_STORAGE_PREFIX}:${scopeKey}` : null;
@@ -149,6 +162,26 @@ function sessionListItemFromConversation(
   };
 }
 
+function sessionMessagesHydrationKey(
+  sessionId: string,
+  messages: AssistantMessage[],
+): string {
+  return [
+    sessionId,
+    messages
+      .map((message) =>
+        [
+          message.id,
+          message.role,
+          message.executionId ?? '',
+          message.timestamp,
+          message.content,
+        ].join('\u001f'),
+      )
+      .join('\u001e'),
+  ].join('\u001d');
+}
+
 function appendPendingActivity(
   message: AssistantMessage,
   event: AssistantAgentActivityEvent,
@@ -157,6 +190,81 @@ function appendPendingActivity(
     ...message,
     activityEvents: [...(message.activityEvents ?? []), event].slice(-24),
   };
+}
+
+function hasPendingAssistantTurn(messages: AssistantMessage[]): boolean {
+  return messages.some(
+    (message) => message.role === 'assistant' && message.content.trim().length === 0,
+  );
+}
+
+function mergeHydratedMessagesWithLocalPendingTurn(
+  messages: AssistantMessage[],
+  sessionId: string,
+  requestScope: string | null,
+  pendingTurn: LocalPendingTurn | null,
+): AssistantMessage[] {
+  if (!pendingTurn || pendingTurn.requestScope !== requestScope) return messages;
+  if (
+    pendingTurn.sessionId !== sessionId &&
+    pendingTurn.optimisticSessionId !== sessionId
+  ) {
+    return messages;
+  }
+  if (messages.some((message) => message.id === pendingTurn.pendingMessage.id)) {
+    return messages;
+  }
+
+  const pendingQuestion = pendingTurn.questionText.trim();
+  let matchingUserIndex = -1;
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index];
+    if (
+      message?.role === 'user' &&
+      message.content.trim() === pendingQuestion
+    ) {
+      matchingUserIndex = index;
+      break;
+    }
+  }
+
+  if (matchingUserIndex >= 0) {
+    const assistantAlreadyExists = messages
+      .slice(matchingUserIndex + 1)
+      .some((message) => message.role === 'assistant');
+    if (assistantAlreadyExists) return messages;
+    return [
+      ...messages.slice(0, matchingUserIndex + 1),
+      pendingTurn.pendingMessage,
+      ...messages.slice(matchingUserIndex + 1),
+    ];
+  }
+
+  return [...messages, pendingTurn.userMessage, pendingTurn.pendingMessage];
+}
+
+function finalizedAssistantMessageFromResult(
+  pendingMessage: AssistantMessage,
+  result: AssistantTurnExecutionResponse,
+  emptyAnswerText: string,
+): AssistantMessage {
+  const durationMs = serverTurnDurationMs(result);
+  return {
+    id: result.responseTurn?.id ?? pendingMessage.id,
+    role: 'assistant',
+    content: result.responseTurn?.contentText ?? emptyAnswerText,
+    timestamp:
+      result.execution?.completedAt ??
+      result.responseTurn?.createdAt ??
+      pendingMessage.timestamp,
+    ...(durationMs !== undefined ? { durationMs } : {}),
+    executionId: result.responseTurn?.executionId ?? null,
+    evidence: mapAssistantTurnToEvidence(result),
+  };
+}
+
+function isOptionalDebugSnapshotMiss(error: unknown): boolean {
+  return error instanceof ApiError && error.status === 404;
 }
 
 export function useAssistantSession({
@@ -189,12 +297,21 @@ export function useAssistantSession({
     libraryScopeKey,
     null,
   );
+  const [debugErrorExecutionId, setDebugErrorExecutionId] =
+    useScopedState<string | null>(libraryScopeKey, null);
+  const [localPendingTurn, setLocalPendingTurn] =
+    useScopedState<LocalPendingTurn | null>(libraryScopeKey, null);
   const libraryScopeRef = useRef<string | null>(libraryScopeKey);
   const activeSessionRef = useRef<string | null>(activeSession);
   const debugRequestRef = useRef(0);
+  const unavailableDebugExecutionsRef = useRef<Set<string>>(new Set());
   const executingRef = useRef(false);
   const hydratedSessionRef = useRef<string | null>(null);
   const [optimisticSessionId, setOptimisticSessionId] = useState<string | null>(null);
+  const sessionHasPendingAssistantTurn = useMemo(
+    () => hasPendingAssistantTurn(messages),
+    [messages],
+  );
 
   const setActiveSession = useCallback(
     (action: SetStateAction<string | null>) => {
@@ -223,8 +340,15 @@ export function useAssistantSession({
     debugRequestRef.current += 1;
     setDebugContext(null);
     setDebugError(null);
+    setDebugErrorExecutionId(null);
     setDebugLoadingId(null);
-  }, [activeSession, setDebugContext, setDebugError, setDebugLoadingId]);
+  }, [
+    activeSession,
+    setDebugContext,
+    setDebugError,
+    setDebugErrorExecutionId,
+    setDebugLoadingId,
+  ]);
 
   const sessionsQueryOptions = queries.listQuerySessionsOptions(
     libraryId ? { query: { libraryId } } : undefined,
@@ -253,6 +377,10 @@ export function useAssistantSession({
       path: { sessionId: activeSession ?? '' },
     }),
     enabled: !!activeSession && !activeSessionIsOptimistic && !!libraryScopeKey,
+    refetchInterval: sessionHasPendingAssistantTurn
+      ? ACTIVE_SESSION_POLL_INTERVAL_MS
+      : false,
+    refetchIntervalInBackground: true,
   });
 
   useEffect(() => {
@@ -260,13 +388,12 @@ export function useAssistantSession({
       hydratedSessionRef.current = null;
       return;
     }
-    if (hydratedSessionRef.current === activeSession) return;
     if (!sessionData) {
       if (sessionError) {
-        hydratedSessionRef.current = activeSession;
-        const sessionId = activeSession;
+        const errorHydrationKey = `error:${activeSession}`;
+        hydratedSessionRef.current = errorHydrationKey;
         queueMicrotask(() => {
-          if (hydratedSessionRef.current === sessionId) {
+          if (hydratedSessionRef.current === errorHydrationKey) {
             setMessages(EMPTY_MESSAGES);
           }
         });
@@ -275,15 +402,33 @@ export function useAssistantSession({
     }
     const data = sessionData;
     if (data.session.libraryId !== libraryId) return;
-    hydratedSessionRef.current = activeSession;
     const sessionId = activeSession;
-    const nextMessages = data.messages.map(mapAssistantMessage);
+    const nextMessages = mergeHydratedMessagesWithLocalPendingTurn(
+      data.messages.map(mapAssistantMessage),
+      sessionId,
+      libraryScopeKey,
+      localPendingTurn,
+    );
+    const hydrationKey = sessionMessagesHydrationKey(sessionId, nextMessages);
+    if (hydratedSessionRef.current === hydrationKey) return;
+    hydratedSessionRef.current = hydrationKey;
     queueMicrotask(() => {
-      if (hydratedSessionRef.current === sessionId) {
+      if (
+        hydratedSessionRef.current === hydrationKey &&
+        activeSessionRef.current === sessionId
+      ) {
         setMessages(nextMessages);
       }
     });
-  }, [activeSession, libraryId, sessionData, sessionError, setMessages]);
+  }, [
+    activeSession,
+    libraryId,
+    libraryScopeKey,
+    localPendingTurn,
+    sessionData,
+    sessionError,
+    setMessages,
+  ]);
 
   const sessions = useMemo<AssistantSession[]>(() => {
     if (!sessionsData || !libraryId) return [];
@@ -331,6 +476,11 @@ export function useAssistantSession({
         if (libraryScopeRef.current === variables.requestScope) {
           activeSessionRef.current = sessionId;
           setActiveSession(sessionId);
+          setLocalPendingTurn((current) =>
+            current?.pendingMessage.id === variables.pendingMessage.id
+              ? { ...current, sessionId }
+              : current,
+          );
         }
         queryClient.setQueryData<AssistantSessionListItem[]>(
           variables.sessionsQueryKey,
@@ -416,6 +566,14 @@ export function useAssistantSession({
         variables.userMessage,
         variables.pendingMessage,
       ]);
+      setLocalPendingTurn({
+        optimisticSessionId: variables.optimisticSessionId,
+        pendingMessage: variables.pendingMessage,
+        questionText: variables.questionText,
+        requestScope: variables.requestScope,
+        sessionId: variables.existingSessionId ?? variables.optimisticSessionId,
+        userMessage: variables.userMessage,
+      });
       setRetryable(null);
       setIsExecuting(true);
       return {
@@ -425,6 +583,11 @@ export function useAssistantSession({
       };
     },
     onSuccess: ({ pendingMessageId, result, sessionId }, variables) => {
+      void queryClient.invalidateQueries({
+        queryKey: queries.getQuerySessionOptions({
+          path: { sessionId },
+        }).queryKey,
+      });
       if (
         libraryScopeRef.current === variables.requestScope &&
         activeSessionRef.current === sessionId
@@ -436,6 +599,19 @@ export function useAssistantSession({
             result,
             t('assistant.noResponseGenerated'),
           ),
+        );
+        setLocalPendingTurn((current) =>
+          current?.pendingMessage.id === pendingMessageId
+            ? {
+                ...current,
+                pendingMessage: finalizedAssistantMessageFromResult(
+                  current.pendingMessage,
+                  result,
+                  t('assistant.noResponseGenerated'),
+                ),
+                sessionId,
+              }
+            : current,
         );
         setRetryable(null);
       }
@@ -475,6 +651,17 @@ export function useAssistantSession({
             question: variables.questionText,
             diagnosis: rawMessage,
           });
+          setLocalPendingTurn((current) =>
+            current?.pendingMessage.id === variables.pendingMessage.id
+              ? {
+                  ...current,
+                  pendingMessage: {
+                    ...current.pendingMessage,
+                    content: inlineError,
+                  },
+                }
+              : current,
+          );
         }
       }
       toast.error(
@@ -513,18 +700,36 @@ export function useAssistantSession({
     activeSessionRef.current = null;
     setActiveSession(null);
     setMessages([]);
+    setLocalPendingTurn(null);
     setRetryable(null);
     setDebugContext(null);
     setDebugError(null);
-  }, [setActiveSession, setDebugContext, setDebugError, setMessages, setRetryable]);
+    setDebugErrorExecutionId(null);
+  }, [
+    setActiveSession,
+    setDebugContext,
+    setDebugError,
+    setDebugErrorExecutionId,
+    setMessages,
+    setLocalPendingTurn,
+    setRetryable,
+  ]);
 
   const openDebugFor = useCallback(
     async (executionId: string) => {
       const requestId = debugRequestRef.current + 1;
       debugRequestRef.current = requestId;
       const requestSession = activeSessionRef.current;
+      if (unavailableDebugExecutionsRef.current.has(executionId)) {
+        setDebugContext(null);
+        setDebugError(t('assistant.llmContextUnavailable'));
+        setDebugErrorExecutionId(executionId);
+        setDebugLoadingId(null);
+        return;
+      }
       setDebugLoadingId(executionId);
       setDebugError(null);
+      setDebugErrorExecutionId(null);
       try {
         const snapshot = await queryApi.getExecutionLlmContext(executionId);
         if (
@@ -532,15 +737,27 @@ export function useAssistantSession({
           activeSessionRef.current === requestSession
         ) {
           setDebugContext(snapshot);
+          setDebugError(null);
+          setDebugErrorExecutionId(null);
         }
       } catch (err: unknown) {
         if (
           debugRequestRef.current === requestId &&
           activeSessionRef.current === requestSession
         ) {
-          const message = errorMessage(err, t('assistant.llmContextUnavailable'));
+          const snapshotMissing = isOptionalDebugSnapshotMiss(err);
+          const message = snapshotMissing
+            ? t('assistant.llmContextUnavailable')
+            : errorMessage(err, t('assistant.llmContextUnavailable'));
+          if (snapshotMissing) {
+            unavailableDebugExecutionsRef.current.add(executionId);
+          }
+          setDebugContext(null);
           setDebugError(message);
-          toast.error(message);
+          setDebugErrorExecutionId(executionId);
+          if (!snapshotMissing) {
+            toast.error(message);
+          }
         }
       } finally {
         if (
@@ -551,7 +768,13 @@ export function useAssistantSession({
         }
       }
     },
-    [setDebugContext, setDebugError, setDebugLoadingId, t],
+    [
+      setDebugContext,
+      setDebugError,
+      setDebugErrorExecutionId,
+      setDebugLoadingId,
+      t,
+    ],
   );
 
   const sendQuestion = useCallback(
@@ -562,7 +785,8 @@ export function useAssistantSession({
         !workspaceId ||
         !libraryId ||
         !libraryScopeKey ||
-        executingRef.current
+        executingRef.current ||
+        sessionHasPendingAssistantTurn
       ) {
         return false;
       }
@@ -602,6 +826,7 @@ export function useAssistantSession({
       libraryScopeKey,
       messages.length,
       mutateSendQuestion,
+      sessionHasPendingAssistantTurn,
       sessions,
       sessionsQueryOptions.queryKey,
       workspaceId,
@@ -623,8 +848,9 @@ export function useAssistantSession({
     activeSession,
     debugContext,
     debugError,
+    debugErrorExecutionId,
     debugLoadingId,
-    isExecuting,
+    isExecuting: isExecuting || sessionHasPendingAssistantTurn,
     latestEvidence,
     messages,
     newSession,
@@ -636,6 +862,7 @@ export function useAssistantSession({
     sessions,
     setDebugContext,
     setDebugError,
+    setDebugErrorExecutionId,
     setSessionSearch,
     sendQuestion,
   };

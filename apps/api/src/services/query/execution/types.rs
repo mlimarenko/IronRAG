@@ -91,6 +91,7 @@ pub(crate) enum RuntimeChunkScoreKind {
     EntityBio,
     GraphEvidence,
     QueryIrFocus,
+    ContentAnchor,
     SourceContext,
     FocusedDocument,
     LatestVersion,

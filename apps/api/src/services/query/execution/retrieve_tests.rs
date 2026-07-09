@@ -10,13 +10,14 @@ use super::super::{
     source_slice_context_top_k,
 };
 use super::{
-    DOCUMENT_IDENTITY_SCORE_FLOOR, RuntimeChunkScoreKind, apply_graph_evidence_texts_to_chunks,
-    build_lexical_queries, canonical_document_revision_id, chunk_answer_source_text,
-    combine_chunk_retrieval_lanes, combine_lexical_query_results,
-    combine_query_ir_focus_search_results, command_dense_excerpt_for,
-    document_identity_chunk_score, document_identity_focus_terms, entity_bio_chunk_score,
-    graph_evidence_chunk_hits_from_rows, graph_evidence_chunk_score, graph_evidence_context_line,
-    graph_evidence_source_document_ids, graph_evidence_source_document_ids_from_scored_targets,
+    DOCUMENT_IDENTITY_SCORE_FLOOR, RetrievalContentAnchorModel, RuntimeChunkScoreKind,
+    apply_graph_evidence_texts_to_chunks, build_lexical_queries, canonical_document_revision_id,
+    chunk_answer_source_text, combine_chunk_retrieval_lanes, combine_lexical_query_results,
+    combine_query_ir_focus_search_results, command_dense_excerpt_for, content_anchor_revision_ids,
+    content_anchor_row_score, document_identity_chunk_score, document_identity_focus_terms,
+    entity_bio_chunk_score, graph_evidence_chunk_hits_from_rows, graph_evidence_chunk_score,
+    graph_evidence_context_line, graph_evidence_source_document_ids,
+    graph_evidence_source_document_ids_from_scored_targets,
     graph_evidence_source_document_ids_with_priority, graph_evidence_targets,
     graph_evidence_targets_for_query, graph_evidence_text_search_document_scope,
     is_answer_driving_search_chunk_row, latest_version_documents, linked_anchor_focus_queries,
@@ -134,6 +135,73 @@ fn target_entities_query_ir(target_labels: &[&str]) -> QueryIR {
         retrieval_query: None,
         confidence: 1.0,
     }
+}
+
+#[test]
+fn content_anchor_model_builds_adjacent_sequences_for_unquoted_questions() {
+    let mut ir = target_entities_query_ir(&[]);
+    ir.retrieval_query = Some("which service plans are available".to_string());
+
+    let model = RetrievalContentAnchorModel::new("which service plans are available?", Some(&ir));
+
+    assert!(model.search_terms.iter().any(|term| term == "service"));
+    assert!(model.search_terms.iter().any(|term| term == "plans"));
+    assert!(
+        model
+            .phrase_sequences
+            .iter()
+            .any(|sequence| { sequence == &vec!["service".to_string(), "plans".to_string()] })
+    );
+}
+
+#[test]
+fn content_anchor_model_adds_prefix_search_terms_for_inflected_matches() {
+    let model = RetrievalContentAnchorModel::new("which service documents are available?", None);
+
+    assert!(model.search_terms.iter().any(|term| term == "documents"));
+    assert!(
+        model.search_terms.iter().any(|term| term == "docum"),
+        "content-anchor candidate lookup should include a stable prefix term: {model:#?}"
+    );
+}
+
+#[test]
+fn content_anchor_row_score_prefers_body_section_over_navigation_overlap() {
+    let document = sample_document_row("overview.md", "Product overview");
+    let nav = knowledge_chunk_row(
+        &document,
+        0,
+        Some("paragraph"),
+        "Service overview image loading help link support available",
+    );
+    let body = knowledge_chunk_row(
+        &document,
+        1,
+        Some("paragraph"),
+        "Pricing policy: service plans. Free tier. Personal tier. Business tier.",
+    );
+    let model = RetrievalContentAnchorModel::new("which service plans are available?", None);
+
+    let nav_score = content_anchor_row_score(&nav, &model);
+    let body_score = content_anchor_row_score(&body, &model);
+
+    assert!(body_score > nav_score);
+    assert!(body_score > 0);
+}
+
+#[test]
+fn content_anchor_revision_ids_respect_target_scope() {
+    let first = sample_document_row("first.md", "First");
+    let second = sample_document_row("second.md", "Second");
+    let expected_revision = canonical_document_revision_id(&second).expect("revision id");
+    let mut document_index = HashMap::new();
+    document_index.insert(first.document_id, first);
+    document_index.insert(second.document_id, second.clone());
+    let targeted_document_ids = BTreeSet::from([second.document_id]);
+
+    let revision_ids = content_anchor_revision_ids(&document_index, &targeted_document_ids);
+
+    assert_eq!(revision_ids, vec![expected_revision]);
 }
 
 fn exact_error_code_query_ir() -> QueryIR {
@@ -1109,6 +1177,37 @@ fn truncate_bundle_preserves_runtime_evidence_lanes() {
 
     assert!(bundle.chunks.iter().any(|chunk| chunk.chunk_id == graph_evidence.chunk_id));
     assert_eq!(bundle.chunks[0].chunk_id, graph_evidence.chunk_id);
+}
+
+#[test]
+fn truncate_bundle_preserves_content_anchor_evidence_lanes() {
+    let mut high_scored_noise = (0..8)
+        .map(|index| {
+            let mut chunk = runtime_chunk(
+                &format!("identity-noise-{index}"),
+                DOCUMENT_IDENTITY_SCORE_FLOOR + index as f32,
+            );
+            chunk.score_kind = RuntimeChunkScoreKind::DocumentIdentity;
+            chunk
+        })
+        .collect::<Vec<_>>();
+    let mut content_anchor = runtime_chunk("focused body evidence", 1.0);
+    content_anchor.score_kind = RuntimeChunkScoreKind::ContentAnchor;
+    let content_anchor_id = content_anchor.chunk_id;
+    high_scored_noise.push(content_anchor);
+    let mut bundle = RetrievalBundle {
+        entities: Vec::new(),
+        relationships: Vec::new(),
+        chunks: high_scored_noise,
+    };
+
+    truncate_bundle(&mut bundle, 4, None, &std::collections::HashSet::new());
+
+    assert!(
+        bundle.chunks.iter().any(|chunk| chunk.chunk_id == content_anchor_id),
+        "content-anchor evidence must survive final context truncation: {:#?}",
+        bundle.chunks
+    );
 }
 
 #[test]

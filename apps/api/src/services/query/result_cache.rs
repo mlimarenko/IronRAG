@@ -90,6 +90,9 @@ const ANSWER_RUNTIME_FINGERPRINT_SOURCES: &[(&str, &str)] = &[
     ("execution/tuning.rs", include_str!("execution/tuning.rs")),
     ("execution/types.rs", include_str!("execution/types.rs")),
     ("execution/verification.rs", include_str!("execution/verification.rs")),
+    ("service/context.rs", include_str!("service/context.rs")),
+    ("service/formatting.rs", include_str!("service/formatting.rs")),
+    ("service/turn.rs", include_str!("service/turn.rs")),
     ("text_match.rs", include_str!("text_match.rs")),
     ("result_cache.rs", include_str!("result_cache.rs")),
 ];

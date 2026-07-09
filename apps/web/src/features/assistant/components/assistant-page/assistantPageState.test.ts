@@ -197,4 +197,30 @@ describe('applyTurnResultToMessages', () => {
     expect(answer?.id).toBe('turn-assistant');
     expect(answer?.executionId).toBe('execution-1');
   });
+
+  it('replaces a server-hydrated pending execution when the local pending id is gone', () => {
+    const sendMs = Date.parse(userBrowserTs);
+    const user = { ...createUserMessage('Question', sendMs), id: 'turn-user' };
+    const serverPending: AssistantMessage = {
+      id: 'execution-1',
+      role: 'assistant',
+      content: '',
+      timestamp: '2026-06-06T21:41:33.000Z',
+      executionId: 'execution-1',
+    };
+    const result = buildTurnResult({ answerText: 'Hydrated pending resolved' });
+
+    const next = applyTurnResultToMessages(
+      [user, serverPending],
+      'm-pending-lost',
+      result,
+      'No answer',
+    );
+    const answer = next.find((m) => m.role === 'assistant');
+
+    expect(answer?.content).toBe('Hydrated pending resolved');
+    expect(answer?.id).toBe('turn-assistant');
+    expect(answer?.executionId).toBe('execution-1');
+    expect(next).toHaveLength(2);
+  });
 });

@@ -864,22 +864,38 @@ async fn map_session_detail(
     state: &AppState,
     detail: QueryConversationDetail,
 ) -> Result<ironrag_contracts::assistant::AssistantHydratedConversation, ApiError> {
-    let QueryConversationDetail { conversation, turns, executions: _ } = detail;
+    let QueryConversationDetail { conversation, turns, executions } = detail;
     let workspace_id = conversation.workspace_id;
     let library_id = conversation.library_id;
     let turn_count = turns.len();
     let mut evidence_by_turn_id =
         hydrate_session_message_evidence(state, &turns, workspace_id, library_id).await?;
+    let pending_execution_by_request_turn_id: HashMap<Uuid, QueryExecution> = executions
+        .into_iter()
+        .filter(is_pending_session_execution)
+        .filter_map(|execution| {
+            execution.request_turn_id.map(|request_turn_id| (request_turn_id, execution))
+        })
+        .collect();
+    let mut messages = Vec::with_capacity(turn_count + pending_execution_by_request_turn_id.len());
+    for turn in turns {
+        let turn_id = turn.id;
+        let evidence = evidence_by_turn_id.remove(&turn_id);
+        messages.push(map_turn_to_message(turn, evidence));
+        if let Some(execution) = pending_execution_by_request_turn_id.get(&turn_id) {
+            messages.push(map_pending_execution_to_message(execution));
+        }
+    }
     Ok(ironrag_contracts::assistant::AssistantHydratedConversation {
         session: map_session_list_item_with_turn_count(conversation, turn_count),
-        messages: turns
-            .into_iter()
-            .map(|turn| {
-                let evidence = evidence_by_turn_id.remove(&turn.id);
-                map_turn_to_message(turn, evidence)
-            })
-            .collect(),
+        messages,
     })
+}
+
+fn is_pending_session_execution(execution: &QueryExecution) -> bool {
+    execution.request_turn_id.is_some()
+        && execution.response_turn_id.is_none()
+        && !execution.lifecycle_state.is_terminal()
 }
 
 async fn hydrate_session_message_evidence(
@@ -1111,6 +1127,19 @@ fn map_turn_to_message(
         timestamp: turn.created_at,
         execution_id: turn.execution_id,
         evidence,
+    }
+}
+
+fn map_pending_execution_to_message(
+    execution: &QueryExecution,
+) -> ironrag_contracts::assistant::AssistantConversationMessage {
+    ironrag_contracts::assistant::AssistantConversationMessage {
+        id: execution.id,
+        role: ironrag_contracts::assistant::AssistantTurnRole::Assistant,
+        content: String::new(),
+        timestamp: execution.started_at,
+        execution_id: Some(execution.id),
+        evidence: None,
     }
 }
 
@@ -1393,6 +1422,75 @@ mod tests {
             child_execution_id: None,
             result_preview: None,
         }
+    }
+
+    fn query_execution_with_state(
+        lifecycle_state: crate::domains::agent_runtime::RuntimeLifecycleState,
+        request_turn_id: Option<Uuid>,
+        response_turn_id: Option<Uuid>,
+    ) -> QueryExecution {
+        QueryExecution {
+            id: Uuid::new_v4(),
+            workspace_id: Uuid::new_v4(),
+            library_id: Uuid::new_v4(),
+            conversation_id: Uuid::new_v4(),
+            context_bundle_id: Uuid::new_v4(),
+            request_turn_id,
+            response_turn_id,
+            binding_id: None,
+            runtime_execution_id: Some(Uuid::new_v4()),
+            lifecycle_state,
+            active_stage: None,
+            query_text: "neutral question".to_string(),
+            failure_code: None,
+            started_at: Utc::now(),
+            completed_at: None,
+        }
+    }
+
+    #[test]
+    fn pending_session_execution_maps_to_empty_assistant_message() {
+        let request_turn_id = Uuid::new_v4();
+        let execution = query_execution_with_state(
+            crate::domains::agent_runtime::RuntimeLifecycleState::Running,
+            Some(request_turn_id),
+            None,
+        );
+
+        assert!(is_pending_session_execution(&execution));
+
+        let message = map_pending_execution_to_message(&execution);
+        assert_eq!(message.id, execution.id);
+        assert_eq!(message.role, ironrag_contracts::assistant::AssistantTurnRole::Assistant);
+        assert!(message.content.is_empty());
+        assert_eq!(message.timestamp, execution.started_at);
+        assert_eq!(message.execution_id, Some(execution.id));
+        assert!(message.evidence.is_none());
+    }
+
+    #[test]
+    fn terminal_or_answered_execution_is_not_session_pending() {
+        let request_turn_id = Uuid::new_v4();
+        let response_turn_id = Uuid::new_v4();
+        let answered = query_execution_with_state(
+            crate::domains::agent_runtime::RuntimeLifecycleState::Running,
+            Some(request_turn_id),
+            Some(response_turn_id),
+        );
+        let failed = query_execution_with_state(
+            crate::domains::agent_runtime::RuntimeLifecycleState::Failed,
+            Some(request_turn_id),
+            None,
+        );
+        let orphan = query_execution_with_state(
+            crate::domains::agent_runtime::RuntimeLifecycleState::Running,
+            None,
+            None,
+        );
+
+        assert!(!is_pending_session_execution(&answered));
+        assert!(!is_pending_session_execution(&failed));
+        assert!(!is_pending_session_execution(&orphan));
     }
 
     #[tokio::test]

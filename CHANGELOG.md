@@ -2,6 +2,77 @@
 
 ## Unreleased
 
+## 0.5.8 — 2026-07-09
+
+### Changed
+
+- **Release image workflows use Node 24-compatible GitHub Actions.** The Docker
+  image publication workflow now uses current major versions of the GitHub and
+  Docker actions that run on the Node 24 runtime, removing the runner warning
+  from release builds without changing image tags or publication semantics.
+
+- **Assistant retrieval gives explicit content anchors higher priority.** The
+  answer pipeline now promotes bounded chunks that match quoted phrases,
+  document-focus hints, target entities, literal constraints, or the active
+  retrieval query before filling the remaining context budget, improving
+  precision for focused questions without introducing domain-specific routing.
+
+### Fixed
+
+- **The assistant works with GPT-5.5 bindings.** OpenAI-compatible requests now
+  omit sampling parameters that GPT-5.5 only accepts at provider defaults, while
+  preserving existing sampling behavior for models that support it. GPT-5.5
+  tool calls also use provider-compatible automatic tool choice, so switching
+  the MCP-backed assistant binding from GPT-5.4-mini no longer fails before the
+  answer step.
+
+- **The assistant chat layout stays bounded on narrow desktop and macOS
+  windows.** The session rail, answer thread, debug pane, and composer now share
+  the same constrained flex/scroll contract, keeping the input pinned inside the
+  chat surface and preventing page-level horizontal overflow when answers or
+  source lists are wide. The debug inspector now docks only on very wide
+  desktops and behaves as a right-side drawer on laptop widths, so it no longer
+  squeezes the answer column into an unusable narrow strip.
+
+- **Assistant answers stay clean while evidence remains inspectable.** The
+  answer formatter now keeps the visible chat response separate from retrieved
+  context, debug traces, source dumps, and low-level artifact text. Evidence and
+  diagnostics remain available through the dedicated side panels and developer
+  inspector instead of being mixed into the assistant bubble.
+
+- **Assistant sessions survive page reloads during a running answer.** Hydrated
+  conversations now include an in-flight assistant placeholder for active
+  executions, the web UI polls that active session until the durable answer
+  lands, and duplicate sends are blocked while the restored turn is still
+  pending.
+
+- **Assistant sends show immediate progress even when the provider is slow.**
+  The chat now preserves the local pending turn across lagging session
+  hydration, so users see an assistant working card immediately after submit
+  instead of a blank thread while the backend/provider starts the execution.
+  The same local overlay prevents stale history refetches from briefly erasing
+  a just-finished answer.
+
+- **Missing optional debug snapshots no longer create notification storms.**
+  The assistant debug inspector now treats a missing LLM-context snapshot as an
+  inline diagnostic state, caches the miss per execution, and reserves global
+  error toasts for real debug fetch failures.
+
+- **Assistant debug state follows the current turn.** Starting a new question
+  now clears stale debug-context diagnostics from the previous execution while
+  the next assistant run is pending, so the inspector no longer shows an old
+  missing-context warning for a newly submitted request.
+
+- **Assistant inspectors no longer fight pending answers.** Pending assistant
+  turns are treated as running work even when the backend has already assigned
+  an execution id, so the debug inspector does not request unavailable LLM
+  context before the answer is complete. The evidence inspector also uses a
+  fixed flex layout with an internal scroll region for long source lists.
+
+- **The installer restarts the frontend after backend updates.** Local and stage
+  upgrades now restart the nginx frontend after recreating backend roles, so the
+  API proxy cannot keep a stale Docker DNS target after an update.
+
 ## 0.5.7 — 2026-07-06
 
 ### Added

@@ -669,6 +669,55 @@ impl UnifiedGateway {
         upstream_extra
     }
 
+    fn openai_compatible_sampling_params(
+        provider_kind: &str,
+        model_name: &str,
+        temperature: Option<f64>,
+        top_p: Option<f64>,
+    ) -> (Option<f64>, Option<f64>) {
+        let model_lc = model_name.to_ascii_lowercase();
+        if provider_kind.eq_ignore_ascii_case("openai") && model_lc.starts_with("gpt-5.5") {
+            // This family only accepts provider defaults for sampling. Omit both
+            // knobs together so future default-only sampling constraints fail closed.
+            return (None, None);
+        }
+
+        (temperature, top_p)
+    }
+
+    fn openai_compatible_tool_choice(
+        provider_kind: &str,
+        model_name: &str,
+        has_tools: bool,
+        require_tool_call: bool,
+    ) -> Option<&'static str> {
+        if !has_tools {
+            return None;
+        }
+
+        // Some OpenAI-compatible models only accept automatic tool routing
+        // even when the caller would prefer to require a tool call. Keep
+        // those families on explicit "auto" so providers do not reject the
+        // request with `does not support this tool_choice`.
+        let model_lc = model_name.to_ascii_lowercase();
+        let provider_lc = provider_kind.to_ascii_lowercase();
+        // DeepSeek's hosted API exposes every `deepseek-v4-*` model
+        // through the reasoner backend (verified empirically: v4-flash,
+        // v4-pro, and the `*-reasoner` aliases all return
+        // `deepseek-reasoner does not support this tool_choice` when
+        // sent `tool_choice="required"`). Treat the entire DeepSeek v4
+        // family as auto-only; OpenAI/Qwen/etc. only need the provider
+        // families below plus explicit reasoner suffix detection.
+        let is_auto_only_tool_choice = model_lc.contains("reasoner")
+            || model_lc.starts_with("o1")
+            || model_lc.starts_with("o3")
+            || model_lc.starts_with("o4")
+            || (provider_lc == "openai" && model_lc.starts_with("gpt-5.5"))
+            || (provider_lc == "deepseek" && model_lc.contains("v4"));
+
+        if require_tool_call && !is_auto_only_tool_choice { Some("required") } else { Some("auto") }
+    }
+
     fn resolve_provider(
         provider_kind: &str,
         api_key_override: Option<&str>,
@@ -960,6 +1009,12 @@ impl LlmGateway for UnifiedGateway {
             request.response_format.as_ref(),
             resolved.runtime.structured_output,
         )?;
+        let (temperature, top_p) = Self::openai_compatible_sampling_params(
+            &request.provider_kind,
+            &request.model_name,
+            request.temperature,
+            request.top_p,
+        );
         let (output_text, usage_json) = self
             .call_openai_compatible(OpenAiCompatibleRequest {
                 provider_kind: &request.provider_kind,
@@ -973,8 +1028,8 @@ impl LlmGateway for UnifiedGateway {
                     content: OpenAiCompatibleMessageContent::Text(request.prompt.clone()),
                 }],
                 system_prompt: system_prompt.as_deref(),
-                temperature: request.temperature,
-                top_p: request.top_p,
+                temperature,
+                top_p,
                 max_output_tokens: request.max_output_tokens_override,
                 token_limit_parameter: resolved.runtime.token_limit_parameter,
                 response_format: response_format.as_ref(),
@@ -1013,6 +1068,12 @@ impl LlmGateway for UnifiedGateway {
             request.response_format.as_ref(),
             resolved.runtime.structured_output,
         )?;
+        let (temperature, top_p) = Self::openai_compatible_sampling_params(
+            &request.provider_kind,
+            &request.model_name,
+            request.temperature,
+            request.top_p,
+        );
         let (output_text, usage_json) = self
             .call_openai_compatible_stream(
                 OpenAiCompatibleRequest {
@@ -1027,8 +1088,8 @@ impl LlmGateway for UnifiedGateway {
                         content: OpenAiCompatibleMessageContent::Text(request.prompt.clone()),
                     }],
                     system_prompt: system_prompt.as_deref(),
-                    temperature: request.temperature,
-                    top_p: request.top_p,
+                    temperature,
+                    top_p,
                     max_output_tokens: request.max_output_tokens_override,
                     token_limit_parameter: resolved.runtime.token_limit_parameter,
                     response_format: response_format.as_ref(),
@@ -1066,40 +1127,25 @@ impl LlmGateway for UnifiedGateway {
             !tools.is_empty(),
             &request.extra_parameters_json,
         );
-        // Some reasoning models (DeepSeek `*-pro` / `*-reasoner` family,
-        // OpenAI `o*` series) reject `tool_choice` overrides. They only
-        // accept the implicit "auto", so coercing them into "required"
-        // returns 400 with `does not support this tool_choice`. Drop the
-        // override for those families and rely on the system prompt to
-        // push them through `grounded_answer`.
-        let model_lc = request.model_name.to_ascii_lowercase();
-        let provider_lc = request.provider_kind.to_ascii_lowercase();
-        // DeepSeek's hosted API exposes every `deepseek-v4-*` model
-        // through the reasoner backend (verified empirically: v4-flash,
-        // v4-pro, and the `*-reasoner` aliases all return
-        // `deepseek-reasoner does not support this tool_choice` when
-        // sent `tool_choice="required"`). Treat the entire DeepSeek v4
-        // family as reasoners; OpenAI/Qwen/etc. only need the
-        // o-series + explicit reasoner suffix detection.
-        let is_reasoner = model_lc.contains("reasoner")
-            || model_lc.starts_with("o1")
-            || model_lc.starts_with("o3")
-            || model_lc.starts_with("o4")
-            || (provider_lc == "deepseek" && model_lc.contains("v4"));
-        let tool_choice = if tools.is_empty() {
-            None
-        } else if request.require_tool_call && !is_reasoner {
-            Some("required")
-        } else {
-            Some("auto")
-        };
+        let tool_choice = Self::openai_compatible_tool_choice(
+            &request.provider_kind,
+            &request.model_name,
+            !tools.is_empty(),
+            request.require_tool_call,
+        );
+        let (temperature, top_p) = Self::openai_compatible_sampling_params(
+            &request.provider_kind,
+            &request.model_name,
+            request.temperature,
+            request.top_p,
+        );
 
         let payload = OpenAiCompatibleToolUseChatRequest {
             model: &request.model_name,
             messages,
             tools,
-            temperature: request.temperature,
-            top_p: request.top_p,
+            temperature,
+            top_p,
             max_completion_tokens,
             max_tokens,
             tool_choice,
@@ -1196,40 +1242,25 @@ impl LlmGateway for UnifiedGateway {
             !tools.is_empty(),
             &request.extra_parameters_json,
         );
-        // Some reasoning models (DeepSeek `*-pro` / `*-reasoner` family,
-        // OpenAI `o*` series) reject `tool_choice` overrides. They only
-        // accept the implicit "auto", so coercing them into "required"
-        // returns 400 with `does not support this tool_choice`. Drop the
-        // override for those families and rely on the system prompt to
-        // push them through `grounded_answer`.
-        let model_lc = request.model_name.to_ascii_lowercase();
-        let provider_lc = request.provider_kind.to_ascii_lowercase();
-        // DeepSeek's hosted API exposes every `deepseek-v4-*` model
-        // through the reasoner backend (verified empirically: v4-flash,
-        // v4-pro, and the `*-reasoner` aliases all return
-        // `deepseek-reasoner does not support this tool_choice` when
-        // sent `tool_choice="required"`). Treat the entire DeepSeek v4
-        // family as reasoners; OpenAI/Qwen/etc. only need the
-        // o-series + explicit reasoner suffix detection.
-        let is_reasoner = model_lc.contains("reasoner")
-            || model_lc.starts_with("o1")
-            || model_lc.starts_with("o3")
-            || model_lc.starts_with("o4")
-            || (provider_lc == "deepseek" && model_lc.contains("v4"));
-        let tool_choice = if tools.is_empty() {
-            None
-        } else if request.require_tool_call && !is_reasoner {
-            Some("required")
-        } else {
-            Some("auto")
-        };
+        let tool_choice = Self::openai_compatible_tool_choice(
+            &request.provider_kind,
+            &request.model_name,
+            !tools.is_empty(),
+            request.require_tool_call,
+        );
+        let (temperature, top_p) = Self::openai_compatible_sampling_params(
+            &request.provider_kind,
+            &request.model_name,
+            request.temperature,
+            request.top_p,
+        );
 
         let payload = OpenAiCompatibleToolUseChatRequest {
             model: &request.model_name,
             messages,
             tools,
-            temperature: request.temperature,
-            top_p: request.top_p,
+            temperature,
+            top_p,
             max_completion_tokens,
             max_tokens,
             tool_choice,
@@ -1556,7 +1587,8 @@ mod tests {
         OpenAiCompatibleRequest, OpenAiCompatibleToolDef, OpenAiCompatibleToolUseChatRequest,
         ProviderAuthScheme, ProviderStructuredOutputMode, ProviderTokenLimitParameter,
         UnifiedGateway, consume_openai_compatible_stream_frame, extract_message_content_text,
-        parse_provider_json_body, provider_response_format, provider_system_prompt,
+        parse_provider_json_body, parse_tool_use_response, provider_response_format,
+        provider_system_prompt,
     };
 
     #[test]
@@ -1717,6 +1749,187 @@ mod tests {
 
         assert_eq!(value.get("tools").and_then(serde_json::Value::as_array).map(Vec::len), Some(1));
         assert_eq!(value.get("tool_choice").and_then(serde_json::Value::as_str), Some("auto"));
+    }
+
+    #[test]
+    fn openai_gpt_55_sampling_params_omit_configured_values() {
+        let (temperature, top_p) = UnifiedGateway::openai_compatible_sampling_params(
+            "openai",
+            "gpt-5.5",
+            Some(0.3),
+            Some(0.9),
+        );
+
+        assert_eq!(temperature, None);
+        assert_eq!(top_p, None);
+    }
+
+    #[test]
+    fn openai_gpt_54_mini_sampling_params_preserve_configured_values() {
+        let (temperature, top_p) = UnifiedGateway::openai_compatible_sampling_params(
+            "openai",
+            "gpt-5.4-mini",
+            Some(0.3),
+            Some(0.9),
+        );
+
+        assert_eq!(temperature, Some(0.3));
+        assert_eq!(top_p, Some(0.9));
+    }
+
+    #[test]
+    fn openai_gpt_55_chat_payload_omits_sampling_params() {
+        let (temperature, top_p) = UnifiedGateway::openai_compatible_sampling_params(
+            "openai",
+            "gpt-5.5",
+            Some(0.3),
+            Some(0.9),
+        );
+        let body = OpenAiCompatibleRequest {
+            provider_kind: "openai",
+            api_key: Some("test"),
+            base_url: "https://api.openai.com/v1",
+            auth_scheme: ProviderAuthScheme::Bearer,
+            chat_path: "/chat/completions".to_string(),
+            model_name: "gpt-5.5",
+            messages: vec![OpenAiCompatibleMessage {
+                role: "user".to_string(),
+                content: OpenAiCompatibleMessageContent::Text("hello".to_string()),
+            }],
+            system_prompt: None,
+            temperature,
+            top_p,
+            max_output_tokens: None,
+            token_limit_parameter: ProviderTokenLimitParameter::MaxCompletionTokens,
+            response_format: None,
+            extra_parameters_json: &serde_json::json!({}),
+            stream: false,
+        }
+        .body()
+        .expect("request body should serialize");
+        let value: serde_json::Value =
+            serde_json::from_slice(&body).expect("serialized body should stay valid json");
+
+        assert!(value.get("temperature").is_none());
+        assert!(value.get("top_p").is_none());
+    }
+
+    #[test]
+    fn openai_gpt_54_mini_tool_payload_preserves_sampling_and_required_tool_choice() {
+        let (temperature, top_p) = UnifiedGateway::openai_compatible_sampling_params(
+            "openai",
+            "gpt-5.4-mini",
+            Some(0.3),
+            Some(0.9),
+        );
+        let payload = OpenAiCompatibleToolUseChatRequest {
+            model: "gpt-5.4-mini",
+            messages: vec![],
+            tools: vec![OpenAiCompatibleToolDef::from(&ChatToolDef {
+                name: "lookup".to_string(),
+                description: "Lookup structured facts".to_string(),
+                parameters: serde_json::json!({"type": "object"}),
+            })],
+            temperature,
+            top_p,
+            max_completion_tokens: None,
+            max_tokens: None,
+            tool_choice: UnifiedGateway::openai_compatible_tool_choice(
+                "openai",
+                "gpt-5.4-mini",
+                true,
+                true,
+            ),
+            stream: false,
+            extra: serde_json::json!({}),
+        };
+        let value =
+            serde_json::to_value(payload).expect("tool-use request should serialize to JSON");
+
+        assert_eq!(value.get("temperature").and_then(serde_json::Value::as_f64), Some(0.3));
+        assert_eq!(value.get("top_p").and_then(serde_json::Value::as_f64), Some(0.9));
+        assert_eq!(value.get("tool_choice").and_then(serde_json::Value::as_str), Some("required"));
+    }
+
+    #[test]
+    fn openai_gpt_55_tool_payload_omits_sampling_and_uses_auto_tool_choice() {
+        let (temperature, top_p) = UnifiedGateway::openai_compatible_sampling_params(
+            "openai",
+            "gpt-5.5",
+            Some(0.3),
+            Some(0.9),
+        );
+        let payload = OpenAiCompatibleToolUseChatRequest {
+            model: "gpt-5.5",
+            messages: vec![],
+            tools: vec![OpenAiCompatibleToolDef::from(&ChatToolDef {
+                name: "lookup".to_string(),
+                description: "Lookup structured facts".to_string(),
+                parameters: serde_json::json!({"type": "object"}),
+            })],
+            temperature,
+            top_p,
+            max_completion_tokens: None,
+            max_tokens: None,
+            tool_choice: UnifiedGateway::openai_compatible_tool_choice(
+                "openai", "gpt-5.5", true, true,
+            ),
+            stream: false,
+            extra: serde_json::json!({}),
+        };
+        let value =
+            serde_json::to_value(payload).expect("tool-use request should serialize to JSON");
+
+        assert!(value.get("temperature").is_none());
+        assert!(value.get("top_p").is_none());
+        assert_eq!(value.get("tool_choice").and_then(serde_json::Value::as_str), Some("auto"));
+    }
+
+    #[test]
+    fn parse_tool_use_response_returns_final_text_when_tool_calls_are_absent() {
+        let body = serde_json::json!({
+            "choices": [{
+                "finish_reason": "stop",
+                "message": {
+                    "role": "assistant",
+                    "content": "Use the grounded answer fallback."
+                }
+            }],
+            "usage": {"prompt_tokens": 3, "completion_tokens": 5}
+        });
+
+        let (output_text, tool_calls, finish_reason, usage_json, reasoning_content) =
+            parse_tool_use_response(&body).expect("tool-call-less response should parse");
+
+        assert_eq!(output_text, "Use the grounded answer fallback.");
+        assert!(tool_calls.is_empty());
+        assert_eq!(finish_reason.as_deref(), Some("stop"));
+        assert_eq!(usage_json["completion_tokens"], 5);
+        assert!(reasoning_content.is_none());
+    }
+
+    #[test]
+    fn openai_compatible_tool_choice_omits_choice_without_tools() {
+        let tool_choice =
+            UnifiedGateway::openai_compatible_tool_choice("openai", "gpt-5.5", false, true);
+
+        assert_eq!(tool_choice, None);
+    }
+
+    #[test]
+    fn openai_compatible_tool_choice_preserves_required_for_gpt_54_mini() {
+        let tool_choice =
+            UnifiedGateway::openai_compatible_tool_choice("openai", "gpt-5.4-mini", true, true);
+
+        assert_eq!(tool_choice, Some("required"));
+    }
+
+    #[test]
+    fn openai_compatible_tool_choice_uses_auto_for_gpt_55_required_tools() {
+        let tool_choice =
+            UnifiedGateway::openai_compatible_tool_choice("openai", "gpt-5.5", true, true);
+
+        assert_eq!(tool_choice, Some("auto"));
     }
 
     #[test]

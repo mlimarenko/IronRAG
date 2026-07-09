@@ -101,6 +101,52 @@ fn canonical_preflight_answer_reuses_single_endpoint_override_for_live_path() {
 }
 
 #[test]
+fn canonical_preflight_answer_keeps_open_enumerations_generative() {
+    let document_id = Uuid::now_v7();
+    let document_index = HashMap::from([(
+        document_id,
+        sample_document_row_for_preflight(document_id, "service_overview.md"),
+    )]);
+    let mut query_ir = query_ir_with_act_scope_literals_and_target_types(
+        QueryAct::Enumerate,
+        QueryScope::SingleDocument,
+        ["service plans"],
+        ["concept"],
+    );
+    query_ir.retrieval_query = Some("which service plans are available".to_string());
+    query_ir.confidence = 0.98;
+    let chunks = vec![RuntimeMatchedChunk {
+        chunk_id: Uuid::now_v7(),
+        revision_id: Uuid::now_v7(),
+        chunk_index: 8,
+        chunk_kind: None,
+        document_id,
+        document_label: "service_overview.md".to_string(),
+        excerpt: "Service plans include Free, Personal, and Business.".to_string(),
+        score_kind: crate::services::query::execution::RuntimeChunkScoreKind::QueryIrFocus,
+        score: Some(0.99),
+        source_text: "Service plans:\n- Free plan\n- Personal plan\n- Business plan".to_string(),
+    }];
+
+    let answer = build_canonical_preflight_answer(
+        "Which service plans are available?",
+        &query_ir,
+        &QueryIntentProfile::default(),
+        &document_index,
+        None,
+        &CanonicalAnswerEvidence {
+            bundle: None,
+            chunk_rows: Vec::new(),
+            structured_blocks: Vec::new(),
+            technical_facts: Vec::new(),
+        },
+        &chunks,
+    );
+
+    assert!(answer.is_none(), "open content enumerations should use the generative answer path");
+}
+
+#[test]
 fn build_preflight_answer_chunks_prioritizes_technical_literal_candidates() {
     let document_id = Uuid::now_v7();
     let noisy_chunk = RuntimeMatchedChunk {

@@ -50,6 +50,9 @@ const TARGET_ENTITY_INVENTORY_CONTEXT_LINE_LIMIT: usize = 192;
 const TARGET_ENTITY_SUMMARY_CONTEXT_CHARS: usize = 180;
 const RETRIEVED_DOCUMENT_BRIEF_PREVIEW_CHARS: usize = 520;
 const RETRIEVED_DOCUMENT_BRIEF_SOURCE_CHUNKS: usize = 3;
+const CONTENT_ANCHOR_TOKEN_MIN_CHARS: usize = 4;
+const CONTENT_ANCHOR_PRIORITY_LIMIT: usize = 8;
+const CONTENT_ANCHOR_MIN_TOKEN_OVERLAP: usize = 2;
 
 #[cfg(test)]
 pub(crate) fn assemble_bounded_context(
@@ -465,6 +468,11 @@ fn order_bounded_context_chunks<'a>(
             }
         }
     }
+    for chunk in content_anchor_priority_chunks(question, query_ir, chunks) {
+        if seen.insert(chunk.chunk_id) {
+            ordered.push(chunk);
+        }
+    }
     let mut identity_chunks = chunks
         .iter()
         .filter(|chunk| {
@@ -497,6 +505,145 @@ fn order_bounded_context_chunks<'a>(
         }
     }
     ordered
+}
+
+fn content_anchor_priority_chunks<'a>(
+    question: &str,
+    query_ir: &QueryIR,
+    chunks: &'a [RuntimeMatchedChunk],
+) -> Vec<&'a RuntimeMatchedChunk> {
+    let model = ContentAnchorModel::new(question, query_ir);
+    if model.is_empty() {
+        return Vec::new();
+    }
+    let mut scored = chunks
+        .iter()
+        .filter(|chunk| content_anchor_candidate(chunk))
+        .filter_map(|chunk| {
+            let score = content_anchor_priority_score(chunk, &model);
+            (score > 0).then_some((score, chunk))
+        })
+        .collect::<Vec<_>>();
+    scored.sort_by(|(left_score, left), (right_score, right)| {
+        right_score
+            .cmp(left_score)
+            .then_with(|| score_value(right.score).total_cmp(&score_value(left.score)))
+            .then_with(|| left.document_id.cmp(&right.document_id))
+            .then_with(|| left.chunk_index.cmp(&right.chunk_index))
+            .then_with(|| left.chunk_id.cmp(&right.chunk_id))
+    });
+    scored.into_iter().take(CONTENT_ANCHOR_PRIORITY_LIMIT).map(|(_, chunk)| chunk).collect()
+}
+
+fn content_anchor_candidate(chunk: &RuntimeMatchedChunk) -> bool {
+    !super::source_profile::is_source_profile_runtime_chunk(chunk)
+        && !matches!(
+            chunk.score_kind,
+            RuntimeChunkScoreKind::DocumentIdentity | RuntimeChunkScoreKind::LatestVersion
+        )
+}
+
+struct ContentAnchorModel {
+    focus_tokens: HashSet<String>,
+    quoted_phrases: Vec<String>,
+}
+
+impl ContentAnchorModel {
+    fn new(question: &str, query_ir: &QueryIR) -> Self {
+        let mut focus_tokens = HashSet::<String>::new();
+        let mut quoted_phrases = Vec::<String>::new();
+        let mut seen_phrases = HashSet::<String>::new();
+
+        let mut add_source = |value: &str| {
+            let current = crate::services::query::effective_query::current_question_segment(value);
+            for token in normalized_alnum_tokens(current, CONTENT_ANCHOR_TOKEN_MIN_CHARS) {
+                focus_tokens.insert(token);
+            }
+            for phrase in quoted_content_anchor_phrases(current) {
+                if seen_phrases.insert(phrase.clone()) {
+                    quoted_phrases.push(phrase);
+                }
+            }
+        };
+
+        add_source(question);
+        if let Some(retrieval_query) = query_ir.retrieval_query.as_deref() {
+            add_source(retrieval_query);
+        }
+        if let Some(document_focus) = query_ir.document_focus.as_ref() {
+            add_source(&document_focus.hint);
+        }
+        for entity in &query_ir.target_entities {
+            add_source(&entity.label);
+        }
+        for literal in &query_ir.literal_constraints {
+            add_source(&literal.text);
+        }
+
+        Self { focus_tokens, quoted_phrases }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.focus_tokens.is_empty() && self.quoted_phrases.is_empty()
+    }
+}
+
+fn quoted_content_anchor_phrases(value: &str) -> Vec<String> {
+    let mut phrases = Vec::<String>::new();
+    let mut seen = HashSet::<String>::new();
+    for (open, close) in [('«', '»'), ('“', '”'), ('"', '"'), ('`', '`'), ('\'', '\'')] {
+        for phrase in quoted_spans(value, open, close) {
+            if normalized_alnum_tokens(&phrase, 3).len() < 2 {
+                continue;
+            }
+            if seen.insert(phrase.clone()) {
+                phrases.push(phrase);
+            }
+        }
+    }
+    phrases
+}
+
+fn quoted_spans(value: &str, open: char, close: char) -> Vec<String> {
+    let mut spans = Vec::<String>::new();
+    let mut start: Option<usize> = None;
+    for (index, ch) in value.char_indices() {
+        if let Some(open_index) = start {
+            if ch == close {
+                let phrase = value[open_index..index].trim();
+                if !phrase.is_empty() {
+                    spans.push(phrase.to_string());
+                }
+                start = None;
+            }
+            continue;
+        }
+        if ch == open {
+            start = Some(index + ch.len_utf8());
+        }
+    }
+    spans
+}
+
+fn content_anchor_priority_score(chunk: &RuntimeMatchedChunk, model: &ContentAnchorModel) -> usize {
+    let text = repair_technical_layout_noise(&format!("{}\n{}", chunk.excerpt, chunk.source_text));
+    let phrase_hits = model
+        .quoted_phrases
+        .iter()
+        .filter(|phrase| token_sequence_exact_or_contains(&text, phrase, 3))
+        .count();
+    let text_tokens =
+        normalized_alnum_tokens(&text, CONTENT_ANCHOR_TOKEN_MIN_CHARS).into_iter().collect();
+    let token_overlap = soft_context_overlap_count(&model.focus_tokens, &text_tokens);
+    if phrase_hits == 0 && token_overlap < CONTENT_ANCHOR_MIN_TOKEN_OVERLAP {
+        return 0;
+    }
+
+    phrase_hits
+        .saturating_mul(512)
+        .saturating_add(token_overlap.saturating_mul(64))
+        .saturating_add((chunk.score_kind == RuntimeChunkScoreKind::FocusedDocument) as usize * 24)
+        .saturating_add((chunk.score_kind == RuntimeChunkScoreKind::SourceContext) as usize * 12)
 }
 
 fn procedure_context_priority_chunks<'a>(
@@ -2062,6 +2209,93 @@ mod tests {
         );
 
         assert_eq!(ordered.first().map(|chunk| chunk.chunk_index), Some(1));
+    }
+
+    #[test]
+    fn bounded_context_prioritizes_content_anchor_before_identity_headers() {
+        let mut query_ir = general_ir();
+        query_ir.scope = QueryScope::MultiDocument;
+        query_ir.retrieval_query = Some(
+            "List service plans from the section «Pricing policy: subscription plans». Include plan names."
+                .to_string(),
+        );
+
+        let mut identity_noise = ordinary_chunk(
+            "Image loading rules",
+            &format!(
+                "{}\nImage loading begins near the viewport. Add DNS records for the hosted domain.",
+                "Navigation and unrelated page chrome. ".repeat(80)
+            ),
+        );
+        identity_noise.score_kind = RuntimeChunkScoreKind::DocumentIdentity;
+        identity_noise.score = Some(1_000_000.0);
+        identity_noise.document_label = "FAQ index".to_string();
+        identity_noise.chunk_index = 0;
+
+        let mut related_body = ordinary_chunk(
+            "Pricing policy: subscription plans",
+            "Pricing policy: subscription plans\n\
+             The service can be used for free.\n\
+             Personal plan includes forms and integrations.\n\
+             Business plan includes multiple projects and code export.",
+        );
+        related_body.score = Some(1.0);
+        related_body.document_label = "Product overview".to_string();
+        related_body.chunk_index = 33;
+
+        let context = assemble_bounded_context_for_query(
+            &query_ir,
+            "what subscription plans are available?",
+            &[],
+            &[],
+            &[identity_noise, related_body],
+            &[],
+            900,
+        );
+
+        assert!(context.contains("Personal plan"), "{context}");
+        assert!(context.contains("Business plan"), "{context}");
+        assert!(
+            context.find("Pricing policy: subscription plans").unwrap()
+                < context.find("Image loading").unwrap_or(usize::MAX),
+            "{context}"
+        );
+    }
+
+    #[test]
+    fn bounded_context_uses_unquoted_question_tokens_for_content_anchors() {
+        let mut identity_noise = ordinary_chunk(
+            "Hosted domain troubleshooting",
+            &format!(
+                "{}\nHosted domain troubleshooting covers DNS records and image loading behavior.",
+                "General navigation text. ".repeat(80)
+            ),
+        );
+        identity_noise.score_kind = RuntimeChunkScoreKind::DocumentIdentity;
+        identity_noise.score = Some(1_000_000.0);
+
+        let mut related_body = ordinary_chunk(
+            "Subscription plan overview",
+            "Subscription plans\n\
+             Free plan covers publishing with platform branding.\n\
+             Personal plan adds forms and integrations.\n\
+             Business plan adds multiple projects and export options.",
+        );
+        related_body.score = Some(1.0);
+        related_body.chunk_index = 12;
+
+        let context = assemble_bounded_context_for_query(
+            &general_ir(),
+            "what subscription plans are available?",
+            &[],
+            &[],
+            &[identity_noise, related_body],
+            &[],
+            900,
+        );
+
+        assert!(context.contains("Free plan"), "{context}");
+        assert!(context.contains("Business plan"), "{context}");
     }
 
     #[test]

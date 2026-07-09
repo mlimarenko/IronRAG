@@ -50,11 +50,16 @@ describe('ChatMessage', () => {
     expect(link?.className).toContain('underline');
   });
 
-  it('renders structured evidence sources as visible clickable links', async () => {
+  it('keeps structured evidence sources out of the answer bubble', async () => {
+    let openedEvidence = false;
     await act(async () => {
       root?.render(
         <ChatMessage
           t={t}
+          onOpenEvidence={() => {
+            openedEvidence = true;
+          }}
+          totalSourceCount={1}
           message={{
             id: 'assistant-2',
             role: 'assistant',
@@ -87,26 +92,32 @@ describe('ChatMessage', () => {
       );
     });
 
-    const sourceLink = container.querySelector<HTMLAnchorElement>(
-      'a[href="/v1/content/documents/doc-1/source"]',
-    );
-    expect(sourceLink).toBeTruthy();
-    expect(sourceLink?.textContent).toContain('Alpha Guide');
-    expect(sourceLink?.target).toBe('_blank');
-    expect(sourceLink?.rel).toContain('noopener');
-    expect(sourceLink?.className).toContain('text-primary');
-    expect(sourceLink?.className).toContain('underline');
-    expect(container.textContent).toContain('assistant.sources');
+    expect(container.querySelector('a[href="/v1/content/documents/doc-1/source"]')).toBeNull();
+    expect(container.textContent).not.toContain('Alpha Guide');
+    expect(container.textContent).toContain('assistant.seeAllSources');
     expect(container.textContent).not.toContain('assistant.attachedSources');
     expect(container.textContent).not.toContain('assistant.attachedSourcesNote');
     expect(container.querySelector('hr')).toBeNull();
+    const evidenceButton = Array.from(container.querySelectorAll('button')).find(button =>
+      button.textContent?.includes('assistant.seeAllSources'),
+    );
+    expect(evidenceButton).toBeTruthy();
+    await act(async () => {
+      evidenceButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    expect(openedEvidence).toBe(true);
   });
 
-  it('keeps model-authored trailing source links and separates structured evidence sources', async () => {
+  it('keeps model-authored source links without adding structured evidence links inline', async () => {
+    let openedEvidence = false;
     await act(async () => {
       root?.render(
         <ChatMessage
           t={t}
+          onOpenEvidence={() => {
+            openedEvidence = true;
+          }}
+          totalSourceCount={1}
           message={{
             id: 'assistant-3',
             role: 'assistant',
@@ -143,18 +154,22 @@ describe('ChatMessage', () => {
     expect(container.textContent).toContain('The answer body stays visible.');
     expect(container.textContent).toContain('Generated Source');
     expect(container.querySelector('a[href="https://generated.example/source"]')).toBeTruthy();
-    expect(container.textContent).toContain('assistant.sources');
+    expect(container.textContent).toContain('assistant.seeAllSources');
     expect(container.textContent).not.toContain('assistant.attachedSources');
     expect(container.textContent).not.toContain('assistant.attachedSourcesNote');
 
-    const sourceLink = container.querySelector<HTMLAnchorElement>(
-      'a[href="/v1/content/documents/doc-1/source"]',
+    expect(container.querySelector('a[href="/v1/content/documents/doc-1/source"]')).toBeNull();
+    const evidenceButton = Array.from(container.querySelectorAll('button')).find(button =>
+      button.textContent?.includes('assistant.seeAllSources'),
     );
-    expect(sourceLink).toBeTruthy();
-    expect(sourceLink?.textContent).toContain('Alpha Guide');
+    expect(evidenceButton).toBeTruthy();
+    await act(async () => {
+      evidenceButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    expect(openedEvidence).toBe(true);
   });
 
-  it('keeps inline model links distinct from the attached structured evidence block', async () => {
+  it('does not duplicate inline model links with attached structured evidence links', async () => {
     await act(async () => {
       root?.render(
         <ChatMessage
@@ -194,12 +209,35 @@ describe('ChatMessage', () => {
     const matchingLinks = container.querySelectorAll<HTMLAnchorElement>(
       'a[href="/v1/content/documents/doc-1/source"]',
     );
-    expect(matchingLinks).toHaveLength(2);
+    expect(matchingLinks).toHaveLength(1);
     expect(matchingLinks[0]?.textContent).toBe('Alpha Guide');
-    expect(matchingLinks[1]?.textContent).toContain('Alpha Guide');
-    expect(container.textContent).toContain('assistant.sources');
+    expect(container.textContent).not.toContain('assistant.sources');
     expect(container.textContent).not.toContain('assistant.attachedSources');
     expect(container.textContent).not.toContain('assistant.attachedSourcesNote');
+  });
+
+  it('renders markdown images as safe links instead of embedded media', async () => {
+    await act(async () => {
+      root?.render(
+        <ChatMessage
+          t={t}
+          message={{
+            id: 'assistant-image',
+            role: 'assistant',
+            content: 'Open ![diagram](https://example.test/diagram.png) for details.',
+            timestamp: '2026-04-10T10:00:00Z',
+          }}
+        />,
+      );
+    });
+
+    expect(container.querySelector('img')).toBeNull();
+    const link = container.querySelector<HTMLAnchorElement>(
+      'a[href="https://example.test/diagram.png"]',
+    );
+    expect(link).toBeTruthy();
+    expect(link?.textContent).toBe('diagram');
+    expect(link?.target).toBe('_blank');
   });
 
   it('keeps prose after a separator when it is not a bare source list', async () => {

@@ -1164,6 +1164,10 @@ run_main() {
   (
     cd "$INSTALL_DIR"
     docker compose up -d backend worker frontend
+    # Nginx resolves the backend upstream at startup. If Compose recreated the
+    # backend container but left the frontend untouched, /v1 proxying can keep a
+    # stale Docker DNS target until nginx restarts.
+    docker compose restart frontend >/dev/null
   )
 
   say ""

@@ -54,49 +54,51 @@ export function Composer({
   };
 
   return (
-    <div className="relative z-10 border-t bg-card p-3">
-      {retryable && (
-        <div
-          role="alert"
-          className="mb-2 flex items-start gap-2 rounded-xl border border-destructive/40 bg-destructive/5 px-3 py-2.5 text-xs text-destructive"
-        >
-          <div className="flex-1 min-w-0">
-            <div className="font-semibold">{t('assistant.retryTitle')}</div>
-            <div className="mt-0.5 break-words opacity-80">{retryable.diagnosis}</div>
-          </div>
-          <Button
-            size="sm"
-            variant="outline"
-            className="h-7 shrink-0 gap-1.5 text-xs"
-            onClick={onRetry}
-            disabled={isExecuting}
+    <div className="relative z-10 shrink-0 border-t bg-card/95 px-3 py-3 shadow-soft backdrop-blur sm:px-5">
+      <div className="mx-auto w-full max-w-5xl">
+        {retryable && (
+          <div
+            role="alert"
+            className="mb-2 flex items-start gap-2 rounded-xl border border-destructive/40 bg-destructive/5 px-3 py-2.5 text-xs text-destructive"
           >
-            <RefreshCw className="h-3.5 w-3.5" aria-hidden="true" />
-            {t('assistant.retryAction')}
+            <div className="min-w-0 flex-1">
+              <div className="font-semibold">{t('assistant.retryTitle')}</div>
+              <div className="mt-0.5 break-words opacity-80">{retryable.diagnosis}</div>
+            </div>
+            <Button
+              size="sm"
+              variant="outline"
+              className="h-7 shrink-0 gap-1.5 text-xs"
+              onClick={onRetry}
+              disabled={isExecuting}
+            >
+              <RefreshCw className="h-3.5 w-3.5" aria-hidden="true" />
+              {t('assistant.retryAction')}
+            </Button>
+          </div>
+        )}
+        <div className="flex items-end gap-2">
+          <Textarea
+            ref={textareaRef}
+            aria-label={t('assistant.askPlaceholder')}
+            value={inputText}
+            onChange={(event) => onInputTextChange(event.target.value)}
+            onKeyDown={handleKeyDown}
+            placeholder={t('assistant.askPlaceholder')}
+            className="min-h-[44px] resize-none rounded-xl text-sm"
+            rows={1}
+          />
+          <Button
+            size="icon"
+            className="h-10 w-10 shrink-0 rounded-xl"
+            aria-label={t('assistant.send')}
+            title={t('assistant.send')}
+            onClick={onSend}
+            disabled={!canSend}
+          >
+            <Send className="h-4 w-4" />
           </Button>
         </div>
-      )}
-      <div className="flex items-end gap-2">
-        <Textarea
-          ref={textareaRef}
-          aria-label={t('assistant.askPlaceholder')}
-          value={inputText}
-          onChange={(event) => onInputTextChange(event.target.value)}
-          onKeyDown={handleKeyDown}
-          placeholder={t('assistant.askPlaceholder')}
-          className="min-h-[44px] resize-none rounded-xl text-sm"
-          rows={1}
-        />
-        <Button
-          size="icon"
-          className="h-10 w-10 shrink-0 rounded-xl"
-          aria-label={t('assistant.send')}
-          title={t('assistant.send')}
-          onClick={onSend}
-          disabled={!canSend}
-        >
-          <Send className="h-4 w-4" />
-        </Button>
       </div>
     </div>
   );

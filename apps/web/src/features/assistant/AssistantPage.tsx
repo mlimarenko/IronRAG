@@ -118,6 +118,8 @@ export default function AssistantPage() {
     for (let i = assistant.messages.length - 1; i >= 0; i -= 1) {
       const message = assistant.messages[i];
       if (!message) continue;
+      if (message.role === 'user') return null;
+      if (message.role === 'assistant' && message.content.trim().length === 0) return null;
       if (message.role === 'assistant' && !message.isStreaming && message.executionId) {
         return message.executionId;
       }
@@ -151,7 +153,16 @@ export default function AssistantPage() {
     return undefined;
   }, [assistant.messages]);
 
-  const { openDebugFor, setDebugContext, debugContext, debugLoadingId } = assistant;
+  const {
+    openDebugFor,
+    setDebugContext,
+    setDebugError,
+    setDebugErrorExecutionId,
+    debugContext,
+    debugError,
+    debugErrorExecutionId,
+    debugLoadingId,
+  } = assistant;
 
   // The evidence panel scopes to the chosen message, falling back to the most
   // recent answer with evidence so the panel always has something to show.
@@ -160,18 +171,20 @@ export default function AssistantPage() {
       const match = assistant.messages.find(
         (m: AssistantMessage) => m.id === evidenceMessageId,
       );
-      if (match?.evidence) return match.evidence;
+      return match?.evidence ?? null;
     }
     return assistant.latestEvidence ?? null;
   }, [assistant.latestEvidence, assistant.messages, evidenceMessageId]);
 
   const handleOpenEvidence = useCallback((message: AssistantMessage) => {
     setEvidenceMessageId(message.id);
+    setDebugInspectorOpen(false);
     setEvidenceOpen(true);
-  }, []);
+  }, [setDebugInspectorOpen]);
 
   const handleInspect = useCallback(
     (executionId: string) => {
+      setEvidenceOpen(false);
       setDebugInspectorOpen(true);
       void openDebugFor(executionId);
     },
@@ -189,10 +202,13 @@ export default function AssistantPage() {
     }
     if (!latestAssistantExecutionId) {
       setDebugContext(null);
+      setDebugError(null);
+      setDebugErrorExecutionId(null);
       return;
     }
     if (
       debugContext?.executionId === latestAssistantExecutionId ||
+      debugErrorExecutionId === latestAssistantExecutionId ||
       debugLoadingId === latestAssistantExecutionId
     ) {
       return;
@@ -200,12 +216,20 @@ export default function AssistantPage() {
     void openDebugFor(latestAssistantExecutionId);
   }, [
     debugContext?.executionId,
+    debugErrorExecutionId,
     debugInspectorOpen,
     debugLoadingId,
     latestAssistantExecutionId,
     openDebugFor,
     setDebugContext,
+    setDebugError,
+    setDebugErrorExecutionId,
   ]);
+
+  const visibleDebugError = useMemo(() => {
+    if (!latestAssistantExecutionId) return null;
+    return debugErrorExecutionId === latestAssistantExecutionId ? debugError : null;
+  }, [debugError, debugErrorExecutionId, latestAssistantExecutionId]);
 
   if (!activeLibrary) return <NoLibraryState t={t} onOpenDocuments={() => navigate('/documents')} />;
 
@@ -213,16 +237,16 @@ export default function AssistantPage() {
     return <QueryNotConfiguredState t={t} onOpenAdmin={() => navigate('/admin/ai')} />;
   }
 
-  const showEvidencePanel = evidenceOpen && evidenceForPanel != null;
+  const showEvidencePanel = evidenceOpen && evidenceForPanel != null && !debugInspectorOpen;
 
   return (
     <PageShell
-      bodyClassName="p-3 md:flex md:gap-3"
+      bodyClassName="flex min-h-0 flex-col overflow-hidden p-2 md:flex-row md:gap-3 md:p-3"
     >
-      <div className={`relative z-10 hidden ${sessionRailCollapsed ? '' : 'md:flex'}`}>
+      <div className={`relative z-10 hidden min-h-0 ${sessionRailCollapsed ? '' : 'md:flex'}`}>
         <SessionRail
           id={SESSION_RAIL_ID}
-          className="overflow-hidden workbench-surface"
+          className="flex min-h-0 overflow-hidden workbench-surface"
           t={t}
           locale={locale}
           sessions={sessions}
@@ -240,7 +264,7 @@ export default function AssistantPage() {
       </div>
 
       <DataView
-        className="relative z-10 min-w-0 flex-1"
+        className="relative z-10 min-h-0 min-w-0 flex-1 overflow-hidden"
         inspector={
           showEvidencePanel ? (
             <EvidencePanel
@@ -261,43 +285,45 @@ export default function AssistantPage() {
           if (!open) setEvidenceOpen(false);
         }}
       >
-        <div className="min-w-0 flex-1 flex flex-col overflow-hidden workbench-surface">
-          <div className="flex min-h-14 shrink-0 items-center gap-3 border-b bg-card px-4 text-foreground">
-            <Button
-              type="button"
-              variant="ghost"
-              size="icon"
-              className="-ml-2 h-8 w-8 md:hidden"
-              aria-label={t('assistant.sessions')}
-              onClick={() => setSessionsOpen(true)}
-            >
-              <PanelLeftOpen className="h-4 w-4" />
-            </Button>
-            {sessionRailCollapsed && (
+        <div className="grid min-h-0 min-w-0 flex-1 grid-rows-[auto_minmax(0,1fr)_auto] overflow-hidden workbench-surface">
+          <div className="shrink-0 border-b bg-card px-3 py-3 text-foreground sm:px-5">
+            <div className="mx-auto flex min-h-10 w-full max-w-5xl items-center gap-3">
               <Button
                 type="button"
                 variant="ghost"
                 size="icon"
-                className="-ml-2 hidden h-8 w-8 md:flex"
-                aria-label={t('assistant.expandSessions')}
-                onClick={() => setSessionRailCollapsed(false)}
+                className="-ml-2 h-8 w-8 md:hidden"
+                aria-label={t('assistant.sessions')}
+                onClick={() => setSessionsOpen(true)}
               >
                 <PanelLeftOpen className="h-4 w-4" />
               </Button>
-            )}
-            <div className="hidden h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary sm:flex">
-              <MessageSquare className="h-5 w-5" aria-hidden="true" />
-            </div>
-            <div className="min-w-0">
-              <div className="section-label">
-                {t('assistant.currentSession')}
+              {sessionRailCollapsed && (
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon"
+                  className="-ml-2 hidden h-8 w-8 md:flex"
+                  aria-label={t('assistant.expandSessions')}
+                  onClick={() => setSessionRailCollapsed(false)}
+                >
+                  <PanelLeftOpen className="h-4 w-4" />
+                </Button>
+              )}
+              <div className="hidden h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary sm:flex">
+                <MessageSquare className="h-5 w-5" aria-hidden="true" />
               </div>
-              <div className="min-w-0 truncate text-base font-bold tracking-tight" title={activeSessionTitle}>
-                {activeSessionTitle}
+              <div className="min-w-0">
+                <div className="section-label">
+                  {t('assistant.currentSession')}
+                </div>
+                <div className="min-w-0 truncate text-base font-bold tracking-tight" title={activeSessionTitle}>
+                  {activeSessionTitle}
+                </div>
               </div>
             </div>
           </div>
-          <div className="min-h-0 flex-1 bg-background">
+          <div className="flex min-h-0 overflow-hidden bg-background">
             <ChatThread
               t={t}
               messages={assistant.messages}
@@ -363,7 +389,7 @@ export default function AssistantPage() {
         open={debugInspectorOpen}
         width={debugPanelWidth}
         snapshot={debugContext}
-        error={assistant.debugError}
+        error={visibleDebugError}
         evidence={assistant.latestEvidence ?? null}
         loading={Boolean(debugLoadingId)}
         turnWallClockMs={latestTurnWallClockMs}

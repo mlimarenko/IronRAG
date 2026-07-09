@@ -27,8 +27,8 @@ pub(crate) use super::focused_document_answer::build_focused_document_answer;
 use super::port_answer::{build_port_and_protocol_answer_from_facts, build_port_answer_from_facts};
 use super::question_intent::{
     QuestionIntent, canonical_target_type_tag, classify_question_or_ir_intents,
-    query_ir_allows_procedure_runbook_target, query_ir_has_focused_document_answer_intent,
-    query_ir_has_setup_configuration_target, query_ir_is_unambiguous_versioned_procedure,
+    query_ir_allows_procedure_runbook_target, query_ir_has_setup_configuration_target,
+    query_ir_is_unambiguous_versioned_procedure,
 };
 use super::transport_answer::build_transport_contract_comparison_answer;
 use crate::services::query::effective_query::current_question_segment;
@@ -38,9 +38,7 @@ use super::retrieve::{
     chunk_is_setup_focus_command_path_anchor, command_dense_excerpt_for, excerpt_for,
     focused_excerpt_for,
 };
-use super::source_context::{
-    salient_source_excerpt_for, source_local_evidence_line_score, structured_literal_excerpt_for,
-};
+use super::source_context::{salient_source_excerpt_for, structured_literal_excerpt_for};
 use super::technical_answer::build_exact_technical_literal_answer;
 #[cfg(test)]
 use super::technical_literals::technical_chunk_selection_score;
@@ -361,285 +359,8 @@ pub(super) fn augment_deterministic_grounded_answer_with_evidence(
     query_ir: &QueryIR,
     chunks: &[RuntimeMatchedChunk],
 ) -> String {
-    if !deterministic_answer_should_append_structured_evidence(query_ir) {
-        return answer;
-    }
-    let fragments =
-        deterministic_structured_evidence_fragments(&answer, question, query_ir, chunks);
-    if fragments.is_empty() {
-        return answer;
-    }
-    let labels = i18n::deterministic_answer_labels(query_ir.language);
-    let mut augmented = answer;
-    augmented.push_str("\n\n**");
-    augmented.push_str(labels.evidence);
-    augmented.push_str(":**\n");
-    for fragment in fragments {
-        augmented.push_str("- ");
-        augmented.push_str(&fragment);
-        augmented.push('\n');
-    }
-    augmented.trim_end().to_string()
-}
-
-fn deterministic_answer_should_append_structured_evidence(query_ir: &QueryIR) -> bool {
-    if query_ir.source_slice.is_some() {
-        return false;
-    }
-    if query_ir_has_focused_document_answer_intent(query_ir) {
-        return false;
-    }
-    matches!(query_ir.act, QueryAct::ConfigureHow | QueryAct::Enumerate | QueryAct::Describe)
-}
-
-fn deterministic_structured_evidence_fragments(
-    answer: &str,
-    question: &str,
-    query_ir: &QueryIR,
-    chunks: &[RuntimeMatchedChunk],
-) -> Vec<String> {
-    const STRUCTURED_EVIDENCE_FRAGMENT_LIMIT: usize = 24;
-    const STRUCTURED_EVIDENCE_FRAGMENT_MAX_CHARS: usize = 260;
-    const STRUCTURED_EVIDENCE_CHUNK_SCAN_LIMIT: usize = 32;
-    const STRUCTURED_EVIDENCE_LINES_PER_CHUNK: usize = 3;
-    const STRUCTURED_EVIDENCE_SELECTED_SOURCE_LINES_PER_CHUNK: usize = 6;
-
-    let focus_terms = deterministic_evidence_focus_terms(question, query_ir);
-    let required_focus_terms = deterministic_required_evidence_focus_terms(query_ir);
-    let folded_answer = answer.to_lowercase();
-    let mut fragments = Vec::<String>::new();
-    let mut seen = BTreeSet::new();
-    let selected_source_labels = deterministic_answer_source_document_labels(answer, chunks);
-    let selected_source_only = matches!(query_ir.act, QueryAct::ConfigureHow)
-        && !selected_source_labels.is_empty()
-        && chunks.iter().any(|chunk| {
-            selected_source_labels
-                .contains(&normalized_deterministic_document_label(&chunk.document_label))
-        });
-    let scan_chunks = chunks
-        .iter()
-        .filter(|chunk| {
-            !selected_source_only
-                || selected_source_labels
-                    .contains(&normalized_deterministic_document_label(&chunk.document_label))
-        })
-        .take(STRUCTURED_EVIDENCE_CHUNK_SCAN_LIMIT);
-    for chunk in scan_chunks {
-        let text =
-            repair_technical_layout_noise(&format!("{}\n{}", chunk.excerpt, chunk.source_text));
-        let mut chunk_candidates = Vec::<(usize, usize, String)>::new();
-        for (line_index, line) in
-            text.lines().map(str::trim).filter(|line| !line.is_empty()).enumerate()
-        {
-            let score = deterministic_structured_evidence_line_score(line, &focus_terms);
-            if score == 0 {
-                continue;
-            }
-            if selected_source_only
-                && deterministic_evidence_appendix_requires_focus_match(query_ir)
-                && !required_focus_terms.is_empty()
-                && !deterministic_evidence_line_matches_focus(line, &required_focus_terms)
-            {
-                continue;
-            }
-            let fragment = deterministic_clean_structured_evidence_fragment(
-                line,
-                STRUCTURED_EVIDENCE_FRAGMENT_MAX_CHARS,
-            );
-            if fragment.is_empty() || folded_answer.contains(&fragment.to_lowercase()) {
-                continue;
-            }
-            if deterministic_evidence_appendix_requires_answer_alignment(query_ir)
-                && !deterministic_evidence_line_matches_answer(&fragment, &folded_answer)
-            {
-                if !deterministic_evidence_line_is_focus_bound_fact(
-                    &fragment,
-                    &required_focus_terms,
-                ) {
-                    continue;
-                }
-            }
-            let key = fragment.to_lowercase();
-            if seen.insert(key) {
-                chunk_candidates.push((score, line_index, fragment));
-            }
-        }
-        chunk_candidates.sort_by(
-            |(left_score, left_index, left), (right_score, right_index, right)| {
-                right_score
-                    .cmp(left_score)
-                    .then_with(|| left_index.cmp(right_index))
-                    .then_with(|| left.cmp(right))
-            },
-        );
-        let per_chunk_limit = if selected_source_only {
-            STRUCTURED_EVIDENCE_SELECTED_SOURCE_LINES_PER_CHUNK
-        } else {
-            STRUCTURED_EVIDENCE_LINES_PER_CHUNK
-        };
-        for (_, _, fragment) in chunk_candidates.into_iter().take(per_chunk_limit) {
-            fragments.push(fragment);
-            if fragments.len() >= STRUCTURED_EVIDENCE_FRAGMENT_LIMIT {
-                return fragments;
-            }
-        }
-    }
-    fragments
-}
-
-fn deterministic_answer_source_document_labels(
-    answer: &str,
-    chunks: &[RuntimeMatchedChunk],
-) -> BTreeSet<String> {
-    let folded_answer = answer.to_lowercase();
-    chunks
-        .iter()
-        .filter_map(|chunk| {
-            let label = normalized_deterministic_document_label(&chunk.document_label);
-            (!label.is_empty() && folded_answer.contains(&label)).then_some(label)
-        })
-        .collect()
-}
-
-fn normalized_deterministic_document_label(label: &str) -> String {
-    label.trim().to_lowercase()
-}
-
-fn deterministic_structured_evidence_line_score(line: &str, focus_terms: &[String]) -> usize {
-    source_local_evidence_line_score(line, focus_terms)
-}
-
-fn deterministic_evidence_appendix_requires_focus_match(query_ir: &QueryIR) -> bool {
-    matches!(query_ir.act, QueryAct::ConfigureHow)
-        && (query_ir_is_unambiguous_versioned_procedure(query_ir)
-            || query_ir.target_types.iter().any(|target_type| {
-                let normalized = target_type.trim().to_lowercase();
-                matches!(
-                    canonical_target_type_tag(target_type).as_str(),
-                    "version" | "release" | "changelog"
-                ) || matches!(normalized.as_str(), "version" | "release" | "changelog")
-            }))
-}
-
-fn deterministic_evidence_appendix_requires_answer_alignment(query_ir: &QueryIR) -> bool {
-    matches!(query_ir.act, QueryAct::ConfigureHow)
-}
-
-fn deterministic_evidence_line_matches_answer(line: &str, folded_answer: &str) -> bool {
-    let structural_anchors = deterministic_evidence_line_structural_anchors(line);
-    if !structural_anchors.is_empty() {
-        let matched_anchor_count =
-            structural_anchors.iter().filter(|anchor| folded_answer.contains(*anchor)).count();
-        if matched_anchor_count == 0 {
-            return false;
-        }
-        if deterministic_evidence_line_has_external_action_anchor(line)
-            && matched_anchor_count < structural_anchors.len()
-        {
-            return false;
-        }
-        return true;
-    }
-    if line_has_command_signal(line) {
-        return false;
-    }
-
-    let tokens = normalized_alnum_tokens(line, 3);
-    if tokens.is_empty() {
-        return false;
-    }
-    let overlap = tokens.iter().filter(|token| folded_answer.contains(token.as_str())).count();
-    overlap >= tokens.len().min(2)
-}
-
-fn deterministic_evidence_line_is_focus_bound_fact(
-    line: &str,
-    required_focus_terms: &[String],
-) -> bool {
-    !required_focus_terms.is_empty()
-        && deterministic_evidence_line_matches_focus(line, required_focus_terms)
-        && !deterministic_evidence_line_has_external_action_anchor(line)
-}
-
-fn deterministic_evidence_line_has_external_action_anchor(line: &str) -> bool {
-    line_has_command_signal(line)
-        || !extract_explicit_path_literals(line, 1).is_empty()
-        || !extract_package_command_literals(line, 1).is_empty()
-        || !extract_configuration_section_literals(line, 1).is_empty()
-        || deterministic_evidence_line_has_version_anchor(line)
-}
-
-fn deterministic_evidence_line_has_version_anchor(line: &str) -> bool {
-    line.split_whitespace().any(|token| {
-        let token = token.trim_matches(|ch: char| {
-            !(ch.is_ascii_alphanumeric() || matches!(ch, '.' | '-' | '_'))
-        });
-        !token.is_empty() && extract_semver_like_version(token).is_some()
-    })
-}
-
-fn deterministic_evidence_line_structural_anchors(line: &str) -> BTreeSet<String> {
-    let mut anchors = BTreeSet::new();
-    anchors.extend(extract_explicit_path_literals(line, 8));
-    anchors.extend(extract_package_command_literals(line, 4));
-    anchors.extend(extract_parameter_literals(line, 8));
-    anchors.extend(extract_configuration_section_literals(line, 4));
-    for token in line.split_whitespace() {
-        let token = token.trim_matches(|ch: char| {
-            !(ch.is_ascii_alphanumeric() || matches!(ch, '.' | '-' | '_'))
-        });
-        if !token.is_empty() && extract_semver_like_version(token).is_some() {
-            anchors.insert(token.to_string());
-        }
-    }
-    anchors
-        .into_iter()
-        .map(|anchor| repair_technical_layout_noise(&anchor).trim().to_lowercase())
-        .filter(|anchor| !anchor.is_empty())
-        .collect()
-}
-
-fn deterministic_evidence_line_matches_focus(line: &str, focus_terms: &[String]) -> bool {
-    let folded = line.to_lowercase();
-    focus_terms
-        .iter()
-        .map(|term| term.trim())
-        .filter(|term| term.chars().count() >= 3)
-        .any(|term| folded.contains(term))
-}
-
-fn deterministic_evidence_focus_terms(question: &str, query_ir: &QueryIR) -> Vec<String> {
-    let mut terms = BTreeSet::new();
-    for term in technical_literal_focus_keywords(question, Some(query_ir))
-        .into_iter()
-        .chain(crate::services::query::planner::extract_keywords(question))
-    {
-        let normalized = term.trim().to_lowercase();
-        if normalized.chars().count() >= 3 {
-            terms.insert(normalized);
-        }
-    }
-    terms.into_iter().collect()
-}
-
-fn deterministic_required_evidence_focus_terms(query_ir: &QueryIR) -> Vec<String> {
-    let mut terms = BTreeSet::new();
-    if let Some(document_focus) = query_ir.document_focus.as_ref() {
-        terms.extend(label_terms(&document_focus.hint, 3));
-    }
-    for entity in &query_ir.target_entities {
-        terms.extend(label_terms(&entity.label, 3));
-    }
-    terms.into_iter().collect()
-}
-
-fn deterministic_clean_structured_evidence_fragment(line: &str, max_chars: usize) -> String {
-    let cleaned = line.trim().trim_start_matches(['-', '*', '+']).trim().trim_matches('`').trim();
-    if cleaned.chars().count() <= max_chars {
-        cleaned.to_string()
-    } else {
-        excerpt_for(cleaned, max_chars)
-    }
+    let _ = (question, query_ir, chunks);
+    answer
 }
 
 fn build_structured_list_grounded_answer(
@@ -881,7 +602,6 @@ struct DeterministicAnswerLabels {
     parameter: &'static str,
     parameter_details: &'static str,
     update_sequence: &'static str,
-    evidence: &'static str,
 }
 
 fn deterministic_answer_labels(question: &str, query_ir: &QueryIR) -> DeterministicAnswerLabels {
@@ -897,7 +617,6 @@ fn deterministic_answer_labels(question: &str, query_ir: &QueryIR) -> Determinis
         parameter: labels.parameter,
         parameter_details: labels.parameter_details,
         update_sequence: labels.update_sequence,
-        evidence: labels.evidence,
     }
 }
 
@@ -1995,10 +1714,6 @@ pub(super) fn build_update_procedure_sequence_answer(
     ];
     for (index, step) in selection.steps.iter().enumerate() {
         lines.push(render_update_procedure_step(index + 1, step));
-    }
-    if !selection.anchors.is_empty() {
-        lines.push(String::new());
-        lines.push(format!("**{}:** `{}`", labels.evidence, selection.anchors.join("`, `")));
     }
     Some(lines.join("\n"))
 }
@@ -5071,7 +4786,7 @@ fn build_structured_source_unit_overlap_inventory_answer(
             .then_with(|| left.value.cmp(&right.value))
     });
     let mut seen = HashSet::<String>::new();
-    let mut lines = selected
+    let lines = selected
         .into_iter()
         .filter_map(|(_, field)| {
             let rendered = format!(
@@ -5090,7 +4805,6 @@ fn build_structured_source_unit_overlap_inventory_answer(
     if !structured_source_unit_inventory_matches_specific_terms(&lines, &focus) {
         return None;
     }
-    lines.insert(0, "Structured field evidence:".to_string());
     Some(lines.join("\n"))
 }
 
@@ -7416,7 +7130,7 @@ mod source_unit_answer_tests {
     }
 
     #[test]
-    fn deterministic_answer_appends_salient_source_lines() {
+    fn deterministic_answer_keeps_salient_source_lines_out_of_visible_answer() {
         let mut chunk = evidence_chunk(
             1,
             Some("paragraph"),
@@ -7434,11 +7148,11 @@ mod source_unit_answer_tests {
             &[chunk],
         );
 
-        assert!(answer.contains("Theta marker changed from state K to state L"), "{answer}");
+        assert!(!answer.contains("Theta marker changed from state K to state L"), "{answer}");
     }
 
     #[test]
-    fn deterministic_answer_appends_focus_only_source_lines() {
+    fn deterministic_answer_keeps_focus_only_source_lines_out_of_visible_answer() {
         let mut chunk = evidence_chunk(1, Some("paragraph"), "Theta marker reached stable status");
         chunk.document_label = "Sample Subject notes".to_string();
         chunk.score = Some(1.0);
@@ -7452,11 +7166,11 @@ mod source_unit_answer_tests {
             &[chunk],
         );
 
-        assert!(answer.contains("Theta marker reached stable status"), "{answer}");
+        assert!(!answer.contains("Theta marker reached stable status"), "{answer}");
     }
 
     #[test]
-    fn update_procedure_answer_augmentation_keeps_salient_non_step_evidence() {
+    fn update_procedure_answer_augmentation_keeps_non_step_evidence_out_of_visible_answer() {
         let procedure_chunk = evidence_chunk(
             1,
             Some("paragraph"),
@@ -7484,11 +7198,11 @@ mod source_unit_answer_tests {
             &[procedure_chunk, evidence_chunk],
         );
 
-        assert!(answer.contains("Theta marker changed from state K to state L"), "{answer}");
+        assert!(!answer.contains("Theta marker changed from state K to state L"), "{answer}");
     }
 
     #[test]
-    fn update_procedure_answer_augmentation_stays_with_selected_source_document() {
+    fn update_procedure_answer_augmentation_does_not_append_selected_source_evidence() {
         let mut procedure_chunk = evidence_chunk(
             1,
             Some("paragraph"),
@@ -7521,7 +7235,7 @@ mod source_unit_answer_tests {
             &[procedure_chunk, sibling_evidence, same_document_sibling, selected_source_evidence],
         );
 
-        assert!(answer.contains("audit.marker=state-l"), "{answer}");
+        assert!(!answer.contains("audit.marker=state-l"), "{answer}");
         assert!(!answer.contains("audit.marker=state-x"), "{answer}");
         assert!(!answer.contains("audit.marker=state-y"), "{answer}");
     }
@@ -8462,13 +8176,16 @@ mod source_unit_answer_tests {
             "how to update Sample Target?",
             &configure_update_focus_ir("Sample Target"),
         );
-        assert_eq!(english.evidence, "Evidence fragments");
         assert_eq!(english.update_sequence, "Steps");
+        assert_eq!(english.parameter_details, "Parameter details");
 
         let mut russian_ir = configure_update_focus_ir("S1");
         russian_ir.language = crate::domains::query_ir::QueryLanguage::Ru;
         let russian = deterministic_answer_labels("how to update S1?", &russian_ir);
-        assert_eq!(russian.evidence, i18n::RU_DETERMINISTIC_ANSWER_LABELS.evidence);
+        assert_eq!(
+            russian.parameter_details,
+            i18n::RU_DETERMINISTIC_ANSWER_LABELS.parameter_details
+        );
 
         let auto_question =
             deterministic_answer_labels("placeholder S1?", &configure_update_focus_ir("S1"));
@@ -8527,7 +8244,7 @@ mod source_unit_answer_tests {
         assert!(answer.contains("Sample Target update guide"));
         assert!(answer.contains("/tmp/sample-runner.sh"));
         assert!(answer.contains("sample-prepare +x"));
-        assert!(answer.contains("**Evidence fragments:**"));
+        assert!(!answer.contains("**Evidence fragments:**"));
         assert!(answer.contains("`/tmp/sample-runner.sh`"));
         assert!(!answer.contains("platform-release"));
     }

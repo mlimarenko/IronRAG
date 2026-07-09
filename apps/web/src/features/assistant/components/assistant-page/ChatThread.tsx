@@ -23,7 +23,7 @@ export function ChatThread({
   onOpenEvidence,
   onInspect,
 }: ChatThreadProps) {
-  const messagesEndRef = useRef<HTMLDivElement>(null);
+  const scrollRef = useRef<HTMLDivElement>(null);
   const lastMessage = messages[messages.length - 1];
   const scrollSignature = lastMessage
     ? [
@@ -38,20 +38,20 @@ export function ChatThread({
   useEffect(() => {
     if (messages.length === 0) return;
     const frame = requestAnimationFrame(() => {
-      if (typeof messagesEndRef.current?.scrollIntoView === 'function') {
-        messagesEndRef.current.scrollIntoView({
-          behavior: 'smooth',
-          block: 'end',
-        });
-      }
+      const container = scrollRef.current;
+      if (!container) return;
+      container.scrollTo({
+        top: container.scrollHeight,
+        behavior: 'smooth',
+      });
     });
     return () => cancelAnimationFrame(frame);
   }, [messages.length, scrollSignature]);
 
   return (
-    <div className="flex-1 overflow-y-auto p-4 space-y-4">
+    <div ref={scrollRef} className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-3 py-4 sm:px-5">
       {messages.length === 0 ? (
-        <div className="flex min-h-full flex-col items-center justify-center py-8 animate-fade-in">
+        <div className="mx-auto flex min-h-full w-full max-w-5xl flex-col items-center justify-center py-8 animate-fade-in">
           <WorkbenchEmptyState
             icon={<Brain className="h-7 w-7 text-primary" />}
             title={t('assistant.askQuestion')}
@@ -75,56 +75,56 @@ export function ChatThread({
           />
         </div>
       ) : (
-        messages.map((message, index) => {
-          let responseMs: number | undefined;
-          if (message.role === 'assistant') {
-            if (typeof message.durationMs === 'number' && message.durationMs > 0) {
-              // Server-authoritative wall-clock; immune to client↔server skew.
-              responseMs = message.durationMs;
-            } else if (message.timestamp) {
-              // Reload path: both timestamps are server-stamped, so their
-              // delta is a single-clock measurement.
-              const assistantMs = Date.parse(message.timestamp);
-              for (let i = index - 1; i >= 0; i -= 1) {
-                const prev = messages[i];
-                if (prev?.role === 'user' && prev.timestamp) {
-                  const userMs = Date.parse(prev.timestamp);
-                  const delta = assistantMs - userMs;
-                  if (Number.isFinite(delta) && delta > 0) {
-                    responseMs = delta;
+        <div className="mx-auto flex w-full max-w-5xl flex-col gap-4">
+          {messages.map((message, index) => {
+            let responseMs: number | undefined;
+            if (message.role === 'assistant') {
+              if (typeof message.durationMs === 'number' && message.durationMs > 0) {
+                // Server-authoritative wall-clock; immune to client↔server skew.
+                responseMs = message.durationMs;
+              } else if (message.timestamp) {
+                // Reload path: both timestamps are server-stamped, so their
+                // delta is a single-clock measurement.
+                const assistantMs = Date.parse(message.timestamp);
+                for (let i = index - 1; i >= 0; i -= 1) {
+                  const prev = messages[i];
+                  if (prev?.role === 'user' && prev.timestamp) {
+                    const userMs = Date.parse(prev.timestamp);
+                    const delta = assistantMs - userMs;
+                    if (Number.isFinite(delta) && delta > 0) {
+                      responseMs = delta;
+                    }
+                    break;
                   }
-                  break;
                 }
               }
             }
-          }
-          const executionId = message.executionId ?? undefined;
-          return (
-            <ChatMessage
-              key={message.id}
-              t={t}
-              message={message}
-              responseMs={responseMs}
-              developerMode={developerMode}
-              totalSourceCount={
-                message.role === 'assistant' ? countDistinctSources(message) : undefined
-              }
-              onOpenEvidence={
-                message.role === 'assistant' && message.evidence
-                  ? () => onOpenEvidence(message)
-                  : undefined
-              }
-              onInspect={
-                message.role === 'assistant' && executionId
-                  ? () => onInspect(executionId)
-                  : undefined
-              }
-            />
-          );
-        })
+            const executionId = message.executionId ?? undefined;
+            return (
+              <ChatMessage
+                key={message.id}
+                t={t}
+                message={message}
+                responseMs={responseMs}
+                developerMode={developerMode}
+                totalSourceCount={
+                  message.role === 'assistant' ? countDistinctSources(message) : undefined
+                }
+                onOpenEvidence={
+                  message.role === 'assistant' && message.evidence
+                    ? () => onOpenEvidence(message)
+                    : undefined
+                }
+                onInspect={
+                  message.role === 'assistant' && executionId
+                    ? () => onInspect(executionId)
+                    : undefined
+                }
+              />
+            );
+          })}
+        </div>
       )}
-
-      <div ref={messagesEndRef} />
     </div>
   );
 }

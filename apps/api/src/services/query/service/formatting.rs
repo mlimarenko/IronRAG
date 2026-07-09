@@ -47,6 +47,7 @@ pub(crate) fn build_prepared_segment_references(
     blocks: &[KnowledgeStructuredBlockRow],
     block_rank_refs: &HashMap<Uuid, RankedBundleReference>,
     query_text: &str,
+    answer_text: Option<&str>,
     revision_info: &HashMap<Uuid, PreparedSegmentRevisionInfo>,
 ) -> Vec<PreparedSegmentReference> {
     let Some(bundle) = bundle else {
@@ -54,6 +55,7 @@ pub(crate) fn build_prepared_segment_references(
     };
     let execution_id = execution_id_of(bundle);
     let query_focus_tokens = prepared_segment_focus_tokens(query_text);
+    let answer_focus_tokens = answer_text.map(prepared_segment_focus_tokens).unwrap_or_default();
     let explicit_document_literals = explicit_document_reference_literals(query_text);
     let explicit_document_literal = match explicit_document_literals.as_slice() {
         [literal] => Some(literal.as_str()),
@@ -64,31 +66,40 @@ pub(crate) fn build_prepared_segment_references(
     let latest_revision_by_document = latest_block_revision_by_document(blocks);
     let latest_revision_has_table_analytics =
         latest_revision_has_table_analytics(blocks, &latest_revision_by_document);
+    let candidate_block_tokens = prepared_segment_candidate_block_tokens(
+        blocks,
+        block_rank_refs,
+        table_aggregation,
+        &latest_revision_by_document,
+        &latest_revision_has_table_analytics,
+    );
+    let query_token_frequencies =
+        prepared_segment_query_token_frequencies(&query_focus_tokens, &candidate_block_tokens);
+    let answer_token_frequencies =
+        prepared_segment_query_token_frequencies(&answer_focus_tokens, &candidate_block_tokens);
     let mut revision_focus_scores = HashMap::<Uuid, usize>::new();
     for block in blocks {
-        if !block_rank_refs.contains_key(&block.block_id) {
+        let Some(block_tokens) = candidate_block_tokens.get(&block.block_id) else {
             continue;
-        }
-        if table_aggregation
-            && latest_revision_by_document.get(&block.document_id).copied()
-                != Some(block.revision_id)
-        {
-            continue;
-        }
-        if table_aggregation
-            && latest_revision_has_table_analytics.contains(&block.document_id)
-            && !is_table_analytics_block(block)
-        {
-            continue;
-        }
-        let focus_score = prepared_segment_focus_score(&query_focus_tokens, block);
-        if focus_score == 0 {
+        };
+        let focus_score = prepared_segment_weighted_focus_score(
+            &query_focus_tokens,
+            block_tokens,
+            &query_token_frequencies,
+        );
+        let answer_score = prepared_segment_weighted_focus_score(
+            &answer_focus_tokens,
+            block_tokens,
+            &answer_token_frequencies,
+        );
+        let combined_score = focus_score.max(answer_score);
+        if combined_score == 0 {
             continue;
         }
         revision_focus_scores
             .entry(block.revision_id)
-            .and_modify(|current| *current = (*current).max(focus_score))
-            .or_insert(focus_score);
+            .and_modify(|current| *current = (*current).max(combined_score))
+            .or_insert(combined_score);
     }
     let max_revision_focus_score = revision_focus_scores.values().copied().max().unwrap_or(0);
     let mut items = blocks
@@ -108,6 +119,17 @@ pub(crate) fn build_prepared_segment_references(
             }) {
                 return None;
             }
+            let block_tokens = candidate_block_tokens.get(&block.block_id)?;
+            let focus_score = prepared_segment_weighted_focus_score(
+                &query_focus_tokens,
+                block_tokens,
+                &query_token_frequencies,
+            );
+            let answer_score = prepared_segment_weighted_focus_score(
+                &answer_focus_tokens,
+                block_tokens,
+                &answer_token_frequencies,
+            );
             let reference = PreparedSegmentReference {
                 execution_id,
                 segment_id: block.block_id,
@@ -125,7 +147,8 @@ pub(crate) fn build_prepared_segment_references(
             };
             Some((
                 reference,
-                prepared_segment_focus_score(&query_focus_tokens, block),
+                answer_score,
+                focus_score,
                 prepared_segment_kind_priority(block, table_aggregation),
                 block.ordinal,
             ))
@@ -135,15 +158,16 @@ pub(crate) fn build_prepared_segment_references(
         right
             .1
             .cmp(&left.1)
+            .then_with(|| right.2.cmp(&left.2))
             .then_with(|| left.0.rank.cmp(&right.0.rank))
             .then_with(|| right.0.score.total_cmp(&left.0.score))
-            .then_with(|| right.2.cmp(&left.2))
-            .then_with(|| left.3.cmp(&right.3))
+            .then_with(|| right.3.cmp(&left.3))
+            .then_with(|| left.4.cmp(&right.4))
             .then_with(|| left.0.segment_id.cmp(&right.0.segment_id))
     });
     let mut per_revision_counts = HashMap::<Uuid, usize>::new();
     let mut limited = Vec::with_capacity(items.len().min(MAX_DETAIL_PREPARED_SEGMENT_REFERENCES));
-    for (reference, _, _, _) in items {
+    for (reference, _, _, _, _) in items {
         let per_revision = per_revision_counts.entry(reference.revision_id).or_insert(0);
         if *per_revision >= MAX_DETAIL_PREPARED_SEGMENT_REFERENCES_PER_REVISION {
             continue;
@@ -211,13 +235,37 @@ pub(crate) fn prepared_segment_focus_tokens(query_text: &str) -> BTreeSet<String
         .collect()
 }
 
-pub(crate) fn prepared_segment_focus_score(
-    query_focus_tokens: &BTreeSet<String>,
-    block: &KnowledgeStructuredBlockRow,
-) -> usize {
-    if query_focus_tokens.is_empty() {
-        return 0;
-    }
+fn prepared_segment_candidate_block_tokens(
+    blocks: &[KnowledgeStructuredBlockRow],
+    block_rank_refs: &HashMap<Uuid, RankedBundleReference>,
+    table_aggregation: bool,
+    latest_revision_by_document: &HashMap<Uuid, Uuid>,
+    latest_revision_has_table_analytics: &BTreeSet<Uuid>,
+) -> HashMap<Uuid, BTreeSet<String>> {
+    blocks
+        .iter()
+        .filter_map(|block| {
+            if !block_rank_refs.contains_key(&block.block_id) {
+                return None;
+            }
+            if table_aggregation
+                && latest_revision_by_document.get(&block.document_id).copied()
+                    != Some(block.revision_id)
+            {
+                return None;
+            }
+            if table_aggregation
+                && latest_revision_has_table_analytics.contains(&block.document_id)
+                && !is_table_analytics_block(block)
+            {
+                return None;
+            }
+            Some((block.block_id, prepared_segment_block_tokens(block)))
+        })
+        .collect()
+}
+
+fn prepared_segment_block_tokens(block: &KnowledgeStructuredBlockRow) -> BTreeSet<String> {
     let mut focus_haystack = String::new();
     if !block.heading_trail.is_empty() {
         focus_haystack.push_str(&block.heading_trail.join(" "));
@@ -225,13 +273,80 @@ pub(crate) fn prepared_segment_focus_score(
     }
     if !block.section_path.is_empty() {
         focus_haystack.push_str(&block.section_path.join(" "));
+        focus_haystack.push(' ');
+    }
+    if !block.text.is_empty() {
+        focus_haystack.push_str(&block.text);
     }
     let normalized_focus_haystack = normalize_graph_identity_component(&focus_haystack);
-    let block_tokens = normalized_focus_haystack
+    normalized_focus_haystack
         .split('_')
-        .filter(|token| !token.is_empty())
-        .collect::<BTreeSet<_>>();
-    query_focus_tokens.iter().filter(|token| block_tokens.contains(token.as_str())).count()
+        .filter(|token| token.chars().count() >= PREPARED_SEGMENT_FOCUS_MIN_TOKEN_LEN)
+        .map(str::to_string)
+        .collect()
+}
+
+fn prepared_segment_query_token_frequencies(
+    query_focus_tokens: &BTreeSet<String>,
+    candidate_block_tokens: &HashMap<Uuid, BTreeSet<String>>,
+) -> HashMap<String, usize> {
+    query_focus_tokens
+        .iter()
+        .map(|query_token| {
+            let frequency = candidate_block_tokens
+                .values()
+                .filter(|block_tokens| {
+                    block_tokens.iter().any(|block_token| {
+                        prepared_segment_token_matches(query_token.as_str(), block_token.as_str())
+                    })
+                })
+                .count()
+                .max(1);
+            (query_token.clone(), frequency)
+        })
+        .collect()
+}
+
+fn prepared_segment_weighted_focus_score(
+    query_focus_tokens: &BTreeSet<String>,
+    block_tokens: &BTreeSet<String>,
+    query_token_frequencies: &HashMap<String, usize>,
+) -> usize {
+    let candidate_count = query_token_frequencies.values().copied().max().unwrap_or(1).max(1);
+    query_focus_tokens
+        .iter()
+        .filter_map(|query_token| {
+            let matched = block_tokens.iter().any(|block_token| {
+                prepared_segment_token_matches(query_token.as_str(), block_token.as_str())
+            });
+            if !matched {
+                return None;
+            }
+            let frequency = query_token_frequencies.get(query_token).copied().unwrap_or(1).max(1);
+            Some(candidate_count.saturating_sub(frequency).saturating_add(1))
+        })
+        .sum()
+}
+
+fn prepared_segment_token_matches(query_token: &str, block_token: &str) -> bool {
+    if query_token == block_token {
+        return true;
+    }
+    let query_len = query_token.chars().count();
+    let block_len = block_token.chars().count();
+    if query_len < PREPARED_SEGMENT_FOCUS_MIN_TOKEN_LEN
+        || block_len < PREPARED_SEGMENT_FOCUS_MIN_TOKEN_LEN
+    {
+        return false;
+    }
+    if query_token.starts_with(block_token) || block_token.starts_with(query_token) {
+        return true;
+    }
+    common_prefix_char_count(query_token, block_token) >= 5
+}
+
+fn common_prefix_char_count(left: &str, right: &str) -> usize {
+    left.chars().zip(right.chars()).take_while(|(left, right)| left == right).count()
 }
 
 fn prepared_segment_kind_priority(

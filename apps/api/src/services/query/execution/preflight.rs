@@ -500,7 +500,11 @@ mod tests {
         });
 
         assert!(query_ir.is_follow_up());
-        assert!(!canonical_preflight_requires_synthesis("how to update Alpha Service?", &query_ir));
+        assert!(!canonical_preflight_requires_synthesis(
+            "how to update Alpha Service?",
+            &query_ir,
+            &QueryIntentProfile::default()
+        ));
     }
 
     fn query_ir(act: QueryAct, scope: QueryScope, target_types: &[&str]) -> QueryIR {
@@ -573,7 +577,8 @@ pub(super) fn build_canonical_preflight_answer(
 ) -> Option<CanonicalAnswerOverride> {
     let missing_explicit_document_answer =
         build_missing_explicit_document_answer(question, document_index);
-    let requires_synthesis = canonical_preflight_requires_synthesis(question, query_ir);
+    let requires_synthesis =
+        canonical_preflight_requires_synthesis(question, query_ir, intent_profile);
     let deterministic_grounded_answer = if requires_synthesis {
         None
     } else {
@@ -627,8 +632,24 @@ pub(super) fn build_canonical_preflight_answer(
     })
 }
 
-fn canonical_preflight_requires_synthesis(question: &str, query_ir: &QueryIR) -> bool {
+fn canonical_preflight_requires_synthesis(
+    question: &str,
+    query_ir: &QueryIR,
+    intent_profile: &QueryIntentProfile,
+) -> bool {
     scoped_setup_literal_inventory_requires_synthesis(question, query_ir)
+        || open_enumeration_preflight_requires_synthesis(question, query_ir, intent_profile)
+}
+
+fn open_enumeration_preflight_requires_synthesis(
+    question: &str,
+    query_ir: &QueryIR,
+    intent_profile: &QueryIntentProfile,
+) -> bool {
+    matches!(query_ir.act, QueryAct::Enumerate)
+        && !intent_profile.exact_literal_technical
+        && !query_ir_requests_setup_literal_context(query_ir)
+        && !current_question_has_exact_technical_surface(question)
 }
 
 fn scoped_setup_literal_inventory_requires_synthesis(question: &str, query_ir: &QueryIR) -> bool {

@@ -45,11 +45,11 @@ function EvidencePanelImpl({
   return (
     <div
       className={cn(
-        'shrink-0 overflow-y-auto',
+        'flex h-full min-h-0 shrink-0 flex-col overflow-hidden',
         className,
       )}
     >
-      <div className="flex items-center justify-between gap-2 border-b p-3">
+      <div className="flex shrink-0 items-center justify-between gap-2 border-b p-3">
         <h3 className="text-sm font-bold tracking-tight">{t('assistant.evidence')}</h3>
         {onClose && (
           <Button
@@ -65,7 +65,10 @@ function EvidencePanelImpl({
           </Button>
         )}
       </div>
-      <div className="p-3 space-y-4">
+      <div
+        className="min-h-0 flex-1 space-y-4 overflow-y-auto overscroll-contain p-3"
+        data-testid="assistant-evidence-scroll"
+      >
         {showVerdict && (
           <VerificationChip
             t={t}

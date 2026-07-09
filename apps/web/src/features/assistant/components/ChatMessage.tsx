@@ -6,8 +6,6 @@ import {
   Check,
   CheckCircle2,
   Copy,
-  ExternalLink,
-  FileText,
   Layers,
   Loader2,
   Wrench,
@@ -29,14 +27,6 @@ type ChatMessageProps = {
   /** When true, surfaces the per-message debug affordance. */
   developerMode?: boolean | undefined;
 };
-
-type AnswerSourceLink = {
-  href: string;
-  label: string;
-  kind: 'stored_document' | 'external_url';
-};
-
-const MAX_INLINE_SOURCE_LINKS = 5;
 
 function formatElapsed(ms: number): string {
   const seconds = Math.max(0, Math.floor(ms / 1000));
@@ -140,33 +130,6 @@ function renderActivityIcon(event: AssistantAgentActivityEvent | undefined) {
   return <Loader2 className={className} />;
 }
 
-function collectAnswerSourceLinks(message: AssistantMessage): AnswerSourceLink[] {
-  const seen = new Set<string>();
-  const links: AnswerSourceLink[] = [];
-
-  for (const ref of message.evidence?.segmentRefs ?? []) {
-    const sourceAccess = ref.sourceAccess;
-    const fallbackSourceUri = ref.sourceUri?.trim();
-    const href =
-      sourceAccess?.href ??
-      (fallbackSourceUri?.startsWith('http://') || fallbackSourceUri?.startsWith('https://')
-        ? fallbackSourceUri
-        : null);
-    if (!href || seen.has(href)) continue;
-
-    const label = (ref.documentTitle || ref.documentName || href).trim();
-    links.push({
-      href,
-      label: label || href,
-      kind: sourceAccess?.kind ?? 'external_url',
-    });
-    seen.add(href);
-    if (links.length >= MAX_INLINE_SOURCE_LINKS) break;
-  }
-
-  return links;
-}
-
 function PendingAssistantActivity({
   events = [],
   live = true,
@@ -193,7 +156,7 @@ function PendingAssistantActivity({
 
   return (
     <div
-      className={`agent-activity-card w-full max-w-[560px] overflow-hidden rounded-xl border border-primary/15 bg-card text-xs shadow-lifted ${
+      className={`agent-activity-card w-full max-w-2xl overflow-hidden rounded-xl border border-primary/15 bg-card text-xs shadow-lifted ${
         live ? 'agent-activity-card-live' : ''
       }`}
     >
@@ -249,6 +212,25 @@ const markdownComponents = {
       {children}
     </a>
   ),
+  img: ({
+    alt,
+    src,
+  }: React.ImgHTMLAttributes<HTMLImageElement>) => {
+    const label = alt?.trim() || src?.trim();
+    if (!src) {
+      return label ? <span>{label}</span> : null;
+    }
+    return (
+      <a
+        href={src}
+        target="_blank"
+        rel="noopener noreferrer"
+        className="break-words font-semibold text-primary underline decoration-primary/40 underline-offset-2 transition-colors hover:decoration-primary"
+      >
+        {label || src}
+      </a>
+    );
+  },
   code: ({ className, children, ...props }: React.HTMLAttributes<HTMLElement>) => {
     const isInline = !className;
     return isInline ? (
@@ -327,9 +309,6 @@ function ChatMessageImpl({
   const vcState = message.evidence?.verificationState;
   const showVerdict = !isUser && vcState != null && vcState !== 'not_run';
   const isPendingAssistant = !isUser && !message.content;
-  const sourceLinks = !isUser && !isPendingAssistant ? collectAnswerSourceLinks(message) : [];
-  const hiddenSourceCount =
-    totalSourceCount != null ? Math.max(0, totalSourceCount - sourceLinks.length) : 0;
   const hasEvidence = Boolean(
     message.evidence &&
       (message.evidence.segmentRefs.length > 0 ||
@@ -339,17 +318,17 @@ function ChatMessageImpl({
   const showFooterActions =
     !isUser && !isPendingAssistant && Boolean(message.content);
   const messageWidthClass = isUser
-    ? 'max-w-[80%]'
+    ? 'max-w-xl'
     : isPendingAssistant
-      ? 'w-full max-w-[560px]'
-      : 'w-full max-w-3xl';
+      ? 'w-full max-w-2xl'
+      : 'w-full';
 
   const timestampFormatted = message.timestamp ? formatTimestamp(message.timestamp) : '';
   const showTimestamp = Boolean(timestampFormatted) && !isPendingAssistant;
   const showLatency = !isUser && !isPendingAssistant && responseMs != null && responseMs > 0;
 
   return (
-    <div className={`flex flex-col gap-0.5 ${isUser ? 'items-end' : 'items-start'} animate-fade-in`}>
+    <div className={`flex w-full flex-col gap-0.5 ${isUser ? 'items-end' : 'items-start'} animate-fade-in`}>
       <div
         className={`${messageWidthClass} ${
           isUser
@@ -376,44 +355,6 @@ function ChatMessageImpl({
               <ReactMarkdown components={markdownComponents}>
                 {message.content}
               </ReactMarkdown>
-              {sourceLinks.length > 0 && (
-                <div className="not-prose mt-3 rounded-lg border border-dashed border-primary/25 bg-primary/[0.03] px-3 py-2.5">
-                  <div className="mb-2 section-label">
-                    {t('assistant.sources')}
-                  </div>
-                  <div className="flex flex-wrap gap-1.5">
-                    {sourceLinks.map((link) => (
-                      <a
-                        key={link.href}
-                        href={link.href}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="inline-flex max-w-full items-center gap-1 rounded-md border border-primary/30 bg-primary/5 px-2 py-1 text-xs font-semibold text-primary underline decoration-primary/50 underline-offset-2 transition-colors hover:bg-primary/10 hover:decoration-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
-                        title={link.label}
-                      >
-                        {link.kind === 'stored_document' ? (
-                          <FileText className="h-3.5 w-3.5 shrink-0" />
-                        ) : (
-                          <ExternalLink className="h-3.5 w-3.5 shrink-0" />
-                        )}
-                        <span className="min-w-0 truncate">{link.label}</span>
-                      </a>
-                    ))}
-                    {onOpenEvidence && (hiddenSourceCount > 0 || hasEvidence) && (
-                      <button
-                        type="button"
-                        onClick={onOpenEvidence}
-                        className="inline-flex items-center gap-1 rounded-md border border-primary/40 bg-primary/10 px-2 py-1 text-xs font-bold text-primary transition-colors hover:bg-primary/15 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
-                      >
-                        <Layers className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
-                        {hiddenSourceCount > 0
-                          ? t('assistant.seeAllSources', { count: totalSourceCount ?? 0 })
-                          : t('assistant.viewEvidence')}
-                      </button>
-                    )}
-                  </div>
-                </div>
-              )}
             </div>
           ) : (
             message.content.split('\n').map((line, i) => (
@@ -437,6 +378,22 @@ function ChatMessageImpl({
       {showFooterActions && (
         <div className="mt-1 flex flex-wrap items-center gap-1.5 px-1">
           <CopyAnswerButton t={t} content={message.content} />
+          {onOpenEvidence && hasEvidence && (
+            <button
+              type="button"
+              onClick={onOpenEvidence}
+              aria-label={t('assistant.viewEvidence')}
+              title={t('assistant.viewEvidence')}
+              className="inline-flex items-center gap-1 rounded-md border border-border/50 bg-background/60 px-1.5 py-0.5 text-2xs font-semibold text-muted-foreground transition-colors hover:bg-accent/60 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-1"
+            >
+              <Layers className="h-3.5 w-3.5" aria-hidden="true" />
+              <span>
+                {totalSourceCount != null && totalSourceCount > 0
+                  ? t('assistant.seeAllSources', { count: totalSourceCount })
+                  : t('assistant.viewEvidence')}
+              </span>
+            </button>
+          )}
           {developerMode && onInspect && (
             <button
               type="button"

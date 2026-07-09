@@ -2285,7 +2285,7 @@ checksum = "d98f6fed1fde3f8c21bc40a1abb88dd75e67924f9cffc3ef95607bad8017f8e2"
 
 [[package]]
 name = "ironrag-backend"
-version = "0.5.7"
+version = "0.5.8"
 dependencies = [
  "anyhow",
  "argon2",
@@ -2370,7 +2370,7 @@ dependencies = [
 
 [[package]]
 name = "ironrag-contracts"
-version = "0.5.7"
+version = "0.5.8"
 dependencies = [
  "chrono",
  "rust_decimal",

@@ -33,6 +33,13 @@ Object.defineProperty(globalThis, "localStorage", {
   value: testStorage,
 });
 
+if (!Element.prototype.scrollTo) {
+  Object.defineProperty(Element.prototype, "scrollTo", {
+    configurable: true,
+    value: () => {},
+  });
+}
+
 await import("../i18n");
 
 // Sprint 5: MSW lifecycle. `bypass` for unhandled requests is critical so

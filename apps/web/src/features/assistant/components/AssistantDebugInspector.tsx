@@ -319,7 +319,7 @@ export function AssistantDebugInspector({
 
   return (
     <aside
-      className="fixed inset-y-0 right-0 z-40 flex w-full flex-col border-l border-border/70 bg-background shadow-elevated md:relative md:inset-auto md:z-auto md:w-[var(--assistant-debug-width)] md:shrink-0 md:shadow-none"
+      className="fixed inset-y-0 right-0 z-40 flex w-full flex-col border-l border-border/70 bg-background shadow-elevated sm:w-[min(var(--assistant-debug-width),calc(100vw-2rem))] min-[1800px]:relative min-[1800px]:inset-auto min-[1800px]:z-auto min-[1800px]:w-[var(--assistant-debug-width)] min-[1800px]:shrink-0 min-[1800px]:shadow-none"
       style={panelStyle}
       data-testid="assistant-debug-inspector"
     >
@@ -330,7 +330,7 @@ export function AssistantDebugInspector({
         aria-valuemin={DEBUG_PANEL_MIN_WIDTH}
         aria-valuemax={DEBUG_PANEL_MAX_WIDTH}
         aria-valuenow={panelWidth}
-        className="absolute -left-2 top-0 hidden h-full w-4 cursor-col-resize items-center justify-center text-muted-foreground transition-colors hover:text-foreground md:flex"
+        className="absolute -left-2 top-0 hidden h-full w-4 cursor-col-resize items-center justify-center text-muted-foreground transition-colors hover:text-foreground min-[1800px]:flex"
         aria-label={t('assistant.debugInspectorResize')}
         onPointerDown={startResize}
         onKeyDown={handleResizeKeyDown}

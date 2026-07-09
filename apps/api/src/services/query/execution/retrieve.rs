@@ -384,6 +384,19 @@ const GRAPH_EVIDENCE_CHUNK_SCORE_BASE: f32 = 1.25;
 const GRAPH_EVIDENCE_CHUNK_SCORE_STEP: f32 = 0.001;
 const QUERY_IR_FOCUS_CHUNK_SCORE_BASE: f32 = 1.5;
 const QUERY_IR_FOCUS_CHUNK_SCORE_STEP: f32 = 0.001;
+const CONTENT_ANCHOR_CHUNK_CAP: usize = 24;
+const CONTENT_ANCHOR_CHUNKS_PER_REVISION: usize = 2;
+const CONTENT_ANCHOR_SEARCH_TERM_CAP: usize = 24;
+const CONTENT_ANCHOR_SEARCH_PREFIX_MIN_CHARS: usize = 6;
+const CONTENT_ANCHOR_SEARCH_PREFIX_CHARS: usize = 5;
+const CONTENT_ANCHOR_SEQUENCE_CAP: usize = 32;
+const CONTENT_ANCHOR_TOKEN_MIN_CHARS: usize = 4;
+const CONTENT_ANCHOR_SEQUENCE_MIN_CHARS: usize = 3;
+const CONTENT_ANCHOR_MIN_TOKEN_OVERLAP: usize = 2;
+const CONTENT_ANCHOR_CONTEXT_RESERVATION_LIMIT: usize = 4;
+const CONTENT_ANCHOR_CHUNK_SCORE_BASE: f32 = 1.75;
+const CONTENT_ANCHOR_CHUNK_SCORE_STEP: f32 = 0.001;
+const CONTENT_ANCHOR_EVIDENCE_SCORE_STEP: f32 = 0.000_001;
 const GRAPH_EVIDENCE_TEXTS_PER_CHUNK: usize = 4;
 const GRAPH_EVIDENCE_CONTEXT_LINE_CAP: usize = 24;
 
@@ -404,6 +417,11 @@ pub(crate) fn graph_evidence_chunk_score(rank: usize) -> f32 {
 
 pub(crate) fn query_ir_focus_chunk_score(rank: usize) -> f32 {
     QUERY_IR_FOCUS_CHUNK_SCORE_BASE - (rank as f32 * QUERY_IR_FOCUS_CHUNK_SCORE_STEP)
+}
+
+pub(crate) fn content_anchor_chunk_score(rank: usize, evidence_score: usize) -> f32 {
+    CONTENT_ANCHOR_CHUNK_SCORE_BASE - (rank as f32 * CONTENT_ANCHOR_CHUNK_SCORE_STEP)
+        + (evidence_score.min(4096) as f32 * CONTENT_ANCHOR_EVIDENCE_SCORE_STEP)
 }
 
 pub(crate) fn graph_evidence_context_top_k(base_limit: usize) -> usize {
@@ -1730,6 +1748,319 @@ async fn load_query_ir_focus_chunks(
         focus_query_count = search_queries.len(),
         focus_chunk_count = chunks.len(),
         "query-IR focus chunks loaded for rare exact retrieval signals",
+    );
+    Ok(chunks)
+}
+
+#[derive(Debug, Clone, Default)]
+pub(crate) struct RetrievalContentAnchorModel {
+    search_terms: Vec<String>,
+    focus_tokens: BTreeSet<String>,
+    phrase_sequences: Vec<Vec<String>>,
+}
+
+impl RetrievalContentAnchorModel {
+    pub(crate) fn new(question: &str, query_ir: Option<&QueryIR>) -> Self {
+        let mut values = Vec::new();
+        collect_content_anchor_text_value(&mut values, question);
+        if let Some(query_ir) = query_ir {
+            if let Some(retrieval_query) = query_ir.retrieval_query.as_deref() {
+                collect_content_anchor_text_value(&mut values, retrieval_query);
+            }
+            if let Some(document_focus) = query_ir.document_focus.as_ref() {
+                collect_content_anchor_text_value(&mut values, &document_focus.hint);
+            }
+            for entity in &query_ir.target_entities {
+                collect_content_anchor_text_value(&mut values, &entity.label);
+            }
+            for literal in &query_ir.literal_constraints {
+                collect_content_anchor_text_value(&mut values, &literal.text);
+            }
+        }
+
+        let mut focus_tokens = BTreeSet::new();
+        let mut phrase_sequences = Vec::new();
+        let mut seen_sequences = BTreeSet::new();
+        for value in &values {
+            for token in normalized_alnum_tokens(value, CONTENT_ANCHOR_TOKEN_MIN_CHARS) {
+                focus_tokens.insert(token);
+            }
+            for sequence in quoted_content_anchor_sequences(value) {
+                push_content_anchor_sequence(&mut phrase_sequences, &mut seen_sequences, sequence);
+            }
+            for sequence in adjacent_content_anchor_sequences(value) {
+                push_content_anchor_sequence(&mut phrase_sequences, &mut seen_sequences, sequence);
+            }
+        }
+
+        let search_terms = content_anchor_search_terms(&focus_tokens);
+        Self { search_terms, focus_tokens, phrase_sequences }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.search_terms.is_empty()
+            && self.focus_tokens.is_empty()
+            && self.phrase_sequences.is_empty()
+    }
+}
+
+fn content_anchor_search_terms(focus_tokens: &BTreeSet<String>) -> Vec<String> {
+    let mut seen = BTreeSet::new();
+    let mut terms = Vec::new();
+    for token in focus_tokens {
+        push_content_anchor_search_term(&mut terms, &mut seen, token.clone());
+        let token_len = token.chars().count();
+        if token_len >= CONTENT_ANCHOR_SEARCH_PREFIX_MIN_CHARS {
+            let prefix = token.chars().take(CONTENT_ANCHOR_SEARCH_PREFIX_CHARS).collect::<String>();
+            if prefix.chars().count() >= CONTENT_ANCHOR_TOKEN_MIN_CHARS && prefix != *token {
+                push_content_anchor_search_term(&mut terms, &mut seen, prefix);
+            }
+        }
+        if terms.len() >= CONTENT_ANCHOR_SEARCH_TERM_CAP {
+            break;
+        }
+    }
+    terms
+}
+
+fn push_content_anchor_search_term(
+    terms: &mut Vec<String>,
+    seen: &mut BTreeSet<String>,
+    term: String,
+) {
+    if terms.len() >= CONTENT_ANCHOR_SEARCH_TERM_CAP {
+        return;
+    }
+    if seen.insert(term.clone()) {
+        terms.push(term);
+    }
+}
+
+fn collect_content_anchor_text_value(values: &mut Vec<String>, value: &str) {
+    let current = current_question_segment(value).trim();
+    if !current.is_empty() {
+        values.push(current.to_string());
+    }
+}
+
+fn quoted_content_anchor_sequences(value: &str) -> Vec<Vec<String>> {
+    let mut sequences = Vec::new();
+    let mut current = String::new();
+    let mut quote: Option<char> = None;
+    for ch in value.chars() {
+        if content_anchor_quote_matches(quote, ch) {
+            let sequence =
+                normalized_alnum_token_sequence(&current, CONTENT_ANCHOR_SEQUENCE_MIN_CHARS);
+            if sequence.len() >= 2 {
+                sequences.push(sequence);
+            }
+            current.clear();
+            quote = None;
+            continue;
+        }
+        if quote.is_some() {
+            current.push(ch);
+            continue;
+        }
+        if content_anchor_opening_quote(ch) {
+            quote = Some(ch);
+            current.clear();
+        }
+    }
+    sequences
+}
+
+fn content_anchor_opening_quote(ch: char) -> bool {
+    matches!(ch, '"' | '\'' | '`' | '\u{00ab}' | '\u{201c}' | '\u{2018}')
+}
+
+fn content_anchor_quote_matches(opening: Option<char>, closing: char) -> bool {
+    matches!(
+        (opening, closing),
+        (Some('"'), '"')
+            | (Some('\''), '\'')
+            | (Some('`'), '`')
+            | (Some('\u{00ab}'), '\u{00bb}')
+            | (Some('\u{201c}'), '\u{201d}')
+            | (Some('\u{2018}'), '\u{2019}')
+    )
+}
+
+fn adjacent_content_anchor_sequences(value: &str) -> Vec<Vec<String>> {
+    let tokens = normalized_alnum_token_sequence(value, CONTENT_ANCHOR_SEQUENCE_MIN_CHARS);
+    let mut sequences = Vec::new();
+    for window_size in 2..=4 {
+        for window in tokens.windows(window_size) {
+            sequences.push(window.to_vec());
+            if sequences.len() >= CONTENT_ANCHOR_SEQUENCE_CAP {
+                return sequences;
+            }
+        }
+    }
+    sequences
+}
+
+fn push_content_anchor_sequence(
+    sequences: &mut Vec<Vec<String>>,
+    seen: &mut BTreeSet<Vec<String>>,
+    sequence: Vec<String>,
+) {
+    if sequences.len() >= CONTENT_ANCHOR_SEQUENCE_CAP || sequence.len() < 2 {
+        return;
+    }
+    if seen.insert(sequence.clone()) {
+        sequences.push(sequence);
+    }
+}
+
+fn content_anchor_revision_ids(
+    document_index: &HashMap<Uuid, KnowledgeDocumentRow>,
+    targeted_document_ids: &BTreeSet<Uuid>,
+) -> Vec<Uuid> {
+    let mut revision_ids = document_index
+        .values()
+        .filter(|document| {
+            targeted_document_ids.is_empty()
+                || targeted_document_ids.contains(&document.document_id)
+        })
+        .filter_map(|document| {
+            canonical_document_revision_id(document).map(|id| (document.document_id, id))
+        })
+        .collect::<Vec<_>>();
+    revision_ids.sort_by_key(|(document_id, revision_id)| (*revision_id, *document_id));
+    revision_ids.dedup_by_key(|(_, revision_id)| *revision_id);
+    revision_ids.into_iter().map(|(_, revision_id)| revision_id).collect()
+}
+
+pub(crate) fn content_anchor_row_score(
+    row: &KnowledgeChunkRow,
+    model: &RetrievalContentAnchorModel,
+) -> usize {
+    if is_source_profile_chunk_row(row)
+        || matches!(row.chunk_kind.as_deref(), Some("DocumentIdentity" | "LatestVersion"))
+    {
+        return 0;
+    }
+    let mut text = String::new();
+    if !row.heading_trail.is_empty() {
+        text.push_str(&row.heading_trail.join(" "));
+        text.push('\n');
+    }
+    if !row.section_path.is_empty() {
+        text.push_str(&row.section_path.join(" "));
+        text.push('\n');
+    }
+    text.push_str(&row.content_text);
+    if !row.normalized_text.trim().is_empty() {
+        text.push('\n');
+        text.push_str(&row.normalized_text);
+    }
+    if let Some(window_text) = row.window_text.as_deref().filter(|value| !value.trim().is_empty()) {
+        text.push('\n');
+        text.push_str(window_text);
+    }
+    let text = repair_technical_layout_noise(&text);
+    let text_sequence = normalized_alnum_token_sequence(&text, CONTENT_ANCHOR_SEQUENCE_MIN_CHARS);
+    let text_tokens = normalized_alnum_tokens(&text, CONTENT_ANCHOR_TOKEN_MIN_CHARS)
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+
+    let phrase_hits = model
+        .phrase_sequences
+        .iter()
+        .filter(|sequence| token_sequence_contains_tokens(&text_sequence, sequence))
+        .count();
+    let token_overlap = model
+        .focus_tokens
+        .iter()
+        .filter(|focus| {
+            text_tokens.contains(*focus)
+                || text_tokens.iter().any(|token| near_token_match(focus, token))
+        })
+        .count();
+    if phrase_hits == 0 && token_overlap < CONTENT_ANCHOR_MIN_TOKEN_OVERLAP {
+        return 0;
+    }
+    let longest_sequence = model
+        .phrase_sequences
+        .iter()
+        .filter(|sequence| token_sequence_contains_tokens(&text_sequence, sequence))
+        .map(Vec::len)
+        .max()
+        .unwrap_or(0);
+    phrase_hits
+        .saturating_mul(1024)
+        .saturating_add(token_overlap.saturating_mul(128))
+        .saturating_add(longest_sequence.saturating_mul(16))
+}
+
+async fn load_content_anchor_chunks(
+    state: &AppState,
+    question: &str,
+    query_ir: Option<&QueryIR>,
+    targeted_document_ids: &BTreeSet<Uuid>,
+    document_index: &HashMap<Uuid, KnowledgeDocumentRow>,
+    plan_keywords: &[String],
+    temporal_start: Option<DateTime<Utc>>,
+    temporal_end: Option<DateTime<Utc>>,
+) -> anyhow::Result<Vec<RuntimeMatchedChunk>> {
+    if temporal_start.is_some() || temporal_end.is_some() {
+        return Ok(Vec::new());
+    }
+    let model = RetrievalContentAnchorModel::new(question, query_ir);
+    if model.is_empty() {
+        return Ok(Vec::new());
+    }
+    let revision_ids = content_anchor_revision_ids(document_index, targeted_document_ids);
+    if revision_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let rows = state
+        .document_store
+        .list_chunks_by_revisions_matching_terms(
+            &revision_ids,
+            &model.search_terms,
+            CONTENT_ANCHOR_CHUNKS_PER_REVISION,
+        )
+        .await
+        .context("failed to load content-anchor chunks")?;
+    let mut scored_rows = rows
+        .into_iter()
+        .filter_map(|row| {
+            let score = content_anchor_row_score(&row, &model);
+            (score > 0).then_some((score, row))
+        })
+        .collect::<Vec<_>>();
+    scored_rows.sort_by(|(left_score, left), (right_score, right)| {
+        right_score
+            .cmp(left_score)
+            .then_with(|| left.chunk_index.cmp(&right.chunk_index))
+            .then_with(|| left.chunk_id.cmp(&right.chunk_id))
+    });
+    let mut seen = BTreeSet::new();
+    let mut chunks = Vec::new();
+    for (rank, (evidence_score, row)) in scored_rows.into_iter().enumerate() {
+        if chunks.len() >= CONTENT_ANCHOR_CHUNK_CAP {
+            break;
+        }
+        if !seen.insert(row.chunk_id) {
+            continue;
+        }
+        if let Some(mut chunk) = map_chunk_hit(
+            row,
+            content_anchor_chunk_score(rank, evidence_score),
+            document_index,
+            plan_keywords,
+        ) {
+            chunk.score_kind = RuntimeChunkScoreKind::ContentAnchor;
+            chunks.push(chunk);
+        }
+    }
+    tracing::info!(
+        stage = "retrieval.content_anchor",
+        content_anchor_chunk_count = chunks.len(),
+        content_anchor_search_term_count = model.search_terms.len(),
+        "content-anchor chunks loaded from body evidence"
     );
     Ok(chunks)
 }
@@ -9385,6 +9716,19 @@ async fn retrieve_document_chunks_with_targets(
             temporal_end,
         ),
     );
+    let content_anchor_future = timed_lane(
+        "retrieve.content_anchor",
+        load_content_anchor_chunks(
+            state,
+            question,
+            query_ir,
+            &targeted_document_ids,
+            document_index,
+            plan_keywords,
+            temporal_start,
+            temporal_end,
+        ),
+    );
     let document_evidence_anchor_future = timed_lane(
         "retrieve.document_evidence_anchor",
         load_document_evidence_anchor_chunks(
@@ -9440,6 +9784,7 @@ async fn retrieve_document_chunks_with_targets(
         latest_version_semantic_result,
         entity_bio_result,
         query_ir_focus_chunks_result,
+        content_anchor_chunks_result,
         document_evidence_anchor_chunks_result,
         versioned_update_procedure_chunks_result,
         setup_focus_document_chunks_result,
@@ -9450,6 +9795,7 @@ async fn retrieve_document_chunks_with_targets(
         latest_version_semantic_future,
         entity_bio_future,
         query_ir_focus_future,
+        content_anchor_future,
         document_evidence_anchor_future,
         versioned_update_procedure_future,
         setup_focus_document_future,
@@ -9522,6 +9868,31 @@ async fn retrieve_document_chunks_with_targets(
         Err(error) => return Err(error),
     }
     let mut protected_document_ids = BTreeSet::new();
+    match content_anchor_chunks_result {
+        Ok(content_anchor_chunks) if !content_anchor_chunks.is_empty() => {
+            protected_document_ids
+                .extend(content_anchor_chunks.iter().map(|chunk| chunk.document_id));
+            chunks = merge_query_ir_focus_chunks_for_query(
+                chunks,
+                content_anchor_chunks,
+                query_ir_focus_context_top_k(limit).saturating_add(CONTENT_ANCHOR_CHUNK_CAP),
+                query_ir,
+            );
+        }
+        Ok(_) => {}
+        Err(error) if !chunks.is_empty() => {
+            let summary = format!("{error:#}");
+            tracing::warn!(
+                stage = "retrieval.content_anchor_failed",
+                error = %summary,
+                retrieval_degraded = true,
+                failed_source = "content_anchor",
+                retained_chunk_count = chunks.len(),
+                "content-anchor retrieval failed; continuing with retrieved chunks"
+            );
+        }
+        Err(error) => return Err(error),
+    }
     match document_evidence_anchor_chunks_result {
         Ok(document_evidence_anchor_chunks) if !document_evidence_anchor_chunks.is_empty() => {
             protected_document_ids
@@ -18859,6 +19230,7 @@ fn score_kind_priority(kind: RuntimeChunkScoreKind) -> u8 {
         | RuntimeChunkScoreKind::SourceContext
         | RuntimeChunkScoreKind::FocusedDocument => 1,
         RuntimeChunkScoreKind::QueryIrFocus => 2,
+        RuntimeChunkScoreKind::ContentAnchor => 4,
         RuntimeChunkScoreKind::DocumentIdentity | RuntimeChunkScoreKind::LatestVersion => 3,
     }
 }
@@ -19193,6 +19565,7 @@ fn truncate_chunks_for_context(
     });
     let reserved_document_evidence =
         reserved_document_evidence_anchor_chunks(&indexed, top_k, query_ir);
+    let reserved_content_anchor_chunks = reserved_content_anchor_chunks(&indexed, top_k);
     // Reserve the focused-document setup anchor (the chunk carrying both a
     // command-object literal and a configuration path) before the score-ordered
     // truncation runs, so a confident single-document configure/how-to answer
@@ -19230,10 +19603,26 @@ fn truncate_chunks_for_context(
         reserved_exact_literal_context_anchors,
         top_k,
     );
+    ensure_content_anchor_chunks_retained(&mut selected, reserved_content_anchor_chunks, top_k);
     if let Some(anchor) = reserved_versioned_update_runbook_anchor {
         ensure_versioned_update_procedure_runbook_anchor_retained(&mut selected, anchor, top_k);
     }
     *chunks = selected.into_iter().map(|(_, chunk)| chunk).collect();
+}
+
+fn reserved_content_anchor_chunks(
+    indexed: &[(usize, RuntimeMatchedChunk)],
+    top_k: usize,
+) -> Vec<(usize, RuntimeMatchedChunk)> {
+    if top_k < 2 {
+        return Vec::new();
+    }
+    indexed
+        .iter()
+        .filter(|(_, chunk)| chunk.score_kind == RuntimeChunkScoreKind::ContentAnchor)
+        .take(CONTENT_ANCHOR_CONTEXT_RESERVATION_LIMIT.min(top_k.saturating_sub(1)))
+        .cloned()
+        .collect()
 }
 
 fn truncate_chunks_with_latest_version_reservation(
@@ -19968,6 +20357,54 @@ fn ensure_exact_literal_context_anchors_retained(
                 stage = "retrieval.exact_literal_context_anchor_reserved",
                 chunk_id = %anchor_chunk_id,
                 "focus-aligned exact literal context anchor reserved past score-ordered truncation"
+            );
+        }
+    }
+}
+
+fn ensure_content_anchor_chunks_retained(
+    selected: &mut Vec<(usize, RuntimeMatchedChunk)>,
+    anchors: Vec<(usize, RuntimeMatchedChunk)>,
+    top_k: usize,
+) {
+    if top_k == 0 || anchors.is_empty() {
+        return;
+    }
+    let protected_anchor_ids =
+        anchors.iter().map(|(_, chunk)| chunk.chunk_id).collect::<BTreeSet<_>>();
+    for anchor in anchors {
+        if selected.iter().any(|(_, chunk)| chunk.chunk_id == anchor.1.chunk_id) {
+            continue;
+        }
+        if selected.len() < top_k {
+            selected.push(anchor);
+            continue;
+        }
+        let evict_position = selected
+            .iter()
+            .rposition(|(_, chunk)| {
+                !protected_anchor_ids.contains(&chunk.chunk_id)
+                    && !matches!(
+                        chunk.score_kind,
+                        RuntimeChunkScoreKind::ContentAnchor
+                            | RuntimeChunkScoreKind::LatestVersion
+                            | RuntimeChunkScoreKind::FocusedDocument
+                            | RuntimeChunkScoreKind::SourceContext
+                    )
+            })
+            .or_else(|| {
+                selected.iter().rposition(|(_, chunk)| {
+                    !protected_anchor_ids.contains(&chunk.chunk_id)
+                        && chunk.score_kind != RuntimeChunkScoreKind::ContentAnchor
+                })
+            });
+        if let Some(position) = evict_position {
+            let anchor_chunk_id = anchor.1.chunk_id;
+            selected[position] = anchor;
+            tracing::info!(
+                stage = "retrieval.content_anchor_reserved",
+                chunk_id = %anchor_chunk_id,
+                "content-anchor evidence reserved past score-ordered truncation"
             );
         }
     }

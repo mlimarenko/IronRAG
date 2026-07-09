@@ -150,7 +150,15 @@ export function applyTurnResultToMessages(
   // The user turn that triggered this answer is the nearest message preceding
   // the pending placeholder; restamp it from the server so the question and
   // answer share one clock.
-  const pendingIndex = messages.findIndex((message) => message.id === pendingId);
+  const executionId = result.execution?.id;
+  const pendingIndex = messages.findIndex(
+    (message) =>
+      message.id === pendingId ||
+      (executionId &&
+        message.role === 'assistant' &&
+        !message.content &&
+        message.executionId === executionId),
+  );
   let userIndex = -1;
   for (let i = pendingIndex - 1; i >= 0; i -= 1) {
     if (messages[i]?.role === 'user') {
@@ -160,7 +168,7 @@ export function applyTurnResultToMessages(
   }
 
   return messages.map((message, index) => {
-    if (message.id === pendingId) {
+    if (index === pendingIndex) {
       return {
         id: result.responseTurn?.id ?? pendingId,
         role: 'assistant',

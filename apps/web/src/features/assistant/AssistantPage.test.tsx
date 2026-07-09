@@ -6,6 +6,7 @@ import { MemoryRouter } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import AssistantPage from '@/features/assistant/AssistantPage';
+import { ApiError } from '@/shared/api/runtime';
 
 const { useAppMock, queryApiMock, toastErrorMock } = vi.hoisted(() => ({
   useAppMock: vi.fn(),
@@ -150,6 +151,7 @@ describe('AssistantPage integration', () => {
     });
     await flushUi();
     await flushUi();
+    return queryClient;
   }
 
   async function rerenderPage() {
@@ -481,7 +483,295 @@ describe('AssistantPage integration', () => {
       expect(queryApiMock.getSession).toHaveBeenCalledWith('session-1');
     });
     expect(container.textContent).toContain('We moved to keyset pagination');
-    expect(container.textContent).toContain('Sources');
+    expect(container.textContent).toContain('See 1 source');
+  });
+
+  it('renders a server-hydrated pending assistant turn after returning mid-execution', async () => {
+    window.localStorage.setItem(
+      'ironrag_assistant_active_session:ws-1:library-1',
+      JSON.stringify('session-1'),
+    );
+    queryApiMock.getSession.mockResolvedValue({
+      session: {
+        id: 'session-1',
+        libraryId: 'library-1',
+        title: 'Deployment notes',
+        updatedAt: '2026-04-10T10:00:00Z',
+        turnCount: 1,
+      },
+      messages: [
+        {
+          id: 'msg-user',
+          role: 'user',
+          content: 'Question still running?',
+          timestamp: '2026-04-10T10:00:01Z',
+        },
+        {
+          id: 'exec-running',
+          role: 'assistant',
+          content: '',
+          timestamp: '2026-04-10T10:00:02Z',
+          executionId: 'exec-running',
+        },
+      ],
+    });
+
+    await renderPage();
+
+    await waitFor(() => {
+      expect(queryApiMock.getSession).toHaveBeenCalledWith('session-1');
+    });
+    expect(container.textContent).toContain('Question still running?');
+    expect(container.textContent).toContain('Agent turn started');
+    expect(container.textContent).toContain('Agent turn is running');
+  });
+
+  it('keeps polling a restored pending turn until the durable answer appears', async () => {
+    window.localStorage.setItem(
+      'ironrag_assistant_active_session:ws-1:library-1',
+      JSON.stringify('session-1'),
+    );
+    let getSessionCalls = 0;
+    queryApiMock.getSession.mockImplementation(async () => {
+      getSessionCalls += 1;
+      return {
+        session: {
+          id: 'session-1',
+          libraryId: 'library-1',
+          title: 'Deployment notes',
+          updatedAt: '2026-04-10T10:00:00Z',
+          turnCount: getSessionCalls === 1 ? 1 : 2,
+        },
+        messages: getSessionCalls === 1
+          ? [
+              {
+                id: 'msg-user',
+                role: 'user',
+                content: 'Question still running?',
+                timestamp: '2026-04-10T10:00:01Z',
+              },
+              {
+                id: 'exec-running',
+                role: 'assistant',
+                content: '',
+                timestamp: '2026-04-10T10:00:02Z',
+                executionId: 'exec-running',
+              },
+            ]
+          : [
+              {
+                id: 'msg-user',
+                role: 'user',
+                content: 'Question still running?',
+                timestamp: '2026-04-10T10:00:01Z',
+              },
+              {
+                id: 'msg-assistant',
+                role: 'assistant',
+                content: 'Recovered durable answer',
+                timestamp: '2026-04-10T10:00:08Z',
+                executionId: 'exec-running',
+                evidence: {
+                  preparedSegmentReferences: [],
+                  technicalFactReferences: [],
+                  entityReferences: [],
+                  relationReferences: [],
+                  verificationState: 'verified',
+                  verificationWarnings: [],
+                  runtimeStageSummaries: [],
+                },
+              },
+            ],
+      };
+    });
+
+    await renderPage();
+
+    await waitFor(() => {
+      expect(container.textContent).toContain('Agent turn is running');
+    });
+    await waitFor(
+      () => {
+        expect(queryApiMock.getSession).toHaveBeenCalledTimes(2);
+      },
+      { timeout: 2500 },
+    );
+    await waitFor(() => {
+      expect(container.textContent).toContain('Recovered durable answer');
+    });
+    expect(container.textContent).not.toContain('Agent turn is running');
+  });
+
+  it('does not loop global notifications when the optional debug context is missing', async () => {
+    window.localStorage.setItem(
+      'ironrag_assistant_active_session:ws-1:library-1',
+      JSON.stringify('session-1'),
+    );
+    window.localStorage.setItem('ironrag_assistant_debug_open', JSON.stringify(true));
+    queryApiMock.getSession.mockResolvedValue({
+      session: {
+        id: 'session-1',
+        libraryId: 'library-1',
+        title: 'Deployment notes',
+        updatedAt: '2026-04-10T10:00:00Z',
+        turnCount: 2,
+      },
+      messages: [
+        {
+          id: 'msg-user',
+          role: 'user',
+          content: 'What changed?',
+          timestamp: '2026-04-10T10:00:01Z',
+        },
+        {
+          id: 'msg-assistant',
+          role: 'assistant',
+          content: 'A stable answer',
+          timestamp: '2026-04-10T10:00:05Z',
+          executionId: 'exec-no-context',
+        },
+      ],
+    });
+    queryApiMock.getExecutionLlmContext.mockRejectedValue(
+      new ApiError(404, { error: 'not found' }),
+    );
+
+    await renderPage();
+
+    await waitFor(() => {
+      expect(queryApiMock.getExecutionLlmContext).toHaveBeenCalledTimes(1);
+    });
+    await flushUi();
+    await flushUi();
+
+    expect(queryApiMock.getExecutionLlmContext).toHaveBeenCalledTimes(1);
+    expect(toastErrorMock).not.toHaveBeenCalled();
+    expect(container.textContent).toContain('LLM context was not recorded');
+  });
+
+  it('clears stale debug-context errors while a new assistant turn is pending', async () => {
+    window.localStorage.setItem(
+      'ironrag_assistant_active_session:ws-1:library-1',
+      JSON.stringify('session-1'),
+    );
+    window.localStorage.setItem('ironrag_assistant_debug_open', JSON.stringify(true));
+    queryApiMock.getSession.mockResolvedValue({
+      session: {
+        id: 'session-1',
+        libraryId: 'library-1',
+        title: 'Deployment notes',
+        updatedAt: '2026-04-10T10:00:00Z',
+        turnCount: 2,
+      },
+      messages: [
+        {
+          id: 'msg-user',
+          role: 'user',
+          content: 'What changed?',
+          timestamp: '2026-04-10T10:00:01Z',
+        },
+        {
+          id: 'msg-assistant',
+          role: 'assistant',
+          content: 'A stable answer',
+          timestamp: '2026-04-10T10:00:05Z',
+          executionId: 'exec-no-context',
+        },
+      ],
+    });
+    queryApiMock.getExecutionLlmContext.mockRejectedValue(
+      new ApiError(404, { error: 'not found' }),
+    );
+
+    let resolveTurn!: (value: unknown) => void;
+    queryApiMock.createTurnStream.mockReturnValue(
+      new Promise((resolve) => {
+        resolveTurn = resolve;
+      }),
+    );
+
+    await renderPage();
+
+    await waitFor(() => {
+      expect(container.textContent).toContain('LLM context was not recorded');
+    });
+
+    setTextareaValue('Why does this take time?');
+    await flushUi();
+
+    const textarea = container.querySelector('textarea') as HTMLTextAreaElement;
+    await act(async () => {
+      textarea.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }),
+      );
+    });
+
+    await waitFor(() => {
+      expect(container.textContent).toContain('Agent turn is running');
+    });
+    expect(container.textContent).not.toContain('LLM context was not recorded');
+
+    resolveTurn({
+      responseTurn: {
+        id: 'turn-after-debug-clear',
+        contentText: 'Done after debug cleared.',
+        createdAt: '2026-04-10T11:00:05Z',
+        executionId: 'exec-after-debug-clear',
+      },
+      preparedSegmentReferences: [],
+      technicalFactReferences: [],
+      entityReferences: [],
+      relationReferences: [],
+      verificationState: 'verified',
+      verificationWarnings: [],
+      runtimeStageSummaries: [],
+    });
+
+    await waitFor(() => {
+      expect(container.textContent).toContain('Done after debug cleared.');
+    });
+  });
+
+  it('does not open debug context for a pending assistant execution with an id', async () => {
+    window.localStorage.setItem(
+      'ironrag_assistant_active_session:ws-1:library-1',
+      JSON.stringify('session-1'),
+    );
+    window.localStorage.setItem('ironrag_assistant_debug_open', JSON.stringify(true));
+    queryApiMock.getSession.mockResolvedValue({
+      session: {
+        id: 'session-1',
+        libraryId: 'library-1',
+        title: 'Deployment notes',
+        updatedAt: '2026-04-10T10:00:00Z',
+        turnCount: 2,
+      },
+      messages: [
+        {
+          id: 'msg-user',
+          role: 'user',
+          content: 'What is still running?',
+          timestamp: '2026-04-10T10:00:01Z',
+        },
+        {
+          id: 'msg-assistant-pending',
+          role: 'assistant',
+          content: '',
+          timestamp: '2026-04-10T10:00:05Z',
+          executionId: 'exec-running',
+        },
+      ],
+    });
+
+    await renderPage();
+    await waitFor(() => {
+      expect(container.textContent).toContain('Agent turn is running');
+    });
+    await flushUi();
+    await flushUi();
+
+    expect(queryApiMock.getExecutionLlmContext).not.toHaveBeenCalled();
+    expect(container.textContent).not.toContain('LLM context was not recorded');
   });
 
   it('keeps the active thread fixed while a turn is pending', async () => {
@@ -573,6 +863,97 @@ describe('AssistantPage integration', () => {
     expect(container.textContent).toContain('Pending answer landed');
     expect(visibleTextOccurrences('What is pending?')).toBe(1);
     expect(releaseSession.disabled).toBe(false);
+  });
+
+  it('keeps the immediate pending indicator when server hydration lags behind execution creation', async () => {
+    queryApiMock.getSession.mockResolvedValue({
+      session: {
+        id: 'session-1',
+        libraryId: 'library-1',
+        title: 'Deployment notes',
+        updatedAt: '2026-04-10T10:00:00Z',
+        turnCount: 1,
+      },
+      messages: [],
+    });
+
+    let resolveTurn!: (value: unknown) => void;
+    queryApiMock.createTurnStream.mockReturnValue(
+      new Promise((resolve) => {
+        resolveTurn = resolve;
+      }),
+    );
+
+    const queryClient = await renderPage();
+
+    const deploymentSession = findButton('Deployment notes') as HTMLButtonElement;
+    expect(deploymentSession).toBeTruthy();
+    await act(async () => {
+      deploymentSession.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    await flushUi();
+    await flushUi();
+
+    setTextareaValue('Why is this slow?');
+    await flushUi();
+
+    const textarea = container.querySelector('textarea') as HTMLTextAreaElement;
+    await act(async () => {
+      textarea.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }),
+      );
+    });
+
+    await waitFor(() => {
+      expect(container.textContent).toContain('Why is this slow?');
+      expect(container.textContent).toContain('Agent turn is running');
+    });
+
+    await act(async () => {
+      queryClient.setQueryData(['mockedGetQuerySession', 'session-1'], {
+        session: {
+          id: 'session-1',
+          libraryId: 'library-1',
+          title: 'Deployment notes',
+          updatedAt: '2026-04-10T10:00:01Z',
+          turnCount: 1,
+        },
+        messages: [
+          {
+            id: 'server-user-1',
+            role: 'user',
+            content: 'Why is this slow?',
+            timestamp: '2026-04-10T10:00:01Z',
+          },
+        ],
+      });
+    });
+    await flushUi();
+
+    expect(container.textContent).toContain('Why is this slow?');
+    expect(container.textContent).toContain('Agent turn is running');
+
+    resolveTurn({
+      responseTurn: {
+        id: 'turn-slow',
+        contentText: 'The request is still visibly running while the provider works.',
+        createdAt: '2026-04-10T11:00:05Z',
+        executionId: 'exec-slow',
+      },
+      preparedSegmentReferences: [],
+      technicalFactReferences: [],
+      entityReferences: [],
+      relationReferences: [],
+      verificationState: 'verified',
+      verificationWarnings: [],
+      runtimeStageSummaries: [],
+    });
+
+    await waitFor(() => {
+      expect(container.textContent).toContain(
+        'The request is still visibly running while the provider works.',
+      );
+    });
   });
 
   it('resets the selected thread and sends new turns to the current library after a library switch', async () => {

@@ -117,9 +117,10 @@ Bump to **1800 s** for local-Ollama runs:
 IRONRAG_RUNTIME_GRAPH_EXTRACT_IDLE_TIMEOUT_SECONDS=1800
 ```
 
-Restart `backend` *and* `worker` together; if you also touch `frontend`
-note that the frontend nginx upstream can cache a stale backend IP —
-recreate the frontend too.
+Restart `backend` *and* `worker` together, then restart or recreate
+`frontend` as well. The frontend nginx upstream resolves `backend` at
+startup, so a backend container recreate can leave `/v1/*` proxying to a
+stale Docker IP until nginx restarts.
 
 ## Vector dimensions: per library
 

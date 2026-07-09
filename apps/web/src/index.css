@@ -1014,8 +1014,12 @@
   }
 
   .data-view__inspector-body {
+    display: flex;
+    min-width: 0;
     min-height: 0;
     flex: 1 1 0%;
+    flex-direction: column;
+    overflow: hidden;
   }
 
   @media (min-width: 1280px) {
@@ -1047,7 +1051,7 @@
     }
 
     .data-view__inspector--open {
-      display: block;
+      display: flex;
     }
 
     .data-view__drawer-header {

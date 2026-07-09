@@ -11,7 +11,6 @@ pub(crate) struct DeterministicAnswerLabelSet {
     pub(crate) parameter: &'static str,
     pub(crate) parameter_details: &'static str,
     pub(crate) update_sequence: &'static str,
-    pub(crate) evidence: &'static str,
 }
 
 pub(crate) const EN_DETERMINISTIC_ANSWER_LABELS: DeterministicAnswerLabelSet =
@@ -25,7 +24,6 @@ pub(crate) const EN_DETERMINISTIC_ANSWER_LABELS: DeterministicAnswerLabelSet =
         parameter: "Parameter",
         parameter_details: "Parameter details",
         update_sequence: "Steps",
-        evidence: "Evidence fragments",
     };
 
 pub(crate) const RU_DETERMINISTIC_ANSWER_LABELS: DeterministicAnswerLabelSet =
@@ -39,7 +37,6 @@ pub(crate) const RU_DETERMINISTIC_ANSWER_LABELS: DeterministicAnswerLabelSet =
         parameter: "Параметр",
         parameter_details: "Детали параметров",
         update_sequence: "Шаги",
-        evidence: "Подтверждающие фрагменты",
     };
 
 pub(crate) fn deterministic_answer_labels(language: QueryLanguage) -> DeterministicAnswerLabelSet {

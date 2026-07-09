@@ -2448,6 +2448,7 @@ impl QueryService {
             &prepared_reference_context.structured_block_rows,
             &prepared_reference_context.block_rank_refs,
             &query_text,
+            response_turn.as_ref().map(|turn| turn.content_text.as_str()),
             &prepared_reference_context.segment_revision_info,
         );
         prepared_segment_references.extend(build_assistant_document_references(

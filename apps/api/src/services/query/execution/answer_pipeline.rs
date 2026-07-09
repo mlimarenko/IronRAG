@@ -236,11 +236,21 @@ fn append_missing_focus_aligned_exact_literals(
     if missing.is_empty() {
         return answer;
     }
-    let suffix = format!(
-        "Grounded exact terms: {}.",
-        missing.into_iter().map(|literal| format!("`{literal}`")).collect::<Vec<_>>().join(", ")
-    );
-    if answer.trim().is_empty() { suffix } else { format!("{}\n\n{}", answer.trim_end(), suffix) }
+    let mut answer = answer.trim_end().to_string();
+    if answer.is_empty() {
+        return missing
+            .into_iter()
+            .map(|literal| format!("`{literal}`"))
+            .collect::<Vec<_>>()
+            .join(", ");
+    }
+    for literal in missing {
+        answer.push_str(if answer.ends_with(['.', '!', '?', ':']) { " " } else { ". " });
+        answer.push('`');
+        answer.push_str(&literal);
+        answer.push('`');
+    }
+    answer
 }
 
 fn exact_literal_postprocessor_focus_keywords(question: &str, query_ir: &QueryIR) -> Vec<String> {
@@ -6904,6 +6914,7 @@ question: How does the Python data pipeline implement the circuit breaker patter
         );
 
         assert!(answer.contains("OrderError"));
+        assert!(!answer.contains("Grounded exact terms"), "{answer}");
         assert!(!answer.contains("DATABASE_URL"));
         assert!(!answer.contains("SAMPLE_LIMIT_REQUESTS"));
     }
