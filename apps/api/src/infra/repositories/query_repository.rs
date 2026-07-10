@@ -9,6 +9,15 @@ use crate::domains::{
     query::{QueryConversationState, QueryTurnKind},
 };
 
+pub const INTERRUPTED_QUERY_EXECUTION_FAILURE_CODE: &str = "query_execution_interrupted";
+
+#[derive(Debug, Clone, FromRow)]
+struct StaleQueryExecutionCandidate {
+    execution_id: Uuid,
+    runtime_execution_id: Uuid,
+    async_operation_id: Uuid,
+}
+
 #[derive(Debug, Clone, FromRow)]
 struct QueryConversationRowRecord {
     id: Uuid,
@@ -767,6 +776,149 @@ pub async fn update_execution(
     .fetch_optional(postgres)
     .await?;
     row.map(map_query_execution_row).transpose()
+}
+
+pub async fn cancel_interrupted_execution(
+    postgres: &PgPool,
+    execution_id: Uuid,
+    runtime_execution_id: Uuid,
+    async_operation_id: Uuid,
+) -> Result<bool, sqlx::Error> {
+    let mut transaction = postgres.begin().await?;
+    let query_exists = sqlx::query_scalar::<_, Uuid>(
+        "select id
+         from query_execution
+         where id = $1
+         for update",
+    )
+    .bind(execution_id)
+    .fetch_optional(&mut *transaction)
+    .await?
+    .is_some();
+    if !query_exists {
+        transaction.commit().await?;
+        return Ok(false);
+    }
+
+    let runtime_state = sqlx::query_scalar::<_, String>(
+        "select lifecycle_state::text
+         from runtime_execution
+         where id = $1
+           and owner_kind = 'query_execution'
+           and owner_id = $2
+         for update",
+    )
+    .bind(runtime_execution_id)
+    .bind(execution_id)
+    .fetch_optional(&mut *transaction)
+    .await?;
+    if !matches!(runtime_state.as_deref(), Some("accepted" | "running")) {
+        transaction.commit().await?;
+        return Ok(false);
+    }
+
+    let completed_at = Utc::now();
+    sqlx::query(
+        "update query_execution
+         set failure_code = $2,
+             completed_at = $3
+         where id = $1
+           and completed_at is null",
+    )
+    .bind(execution_id)
+    .bind(INTERRUPTED_QUERY_EXECUTION_FAILURE_CODE)
+    .bind(completed_at)
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "update runtime_execution
+         set lifecycle_state = 'canceled',
+             active_stage = null,
+             failure_code = $3,
+             failure_summary_redacted = 'query execution interrupted before terminal persistence',
+             completed_at = $4
+         where id = $1
+           and owner_id = $2
+           and lifecycle_state in ('accepted', 'running')",
+    )
+    .bind(runtime_execution_id)
+    .bind(execution_id)
+    .bind(INTERRUPTED_QUERY_EXECUTION_FAILURE_CODE)
+    .bind(completed_at)
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "update ops_async_operation
+         set status = 'canceled',
+             completed_at = $4,
+             failure_code = $5
+         where id = $1
+           and subject_kind = 'query_execution'
+           and subject_id = $2
+           and operation_kind = $3
+           and status in ('accepted', 'processing')",
+    )
+    .bind(async_operation_id)
+    .bind(execution_id)
+    .bind("query_execution")
+    .bind(completed_at)
+    .bind(INTERRUPTED_QUERY_EXECUTION_FAILURE_CODE)
+    .execute(&mut *transaction)
+    .await?;
+    transaction.commit().await?;
+    Ok(true)
+}
+
+pub async fn reap_stale_query_executions(
+    postgres: &PgPool,
+    stale_before: DateTime<Utc>,
+    batch_limit: i64,
+) -> Result<u64, sqlx::Error> {
+    let candidates = sqlx::query_as::<_, StaleQueryExecutionCandidate>(
+        "select
+            query.id as execution_id,
+            query.runtime_execution_id,
+            operation.id as async_operation_id
+         from query_execution query
+         join runtime_execution runtime
+           on runtime.id = query.runtime_execution_id
+          and runtime.owner_kind = 'query_execution'
+          and runtime.owner_id = query.id
+          and runtime.lifecycle_state in ('accepted', 'running')
+         join lateral (
+            select candidate.id
+            from ops_async_operation candidate
+            where candidate.subject_kind = 'query_execution'
+              and candidate.subject_id = query.id
+              and candidate.operation_kind = 'query_execution'
+              and candidate.status in ('accepted', 'processing')
+            order by candidate.created_at desc, candidate.id desc
+            limit 1
+         ) operation on true
+         where query.completed_at is null
+           and query.started_at < $1
+         order by query.started_at, query.id
+         limit $2",
+    )
+    .bind(stale_before)
+    .bind(batch_limit.max(1))
+    .fetch_all(postgres)
+    .await?;
+
+    let mut reaped = 0u64;
+    for candidate in candidates {
+        if cancel_interrupted_execution(
+            postgres,
+            candidate.execution_id,
+            candidate.runtime_execution_id,
+            candidate.async_operation_id,
+        )
+        .await?
+        {
+            reaped += 1;
+        }
+    }
+    Ok(reaped)
 }
 
 fn map_query_conversation_row(

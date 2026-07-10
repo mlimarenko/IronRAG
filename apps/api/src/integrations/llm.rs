@@ -36,6 +36,15 @@ use crate::{
 #[cfg(test)]
 use crate::domains::provider_profiles::ProviderTokenLimitParameter;
 
+const DEFAULT_GPT_56_TOOL_MAX_OUTPUT_TOKENS: i32 = 65_536;
+
+fn is_gpt_56_family_model(model_name: &str) -> bool {
+    model_name
+        .rsplit('/')
+        .next()
+        .is_some_and(|name| name.to_ascii_lowercase().starts_with("gpt-5.6"))
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct ChatRequest {
     pub provider_kind: String,
@@ -655,17 +664,29 @@ impl UnifiedGateway {
 
     fn tool_use_extra_parameters(
         provider_kind: &str,
+        model_name: &str,
         has_tools: bool,
         extra_parameters_json: &serde_json::Value,
     ) -> serde_json::Value {
         let mut upstream_extra = Self::upstream_extra_parameters(extra_parameters_json);
-        if !has_tools || !provider_kind.eq_ignore_ascii_case("qwen") {
+        if !has_tools {
             return upstream_extra;
         }
         let serde_json::Value::Object(ref mut object) = upstream_extra else {
             return upstream_extra;
         };
-        object.entry("enable_thinking".to_string()).or_insert(serde_json::Value::Bool(false));
+        if provider_kind.eq_ignore_ascii_case("qwen") {
+            object.entry("enable_thinking".to_string()).or_insert(serde_json::Value::Bool(false));
+        }
+        if is_gpt_56_family_model(model_name) {
+            // OpenAI-compatible Chat Completions providers can forward this
+            // family to the same upstream constraint: function tools require
+            // reasoning to be disabled. Responses API support can lift this.
+            object.insert(
+                "reasoning_effort".to_string(),
+                serde_json::Value::String("none".to_string()),
+            );
+        }
         upstream_extra
     }
 
@@ -676,13 +697,29 @@ impl UnifiedGateway {
         top_p: Option<f64>,
     ) -> (Option<f64>, Option<f64>) {
         let model_lc = model_name.to_ascii_lowercase();
-        if provider_kind.eq_ignore_ascii_case("openai") && model_lc.starts_with("gpt-5.5") {
-            // This family only accepts provider defaults for sampling. Omit both
-            // knobs together so future default-only sampling constraints fail closed.
+        if (provider_kind.eq_ignore_ascii_case("openai") && model_lc.starts_with("gpt-5.5"))
+            || is_gpt_56_family_model(model_name)
+        {
+            // These families only accept provider defaults for sampling. Omit
+            // both knobs together so default-only constraints fail closed.
             return (None, None);
         }
 
         (temperature, top_p)
+    }
+
+    fn openai_compatible_tool_max_output_tokens(
+        _provider_kind: &str,
+        model_name: &str,
+        requested: Option<i32>,
+    ) -> Option<i32> {
+        if requested.is_some() {
+            return requested;
+        }
+        if is_gpt_56_family_model(model_name) {
+            return Some(DEFAULT_GPT_56_TOOL_MAX_OUTPUT_TOKENS);
+        }
+        None
     }
 
     fn openai_compatible_tool_choice(
@@ -1118,12 +1155,18 @@ impl LlmGateway for UnifiedGateway {
         let messages =
             request.messages.iter().map(OpenAiCompatibleToolUseMessage::from).collect::<Vec<_>>();
         let tools = request.tools.iter().map(OpenAiCompatibleToolDef::from).collect::<Vec<_>>();
+        let max_output_tokens = Self::openai_compatible_tool_max_output_tokens(
+            &request.provider_kind,
+            &request.model_name,
+            request.max_output_tokens_override,
+        );
         let (max_completion_tokens, max_tokens) = openai_compatible_token_limit_fields(
             resolved.runtime.token_limit_parameter,
-            request.max_output_tokens_override,
+            max_output_tokens,
         );
         let upstream_extra = Self::tool_use_extra_parameters(
             &request.provider_kind,
+            &request.model_name,
             !tools.is_empty(),
             &request.extra_parameters_json,
         );
@@ -1233,12 +1276,18 @@ impl LlmGateway for UnifiedGateway {
         let messages =
             request.messages.iter().map(OpenAiCompatibleToolUseMessage::from).collect::<Vec<_>>();
         let tools = request.tools.iter().map(OpenAiCompatibleToolDef::from).collect::<Vec<_>>();
+        let max_output_tokens = Self::openai_compatible_tool_max_output_tokens(
+            &request.provider_kind,
+            &request.model_name,
+            request.max_output_tokens_override,
+        );
         let (max_completion_tokens, max_tokens) = openai_compatible_token_limit_fields(
             resolved.runtime.token_limit_parameter,
-            request.max_output_tokens_override,
+            max_output_tokens,
         );
         let upstream_extra = Self::tool_use_extra_parameters(
             &request.provider_kind,
+            &request.model_name,
             !tools.is_empty(),
             &request.extra_parameters_json,
         );
@@ -1583,12 +1632,12 @@ impl LlmGateway for UnifiedGateway {
 #[cfg(test)]
 mod tests {
     use super::{
-        ChatToolDef, OpenAiCompatibleMessage, OpenAiCompatibleMessageContent,
-        OpenAiCompatibleRequest, OpenAiCompatibleToolDef, OpenAiCompatibleToolUseChatRequest,
-        ProviderAuthScheme, ProviderStructuredOutputMode, ProviderTokenLimitParameter,
-        UnifiedGateway, consume_openai_compatible_stream_frame, extract_message_content_text,
-        parse_provider_json_body, parse_tool_use_response, provider_response_format,
-        provider_system_prompt,
+        ChatToolDef, DEFAULT_GPT_56_TOOL_MAX_OUTPUT_TOKENS, OpenAiCompatibleMessage,
+        OpenAiCompatibleMessageContent, OpenAiCompatibleRequest, OpenAiCompatibleToolDef,
+        OpenAiCompatibleToolUseChatRequest, ProviderAuthScheme, ProviderStructuredOutputMode,
+        ProviderTokenLimitParameter, UnifiedGateway, consume_openai_compatible_stream_frame,
+        extract_message_content_text, parse_provider_json_body, parse_tool_use_response,
+        provider_response_format, provider_system_prompt,
     };
 
     #[test]
@@ -1765,6 +1814,35 @@ mod tests {
     }
 
     #[test]
+    fn openai_gpt_56_sampling_params_omit_configured_values() {
+        let (temperature, top_p) = UnifiedGateway::openai_compatible_sampling_params(
+            "openai",
+            "gpt-5.6-luna",
+            Some(0.3),
+            Some(0.9),
+        );
+
+        assert_eq!(temperature, None);
+        assert_eq!(top_p, None);
+    }
+
+    #[test]
+    fn openai_gpt_56_tool_calls_get_bounded_default_output_tokens() {
+        assert_eq!(
+            UnifiedGateway::openai_compatible_tool_max_output_tokens("openai", "gpt-5.6-sol", None,),
+            Some(DEFAULT_GPT_56_TOOL_MAX_OUTPUT_TOKENS)
+        );
+        assert_eq!(
+            UnifiedGateway::openai_compatible_tool_max_output_tokens(
+                "openai",
+                "gpt-5.6-sol",
+                Some(1024),
+            ),
+            Some(1024)
+        );
+    }
+
+    #[test]
     fn openai_gpt_54_mini_sampling_params_preserve_configured_values() {
         let (temperature, top_p) = UnifiedGateway::openai_compatible_sampling_params(
             "openai",
@@ -1934,7 +2012,12 @@ mod tests {
 
     #[test]
     fn qwen_tool_use_disables_thinking_by_default() {
-        let extra = UnifiedGateway::tool_use_extra_parameters("qwen", true, &serde_json::json!({}));
+        let extra = UnifiedGateway::tool_use_extra_parameters(
+            "qwen",
+            "qwen-plus",
+            true,
+            &serde_json::json!({}),
+        );
 
         assert_eq!(extra.get("enable_thinking").and_then(serde_json::Value::as_bool), Some(false));
     }
@@ -1943,6 +2026,7 @@ mod tests {
     fn qwen_tool_use_preserves_explicit_thinking_override() {
         let extra = UnifiedGateway::tool_use_extra_parameters(
             "qwen",
+            "qwen-plus",
             true,
             &serde_json::json!({ "enable_thinking": true }),
         );
@@ -1952,10 +2036,55 @@ mod tests {
 
     #[test]
     fn non_qwen_tool_use_does_not_add_thinking_flag() {
-        let extra =
-            UnifiedGateway::tool_use_extra_parameters("openai", true, &serde_json::json!({}));
+        let extra = UnifiedGateway::tool_use_extra_parameters(
+            "openai",
+            "gpt-5.5",
+            true,
+            &serde_json::json!({}),
+        );
 
         assert!(extra.get("enable_thinking").is_none());
+    }
+
+    #[test]
+    fn openai_gpt_56_tool_use_disables_reasoning_for_chat_completions() {
+        let extra = UnifiedGateway::tool_use_extra_parameters(
+            "openai",
+            "gpt-5.6-sol",
+            true,
+            &serde_json::json!({}),
+        );
+
+        assert_eq!(extra.get("reasoning_effort").and_then(serde_json::Value::as_str), Some("none"));
+    }
+
+    #[test]
+    fn proxied_gpt_56_tool_use_disables_reasoning_for_chat_completions() {
+        for provider_kind in ["gptunnel", "openrouter", "routerai"] {
+            let model_name =
+                if provider_kind == "gptunnel" { "gpt-5.6-sol" } else { "openai/gpt-5.6-sol" };
+            let extra = UnifiedGateway::tool_use_extra_parameters(
+                provider_kind,
+                model_name,
+                true,
+                &serde_json::json!({}),
+            );
+
+            assert_eq!(
+                extra.get("reasoning_effort").and_then(serde_json::Value::as_str),
+                Some("none"),
+                "provider={provider_kind}",
+            );
+            assert_eq!(
+                UnifiedGateway::openai_compatible_tool_max_output_tokens(
+                    provider_kind,
+                    model_name,
+                    None,
+                ),
+                Some(DEFAULT_GPT_56_TOOL_MAX_OUTPUT_TOKENS),
+                "provider={provider_kind}",
+            );
+        }
     }
 
     #[test]

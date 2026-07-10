@@ -2,6 +2,46 @@
 
 ## Unreleased
 
+## 0.5.9 — 2026-07-10
+
+### Changed
+
+- **GPT-5.6 models are available in supported provider catalogs.** Luna, Terra,
+  Sol, and the provider-exposed Pro aliases now include multimodal chat roles,
+  context limits, and token prices. Provider bootstrap bundles keep graph
+  extraction on GPT-5.4 Nano, use Luna for the remaining chat and vision roles,
+  and use Sol for the agent role. Tool-bearing GPT-5.6 defaults now carry the
+  same reasoning contract across direct and OpenAI-compatible proxy routes.
+
+### Fixed
+
+- **GPT-5.6 requests work through OpenAI Chat Completions.** Requests omit
+  unsupported sampling overrides, while tool-bearing calls disable reasoning
+  and receive a 65,536-token output default when the binding has no explicit
+  limit. Existing explicit output limits and earlier model families keep their
+  current behavior.
+
+- **Long grounded assistant calls no longer fail at the generic tool timeout.**
+  The canonical grounded-answer tool has a bounded 90-second call budget inside
+  the existing 180-second turn deadline, while all other tools retain the
+  shorter collection budget.
+
+- **Rotated environment credentials reach restored and scoped bindings.**
+  Startup synchronizes every canonical bootstrap account that still carries an
+  older env-managed key, including workspace and library copies, while
+  preserving an operator-disabled state and provider base URL.
+
+- **Interrupted assistant executions cannot remain active indefinitely.** A
+  cancellation guard atomically closes query, runtime, and async-operation rows
+  when a turn future is dropped. The maintenance scheduler also reaps stale
+  non-terminal executions after the turn deadline, covering process restarts
+  and failed best-effort cleanup.
+
+- **Reloading during an assistant answer no longer creates debug-notification
+  storms.** Optional missing LLM-context snapshots are de-duplicated per
+  execution, recognized across generated-client error shapes, and kept as one
+  inline inspector state without repeated requests or global toasts.
+
 ## 0.5.8 — 2026-07-09
 
 ### Changed

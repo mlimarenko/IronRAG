@@ -137,7 +137,7 @@ impl AiCatalogService {
     }
 }
 
-fn map_account_row(row: ai_repository::AiAccountRow) -> AiAccount {
+pub(super) fn map_account_row(row: ai_repository::AiAccountRow) -> AiAccount {
     AiAccount {
         id: row.id,
         scope_kind: parse_scope_kind(&row.scope_kind).unwrap_or(AiScopeKind::Workspace),

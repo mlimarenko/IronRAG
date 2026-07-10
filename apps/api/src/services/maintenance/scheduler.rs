@@ -4,10 +4,11 @@
 //! `Settings::runs_maintenance_scheduler`). Each tick:
 //!
 //! 1. Reaps `leased` rows whose heartbeat has gone stale.
-//! 2. Bootstraps any missing `maintenance_job_run` rows for known
+//! 2. Cancels query executions that outlived the canonical turn deadline.
+//! 3. Bootstraps any missing `maintenance_job_run` rows for known
 //!    (class, scope) pairs, so a freshly-added library shows up in
 //!    the next tick without operator intervention.
-//! 3. For every class enabled in this build, atomically picks the
+//! 4. For every class enabled in this build, atomically picks the
 //!    oldest pending row whose `next_due_at` has passed and runs the
 //!    matching sweeper under a tokio task that refreshes the lease
 //!    heartbeat every 30 s.
@@ -27,6 +28,7 @@
 
 use std::time::Duration;
 
+use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use sqlx::PgPool;
 use tokio::{sync::broadcast, task::JoinHandle, time::sleep};
 use tracing::{info, warn};
@@ -34,7 +36,7 @@ use uuid::Uuid;
 
 use crate::{
     app::state::AppState,
-    infra::repositories::catalog_repository,
+    infra::repositories::{catalog_repository, query_repository},
     services::maintenance::{
         gc::{self, GcStaleChunksError, GcStaleChunksOptions, LibraryGcReport},
         lease::{self, MaintenanceClass, MaintenanceJobRun, Scope},
@@ -48,6 +50,8 @@ pub const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(30);
 /// busy with ingest. Short enough that the next tick within a few
 /// minutes can pick the work up once ingest quiesces.
 pub const ACTIVE_INGEST_RETRY: Duration = Duration::from_secs(5 * 60);
+
+const STALE_QUERY_EXECUTION_BATCH_LIMIT: i64 = 100;
 
 /// Build a scheduler-task handle for the lifetime of the process.
 /// Returns `None` when the role / kill-switch combination means the
@@ -74,6 +78,7 @@ pub fn spawn_maintenance_scheduler(
         if let Err(error) = bootstrap_rows(&state).await {
             warn!(?error, "maintenance scheduler bootstrap failed; will retry on next tick");
         }
+        reap_stale_query_executions(&state, config.stale_lease_after).await;
         loop {
             tokio::select! {
                 _ = shutdown.recv() => {
@@ -153,6 +158,7 @@ async fn run_tick(
         Ok(_) => {}
         Err(error) => warn!(?error, "stale-lease reaper failed; continuing"),
     }
+    reap_stale_query_executions(state, config.stale_lease_after).await;
     // New libraries show up between bootstrap and this tick — ensure
     // their rows now so they are eligible for acquisition immediately.
     if let Err(error) = bootstrap_rows(state).await {
@@ -160,6 +166,25 @@ async fn run_tick(
     }
     process_class(state, config, owner_node, MaintenanceClass::GcStaleChunks).await;
     Ok(())
+}
+
+async fn reap_stale_query_executions(state: &AppState, stale_after: Duration) {
+    let stale_after = ChronoDuration::from_std(stale_after).unwrap_or(ChronoDuration::MAX);
+    let stale_before =
+        Utc::now().checked_sub_signed(stale_after).unwrap_or(DateTime::<Utc>::MIN_UTC);
+    match query_repository::reap_stale_query_executions(
+        &state.persistence.postgres,
+        stale_before,
+        STALE_QUERY_EXECUTION_BATCH_LIMIT,
+    )
+    .await
+    {
+        Ok(reaped) if reaped > 0 => {
+            info!(reaped, "maintenance scheduler canceled stale query executions");
+        }
+        Ok(_) => {}
+        Err(error) => warn!(?error, "stale query execution reaper failed; continuing"),
+    }
 }
 
 async fn process_class(

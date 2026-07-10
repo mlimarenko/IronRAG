@@ -397,6 +397,14 @@ fn validate_provider_capability_for_binding(
     )))
 }
 
+fn bootstrap_env_credential_needs_sync(
+    stored_api_key: Option<&str>,
+    _credential_state: &str,
+    configured_api_key: &str,
+) -> bool {
+    stored_api_key != Some(configured_api_key)
+}
+
 impl AiCatalogService {
     #[must_use]
     pub const fn new() -> Self {
@@ -802,12 +810,15 @@ impl AiCatalogService {
         .await
     }
 
-    /// Idempotently ensure every env-keyed provider has an instance-scope
+    /// Idempotently ensure every env-keyed provider has a canonical
     /// "Bootstrap <DisplayName>" account.
     ///
     /// Runs independent of binding selection and creates one account
-    /// per env-keyed provider; existing rows with the canonical label are
-    /// skipped (returning the count of newly created rows).
+    /// per env-keyed provider. Existing canonical rows in any scope are
+    /// synchronized when the configured key changes so restored or copied
+    /// bindings cannot retain a stale env-managed credential. Operator-managed
+    /// state and base URL remain unchanged. Returns the number of created or
+    /// updated rows.
     pub async fn ensure_env_ai_accounts(&self, state: &AppState) -> Result<usize, ApiError> {
         let Some(configured_ai) = state.ui_bootstrap_ai_setup.as_ref() else {
             return Ok(0);
@@ -816,17 +827,9 @@ impl AiCatalogService {
             return Ok(0);
         }
         let providers = self.list_provider_catalog(state).await?;
-        let existing = self
-            .list_accounts_exact(
-                state,
-                AiScopeRef {
-                    scope_kind: AiScopeKind::Instance,
-                    workspace_id: None,
-                    library_id: None,
-                },
-            )
-            .await?;
+        let mut changed = 0usize;
         let mut created = 0usize;
+        let mut updated = 0usize;
         let mut skipped = 0usize;
         for secret in &configured_ai.provider_secrets {
             let Some(provider) = providers.iter().find(|p| p.provider_kind == secret.provider_kind)
@@ -834,35 +837,100 @@ impl AiCatalogService {
                 continue;
             };
             let label = format!("Bootstrap {}", provider.display_name);
-            if existing.iter().any(|c| c.provider_catalog_id == provider.id && c.label == label) {
-                continue;
-            }
-            let command = CreateAiAccountCommand {
-                scope_kind: AiScopeKind::Instance,
-                workspace_id: None,
-                library_id: None,
-                provider_catalog_id: provider.id,
-                label,
-                api_key: Some(secret.api_key.clone()),
-                base_url: None,
-                created_by_principal_id: None,
-            };
-            match self.create_account(state, command).await {
-                Ok(_) => created += 1,
-                Err(error) if is_provider_credential_validation_error(&error) => {
-                    skipped += 1;
-                    tracing::warn!(
-                        stage = "bootstrap",
-                        provider_kind = %secret.provider_kind,
-                        error = %error,
-                        "skipped env-keyed provider account",
-                    );
+            let existing_accounts = ai_repository::list_accounts_by_provider_and_label(
+                &state.persistence.postgres,
+                provider.id,
+                &label,
+            )
+            .await
+            .map_err(|error| ApiError::internal_with_log(error, "internal"))?
+            .into_iter()
+            .map(accounts::map_account_row)
+            .collect::<Vec<_>>();
+            let has_instance_account =
+                existing_accounts.iter().any(|account| account.scope_kind == AiScopeKind::Instance);
+            if !has_instance_account {
+                let result = self
+                    .create_account(
+                        state,
+                        CreateAiAccountCommand {
+                            scope_kind: AiScopeKind::Instance,
+                            workspace_id: None,
+                            library_id: None,
+                            provider_catalog_id: provider.id,
+                            label: label.clone(),
+                            api_key: Some(secret.api_key.clone()),
+                            base_url: None,
+                            created_by_principal_id: None,
+                        },
+                    )
+                    .await;
+                match result {
+                    Ok(_) => {
+                        changed += 1;
+                        created += 1;
+                    }
+                    Err(error) if is_provider_credential_validation_error(&error) => {
+                        skipped += 1;
+                        tracing::warn!(
+                            stage = "bootstrap",
+                            provider_kind = %secret.provider_kind,
+                            error = %error,
+                            "skipped env-keyed provider account",
+                        );
+                        continue;
+                    }
+                    Err(error) => return Err(error),
                 }
-                Err(error) => return Err(error),
+            }
+            for account in existing_accounts {
+                if !bootstrap_env_credential_needs_sync(
+                    account.api_key.as_deref(),
+                    &account.credential_state,
+                    &secret.api_key,
+                ) {
+                    continue;
+                }
+                let result = self
+                    .update_account(
+                        state,
+                        UpdateAiAccountCommand {
+                            account_id: account.id,
+                            label: label.clone(),
+                            api_key: Some(secret.api_key.clone()),
+                            base_url: account.base_url,
+                            credential_state: account.credential_state,
+                        },
+                    )
+                    .await;
+                match result {
+                    Ok(_) => {
+                        changed += 1;
+                        updated += 1;
+                    }
+                    Err(error) if is_provider_credential_validation_error(&error) => {
+                        skipped += 1;
+                        tracing::warn!(
+                            stage = "bootstrap",
+                            provider_kind = %secret.provider_kind,
+                            account_scope = %scope_kind_key(account.scope_kind),
+                            error = %error,
+                            "skipped env-keyed provider account synchronization",
+                        );
+                    }
+                    Err(error) => return Err(error),
+                }
             }
         }
         if created > 0 {
             tracing::info!(stage = "bootstrap", created, "ensured env-keyed provider accounts",);
+        }
+        if updated > 0 {
+            tracing::info!(
+                stage = "bootstrap",
+                updated,
+                "synchronized env-keyed provider accounts",
+            );
         }
         if skipped > 0 {
             tracing::warn!(
@@ -871,7 +939,7 @@ impl AiCatalogService {
                 "some env-keyed provider accounts could not be validated",
             );
         }
-        Ok(created)
+        Ok(changed)
     }
 
     pub async fn apply_configured_bootstrap_ai_setup(

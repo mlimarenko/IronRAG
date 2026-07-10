@@ -46,8 +46,8 @@ use ironrag_backend::{
 };
 
 const SEEDED_PROVIDER_COUNT: i64 = 8;
-const SEEDED_MODEL_COUNT: i64 = 1143;
-const SEEDED_PRICE_COUNT: i64 = 2147;
+const SEEDED_MODEL_COUNT: i64 = 1161;
+const SEEDED_PRICE_COUNT: i64 = 2183;
 
 // Env-backed bootstrap seeds the six canonical required purposes plus vision;
 // the interactive provider-bundle path additionally covers extract_text.
@@ -478,6 +478,131 @@ async fn fresh_bootstrap_migration_creates_canonical_schema_and_seeded_catalog()
         );
         assert_eq!(scalar_count(fixture.pool(), "ai_model_catalog").await?, SEEDED_MODEL_COUNT);
         assert_eq!(scalar_count(fixture.pool(), "ai_price_catalog").await?, SEEDED_PRICE_COUNT);
+
+        let gpt_56_models = sqlx::query_as::<_, (String, String)>(
+            "select provider.provider_kind, model.model_name
+             from ai_model_catalog model
+             join ai_provider_catalog provider on provider.id = model.provider_catalog_id
+             where model.model_name like '%gpt-5.6%'
+               and model.capability_kind = 'chat'
+               and model.modality_kind = 'multimodal'
+               and model.lifecycle_state = 'active'
+               and model.context_window = 1050000
+               and model.max_output_tokens = 128000
+               and model.metadata_json -> 'defaultRoles'
+                   @> '[\"extract_text\",\"extract_graph\",\"query_compile\",\"query_answer\",\"vision\",\"agent\"]'::jsonb
+             order by provider.provider_kind, model.model_name",
+        )
+        .fetch_all(fixture.pool())
+        .await
+        .context("failed to inspect seeded GPT-5.6 provider models")?;
+        assert_eq!(
+            gpt_56_models,
+            vec![
+                ("gptunnel".to_string(), "gpt-5.6-luna".to_string()),
+                ("gptunnel".to_string(), "gpt-5.6-sol".to_string()),
+                ("gptunnel".to_string(), "gpt-5.6-terra".to_string()),
+                ("openai".to_string(), "gpt-5.6-luna".to_string()),
+                ("openai".to_string(), "gpt-5.6-sol".to_string()),
+                ("openai".to_string(), "gpt-5.6-terra".to_string()),
+                ("openrouter".to_string(), "openai/gpt-5.6-luna".to_string()),
+                ("openrouter".to_string(), "openai/gpt-5.6-luna-pro".to_string()),
+                ("openrouter".to_string(), "openai/gpt-5.6-sol".to_string()),
+                ("openrouter".to_string(), "openai/gpt-5.6-sol-pro".to_string()),
+                ("openrouter".to_string(), "openai/gpt-5.6-terra".to_string()),
+                ("openrouter".to_string(), "openai/gpt-5.6-terra-pro".to_string()),
+                ("routerai".to_string(), "openai/gpt-5.6-luna".to_string()),
+                ("routerai".to_string(), "openai/gpt-5.6-luna-pro".to_string()),
+                ("routerai".to_string(), "openai/gpt-5.6-sol".to_string()),
+                ("routerai".to_string(), "openai/gpt-5.6-sol-pro".to_string()),
+                ("routerai".to_string(), "openai/gpt-5.6-terra".to_string()),
+                ("routerai".to_string(), "openai/gpt-5.6-terra-pro".to_string()),
+            ]
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "select count(*)
+                 from ai_price_catalog price
+                 join ai_model_catalog model on model.id = price.model_catalog_id
+                 join ai_provider_catalog provider on provider.id = model.provider_catalog_id
+                 where model.model_name like '%gpt-5.6%'
+                   and provider.provider_kind in ('openai', 'openrouter', 'gptunnel', 'routerai')
+                   and price.billing_unit in ('per_1m_input_tokens', 'per_1m_output_tokens')
+                   and price.currency_code = 'USD'",
+            )
+            .fetch_one(fixture.pool())
+            .await
+            .context("failed to inspect seeded GPT-5.6 prices")?,
+            36
+        );
+        assert_eq!(
+            sqlx::query_as::<_, (String, String, String, Option<String>)>(
+                "select
+                     provider.provider_kind,
+                     preset ->> 'purpose',
+                     preset ->> 'modelName',
+                     preset -> 'extraParametersJson' ->> 'reasoning_effort'
+                 from ai_provider_catalog provider
+                 cross join lateral jsonb_array_elements(
+                     provider.capability_flags_json -> 'bootstrapPresets'
+                 ) preset
+                 where provider.provider_kind in ('openai', 'openrouter', 'gptunnel', 'routerai')
+                 order by provider.provider_kind, preset ->> 'purpose'",
+            )
+            .fetch_all(fixture.pool())
+            .await
+            .context("failed to inspect GPT-5.6 provider defaults")?,
+            vec![
+                ("gptunnel".to_string(), "agent".to_string(), "gpt-5.6-sol".to_string(), Some("none".to_string())),
+                ("gptunnel".to_string(), "embed_chunk".to_string(), "text-embedding-3-large".to_string(), None),
+                ("gptunnel".to_string(), "extract_graph".to_string(), "gpt-5.4-nano".to_string(), None),
+                ("gptunnel".to_string(), "extract_text".to_string(), "gpt-5.6-luna".to_string(), None),
+                ("gptunnel".to_string(), "query_answer".to_string(), "gpt-5.6-luna".to_string(), None),
+                ("gptunnel".to_string(), "query_compile".to_string(), "gpt-5.6-luna".to_string(), None),
+                ("gptunnel".to_string(), "query_retrieve".to_string(), "text-embedding-3-large".to_string(), None),
+                ("gptunnel".to_string(), "vision".to_string(), "gpt-5.6-luna".to_string(), None),
+                ("openai".to_string(), "agent".to_string(), "gpt-5.6-sol".to_string(), Some("none".to_string())),
+                ("openai".to_string(), "embed_chunk".to_string(), "text-embedding-3-large".to_string(), None),
+                ("openai".to_string(), "extract_graph".to_string(), "gpt-5.4-nano".to_string(), None),
+                ("openai".to_string(), "extract_text".to_string(), "gpt-5.6-luna".to_string(), None),
+                ("openai".to_string(), "query_answer".to_string(), "gpt-5.6-luna".to_string(), None),
+                ("openai".to_string(), "query_compile".to_string(), "gpt-5.6-luna".to_string(), None),
+                ("openai".to_string(), "query_retrieve".to_string(), "text-embedding-3-large".to_string(), None),
+                ("openai".to_string(), "vision".to_string(), "gpt-5.6-luna".to_string(), None),
+                ("openrouter".to_string(), "agent".to_string(), "openai/gpt-5.6-sol".to_string(), Some("none".to_string())),
+                ("openrouter".to_string(), "embed_chunk".to_string(), "openai/text-embedding-3-large".to_string(), None),
+                ("openrouter".to_string(), "extract_graph".to_string(), "openai/gpt-5.4-nano".to_string(), None),
+                ("openrouter".to_string(), "extract_text".to_string(), "openai/gpt-5.6-luna".to_string(), None),
+                ("openrouter".to_string(), "query_answer".to_string(), "openai/gpt-5.6-luna".to_string(), None),
+                ("openrouter".to_string(), "query_compile".to_string(), "openai/gpt-5.6-luna".to_string(), None),
+                ("openrouter".to_string(), "query_retrieve".to_string(), "openai/text-embedding-3-large".to_string(), None),
+                ("openrouter".to_string(), "vision".to_string(), "openai/gpt-5.6-luna".to_string(), None),
+                ("routerai".to_string(), "agent".to_string(), "openai/gpt-5.6-sol".to_string(), Some("none".to_string())),
+                ("routerai".to_string(), "embed_chunk".to_string(), "openai/text-embedding-3-large".to_string(), None),
+                ("routerai".to_string(), "extract_graph".to_string(), "openai/gpt-5.4-nano".to_string(), None),
+                ("routerai".to_string(), "extract_text".to_string(), "openai/gpt-5.6-luna".to_string(), None),
+                ("routerai".to_string(), "query_answer".to_string(), "openai/gpt-5.6-luna".to_string(), None),
+                ("routerai".to_string(), "query_compile".to_string(), "openai/gpt-5.6-luna".to_string(), None),
+                ("routerai".to_string(), "query_retrieve".to_string(), "openai/text-embedding-3-large".to_string(), None),
+                ("routerai".to_string(), "vision".to_string(), "openai/gpt-5.6-luna".to_string(), None),
+            ]
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "select count(*)
+                 from ai_provider_catalog provider
+                 cross join lateral jsonb_array_elements(
+                     provider.capability_flags_json -> 'bootstrapPresets'
+                 ) preset
+                 where provider.provider_kind in ('openai', 'openrouter', 'gptunnel', 'routerai')
+                   and preset ->> 'purpose' = 'agent'
+                   and (preset ->> 'maxOutputTokensOverride')::integer = 65536",
+            )
+            .fetch_one(fixture.pool())
+            .await
+            .context("failed to inspect GPT-5.6 agent output limits")?,
+            4
+        );
         assert!(!table_exists(fixture.pool(), "workspace").await?);
         assert!(!table_exists(fixture.pool(), "project").await?);
         assert!(!table_exists(fixture.pool(), "mcp_audit_event").await?);
@@ -624,6 +749,94 @@ async fn bootstrap_setup_route_uses_env_backed_openai_defaults() -> Result<()> {
         assert_eq!(scalar_count(fixture.pool(), "iam_user").await?, 1);
         assert_eq!(scalar_count(fixture.pool(), "ai_account").await?, 1);
         assert_eq!(scalar_count(fixture.pool(), "ai_binding").await?, ENV_BOOTSTRAP_BINDING_COUNT);
+        Ok(())
+    }
+    .await;
+
+    fixture.cleanup().await?;
+    result
+}
+
+#[tokio::test]
+#[ignore = "requires local postgres service"]
+async fn env_account_sync_rotates_canonical_accounts_in_every_scope() -> Result<()> {
+    let configured_key = "test-current-bootstrap-token"; // pragma: allowlist secret
+    let fixture =
+        GreenfieldBootstrapFixture::create_with_ui_bootstrap_ai_setup(Some(UiBootstrapAiSetup {
+            provider_secrets: vec![UiBootstrapAiProviderSecret {
+                provider_kind: "openai".to_string(),
+                api_key: configured_key.to_string(),
+            }],
+            binding_defaults: vec![],
+        }))
+        .await?;
+
+    let result = async {
+        let suffix = Uuid::now_v7().simple().to_string();
+        let workspace = catalog_repository::create_workspace(
+            fixture.pool(),
+            &format!("credential-sync-workspace-{suffix}"),
+            "Credential Sync Workspace",
+            None,
+        )
+        .await?;
+        let library = catalog_repository::create_library(
+            fixture.pool(),
+            workspace.id,
+            &format!("credential-sync-library-{suffix}"),
+            "Credential Sync Library",
+            None,
+            None,
+        )
+        .await?;
+        let provider_id = sqlx::query_scalar::<_, Uuid>(
+            "select id from ai_provider_catalog where provider_kind = 'openai'",
+        )
+        .fetch_one(fixture.pool())
+        .await?;
+        let library_account = repositories::ai_repository::create_account(
+            fixture.pool(),
+            "library",
+            Some(workspace.id),
+            Some(library.id),
+            provider_id,
+            "Bootstrap OpenAI",
+            Some("test-stale-bootstrap-token"), // pragma: allowlist secret
+            None,
+            None,
+        )
+        .await?;
+        sqlx::query("update ai_account set credential_state = 'disabled' where id = $1")
+            .bind(library_account.id)
+            .execute(fixture.pool())
+            .await?;
+
+        assert_eq!(
+            fixture
+                .state
+                .canonical_services
+                .ai_catalog
+                .ensure_env_ai_accounts(&fixture.state)
+                .await?,
+            2,
+        );
+
+        let accounts = sqlx::query_as::<_, (String, String, Option<String>)>(
+            "select scope_kind::text, credential_state::text, api_key
+             from ai_account
+             where provider_catalog_id = $1 and label = 'Bootstrap OpenAI'
+             order by scope_kind",
+        )
+        .bind(provider_id)
+        .fetch_all(fixture.pool())
+        .await?;
+        assert_eq!(
+            accounts,
+            vec![
+                ("instance".to_string(), "active".to_string(), Some(configured_key.to_string())),
+                ("library".to_string(), "disabled".to_string(), Some(configured_key.to_string())),
+            ],
+        );
         Ok(())
     }
     .await;

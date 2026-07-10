@@ -602,6 +602,86 @@ describe('AssistantPage integration', () => {
     expect(container.textContent).not.toContain('Agent turn is running');
   });
 
+  it('does not retry a missing debug snapshot after a restored pending turn completes', async () => {
+    window.localStorage.setItem(
+      'ironrag_assistant_active_session:ws-1:library-1',
+      JSON.stringify('session-1'),
+    );
+    window.localStorage.setItem('ironrag_assistant_debug_open', JSON.stringify(true));
+    let getSessionCalls = 0;
+    queryApiMock.getSession.mockImplementation(async () => {
+      getSessionCalls += 1;
+      const pending = getSessionCalls === 1;
+      return {
+        session: {
+          id: 'session-1',
+          libraryId: 'library-1',
+          title: 'Deployment notes',
+          updatedAt: '2026-04-10T10:00:00Z',
+          turnCount: pending ? 1 : 2,
+        },
+        messages: [
+          {
+            id: 'msg-user',
+            role: 'user',
+            content: 'Question still running?',
+            timestamp: '2026-04-10T10:00:01Z',
+          },
+          pending
+            ? {
+                id: 'exec-running',
+                role: 'assistant',
+                content: '',
+                timestamp: '2026-04-10T10:00:02Z',
+                executionId: 'exec-running',
+              }
+            : {
+                id: 'msg-assistant',
+                role: 'assistant',
+                content: 'Recovered durable answer',
+                timestamp: '2026-04-10T10:00:08Z',
+                executionId: 'exec-running',
+                evidence: {
+                  preparedSegmentReferences: [],
+                  technicalFactReferences: [],
+                  entityReferences: [],
+                  relationReferences: [],
+                  verificationState: 'verified',
+                  verificationWarnings: [],
+                  runtimeStageSummaries: [],
+                },
+              },
+        ],
+      };
+    });
+    queryApiMock.getExecutionLlmContext.mockRejectedValue(
+      Object.assign(new Error('optional context snapshot is unavailable'), {
+        status: 404,
+      }),
+    );
+
+    await renderPage();
+
+    await waitFor(() => {
+      expect(container.textContent).toContain('Agent turn is running');
+    });
+    await waitFor(
+      () => {
+        expect(container.textContent).toContain('Recovered durable answer');
+      },
+      { timeout: 2500 },
+    );
+    await waitFor(() => {
+      expect(queryApiMock.getExecutionLlmContext).toHaveBeenCalledTimes(1);
+    });
+    await rerenderPage();
+    await flushUi();
+
+    expect(queryApiMock.getExecutionLlmContext).toHaveBeenCalledTimes(1);
+    expect(toastErrorMock).not.toHaveBeenCalled();
+    expect(container.textContent).toContain('LLM context was not recorded');
+  });
+
   it('does not loop global notifications when the optional debug context is missing', async () => {
     window.localStorage.setItem(
       'ironrag_assistant_active_session:ws-1:library-1',
@@ -633,7 +713,9 @@ describe('AssistantPage integration', () => {
       ],
     });
     queryApiMock.getExecutionLlmContext.mockRejectedValue(
-      new ApiError(404, { error: 'not found' }),
+      Object.assign(new Error('not found: optional context snapshot'), {
+        status: 404,
+      }),
     );
 
     await renderPage();

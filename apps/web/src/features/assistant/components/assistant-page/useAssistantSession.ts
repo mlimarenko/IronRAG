@@ -20,7 +20,6 @@ import {
   mapAssistantSession,
 } from '@/features/assistant/model/assistantAdapter';
 import { queryApi, queries } from '@/shared/api';
-import { ApiError } from '@/shared/api/runtime';
 import type {
   AssistantSessionListItem,
   QueryConversation,
@@ -264,7 +263,10 @@ function finalizedAssistantMessageFromResult(
 }
 
 function isOptionalDebugSnapshotMiss(error: unknown): boolean {
-  return error instanceof ApiError && error.status === 404;
+  if (typeof error !== 'object' || error === null || !('status' in error)) {
+    return false;
+  }
+  return error.status === 404;
 }
 
 export function useAssistantSession({
@@ -304,6 +306,7 @@ export function useAssistantSession({
   const libraryScopeRef = useRef<string | null>(libraryScopeKey);
   const activeSessionRef = useRef<string | null>(activeSession);
   const debugRequestRef = useRef(0);
+  const debugRequestsInFlightRef = useRef<Set<string>>(new Set());
   const unavailableDebugExecutionsRef = useRef<Set<string>>(new Set());
   const executingRef = useRef(false);
   const hydratedSessionRef = useRef<string | null>(null);
@@ -717,9 +720,6 @@ export function useAssistantSession({
 
   const openDebugFor = useCallback(
     async (executionId: string) => {
-      const requestId = debugRequestRef.current + 1;
-      debugRequestRef.current = requestId;
-      const requestSession = activeSessionRef.current;
       if (unavailableDebugExecutionsRef.current.has(executionId)) {
         setDebugContext(null);
         setDebugError(t('assistant.llmContextUnavailable'));
@@ -727,6 +727,13 @@ export function useAssistantSession({
         setDebugLoadingId(null);
         return;
       }
+      if (debugRequestsInFlightRef.current.has(executionId)) {
+        return;
+      }
+      debugRequestsInFlightRef.current.add(executionId);
+      const requestId = debugRequestRef.current + 1;
+      debugRequestRef.current = requestId;
+      const requestSession = activeSessionRef.current;
       setDebugLoadingId(executionId);
       setDebugError(null);
       setDebugErrorExecutionId(null);
@@ -760,6 +767,7 @@ export function useAssistantSession({
           }
         }
       } finally {
+        debugRequestsInFlightRef.current.delete(executionId);
         if (
           debugRequestRef.current === requestId &&
           activeSessionRef.current === requestSession

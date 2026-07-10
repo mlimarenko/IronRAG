@@ -16,7 +16,7 @@ use ironrag_backend::{
         audit::AuditEventSubject,
         ops::{OpsAsyncOperation, OpsAsyncOperationStatus},
     },
-    infra::repositories::{self, query_repository, runtime_repository},
+    infra::repositories::{self, ops_repository, query_repository, runtime_repository},
     infra::{
         knowledge_plane::{ContextStore, DocumentStore, GraphStore},
         knowledge_rows::{
@@ -1478,6 +1478,173 @@ async fn context_bundle_roundtrip_by_query_execution_persists_trace_and_chunk_re
         assert_eq!(traces[0].timing_breakdown["bundle_ms"], json!(1));
         assert_eq!(traces[0].diagnostics_json["grounding_kind"], json!("hybrid"));
 
+        Ok(())
+    }
+    .await;
+
+    fixture.cleanup().await?;
+    result
+}
+
+#[tokio::test]
+#[ignore = "requires local postgres service with database create/drop access"]
+async fn interrupted_query_execution_cleanup_is_atomic_and_idempotent() -> Result<()> {
+    let fixture = QueryGroundingFixture::create().await?;
+    let result = async {
+        let suffix = Uuid::now_v7().simple().to_string();
+        let workspace = repositories::catalog_repository::create_workspace(
+            &fixture.postgres,
+            &format!("interrupted-query-workspace-{suffix}"),
+            "Interrupted Query Workspace",
+            None,
+        )
+        .await?;
+        let library = repositories::catalog_repository::create_library(
+            &fixture.postgres,
+            workspace.id,
+            &format!("interrupted-query-library-{suffix}"),
+            "Interrupted Query Library",
+            None,
+            None,
+        )
+        .await?;
+        let conversation = query_repository::create_conversation(
+            &fixture.postgres,
+            &query_repository::NewQueryConversation {
+                workspace_id: workspace.id,
+                library_id: library.id,
+                created_by_principal_id: None,
+                title: Some("Interrupted Query"),
+                conversation_state: "active",
+                request_surface: "mcp",
+            },
+            4,
+        )
+        .await?;
+        let request_turn = query_repository::create_turn(
+            &fixture.postgres,
+            &query_repository::NewQueryTurn {
+                conversation_id: conversation.id,
+                turn_kind: "user",
+                author_principal_id: None,
+                content_text: "Summarize the available evidence.",
+                execution_id: None,
+            },
+        )
+        .await?;
+        let execution_id = Uuid::now_v7();
+        let runtime_execution_id = Uuid::now_v7();
+        runtime_repository::create_runtime_execution(
+            &fixture.postgres,
+            &runtime_repository::NewRuntimeExecution {
+                id: runtime_execution_id,
+                owner_kind: RuntimeExecutionOwnerKind::QueryExecution.as_str(),
+                owner_id: execution_id,
+                task_kind: RuntimeTaskKind::QueryAnswer.as_str(),
+                surface_kind: "mcp",
+                contract_name: "query_answer",
+                contract_version: "1",
+                lifecycle_state: RuntimeLifecycleState::Running.as_str(),
+                active_stage: Some(RuntimeStageKind::Retrieve.as_str()),
+                turn_budget: 4,
+                turn_count: 1,
+                parallel_action_limit: 1,
+                failure_code: None,
+                failure_summary_redacted: None,
+                parent_execution_id: None,
+            },
+        )
+        .await?;
+        query_repository::create_execution(
+            &fixture.postgres,
+            &query_repository::NewQueryExecution {
+                execution_id,
+                context_bundle_id: canonical_context_bundle_id(execution_id),
+                workspace_id: workspace.id,
+                library_id: library.id,
+                conversation_id: conversation.id,
+                request_turn_id: Some(request_turn.id),
+                response_turn_id: None,
+                binding_id: None,
+                runtime_execution_id,
+                query_text: "Summarize the available evidence.",
+                failure_code: None,
+            },
+        )
+        .await?;
+        let operation = ops_repository::create_async_operation(
+            &fixture.postgres,
+            &ops_repository::NewOpsAsyncOperation {
+                workspace_id: workspace.id,
+                library_id: Some(library.id),
+                operation_kind: "query_execution",
+                surface_kind: "mcp",
+                requested_by_principal_id: None,
+                status: "processing",
+                subject_kind: "query_execution",
+                subject_id: Some(execution_id),
+                parent_async_operation_id: None,
+                completed_at: None,
+                failure_code: None,
+            },
+        )
+        .await?;
+
+        sqlx::query("update query_execution set started_at = $2 where id = $1")
+            .bind(execution_id)
+            .bind(Utc::now() - chrono::Duration::minutes(10))
+            .execute(&fixture.postgres)
+            .await?;
+
+        assert_eq!(
+            query_repository::reap_stale_query_executions(
+                &fixture.postgres,
+                Utc::now() - chrono::Duration::minutes(5),
+                10,
+            )
+            .await?,
+            1,
+        );
+        assert_eq!(
+            query_repository::reap_stale_query_executions(
+                &fixture.postgres,
+                Utc::now() - chrono::Duration::minutes(5),
+                10,
+            )
+            .await?,
+            0,
+        );
+        assert!(
+            !query_repository::cancel_interrupted_execution(
+                &fixture.postgres,
+                execution_id,
+                runtime_execution_id,
+                operation.id,
+            )
+            .await?
+        );
+
+        let execution = query_repository::get_execution_by_id(&fixture.postgres, execution_id)
+            .await?
+            .context("interrupted query execution missing")?;
+        let runtime = runtime_repository::get_runtime_execution_by_id(
+            &fixture.postgres,
+            runtime_execution_id,
+        )
+        .await?
+        .context("interrupted runtime execution missing")?;
+        let operation = ops_repository::get_async_operation_by_id(&fixture.postgres, operation.id)
+            .await?
+            .context("interrupted async operation missing")?;
+        assert_eq!(execution.failure_code.as_deref(), Some("query_execution_interrupted"));
+        assert!(execution.completed_at.is_some());
+        assert_eq!(runtime.lifecycle_state, RuntimeLifecycleState::Canceled);
+        assert_eq!(runtime.active_stage, None);
+        assert_eq!(runtime.failure_code.as_deref(), Some("query_execution_interrupted"));
+        assert!(runtime.completed_at.is_some());
+        assert_eq!(operation.status, "canceled");
+        assert_eq!(operation.failure_code.as_deref(), Some("query_execution_interrupted"));
+        assert!(operation.completed_at.is_some());
         Ok(())
     }
     .await;

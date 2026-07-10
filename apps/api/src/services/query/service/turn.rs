@@ -113,6 +113,77 @@ struct QueryResultCacheContext {
     binding_fingerprint: String,
 }
 
+struct QueryExecutionInterruptionGuard {
+    postgres: sqlx::PgPool,
+    execution_id: Uuid,
+    runtime_execution_id: Uuid,
+    async_operation_id: Uuid,
+    armed: bool,
+}
+
+impl QueryExecutionInterruptionGuard {
+    fn new(
+        postgres: &sqlx::PgPool,
+        execution_id: Uuid,
+        runtime_execution_id: Uuid,
+        async_operation_id: Uuid,
+    ) -> Self {
+        Self {
+            postgres: postgres.clone(),
+            execution_id,
+            runtime_execution_id,
+            async_operation_id,
+            armed: true,
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for QueryExecutionInterruptionGuard {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            tracing::error!(
+                execution_id = %self.execution_id,
+                "query execution was interrupted without an active cleanup runtime"
+            );
+            return;
+        };
+        let postgres = self.postgres.clone();
+        let execution_id = self.execution_id;
+        let runtime_execution_id = self.runtime_execution_id;
+        let async_operation_id = self.async_operation_id;
+        runtime.spawn(async move {
+            match query_repository::cancel_interrupted_execution(
+                &postgres,
+                execution_id,
+                runtime_execution_id,
+                async_operation_id,
+            )
+            .await
+            {
+                Ok(true) => tracing::warn!(
+                    %execution_id,
+                    %runtime_execution_id,
+                    "canceled interrupted query execution"
+                ),
+                Ok(false) => {}
+                Err(error) => tracing::error!(
+                    %error,
+                    %execution_id,
+                    %runtime_execution_id,
+                    "failed to cancel interrupted query execution"
+                ),
+            }
+        });
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum UiAgentHistoryScope {
     Preserve,
@@ -1412,6 +1483,12 @@ impl QueryService {
                 },
             )
             .await?;
+        let mut interruption_guard = QueryExecutionInterruptionGuard::new(
+            &state.persistence.postgres,
+            execution.id,
+            runtime_execution_id,
+            async_operation.id,
+        );
 
         let mut query_embedding_usage = None;
         // Compile + embed both bill separately from answer generation:
@@ -1591,6 +1668,7 @@ impl QueryService {
                             &runtime_result,
                         )
                         .await;
+                        interruption_guard.disarm();
                         return Err(map_query_execution_error_message(
                             state,
                             &failed.id,
@@ -2087,6 +2165,7 @@ impl QueryService {
                     &runtime_result,
                 )
                 .await;
+                interruption_guard.disarm();
                 return Err(map_query_execution_error_message(
                     state,
                     &terminal_execution.id,
@@ -2117,6 +2196,7 @@ impl QueryService {
             "query.turn.completed"
         );
 
+        interruption_guard.disarm();
         Ok(QueryTurnExecutionResult {
             conversation: map_conversation_row(conversation),
             request_turn,

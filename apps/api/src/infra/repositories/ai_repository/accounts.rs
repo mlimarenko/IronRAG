@@ -51,6 +51,36 @@ pub async fn list_accounts_exact(
     .await
 }
 
+pub async fn list_accounts_by_provider_and_label(
+    postgres: &PgPool,
+    provider_catalog_id: Uuid,
+    label: &str,
+) -> Result<Vec<AiAccountRow>, sqlx::Error> {
+    sqlx::query_as::<_, AiAccountRow>(
+        "select
+            id,
+            scope_kind::text as scope_kind,
+            workspace_id,
+            library_id,
+            provider_catalog_id,
+            label,
+            api_key,
+            base_url,
+            credential_state::text as credential_state,
+            created_by_principal_id,
+            created_at,
+            updated_at
+         from ai_account
+         where provider_catalog_id = $1
+           and label = $2
+         order by created_at, id",
+    )
+    .bind(provider_catalog_id)
+    .bind(label)
+    .fetch_all(postgres)
+    .await
+}
+
 pub async fn list_visible_accounts(
     postgres: &PgPool,
     workspace_id: Option<Uuid>,

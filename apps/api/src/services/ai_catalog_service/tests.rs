@@ -5,8 +5,9 @@ use super::provider_validation::normalize_provider_base_url_input;
 use super::{
     BootstrapAiBindingInput, BootstrapAiCredentialSource,
     bootstrap_binding_inputs_cover_required_purposes, bootstrap_bundle_is_self_contained,
-    canonicalize_provider_base_url, discovered_provider_model_signature_for_capability,
-    is_loopback_base_url, is_provider_credential_validation_error, merge_provider_runtime_profile,
+    bootstrap_env_credential_needs_sync, canonicalize_provider_base_url,
+    discovered_provider_model_signature_for_capability, is_loopback_base_url,
+    is_provider_credential_validation_error, merge_provider_runtime_profile,
     parse_allowed_binding_purposes, provider_credential_base_url_for_create,
     provider_credential_base_url_for_update, resolve_bootstrap_provider_binding_bundle,
     resolve_bootstrap_provider_binding_descriptors, resolve_configured_bootstrap_binding_inputs,
@@ -1584,6 +1585,15 @@ fn env_provider_credential_bootstrap_skips_only_provider_validation_errors() {
     assert!(!is_provider_credential_validation_error(&ApiError::NotFound(
         "provider_catalog missing".to_string()
     )));
+}
+
+#[test]
+fn env_provider_credential_bootstrap_syncs_rotated_keys_without_reactivating_accounts() {
+    assert!(!bootstrap_env_credential_needs_sync(Some("current-key"), "active", "current-key",));
+    assert!(bootstrap_env_credential_needs_sync(Some("previous-key"), "active", "current-key",));
+    assert!(!bootstrap_env_credential_needs_sync(Some("current-key"), "disabled", "current-key",));
+    assert!(bootstrap_env_credential_needs_sync(Some("previous-key"), "disabled", "current-key",));
+    assert!(bootstrap_env_credential_needs_sync(None, "active", "current-key",));
 }
 
 fn vector_alignment_input(

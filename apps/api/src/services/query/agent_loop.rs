@@ -86,6 +86,7 @@ const NO_PROGRESS_ITERATION_LIMIT: usize = 2;
 /// the soft target (the canonical per-tool-call SLO threaded into the turn)
 /// bounds the wait.
 const PER_TOOL_CALL_MAX_WAIT: Duration = Duration::from_secs(35);
+const GROUNDED_ANSWER_TOOL_MAX_WAIT: Duration = Duration::from_secs(90);
 const VERBATIM_USER_FRAGMENT_LIMIT: usize = 6;
 const VERBATIM_USER_FRAGMENT_MIN_CHARS: usize = 4;
 const VERBATIM_USER_FRAGMENT_MAX_CHARS: usize = 400;
@@ -2200,8 +2201,11 @@ async fn execute_tool_calls(
                         // budget. On timeout produce a structured error outcome;
                         // the error path clears the dedup fingerprint so a retry
                         // of the same call is not suppressed.
-                        let per_call_wait =
-                            per_tool_call_wait(remaining, input.soft_final_answer_deadline);
+                        let per_call_wait = per_tool_call_wait_for_tool(
+                            &pending.call.name,
+                            remaining,
+                            input.soft_final_answer_deadline,
+                        );
                         run_tool_call_within_budget(
                             execute_one_tool_call(&input, &pending.call, single_tool_iteration),
                             per_call_wait,
@@ -3669,6 +3673,17 @@ fn per_tool_call_wait(
     let per_call_max =
         soft_final_answer_deadline.unwrap_or(PER_TOOL_CALL_MAX_WAIT).min(PER_TOOL_CALL_MAX_WAIT);
     remaining_turn_deadline.min(per_call_max)
+}
+
+fn per_tool_call_wait_for_tool(
+    tool_name: &str,
+    remaining_turn_deadline: Duration,
+    soft_final_answer_deadline: Option<Duration>,
+) -> Duration {
+    if tool_name == GROUNDED_ANSWER_TOOL_NAME {
+        return remaining_turn_deadline.min(GROUNDED_ANSWER_TOOL_MAX_WAIT);
+    }
+    per_tool_call_wait(remaining_turn_deadline, soft_final_answer_deadline)
 }
 
 /// Run one tool-execution future under a per-call wait. If the future does not
@@ -6560,6 +6575,25 @@ mod tests {
             per_tool_call_wait(Duration::from_secs(600), Some(Duration::from_secs(300))),
             PER_TOOL_CALL_MAX_WAIT
         );
+    }
+
+    #[test]
+    fn grounded_answer_wait_uses_its_canonical_pipeline_budget() {
+        let remaining = Duration::from_secs(150);
+        let soft = Duration::from_secs(35);
+
+        let wait = per_tool_call_wait_for_tool(GROUNDED_ANSWER_TOOL_NAME, remaining, Some(soft));
+
+        assert_eq!(wait, GROUNDED_ANSWER_TOOL_MAX_WAIT);
+        assert_eq!(
+            per_tool_call_wait_for_tool(
+                GROUNDED_ANSWER_TOOL_NAME,
+                Duration::from_secs(45),
+                Some(soft),
+            ),
+            Duration::from_secs(45),
+        );
+        assert_eq!(per_tool_call_wait_for_tool("search_documents", remaining, Some(soft)), soft,);
     }
 
     // GUARD 1 — per-tool-call timeout.
