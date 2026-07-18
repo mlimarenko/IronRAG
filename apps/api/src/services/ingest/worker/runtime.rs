@@ -117,7 +117,7 @@ pub(super) async fn run_ingestion_worker_pool(
                     handle_job_join_result(&state, result).await;
                 }
             }
-            _ = time::sleep(WORKER_POLL_INTERVAL) => {
+            () = time::sleep(WORKER_POLL_INTERVAL) => {
                 state.worker_runtime.touch().await;
             }
         }
@@ -188,18 +188,19 @@ async fn fill_available_job_slots(
         // the worker process RSS approaches the soft limit, so a burst of
         // heavy docs cannot stack past the cgroup. When one of the in-flight
         // jobs finishes and frees memory, the dispatcher resumes claiming.
-        if memory_soft_limit_mib > 0 && !active_jobs.is_empty() {
-            if let Some(rss_bytes) = crate::shared::telemetry::current_process_rss_bytes() {
-                let rss_mib = rss_bytes / (1024 * 1024);
-                if rss_mib >= memory_soft_limit_mib {
-                    warn!(
-                        rss_mib,
-                        memory_soft_limit_mib,
-                        active_jobs = active_jobs.len(),
-                        "ingest dispatcher holding claims: worker RSS over soft limit",
-                    );
-                    break;
-                }
+        if memory_soft_limit_mib > 0
+            && !active_jobs.is_empty()
+            && let Some(rss_bytes) = crate::shared::telemetry::current_process_rss_bytes()
+        {
+            let rss_mib = rss_bytes / (1024 * 1024);
+            if rss_mib >= memory_soft_limit_mib {
+                warn!(
+                    rss_mib,
+                    memory_soft_limit_mib,
+                    active_jobs = active_jobs.len(),
+                    "ingest dispatcher holding claims: worker RSS over soft limit",
+                );
+                break;
             }
         }
         state.worker_runtime.touch().await;
@@ -240,7 +241,7 @@ async fn fill_available_job_slots(
                         // task-local lane does not cross the `spawn` boundary.
                         // Marking ingest keeps its fan-out off the
                         // query-reserved budget.
-                        let result = crate::integrations::provider_budget::with_lane(
+                        let result = Box::pin(crate::integrations::provider_budget::with_lane(
                             crate::integrations::provider_budget::ProviderLane::Ingest,
                             execute_canonical_ingest_job(
                                 state,
@@ -248,7 +249,7 @@ async fn fill_available_job_slots(
                                 job,
                                 job_cancellation_token,
                             ),
-                        )
+                        ))
                         .await;
                         CanonicalJobOutcome {
                             job_id,
@@ -361,8 +362,8 @@ async fn reclaim_orphaned_leases_on_startup(state: &Arc<AppState>) {
 /// exceed the per-library backfill debounce (60 s) so the loop never races the
 /// per-job hook, while still catching up within a few minutes on an idle
 /// queue.
-const GRAPH_BACKFILL_TICK: std::time::Duration = std::time::Duration::from_secs(120);
-const GRAPH_MAINTENANCE_TICK: std::time::Duration = std::time::Duration::from_secs(300);
+const GRAPH_BACKFILL_TICK: std::time::Duration = std::time::Duration::from_mins(2);
+const GRAPH_MAINTENANCE_TICK: std::time::Duration = std::time::Duration::from_mins(5);
 
 async fn run_graph_backfill_loop(state: Arc<AppState>, mut shutdown: broadcast::Receiver<()>) {
     info!("starting graph backfill loop");
@@ -372,7 +373,7 @@ async fn run_graph_backfill_loop(state: Arc<AppState>, mut shutdown: broadcast::
                 info!("stopping graph backfill loop");
                 break;
             }
-            _ = time::sleep(GRAPH_BACKFILL_TICK) => {
+            () = time::sleep(GRAPH_BACKFILL_TICK) => {
                 if !ingest_queue_is_idle(&state).await {
                     continue;
                 }
@@ -389,8 +390,8 @@ async fn run_graph_backfill_loop(state: Arc<AppState>, mut shutdown: broadcast::
                     }
                 };
                 for library_id in libraries {
-                    if crate::services::graph::backfill::try_acquire_graph_backfill_slot(library_id) {
-                        if let Err(error) = crate::services::graph::backfill::run_library_graph_backfill(
+                    if crate::services::graph::backfill::try_acquire_graph_backfill_slot(library_id)
+                        && let Err(error) = crate::services::graph::backfill::run_library_graph_backfill(
                             &state,
                             library_id,
                         )
@@ -398,14 +399,13 @@ async fn run_graph_backfill_loop(state: Arc<AppState>, mut shutdown: broadcast::
                         {
                             warn!(%library_id, ?error, "graph backfill tick failed");
                         }
-                    }
                     // Re-extract pass covers the World B case: readable
                     // documents whose active revision has NO extraction
                     // records at all. Its own 300 s debounce slot gates
                     // the LLM budget separately from the much cheaper
                     // backfill pass.
-                    if crate::services::graph::backfill::try_acquire_graph_reextract_slot(library_id) {
-                        if let Err(error) = crate::services::graph::backfill::run_library_graph_reextract(
+                    if crate::services::graph::backfill::try_acquire_graph_reextract_slot(library_id)
+                        && let Err(error) = crate::services::graph::backfill::run_library_graph_reextract(
                             &state,
                             library_id,
                         )
@@ -413,7 +413,6 @@ async fn run_graph_backfill_loop(state: Arc<AppState>, mut shutdown: broadcast::
                         {
                             warn!(%library_id, ?error, "graph re-extract tick failed");
                         }
-                    }
                 }
             }
         }
@@ -428,7 +427,7 @@ async fn run_graph_maintenance_loop(state: Arc<AppState>, mut shutdown: broadcas
                 info!("stopping graph maintenance loop");
                 break;
             }
-            _ = time::sleep(GRAPH_MAINTENANCE_TICK) => {
+            () = time::sleep(GRAPH_MAINTENANCE_TICK) => {
                 if !ingest_queue_is_idle(&state).await {
                     continue;
                 }
@@ -500,7 +499,7 @@ async fn run_canonical_lease_recovery_loop(
                 info!("stopping canonical lease recovery loop");
                 break;
             }
-            _ = time::sleep(CANONICAL_LEASE_RECOVERY_INTERVAL) => {
+            () = time::sleep(CANONICAL_LEASE_RECOVERY_INTERVAL) => {
                 let threshold = chrono::Duration::seconds(CANONICAL_STALE_LEASE_SECONDS);
                 match ingest_repository::recover_stale_canonical_leases(
                     &state.persistence.postgres,

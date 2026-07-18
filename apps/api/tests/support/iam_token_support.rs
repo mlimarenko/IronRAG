@@ -1,5 +1,3 @@
-#![allow(clippy::unwrap_used, clippy::expect_used, dead_code)]
-
 use std::collections::BTreeSet;
 
 use anyhow::Context;
@@ -8,12 +6,11 @@ use uuid::Uuid;
 
 use ironrag_backend::{infra::repositories::iam_repository, interfaces::http::auth::hash_token};
 
-pub struct MintedApiToken {
-    pub principal_id: Uuid,
-    pub plaintext: String,
+pub(crate) struct MintedApiToken {
+    pub(crate) plaintext: String,
 }
 
-pub async fn mint_api_token(
+pub(crate) async fn mint_api_token(
     postgres: &PgPool,
     workspace_id: Option<Uuid>,
     token_kind: &str,
@@ -75,17 +72,7 @@ pub async fn mint_api_token(
         }
     }
 
-    Ok(MintedApiToken { principal_id: token.principal_id, plaintext })
-}
-
-pub async fn find_active_api_token(
-    postgres: &PgPool,
-    plaintext: &str,
-) -> anyhow::Result<iam_repository::AuthenticatedApiTokenRow> {
-    iam_repository::find_active_api_token_by_secret_hash(postgres, &hash_token(plaintext))
-        .await
-        .context("failed to resolve api token by secret hash")?
-        .context("api token missing")
+    Ok(MintedApiToken { plaintext })
 }
 
 fn normalize_permission_kind(scope: &str, token_kind: &str) -> &'static str {

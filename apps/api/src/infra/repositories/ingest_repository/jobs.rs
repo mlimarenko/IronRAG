@@ -8,6 +8,7 @@ pub struct IngestJobRow {
     pub workspace_id: Uuid,
     pub library_id: Uuid,
     pub mutation_id: Option<Uuid>,
+    pub mutation_item_id: Option<Uuid>,
     pub connector_id: Option<Uuid>,
     pub async_operation_id: Option<Uuid>,
     pub knowledge_document_id: Option<Uuid>,
@@ -32,6 +33,7 @@ pub struct NewIngestJob {
     pub workspace_id: Uuid,
     pub library_id: Uuid,
     pub mutation_id: Option<Uuid>,
+    pub mutation_item_id: Option<Uuid>,
     pub connector_id: Option<Uuid>,
     pub async_operation_id: Option<Uuid>,
     pub knowledge_document_id: Option<Uuid>,
@@ -100,16 +102,36 @@ pub enum QueueMoveDirection {
     Bottom,
 }
 
+enum QueuedJobMove {
+    Swap { target_id: Uuid, target_rank: i64 },
+    SetRank(i64),
+}
+
 pub async fn create_ingest_job(
     postgres: &PgPool,
     input: &NewIngestJob,
 ) -> Result<IngestJobRow, sqlx::Error> {
+    create_ingest_job_with_executor(postgres, input).await
+}
+
+/// Creates a queue job using the caller's pool connection or transaction.
+///
+/// Transaction-aware callers use this to commit a job and its owning domain
+/// record atomically.
+pub async fn create_ingest_job_with_executor<'e, E>(
+    executor: E,
+    input: &NewIngestJob,
+) -> Result<IngestJobRow, sqlx::Error>
+where
+    E: Executor<'e, Database = Postgres>,
+{
     sqlx::query_as::<_, IngestJobRow>(
         "insert into ingest_job (
             id,
             workspace_id,
             library_id,
             mutation_id,
+            mutation_item_id,
             connector_id,
             async_operation_id,
             knowledge_document_id,
@@ -131,19 +153,21 @@ pub async fn create_ingest_job(
             $6,
             $7,
             $8,
-            $9::ingest_job_kind,
-            $10::ingest_queue_state,
-            $11,
+            $9,
+            $10::ingest_job_kind,
+            $11::ingest_queue_state,
             $12,
-            coalesce($13, now()),
+            $13,
             coalesce($14, now()),
-            $15
+            coalesce($15, now()),
+            $16
         )
         returning
             id,
             workspace_id,
             library_id,
             mutation_id,
+            mutation_item_id,
             connector_id,
             async_operation_id,
             knowledge_document_id,
@@ -160,6 +184,7 @@ pub async fn create_ingest_job(
     .bind(input.workspace_id)
     .bind(input.library_id)
     .bind(input.mutation_id)
+    .bind(input.mutation_item_id)
     .bind(input.connector_id)
     .bind(input.async_operation_id)
     .bind(input.knowledge_document_id)
@@ -171,7 +196,7 @@ pub async fn create_ingest_job(
     .bind(input.queued_at)
     .bind(input.available_at)
     .bind(input.completed_at)
-    .fetch_one(postgres)
+    .fetch_one(executor)
     .await
 }
 
@@ -185,6 +210,7 @@ pub async fn get_ingest_job_by_id(
             workspace_id,
             library_id,
             mutation_id,
+            mutation_item_id,
             connector_id,
             async_operation_id,
             knowledge_document_id,
@@ -218,6 +244,7 @@ pub async fn get_ingest_job_by_dedupe_key(
             workspace_id,
             library_id,
             mutation_id,
+            mutation_item_id,
             connector_id,
             async_operation_id,
             knowledge_document_id,
@@ -254,6 +281,7 @@ pub async fn get_latest_ingest_job_by_mutation_id(
             workspace_id,
             library_id,
             mutation_id,
+            mutation_item_id,
             connector_id,
             async_operation_id,
             knowledge_document_id,
@@ -285,6 +313,7 @@ pub async fn get_latest_ingest_job_by_async_operation_id(
             workspace_id,
             library_id,
             mutation_id,
+            mutation_item_id,
             connector_id,
             async_operation_id,
             knowledge_document_id,
@@ -316,6 +345,7 @@ pub async fn get_latest_ingest_job_by_knowledge_revision_id(
             workspace_id,
             library_id,
             mutation_id,
+            mutation_item_id,
             connector_id,
             async_operation_id,
             knowledge_document_id,
@@ -349,6 +379,7 @@ pub async fn list_ingest_jobs_by_knowledge_document_id(
             workspace_id,
             library_id,
             mutation_id,
+            mutation_item_id,
             connector_id,
             async_operation_id,
             knowledge_document_id,
@@ -389,6 +420,7 @@ pub async fn list_ingest_jobs_by_mutation_ids(
             workspace_id,
             library_id,
             mutation_id,
+            mutation_item_id,
             connector_id,
             async_operation_id,
             knowledge_document_id,
@@ -413,6 +445,71 @@ pub async fn list_ingest_jobs_by_mutation_ids(
     .await
 }
 
+#[derive(Debug, Clone)]
+pub struct IngestJobPage {
+    pub rows: Vec<IngestJobRow>,
+    pub has_more: bool,
+}
+
+/// Keyset-paginated fetch for `GET /v1/ingest/libraries/{libraryId}/jobs`.
+///
+/// * `limit` is clamped by the caller to a sane page size; this function
+///   fetches `limit + 1` rows so `has_more` is derived without a `COUNT(*)`.
+/// * `cursor` is `(queued_at, id)` of the last row on the previous page;
+///   rows strictly older on the `(queued_at desc, id desc)` keyset are
+///   returned. Unlike `list_active_ingest_queue` (a live "currently active"
+///   snapshot), this is the full paginated history, including terminal
+///   (`completed` / `failed` / `canceled`) jobs.
+/// * `status_filter` holds `ingest_queue_state` values; empty = no filter.
+pub async fn list_ingest_jobs_page(
+    postgres: &PgPool,
+    library_id: Uuid,
+    cursor: Option<(DateTime<Utc>, Uuid)>,
+    limit: i64,
+    status_filter: &[String],
+) -> Result<IngestJobPage, sqlx::Error> {
+    let fetch_limit = limit + 1;
+    let (cursor_queued_at, cursor_id) =
+        cursor.map_or((None, None), |(queued_at, id)| (Some(queued_at), Some(id)));
+
+    let mut rows = sqlx::query_as::<_, IngestJobRow>(
+        "select
+            id,
+            workspace_id,
+            library_id,
+            mutation_id,
+            mutation_item_id,
+            connector_id,
+            async_operation_id,
+            knowledge_document_id,
+            knowledge_revision_id,
+            job_kind::text as job_kind,
+            queue_state::text as queue_state,
+            priority,
+            dedupe_key,
+            queued_at,
+            available_at,
+            completed_at
+         from ingest_job
+         where library_id = $1
+           and ($2::timestamptz is null or (queued_at, id) < ($2, $3))
+           and (cardinality($4::text[]) = 0 or queue_state::text = any($4))
+         order by queued_at desc, id desc
+         limit $5",
+    )
+    .bind(library_id)
+    .bind(cursor_queued_at)
+    .bind(cursor_id)
+    .bind(status_filter)
+    .bind(fetch_limit)
+    .fetch_all(postgres)
+    .await?;
+
+    let has_more = rows.len() as i64 > limit;
+    rows.truncate(usize::try_from(limit).unwrap_or(usize::MAX));
+    Ok(IngestJobPage { rows, has_more })
+}
+
 pub async fn list_ingest_jobs(
     postgres: &PgPool,
     workspace_id: Option<Uuid>,
@@ -431,6 +528,7 @@ pub async fn list_ingest_jobs(
                     workspace_id,
                     library_id,
                     mutation_id,
+                    mutation_item_id,
                     connector_id,
                     async_operation_id,
                     knowledge_document_id,
@@ -462,6 +560,7 @@ pub async fn list_ingest_jobs(
                     workspace_id,
                     library_id,
                     mutation_id,
+                    mutation_item_id,
                     connector_id,
                     async_operation_id,
                     knowledge_document_id,
@@ -491,6 +590,7 @@ pub async fn list_ingest_jobs(
                     workspace_id,
                     library_id,
                     mutation_id,
+                    mutation_item_id,
                     connector_id,
                     async_operation_id,
                     knowledge_document_id,
@@ -520,6 +620,7 @@ pub async fn list_ingest_jobs(
                     workspace_id,
                     library_id,
                     mutation_id,
+                    mutation_item_id,
                     connector_id,
                     async_operation_id,
                     knowledge_document_id,
@@ -570,6 +671,7 @@ pub async fn update_ingest_job(
             workspace_id,
             library_id,
             mutation_id,
+            mutation_item_id,
             connector_id,
             async_operation_id,
             knowledge_document_id,
@@ -668,6 +770,7 @@ pub async fn claim_next_queued_ingest_job(
             workspace_id,
             library_id,
             mutation_id,
+            mutation_item_id,
             connector_id,
             async_operation_id,
             knowledge_document_id,
@@ -791,84 +894,92 @@ pub async fn move_queued_ingest_job(
     direction: QueueMoveDirection,
 ) -> Result<Option<()>, sqlx::Error> {
     let mut tx = postgres.begin().await?;
-    let rows = sqlx::query_as::<_, (Uuid, i64)>(
-        "select id, queue_rank
-         from ingest_job
-         where queue_state in ('queued', 'paused')
-         order by queue_rank asc, priority asc, available_at asc, queued_at asc, id asc
-         for update",
-    )
-    .fetch_all(&mut *tx)
-    .await?;
+    let rows = queued_ingest_job_rows(&mut tx).await?;
 
     let Some(index) = rows.iter().position(|(id, _)| *id == job_id) else {
         tx.commit().await?;
         return Ok(None);
     };
 
-    let target_rank = match direction {
-        QueueMoveDirection::Up => {
-            if index == 0 {
-                None
-            } else {
-                Some(rows[index - 1].1)
-            }
-        }
-        QueueMoveDirection::Down => rows.get(index + 1).map(|(_, rank)| *rank),
-        QueueMoveDirection::Top => {
-            if index == 0 {
-                None
-            } else {
-                rows.first().map(|(_, rank)| *rank - 1_000_000)
-            }
-        }
-        QueueMoveDirection::Bottom => {
-            if index + 1 >= rows.len() {
-                None
-            } else {
-                rows.last().map(|(_, rank)| *rank + 1_000_000)
-            }
-        }
-    };
-
-    if let Some(target_rank) = target_rank {
-        match direction {
-            QueueMoveDirection::Up | QueueMoveDirection::Down => {
-                let (target_id, _) = if direction == QueueMoveDirection::Up {
-                    rows[index - 1]
-                } else {
-                    rows[index + 1]
-                };
-                sqlx::query(
-                    "update ingest_job
-                     set queue_rank = case
-                         when id = $1 then $4
-                         when id = $3 then $2
-                         else queue_rank
-                     end
-                     where id in ($1, $3)",
-                )
-                .bind(job_id)
-                .bind(rows[index].1)
-                .bind(target_id)
-                .bind(target_rank)
-                .execute(&mut *tx)
-                .await?;
-            }
-            QueueMoveDirection::Top | QueueMoveDirection::Bottom => {
-                if target_rank != rows[index].1 {
-                    sqlx::query("update ingest_job set queue_rank = $2 where id = $1")
-                        .bind(job_id)
-                        .bind(target_rank)
-                        .execute(&mut *tx)
-                        .await?;
-                }
-            }
-        }
+    if let Some(job_move) = queued_job_move(&rows, index, direction) {
+        apply_queued_job_move(&mut tx, job_id, rows[index].1, job_move).await?;
     }
 
     tx.commit().await?;
     Ok(Some(()))
+}
+
+async fn queued_ingest_job_rows(
+    tx: &mut sqlx::Transaction<'_, Postgres>,
+) -> Result<Vec<(Uuid, i64)>, sqlx::Error> {
+    sqlx::query_as::<_, (Uuid, i64)>(
+        "select id, queue_rank
+         from ingest_job
+         where queue_state in ('queued', 'paused')
+         order by queue_rank asc, priority asc, available_at asc, queued_at asc, id asc
+         for update",
+    )
+    .fetch_all(&mut **tx)
+    .await
+}
+
+fn queued_job_move(
+    rows: &[(Uuid, i64)],
+    index: usize,
+    direction: QueueMoveDirection,
+) -> Option<QueuedJobMove> {
+    match direction {
+        QueueMoveDirection::Up => index.checked_sub(1).map(|target_index| QueuedJobMove::Swap {
+            target_id: rows[target_index].0,
+            target_rank: rows[target_index].1,
+        }),
+        QueueMoveDirection::Down => rows
+            .get(index + 1)
+            .map(|target| QueuedJobMove::Swap { target_id: target.0, target_rank: target.1 }),
+        QueueMoveDirection::Top => index
+            .checked_sub(1)
+            .and_then(|_| rows.first())
+            .map(|(_, rank)| QueuedJobMove::SetRank(rank - 1_000_000)),
+        QueueMoveDirection::Bottom => rows
+            .get(index + 1)
+            .and_then(|_| rows.last().map(|(_, rank)| QueuedJobMove::SetRank(rank + 1_000_000))),
+    }
+}
+
+async fn apply_queued_job_move(
+    tx: &mut sqlx::Transaction<'_, Postgres>,
+    job_id: Uuid,
+    current_rank: i64,
+    job_move: QueuedJobMove,
+) -> Result<(), sqlx::Error> {
+    match job_move {
+        QueuedJobMove::Swap { target_id, target_rank } => {
+            sqlx::query(
+                "update ingest_job
+                 set queue_rank = case
+                     when id = $1 then $4
+                     when id = $3 then $2
+                     else queue_rank
+                 end
+                 where id in ($1, $3)",
+            )
+            .bind(job_id)
+            .bind(current_rank)
+            .bind(target_id)
+            .bind(target_rank)
+            .execute(&mut **tx)
+            .await?;
+        }
+        QueuedJobMove::SetRank(target_rank) if target_rank != current_rank => {
+            sqlx::query("update ingest_job set queue_rank = $2 where id = $1")
+                .bind(job_id)
+                .bind(target_rank)
+                .execute(&mut **tx)
+                .await?;
+        }
+        QueuedJobMove::SetRank(_) => {}
+    }
+    Ok(())
 }
 
 pub async fn pause_ingest_job(postgres: &PgPool, job_id: Uuid) -> Result<Option<()>, sqlx::Error> {
@@ -924,7 +1035,7 @@ pub async fn retry_or_requeue_ingest_job(
     stale_threshold: chrono::Duration,
     available_at: DateTime<Utc>,
 ) -> Result<Option<IngestJobRow>, sqlx::Error> {
-    let cutoff = Utc::now() - stale_threshold;
+    let stale_seconds = stale_threshold.num_seconds().max(1);
     let mut tx = postgres.begin().await?;
     let target = sqlx::query_scalar::<_, Uuid>(
         "select id
@@ -956,7 +1067,8 @@ pub async fn retry_or_requeue_ingest_job(
                j.queue_state in ('queued', 'paused')
                or (
                    j.queue_state = 'leased'
-                   and coalesce(j.queue_leased_at, j.queued_at) < $2
+                   and coalesce(j.queue_leased_at, j.queued_at)
+                       < now() - make_interval(secs => $2::double precision)
                    and not exists (
                        select 1
                        from ingest_attempt active_attempt
@@ -970,6 +1082,7 @@ pub async fn retry_or_requeue_ingest_job(
             workspace_id,
             library_id,
             mutation_id,
+            mutation_item_id,
             connector_id,
             async_operation_id,
             knowledge_document_id,
@@ -986,7 +1099,7 @@ pub async fn retry_or_requeue_ingest_job(
             queue_lease_owner",
     )
     .bind(job_id)
-    .bind(cutoff)
+    .bind(stale_seconds as f64)
     .bind(available_at)
     .fetch_optional(&mut *tx)
     .await?;
@@ -995,12 +1108,23 @@ pub async fn retry_or_requeue_ingest_job(
 }
 
 pub async fn cancel_ingest_job(postgres: &PgPool, job_id: Uuid) -> Result<u64, sqlx::Error> {
-    let result = sqlx::query(
-        "WITH target_job AS (
-             SELECT id FROM ingest_job
+    let affected = sqlx::query_scalar::<_, i64>(
+        "with target_job as materialized (
+             select id from ingest_job
              WHERE id = $1
                AND queue_state IN ('queued', 'leased', 'paused')
                AND completed_at IS NULL
+             for update
+         ),
+         job_canceled as (
+             update ingest_job
+             set queue_state = 'canceled',
+                 completed_at = now(),
+                 queue_leased_at = null,
+                 queue_lease_token = null,
+                 queue_lease_owner = null
+             where id in (select id from target_job)
+             returning id
          ),
          attempts_canceled AS (
              UPDATE ingest_attempt
@@ -1009,28 +1133,26 @@ pub async fn cancel_ingest_job(postgres: &PgPool, job_id: Uuid) -> Result<u64, s
                  failure_code = 'canceled_by_operator',
                  failure_message = 'Processing was canceled from the administration queue',
                  finished_at = now()
-             WHERE job_id IN (SELECT id FROM target_job)
+             WHERE job_id IN (SELECT id FROM job_canceled)
                AND attempt_state IN ('leased', 'running')
+             returning id
          )
-         UPDATE ingest_job
-         SET queue_state = 'canceled',
-             completed_at = now(),
-             queue_leased_at = null,
-             queue_lease_token = null,
-             queue_lease_owner = null
-         WHERE id IN (SELECT id FROM target_job)",
+         select count(*)::bigint
+                + (select count(*) * 0 from attempts_canceled)
+         from job_canceled",
     )
     .bind(job_id)
-    .execute(postgres)
+    .fetch_one(postgres)
     .await?;
-    Ok(result.rows_affected())
+    u64::try_from(affected)
+        .map_err(|_| sqlx::Error::Protocol("negative canceled ingest job count".to_string()))
 }
 
 pub async fn recover_stale_canonical_leases(
     postgres: &PgPool,
     stale_threshold: chrono::Duration,
 ) -> Result<u64, sqlx::Error> {
-    let cutoff = Utc::now() - stale_threshold;
+    let stale_seconds = stale_threshold.num_seconds().max(1);
 
     // Two classes of stale-lease recovery in one statement:
     //
@@ -1064,16 +1186,18 @@ pub async fn recover_stale_canonical_leases(
              from ingest_attempt a
              where a.job_id = j.id
                and a.attempt_state = 'leased'
-               and a.heartbeat_at < $1
+               and a.heartbeat_at < now() - make_interval(secs => $1::double precision)
                and j.queue_state in ('leased', 'completed', 'failed', 'canceled')
          )
          or (
              j.queue_state = 'leased'
-             and coalesce(j.queue_leased_at, j.queued_at) < $1
+             and coalesce(j.queue_leased_at, j.queued_at)
+                 < now() - make_interval(secs => $1::double precision)
          )
+         order by j.id
          for update of j",
     )
-    .bind(cutoff)
+    .bind(stale_seconds as f64)
     .fetch_all(&mut *tx)
     .await?;
 
@@ -1092,7 +1216,7 @@ pub async fn recover_stale_canonical_leases(
              retryable = true
          where a.job_id = any($2)
            and a.attempt_state = 'leased'
-           and a.heartbeat_at < $1
+           and a.heartbeat_at < now() - make_interval(secs => $1::double precision)
            and exists (
                select 1
                from ingest_job j
@@ -1100,7 +1224,7 @@ pub async fn recover_stale_canonical_leases(
                  and j.queue_state in ('leased', 'completed', 'failed', 'canceled')
            )",
     )
-    .bind(cutoff)
+    .bind(stale_seconds as f64)
     .bind(&locked_job_ids)
     .execute(&mut *tx)
     .await?;
@@ -1115,13 +1239,15 @@ pub async fn recover_stale_canonical_leases(
          where j.id = any($2)
            and j.queue_state = 'leased'
            and (
-               coalesce(j.queue_leased_at, j.queued_at) < $1
+               coalesce(j.queue_leased_at, j.queued_at)
+                   < now() - make_interval(secs => $1::double precision)
                or exists (
                    select 1
                    from ingest_attempt stale_attempt
                    where stale_attempt.job_id = j.id
                      and stale_attempt.attempt_state = 'failed'
-                     and stale_attempt.heartbeat_at < $1
+                     and stale_attempt.heartbeat_at
+                         < now() - make_interval(secs => $1::double precision)
                )
            )
            and not exists (
@@ -1131,7 +1257,7 @@ pub async fn recover_stale_canonical_leases(
                  and active_attempt.attempt_state in ('leased', 'running')
            )",
     )
-    .bind(cutoff)
+    .bind(stale_seconds as f64)
     .bind(&locked_job_ids)
     .execute(&mut *tx)
     .await?;
@@ -1169,8 +1295,8 @@ pub async fn cancel_jobs_for_document_with_executor<'e, E>(
 where
     E: Executor<'e, Database = Postgres>,
 {
-    let result = sqlx::query(
-        "WITH target_jobs AS (
+    let affected = sqlx::query_scalar::<_, i64>(
+        "with target_jobs as materialized (
              SELECT j.id FROM ingest_job j
              WHERE j.mutation_id IN (
                  SELECT m.id FROM content_mutation m
@@ -1179,6 +1305,18 @@ where
              )
              AND j.queue_state IN ('queued', 'leased', 'paused')
              AND j.completed_at IS NULL
+             order by j.id
+             for update of j
+         ),
+         jobs_canceled as (
+             update ingest_job
+             set queue_state = 'canceled',
+                 completed_at = now(),
+                 queue_leased_at = null,
+                 queue_lease_token = null,
+                 queue_lease_owner = null
+             where id in (select id from target_jobs)
+             returning id
          ),
          attempts_canceled AS (
              UPDATE ingest_attempt
@@ -1187,19 +1325,17 @@ where
                  failure_code = 'canceled_by_request',
                  failure_message = 'Processing was canceled by request',
                  finished_at = now()
-             WHERE job_id IN (SELECT id FROM target_jobs)
+             WHERE job_id IN (SELECT id FROM jobs_canceled)
                AND attempt_state IN ('leased', 'running')
+             returning id
          )
-         UPDATE ingest_job
-         SET queue_state = 'canceled',
-             completed_at = now(),
-             queue_leased_at = null,
-             queue_lease_token = null,
-             queue_lease_owner = null
-         WHERE id IN (SELECT id FROM target_jobs)",
+         select count(*)::bigint
+                + (select count(*) * 0 from attempts_canceled)
+         from jobs_canceled",
     )
     .bind(document_id)
-    .execute(executor)
+    .fetch_one(executor)
     .await?;
-    Ok(result.rows_affected())
+    u64::try_from(affected)
+        .map_err(|_| sqlx::Error::Protocol("negative canceled ingest job count".to_string()))
 }

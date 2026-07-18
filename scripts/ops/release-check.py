@@ -37,15 +37,13 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import statistics
 import subprocess
 import sys
 import tempfile
 import time
-import urllib.parse
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any, Callable, Iterable
+from typing import Any
 
 # --- Per-check budgets -----------------------------------------------------
 #
@@ -60,6 +58,12 @@ BUDGET_STANDARD = (300, 1000)  # common REST (list, detail, admin)
 BUDGET_HEAVY = (1000, 5000)    # graph topology fetch, knowledge collections
 BUDGET_LLM = (5000, 60000)     # anything that goes through a model call
 PROBE_PASSWORD_ENV = "IRONRAG_PROBE_PASSWORD"  # pragma: allowlist secret
+MCP_PROTOCOL_HEADER = "mcp-protocol-version"
+MCP_PROTOCOL_VERSION = "2025-11-25"
+MCP_SESSION_HEADER = "mcp-session-id"
+CURL_WRITE_FORMAT = "%{http_code} %{time_total} %{size_download}"
+MCP_PATH = "/v1/mcp"
+MCP_TOOL_CALL_METHOD = "tools/call"
 
 VERDICT_OK = "ok"
 VERDICT_WARN = "warn"
@@ -137,46 +141,159 @@ def curl_json_post(
     payload: dict[str, Any] | list[Any],
     *,
     write_cookie_jar: bool = False,
-) -> tuple[int | None, float, int, bytes]:
+    headers: dict[str, str] | None = None,
+) -> tuple[int | None, float, int, bytes, dict[str, str]]:
     body = json.dumps(payload)
-    out_file = tempfile.NamedTemporaryFile(
-        prefix="ironrag-rc-post-", delete=False
-    )
+    out_file = tempfile.NamedTemporaryFile(prefix="ironrag-rc-post-", delete=False)
     out_file.close()
-    args = [
-        "curl",
-        "-s",
-        "-o",
-        out_file.name,
-        "-w",
-        "%{http_code} %{time_total} %{size_download}",
-        "-X",
-        "POST",
-        "-H",
-        "Content-Type: application/json",
-        "--data-binary",
-        "@-",
-        f"{base_url}{path}",
-    ]
-    if write_cookie_jar:
-        args.extend(["-c", cookie_jar])
-    else:
-        args.extend(["-b", cookie_jar])
-    proc = subprocess.run(args, input=body.encode(), capture_output=True, check=False)
+    request_headers = tempfile.NamedTemporaryFile(
+        mode="w", prefix="ironrag-rc-request-headers-", delete=False
+    )
+    response_headers = tempfile.NamedTemporaryFile(
+        prefix="ironrag-rc-response-headers-", delete=False
+    )
+    response_headers.close()
     try:
-        raw = proc.stdout.decode("utf-8", errors="replace").strip()
-        parts = raw.split()
-        status = int(parts[0]) if parts else None
-        latency_ms = float(parts[1]) * 1000 if len(parts) > 1 else -1.0
-        size = int(parts[2]) if len(parts) > 2 else 0
-    except Exception:
-        status = None
-        latency_ms = -1.0
-        size = 0
-    with open(out_file.name, "rb") as fh:
-        body_bytes = fh.read()
-    os.unlink(out_file.name)
-    return status, latency_ms, size, body_bytes
+        request_headers.write(safe_curl_header_line("Content-Type", "application/json"))
+        request_headers.write("\n")
+        for name, value in (headers or {}).items():
+            request_headers.write(safe_curl_header_line(name, value))
+            request_headers.write("\n")
+        request_headers.close()
+        args = [
+            "curl",
+            "-s",
+            "-o",
+            out_file.name,
+            "-w",
+            CURL_WRITE_FORMAT,
+            "-X",
+            "POST",
+            "--header",
+            f"@{request_headers.name}",
+            "--dump-header",
+            response_headers.name,
+            "--data-binary",
+            "@-",
+            f"{base_url}{path}",
+        ]
+        if write_cookie_jar:
+            args.extend(["-c", cookie_jar])
+        else:
+            args.extend(["-b", cookie_jar])
+        try:
+            proc = subprocess.run(
+                args, input=body.encode(), capture_output=True, check=False
+            )
+            raw = proc.stdout.decode("utf-8", errors="replace").strip()
+            parts = raw.split()
+            status = int(parts[0]) if parts else None
+            latency_ms = float(parts[1]) * 1000 if len(parts) > 1 else -1.0
+            size = int(parts[2]) if len(parts) > 2 else 0
+        except (IndexError, ValueError):
+            status = None
+            latency_ms = -1.0
+            size = 0
+        with open(out_file.name, "rb") as fh:
+            body_bytes = fh.read()
+        with open(response_headers.name, encoding="utf-8") as fh:
+            parsed_response_headers = parse_curl_response_headers(fh.read())
+    finally:
+        if not request_headers.closed:
+            request_headers.close()
+        for temporary_path in (
+            out_file.name,
+            request_headers.name,
+            response_headers.name,
+        ):
+            try:
+                os.unlink(temporary_path)
+            except FileNotFoundError:
+                pass
+    return status, latency_ms, size, body_bytes, parsed_response_headers
+
+
+def curl_delete(
+    base_url: str,
+    cookie_jar: str,
+    path: str,
+    *,
+    headers: dict[str, str],
+) -> tuple[int | None, float, int]:
+    out_file = tempfile.NamedTemporaryFile(prefix="ironrag-rc-delete-", delete=False)
+    out_file.close()
+    request_headers = tempfile.NamedTemporaryFile(
+        mode="w", prefix="ironrag-rc-request-headers-", delete=False
+    )
+    try:
+        for name, value in headers.items():
+            request_headers.write(safe_curl_header_line(name, value))
+            request_headers.write("\n")
+        request_headers.close()
+        proc = subprocess.run(
+            [
+                "curl",
+                "-s",
+                "-b",
+                cookie_jar,
+                "-o",
+                out_file.name,
+                "-w",
+                CURL_WRITE_FORMAT,
+                "-X",
+                "DELETE",
+                "--header",
+                f"@{request_headers.name}",
+                f"{base_url}{path}",
+            ],
+            capture_output=True,
+            check=False,
+        )
+        try:
+            raw = proc.stdout.decode("utf-8", errors="replace").strip()
+            parts = raw.split()
+            status = int(parts[0]) if parts else None
+            latency_ms = float(parts[1]) * 1000 if len(parts) > 1 else -1.0
+            size = int(parts[2]) if len(parts) > 2 else 0
+        except (IndexError, ValueError):
+            status = None
+            latency_ms = -1.0
+            size = 0
+    finally:
+        if not request_headers.closed:
+            request_headers.close()
+        for temporary_path in (out_file.name, request_headers.name):
+            try:
+                os.unlink(temporary_path)
+            except FileNotFoundError:
+                pass
+    return status, latency_ms, size
+
+
+def safe_curl_header_line(name: str, value: str) -> str:
+    if not name or any(character in name for character in "\r\n:"):
+        raise ValueError("invalid HTTP header name")
+    if any(character in value for character in "\r\n"):
+        raise ValueError("invalid HTTP header value")
+    return f"{name}: {value}"
+
+
+def parse_curl_response_headers(raw_headers: str) -> dict[str, str]:
+    response_headers: dict[str, str] = {}
+    current_headers: dict[str, str] = {}
+    for raw_line in raw_headers.replace("\r\n", "\n").split("\n"):
+        line = raw_line.strip()
+        if line.startswith("HTTP/"):
+            current_headers = {}
+            continue
+        if not line:
+            if current_headers:
+                response_headers = current_headers
+            continue
+        name, separator, value = line.partition(":")
+        if separator:
+            current_headers[name.strip().lower()] = value.strip()
+    return current_headers or response_headers
 
 
 def curl_get(
@@ -199,7 +316,7 @@ def curl_get(
         "-o",
         out_file.name,
         "-w",
-        "%{http_code} %{time_total} %{size_download}",
+        CURL_WRITE_FORMAT,
         f"{base_url}{path}",
     ]
     if accept:
@@ -228,7 +345,7 @@ def curl_get(
 
 
 def check_login(suite: Suite, login: str, password: str) -> None:
-    status, latency_ms, size, _ = curl_json_post(
+    status, latency_ms, size, _, _ = curl_json_post(
         suite.base_url,
         suite.cookie_jar,
         "/v1/iam/session/login",
@@ -463,7 +580,11 @@ def check_knowledge(suite: Suite) -> None:
             suite.cookie_jar,
             f"/v1/knowledge/libraries/{lib}/entities/{suite.entity_id}",
         )
-        verdict = VERDICT_WARN if status == 404 else verdict_for(latency_ms, status, BUDGET_STANDARD)
+        verdict = (
+            VERDICT_WARN
+            if status == 404
+            else verdict_for(latency_ms, status, BUDGET_STANDARD)
+        )
         suite.record(
             CheckResult(
                 name="knowledge.entity.detail",
@@ -506,43 +627,84 @@ def check_snapshot_export(suite: Suite) -> None:
     )
 
 
-def check_mcp(suite: Suite) -> None:
-    # Capabilities — cheap GET, confirms the JSON-RPC surface is up.
-    simple_get(
-        suite,
-        "mcp.capabilities",
-        "/v1/mcp/capabilities",
-        BUDGET_FAST,
-    )
+@dataclass
+class McpProbe:
+    suite: Suite
+    session_id: str | None = None
+    request_id: int = 0
 
-    def jsonrpc(
+    def session_headers(self, method: str) -> dict[str, str]:
+        if method == "initialize":
+            return {}
+        if self.session_id is None:
+            raise RuntimeError("MCP initialize did not establish a session")
+        return {
+            MCP_PROTOCOL_HEADER: MCP_PROTOCOL_VERSION,
+            MCP_SESSION_HEADER: self.session_id,
+        }
+
+    def validate_initialize(
+        self,
+        parsed: dict[str, Any] | None,
+        response_headers: dict[str, str],
+    ) -> str:
+        negotiated_session_id = response_headers.get(MCP_SESSION_HEADER)
+        result = parsed.get("result") if isinstance(parsed, dict) else None
+        negotiated_protocol = (
+            result.get("protocolVersion") if isinstance(result, dict) else None
+        )
+        if not negotiated_session_id:
+            return "initialize response missing mcp-session-id"
+        if negotiated_protocol != MCP_PROTOCOL_VERSION:
+            return "initialize response negotiated an unexpected protocol version"
+        self.session_id = negotiated_session_id
+        return ""
+
+    @staticmethod
+    def parse_response(body_bytes: bytes) -> tuple[dict[str, Any] | None, str]:
+        try:
+            parsed = json.loads(body_bytes)
+        except ValueError:
+            return None, ""
+        if not isinstance(parsed, dict):
+            return None, ""
+        error = parsed.get("error")
+        if isinstance(error, dict):
+            return parsed, f"rpc error: {str(error.get('message', ''))[:80]}"
+        return parsed, ""
+
+    def call(
+        self,
         name: str,
         method: str,
         params: dict[str, Any] | None,
         budget: tuple[int, int],
     ) -> dict[str, Any] | None:
-        payload: dict[str, Any] = {"jsonrpc": "2.0", "id": 1, "method": method}
+        self.request_id += 1
+        payload: dict[str, Any] = {
+            "jsonrpc": "2.0",
+            "id": self.request_id,
+            "method": method,
+        }
         if params is not None:
             payload["params"] = params
-        status, latency_ms, size, body_bytes = curl_json_post(
-            suite.base_url, suite.cookie_jar, "/v1/mcp", payload
+        status, latency_ms, size, body_bytes, response_headers = curl_json_post(
+            self.suite.base_url,
+            self.suite.cookie_jar,
+            MCP_PATH,
+            payload,
+            headers=self.session_headers(method),
         )
-        note = ""
-        parsed: dict[str, Any] | None = None
-        try:
-            parsed = json.loads(body_bytes)
-            if isinstance(parsed, dict) and "error" in parsed:
-                note = f"rpc error: {parsed['error'].get('message', '')[:80]}"
-        except Exception:
-            parsed = None
-        verdict = verdict_for(latency_ms, status, budget)
-        if note:
-            verdict = VERDICT_FAIL if verdict != VERDICT_FAIL else verdict
-        suite.record(
+        parsed, note = self.parse_response(body_bytes)
+        if method == "initialize":
+            initialize_note = self.validate_initialize(parsed, response_headers)
+            note = initialize_note or note
+        verdict = VERDICT_FAIL if note else verdict_for(latency_ms, status, budget)
+        self.suite.record(
             CheckResult(
                 name=name,
                 method="POST",
-                url="/v1/mcp",
+                url=MCP_PATH,
                 status=status,
                 latency_ms=latency_ms,
                 size_bytes=size,
@@ -552,53 +714,96 @@ def check_mcp(suite: Suite) -> None:
         )
         return parsed
 
-    jsonrpc(
+    def terminate(self) -> None:
+        if self.session_id is None:
+            return
+        status, latency_ms, size = curl_delete(
+            self.suite.base_url,
+            self.suite.cookie_jar,
+            MCP_PATH,
+            headers={
+                MCP_PROTOCOL_HEADER: MCP_PROTOCOL_VERSION,
+                MCP_SESSION_HEADER: self.session_id,
+            },
+        )
+        self.suite.record(
+            CheckResult(
+                name="mcp.terminate",
+                method="DELETE",
+                url=MCP_PATH,
+                status=status,
+                latency_ms=latency_ms,
+                size_bytes=size,
+                verdict=verdict_for(latency_ms, status, BUDGET_FAST),
+            )
+        )
+
+
+def check_mcp_document_tools(probe: McpProbe) -> None:
+    suite = probe.suite
+    if not suite.library_id:
+        return
+    library_catalog_ref = discover_library_catalog_ref(suite)
+    probe.call(
+        "mcp.list_libraries",
+        MCP_TOOL_CALL_METHOD,
+        {"name": "list_libraries", "arguments": {}},
+        BUDGET_STANDARD,
+    )
+    probe.call(
+        "mcp.search_documents",
+        MCP_TOOL_CALL_METHOD,
+        {
+            "name": "search_documents",
+            "arguments": {
+                "libraries": [library_catalog_ref],
+                "query": "hello",
+                "limit": 5,
+            },
+        },
+        BUDGET_LLM,
+    )
+    if suite.document_id:
+        probe.call(
+            "mcp.read_document",
+            MCP_TOOL_CALL_METHOD,
+            {
+                "name": "read_document",
+                "arguments": {
+                    "documentId": suite.document_id,
+                    "mode": "excerpt",
+                    "length": 500,
+                },
+            },
+            BUDGET_STANDARD,
+        )
+
+
+def check_mcp(suite: Suite) -> None:
+    simple_get(
+        suite,
+        "mcp.capabilities",
+        "/v1/mcp/capabilities",
+        BUDGET_FAST,
+    )
+    probe = McpProbe(suite)
+    probe.call(
         "mcp.initialize",
         "initialize",
         {
-            "protocolVersion": "2025-06-18",
+            "protocolVersion": MCP_PROTOCOL_VERSION,
             "capabilities": {},
             "clientInfo": {"name": "release-check", "version": "1"},
         },
         BUDGET_FAST,
     )
-    jsonrpc("mcp.tools.list", "tools/list", {}, BUDGET_FAST)
-
-    if suite.library_id:
-        library_catalog_ref = discover_library_catalog_ref(suite)
-        jsonrpc(
-            "mcp.list_libraries",
-            "tools/call",
-            {"name": "list_libraries", "arguments": {}},
-            BUDGET_STANDARD,
-        )
-        jsonrpc(
-            "mcp.search_documents",
-            "tools/call",
-            {
-                "name": "search_documents",
-                "arguments": {
-                    "libraries": [library_catalog_ref],
-                    "query": "hello",
-                    "limit": 5,
-                },
-            },
-            BUDGET_LLM,
-        )
-        if suite.document_id:
-            jsonrpc(
-                "mcp.read_document",
-                "tools/call",
-                {
-                    "name": "read_document",
-                    "arguments": {
-                        "documentId": suite.document_id,
-                        "mode": "excerpt",
-                        "length": 500,
-                    },
-                },
-                BUDGET_STANDARD,
-            )
+    if probe.session_id is None:
+        return
+    try:
+        probe.call("mcp.tools.list", "tools/list", {}, BUDGET_FAST)
+        check_mcp_document_tools(probe)
+    finally:
+        probe.terminate()
 
 
 # --- Runner ----------------------------------------------------------------

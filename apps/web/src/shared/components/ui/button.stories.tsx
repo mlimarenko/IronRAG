@@ -1,18 +1,18 @@
-import type { Meta, StoryObj } from "@storybook/react";
-import { Button } from "./button";
+import type { Meta, StoryObj } from '@storybook/react'
+import { Button } from './button'
 
 const meta = {
-  title: "UI/Button",
+  title: 'UI/Button',
   component: Button,
   args: {
-    children: "Button",
+    children: 'Button',
   },
-} satisfies Meta<typeof Button>;
+} satisfies Meta<typeof Button>
 
-export default meta;
-type Story = StoryObj<typeof meta>;
+export default meta
+type Story = StoryObj<typeof meta>
 
-export const Default: Story = {};
+export const Default: Story = {}
 
 export const Variants: Story = {
   render: () => (
@@ -25,7 +25,7 @@ export const Variants: Story = {
       <Button variant="link">Link</Button>
     </div>
   ),
-};
+}
 
 export const Sizes: Story = {
   render: () => (
@@ -38,11 +38,11 @@ export const Sizes: Story = {
       </Button>
     </div>
   ),
-};
+}
 
 export const Disabled: Story = {
   args: {
     disabled: true,
-    children: "Disabled",
+    children: 'Disabled',
   },
-};
+}

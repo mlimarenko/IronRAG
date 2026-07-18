@@ -1,8 +1,7 @@
-#![allow(clippy::unwrap_used, clippy::expect_used)]
-
 #[path = "support/structured_document_fixtures.rs"]
 mod structured_document_fixtures;
 
+use anyhow::Context as _;
 use ironrag_backend::{
     services::ingest::structured_preparation::StructuredPreparationService,
     shared::extraction::structured_document::StructuredBlockKind,
@@ -10,7 +9,7 @@ use ironrag_backend::{
 use tokio_util::sync::CancellationToken;
 
 #[test]
-fn structured_preparation_preserves_semantic_blocks_and_chunk_ancestry() {
+fn structured_preparation_preserves_semantic_blocks_and_chunk_ancestry() -> anyhow::Result<()> {
     let service = StructuredPreparationService::new();
     let cancellation_token = CancellationToken::new();
     let prepared = service
@@ -18,7 +17,7 @@ fn structured_preparation_preserves_semantic_blocks_and_chunk_ancestry() {
             structured_document_fixtures::canonical_prepare_command(),
             &cancellation_token,
         )
-        .expect("fixture should prepare successfully");
+        .context("fixture should prepare successfully")?;
 
     assert!(
         prepared.prepared_revision.outline.iter().any(|entry| entry.heading == "REST API"),
@@ -96,4 +95,5 @@ fn structured_preparation_preserves_semantic_blocks_and_chunk_ancestry() {
         }),
         "prepared chunks must expose literal digests"
     );
+    Ok(())
 }

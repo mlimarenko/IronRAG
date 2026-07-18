@@ -1,103 +1,118 @@
-import { useMemo, useState, type ReactNode } from 'react';
-import { useTranslation } from 'react-i18next';
-import { ArrowDown, ArrowUp, ArrowUpDown, Search, X } from 'lucide-react';
+import { useMemo, useState, type ReactNode } from 'react'
+import { useTranslation } from 'react-i18next'
+import { ArrowDown, ArrowUp, ArrowUpDown, Search, X } from 'lucide-react'
 
-import { DataState } from '@/shared/components/DataState';
-import { WorkbenchEmptyState } from '@/shared/components/layout/WorkbenchEmptyState';
-import { Badge } from '@/shared/components/ui/badge';
-import { Button } from '@/shared/components/ui/button';
-import { Input } from '@/shared/components/ui/input';
+import { DataState } from '@/shared/components/DataState'
+import { WorkbenchEmptyState } from '@/shared/components/layout/WorkbenchEmptyState'
+import { Badge } from '@/shared/components/ui/badge'
+import { Button } from '@/shared/components/ui/button'
+import { Input } from '@/shared/components/ui/input'
 import {
   Select,
   SelectContent,
   SelectItem,
   SelectTrigger,
   SelectValue,
-} from '@/shared/components/ui/select';
+} from '@/shared/components/ui/select'
 import {
   isStorageRecord,
   parseNumberOption,
   parseTableSort,
   useTableState,
   type TableSortState,
-} from '@/shared/hooks/useTableState';
-import type { AiConfigDataState } from '@/features/admin/model/aiConfig';
+} from '@/shared/hooks/useTableState'
+import type { AiConfigDataState } from '@/features/admin/model/aiConfig'
 
-const PAGE_SIZE_OPTIONS = [25, 50, 100] as const;
-const DEFAULT_PAGE_SIZE = 25;
+const PAGE_SIZE_OPTIONS = [25, 50, 100] as const
+const DEFAULT_PAGE_SIZE = 25
 
-export type EntityColumn<T> = {
-  key: string;
-  header: ReactNode;
-  width?: string;
-  align?: 'left' | 'right' | 'center';
-  cell: (row: T) => ReactNode;
-  sortValue?: (row: T) => string | number | null | undefined;
-};
+type EntityColumn<T> = Readonly<{
+  key: string
+  header: ReactNode
+  width?: string
+  align?: 'left' | 'right' | 'center'
+  cell: (row: T) => ReactNode
+  sortValue?: (row: T) => string | number | null | undefined
+}>
 
 type EntityTableState = {
-  pageSize: (typeof PAGE_SIZE_OPTIONS)[number];
-  sort: TableSortState<string>;
-};
+  pageSize: (typeof PAGE_SIZE_OPTIONS)[number]
+  sort: TableSortState<string>
+}
 
 const DEFAULT_TABLE_STATE: EntityTableState = {
   pageSize: DEFAULT_PAGE_SIZE,
   sort: null,
-};
+}
 
 function getPageItems(current: number, total: number): Array<number | 'ellipsis'> {
   if (total <= 7) {
-    return Array.from({ length: total }, (_, index) => index + 1);
+    return Array.from({ length: total }, (_, index) => index + 1)
   }
-  const items: Array<number | 'ellipsis'> = [1];
-  const start = Math.max(2, current - 1);
-  const end = Math.min(total - 1, current + 1);
-  if (start > 2) items.push('ellipsis');
-  for (let page = start; page <= end; page += 1) items.push(page);
-  if (end < total - 1) items.push('ellipsis');
-  items.push(total);
-  return items;
+  const items: Array<number | 'ellipsis'> = [1]
+  const start = Math.max(2, current - 1)
+  const end = Math.min(total - 1, current + 1)
+  if (start > 2) items.push('ellipsis')
+  for (let page = start; page <= end; page += 1) items.push(page)
+  if (end < total - 1) items.push('ellipsis')
+  items.push(total)
+  return items
+}
+
+function nextSortState(current: TableSortState<string>, key: string): TableSortState<string> {
+  if (current?.key !== key) {
+    return { key, direction: 'asc' }
+  }
+  if (current.direction === 'asc') {
+    return { key, direction: 'desc' }
+  }
+  return null
+}
+
+function sortIcon(isActive: boolean, direction: 'asc' | 'desc' | undefined): typeof ArrowUpDown {
+  if (!isActive) return ArrowUpDown
+  return direction === 'asc' ? ArrowUp : ArrowDown
 }
 
 function compareSortValues(
   a: string | number | null | undefined,
   b: string | number | null | undefined,
 ): number {
-  if (a == null && b == null) return 0;
-  if (a == null) return 1;
-  if (b == null) return -1;
+  if (a == null && b == null) return 0
+  if (a == null) return 1
+  if (b == null) return -1
   if (typeof a === 'number' && typeof b === 'number') {
-    return a - b;
+    return a - b
   }
   return String(a).localeCompare(String(b), undefined, {
     numeric: true,
     sensitivity: 'base',
-  });
+  })
 }
 
-export type EntityInspector<T> = {
-  title: ReactNode;
-  subtitle?: ReactNode;
-  body: ReactNode;
-  actions?: ReactNode;
-  row: T;
-};
+type EntityInspector<T> = {
+  title: ReactNode
+  subtitle?: ReactNode
+  body: ReactNode
+  actions?: ReactNode
+  row: T
+}
 
-type EntityWorkbenchProps<T> = {
-  tableId: string;
-  title: string;
-  count: number;
-  state: AiConfigDataState<unknown>;
-  rows: T[];
-  rowKey: (row: T) => string;
-  columns: EntityColumn<T>[];
-  emptyMessage: string;
-  matchesFilter?: (row: T, filter: string) => boolean;
-  searchPlaceholder?: string;
-  toolbar?: ReactNode;
-  rowActions?: (row: T) => ReactNode;
-  renderInspector?: (row: T) => EntityInspector<T> | null;
-};
+type EntityWorkbenchProps<T> = Readonly<{
+  tableId: string
+  title: string
+  count: number
+  state: AiConfigDataState<unknown>
+  rows: T[]
+  rowKey: (row: T) => string
+  columns: EntityColumn<T>[]
+  emptyMessage: string
+  matchesFilter?: (row: T, filter: string) => boolean
+  searchPlaceholder?: string
+  toolbar?: ReactNode
+  rowActions?: (row: T) => ReactNode
+  renderInspector?: (row: T) => EntityInspector<T> | null
+}>
 
 export function EntityWorkbench<T>({
   tableId,
@@ -114,68 +129,62 @@ export function EntityWorkbench<T>({
   rowActions,
   renderInspector,
 }: EntityWorkbenchProps<T>) {
-  const { t } = useTranslation();
-  const [search, setSearch] = useState('');
-  const [page, setPage] = useState(1);
-  const [selectedKey, setSelectedKey] = useState<string | null>(null);
+  const { t } = useTranslation()
+  const [search, setSearch] = useState('')
+  const [page, setPage] = useState(1)
+  const [selectedKey, setSelectedKey] = useState<string | null>(null)
   const sortableColumnKeysList = useMemo(
-    () => columns.filter(col => col.sortValue).map(col => col.key),
+    () => columns.filter((col) => col.sortValue).map((col) => col.key),
     [columns],
-  );
+  )
   const [tableState, setTableState] = useTableState<EntityTableState>({
     tableId,
     defaultValue: DEFAULT_TABLE_STATE,
-    parse: raw => {
-      const record = isStorageRecord(raw) ? raw : {};
+    parse: (raw) => {
+      const record = isStorageRecord(raw) ? raw : {}
       return {
         pageSize: parseNumberOption(record.pageSize, PAGE_SIZE_OPTIONS, DEFAULT_PAGE_SIZE),
         sort: parseTableSort(record.sort, sortableColumnKeysList, DEFAULT_TABLE_STATE.sort),
-      };
+      }
     },
-  });
-  const { pageSize, sort } = tableState;
+  })
+  const { pageSize, sort } = tableState
 
   const sortableColumnKeys = useMemo(
     () => new Set(sortableColumnKeysList),
     [sortableColumnKeysList],
-  );
+  )
 
   const toggleSort = (key: string) => {
-    if (!sortableColumnKeys.has(key)) return;
-    setTableState(prev => {
-      const current = prev.sort;
-      const nextSort =
-        !current || current.key !== key
-          ? { key, direction: 'asc' as const }
-          : current.direction === 'asc'
-            ? { key, direction: 'desc' as const }
-            : null;
-      return { ...prev, sort: nextSort };
-    });
-  };
+    if (!sortableColumnKeys.has(key)) return
+    setTableState((prev) => {
+      const current = prev.sort
+      const nextSort = nextSortState(current, key)
+      return { ...prev, sort: nextSort }
+    })
+  }
 
   const filteredRows = useMemo(() => {
-    const base = !matchesFilter || !search.trim()
-      ? rows
-      : rows.filter(row => matchesFilter(row, search));
-    if (!sort) return base;
-    const column = columns.find(col => col.key === sort.key);
-    if (!column?.sortValue) return base;
-    const sortValue = column.sortValue;
-    const dir = sort.direction === 'asc' ? 1 : -1;
+    const base =
+      !matchesFilter || !search.trim() ? rows : rows.filter((row) => matchesFilter(row, search))
+    if (!sort) return base
+    const column = columns.find((col) => col.key === sort.key)
+    if (!column?.sortValue) return base
+    const sortValue = column.sortValue
+    const dir = sort.direction === 'asc' ? 1 : -1
     return base
       .slice()
-      .sort((left, right) => compareSortValues(sortValue(left), sortValue(right)) * dir);
-  }, [columns, matchesFilter, rows, search, sort]);
+      .sort((left, right) => compareSortValues(sortValue(left), sortValue(right)) * dir)
+  }, [columns, matchesFilter, rows, search, sort])
 
-  const totalPages = Math.max(1, Math.ceil(filteredRows.length / pageSize));
-  const currentPage = Math.min(page, totalPages);
-  const visibleStart = filteredRows.length === 0 ? 0 : (currentPage - 1) * pageSize + 1;
-  const visibleEnd = Math.min(currentPage * pageSize, filteredRows.length);
+  const totalPages = Math.max(1, Math.ceil(filteredRows.length / pageSize))
+  const currentPage = Math.min(page, totalPages)
+  const visibleStart = filteredRows.length === 0 ? 0 : (currentPage - 1) * pageSize + 1
+  const visibleEnd = Math.min(currentPage * pageSize, filteredRows.length)
   const pagedRows = useMemo(
     () => filteredRows.slice((currentPage - 1) * pageSize, currentPage * pageSize),
     [filteredRows, currentPage, pageSize],
-  );
+  )
 
   // Both prior pagination effects (clamp page to currentPage when row
   // count shrinks; reset page to 1 on search/pageSize change) violated
@@ -185,17 +194,19 @@ export function EntityWorkbench<T>({
   // search / page-size change live in their respective setter handlers.
 
   const selectedRow = useMemo(() => {
-    if (!selectedKey) return null;
-    return rows.find(row => rowKey(row) === selectedKey) ?? null;
-  }, [rows, rowKey, selectedKey]);
-  const inspector = selectedRow && renderInspector ? renderInspector(selectedRow) : null;
+    if (!selectedKey) return null
+    return rows.find((row) => rowKey(row) === selectedKey) ?? null
+  }, [rows, rowKey, selectedKey])
+  const inspector = selectedRow && renderInspector ? renderInspector(selectedRow) : null
 
   return (
     <div className="workbench-surface flex h-full min-h-[420px] flex-col overflow-hidden">
       <div className="flex flex-wrap items-center gap-3 border-b border-border/70 px-4 py-3">
         <div className="flex items-center gap-2">
           <h3 className="text-sm font-bold tracking-tight">{title}</h3>
-          <Badge variant="outline" className="font-mono text-2xs">{count}</Badge>
+          <Badge variant="outline" className="font-mono text-2xs">
+            {count}
+          </Badge>
         </div>
         {matchesFilter && (
           <div className="relative ml-auto w-full max-w-[280px] sm:ml-2">
@@ -203,15 +214,19 @@ export function EntityWorkbench<T>({
             <Input
               className="h-9 pl-9"
               value={search}
-              onChange={event => {
-                setSearch(event.target.value);
-                setPage(1);
+              onChange={(event) => {
+                setSearch(event.target.value)
+                setPage(1)
               }}
               placeholder={searchPlaceholder}
             />
           </div>
         )}
-        {toolbar && <div className={`flex items-center gap-2 ${matchesFilter ? '' : 'ml-auto'}`}>{toolbar}</div>}
+        {toolbar && (
+          <div className={`flex items-center gap-2 ${matchesFilter ? '' : 'ml-auto'}`}>
+            {toolbar}
+          </div>
+        )}
       </div>
 
       <div className="flex min-h-0 flex-1">
@@ -228,124 +243,141 @@ export function EntityWorkbench<T>({
                   ) : (
                     <>
                       <div className="space-y-3 p-3 xl:hidden">
-                        {pagedRows.map(row => {
-                          const key = rowKey(row);
-                          const selected = selectedKey === key;
+                        {pagedRows.map((row) => {
+                          const key = rowKey(row)
+                          const selected = selectedKey === key
                           return (
                             <article
                               key={key}
-                              aria-selected={selected}
-                              className={`workbench-surface cursor-pointer p-4 transition-all ${
+                              aria-current={selected ? 'true' : undefined}
+                              className={`workbench-surface p-4 transition-all ${
                                 selected ? 'border-primary/40 bg-primary/5' : ''
                               }`}
-                              onClick={() => setSelectedKey(selected ? null : key)}
                             >
                               <div className="grid grid-cols-2 gap-x-3 gap-y-2 text-xs">
-                                {columns.map(col => (
-                                  <div key={col.key} className={col.align === 'right' ? 'text-right' : ''}>
+                                {columns.map((col) => (
+                                  <div
+                                    key={col.key}
+                                    className={col.align === 'right' ? 'text-right' : ''}
+                                  >
                                     <div className="section-label truncate">{col.header}</div>
                                     <div className="mt-0.5 font-semibold">{col.cell(row)}</div>
                                   </div>
                                 ))}
                               </div>
+                              <Button
+                                type="button"
+                                variant="ghost"
+                                className="mt-3 w-full"
+                                aria-pressed={selected}
+                                onClick={() => setSelectedKey(selected ? null : key)}
+                              >
+                                {t('documents.detailColumns')}
+                              </Button>
                               {rowActions && (
-                                <div
-                                  className="mt-3 flex items-center justify-end gap-1 border-t border-border/70 pt-3"
-                                  onClick={event => event.stopPropagation()}
-                                >
+                                <div className="mt-3 flex items-center justify-end gap-1 border-t border-border/70 pt-3">
                                   {rowActions(row)}
                                 </div>
                               )}
                             </article>
-                          );
+                          )
                         })}
                       </div>
                       <table className="hidden min-w-full table-fixed text-sm xl:table">
-                      <colgroup>
-                        {columns.map(col => (
-                          <col key={col.key} className={col.width ?? ''} />
-                        ))}
-                        {rowActions && <col className="w-24" />}
-                      </colgroup>
-                      <thead className="sticky top-0 z-10 bg-card">
-                        <tr className="border-b text-left">
-                          {columns.map(col => {
-                            const sortable = Boolean(col.sortValue);
-                            const active = sort?.key === col.key;
-                            const Icon = active
-                              ? sort?.direction === 'asc'
-                                ? ArrowUp
-                                : ArrowDown
-                              : ArrowUpDown;
-                            return (
-                              <th
-                                key={col.key}
-                                className={`section-label whitespace-nowrap px-4 py-3 ${col.align === 'right' ? 'text-right' : ''}`}
-                              >
-                                {sortable ? (
-                                  <button
-                                    type="button"
-                                    onClick={() => toggleSort(col.key)}
-                                    className={`inline-flex items-center gap-1 transition-colors hover:text-foreground ${
-                                      col.align === 'right' ? 'flex-row-reverse' : ''
-                                    } ${active ? 'text-foreground' : ''}`}
-                                  >
-                                    <span>{col.header}</span>
-                                    <Icon
-                                      className={`h-3.5 w-3.5 ${
-                                        active ? 'text-foreground' : 'text-muted-foreground/50'
-                                      }`}
-                                    />
-                                  </button>
-                                ) : (
-                                  col.header
-                                )}
-                              </th>
-                            );
-                          })}
-                          {rowActions && (
-                            <th className="section-label w-24 whitespace-nowrap px-4 py-3 text-right">
-                              {t('admin.actions')}
+                        <colgroup>
+                          <col className="w-12" />
+                          {columns.map((col) => (
+                            <col key={col.key} className={col.width ?? ''} />
+                          ))}
+                          {rowActions && <col className="w-24" />}
+                        </colgroup>
+                        <thead className="sticky top-0 z-10 bg-card">
+                          <tr className="border-b text-left">
+                            <th className="w-12 px-2 py-3">
+                              <span className="sr-only">{t('documents.detailColumns')}</span>
                             </th>
-                          )}
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {pagedRows.map(row => {
-                          const key = rowKey(row);
-                          const selected = selectedKey === key;
-                          return (
-                            <tr
-                              key={key}
-                              className={`cursor-pointer border-b border-border/40 transition-colors ${
-                                selected
-                                  ? 'border-l-2 border-l-primary bg-primary/5'
-                                  : 'hover:bg-accent/30'
-                              }`}
-                              onClick={() => setSelectedKey(selected ? null : key)}
-                            >
-                              {columns.map(col => (
-                                <td
+                            {columns.map((col) => {
+                              const sortable = Boolean(col.sortValue)
+                              const active = sort?.key === col.key
+                              const Icon = sortIcon(active, sort?.direction)
+                              return (
+                                <th
                                   key={col.key}
-                                  className={`px-4 py-3 align-middle ${col.align === 'right' ? 'text-right' : ''}`}
+                                  className={`section-label whitespace-nowrap px-4 py-3 ${col.align === 'right' ? 'text-right' : ''}`}
                                 >
-                                  {col.cell(row)}
+                                  {sortable ? (
+                                    <button
+                                      type="button"
+                                      onClick={() => toggleSort(col.key)}
+                                      className={`inline-flex items-center gap-1 transition-colors hover:text-foreground ${
+                                        col.align === 'right' ? 'flex-row-reverse' : ''
+                                      } ${active ? 'text-foreground' : ''}`}
+                                    >
+                                      <span>{col.header}</span>
+                                      <Icon
+                                        className={`h-3.5 w-3.5 ${
+                                          active ? 'text-foreground' : 'text-muted-foreground/50'
+                                        }`}
+                                      />
+                                    </button>
+                                  ) : (
+                                    col.header
+                                  )}
+                                </th>
+                              )
+                            })}
+                            {rowActions && (
+                              <th className="section-label w-24 whitespace-nowrap px-4 py-3 text-right">
+                                {t('admin.actions')}
+                              </th>
+                            )}
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {pagedRows.map((row) => {
+                            const key = rowKey(row)
+                            const selected = selectedKey === key
+                            return (
+                              <tr
+                                key={key}
+                                className={`border-b border-border/40 transition-colors ${
+                                  selected
+                                    ? 'border-l-2 border-l-primary bg-primary/5'
+                                    : 'hover:bg-accent/30'
+                                }`}
+                              >
+                                <td className="w-12 px-2 py-3 align-middle">
+                                  <Button
+                                    type="button"
+                                    size="icon"
+                                    variant="ghost"
+                                    className="h-8 w-8"
+                                    aria-label={`${t('documents.detailColumns')}: ${key}`}
+                                    aria-pressed={selected}
+                                    onClick={() => setSelectedKey(selected ? null : key)}
+                                  >
+                                    <Search className="h-3.5 w-3.5" />
+                                  </Button>
                                 </td>
-                              ))}
-                              {rowActions && (
-                                <td
-                                  className="px-4 py-3 text-right align-middle"
-                                  onClick={event => event.stopPropagation()}
-                                >
-                                  <div className="inline-flex items-center gap-1">
-                                    {rowActions(row)}
-                                  </div>
-                                </td>
-                              )}
-                            </tr>
-                          );
-                        })}
-                      </tbody>
+                                {columns.map((col) => (
+                                  <td
+                                    key={col.key}
+                                    className={`px-4 py-3 align-middle ${col.align === 'right' ? 'text-right' : ''}`}
+                                  >
+                                    {col.cell(row)}
+                                  </td>
+                                ))}
+                                {rowActions && (
+                                  <td className="px-4 py-3 text-right align-middle">
+                                    <div className="inline-flex items-center gap-1">
+                                      {rowActions(row)}
+                                    </div>
+                                  </td>
+                                )}
+                              </tr>
+                            )
+                          })}
+                        </tbody>
                       </table>
                     </>
                   )}
@@ -366,19 +398,19 @@ export function EntityWorkbench<T>({
                         </span>
                         <Select
                           value={String(pageSize)}
-                          onValueChange={value => {
-                            setTableState(prev => ({
+                          onValueChange={(value) => {
+                            setTableState((prev) => ({
                               ...prev,
                               pageSize: Number(value) as EntityTableState['pageSize'],
-                            }));
-                            setPage(1);
+                            }))
+                            setPage(1)
                           }}
                         >
                           <SelectTrigger className="h-8 w-[80px] text-xs">
                             <SelectValue />
                           </SelectTrigger>
                           <SelectContent>
-                            {PAGE_SIZE_OPTIONS.map(option => (
+                            {PAGE_SIZE_OPTIONS.map((option) => (
                               <SelectItem key={option} value={String(option)}>
                                 {option}
                               </SelectItem>
@@ -392,14 +424,18 @@ export function EntityWorkbench<T>({
                           size="sm"
                           className="h-8 text-xs"
                           disabled={currentPage <= 1}
-                          onClick={() => setPage(p => Math.max(1, p - 1))}
+                          onClick={() => setPage((p) => Math.max(1, p - 1))}
                         >
                           {t('documents.previous')}
                         </Button>
                         {getPageItems(currentPage, totalPages).map((item, index) =>
                           item === 'ellipsis' ? (
                             <span
-                              key={`ellipsis-${index}`}
+                              key={
+                                index === 1
+                                  ? `ellipsis-before-${currentPage}`
+                                  : `ellipsis-after-${currentPage}`
+                              }
                               className="px-1.5 text-xs text-muted-foreground"
                             >
                               …
@@ -422,7 +458,7 @@ export function EntityWorkbench<T>({
                           size="sm"
                           className="h-8 text-xs"
                           disabled={currentPage >= totalPages}
-                          onClick={() => setPage(p => Math.min(totalPages, p + 1))}
+                          onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
                         >
                           {t('documents.next')}
                         </Button>
@@ -465,18 +501,16 @@ export function EntityWorkbench<T>({
         )}
       </div>
     </div>
-  );
+  )
 }
 
-export function InspectorField({
-  label,
-  value,
-  mono = false,
-}: {
-  label: ReactNode;
-  value: ReactNode;
-  mono?: boolean;
-}) {
+type InspectorFieldProps = Readonly<{
+  label: ReactNode
+  value: ReactNode
+  mono?: boolean
+}>
+
+export function InspectorField({ label, value, mono = false }: InspectorFieldProps) {
   return (
     <div className="flex justify-between gap-3 text-sm">
       <span className="text-muted-foreground">{label}</span>
@@ -486,14 +520,16 @@ export function InspectorField({
         {value}
       </span>
     </div>
-  );
+  )
 }
 
-export function InspectorSection({ title, children }: { title: ReactNode; children: ReactNode }) {
+type InspectorSectionProps = Readonly<{ title: ReactNode; children: ReactNode }>
+
+export function InspectorSection({ title, children }: InspectorSectionProps) {
   return (
     <div className="space-y-2">
       <div className="section-label">{title}</div>
       {children}
     </div>
-  );
+  )
 }

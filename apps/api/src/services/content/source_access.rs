@@ -5,13 +5,13 @@ use crate::domains::content::{ContentSourceAccess, ContentSourceAccessKind};
 const DOCUMENT_SOURCE_ROUTE_PREFIX: &str = "/v1/content/documents";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ContentSourceDescriptor {
+pub(crate) struct ContentSourceDescriptor {
     pub access: Option<ContentSourceAccess>,
     pub file_name: String,
 }
 
 #[must_use]
-pub fn describe_content_source(
+pub(crate) fn describe_content_source(
     document_id: Uuid,
     revision_id: Option<Uuid>,
     content_source_kind: &str,
@@ -38,7 +38,7 @@ pub fn describe_content_source(
 }
 
 #[must_use]
-pub fn derive_content_source_file_name(
+pub(crate) fn derive_content_source_file_name(
     source_uri: Option<&str>,
     title: Option<&str>,
     fallback: &str,
@@ -48,7 +48,7 @@ pub fn derive_content_source_file_name(
 }
 
 #[must_use]
-pub fn derive_storage_backed_content_file_name(
+pub(crate) fn derive_storage_backed_content_file_name(
     content_source_kind: &str,
     source_uri: Option<&str>,
     title: Option<&str>,
@@ -134,7 +134,7 @@ fn file_name_from_source_uri(source_uri: Option<&str>) -> Option<String> {
                 .ok()
                 .and_then(|url| {
                     url.path_segments()
-                        .and_then(|segments| segments.last())
+                        .and_then(|mut segments| segments.next_back())
                         .map(str::trim)
                         .filter(|segment| !segment.is_empty())
                         .map(std::string::ToString::to_string)
@@ -168,7 +168,10 @@ fn normalize_external_source_uri(source_uri: Option<&str>) -> Option<String> {
 }
 
 #[must_use]
-pub fn document_source_download_path(document_id: Uuid, revision_id: Option<Uuid>) -> String {
+pub(crate) fn document_source_download_path(
+    document_id: Uuid,
+    revision_id: Option<Uuid>,
+) -> String {
     match revision_id {
         Some(revision_id) => {
             format!("{DOCUMENT_SOURCE_ROUTE_PREFIX}/{document_id}/source?revisionId={revision_id}")

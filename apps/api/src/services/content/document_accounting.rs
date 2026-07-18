@@ -142,7 +142,7 @@ pub async fn load_document_lifecycle(
     sort_attempt_entries_latest_first(&mut attempts_with_ids);
 
     // Single canonical billing query: provider calls → per-stage + total
-    let billing = load_canonical_billing(state, document_id).await;
+    let billing = load_canonical_billing(state, document_id).await?;
 
     // Stage events describe the worker lifecycle; billing calls are the source
     // of truth for model and cost attribution. Keep the attribution scoped to
@@ -163,14 +163,13 @@ pub async fn load_document_lifecycle(
 
     let document_level_stage_billing =
         collect_document_level_stage_billing(&billing, &visible_attempt_ids);
-    if !document_level_stage_billing.is_empty() {
-        if let Some((_, terminal_attempt)) =
+    if !document_level_stage_billing.is_empty()
+        && let Some((_, terminal_attempt)) =
             attempts_with_ids.iter_mut().find(|(_, attempt)| attempt.finished_at.is_some())
-        {
-            merge_billing_into_stage_events(terminal_attempt, &document_level_stage_billing);
-            terminal_attempt.total_cost = Some(billing.total);
-            terminal_attempt.currency_code = Some(billing.currency.clone());
-        }
+    {
+        merge_billing_into_stage_events(terminal_attempt, &document_level_stage_billing);
+        terminal_attempt.total_cost = Some(billing.total);
+        terminal_attempt.currency_code = Some(billing.currency.clone());
     }
 
     let (total_cost, currency_code) = lifecycle_total_cost_fields(billing.total, &billing.currency);
@@ -185,15 +184,16 @@ fn merge_stages(rows: &[&ingest_repository::IngestStageEventRow]) -> Vec<Documen
         if let Some(ex) = out.iter_mut().find(|s| s.stage == row.stage_name) {
             merge_stage_details(&mut ex.details, &row.details_json);
             if row.stage_state == "completed" || row.stage_state == "failed" {
-                if let Some(started_at) = row.started_at {
-                    if started_at < ex.started_at {
-                        ex.started_at = started_at;
-                    }
+                if let Some(started_at) = row.started_at
+                    && started_at < ex.started_at
+                {
+                    ex.started_at = started_at;
                 }
                 ex.status = row.stage_state.clone();
                 ex.finished_at = Some(row.recorded_at);
-                ex.elapsed_ms =
-                    row.elapsed_ms.or(Some((row.recorded_at - ex.started_at).num_milliseconds()));
+                ex.elapsed_ms = row
+                    .elapsed_ms
+                    .or_else(|| Some((row.recorded_at - ex.started_at).num_milliseconds()));
                 ex.provider_kind = row
                     .provider_kind
                     .clone()
@@ -203,38 +203,38 @@ fn merge_stages(rows: &[&ingest_repository::IngestStageEventRow]) -> Vec<Documen
                             .and_then(|v| v.as_str())
                             .map(String::from)
                     })
-                    .or(ex.provider_kind.take());
+                    .or_else(|| ex.provider_kind.take());
                 ex.model_name = row
                     .model_name
                     .clone()
                     .or_else(|| {
                         row.details_json.get("modelName").and_then(|v| v.as_str()).map(String::from)
                     })
-                    .or(ex.model_name.take());
+                    .or_else(|| ex.model_name.take());
                 ex.prompt_tokens = row.prompt_tokens.or(ex.prompt_tokens);
                 ex.completion_tokens = row.completion_tokens.or(ex.completion_tokens);
                 ex.total_tokens = row.total_tokens.or(ex.total_tokens);
                 ex.estimated_cost = row.estimated_cost.or(ex.estimated_cost);
-                ex.currency_code = row.currency_code.clone().or(ex.currency_code.take());
+                ex.currency_code = row.currency_code.clone().or_else(|| ex.currency_code.take());
                 ex.reused_chunks = row
                     .details_json
                     .get("reusedChunks")
-                    .and_then(|v| v.as_i64())
+                    .and_then(serde_json::Value::as_i64)
                     .or(ex.reused_chunks);
                 ex.reused_entities = row
                     .details_json
                     .get("reusedEntities")
-                    .and_then(|v| v.as_i64())
+                    .and_then(serde_json::Value::as_i64)
                     .or(ex.reused_entities);
                 ex.reused_relations = row
                     .details_json
                     .get("reusedRelations")
-                    .and_then(|v| v.as_i64())
+                    .and_then(serde_json::Value::as_i64)
                     .or(ex.reused_relations);
                 ex.chunks_processed = row
                     .details_json
                     .get("chunksProcessed")
-                    .and_then(|v| v.as_i64())
+                    .and_then(serde_json::Value::as_i64)
                     .or(ex.chunks_processed);
             }
         } else {
@@ -259,10 +259,22 @@ fn merge_stages(rows: &[&ingest_repository::IngestStageEventRow]) -> Vec<Documen
                 total_tokens: row.total_tokens,
                 estimated_cost: row.estimated_cost,
                 currency_code: row.currency_code.clone(),
-                reused_chunks: row.details_json.get("reusedChunks").and_then(|v| v.as_i64()),
-                reused_entities: row.details_json.get("reusedEntities").and_then(|v| v.as_i64()),
-                reused_relations: row.details_json.get("reusedRelations").and_then(|v| v.as_i64()),
-                chunks_processed: row.details_json.get("chunksProcessed").and_then(|v| v.as_i64()),
+                reused_chunks: row
+                    .details_json
+                    .get("reusedChunks")
+                    .and_then(serde_json::Value::as_i64),
+                reused_entities: row
+                    .details_json
+                    .get("reusedEntities")
+                    .and_then(serde_json::Value::as_i64),
+                reused_relations: row
+                    .details_json
+                    .get("reusedRelations")
+                    .and_then(serde_json::Value::as_i64),
+                chunks_processed: row
+                    .details_json
+                    .get("chunksProcessed")
+                    .and_then(serde_json::Value::as_i64),
                 provider_call_count: None,
                 details: stage_details_or_none(&row.details_json),
             });
@@ -323,6 +335,7 @@ fn latest_attempt_sort_key(
 /// Single canonical billing query: provider calls + optional charges →
 /// per-stage costs and call counts. This is the one source of truth for
 /// document lifecycle model/cost observability.
+#[derive(Debug)]
 struct CanonicalBilling {
     total: Decimal,
     currency: String,
@@ -363,7 +376,10 @@ struct CanonicalBillingRow {
     provider_call_count: i64,
 }
 
-async fn load_canonical_billing(state: &AppState, document_id: Uuid) -> CanonicalBilling {
+async fn load_canonical_billing(
+    state: &AppState,
+    document_id: Uuid,
+) -> Result<CanonicalBilling, ApiError> {
     let rows = sqlx::query_as::<_, CanonicalBillingRow>(
         "WITH attributed_provider_call AS (
              SELECT
@@ -397,7 +413,7 @@ async fn load_canonical_billing(state: &AppState, document_id: Uuid) -> Canonica
          SELECT attributed_provider_call.attempt_id,
                 attributed_provider_call.call_kind,
                 COALESCE(SUM(bc.total_price), 0) AS stage_cost,
-                COALESCE(MAX(bc.currency_code), 'USD') AS currency_code,
+                COALESCE(bc.currency_code, 'USD') AS currency_code,
                 NULLIF(string_agg(DISTINCT apc.provider_kind, ', ' ORDER BY apc.provider_kind), '') AS provider_kind,
                 NULLIF(string_agg(DISTINCT amc.model_name, ', ' ORDER BY amc.model_name), '') AS model_name,
                 MIN(attributed_provider_call.started_at) AS stage_started_at,
@@ -408,19 +424,35 @@ async fn load_canonical_billing(state: &AppState, document_id: Uuid) -> Canonica
          LEFT JOIN billing_charge bc ON bc.usage_id = bu.id
          JOIN ai_provider_catalog apc ON apc.id = attributed_provider_call.provider_catalog_id
          JOIN ai_model_catalog amc ON amc.id = attributed_provider_call.model_catalog_id
-         GROUP BY attributed_provider_call.attempt_id, attributed_provider_call.call_kind",
+         GROUP BY
+             attributed_provider_call.attempt_id,
+             attributed_provider_call.call_kind,
+             COALESCE(bc.currency_code, 'USD')",
     )
     .bind(document_id)
     .fetch_all(&state.persistence.postgres)
     .await
-    .unwrap_or_default();
+    .map_err(|e| ApiError::internal_with_log(e, "lifecycle: load canonical billing"))?;
 
     canonical_billing_from_rows(&rows)
 }
 
-fn canonical_billing_from_rows(rows: &[CanonicalBillingRow]) -> CanonicalBilling {
+fn canonical_billing_from_rows(rows: &[CanonicalBillingRow]) -> Result<CanonicalBilling, ApiError> {
+    let mut nonzero_currency: Option<&str> = None;
+    for row in rows.iter().filter(|row| row.stage_cost != Decimal::ZERO) {
+        match nonzero_currency {
+            None => nonzero_currency = Some(&row.currency_code),
+            Some(currency_code) if currency_code == row.currency_code.as_str() => {}
+            Some(_) => {
+                return Err(ApiError::Conflict(
+                    "document lifecycle has billing charges in multiple currencies; request per-currency charges"
+                        .to_string(),
+                ));
+            }
+        }
+    }
+    let currency = nonzero_currency.unwrap_or("USD").to_string();
     let mut total = Decimal::ZERO;
-    let mut currency = "USD".to_string();
     let mut total_by_attempt: BTreeMap<Uuid, CanonicalAttemptBilling> = BTreeMap::new();
     let mut per_stage_by_attempt: BTreeMap<Uuid, BTreeMap<String, CanonicalStageBilling>> =
         BTreeMap::new();
@@ -429,7 +461,6 @@ fn canonical_billing_from_rows(rows: &[CanonicalBillingRow]) -> CanonicalBilling
 
     for row in rows {
         total += row.stage_cost;
-        currency = row.currency_code.clone();
 
         let Some(stage_name) = billing_stage_name(&row.call_kind) else {
             continue;
@@ -440,7 +471,7 @@ fn canonical_billing_from_rows(rows: &[CanonicalBillingRow]) -> CanonicalBilling
                 .or_insert_with(|| CanonicalStageBilling {
                     stage_name: stage_name.to_string(),
                     cost: Decimal::ZERO,
-                    currency: row.currency_code.clone(),
+                    currency: currency.clone(),
                     provider_kind: None,
                     model_name: None,
                     started_at: None,
@@ -449,7 +480,7 @@ fn canonical_billing_from_rows(rows: &[CanonicalBillingRow]) -> CanonicalBilling
                     provider_call_count: 0,
                 });
             entry.cost += row.stage_cost;
-            entry.currency = row.currency_code.clone();
+            entry.currency = currency.clone();
             merge_distinct_csv(&mut entry.provider_kind, row.provider_kind.as_deref());
             merge_distinct_csv(&mut entry.model_name, row.model_name.as_deref());
             merge_stage_bounds(entry, row.stage_started_at, row.stage_finished_at);
@@ -457,10 +488,10 @@ fn canonical_billing_from_rows(rows: &[CanonicalBillingRow]) -> CanonicalBilling
             continue;
         };
         let attempt_total = total_by_attempt.entry(attempt_id).or_insert_with(|| {
-            CanonicalAttemptBilling { total: Decimal::ZERO, currency: row.currency_code.clone() }
+            CanonicalAttemptBilling { total: Decimal::ZERO, currency: currency.clone() }
         });
         attempt_total.total += row.stage_cost;
-        attempt_total.currency = row.currency_code.clone();
+        attempt_total.currency = currency.clone();
 
         let entry = per_stage_by_attempt
             .entry(attempt_id)
@@ -469,7 +500,7 @@ fn canonical_billing_from_rows(rows: &[CanonicalBillingRow]) -> CanonicalBilling
             .or_insert_with(|| CanonicalStageBilling {
                 stage_name: stage_name.to_string(),
                 cost: Decimal::ZERO,
-                currency: row.currency_code.clone(),
+                currency: currency.clone(),
                 provider_kind: None,
                 model_name: None,
                 started_at: None,
@@ -478,7 +509,7 @@ fn canonical_billing_from_rows(rows: &[CanonicalBillingRow]) -> CanonicalBilling
                 provider_call_count: 0,
             });
         entry.cost += row.stage_cost;
-        entry.currency = row.currency_code.clone();
+        entry.currency = currency.clone();
         merge_distinct_csv(&mut entry.provider_kind, row.provider_kind.as_deref());
         merge_distinct_csv(&mut entry.model_name, row.model_name.as_deref());
         merge_stage_bounds(entry, row.stage_started_at, row.stage_finished_at);
@@ -505,13 +536,13 @@ fn canonical_billing_from_rows(rows: &[CanonicalBillingRow]) -> CanonicalBilling
         })
         .collect();
     let unattributed_per_stage = finalize_stage_billing(unattributed_per_stage_by_name);
-    CanonicalBilling {
+    Ok(CanonicalBilling {
         total,
         currency,
         total_by_attempt,
         per_stage_by_attempt,
         unattributed_per_stage,
-    }
+    })
 }
 
 fn finalize_stage_billing(
@@ -578,15 +609,15 @@ fn merge_stage_bounds(
     started_at: Option<DateTime<Utc>>,
     finished_at: Option<DateTime<Utc>>,
 ) {
-    if let Some(started_at) = started_at {
-        if stage.started_at.as_ref().is_none_or(|existing| started_at < *existing) {
-            stage.started_at = Some(started_at);
-        }
+    if let Some(started_at) = started_at
+        && stage.started_at.as_ref().is_none_or(|existing| started_at < *existing)
+    {
+        stage.started_at = Some(started_at);
     }
-    if let Some(finished_at) = finished_at {
-        if stage.finished_at.as_ref().is_none_or(|existing| finished_at > *existing) {
-            stage.finished_at = Some(finished_at);
-        }
+    if let Some(finished_at) = finished_at
+        && stage.finished_at.as_ref().is_none_or(|existing| finished_at > *existing)
+    {
+        stage.finished_at = Some(finished_at);
     }
 }
 
@@ -649,8 +680,7 @@ fn merge_billing_into_stage_events(
 
 fn stage_order(stage: &str) -> u8 {
     canonical_ingest_stage_metadata(stage)
-        .map(|metadata| u8::try_from(metadata.stage_rank).unwrap_or(u8::MAX))
-        .unwrap_or(u8::MAX)
+        .map_or(u8::MAX, |metadata| u8::try_from(metadata.stage_rank).unwrap_or(u8::MAX))
 }
 
 fn billing_stage_name(call_kind: &str) -> Option<&str> {
@@ -749,7 +779,8 @@ mod tests {
             },
         ];
 
-        let billing = canonical_billing_from_rows(&rows);
+        let billing = canonical_billing_from_rows(&rows)
+            .expect("single-currency billing rows should aggregate");
         let per_stage =
             billing.per_stage_by_attempt.get(&attempt_id).expect("attempt billing should exist");
 
@@ -771,6 +802,30 @@ mod tests {
     }
 
     #[test]
+    fn canonical_billing_rejects_mixed_currencies_before_summing() {
+        let attempt_id = Uuid::now_v7();
+        let usd = CanonicalBillingRow {
+            attempt_id: Some(attempt_id),
+            call_kind: "graph_extract".to_string(),
+            stage_cost: Decimal::from_str_exact("0.1000").expect("valid decimal"),
+            currency_code: "USD".to_string(),
+            provider_kind: Some("provider-alpha".to_string()),
+            model_name: Some("alpha-chat-large".to_string()),
+            stage_started_at: Some(utc("2026-05-12T10:00:00Z")),
+            stage_finished_at: Some(utc("2026-05-12T10:00:02Z")),
+            provider_call_count: 1,
+        };
+        let mut eur = usd.clone();
+        eur.stage_cost = Decimal::from_str_exact("0.2000").expect("valid decimal");
+        eur.currency_code = "EUR".to_string();
+
+        let error = canonical_billing_from_rows(&[usd, eur])
+            .expect_err("unlike currencies must never be combined into one document total");
+
+        assert!(error.to_string().contains("multiple currencies"));
+    }
+
+    #[test]
     fn canonical_billing_keeps_zero_cost_provider_calls_visible() {
         let attempt_id = Uuid::now_v7();
         let rows = vec![CanonicalBillingRow {
@@ -785,7 +840,8 @@ mod tests {
             provider_call_count: 3,
         }];
 
-        let billing = canonical_billing_from_rows(&rows);
+        let billing = canonical_billing_from_rows(&rows)
+            .expect("single-currency billing rows should aggregate");
         let per_stage =
             billing.per_stage_by_attempt.get(&attempt_id).expect("attempt billing should exist");
 
@@ -839,7 +895,8 @@ mod tests {
             },
         ];
 
-        let billing = canonical_billing_from_rows(&rows);
+        let billing = canonical_billing_from_rows(&rows)
+            .expect("single-currency billing rows should aggregate");
         let visible_attempt_ids = BTreeSet::from([visible_attempt_id]);
         let document_level_stages =
             collect_document_level_stage_billing(&billing, &visible_attempt_ids);
@@ -873,7 +930,8 @@ mod tests {
             provider_call_count: 1,
         }];
 
-        let billing = canonical_billing_from_rows(&rows);
+        let billing = canonical_billing_from_rows(&rows)
+            .expect("single-currency billing rows should aggregate");
 
         assert_eq!(billing.total, Decimal::from_str_exact("1.5000").expect("valid decimal"));
         assert!(billing.total_by_attempt.is_empty());
@@ -894,7 +952,8 @@ mod tests {
             provider_call_count: 4,
         }];
 
-        let billing = canonical_billing_from_rows(&rows);
+        let billing = canonical_billing_from_rows(&rows)
+            .expect("single-currency billing rows should aggregate");
 
         assert_eq!(billing.total, Decimal::from_str_exact("0.2500").expect("valid decimal"));
         assert!(billing.total_by_attempt.is_empty());
@@ -934,7 +993,8 @@ mod tests {
             },
         ];
 
-        let billing = canonical_billing_from_rows(&rows);
+        let billing = canonical_billing_from_rows(&rows)
+            .expect("single-currency billing rows should aggregate");
 
         assert_eq!(billing.total, Decimal::from_str_exact("0.3000").expect("valid decimal"));
         assert_eq!(

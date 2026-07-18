@@ -3,7 +3,7 @@
 //! The graph viewer needs every node and every edge — no truncation, no
 //! top-N. The old JSON endpoint shipped the full `RuntimeKnowledgeEntityRow`
 //! / `RuntimeKnowledgeRelationRow` shape which is wasteful: long UUIDs are
-//! repeated in every edge, metadata_json fields the client never reads are
+//! repeated in every edge, `metadata_json` fields the client never reads are
 //! serialized, and nested object envelopes cost bytes. This module produces
 //! the canonical compact wire format used by the graph page.
 //!
@@ -19,20 +19,20 @@
 //! 7. `end`      — `{ s: "end" }`
 //!
 //! Field key legend:
-//!   i  id (u32 assigned by id_map)
+//!   i  id (u32 assigned by `id_map`)
 //!   l  label
-//!   k  canonical_key / document external_key
+//!   k  `canonical_key` / document `external_key`
 //!   t  type (entityType / nodeType)
-//!   ts sub_type (only when present)
-//!   s  support_count (only when > 1)
+//!   ts `sub_type` (only when present)
+//!   s  `support_count` (only when > 1)
 //!   c  confidence (only when present)
-//!   es entity_state (only when not "active")
+//!   es `entity_state` (only when not "active")
 //!   a  aliases (only when non-empty)
 //!   sm summary (only when present)
-//!   fn file_name (only when present, for docs)
+//!   fn `file_name` (only when present, for docs)
 //!
 //! Defaults omitted from wire: client must treat missing as default (empty
-//! aliases, null sub_type, "active" state, support_count = 1, null summary).
+//! aliases, null `sub_type`, "active" state, `support_count` = 1, null summary).
 //! `metadata_json`, `workspace_id`, `library_id`, `contradiction_state`,
 //! `freshness_generation`, `created_at`, `updated_at`, `normalized_assertion`
 //! are NOT serialized — the frontend never reads them from this endpoint.
@@ -47,7 +47,7 @@ use uuid::Uuid;
 
 use crate::{
     app::state::AppState,
-    infra::repositories::{self, RuntimeGraphNodeRow},
+    infra::repositories::{self, RuntimeGraphEdgeCompactRow, RuntimeGraphNodeRow},
     services::{
         graph::canonical_projection::{
             canonicalize_runtime_graph_document_links, canonicalize_runtime_graph_nodes,
@@ -103,7 +103,7 @@ fn prewarm_state() -> &'static std::sync::Mutex<std::collections::HashMap<Uuid, 
 /// so concurrent reads either see the old bytes or the new bytes,
 /// never an empty window.
 ///
-/// Debounced via [`PREWARM_STATE`] so a burst of publishes only
+/// Debounced via `PREWARM_STATE` so a burst of publishes only
 /// runs one rebuild at a time per library; the tail is dropped because
 /// any in-flight rebuild is already reading the latest projection
 /// state from Postgres anyway.
@@ -124,6 +124,7 @@ pub async fn prewarm_graph_topology_cache(state: &AppState, library_id: Uuid) {
         }
         entry.running = true;
         entry.pending = false;
+        drop(state_map);
     }
 
     // Loop so coalesced publishes re-run without re-entry. Exit when
@@ -136,13 +137,20 @@ pub async fn prewarm_graph_topology_cache(state: &AppState, library_id: Uuid) {
         let mut state_map =
             prewarm_state().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let entry = state_map.entry(library_id).or_default();
-        if entry.pending {
+        let should_rerun = if entry.pending {
             entry.pending = false;
             entry.running = true;
-            // drop lock + loop re-runs without holding it
+            true
+        } else {
+            // No task is active and no tail run is pending. Remove the slot
+            // entirely so one-off libraries cannot grow this registry forever.
+            state_map.remove(&library_id);
+            false
+        };
+        drop(state_map);
+        if should_rerun {
             continue;
         }
-        entry.running = false;
         return;
     }
 }
@@ -233,7 +241,7 @@ async fn run_prewarm_once(state: &AppState, library_id: Uuid) {
 /// The handler wraps the returned `Vec<u8>` in a regular
 /// `Body::from(bytes)` response. We deliberately do NOT use
 /// `Body::from_stream` here: the NDJSON is produced in memory in full
-/// anyway (documents + entities must be known before id_map can be
+/// anyway (documents + entities must be known before `id_map` can be
 /// emitted), and `tower_http::CompressionLayer` currently mis-frames
 /// chunked+gzip responses whose body uses `Body::from_stream`, producing
 /// `ERR_INCOMPLETE_CHUNKED_ENCODING` in the browser. A single-buffer
@@ -384,6 +392,33 @@ struct CompactDocumentLink {
     support_count: i64,
 }
 
+fn canonicalize_compact_edges(
+    edges: Vec<RuntimeGraphEdgeCompactRow>,
+    node_id_remap: &HashMap<Uuid, Uuid>,
+) -> Vec<RuntimeGraphEdgeCompactRow> {
+    let mut edges = edges
+        .into_iter()
+        .filter_map(|mut edge| {
+            edge.from_node_id = remap_node_id(edge.from_node_id, node_id_remap);
+            edge.to_node_id = remap_node_id(edge.to_node_id, node_id_remap);
+            (edge.from_node_id != edge.to_node_id).then_some(edge)
+        })
+        .collect::<Vec<_>>();
+    edges.sort_by(|left, right| {
+        right
+            .support_count
+            .cmp(&left.support_count)
+            .then_with(|| left.relation_type.cmp(&right.relation_type))
+            .then_with(|| left.from_node_id.cmp(&right.from_node_id))
+            .then_with(|| left.to_node_id.cmp(&right.to_node_id))
+    });
+    let mut seen = HashSet::new();
+    edges.retain(|edge| {
+        seen.insert((edge.from_node_id, edge.relation_type.trim().to_string(), edge.to_node_id))
+    });
+    edges
+}
+
 async fn build_compact_topology(
     state: &AppState,
     library_id: Uuid,
@@ -456,30 +491,8 @@ async fn build_compact_topology(
     );
     let canonical_nodes = canonicalize_runtime_graph_nodes(node_rows);
     let node_rows = canonical_nodes.nodes;
-    let mut edge_rows_compact = edge_rows_compact
-        .into_iter()
-        .filter_map(|mut edge| {
-            edge.from_node_id = remap_node_id(edge.from_node_id, &canonical_nodes.node_id_remap);
-            edge.to_node_id = remap_node_id(edge.to_node_id, &canonical_nodes.node_id_remap);
-            (edge.from_node_id != edge.to_node_id).then_some(edge)
-        })
-        .collect::<Vec<_>>();
-    edge_rows_compact.sort_by(|left, right| {
-        right
-            .support_count
-            .cmp(&left.support_count)
-            .then_with(|| left.relation_type.cmp(&right.relation_type))
-            .then_with(|| left.from_node_id.cmp(&right.from_node_id))
-            .then_with(|| left.to_node_id.cmp(&right.to_node_id))
-    });
-    let mut seen_edge_signatures = HashSet::new();
-    edge_rows_compact.retain(|edge| {
-        seen_edge_signatures.insert((
-            edge.from_node_id,
-            edge.relation_type.trim().to_string(),
-            edge.to_node_id,
-        ))
-    });
+    let edge_rows_compact =
+        canonicalize_compact_edges(edge_rows_compact, &canonical_nodes.node_id_remap);
     let document_link_rows = canonicalize_runtime_graph_document_links(
         document_link_rows,
         &node_rows,
@@ -602,25 +615,13 @@ async fn build_compact_topology(
     // every knowledge-backed document above; now cover the ones present only as
     // runtime_graph_node `document` rows so they also get a numeric slot the
     // edges and doc_links can reference.
-    for row in &node_rows {
-        if row.node_type != "document" {
-            continue;
-        }
-        let document_uuid = match document_uuid_by_runtime_node.get(&row.id) {
-            Some(uuid) => *uuid,
-            None => continue,
-        };
-        if id_map.contains_key(&document_uuid) {
-            continue;
-        }
-        let num = allocate(document_uuid, &mut id_map, &mut next_num);
-        compact_documents.push(CompactDocument {
-            num,
-            external_key: row.canonical_key.clone(),
-            title: Some(row.label.clone()),
-            file_name: None,
-        });
-    }
+    append_runtime_only_documents(
+        &node_rows,
+        &document_uuid_by_runtime_node,
+        &mut id_map,
+        &mut next_num,
+        &mut compact_documents,
+    );
 
     Ok(CompactTopology {
         library_id,
@@ -633,6 +634,32 @@ async fn build_compact_topology(
         edges: compact_edges,
         document_links: compact_document_links,
     })
+}
+
+fn append_runtime_only_documents(
+    node_rows: &[RuntimeGraphNodeRow],
+    document_uuid_by_runtime_node: &HashMap<Uuid, Uuid>,
+    id_map: &mut HashMap<Uuid, u32>,
+    next_num: &mut u32,
+    documents: &mut Vec<CompactDocument>,
+) {
+    for row in node_rows.iter().filter(|row| row.node_type == "document") {
+        let Some(&document_uuid) = document_uuid_by_runtime_node.get(&row.id) else {
+            continue;
+        };
+        if id_map.contains_key(&document_uuid) {
+            continue;
+        }
+        let num = *next_num;
+        *next_num += 1;
+        id_map.insert(document_uuid, num);
+        documents.push(CompactDocument {
+            num,
+            external_key: row.canonical_key.clone(),
+            title: Some(row.label.clone()),
+            file_name: None,
+        });
+    }
 }
 
 fn map_entity(row: &RuntimeGraphNodeRow, num: u32) -> CompactEntity {

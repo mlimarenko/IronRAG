@@ -27,100 +27,131 @@ pub fn build_structured_chunk_windows(
     blocks: &[StructuredBlockData],
     profile: StructuredChunkingProfile,
 ) -> Vec<StructuredChunkWindow> {
+    let filtered_blocks = filter_chunkable_blocks(blocks);
+    let mut chunks = StructuredChunkWindowBuilder::new(&filtered_blocks, profile).build();
+
+    mark_near_duplicates(&mut chunks);
+    compute_window_text_pass(&mut chunks);
+
+    chunks
+}
+
+fn filter_chunkable_blocks(blocks: &[StructuredBlockData]) -> Vec<StructuredBlockData> {
     let table_parent_ids_with_rows = blocks
         .iter()
         .filter(|block| block.block_kind == StructuredBlockKind::TableRow)
         .filter_map(|block| block.parent_block_id)
         .collect::<HashSet<_>>();
-    let filtered_blocks: Vec<StructuredBlockData> = blocks
+
+    blocks
         .iter()
         .filter(|block| !block.is_boilerplate)
         .filter(|block| {
-            !(block.block_kind == StructuredBlockKind::Table
-                && table_parent_ids_with_rows.contains(&block.block_id))
+            block.block_kind != StructuredBlockKind::Table
+                || !table_parent_ids_with_rows.contains(&block.block_id)
         })
         .cloned()
-        .collect();
+        .collect()
+}
 
-    let blocks = &filtered_blocks;
+struct StructuredChunkWindowBuilder<'block> {
+    blocks: &'block [StructuredBlockData],
+    profile: StructuredChunkingProfile,
+    chunks: Vec<StructuredChunkWindow>,
+    window_start: usize,
+    current_char_count: usize,
+}
 
-    let mut chunks = Vec::<StructuredChunkWindow>::new();
-    let mut window_start = 0_usize;
-    let mut current_char_count = 0_usize;
+impl<'block> StructuredChunkWindowBuilder<'block> {
+    fn new(blocks: &'block [StructuredBlockData], profile: StructuredChunkingProfile) -> Self {
+        Self { blocks, profile, chunks: Vec::new(), window_start: 0, current_char_count: 0 }
+    }
 
-    for (index, block) in blocks.iter().enumerate() {
-        if block.block_kind == StructuredBlockKind::TableRow
-            || block.block_kind == StructuredBlockKind::SourceProfile
-            || block.block_kind == StructuredBlockKind::SourceUnit
-            || (block.block_kind == StructuredBlockKind::MetadataBlock
-                && is_table_summary_text(&block.normalized_text))
-        {
-            if window_start < index {
-                push_structured_chunk_window(&mut chunks, &blocks[window_start..index]);
-            }
-            push_structured_chunk_window(&mut chunks, std::slice::from_ref(block));
-            window_start = index.saturating_add(1);
-            current_char_count = 0;
-            continue;
+    fn build(mut self) -> Vec<StructuredChunkWindow> {
+        for (index, block) in self.blocks.iter().enumerate() {
+            self.push_block(index, block);
+        }
+        self.flush_trailing_window();
+        self.chunks
+    }
+
+    fn push_block(&mut self, index: usize, block: &StructuredBlockData) {
+        if is_standalone_chunk_block(block) {
+            self.push_standalone_block(index, block);
+            return;
         }
 
         let block_len = chunk_block_len(block);
-        let projected = if current_char_count == 0 {
-            block_len
-        } else {
-            current_char_count.saturating_add(2).saturating_add(block_len)
-        };
-
-        // If adding this block exceeds the limit, flush the current window.
-        if window_start < index && projected > profile.max_chars {
-            // Heading-aware: if this block is a Heading, it naturally starts the next window.
-            // Otherwise, flush up to (not including) this block.
-            push_structured_chunk_window(&mut chunks, &blocks[window_start..index]);
-
-            // Overlap: rewind to include trailing blocks from the previous window
-            // that fit within overlap_chars budget.
-            window_start =
-                compute_overlap_start(blocks, window_start, index, profile.overlap_chars);
-            current_char_count = blocks[window_start..=index]
-                .iter()
-                .map(chunk_block_len)
-                .enumerate()
-                .fold(0_usize, |acc, (i, len)| {
-                    if i == 0 { len } else { acc.saturating_add(2).saturating_add(len) }
-                });
-            continue;
+        let projected = projected_window_len(self.current_char_count, block_len);
+        if self.window_start < index && projected > self.profile.max_chars {
+            self.flush_overflowing_window(index);
+            return;
+        }
+        if self.should_start_heading_window(index, block) {
+            self.flush_window(self.window_start, index);
+            self.window_start = index;
+            self.current_char_count = block_len;
+            return;
         }
 
-        // Heading-aware: if a heading appears mid-window and the window already has
-        // substantial content, start a new window so the heading leads the next chunk.
-        if block.block_kind == StructuredBlockKind::Heading
-            && window_start < index
-            && current_char_count >= profile.max_chars / 3
-        {
-            push_structured_chunk_window(&mut chunks, &blocks[window_start..index]);
-            window_start = index;
-            current_char_count = block_len;
-            continue;
-        }
-
-        if window_start == index {
-            current_char_count = block_len;
-        } else {
-            current_char_count = projected;
-        }
+        self.current_char_count = if self.window_start == index { block_len } else { projected };
     }
 
-    if window_start < blocks.len() {
-        push_structured_chunk_window(&mut chunks, &blocks[window_start..]);
+    fn push_standalone_block(&mut self, index: usize, block: &StructuredBlockData) {
+        self.flush_window(self.window_start, index);
+        push_structured_chunk_window(&mut self.chunks, std::slice::from_ref(block));
+        self.window_start = index.saturating_add(1);
+        self.current_char_count = 0;
     }
 
-    // Near-duplicate detection pass
-    mark_near_duplicates(&mut chunks);
+    fn flush_overflowing_window(&mut self, index: usize) {
+        self.flush_window(self.window_start, index);
+        self.window_start = compute_overlap_start(
+            self.blocks,
+            self.window_start,
+            index,
+            self.profile.overlap_chars,
+        );
+        self.current_char_count = count_window_chars(&self.blocks[self.window_start..=index]);
+    }
 
-    // Sentence-window pass: compute ±2 sentence context for each chunk
-    compute_window_text_pass(&mut chunks);
+    fn should_start_heading_window(&self, index: usize, block: &StructuredBlockData) -> bool {
+        block.block_kind == StructuredBlockKind::Heading
+            && self.window_start < index
+            && self.current_char_count >= self.profile.max_chars / 3
+    }
 
-    chunks
+    fn flush_trailing_window(&mut self) {
+        self.flush_window(self.window_start, self.blocks.len());
+    }
+
+    fn flush_window(&mut self, start: usize, end: usize) {
+        if start < end {
+            push_structured_chunk_window(&mut self.chunks, &self.blocks[start..end]);
+        }
+    }
+}
+
+fn is_standalone_chunk_block(block: &StructuredBlockData) -> bool {
+    matches!(
+        block.block_kind,
+        StructuredBlockKind::TableRow
+            | StructuredBlockKind::SourceProfile
+            | StructuredBlockKind::SourceUnit
+    ) || (block.block_kind == StructuredBlockKind::MetadataBlock
+        && is_table_summary_text(&block.normalized_text))
+}
+
+fn projected_window_len(current_char_count: usize, block_len: usize) -> usize {
+    if current_char_count == 0 {
+        block_len
+    } else {
+        current_char_count.saturating_add(2).saturating_add(block_len)
+    }
+}
+
+fn count_window_chars(blocks: &[StructuredBlockData]) -> usize {
+    blocks.iter().map(chunk_block_len).fold(0, projected_window_len)
 }
 
 /// Compute the overlap start index: walk backward from `flush_end` toward `window_start`,
@@ -212,7 +243,7 @@ fn push_structured_chunk_window(
 // Sentence-window retrieval
 // ---------------------------------------------------------------------------
 
-/// Maximum token budget for window_text (approx. whitespace-split words).
+/// Maximum token budget for `window_text` (approx. whitespace-split words).
 const WINDOW_TEXT_MAX_TOKENS: usize = 1_500;
 
 /// Number of sentence-radius neighbours to include on each side of a chunk.
@@ -222,65 +253,64 @@ const WINDOW_SENTENCE_RADIUS: usize = 2;
 /// ±`WINDOW_SENTENCE_RADIUS` sentences from the neighbouring chunks' content.
 /// The result is capped at `WINDOW_TEXT_MAX_TOKENS` tokens.
 pub(crate) fn compute_window_text_pass(chunks: &mut [StructuredChunkWindow]) {
-    // Collect all sentences per chunk up front to avoid borrow issues.
-    let sentences_per_chunk: Vec<Vec<String>> =
-        chunks.iter().map(|c| split_into_sentences(&c.content_text)).collect();
+    let sentences_per_chunk =
+        chunks.iter().map(|chunk| split_into_sentences(&chunk.content_text)).collect::<Vec<_>>();
 
-    for i in 0..chunks.len() {
-        // Gather preceding sentences from neighbouring chunks.
-        let mut before: Vec<&str> = Vec::new();
-        let mut remaining = WINDOW_SENTENCE_RADIUS;
-        let mut chunk_idx = i;
-        loop {
-            if chunk_idx == 0 {
-                break;
-            }
-            chunk_idx -= 1;
-            let sents = &sentences_per_chunk[chunk_idx];
-            let take = remaining.min(sents.len());
-            for s in sents[sents.len() - take..].iter() {
-                before.push(s.as_str());
-            }
-            remaining = remaining.saturating_sub(take);
-            if remaining == 0 {
-                break;
-            }
+    for (index, chunk) in chunks.iter_mut().enumerate() {
+        let before = collect_preceding_sentences(&sentences_per_chunk, index);
+        let after = collect_following_sentences(&sentences_per_chunk, index);
+        chunk.window_text = build_window_text(&chunk.content_text, &before, &after);
+    }
+}
+
+fn collect_preceding_sentences(sentences_per_chunk: &[Vec<String>], index: usize) -> Vec<&str> {
+    let mut before = Vec::new();
+    let mut remaining = WINDOW_SENTENCE_RADIUS;
+    let mut chunk_index = index;
+
+    loop {
+        if chunk_index == 0 {
+            break;
         }
-        before.reverse();
-
-        // Gather following sentences from neighbouring chunks.
-        let mut after: Vec<&str> = Vec::new();
-        remaining = WINDOW_SENTENCE_RADIUS;
-        chunk_idx = i;
-        loop {
-            chunk_idx += 1;
-            if chunk_idx >= chunks.len() {
-                break;
-            }
-            let sents = &sentences_per_chunk[chunk_idx];
-            let take = remaining.min(sents.len());
-            for s in sents[..take].iter() {
-                after.push(s.as_str());
-            }
-            remaining = remaining.saturating_sub(take);
-            if remaining == 0 {
-                break;
-            }
-        }
-
-        let core = &chunks[i].content_text;
-        let window = format!(
-            "{}{}{}",
-            if before.is_empty() { String::new() } else { format!("{}\n\n", before.join(" ")) },
-            core,
-            if after.is_empty() { String::new() } else { format!("\n\n{}", after.join(" ")) },
-        );
-        let trimmed = trim_to_tokens(&window, WINDOW_TEXT_MAX_TOKENS);
-        // Only store when it actually extends beyond the core text.
-        if trimmed.len() > core.len() {
-            chunks[i].window_text = Some(trimmed);
+        chunk_index -= 1;
+        let sentences = &sentences_per_chunk[chunk_index];
+        let take = remaining.min(sentences.len());
+        before.extend(sentences[sentences.len() - take..].iter().map(String::as_str));
+        remaining = remaining.saturating_sub(take);
+        if remaining == 0 {
+            break;
         }
     }
+    before.reverse();
+    before
+}
+
+fn collect_following_sentences(sentences_per_chunk: &[Vec<String>], index: usize) -> Vec<&str> {
+    let mut after = Vec::new();
+    let mut remaining = WINDOW_SENTENCE_RADIUS;
+    let mut chunk_index = index;
+
+    loop {
+        chunk_index += 1;
+        let Some(sentences) = sentences_per_chunk.get(chunk_index) else {
+            break;
+        };
+        let take = remaining.min(sentences.len());
+        after.extend(sentences[..take].iter().map(String::as_str));
+        remaining = remaining.saturating_sub(take);
+        if remaining == 0 {
+            break;
+        }
+    }
+    after
+}
+
+fn build_window_text(core: &str, before: &[&str], after: &[&str]) -> Option<String> {
+    let prefix =
+        if before.is_empty() { String::new() } else { format!("{}\n\n", before.join(" ")) };
+    let suffix = if after.is_empty() { String::new() } else { format!("\n\n{}", after.join(" ")) };
+    let trimmed = trim_to_tokens(&format!("{prefix}{core}{suffix}"), WINDOW_TEXT_MAX_TOKENS);
+    (trimmed.len() > core.len()).then_some(trimmed)
 }
 
 /// Naively splits text into sentences at `.`, `!`, `?` boundaries.
@@ -364,76 +394,118 @@ fn detect_code_boundaries(text: &str, language: Option<&str>) -> Vec<usize> {
 
 fn guess_language(lines: &[&str]) -> &'static str {
     let sample = lines.iter().take(50).copied().collect::<Vec<_>>().join("\n");
-    if sample.contains("fn ")
-        && (sample.contains("-> ") || sample.contains("pub ") || sample.contains("let "))
-    {
-        return "rust";
-    }
-    if sample.contains("def ") && sample.contains(':') && !sample.contains('{') {
-        return "python";
-    }
-    if sample.contains("func ") && sample.contains("package ") {
-        return "go";
-    }
-    if sample.contains("function ") || sample.contains("const ") || sample.contains("=> {") {
-        if sample.contains(": string")
-            || sample.contains(": number")
-            || sample.contains("interface ")
-        {
-            return "typescript";
-        }
-        return "javascript";
-    }
-    if sample.contains("class ")
-        && sample.contains('{')
-        && (sample.contains("public ") || sample.contains("private "))
-    {
-        if sample.contains("package ") && sample.contains("import java") {
-            return "java";
-        }
-        if sample.contains("#include") || sample.contains("std::") {
-            return "cpp";
-        }
-        if sample.contains("using ") && sample.contains("namespace ") {
-            return "csharp";
-        }
-    }
-    if sample.contains("<?php") || (sample.contains("function ") && sample.contains('$')) {
-        return "php";
-    }
-    if sample.contains("require ") && sample.contains("end\n") {
-        return "ruby";
-    }
-    if sample.contains("import Swift")
-        || (sample.contains("func ") && sample.contains("->") && !sample.contains("pub "))
-    {
-        return "swift";
-    }
-    if sample.contains("fun ") && sample.contains("val ") {
-        return "kotlin";
-    }
-    if sample.contains("defmodule ") || (sample.contains("def ") && sample.contains("do\n")) {
-        return "elixir";
-    }
-    if sample.contains("FROM ") && sample.contains("RUN ") {
-        return "dockerfile";
-    }
-    if sample.contains("---") && sample.contains(": ") && !sample.contains('{') {
-        return "yaml";
-    }
-    if sample.starts_with('{') || sample.contains("\":\n") {
-        return "json";
-    }
-    if sample.contains("resource ") && sample.contains("provider ") {
-        return "terraform";
-    }
-    if sample.contains("CREATE TABLE") || sample.contains("SELECT ") {
-        return "sql";
-    }
-    ""
+    const DETECTORS: &[fn(&str) -> Option<&'static str>] = &[
+        detect_rust,
+        detect_python,
+        detect_go,
+        detect_javascript_family,
+        detect_class_based_language,
+        detect_php,
+        detect_ruby,
+        detect_swift,
+        detect_kotlin,
+        detect_elixir,
+        detect_dockerfile,
+        detect_yaml,
+        detect_json,
+        detect_terraform,
+        detect_sql,
+    ];
+    DETECTORS.iter().find_map(|detect| detect(&sample)).unwrap_or("")
 }
 
-#[allow(clippy::too_many_lines)]
+fn detect_rust(sample: &str) -> Option<&'static str> {
+    (sample.contains("fn ")
+        && (sample.contains("-> ") || sample.contains("pub ") || sample.contains("let ")))
+    .then_some("rust")
+}
+
+fn detect_python(sample: &str) -> Option<&'static str> {
+    (sample.contains("def ") && sample.contains(':') && !sample.contains('{')).then_some("python")
+}
+
+fn detect_go(sample: &str) -> Option<&'static str> {
+    (sample.contains("func ") && sample.contains("package ")).then_some("go")
+}
+
+fn detect_javascript_family(sample: &str) -> Option<&'static str> {
+    (sample.contains("function ") || sample.contains("const ") || sample.contains("=> {")).then(
+        || {
+            if sample.contains(": string")
+                || sample.contains(": number")
+                || sample.contains("interface ")
+            {
+                "typescript"
+            } else {
+                "javascript"
+            }
+        },
+    )
+}
+
+fn detect_class_based_language(sample: &str) -> Option<&'static str> {
+    if !sample.contains("class ")
+        || !sample.contains('{')
+        || (!sample.contains("public ") && !sample.contains("private "))
+    {
+        return None;
+    }
+    if sample.contains("package ") && sample.contains("import java") {
+        return Some("java");
+    }
+    if sample.contains("#include") || sample.contains("std::") {
+        return Some("cpp");
+    }
+    if sample.contains("using ") && sample.contains("namespace ") {
+        return Some("csharp");
+    }
+    None
+}
+
+fn detect_php(sample: &str) -> Option<&'static str> {
+    (sample.contains("<?php") || (sample.contains("function ") && sample.contains('$')))
+        .then_some("php")
+}
+
+fn detect_ruby(sample: &str) -> Option<&'static str> {
+    (sample.contains("require ") && sample.contains("end\n")).then_some("ruby")
+}
+
+fn detect_swift(sample: &str) -> Option<&'static str> {
+    (sample.contains("import Swift")
+        || (sample.contains("func ") && sample.contains("->") && !sample.contains("pub ")))
+    .then_some("swift")
+}
+
+fn detect_kotlin(sample: &str) -> Option<&'static str> {
+    (sample.contains("fun ") && sample.contains("val ")).then_some("kotlin")
+}
+
+fn detect_elixir(sample: &str) -> Option<&'static str> {
+    (sample.contains("defmodule ") || (sample.contains("def ") && sample.contains("do\n")))
+        .then_some("elixir")
+}
+
+fn detect_dockerfile(sample: &str) -> Option<&'static str> {
+    (sample.contains("FROM ") && sample.contains("RUN ")).then_some("dockerfile")
+}
+
+fn detect_yaml(sample: &str) -> Option<&'static str> {
+    (sample.contains("---") && sample.contains(": ") && !sample.contains('{')).then_some("yaml")
+}
+
+fn detect_json(sample: &str) -> Option<&'static str> {
+    (sample.starts_with('{') || sample.contains("\":\n")).then_some("json")
+}
+
+fn detect_terraform(sample: &str) -> Option<&'static str> {
+    (sample.contains("resource ") && sample.contains("provider ")).then_some("terraform")
+}
+
+fn detect_sql(sample: &str) -> Option<&'static str> {
+    (sample.contains("CREATE TABLE") || sample.contains("SELECT ")).then_some("sql")
+}
+
 fn is_code_boundary(
     trimmed: &str,
     raw_line: &str,
@@ -442,227 +514,240 @@ fn is_code_boundary(
     lines: &[&str],
 ) -> bool {
     match lang {
-        "rust" | "rs" => {
-            trimmed.starts_with("pub fn ")
-                || trimmed.starts_with("fn ")
-                || trimmed.starts_with("pub async fn ")
-                || trimmed.starts_with("async fn ")
-                || trimmed.starts_with("pub struct ")
-                || trimmed.starts_with("struct ")
-                || trimmed.starts_with("pub enum ")
-                || trimmed.starts_with("enum ")
-                || trimmed.starts_with("pub trait ")
-                || trimmed.starts_with("trait ")
-                || trimmed.starts_with("impl ")
-                || trimmed.starts_with("pub impl ")
-                || trimmed.starts_with("mod ")
-                || trimmed.starts_with("pub mod ")
-                || trimmed.starts_with("pub const ")
-                || trimmed.starts_with("pub static ")
-                || trimmed.starts_with("#[test]")
-                || trimmed.starts_with("#[cfg(test)]")
-                || (trimmed.starts_with("/// ") && line_idx + 1 < lines.len() && {
-                    let next = lines[line_idx + 1].trim();
-                    next.starts_with("pub fn ")
-                        || next.starts_with("fn ")
-                        || next.starts_with("pub struct ")
-                })
-        }
-        "python" | "py" => {
-            trimmed.starts_with("def ")
-                || trimmed.starts_with("async def ")
-                || trimmed.starts_with("class ")
-                || (trimmed.starts_with('@')
-                    && !trimmed.starts_with("@property")
-                    && line_idx + 1 < lines.len()
-                    && {
-                        let next = lines[line_idx + 1].trim();
-                        next.starts_with("def ")
-                            || next.starts_with("class ")
-                            || next.starts_with("async def ")
-                    })
-        }
-        "go" => {
-            trimmed.starts_with("func ")
-                || trimmed.starts_with("func(")
-                || (trimmed.starts_with("type ")
-                    && (trimmed.contains(" struct ") || trimmed.contains(" interface ")))
-                || trimmed.starts_with("package ")
-        }
+        "rust" | "rs" => is_rust_boundary(trimmed, line_idx, lines),
+        "python" | "py" => is_python_boundary(trimmed, line_idx, lines),
+        "go" => is_go_boundary(trimmed),
         "typescript" | "ts" | "tsx" | "javascript" | "js" | "jsx" => {
-            trimmed.starts_with("function ")
-                || trimmed.starts_with("async function ")
-                || trimmed.starts_with("export function ")
-                || trimmed.starts_with("export async function ")
-                || trimmed.starts_with("export default function ")
-                || trimmed.starts_with("class ")
-                || trimmed.starts_with("export class ")
-                || trimmed.starts_with("interface ")
-                || trimmed.starts_with("export interface ")
-                || (trimmed.starts_with("type ") && trimmed.contains(" = "))
-                || trimmed.starts_with("export type ")
-                || (trimmed.starts_with("export const ")
-                    && (trimmed.contains(" = (") || trimmed.contains(" = async (")))
-                || (trimmed.starts_with("const ")
-                    && trimmed.contains(" = (")
-                    && raw_line.starts_with("const "))
+            is_javascript_boundary(trimmed, raw_line)
         }
-        "java" => {
-            ((trimmed.starts_with("public ")
-                || trimmed.starts_with("private ")
-                || trimmed.starts_with("protected "))
-                && (trimmed.contains(" class ")
-                    || trimmed.contains(" interface ")
-                    || trimmed.contains(" enum ")
-                    || (trimmed.contains('(') && trimmed.contains(')') && !trimmed.contains('='))))
-                || trimmed.starts_with("@Override")
-                || trimmed.starts_with("@Test")
-                || trimmed.starts_with("package ")
-                || trimmed.starts_with("import ")
-        }
-        "csharp" | "cs" => {
-            ((trimmed.starts_with("public ")
-                || trimmed.starts_with("private ")
-                || trimmed.starts_with("protected ")
-                || trimmed.starts_with("internal "))
-                && (trimmed.contains(" class ")
-                    || trimmed.contains(" interface ")
-                    || trimmed.contains(" struct ")
-                    || trimmed.contains(" enum ")
-                    || (trimmed.contains('(') && !trimmed.contains('='))))
-                || trimmed.starts_with("namespace ")
-                || trimmed.starts_with("using ")
-                || (trimmed.starts_with('[') && trimmed.ends_with(']'))
-        }
-        "c" | "cpp" | "cc" | "cxx" | "h" | "hpp" => {
-            (raw_line.starts_with(|c: char| c.is_alphabetic() || c == '_')
-                && trimmed.contains('(')
-                && !trimmed.starts_with("//")
-                && !trimmed.starts_with('#')
-                && !trimmed.starts_with("if ")
-                && !trimmed.starts_with("for ")
-                && !trimmed.starts_with("while ")
-                && !trimmed.starts_with("return ")
-                && !trimmed.starts_with("case "))
-                || trimmed.starts_with("class ")
-                || trimmed.starts_with("struct ")
-                || trimmed.starts_with("namespace ")
-                || trimmed.starts_with("template")
-                || trimmed.starts_with("#include ")
-                || trimmed.starts_with("#define ")
-        }
-        "php" => {
-            trimmed.starts_with("function ")
-                || trimmed.starts_with("public function ")
-                || trimmed.starts_with("private function ")
-                || trimmed.starts_with("protected function ")
-                || trimmed.starts_with("class ")
-                || trimmed.starts_with("interface ")
-                || trimmed.starts_with("trait ")
-                || trimmed.starts_with("namespace ")
-        }
-        "ruby" | "rb" => {
-            trimmed.starts_with("def ")
-                || trimmed.starts_with("class ")
-                || trimmed.starts_with("module ")
-                || trimmed.starts_with("describe ")
-                || trimmed.starts_with("it ")
-                || trimmed.starts_with("context ")
-        }
-        "swift" => {
-            trimmed.starts_with("func ")
-                || trimmed.starts_with("class ")
-                || trimmed.starts_with("struct ")
-                || trimmed.starts_with("enum ")
-                || trimmed.starts_with("protocol ")
-                || trimmed.starts_with("extension ")
-                || trimmed.starts_with("import ")
-        }
-        "kotlin" | "kt" => {
-            trimmed.starts_with("fun ")
-                || trimmed.starts_with("class ")
-                || trimmed.starts_with("data class ")
-                || trimmed.starts_with("object ")
-                || trimmed.starts_with("interface ")
-                || trimmed.starts_with("sealed class ")
-                || trimmed.starts_with("suspend fun ")
-                || trimmed.starts_with("override fun ")
-                || trimmed.starts_with("package ")
-                || trimmed.starts_with("import ")
-        }
-        "scala" => {
-            trimmed.starts_with("def ")
-                || trimmed.starts_with("class ")
-                || trimmed.starts_with("object ")
-                || trimmed.starts_with("trait ")
-                || trimmed.starts_with("case class ")
-                || trimmed.starts_with("val ")
-                || trimmed.starts_with("package ")
-                || trimmed.starts_with("import ")
-        }
-        "elixir" | "ex" | "exs" => {
-            trimmed.starts_with("def ")
-                || trimmed.starts_with("defp ")
-                || trimmed.starts_with("defmodule ")
-                || trimmed.starts_with("defmacro ")
-                || trimmed.starts_with("test ")
-                || trimmed.starts_with("describe ")
-        }
-        "dart" => {
-            trimmed.starts_with("class ")
-                || trimmed.starts_with("abstract class ")
-                || trimmed.starts_with("void ")
-                || trimmed.starts_with("Future<")
-                || trimmed.starts_with("import ")
-                || trimmed.starts_with("enum ")
-        }
-        "lua" => trimmed.starts_with("function ") || trimmed.starts_with("local function "),
-        "r" => trimmed.contains("<- function(") || trimmed.contains("= function("),
-        "sh" | "bash" | "shell" | "zsh" => {
-            trimmed.starts_with("function ")
-                || (!trimmed.starts_with('#')
-                    && (trimmed.ends_with("()") || trimmed.ends_with("() {")))
-        }
-        "sql" => {
-            let upper = trimmed.to_ascii_uppercase();
-            upper.starts_with("CREATE TABLE")
-                || upper.starts_with("CREATE INDEX")
-                || upper.starts_with("CREATE VIEW")
-                || upper.starts_with("CREATE FUNCTION")
-                || upper.starts_with("ALTER TABLE")
-                || upper.starts_with("INSERT INTO")
-                || upper.starts_with("-- ===")
-                || upper.starts_with("-- ---")
-        }
-        "terraform" | "tf" | "hcl" => {
-            trimmed.starts_with("resource ")
-                || trimmed.starts_with("data ")
-                || trimmed.starts_with("variable ")
-                || trimmed.starts_with("output ")
-                || trimmed.starts_with("module ")
-                || trimmed.starts_with("provider ")
-                || trimmed.starts_with("locals {")
-        }
-        "dockerfile" => {
-            trimmed.starts_with("FROM ")
-                || trimmed.starts_with("RUN ")
-                || trimmed.starts_with("COPY ")
-                || trimmed.starts_with("ENTRYPOINT ")
-                || trimmed.starts_with("CMD ")
-                || trimmed.starts_with("EXPOSE ")
-                || trimmed.starts_with("ENV ")
-                || trimmed.starts_with("WORKDIR ")
-        }
-        "yaml" | "yml" => {
-            !raw_line.starts_with(' ')
-                && !raw_line.starts_with('\t')
-                && trimmed.ends_with(':')
-                && !trimmed.starts_with('#')
-                && !trimmed.starts_with('-')
-        }
+        "java" => is_java_boundary(trimmed),
+        "csharp" | "cs" => is_csharp_boundary(trimmed),
+        "c" | "cpp" | "cc" | "cxx" | "h" | "hpp" => is_c_family_boundary(trimmed, raw_line),
+        "php" => is_php_boundary(trimmed),
+        "ruby" | "rb" => is_ruby_boundary(trimmed),
+        "swift" => is_swift_boundary(trimmed),
+        "kotlin" | "kt" => is_kotlin_boundary(trimmed),
+        "scala" => is_scala_boundary(trimmed),
+        "elixir" | "ex" | "exs" => is_elixir_boundary(trimmed),
+        "dart" => is_dart_boundary(trimmed),
+        "lua" => starts_with_any(trimmed, &["function ", "local function "]),
+        "r" => contains_any(trimmed, &["<- function(", "= function("]),
+        "sh" | "bash" | "shell" | "zsh" => is_shell_boundary(trimmed),
+        "sql" => is_sql_boundary(trimmed),
+        "terraform" | "tf" | "hcl" => is_terraform_boundary(trimmed),
+        "dockerfile" => is_dockerfile_boundary(trimmed),
+        "yaml" | "yml" => is_yaml_boundary(trimmed, raw_line),
         "toml" => trimmed.starts_with('[') && trimmed.ends_with(']'),
         _ => false,
     }
+}
+
+fn starts_with_any(value: &str, prefixes: &[&str]) -> bool {
+    prefixes.iter().any(|prefix| value.starts_with(prefix))
+}
+
+fn contains_any(value: &str, needles: &[&str]) -> bool {
+    needles.iter().any(|needle| value.contains(needle))
+}
+
+fn next_trimmed_line<'line>(line_idx: usize, lines: &'line [&str]) -> Option<&'line str> {
+    lines.get(line_idx.saturating_add(1)).map(|line| line.trim())
+}
+
+fn is_rust_boundary(trimmed: &str, line_idx: usize, lines: &[&str]) -> bool {
+    const PREFIXES: &[&str] = &[
+        "pub fn ",
+        "fn ",
+        "pub async fn ",
+        "async fn ",
+        "pub struct ",
+        "struct ",
+        "pub enum ",
+        "enum ",
+        "pub trait ",
+        "trait ",
+        "impl ",
+        "pub impl ",
+        "mod ",
+        "pub mod ",
+        "pub const ",
+        "pub static ",
+        "#[test]",
+        "#[cfg(test)]",
+    ];
+    starts_with_any(trimmed, PREFIXES)
+        || (trimmed.starts_with("/// ")
+            && next_trimmed_line(line_idx, lines)
+                .is_some_and(|next| starts_with_any(next, &["pub fn ", "fn ", "pub struct "])))
+}
+
+fn is_python_boundary(trimmed: &str, line_idx: usize, lines: &[&str]) -> bool {
+    starts_with_any(trimmed, &["def ", "async def ", "class "])
+        || (trimmed.starts_with('@')
+            && !trimmed.starts_with("@property")
+            && next_trimmed_line(line_idx, lines)
+                .is_some_and(|next| starts_with_any(next, &["def ", "class ", "async def "])))
+}
+
+fn is_go_boundary(trimmed: &str) -> bool {
+    starts_with_any(trimmed, &["func ", "func(", "package "])
+        || (trimmed.starts_with("type ") && contains_any(trimmed, &[" struct ", " interface "]))
+}
+
+fn is_javascript_boundary(trimmed: &str, raw_line: &str) -> bool {
+    const PREFIXES: &[&str] = &[
+        "function ",
+        "async function ",
+        "export function ",
+        "export async function ",
+        "export default function ",
+        "class ",
+        "export class ",
+        "interface ",
+        "export interface ",
+        "export type ",
+    ];
+    starts_with_any(trimmed, PREFIXES)
+        || (trimmed.starts_with("type ") && trimmed.contains(" = "))
+        || (trimmed.starts_with("export const ") && contains_any(trimmed, &[" = (", " = async ("]))
+        || (trimmed.starts_with("const ")
+            && trimmed.contains(" = (")
+            && raw_line.starts_with("const "))
+}
+
+fn is_java_boundary(trimmed: &str) -> bool {
+    const MODIFIERS: &[&str] = &["public ", "private ", "protected "];
+    const DECLARATIONS: &[&str] = &[" class ", " interface ", " enum "];
+    (starts_with_any(trimmed, MODIFIERS)
+        && (contains_any(trimmed, DECLARATIONS)
+            || (trimmed.contains('(') && trimmed.contains(')') && !trimmed.contains('='))))
+        || starts_with_any(trimmed, &["@Override", "@Test", "package ", "import "])
+}
+
+fn is_csharp_boundary(trimmed: &str) -> bool {
+    const MODIFIERS: &[&str] = &["public ", "private ", "protected ", "internal "];
+    const DECLARATIONS: &[&str] = &[" class ", " interface ", " struct ", " enum "];
+    (starts_with_any(trimmed, MODIFIERS)
+        && (contains_any(trimmed, DECLARATIONS)
+            || (trimmed.contains('(') && !trimmed.contains('='))))
+        || starts_with_any(trimmed, &["namespace ", "using "])
+        || (trimmed.starts_with('[') && trimmed.ends_with(']'))
+}
+
+fn is_c_family_boundary(trimmed: &str, raw_line: &str) -> bool {
+    let is_top_level_declaration = raw_line
+        .starts_with(|character: char| character.is_alphabetic() || character == '_')
+        && trimmed.contains('(')
+        && !starts_with_any(trimmed, &["//", "#", "if ", "for ", "while ", "return ", "case "]);
+    is_top_level_declaration
+        || starts_with_any(
+            trimmed,
+            &["class ", "struct ", "namespace ", "template", "#include ", "#define "],
+        )
+}
+
+fn is_php_boundary(trimmed: &str) -> bool {
+    starts_with_any(
+        trimmed,
+        &[
+            "function ",
+            "public function ",
+            "private function ",
+            "protected function ",
+            "class ",
+            "interface ",
+            "trait ",
+            "namespace ",
+        ],
+    )
+}
+
+fn is_ruby_boundary(trimmed: &str) -> bool {
+    starts_with_any(trimmed, &["def ", "class ", "module ", "describe ", "it ", "context "])
+}
+
+fn is_swift_boundary(trimmed: &str) -> bool {
+    starts_with_any(
+        trimmed,
+        &["func ", "class ", "struct ", "enum ", "protocol ", "extension ", "import "],
+    )
+}
+
+fn is_kotlin_boundary(trimmed: &str) -> bool {
+    starts_with_any(
+        trimmed,
+        &[
+            "fun ",
+            "class ",
+            "data class ",
+            "object ",
+            "interface ",
+            "sealed class ",
+            "suspend fun ",
+            "override fun ",
+            "package ",
+            "import ",
+        ],
+    )
+}
+
+fn is_scala_boundary(trimmed: &str) -> bool {
+    starts_with_any(
+        trimmed,
+        &["def ", "class ", "object ", "trait ", "case class ", "val ", "package ", "import "],
+    )
+}
+
+fn is_elixir_boundary(trimmed: &str) -> bool {
+    starts_with_any(trimmed, &["def ", "defp ", "defmodule ", "defmacro ", "test ", "describe "])
+}
+
+fn is_dart_boundary(trimmed: &str) -> bool {
+    starts_with_any(trimmed, &["class ", "abstract class ", "void ", "Future<", "import ", "enum "])
+}
+
+fn is_shell_boundary(trimmed: &str) -> bool {
+    trimmed.starts_with("function ")
+        || (!trimmed.starts_with('#') && (trimmed.ends_with("()") || trimmed.ends_with("() {")))
+}
+
+fn is_sql_boundary(trimmed: &str) -> bool {
+    let upper = trimmed.to_ascii_uppercase();
+    starts_with_any(
+        &upper,
+        &[
+            "CREATE TABLE",
+            "CREATE INDEX",
+            "CREATE VIEW",
+            "CREATE FUNCTION",
+            "ALTER TABLE",
+            "INSERT INTO",
+            "-- ===",
+            "-- ---",
+        ],
+    )
+}
+
+fn is_terraform_boundary(trimmed: &str) -> bool {
+    starts_with_any(
+        trimmed,
+        &["resource ", "data ", "variable ", "output ", "module ", "provider ", "locals {"],
+    )
+}
+
+fn is_dockerfile_boundary(trimmed: &str) -> bool {
+    starts_with_any(
+        trimmed,
+        &["FROM ", "RUN ", "COPY ", "ENTRYPOINT ", "CMD ", "EXPOSE ", "ENV ", "WORKDIR "],
+    )
+}
+
+fn is_yaml_boundary(trimmed: &str, raw_line: &str) -> bool {
+    !raw_line.starts_with(' ')
+        && !raw_line.starts_with('\t')
+        && trimmed.ends_with(':')
+        && !trimmed.starts_with('#')
+        && !trimmed.starts_with('-')
 }
 
 /// Splits large code blocks at language-aware boundaries before chunk windows are built.
@@ -913,7 +998,7 @@ fn compute_chunk_quality_score(blocks: &[StructuredBlockData]) -> f32 {
     score.clamp(0.0, 1.0)
 }
 
-/// Computes a 64-bit SimHash fingerprint from text using 3-gram word shingles.
+/// Computes a 64-bit `SimHash` fingerprint from text using 3-gram word shingles.
 fn compute_simhash(text: &str) -> u64 {
     let words: Vec<&str> = text.split_whitespace().collect();
     if words.len() < 3 {
@@ -975,7 +1060,8 @@ mod tests {
 
     use super::{
         StructuredChunkingProfile, build_structured_chunk_windows, compute_simhash,
-        detect_code_boundaries, guess_language, mark_near_duplicates, split_large_code_blocks,
+        compute_window_text_pass, detect_code_boundaries, guess_language, mark_near_duplicates,
+        split_large_code_blocks,
     };
     use crate::shared::extraction::structured_document::{
         StructuredBlockData, StructuredBlockKind, StructuredChunkWindow,
@@ -1008,6 +1094,24 @@ mod tests {
         let text: String =
             "abcdefghij ".repeat(char_count / 11 + 1).chars().take(char_count).collect();
         make_block(ordinal, StructuredBlockKind::Paragraph, &text, false)
+    }
+
+    fn make_chunk(chunk_index: i32, content_text: &str) -> StructuredChunkWindow {
+        StructuredChunkWindow {
+            chunk_index,
+            chunk_kind: StructuredBlockKind::Paragraph,
+            support_block_ids: vec![Uuid::now_v7()],
+            content_text: content_text.to_string(),
+            normalized_text: content_text.to_string(),
+            heading_trail: Vec::new(),
+            section_path: Vec::new(),
+            token_count: None,
+            literal_digest: None,
+            quality_score: 1.0,
+            simhash_fingerprint: None,
+            is_near_duplicate: false,
+            window_text: None,
+        }
     }
 
     #[test]
@@ -1220,6 +1324,46 @@ mod tests {
         let bounds = detect_code_boundaries(code, Some("rust"));
         assert!(bounds.contains(&2), "should detect pub fn main at line 2, got {bounds:?}");
         assert!(bounds.contains(&6), "should detect fn helper at line 6, got {bounds:?}");
+    }
+
+    #[test]
+    fn computes_sentence_context_without_reordering_existing_semantics() {
+        let mut chunks = vec![
+            make_chunk(0, "First alpha. First beta."),
+            make_chunk(1, "Core sentence."),
+            make_chunk(2, "Last alpha. Last beta."),
+        ];
+
+        compute_window_text_pass(&mut chunks);
+
+        assert_eq!(
+            chunks[1].window_text.as_deref(),
+            Some("First beta. First alpha.\n\nCore sentence.\n\nLast alpha. Last beta.")
+        );
+    }
+
+    #[test]
+    fn detects_language_boundary_aliases_and_lookahead_rules() {
+        let rust_code = "/// Boundary docs\npub struct Item;\n";
+        assert_eq!(detect_code_boundaries(rust_code, Some("rs")), vec![0, 1]);
+
+        let python_code = "@decorator\ndef item():\n    pass\n@property\ndef value():\n    pass\n";
+        assert_eq!(detect_code_boundaries(python_code, Some("py")), vec![0, 1, 4]);
+
+        let javascript_code = "const top = () => true;\n    const nested = () => false;\nexport type Item = string;\n";
+        assert_eq!(detect_code_boundaries(javascript_code, Some("js")), vec![0, 2]);
+    }
+
+    #[test]
+    fn detects_raw_line_sensitive_and_case_normalized_boundaries() {
+        let c_code = "int run() {\n    if (ready) {\n}\nreturn value;\n";
+        assert_eq!(detect_code_boundaries(c_code, Some("cpp")), vec![0]);
+
+        let sql_code = "create table items (id int);\nselect * from items;\n";
+        assert_eq!(detect_code_boundaries(sql_code, Some("sql")), vec![0]);
+
+        let yaml = "root:\n  nested:\n- list:\nsecond:\n";
+        assert_eq!(detect_code_boundaries(yaml, Some("yaml")), vec![0, 3]);
     }
 
     #[test]

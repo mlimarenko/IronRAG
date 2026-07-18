@@ -18,8 +18,14 @@ spec:
         {{- include "ironrag.selectorLabels" . | nindent 8 }}
         app.kubernetes.io/component: redis
     spec:
+      automountServiceAccountToken: false
       securityContext:
+        runAsNonRoot: true
+        runAsUser: 999
+        runAsGroup: 999
         fsGroup: 999
+        seccompProfile:
+          type: RuntimeDefault
       containers:
         - name: redis
           image: "{{ .Values.dependencies.redis.image.repository }}:{{ .Values.dependencies.redis.image.tag }}"
@@ -28,7 +34,11 @@ spec:
             runAsNonRoot: true
             runAsUser: 999
             runAsGroup: 999
+            readOnlyRootFilesystem: true
             allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
           args:
             - redis-server
             - --save

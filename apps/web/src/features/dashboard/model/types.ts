@@ -7,28 +7,25 @@ import type {
   MessageLevel as GeneratedMessageLevel,
   WebIngestRunState as GeneratedWebIngestRunState,
   WebIngestRunSummary,
-} from '@/shared/api/generated';
+} from '@/shared/api/generated'
 
-export type DashboardState = 'no-library' | 'loading' | 'loaded' | 'error';
-export type MessageLevel = GeneratedMessageLevel;
-export type GraphStatus = GeneratedGraphStatus;
-export type WebIngestRunState = GeneratedWebIngestRunState;
-export type DashboardAttentionItem = GeneratedDashboardAttentionItem;
-export type RecentDocument = DocumentSummary;
-export type DashboardGraph = GraphSurface;
-export type RecentWebRun = WebIngestRunSummary;
-export type DashboardData = DashboardSurface;
+export type MessageLevel = GeneratedMessageLevel
+export type GraphStatus = GeneratedGraphStatus
+export type WebIngestRunState = GeneratedWebIngestRunState
+export type DashboardAttentionItem = GeneratedDashboardAttentionItem
+export type RecentDocument = DocumentSummary
+export type DashboardGraph = GraphSurface
+export type RecentWebRun = WebIngestRunSummary
+export type DashboardData = DashboardSurface
 
-export function buildDocumentsPath(
-  filters: { documentId?: string; status?: string } = {},
-): string {
-  const params = new URLSearchParams();
+export function buildDocumentsPath(filters: { documentId?: string; status?: string } = {}): string {
+  const params = new URLSearchParams()
   if (filters.documentId) {
-    params.set('documentId', filters.documentId);
+    params.set('documentId', filters.documentId)
   }
   if (filters.status) {
-    params.set('status', filters.status);
+    params.set('status', filters.status)
   }
-  const query = params.toString();
-  return query ? `/documents?${query}` : '/documents';
+  const query = params.toString()
+  return query ? `/documents?${query}` : '/documents'
 }

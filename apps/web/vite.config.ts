@@ -1,119 +1,113 @@
-import { readFileSync } from "node:fs";
-import path from "node:path";
-import { defineConfig } from "vite";
-import react from "@vitejs/plugin-react-swc";
-import tailwindcss from "@tailwindcss/vite";
+import { readFileSync } from 'node:fs'
+import path from 'node:path'
+import { defineConfig } from 'vite'
+import react from '@vitejs/plugin-react'
+import tailwindcss from '@tailwindcss/vite'
 
-const packageJson = JSON.parse(
-  readFileSync(path.resolve(__dirname, "package.json"), "utf8"),
-) as { version?: string };
+const packageJson = JSON.parse(readFileSync(path.resolve(__dirname, 'package.json'), 'utf8')) as {
+  version?: string
+}
 
 const normalizeBuildVersion = (value?: string) => {
-  const trimmed = value?.trim();
+  const trimmed = value?.trim()
   if (!trimmed) {
-    return packageJson.version ?? "0.0.0";
+    return packageJson.version ?? '0.0.0'
   }
-  return trimmed.replace(/^v(?=\d)/, "");
-};
+  return trimmed.replace(/^v(?=\d)/, '')
+}
 
-const appVersion = normalizeBuildVersion(
-  process.env.APP_VERSION ?? process.env.VITE_APP_VERSION,
-);
+const appVersion = normalizeBuildVersion(process.env.APP_VERSION ?? process.env.VITE_APP_VERSION)
 
 const vendorChunk = (id: string) => {
-  const normalizedId = id.replaceAll("\\", "/");
-  if (!normalizedId.includes("/node_modules/")) {
-    return null;
+  const normalizedId = id.replaceAll('\\', '/')
+  if (!normalizedId.includes('/node_modules/')) {
+    return null
   }
 
   if (
-    normalizedId.includes("/node_modules/swagger-ui-react/") ||
-    normalizedId.includes("/node_modules/swagger-client/") ||
-    normalizedId.includes("/node_modules/swagger-ui/")
+    normalizedId.includes('/node_modules/@tiptap/') ||
+    normalizedId.includes('/node_modules/@prosemirror/') ||
+    normalizedId.includes('/node_modules/prosemirror-') ||
+    normalizedId.includes('/node_modules/orderedmap/')
   ) {
-    return "vendor-swagger";
+    return 'vendor-tiptap'
   }
 
   if (
-    normalizedId.includes("/node_modules/@tiptap/") ||
-    normalizedId.includes("/node_modules/@prosemirror/") ||
-    normalizedId.includes("/node_modules/prosemirror-") ||
-    normalizedId.includes("/node_modules/orderedmap/")
+    normalizedId.includes('/node_modules/@sigma/') ||
+    normalizedId.includes('/node_modules/sigma/') ||
+    normalizedId.includes('/node_modules/graphology')
   ) {
-    return "vendor-tiptap";
+    return 'vendor-sigma'
   }
 
   if (
-    normalizedId.includes("/node_modules/@sigma/") ||
-    normalizedId.includes("/node_modules/sigma/") ||
-    normalizedId.includes("/node_modules/graphology")
+    normalizedId.includes('/node_modules/react/') ||
+    normalizedId.includes('/node_modules/react-dom/') ||
+    normalizedId.includes('/node_modules/react-router') ||
+    normalizedId.includes('/node_modules/scheduler/')
   ) {
-    return "vendor-sigma";
+    return 'vendor-react'
   }
 
-  if (
-    normalizedId.includes("/node_modules/react/") ||
-    normalizedId.includes("/node_modules/react-dom/") ||
-    normalizedId.includes("/node_modules/react-router") ||
-    normalizedId.includes("/node_modules/scheduler/")
-  ) {
-    return "vendor-react";
-  }
-
-  if (normalizedId.includes("/node_modules/@tanstack/")) {
-    return "vendor-query";
+  if (normalizedId.includes('/node_modules/@tanstack/')) {
+    return 'vendor-query'
   }
 
   // Radix primitives back the shell, dialogs, selects and dropdowns across
   // both eager (AppShell) and lazy (admin/documents/assistant) surfaces.
   // Pinning them to one chunk keeps a single cached copy instead of letting
   // the splitter inline Radix into whichever feature chunk touches it first.
-  if (normalizedId.includes("/node_modules/@radix-ui/")) {
-    return "vendor-radix";
+  if (normalizedId.includes('/node_modules/@radix-ui/')) {
+    return 'vendor-radix'
   }
 
   // Form stack (react-hook-form + zod resolver + zod). Lives behind admin and
   // bootstrap forms only, so isolating it keeps validation weight out of the
   // index chunk while still sharing one copy between those routes.
   if (
-    normalizedId.includes("/node_modules/react-hook-form/") ||
-    normalizedId.includes("/node_modules/@hookform/") ||
-    normalizedId.includes("/node_modules/zod/")
+    normalizedId.includes('/node_modules/react-hook-form/') ||
+    normalizedId.includes('/node_modules/@hookform/') ||
+    normalizedId.includes('/node_modules/zod/')
   ) {
-    return "vendor-forms";
+    return 'vendor-forms'
   }
 
   if (
-    normalizedId.includes("/node_modules/i18next/") ||
-    normalizedId.includes("/node_modules/react-i18next/")
+    normalizedId.includes('/node_modules/i18next/') ||
+    normalizedId.includes('/node_modules/react-i18next/')
   ) {
-    return "vendor-i18n";
+    return 'vendor-i18n'
   }
 
-  if (normalizedId.includes("/node_modules/@opentelemetry/")) {
-    return "vendor-observability";
+  if (normalizedId.includes('/node_modules/@opentelemetry/')) {
+    return 'vendor-observability'
   }
 
-  return null;
-};
+  return null
+}
 
 export default defineConfig({
   define: {
     __APP_VERSION__: JSON.stringify(appVersion),
   },
   server: {
-    host: "::",
+    host: '::',
     port: 3000,
     proxy: {
-      "/v1": {
-        target: "http://127.0.0.1:19000",
+      '/v1': {
+        target: 'http://127.0.0.1:19000',
         changeOrigin: true,
       },
     },
   },
   build: {
-    outDir: "dist",
+    outDir: 'dist',
     sourcemap: true,
+    // Tiptap is an intentionally isolated, lazy-loaded vendor chunk. Its raw
+    // size is just above Vite's generic 500 kB warning, while the enforced
+    // gzip budget remains 180 kB in package.json and catches real regressions.
+    chunkSizeWarningLimit: 600,
     rolldownOptions: {
       output: {
         codeSplitting: {
@@ -131,21 +125,21 @@ export default defineConfig({
   plugins: [tailwindcss(), react()],
   resolve: {
     alias: {
-      "@": path.resolve(__dirname, "./src"),
+      '@': path.resolve(__dirname, './src'),
       // The ESM graphology build exposes a class method named `import(...)`.
       // Vite's Rolldown dev prebundle preserves that method name and Chromium
       // rejects it as a module parse error. The CJS build emits
       // `_proto["import"]`, so dev visual QA and production builds use the
       // same Graph API without a browser-only syntax fault.
-      graphology: path.resolve(__dirname, "node_modules/graphology/dist/graphology.cjs.js"),
+      graphology: path.resolve(__dirname, 'node_modules/graphology/dist/graphology.cjs.js'),
     },
     dedupe: [
-      "react",
-      "react-dom",
-      "react/jsx-runtime",
-      "react/jsx-dev-runtime",
-      "@tanstack/react-query",
-      "@tanstack/query-core",
+      'react',
+      'react-dom',
+      'react/jsx-runtime',
+      'react/jsx-dev-runtime',
+      '@tanstack/react-query',
+      '@tanstack/query-core',
     ],
   },
-});
+})

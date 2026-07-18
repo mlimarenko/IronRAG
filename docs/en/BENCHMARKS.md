@@ -38,12 +38,17 @@ apps/api/benchmarks/grounded_query/
 ```bash
 export IRONRAG_SESSION_COOKIE="..."
 export IRONRAG_BENCHMARK_WORKSPACE_ID="..."
+export IRONRAG_BENCHMARK_RUNTIME_ARTIFACT_DIGEST="sha256:<64 lowercase hex>"
 
 make benchmark-grounded-seed
 make benchmark-grounded-all
 make benchmark-grounded-technical
 make benchmark-golden
 ```
+
+The session cookie is accepted only through `IRONRAG_SESSION_COOKIE` or a
+pre-provisioned file named by `IRONRAG_SESSION_COOKIE_FILE`; command-line cookie
+arguments are rejected so the secret cannot leak through the process list.
 
 `make benchmark-grounded` uses the `IRONRAG_BENCHMARK_SUITES` matrix and writes
 to `tmp-grounded-benchmarks/`. `make benchmark-golden` switches to the broader
@@ -67,20 +72,89 @@ Setup/procedure changes should include at least:
 
 ```bash
 python3 apps/api/benchmarks/grounded_query/run_live_benchmark.py --help
-python3 apps/api/benchmarks/grounded_query/compare_benchmarks.py old.json new.json
+python3 apps/api/benchmarks/grounded_query/compare_benchmarks.py baseline-dir candidate-dir
 ```
 
-`compare_benchmarks.py` accepts two result directories and reports pass/fail
-movement, graph topology deltas, and retrieval rank-metric deltas.
+`compare_benchmarks.py` accepts two result directories and is a fail-closed
+regression gate. It rejects a previously passing case that fails, missing paired
+cases or latency samples, lower labelled MRR/hit metrics, or a p50/p95/p99
+increase above 10% by default. It also requires every candidate strict case to
+pass and enforces absolute grounded-answer ceilings of p50 <= 12 s and
+p95 <= 30 s. The budgets are configurable with
+`--max-latency-regression-percent`, `--max-candidate-p50-ms`, and
+`--max-candidate-p95-ms`; `--json-output` writes the machine-readable decision.
+
+Latency percentiles use only identical `suiteId/caseId` pairs from the baseline
+and candidate. Added cases cannot replace a missing baseline sample or change
+the regression percentiles. p50/p95/p99 use the conservative nearest-rank
+definition (no interpolation toward a lower sample).
+
+Every result also carries SHA-256 fingerprints for the complete case
+definition, suite definition, ordered corpus bytes read back from the running
+service, and matrix runtime knobs (`queryTopK`, cache policy, round id, isolated
+session policy, and corpus reuse mode). Comparison fails closed when a
+fingerprint is missing or differs. Therefore changing a question, expected literal,
+relevance label, threshold, fixture byte, suite order, or top-k cannot be
+mistaken for a product improvement. Baselines created before this integrity
+contract must be rerun.
+
+The equivalent Make target is:
+
+```bash
+make benchmark-regression \
+  IRONRAG_BENCHMARK_BASELINE_DIR=results/baseline \
+  IRONRAG_BENCHMARK_CANDIDATE_DIR=results/candidate
+```
+
+The runner creates a fresh query session per independent case and executes the
+timed answer before the auxiliary rank-search probe, so earlier turns and rank
+cache warming cannot bias answer latency. Reused libraries are accepted only
+when the exact primary-document inventory and original source bytes match the
+local fixtures.
+
+Capture baseline and candidate in at least three alternating paired rounds. Set
+`IRONRAG_BENCHMARK_RUNTIME_LABEL`, the required immutable
+`IRONRAG_BENCHMARK_RUNTIME_ARTIFACT_DIGEST`, one of the explicit `cold`, `warm`,
+or `mixed` cache policies, and `IRONRAG_BENCHMARK_ROUND_ID`. A round-keyed
+SHA-256 permutation changes case order between rounds while giving the paired
+baseline and candidate the same order. The comparator requires non-empty,
+distinct artifact digests and the same cache policy, round, and host-environment
+fingerprint.
+
+Release eligibility is recomputed from raw pre/mid/post snapshots instead of
+trusting the stored boolean. Every snapshot must pass load-per-CPU, available
+memory, used swap, and CPU/memory/I/O PSI gates; the host policy cannot weaken
+the repository defaults. A busy-host override or a missing/mismatched hardware,
+kernel, boot, cgroup, CPU, or memory identity makes the run diagnostic evidence
+only.
+
+Latency policy has three explicit levels: grounded answers target p50 <= 12 s
+and p95 <= 30 s; a complete agent turn has a hard p95 ceiling of 90 s; rollout
+canaries intentionally apply the stricter 25 s target. Relative regression
+limits still apply even when an absolute ceiling passes.
+
+The legacy `scripts/bench/compare_pg_vs_baseline.py` command delegates grounded
+decisions to the same canonical comparator. Its combined release verdict also
+requires valid baseline and candidate `agent_turn_p95.result.json` artifacts,
+the candidate agent quality gate, agent p95 <= 90 s, and <= 10% relative agent
+p95 regression.
 
 ## Result contract
 
 Benchmark runs write to `tmp-grounded-benchmarks/` by default and include:
 
 - per-case pass/fail details,
+- per-case, suite, corpus, and matrix integrity fingerprints,
+- runtime version/label and required immutable artifact digest,
+- constrained cache policy, paired round id, deterministic case order, and
+  compatible environment identity,
+- independently evaluated host load, memory, swap, and PSI snapshots at
+  pre/mid/post phases,
 - `failedChecks` for each broken assertion,
 - suite-level `failureReasonCounts`,
 - suite-level and matrix-level `summary.rankMetrics`,
+- suite-level and matrix-level `summary.answerLatencyMs` with sample count and
+  p50/p95/p99,
 - appended `rank_metrics_trend.jsonl` records in the output directory,
 - latency and evidence metadata for each case.
 

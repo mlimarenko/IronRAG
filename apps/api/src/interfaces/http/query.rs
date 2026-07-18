@@ -1,7 +1,7 @@
 use axum::{
     Json, Router,
     extract::{Path, Query, State},
-    http::{HeaderMap, header},
+    http::{HeaderMap, StatusCode, header},
     response::{
         IntoResponse, Response,
         sse::{Event, KeepAlive, Sse},
@@ -24,10 +24,10 @@ use crate::{
         RuntimeSurfaceKind,
     },
     domains::query::{
-        PreparedSegmentReference, QueryChunkReference, QueryConversation, QueryConversationDetail,
-        QueryExecution, QueryExecutionDetail, QueryGraphEdgeReference, QueryGraphNodeReference,
-        QueryRuntimeStageSummary, QueryTurn, QueryVerificationState, QueryVerificationWarning,
-        TechnicalFactReference, resolve_top_k,
+        PreparedSegmentReference, QueryAnswerCandidate, QueryChunkReference, QueryClarification,
+        QueryConversation, QueryConversationDetail, QueryExecution, QueryExecutionDetail,
+        QueryGraphEdgeReference, QueryGraphNodeReference, QueryRuntimeStageSummary, QueryTurn,
+        QueryVerificationState, QueryVerificationWarning, TechnicalFactReference, resolve_top_k,
     },
     infra::repositories::catalog_repository,
     interfaces::http::{
@@ -51,19 +51,29 @@ use crate::{
     },
 };
 
-#[derive(Debug, Deserialize, utoipa::ToSchema, utoipa::IntoParams)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
-#[into_params(parameter_in = Query)]
-pub struct ListSessionsQuery {
-    pub library_id: Option<Uuid>,
+pub struct QuerySessionListResponse {
+    pub items: Vec<ironrag_contracts::assistant::AssistantSessionListItem>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<String>,
+    pub total: i64,
+}
+
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct QueryTurnListResponse {
+    pub items: Vec<ironrag_contracts::assistant::AssistantTurn>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<String>,
+    pub total: i64,
 }
 
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct CreateSessionRequest {
-    /// When omitted, inferred from the library's parent workspace.
-    workspace_id: Option<Uuid>,
-    library_id: Uuid,
+    /// Optional display title; the server derives one from the first turn
+    /// when omitted.
     title: Option<String>,
 }
 
@@ -79,7 +89,7 @@ pub struct CreateSessionTurnRequest {
 #[serde(tag = "type", rename_all = "snake_case")]
 enum AssistantTurnStreamEvent {
     Activity { event: AssistantActivityEvent },
-    Completed { detail: ironrag_contracts::assistant::AssistantExecutionDetail },
+    Completed { detail: Box<ironrag_contracts::assistant::AssistantExecutionDetail> },
     Failed { message: String },
 }
 
@@ -116,15 +126,223 @@ const ASSISTANT_TURN_STREAM_BUFFER: usize = 512;
 const ASSISTANT_TURN_TERMINAL_EVENT_RESERVE: usize = 8;
 const ASSISTANT_ACTIVITY_DRAIN_GRACE: Duration = Duration::from_millis(250);
 const ASSISTANT_PANIC_FAILURE_SEND_GRACE: Duration = Duration::from_secs(1);
+const UI_VISIBLE_REFERENCE_LIMIT: usize = 12;
+
+struct UiReferenceProjection {
+    chunk_references: Vec<ironrag_contracts::assistant::AssistantChunkReference>,
+    prepared_segment_references:
+        Vec<ironrag_contracts::assistant::AssistantPreparedSegmentReference>,
+    technical_fact_references: Vec<ironrag_contracts::assistant::AssistantTechnicalFactReference>,
+    entity_references: Vec<ironrag_contracts::assistant::AssistantEntityReference>,
+    relation_references: Vec<ironrag_contracts::assistant::AssistantRelationReference>,
+    summary: ironrag_contracts::assistant::AssistantReferenceSummary,
+}
+
+enum UiRankedReference {
+    Chunk(ironrag_contracts::assistant::AssistantChunkReference),
+    PreparedSegment(ironrag_contracts::assistant::AssistantPreparedSegmentReference),
+    TechnicalFact(ironrag_contracts::assistant::AssistantTechnicalFactReference),
+    Entity(ironrag_contracts::assistant::AssistantEntityReference),
+    Relation(ironrag_contracts::assistant::AssistantRelationReference),
+}
+
+impl UiRankedReference {
+    const fn rank(&self) -> i32 {
+        match self {
+            Self::Chunk(reference) => reference.rank,
+            Self::PreparedSegment(reference) => reference.rank,
+            Self::TechnicalFact(reference) => reference.rank,
+            Self::Entity(reference) => reference.rank,
+            Self::Relation(reference) => reference.rank,
+        }
+    }
+
+    const fn kind_order(&self) -> u8 {
+        match self {
+            Self::Chunk(_) => 0,
+            Self::PreparedSegment(_) => 1,
+            Self::TechnicalFact(_) => 2,
+            Self::Entity(_) => 3,
+            Self::Relation(_) => 4,
+        }
+    }
+}
+
+fn project_ui_reference_arrays(
+    chunk_references: Vec<ironrag_contracts::assistant::AssistantChunkReference>,
+    prepared_segment_references: Vec<
+        ironrag_contracts::assistant::AssistantPreparedSegmentReference,
+    >,
+    technical_fact_references: Vec<ironrag_contracts::assistant::AssistantTechnicalFactReference>,
+    entity_references: Vec<ironrag_contracts::assistant::AssistantEntityReference>,
+    relation_references: Vec<ironrag_contracts::assistant::AssistantRelationReference>,
+    total_count_hint: Option<usize>,
+) -> UiReferenceProjection {
+    let visible_count = chunk_references
+        .len()
+        .saturating_add(prepared_segment_references.len())
+        .saturating_add(technical_fact_references.len())
+        .saturating_add(entity_references.len())
+        .saturating_add(relation_references.len());
+    let total_count = total_count_hint.unwrap_or(visible_count).max(visible_count);
+    let mut ranked = Vec::with_capacity(visible_count);
+
+    ranked.extend(
+        chunk_references.into_iter().enumerate().map(|(original_order, reference)| {
+            (original_order, UiRankedReference::Chunk(reference))
+        }),
+    );
+    ranked.extend(prepared_segment_references.into_iter().enumerate().map(
+        |(original_order, reference)| {
+            (original_order, UiRankedReference::PreparedSegment(reference))
+        },
+    ));
+    ranked.extend(technical_fact_references.into_iter().enumerate().map(
+        |(original_order, reference)| (original_order, UiRankedReference::TechnicalFact(reference)),
+    ));
+    ranked.extend(
+        entity_references.into_iter().enumerate().map(|(original_order, reference)| {
+            (original_order, UiRankedReference::Entity(reference))
+        }),
+    );
+    ranked.extend(relation_references.into_iter().enumerate().map(
+        |(original_order, reference)| (original_order, UiRankedReference::Relation(reference)),
+    ));
+    ranked.sort_by_key(|(original_order, reference)| {
+        (reference.rank(), reference.kind_order(), *original_order)
+    });
+
+    let returned_count = ranked.len().min(UI_VISIBLE_REFERENCE_LIMIT);
+    let mut projected = UiReferenceProjection {
+        chunk_references: Vec::new(),
+        prepared_segment_references: Vec::new(),
+        technical_fact_references: Vec::new(),
+        entity_references: Vec::new(),
+        relation_references: Vec::new(),
+        summary: ironrag_contracts::assistant::AssistantReferenceSummary {
+            total_count,
+            returned_count,
+            truncated: total_count > returned_count,
+        },
+    };
+    for (_, reference) in ranked.into_iter().take(UI_VISIBLE_REFERENCE_LIMIT) {
+        match reference {
+            UiRankedReference::Chunk(reference) => projected.chunk_references.push(reference),
+            UiRankedReference::PreparedSegment(reference) => {
+                projected.prepared_segment_references.push(reference);
+            }
+            UiRankedReference::TechnicalFact(reference) => {
+                projected.technical_fact_references.push(reference);
+            }
+            UiRankedReference::Entity(reference) => projected.entity_references.push(reference),
+            UiRankedReference::Relation(reference) => projected.relation_references.push(reference),
+        }
+    }
+    projected
+}
+
+fn project_ui_evidence_bundle(
+    evidence: ironrag_contracts::assistant::AssistantEvidenceBundle,
+) -> ironrag_contracts::assistant::AssistantEvidenceBundle {
+    let ironrag_contracts::assistant::AssistantEvidenceBundle {
+        chunk_references,
+        prepared_segment_references,
+        technical_fact_references,
+        entity_references,
+        relation_references,
+        reference_summary,
+        verification_state,
+        verification_warnings,
+        answer_disposition,
+        clarification,
+        runtime_summary,
+        runtime_stage_summaries,
+    } = evidence;
+    let projection = project_ui_reference_arrays(
+        chunk_references,
+        prepared_segment_references,
+        technical_fact_references,
+        entity_references,
+        relation_references,
+        reference_summary.map(|summary| summary.total_count),
+    );
+    ironrag_contracts::assistant::AssistantEvidenceBundle {
+        chunk_references: projection.chunk_references,
+        prepared_segment_references: projection.prepared_segment_references,
+        technical_fact_references: projection.technical_fact_references,
+        entity_references: projection.entity_references,
+        relation_references: projection.relation_references,
+        reference_summary: Some(projection.summary),
+        verification_state,
+        verification_warnings,
+        answer_disposition,
+        clarification,
+        runtime_summary,
+        runtime_stage_summaries,
+    }
+}
+
+fn project_ui_execution_detail(
+    detail: ironrag_contracts::assistant::AssistantExecutionDetail,
+) -> ironrag_contracts::assistant::AssistantExecutionDetail {
+    let ironrag_contracts::assistant::AssistantExecutionDetail {
+        context_bundle_id,
+        execution,
+        runtime_summary,
+        runtime_stage_summaries,
+        request_turn,
+        response_turn,
+        chunk_references,
+        prepared_segment_references,
+        technical_fact_references,
+        entity_references,
+        relation_references,
+        reference_summary,
+        verification_state,
+        verification_warnings,
+        answer_disposition,
+        clarification,
+    } = detail;
+    let projection = project_ui_reference_arrays(
+        chunk_references,
+        prepared_segment_references,
+        technical_fact_references,
+        entity_references,
+        relation_references,
+        reference_summary.map(|summary| summary.total_count),
+    );
+    ironrag_contracts::assistant::AssistantExecutionDetail {
+        context_bundle_id,
+        execution,
+        runtime_summary,
+        runtime_stage_summaries,
+        request_turn,
+        response_turn,
+        chunk_references: projection.chunk_references,
+        prepared_segment_references: projection.prepared_segment_references,
+        technical_fact_references: projection.technical_fact_references,
+        entity_references: projection.entity_references,
+        relation_references: projection.relation_references,
+        reference_summary: Some(projection.summary),
+        verification_state,
+        verification_warnings,
+        answer_disposition,
+        clarification,
+    }
+}
 
 pub fn router() -> Router<AppState> {
     Router::new()
-        .route("/query/sessions", get(list_sessions).post(create_session))
+        .route("/query/libraries/{library_id}/sessions", get(list_sessions).post(create_session))
         .route("/query/sessions/{session_id}", get(get_session))
-        .route("/query/sessions/{session_id}/turns", axum::routing::post(create_session_turn))
+        .route(
+            "/query/sessions/{session_id}/turns",
+            get(list_session_turns).post(create_session_turn),
+        )
+        .route("/query/sessions/{session_id}/turns/{turn_id}", get(get_session_turn))
         .route("/query/executions/{execution_id}", get(get_execution))
         .route("/query/executions/{execution_id}/llm-context", get(get_execution_llm_context))
-        .route("/query/assistant/system-prompt", get(get_assistant_system_prompt))
+        .route("/query/system-prompt", get(get_assistant_system_prompt))
 }
 
 #[derive(Debug, Deserialize, utoipa::ToSchema, utoipa::IntoParams)]
@@ -139,7 +357,7 @@ pub struct AssistantSystemPromptQuery {
 pub struct AssistantSystemPromptResponse {
     /// Raw template with the `{LIBRARY_REF}` placeholder. This is what
     /// transport-agnostic external MCP clients should paste into their
-    /// own system prompt when attaching IronRAG's MCP server. Documented
+    /// own system prompt when attaching `IronRAG`'s MCP server. Documented
     /// clients include Claude Desktop, Claude Code, Cursor, Codex, VS Code
     /// with Continue/Cline/Roo, Zed, and Hermes, so every agent — in-app
     /// or external — shares the same grounding discipline.
@@ -169,7 +387,7 @@ pub struct AssistantSystemPromptResponse {
 )]
 #[utoipa::path(
     get,
-    path = "/v1/query/assistant/system-prompt",
+    path = "/v1/query/system-prompt",
     tag = "query",
     operation_id = "getAssistantSystemPrompt",
     summary = "Get the recommended MCP assistant system prompt.",
@@ -202,8 +420,7 @@ pub async fn get_assistant_system_prompt(
         None
     };
     Ok(Json(AssistantSystemPromptResponse {
-        template: crate::services::query::assistant_prompt::ASSISTANT_SYSTEM_PROMPT_TEMPLATE
-            .to_string(),
+        template: crate::services::query::assistant_prompt::template(),
         rendered,
         library_id: query.library_id,
     }))
@@ -213,84 +430,87 @@ pub async fn get_assistant_system_prompt(
     level = "info",
     name = "http.query.list_sessions",
     skip_all,
-    fields(library_id = ?query.library_id, item_count)
+    fields(library_id = %library_id, item_count)
 )]
 #[utoipa::path(
     get,
-    path = "/v1/query/sessions",
+    path = "/v1/query/libraries/{libraryId}/sessions",
     tag = "query",
     operation_id = "listQuerySessions",
     summary = "List assistant sessions for one library.",
-    description = "Returns the chat sessions visible to the caller for the requested library. The web UI uses this endpoint to populate the assistant sidebar and restore recent conversations. Clients must provide `libraryId`; authorization is checked against the library before any session metadata is returned.",
-    params(ListSessionsQuery),
+    description = "Returns the chat sessions visible to the caller for the requested library, most recently updated first. The web UI uses this endpoint to populate the assistant sidebar and restore recent conversations. The session list is retention-bounded per library, so the full set always fits on one page and `nextCursor` is always `null`.",
+    params(("libraryId" = uuid::Uuid, Path, description = "Library that owns the session collection")),
     responses(
-        (status = 200, description = "Query sessions visible to the caller", body = [ironrag_contracts::assistant::AssistantSessionListItem]),
-        (status = 400, description = "libraryId is required"),
+        (status = 200, description = "Query session list page", body = QuerySessionListResponse),
         (status = 401, description = "Caller is not authenticated"),
         (status = 403, description = "Caller is not authorized for the library"),
+        (status = 404, description = "Library not found"),
     ),
 )]
 pub async fn list_sessions(
     auth: AuthContext,
     State(state): State<AppState>,
-    Query(query): Query<ListSessionsQuery>,
-) -> Result<Json<Vec<ironrag_contracts::assistant::AssistantSessionListItem>>, ApiError> {
+    Path(library_id): Path<Uuid>,
+) -> Result<Json<QuerySessionListResponse>, ApiError> {
     let span = tracing::Span::current();
-    let library_id = query
-        .library_id
-        .ok_or_else(|| ApiError::BadRequest("libraryId is required".to_string()))?;
     let _ = load_library_and_authorize(&auth, &state, library_id, POLICY_QUERY_READ).await?;
     let conversations =
         state.canonical_services.query.list_conversations(&state, library_id).await?;
-    let items: Vec<_> =
-        conversations.into_iter().map(map_session_list_item_with_defaults).collect();
+    let mut items = Vec::with_capacity(conversations.len());
+    for conversation in conversations {
+        let turn_count = state
+            .canonical_services
+            .query
+            .count_conversation_turns(&state, conversation.id)
+            .await?;
+        items.push(map_session_list_item_with_turn_count(
+            conversation,
+            usize::try_from(turn_count).unwrap_or(usize::MAX),
+        ));
+    }
     span.record("item_count", items.len());
-    Ok(Json(items))
+    let total = i64::try_from(items.len()).unwrap_or(i64::MAX);
+    Ok(Json(QuerySessionListResponse { items, next_cursor: None, total }))
 }
 
 #[utoipa::path(
     post,
-    path = "/v1/query/sessions",
+    path = "/v1/query/libraries/{libraryId}/sessions",
     tag = "query",
     operation_id = "createQuerySession",
     summary = "Create an assistant session.",
-    description = "Creates a persistent assistant conversation scoped to one library. The session stores the user and assistant turns, execution ids, verifier state, citations, runtime traces, and debug snapshots produced by later turns. `workspaceId` is optional for normal callers because the backend derives it from `libraryId`; when supplied it must match the target library.",
-    request_body(content = CreateSessionRequest, description = "Target library, optional workspace assertion, and optional display title for the new assistant session."),
+    description = "Creates a persistent assistant conversation scoped to one library. The session stores the user and assistant turns, execution ids, verifier state, citations, runtime traces, and debug snapshots produced by later turns.",
+    params(("libraryId" = uuid::Uuid, Path, description = "Library that owns the new session")),
+    request_body(content = CreateSessionRequest, description = "Optional display title for the new assistant session."),
     responses(
-        (status = 200, description = "Newly created query conversation", body = QueryConversation),
+        (status = 201, description = "Newly created query conversation", body = QueryConversation, headers(("Location" = String, description = "Canonical URI of the created session"))),
         (status = 400, description = "Invalid request"),
         (status = 401, description = "Caller is not authenticated"),
         (status = 403, description = "Caller is not authorized for the library"),
+        (status = 404, description = "Library not found"),
     ),
 )]
 #[tracing::instrument(
     level = "info",
     name = "http.query.create_session",
     skip_all,
-    fields(library_id = %payload.library_id)
+    fields(library_id = %library_id)
 )]
 pub async fn create_session(
     auth: AuthContext,
     State(state): State<AppState>,
+    Path(library_id): Path<Uuid>,
     Json(payload): Json<CreateSessionRequest>,
-) -> Result<Json<QueryConversation>, ApiError> {
-    let library =
-        load_library_and_authorize(&auth, &state, payload.library_id, POLICY_QUERY_RUN).await?;
-    // workspace_id is now optional — infer from the library when omitted.
-    let workspace_id = payload.workspace_id.unwrap_or(library.workspace_id);
-    if library.workspace_id != workspace_id {
-        return Err(ApiError::BadRequest(
-            "workspaceId does not match the target library".to_string(),
-        ));
-    }
+) -> Result<Response, ApiError> {
+    let library = load_library_and_authorize(&auth, &state, library_id, POLICY_QUERY_RUN).await?;
     let conversation = state
         .canonical_services
         .query
         .create_conversation(
             &state,
             CreateConversationCommand {
-                workspace_id,
-                library_id: payload.library_id,
+                workspace_id: library.workspace_id,
+                library_id: library.id,
                 created_by_principal_id: Some(auth.principal_id),
                 title: payload.title,
                 request_surface: "ui".to_string(),
@@ -325,7 +545,81 @@ pub async fn create_session(
     {
         tracing::warn!(stage = "audit", error = %error, "audit append failed");
     }
-    Ok(Json(conversation))
+    let location = format!("/v1/query/sessions/{}", conversation.id);
+    let mut response = (StatusCode::CREATED, Json(conversation)).into_response();
+    if let Ok(value) = axum::http::HeaderValue::from_str(&location) {
+        response.headers_mut().insert(axum::http::header::LOCATION, value);
+    }
+    Ok(response)
+}
+
+#[tracing::instrument(
+    level = "info",
+    name = "http.query.list_session_turns",
+    skip_all,
+    fields(session_id = %session_id, item_count)
+)]
+#[utoipa::path(
+    get,
+    path = "/v1/query/sessions/{sessionId}/turns",
+    tag = "query",
+    operation_id = "listQuerySessionTurns",
+    summary = "List turns recorded for one assistant session.",
+    description = "Returns the bounded, chronological turn history for one assistant session: recorded content, author, and the execution that produced or consumed each turn (without hydrated evidence). Use `GET /v1/query/sessions/{sessionId}/turns/{turnId}` for one turn, or `GET /v1/query/sessions/{sessionId}` for the fully hydrated conversation with evidence.",
+    params(("sessionId" = uuid::Uuid, Path, description = "Query session identifier")),
+    responses(
+        (status = 200, description = "Query turn list page", body = QueryTurnListResponse),
+        (status = 401, description = "Caller is not authenticated"),
+        (status = 403, description = "Caller is not authorized for the session"),
+        (status = 404, description = "Session not found"),
+    ),
+)]
+pub async fn list_session_turns(
+    auth: AuthContext,
+    State(state): State<AppState>,
+    Path(session_id): Path<Uuid>,
+) -> Result<Json<QueryTurnListResponse>, ApiError> {
+    let span = tracing::Span::current();
+    let _ = load_query_session_and_authorize(&auth, &state, session_id, POLICY_QUERY_READ).await?;
+    let turns = state.canonical_services.query.list_turns(&state, session_id).await?;
+    let items: Vec<_> = turns.into_iter().map(map_turn).collect();
+    span.record("item_count", items.len());
+    let total = i64::try_from(items.len()).unwrap_or(i64::MAX);
+    Ok(Json(QueryTurnListResponse { items, next_cursor: None, total }))
+}
+
+#[tracing::instrument(
+    level = "info",
+    name = "http.query.get_session_turn",
+    skip_all,
+    fields(session_id = %session_id, turn_id = %turn_id)
+)]
+#[utoipa::path(
+    get,
+    path = "/v1/query/sessions/{sessionId}/turns/{turnId}",
+    tag = "query",
+    operation_id = "getQuerySessionTurn",
+    summary = "Load one assistant session turn.",
+    description = "Returns a single immutable turn from an assistant session: recorded content, author, timestamp, and the execution that produced or consumed it. Turns are append-only historical records — there is no item-level update or delete, only `POST .../turns` to record a new one and `DELETE /v1/query/sessions/{sessionId}` to erase the whole session, preserving the same audit trail that protects execution traces.",
+    params(
+        ("sessionId" = uuid::Uuid, Path, description = "Query session identifier"),
+        ("turnId" = uuid::Uuid, Path, description = "Query turn identifier"),
+    ),
+    responses(
+        (status = 200, description = "Assistant session turn", body = ironrag_contracts::assistant::AssistantTurn),
+        (status = 401, description = "Caller is not authenticated"),
+        (status = 403, description = "Caller is not authorized for the session"),
+        (status = 404, description = "Session or turn not found"),
+    ),
+)]
+pub async fn get_session_turn(
+    auth: AuthContext,
+    State(state): State<AppState>,
+    Path((session_id, turn_id)): Path<(Uuid, Uuid)>,
+) -> Result<Json<ironrag_contracts::assistant::AssistantTurn>, ApiError> {
+    let _ = load_query_session_and_authorize(&auth, &state, session_id, POLICY_QUERY_READ).await?;
+    let turn = state.canonical_services.query.get_turn(&state, session_id, turn_id).await?;
+    Ok(Json(map_turn(turn)))
 }
 
 #[utoipa::path(
@@ -394,10 +688,11 @@ pub async fn create_session_turn(
         let stream = create_session_turn_event_stream(auth, state, session_id, payload).await?;
         return Ok(stream.into_response());
     }
-    let outcome = execute_ui_session_turn(&state, &auth, session_id, payload, None).await?;
+    let outcome =
+        execute_ui_session_turn(state.clone(), auth.clone(), session_id, payload, None).await?;
     append_query_execution_audit(state.clone(), auth.principal_id, "ui", &outcome).await;
     span.record("elapsed_ms", started_at.elapsed().as_millis() as u64);
-    Ok(Json(map_turn_execution_response(outcome)).into_response())
+    Ok(Json(map_ui_turn_execution_response(outcome)).into_response())
 }
 
 #[tracing::instrument(
@@ -474,8 +769,8 @@ async fn create_session_turn_event_stream(
             });
 
             let result = execute_ui_session_turn(
-                &state_for_task,
-                &auth_for_task,
+                state_for_task.clone(),
+                auth_for_task.clone(),
                 session_id,
                 payload,
                 Some(agent_activity_tx),
@@ -538,7 +833,7 @@ async fn create_session_turn_event_stream(
                     send_required_turn_stream_event(
                         &sender,
                         AssistantTurnStreamEvent::Completed {
-                            detail: map_turn_execution_response(outcome),
+                            detail: Box::new(map_ui_turn_execution_response(outcome)),
                         },
                     )
                     .await;
@@ -569,7 +864,7 @@ async fn create_session_turn_event_stream(
                 }
             }
         };
-        if let Err(panic) = AssertUnwindSafe(producer).catch_unwind().await {
+        if let Err(panic) = Box::pin(AssertUnwindSafe(producer).catch_unwind()).await {
             tracing::error!(
                 panic = %panic_payload_message(panic.as_ref()),
                 "assistant turn stream producer panicked"
@@ -608,19 +903,18 @@ async fn create_session_turn_event_stream(
 }
 
 async fn execute_ui_session_turn(
-    state: &AppState,
-    auth: &AuthContext,
+    state: AppState,
+    auth: AuthContext,
     session_id: Uuid,
     payload: CreateSessionTurnRequest,
     agent_activity_tx: Option<tokio::sync::mpsc::Sender<AgentLoopActivityEvent>>,
 ) -> Result<crate::services::query::service::QueryTurnExecutionResult, ApiError> {
-    let _ = load_query_session_and_authorize(auth, state, session_id, POLICY_QUERY_RUN).await?;
-    state
-        .canonical_services
-        .query
+    let _ = load_query_session_and_authorize(&auth, &state, session_id, POLICY_QUERY_RUN).await?;
+    let query_service = state.canonical_services.query.clone();
+    query_service
         .execute_assistant_agent_turn(
-            state,
-            auth,
+            &state,
+            &auth,
             ExecuteConversationTurnCommand {
                 conversation_id: session_id,
                 author_principal_id: Some(auth.principal_id),
@@ -752,16 +1046,11 @@ const fn verification_state_stream_label(state: &QueryVerificationState) -> &'st
 }
 
 fn accepts_event_stream(headers: &HeaderMap) -> bool {
-    headers
-        .get(header::ACCEPT)
-        .and_then(|value| value.to_str().ok())
-        .map(|value| {
-            value.split(',').any(|segment| segment.trim().eq_ignore_ascii_case("text/event-stream"))
-        })
-        .unwrap_or(false)
+    headers.get(header::ACCEPT).and_then(|value| value.to_str().ok()).is_some_and(|value| {
+        value.split(',').any(|segment| segment.trim().eq_ignore_ascii_case("text/event-stream"))
+    })
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn resolve_query_turn_top_k(requested_top_k: Option<usize>) -> usize {
     resolve_top_k(requested_top_k)
 }
@@ -838,12 +1127,6 @@ pub async fn get_execution_llm_context(
     .ok_or_else(|| ApiError::resource_not_found("llm_context_snapshot", execution_id))
 }
 
-fn map_session_list_item_with_defaults(
-    session: QueryConversation,
-) -> ironrag_contracts::assistant::AssistantSessionListItem {
-    map_session_list_item_with_turn_count(session, 0)
-}
-
 fn map_session_list_item_with_turn_count(
     session: QueryConversation,
     turn_count: usize,
@@ -892,7 +1175,7 @@ async fn map_session_detail(
     })
 }
 
-fn is_pending_session_execution(execution: &QueryExecution) -> bool {
+const fn is_pending_session_execution(execution: &QueryExecution) -> bool {
     execution.request_turn_id.is_some()
         && execution.response_turn_id.is_none()
         && !execution.lifecycle_state.is_terminal()
@@ -945,6 +1228,9 @@ fn map_execution_detail(
         graph_edge_references,
         verification_state,
         verification_warnings,
+        answer_disposition,
+        clarification,
+        query_ir: _,
     } = detail;
     let context_bundle_id = execution.context_bundle_id;
     let execution = map_execution(execution);
@@ -960,6 +1246,8 @@ fn map_execution_detail(
         graph_edge_references,
         verification_state,
         verification_warnings,
+        answer_disposition,
+        clarification,
     );
     ironrag_contracts::assistant::AssistantExecutionDetail {
         context_bundle_id,
@@ -973,20 +1261,18 @@ fn map_execution_detail(
         technical_fact_references: evidence.technical_fact_references,
         entity_references: evidence.entity_references,
         relation_references: evidence.relation_references,
+        reference_summary: evidence.reference_summary,
         verification_state: evidence.verification_state,
         verification_warnings: evidence.verification_warnings,
-        // Historical-replay reads carry no clarification metadata: the typed
-        // clarification surface is live-turn-only metadata (see the doc note
-        // on `AssistantClarification`) and is not persisted with the
-        // execution detail.
-        clarification: ironrag_contracts::assistant::AssistantClarification::default(),
+        answer_disposition: evidence.answer_disposition,
+        clarification: evidence.clarification,
     }
 }
 
 fn map_execution_detail_to_evidence(
     detail: QueryExecutionDetail,
 ) -> ironrag_contracts::assistant::AssistantEvidenceBundle {
-    map_execution_evidence_parts(
+    project_ui_evidence_bundle(map_execution_evidence_parts(
         detail.runtime_summary,
         detail.runtime_stage_summaries,
         detail.chunk_references,
@@ -996,10 +1282,11 @@ fn map_execution_detail_to_evidence(
         detail.graph_edge_references,
         detail.verification_state,
         detail.verification_warnings,
-    )
+        detail.answer_disposition,
+        detail.clarification,
+    ))
 }
 
-#[allow(clippy::too_many_arguments)]
 fn map_execution_evidence_parts(
     runtime_summary: RuntimeExecutionSummary,
     runtime_stage_summaries: Vec<QueryRuntimeStageSummary>,
@@ -1010,6 +1297,8 @@ fn map_execution_evidence_parts(
     graph_edge_references: Vec<QueryGraphEdgeReference>,
     verification_state: QueryVerificationState,
     verification_warnings: Vec<QueryVerificationWarning>,
+    answer_disposition: crate::domains::query::QueryAnswerDisposition,
+    clarification: QueryClarification,
 ) -> ironrag_contracts::assistant::AssistantEvidenceBundle {
     ironrag_contracts::assistant::AssistantEvidenceBundle {
         chunk_references: chunk_references.into_iter().map(map_chunk_reference).collect(),
@@ -1029,11 +1318,14 @@ fn map_execution_evidence_parts(
             .into_iter()
             .map(map_graph_edge_reference)
             .collect(),
+        reference_summary: None,
         verification_state: map_verification_state(verification_state),
         verification_warnings: verification_warnings
             .into_iter()
             .map(map_verification_warning)
             .collect(),
+        answer_disposition: map_answer_disposition(answer_disposition),
+        clarification: map_query_clarification(clarification),
         runtime_summary: map_runtime_summary(runtime_summary),
         runtime_stage_summaries: runtime_stage_summaries
             .into_iter()
@@ -1077,18 +1369,26 @@ pub(crate) fn map_turn_execution_response(
             .into_iter()
             .map(map_graph_edge_reference)
             .collect(),
+        reference_summary: None,
         verification_state: map_verification_state(outcome.verification_state),
         verification_warnings: outcome
             .verification_warnings
             .into_iter()
             .map(map_verification_warning)
             .collect(),
-        clarification: map_runtime_clarification(outcome.clarification),
+        answer_disposition: map_answer_disposition(outcome.answer_disposition),
+        clarification: map_query_clarification(outcome.clarification),
     }
 }
 
-fn map_runtime_clarification(
-    clarification: crate::services::query::execution::RuntimeClarification,
+fn map_ui_turn_execution_response(
+    outcome: crate::services::query::service::QueryTurnExecutionResult,
+) -> ironrag_contracts::assistant::AssistantExecutionDetail {
+    project_ui_execution_detail(map_turn_execution_response(outcome))
+}
+
+fn map_query_clarification(
+    clarification: QueryClarification,
 ) -> ironrag_contracts::assistant::AssistantClarification {
     ironrag_contracts::assistant::AssistantClarification {
         required: clarification.required,
@@ -1096,13 +1396,13 @@ fn map_runtime_clarification(
         answer_candidates: clarification
             .answer_candidates
             .into_iter()
-            .map(map_runtime_answer_candidate)
+            .map(map_query_answer_candidate)
             .collect(),
     }
 }
 
-fn map_runtime_answer_candidate(
-    candidate: crate::services::query::execution::RuntimeAnswerCandidate,
+fn map_query_answer_candidate(
+    candidate: QueryAnswerCandidate,
 ) -> ironrag_contracts::assistant::AssistantAnswerCandidate {
     ironrag_contracts::assistant::AssistantAnswerCandidate {
         label: candidate.label,
@@ -1130,7 +1430,7 @@ fn map_turn_to_message(
     }
 }
 
-fn map_pending_execution_to_message(
+const fn map_pending_execution_to_message(
     execution: &QueryExecution,
 ) -> ironrag_contracts::assistant::AssistantConversationMessage {
     ironrag_contracts::assistant::AssistantConversationMessage {
@@ -1278,6 +1578,25 @@ const fn map_verification_state(
     }
 }
 
+const fn map_answer_disposition(
+    disposition: crate::domains::query::QueryAnswerDisposition,
+) -> ironrag_contracts::assistant::AssistantAnswerDisposition {
+    match disposition {
+        crate::domains::query::QueryAnswerDisposition::NonTerminal => {
+            ironrag_contracts::assistant::AssistantAnswerDisposition::NonTerminal
+        }
+        crate::domains::query::QueryAnswerDisposition::FactualReady => {
+            ironrag_contracts::assistant::AssistantAnswerDisposition::FactualReady
+        }
+        crate::domains::query::QueryAnswerDisposition::SafeFallback => {
+            ironrag_contracts::assistant::AssistantAnswerDisposition::SafeFallback
+        }
+        crate::domains::query::QueryAnswerDisposition::Clarification => {
+            ironrag_contracts::assistant::AssistantAnswerDisposition::Clarification
+        }
+    }
+}
+
 fn map_verification_warning(
     warning: QueryVerificationWarning,
 ) -> ironrag_contracts::assistant::AssistantVerificationWarning {
@@ -1373,34 +1692,30 @@ fn map_graph_edge_reference(
     }
 }
 
-async fn append_query_execution_audit(
+fn append_query_execution_audit(
     state: AppState,
     principal_id: Uuid,
     surface_kind: &'static str,
     outcome: &crate::services::query::service::QueryTurnExecutionResult,
-) {
-    if let Err(error) = state
-        .canonical_services
-        .audit
-        .append_query_execution_event(
-            &state,
-            AppendQueryExecutionAuditCommand {
-                actor_principal_id: principal_id,
-                surface_kind: surface_kind.to_string(),
-                request_id: None,
-                query_session_id: outcome.conversation.id,
-                query_execution_id: outcome.execution.id,
-                runtime_execution_id: outcome.execution.runtime_execution_id,
-                context_bundle_id: outcome.context_bundle_id,
-                workspace_id: outcome.execution.workspace_id,
-                library_id: outcome.execution.library_id,
-                question_preview: Some(outcome.request_turn.content_text.clone()),
-            },
-        )
-        .await
-    {
-        tracing::warn!(stage = "audit", error = %error, "audit append failed");
-    }
+) -> futures::future::BoxFuture<'static, ()> {
+    let command = AppendQueryExecutionAuditCommand {
+        actor_principal_id: principal_id,
+        surface_kind: surface_kind.to_string(),
+        request_id: None,
+        query_session_id: outcome.conversation.id,
+        query_execution_id: outcome.execution.id,
+        runtime_execution_id: outcome.execution.runtime_execution_id,
+        context_bundle_id: outcome.context_bundle_id,
+        workspace_id: outcome.execution.workspace_id,
+        library_id: outcome.execution.library_id,
+        question_preview: Some(outcome.request_turn.content_text.clone()),
+    };
+    let audit_service = state.canonical_services.audit.clone();
+    Box::pin(async move {
+        if let Err(error) = audit_service.append_query_execution_event(&state, command).await {
+            tracing::warn!(stage = "audit", error = %error, "audit append failed");
+        }
+    })
 }
 
 #[cfg(test)]
@@ -1421,6 +1736,223 @@ mod tests {
             is_error: None,
             child_execution_id: None,
             result_preview: None,
+        }
+    }
+
+    fn assistant_runtime_summary() -> ironrag_contracts::assistant::AssistantRuntimeSummary {
+        let now = Utc::now();
+        ironrag_contracts::assistant::AssistantRuntimeSummary {
+            runtime_execution_id: Uuid::new_v4(),
+            lifecycle_state: "completed".to_string(),
+            active_stage: None,
+            turn_budget: 1,
+            turn_count: 1,
+            parallel_action_limit: 1,
+            failure_code: None,
+            failure_summary_redacted: None,
+            policy_summary: ironrag_contracts::assistant::AssistantPolicySummary {
+                allow_count: 0,
+                reject_count: 0,
+                terminate_count: 0,
+                recent_decisions: Vec::new(),
+            },
+            accepted_at: now,
+            completed_at: Some(now),
+        }
+    }
+
+    fn chunk_reference(
+        rank: i32,
+        id: u128,
+    ) -> ironrag_contracts::assistant::AssistantChunkReference {
+        ironrag_contracts::assistant::AssistantChunkReference {
+            execution_id: Uuid::from_u128(1),
+            chunk_id: Uuid::from_u128(id),
+            rank,
+            score: 1.0 / f64::from(rank.max(1)),
+        }
+    }
+
+    fn prepared_segment_reference(
+        rank: i32,
+        id: u128,
+    ) -> ironrag_contracts::assistant::AssistantPreparedSegmentReference {
+        ironrag_contracts::assistant::AssistantPreparedSegmentReference {
+            execution_id: Uuid::from_u128(1),
+            segment_id: Uuid::from_u128(id),
+            revision_id: Uuid::from_u128(id + 100),
+            block_kind: "paragraph".to_string(),
+            rank,
+            score: 1.0 / f64::from(rank.max(1)),
+            heading_trail: Vec::new(),
+            section_path: Vec::new(),
+            document_id: None,
+            document_title: None,
+            document_hint: None,
+            source_access: None,
+        }
+    }
+
+    fn technical_fact_reference(
+        rank: i32,
+        id: u128,
+    ) -> ironrag_contracts::assistant::AssistantTechnicalFactReference {
+        ironrag_contracts::assistant::AssistantTechnicalFactReference {
+            execution_id: Uuid::from_u128(1),
+            fact_id: Uuid::from_u128(id),
+            revision_id: Uuid::from_u128(id + 100),
+            fact_kind: "scalar".to_string(),
+            canonical_value: id.to_string(),
+            display_value: id.to_string(),
+            rank,
+            score: 1.0 / f64::from(rank.max(1)),
+        }
+    }
+
+    fn entity_reference(
+        rank: i32,
+        id: u128,
+    ) -> ironrag_contracts::assistant::AssistantEntityReference {
+        ironrag_contracts::assistant::AssistantEntityReference {
+            execution_id: Uuid::from_u128(1),
+            node_id: Uuid::from_u128(id),
+            rank,
+            score: 1.0 / f64::from(rank.max(1)),
+            label: id.to_string(),
+            entity_type: None,
+            summary: None,
+        }
+    }
+
+    fn relation_reference(
+        rank: i32,
+        id: u128,
+    ) -> ironrag_contracts::assistant::AssistantRelationReference {
+        ironrag_contracts::assistant::AssistantRelationReference {
+            execution_id: Uuid::from_u128(1),
+            edge_id: Uuid::from_u128(id),
+            rank,
+            score: 1.0 / f64::from(rank.max(1)),
+            predicate: id.to_string(),
+            normalized_assertion: None,
+        }
+    }
+
+    fn evidence_bundle_with_references(
+        chunk_references: Vec<ironrag_contracts::assistant::AssistantChunkReference>,
+        prepared_segment_references: Vec<
+            ironrag_contracts::assistant::AssistantPreparedSegmentReference,
+        >,
+        technical_fact_references: Vec<
+            ironrag_contracts::assistant::AssistantTechnicalFactReference,
+        >,
+        entity_references: Vec<ironrag_contracts::assistant::AssistantEntityReference>,
+        relation_references: Vec<ironrag_contracts::assistant::AssistantRelationReference>,
+    ) -> ironrag_contracts::assistant::AssistantEvidenceBundle {
+        ironrag_contracts::assistant::AssistantEvidenceBundle {
+            chunk_references,
+            prepared_segment_references,
+            technical_fact_references,
+            entity_references,
+            relation_references,
+            reference_summary: None,
+            verification_state: ironrag_contracts::assistant::AssistantVerificationState::Verified,
+            verification_warnings: Vec::new(),
+            answer_disposition:
+                ironrag_contracts::assistant::AssistantAnswerDisposition::FactualReady,
+            clarification: ironrag_contracts::assistant::AssistantClarification::default(),
+            runtime_summary: assistant_runtime_summary(),
+            runtime_stage_summaries: Vec::new(),
+        }
+    }
+
+    fn execution_detail_from_evidence(
+        evidence: ironrag_contracts::assistant::AssistantEvidenceBundle,
+    ) -> ironrag_contracts::assistant::AssistantExecutionDetail {
+        let now = Utc::now();
+        let context_bundle_id = Uuid::new_v4();
+        let execution_id = Uuid::new_v4();
+        ironrag_contracts::assistant::AssistantExecutionDetail {
+            context_bundle_id,
+            execution: ironrag_contracts::assistant::AssistantExecution {
+                id: execution_id,
+                workspace_id: Uuid::new_v4(),
+                library_id: Uuid::new_v4(),
+                conversation_id: Uuid::new_v4(),
+                context_bundle_id,
+                request_turn_id: None,
+                response_turn_id: None,
+                binding_id: None,
+                runtime_execution_id: Some(evidence.runtime_summary.runtime_execution_id),
+                lifecycle_state: "completed".to_string(),
+                active_stage: None,
+                query_text: "neutral question".to_string(),
+                failure_code: None,
+                started_at: now,
+                completed_at: Some(now),
+            },
+            runtime_summary: evidence.runtime_summary,
+            runtime_stage_summaries: evidence.runtime_stage_summaries,
+            request_turn: None,
+            response_turn: None,
+            chunk_references: evidence.chunk_references,
+            prepared_segment_references: evidence.prepared_segment_references,
+            technical_fact_references: evidence.technical_fact_references,
+            entity_references: evidence.entity_references,
+            relation_references: evidence.relation_references,
+            reference_summary: evidence.reference_summary,
+            verification_state: evidence.verification_state,
+            verification_warnings: evidence.verification_warnings,
+            answer_disposition: evidence.answer_disposition,
+            clarification: evidence.clarification,
+        }
+    }
+
+    fn query_execution_detail_with_chunks(count: usize) -> QueryExecutionDetail {
+        let now = Utc::now();
+        let execution = query_execution_with_state(
+            crate::domains::agent_runtime::RuntimeLifecycleState::Completed,
+            None,
+            None,
+        );
+        let execution_id = execution.id;
+        QueryExecutionDetail {
+            runtime_summary: RuntimeExecutionSummary {
+                runtime_execution_id: execution
+                    .runtime_execution_id
+                    .expect("test execution carries a runtime id"),
+                lifecycle_state: crate::domains::agent_runtime::RuntimeLifecycleState::Completed,
+                active_stage: None,
+                turn_budget: 1,
+                turn_count: 1,
+                parallel_action_limit: 1,
+                failure_code: None,
+                failure_summary_redacted: None,
+                policy_summary: RuntimePolicySummary::default(),
+                accepted_at: now,
+                completed_at: Some(now),
+            },
+            runtime_stage_summaries: Vec::new(),
+            request_turn: None,
+            response_turn: None,
+            chunk_references: (0..count)
+                .map(|index| QueryChunkReference {
+                    execution_id,
+                    chunk_id: Uuid::from_u128(1_000 + index as u128),
+                    rank: i32::try_from(index + 1).expect("test rank fits i32"),
+                    score: 1.0 / (index + 1) as f64,
+                })
+                .collect(),
+            prepared_segment_references: Vec::new(),
+            technical_fact_references: Vec::new(),
+            graph_node_references: Vec::new(),
+            graph_edge_references: Vec::new(),
+            verification_state: QueryVerificationState::Verified,
+            verification_warnings: Vec::new(),
+            answer_disposition: crate::domains::query::QueryAnswerDisposition::FactualReady,
+            clarification: QueryClarification::default(),
+            query_ir: None,
+            execution,
         }
     }
 
@@ -1536,8 +2068,12 @@ mod tests {
             technical_fact_references: Vec::new(),
             entity_references: Vec::new(),
             relation_references: Vec::new(),
+            reference_summary: None,
             verification_state: ironrag_contracts::assistant::AssistantVerificationState::Verified,
             verification_warnings: Vec::new(),
+            answer_disposition:
+                ironrag_contracts::assistant::AssistantAnswerDisposition::FactualReady,
+            clarification: ironrag_contracts::assistant::AssistantClarification::default(),
             runtime_summary: ironrag_contracts::assistant::AssistantRuntimeSummary {
                 runtime_execution_id: Uuid::new_v4(),
                 lifecycle_state: "completed".to_string(),
@@ -1588,6 +2124,196 @@ mod tests {
         );
         assert_eq!(hydrated_evidence.runtime_stage_summaries.len(), 1);
         assert_eq!(hydrated_evidence.runtime_stage_summaries[0].stage_kind, "retrieve");
+    }
+
+    #[test]
+    fn ui_reference_projection_caps_all_reference_kinds_globally() {
+        let evidence = evidence_bundle_with_references(
+            (0..8).map(|index| chunk_reference(20 + index, 10 + index as u128)).collect(),
+            Vec::new(),
+            (0..5).map(|index| technical_fact_reference(1 + index, 30 + index as u128)).collect(),
+            Vec::new(),
+            Vec::new(),
+        );
+
+        let projected = project_ui_evidence_bundle(evidence);
+        let returned_count = projected.chunk_references.len()
+            + projected.prepared_segment_references.len()
+            + projected.technical_fact_references.len()
+            + projected.entity_references.len()
+            + projected.relation_references.len();
+
+        assert_eq!(returned_count, UI_VISIBLE_REFERENCE_LIMIT);
+        assert_eq!(projected.technical_fact_references.len(), 5);
+        assert_eq!(projected.chunk_references.len(), 7);
+        assert_eq!(
+            projected.reference_summary,
+            Some(ironrag_contracts::assistant::AssistantReferenceSummary {
+                total_count: 13,
+                returned_count: UI_VISIBLE_REFERENCE_LIMIT,
+                truncated: true,
+            })
+        );
+    }
+
+    #[test]
+    fn ui_reference_projection_keeps_small_sets_without_truncation() {
+        let evidence = evidence_bundle_with_references(
+            vec![chunk_reference(2, 10)],
+            vec![prepared_segment_reference(1, 20)],
+            vec![technical_fact_reference(3, 30)],
+            vec![entity_reference(4, 40)],
+            vec![relation_reference(5, 50)],
+        );
+
+        let projected = project_ui_evidence_bundle(evidence);
+
+        assert_eq!(projected.chunk_references.len(), 1);
+        assert_eq!(projected.prepared_segment_references.len(), 1);
+        assert_eq!(projected.technical_fact_references.len(), 1);
+        assert_eq!(projected.entity_references.len(), 1);
+        assert_eq!(projected.relation_references.len(), 1);
+        assert_eq!(
+            projected.reference_summary,
+            Some(ironrag_contracts::assistant::AssistantReferenceSummary {
+                total_count: 5,
+                returned_count: 5,
+                truncated: false,
+            })
+        );
+    }
+
+    #[test]
+    fn ui_reference_projection_breaks_rank_ties_by_kind_then_original_order() {
+        let evidence = evidence_bundle_with_references(
+            vec![chunk_reference(1, 12), chunk_reference(1, 11), chunk_reference(1, 10)],
+            vec![
+                prepared_segment_reference(1, 22),
+                prepared_segment_reference(1, 21),
+                prepared_segment_reference(1, 20),
+            ],
+            vec![
+                technical_fact_reference(1, 32),
+                technical_fact_reference(1, 31),
+                technical_fact_reference(1, 30),
+            ],
+            vec![entity_reference(1, 42), entity_reference(1, 41), entity_reference(1, 40)],
+            vec![relation_reference(1, 50)],
+        );
+
+        let projected = project_ui_evidence_bundle(evidence);
+
+        assert_eq!(
+            projected
+                .chunk_references
+                .iter()
+                .map(|reference| reference.chunk_id)
+                .collect::<Vec<_>>(),
+            vec![Uuid::from_u128(12), Uuid::from_u128(11), Uuid::from_u128(10)]
+        );
+        assert_eq!(projected.entity_references.len(), 3);
+        assert!(projected.relation_references.is_empty());
+    }
+
+    #[test]
+    fn ui_completion_and_hydration_serialize_bounded_reference_summaries() {
+        let evidence = evidence_bundle_with_references(
+            (0..13).map(|index| chunk_reference(index + 1, 100 + index as u128)).collect(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        );
+        let projected_evidence = project_ui_evidence_bundle(evidence.clone());
+        let projected_detail =
+            project_ui_execution_detail(execution_detail_from_evidence(evidence));
+
+        let json_completion =
+            serde_json::to_value(&projected_detail).expect("serialize completion");
+        assert_eq!(json_completion["referenceSummary"]["totalCount"], 13);
+        assert_eq!(json_completion["referenceSummary"]["returnedCount"], 12);
+        assert_eq!(json_completion["chunkReferences"].as_array().map(Vec::len), Some(12));
+
+        let stream_completion = serde_json::to_value(AssistantTurnStreamEvent::Completed {
+            detail: Box::new(projected_detail),
+        })
+        .expect("serialize terminal stream event");
+        assert_eq!(stream_completion["type"], "completed");
+        assert_eq!(stream_completion["detail"]["referenceSummary"]["totalCount"], 13);
+        assert_eq!(
+            stream_completion["detail"]["chunkReferences"].as_array().map(Vec::len),
+            Some(12)
+        );
+
+        let hydrated = serde_json::to_value(projected_evidence).expect("serialize hydration");
+        assert_eq!(hydrated["referenceSummary"]["totalCount"], 13);
+        assert_eq!(hydrated["referenceSummary"]["returnedCount"], 12);
+    }
+
+    #[test]
+    fn unprojected_debug_detail_remains_unbounded_and_omits_ui_summary() {
+        let evidence = evidence_bundle_with_references(
+            (0..13).map(|index| chunk_reference(index + 1, 200 + index as u128)).collect(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        );
+        let debug_detail = execution_detail_from_evidence(evidence);
+
+        let serialized = serde_json::to_value(debug_detail).expect("serialize debug detail");
+
+        assert_eq!(serialized["chunkReferences"].as_array().map(Vec::len), Some(13));
+        assert!(serialized.get("referenceSummary").is_none());
+    }
+
+    #[test]
+    fn session_hydration_projects_references_while_debug_mapping_stays_complete() {
+        let durable_detail = query_execution_detail_with_chunks(13);
+
+        let debug_detail = map_execution_detail(durable_detail.clone());
+        let hydrated_evidence = map_execution_detail_to_evidence(durable_detail);
+
+        assert_eq!(debug_detail.chunk_references.len(), 13);
+        assert!(debug_detail.reference_summary.is_none());
+        assert_eq!(hydrated_evidence.chunk_references.len(), 12);
+        assert_eq!(
+            hydrated_evidence.reference_summary,
+            Some(ironrag_contracts::assistant::AssistantReferenceSummary {
+                total_count: 13,
+                returned_count: 12,
+                truncated: true,
+            })
+        );
+    }
+
+    #[test]
+    fn session_hydration_preserves_typed_clarification_and_candidates() {
+        let mut durable_detail = query_execution_detail_with_chunks(0);
+        let candidate = QueryAnswerCandidate {
+            label: "Neutral variant".to_string(),
+            kind: "document".to_string(),
+            confidence: Some(0.75),
+            provenance: crate::domains::query::QueryAnswerCandidateProvenance::default(),
+        };
+        durable_detail.answer_disposition =
+            crate::domains::query::QueryAnswerDisposition::Clarification;
+        durable_detail.clarification = QueryClarification {
+            required: true,
+            question: Some("Which neutral variant?".to_string()),
+            answer_candidates: vec![candidate],
+        };
+
+        let hydrated = map_execution_detail_to_evidence(durable_detail);
+
+        assert_eq!(
+            hydrated.answer_disposition,
+            ironrag_contracts::assistant::AssistantAnswerDisposition::Clarification,
+        );
+        assert!(hydrated.clarification.required);
+        assert_eq!(hydrated.clarification.question.as_deref(), Some("Which neutral variant?"));
+        assert_eq!(hydrated.clarification.answer_candidates.len(), 1);
+        assert_eq!(hydrated.clarification.answer_candidates[0].label, "Neutral variant");
     }
 
     #[test]

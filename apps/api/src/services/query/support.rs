@@ -1,9 +1,5 @@
 use std::collections::{HashMap, HashSet};
 
-use anyhow::{Context, anyhow};
-use serde::{Deserialize, Serialize};
-use uuid::Uuid;
-
 use crate::{
     domains::query::{
         ContextAssemblyMetadata, ContextAssemblyStatus, GroupedReference, GroupedReferenceKind,
@@ -11,18 +7,15 @@ use crate::{
         RuntimeQueryMode,
     },
     domains::query_ir::QueryIR,
-    services::query::{
-        error::QueryServiceError,
-        planner::{derive_lexical_lane_keywords, extract_keywords},
-    },
+    services::query::planner::{derive_lexical_lane_keywords, extract_keywords},
 };
+use serde::{Deserialize, Serialize};
+use thiserror::Error;
 
 #[derive(Debug, Clone)]
-pub struct IntentResolutionRequest {
-    pub library_id: Uuid,
+pub(crate) struct IntentResolutionRequest {
     pub question: String,
     pub explicit_mode: RuntimeQueryMode,
-    pub source_truth_version: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
@@ -63,17 +56,31 @@ pub struct QueryRerankTaskInput {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
-pub enum QueryRerankFailureCode {
+pub(crate) enum QueryRerankFailureCode {
     InvalidResultLimit,
     DuplicateCandidateId,
 }
 
 impl QueryRerankFailureCode {
     #[must_use]
-    pub const fn as_str(self) -> &'static str {
+    pub(crate) const fn as_str(self) -> &'static str {
         match self {
             Self::InvalidResultLimit => "invalid_result_limit",
             Self::DuplicateCandidateId => "duplicate_candidate_id",
+        }
+    }
+}
+
+#[derive(Debug, Error)]
+enum QueryRerankError {
+    #[error("duplicate rerank candidate id {candidate_id}")]
+    DuplicateCandidateId { candidate_id: String },
+}
+
+impl QueryRerankError {
+    const fn code(&self) -> QueryRerankFailureCode {
+        match self {
+            Self::DuplicateCandidateId { .. } => QueryRerankFailureCode::DuplicateCandidateId,
         }
     }
 }
@@ -87,14 +94,14 @@ pub struct QueryRerankFailure {
 
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
-pub struct ContextAssemblyRequest {
+pub(crate) struct ContextAssemblyRequest {
     pub requested_mode: RuntimeQueryMode,
     pub graph_support_count: usize,
     pub document_support_count: usize,
 }
 
 #[derive(Debug, Clone)]
-pub struct GroupedReferenceCandidate {
+pub(crate) struct GroupedReferenceCandidate {
     pub dedupe_key: String,
     pub kind: GroupedReferenceKind,
     pub rank: usize,
@@ -103,46 +110,38 @@ pub struct GroupedReferenceCandidate {
     pub support_id: String,
 }
 
-pub async fn invalidate_library_source_truth(
-    state: &crate::app::state::AppState,
-    library_id: Uuid,
-) -> Result<i64, QueryServiceError> {
-    let source_truth_version = crate::infra::repositories::touch_library_source_truth_version(
-        &state.persistence.postgres,
-        library_id,
-    )
-    .await
-    .context("failed to touch project source-truth version")?;
-    Ok(source_truth_version)
-}
-
 #[must_use]
-pub fn derive_query_planning_metadata(request: &IntentResolutionRequest) -> QueryPlanningMetadata {
-    let _ = (request.library_id, request.source_truth_version);
+pub(crate) fn derive_query_planning_metadata(
+    request: &IntentResolutionRequest,
+) -> QueryPlanningMetadata {
     derive_planning_metadata(request, QueryIntentCacheStatus::Miss, None)
 }
 
 #[must_use]
-pub fn derive_query_planning_metadata_for_query_ir(
+pub(crate) fn derive_query_planning_metadata_for_query_ir(
     request: &IntentResolutionRequest,
     query_ir: &QueryIR,
 ) -> QueryPlanningMetadata {
-    let _ = (request.library_id, request.source_truth_version);
     derive_planning_metadata(request, QueryIntentCacheStatus::Miss, Some(query_ir))
 }
 
 #[must_use]
-pub fn derive_rerank_metadata(request: &RerankRequest) -> RerankMetadata {
+pub(crate) fn derive_rerank_metadata(request: &RerankRequest) -> RerankMetadata {
     let status =
         if matches!(request.requested_mode, RuntimeQueryMode::Hybrid | RuntimeQueryMode::Mix) {
             RerankStatus::Skipped
         } else {
             RerankStatus::NotApplicable
         };
-    RerankMetadata { status, candidate_count: request.candidate_count, reordered_count: None }
+    RerankMetadata {
+        status,
+        candidate_count: request.candidate_count,
+        reordered_count: None,
+        semantic_rerank: None,
+    }
 }
 
-pub fn rerank_query_candidates(
+pub(crate) fn rerank_query_candidates(
     input: &QueryRerankTaskInput,
 ) -> Result<RerankOutcome, QueryRerankFailure> {
     if input.request.result_limit == 0 {
@@ -162,7 +161,9 @@ pub fn rerank_query_candidates(
 }
 
 #[must_use]
-pub fn assemble_context_metadata(request: &ContextAssemblyRequest) -> ContextAssemblyMetadata {
+pub(crate) fn assemble_context_metadata(
+    request: &ContextAssemblyRequest,
+) -> ContextAssemblyMetadata {
     let (status, warning) = match request.requested_mode {
         RuntimeQueryMode::Document => (ContextAssemblyStatus::DocumentOnly, None),
         RuntimeQueryMode::Local | RuntimeQueryMode::Global => {
@@ -194,7 +195,7 @@ pub fn assemble_context_metadata(request: &ContextAssemblyRequest) -> ContextAss
 }
 
 #[must_use]
-pub fn group_visible_references(
+pub(crate) fn group_visible_references(
     candidates: &[GroupedReferenceCandidate],
     limit: usize,
 ) -> Vec<GroupedReference> {
@@ -276,7 +277,7 @@ fn rerank_candidate_bundle(
     entities: &[RerankCandidate],
     relationships: &[RerankCandidate],
     chunks: &[RerankCandidate],
-) -> anyhow::Result<RerankOutcome> {
+) -> Result<RerankOutcome, QueryRerankError> {
     let candidate_count = entities.len() + relationships.len() + chunks.len();
     if !request.enabled || candidate_count == 0 || candidate_count <= request.result_limit {
         return Ok(RerankOutcome {
@@ -287,6 +288,7 @@ fn rerank_candidate_bundle(
                 status: RerankStatus::Skipped,
                 candidate_count,
                 reordered_count: None,
+                semantic_rerank: None,
             },
         });
     }
@@ -305,6 +307,7 @@ fn rerank_candidate_bundle(
                 status: RerankStatus::Skipped,
                 candidate_count,
                 reordered_count: None,
+                semantic_rerank: None,
             },
         });
     }
@@ -322,6 +325,7 @@ fn rerank_candidate_bundle(
             status: RerankStatus::Applied,
             candidate_count,
             reordered_count: Some(entity_reordered + relationship_reordered + chunk_reordered),
+            semantic_rerank: None,
         },
     })
 }
@@ -339,25 +343,24 @@ pub(crate) fn build_failed_rerank_outcome(
             status: RerankStatus::Failed,
             candidate_count: entities.len() + relationships.len() + chunks.len(),
             reordered_count: None,
+            semantic_rerank: None,
         },
     }
 }
 
-fn map_query_rerank_failure(error: anyhow::Error) -> QueryRerankFailure {
+fn map_query_rerank_failure(error: QueryRerankError) -> QueryRerankFailure {
+    let code = error.code();
     let summary = error.to_string();
-    let code = if summary.contains("duplicate rerank candidate id") {
-        QueryRerankFailureCode::DuplicateCandidateId
-    } else {
-        QueryRerankFailureCode::InvalidResultLimit
-    };
     QueryRerankFailure { code: code.as_str().to_string(), summary }
 }
 
-fn validate_unique_candidate_ids(candidates: &[RerankCandidate]) -> anyhow::Result<()> {
+fn validate_unique_candidate_ids(candidates: &[RerankCandidate]) -> Result<(), QueryRerankError> {
     let mut seen = HashSet::new();
     for candidate in candidates {
         if !seen.insert(candidate.id.as_str()) {
-            return Err(anyhow!("duplicate rerank candidate id {}", candidate.id));
+            return Err(QueryRerankError::DuplicateCandidateId {
+                candidate_id: candidate.id.clone(),
+            });
         }
     }
     Ok(())
@@ -533,6 +536,15 @@ mod tests {
 
         assert_eq!(outcome.metadata.status, RerankStatus::Failed);
         assert_eq!(outcome.entities, vec!["dup".to_string(), "dup".to_string()]);
+    }
+
+    #[test]
+    fn rerank_failure_code_comes_from_the_typed_error_variant() {
+        let failure = map_query_rerank_failure(QueryRerankError::DuplicateCandidateId {
+            candidate_id: "invalid_result_limit".to_string(),
+        });
+
+        assert_eq!(failure.code, QueryRerankFailureCode::DuplicateCandidateId.as_str());
     }
 
     #[test]

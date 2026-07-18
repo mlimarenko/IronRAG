@@ -19,6 +19,7 @@ pub struct OpsAsyncOperationRow {
 }
 
 /// Aggregated child-operation progress for a parent `ops_async_operation`.
+///
 /// Populated via a single grouped count query over `parent_async_operation_id`
 /// — canonical progress source for any batch-ops endpoint.
 #[derive(Debug, Clone, FromRow)]

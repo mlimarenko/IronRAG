@@ -1,3 +1,5 @@
+#![cfg(feature = "test-support")]
+
 #[path = "support/web_ingest_support.rs"]
 mod web_ingest_support;
 
@@ -96,7 +98,8 @@ impl WebIngestSinglePageFixture {
         let redis = redis::Client::open(settings.redis_url.clone())
             .context("failed to build redis client for web_ingest_single_page")?;
         let persistence = Persistence::for_tests(postgres, redis);
-        let state = AppState::from_dependencies(settings, persistence)?;
+        let mut state = AppState::from_dependencies(settings, persistence)?;
+        web_ingest_support::enable_loopback_test_transport(&mut state);
         let workspace = state
             .canonical_services
             .catalog

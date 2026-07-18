@@ -15,11 +15,12 @@ IRONRAG_UI_BOOTSTRAP_ADMIN_* variables written by the local install flow.
 PROVIDER ∈ {openai, deepseek, qwen, gptunnel, openrouter, routerai, minimax}.
 
 Embed fallback: if the chosen provider exposes no embedding catalog
-row, the embed_chunk + query_retrieve bindings are wired through the
-gptunnel text-embedding-3-large model. Providers with native 3072-dim
-embedding presets must use their own embedding lane.
+row, the canonical embed_chunk binding is wired through the gptunnel
+text-embedding-3-large model. Providers with native 3072-dim embedding
+presets must use their own embedding lane.
 
-Writes /tmp/multi-provider-e2e-<provider>.json with the full report.
+Writes the full report to a private, per-run temporary directory. Set
+IRONRAG_E2E_REPORT_DIR to retain it in an operator-controlled directory.
 The smoke is provider-strict for query answering: fallback text can keep
 the product usable, but it is not counted as a successful provider e2e.
 """
@@ -29,6 +30,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+import tempfile
 import time
 import uuid
 from pathlib import Path
@@ -59,49 +61,92 @@ ALPHA_RELAY_QUESTION = (
 )
 REQUIRED_TERMS = ["37", "Delta Ops Queue"]
 
-# Per-provider chat / embedding model preferences. The harness picks the
-# first available preset per role, falling back to gptunnel for embedding
-# when the provider has none.
+OPENAI_SMALL_CHAT_MODEL = "gpt-5.4-mini"
+OPENAI_PRIMARY_CHAT_MODEL = "gpt-5.4"
+OPENAI_LEGACY_SMALL_MODEL = "gpt-4.1-mini"
+OPENAI_MULTIMODAL_SMALL_MODEL = "gpt-4o-mini"
+OPENAI_MULTIMODAL_MODEL = "gpt-4o"
+QWEN_PLUS_MODEL = "qwen3.6-plus"
+QWEN_LEGACY_PLUS_MODEL = "qwen3.5-plus"
+ROUTER_SMALL_OPENAI_MODEL = "openai/gpt-4o-mini"
+ROUTER_SMALL_ANTHROPIC_MODEL = "anthropic/claude-3-haiku"
+ROUTER_OPENAI_MODEL = "openai/gpt-4o"
+ROUTER_ANTHROPIC_MODEL = "anthropic/claude-3.5-sonnet"
+
+# Per-provider model preferences keyed by the public binding contract. The
+# harness picks the first available preset for each canonical purpose.
 PROVIDER_PROFILES: dict[str, dict[str, list[str]]] = {
     "openai": {
-        "chat":      ["gpt-5.4-mini", "gpt-5.4", "gpt-4.1-mini", "gpt-4o-mini"],
-        "answer":    ["gpt-5.4", "gpt-4.1", "gpt-4o"],
-        "vision":    ["gpt-4o", "gpt-4o-mini", "gpt-5.4"],
-        "embedding": ["text-embedding-3-large", "text-embedding-3-small"],
+        "extract_graph": [
+            OPENAI_SMALL_CHAT_MODEL,
+            OPENAI_PRIMARY_CHAT_MODEL,
+            OPENAI_LEGACY_SMALL_MODEL,
+            OPENAI_MULTIMODAL_SMALL_MODEL,
+        ],
+        "embed_chunk": ["text-embedding-3-large", "text-embedding-3-small"],
+        "query_compile": [
+            OPENAI_SMALL_CHAT_MODEL,
+            OPENAI_PRIMARY_CHAT_MODEL,
+            OPENAI_LEGACY_SMALL_MODEL,
+            OPENAI_MULTIMODAL_SMALL_MODEL,
+        ],
+        "query_answer": [OPENAI_PRIMARY_CHAT_MODEL, "gpt-4.1", OPENAI_MULTIMODAL_MODEL],
+        "agent": [OPENAI_PRIMARY_CHAT_MODEL, "gpt-4.1", OPENAI_MULTIMODAL_MODEL],
+        "extract_text": [
+            OPENAI_MULTIMODAL_MODEL,
+            OPENAI_MULTIMODAL_SMALL_MODEL,
+            OPENAI_PRIMARY_CHAT_MODEL,
+        ],
     },
     "deepseek": {
-        "chat":      ["deepseek-v4-flash", "deepseek-chat", "deepseek-v3.2"],
-        "answer":    ["deepseek-v4-pro", "deepseek-reasoner", "deepseek-chat"],
-        "vision":    [],  # deepseek has no vision model; fall back to gptunnel
-        "embedding": [],
+        "extract_graph": ["deepseek-v4-flash", "deepseek-chat", "deepseek-v3.2"],
+        "embed_chunk": [],
+        "query_compile": ["deepseek-v4-flash", "deepseek-chat", "deepseek-v3.2"],
+        "query_answer": ["deepseek-v4-pro", "deepseek-reasoner", "deepseek-chat"],
+        "agent": ["deepseek-v4-pro", "deepseek-reasoner", "deepseek-chat"],
+        "extract_text": [],
     },
     "qwen": {
-        "chat":      ["qwen3.6-plus", "qwen3.5-plus", "qwen-plus"],
-        "answer":    ["qwen3.6-max-preview", "qwen3.6-plus", "qwen3.5-plus"],
-        "vision":    ["qwen3-vl-plus", "qwen-vl-max", "qwen-vl-plus"],
-        "embedding": [],  # qwen native embedding presets are not part of this smoke profile
+        "extract_graph": [QWEN_PLUS_MODEL, QWEN_LEGACY_PLUS_MODEL, "qwen-plus"],
+        "embed_chunk": [],
+        "query_compile": [QWEN_PLUS_MODEL, QWEN_LEGACY_PLUS_MODEL, "qwen-plus"],
+        "query_answer": ["qwen3.6-max-preview", QWEN_PLUS_MODEL, QWEN_LEGACY_PLUS_MODEL],
+        "agent": ["qwen3.6-max-preview", QWEN_PLUS_MODEL, QWEN_LEGACY_PLUS_MODEL],
+        "extract_text": ["qwen3-vl-plus", "qwen-vl-max", "qwen-vl-plus"],
     },
     "gptunnel": {
-        "chat":      ["gpt-4o-mini", "gpt-4.1-mini"],
-        "answer":    ["gpt-4o", "gpt-5.4"],
-        "vision":    ["gpt-4o", "claude-4.6-sonnet", "gemini-3.1-pro"],
-        "embedding": ["text-embedding-3-large"],
+        "extract_graph": [OPENAI_MULTIMODAL_SMALL_MODEL, OPENAI_LEGACY_SMALL_MODEL],
+        "embed_chunk": ["text-embedding-3-large"],
+        "query_compile": [OPENAI_MULTIMODAL_SMALL_MODEL, OPENAI_LEGACY_SMALL_MODEL],
+        "query_answer": [OPENAI_MULTIMODAL_MODEL, OPENAI_PRIMARY_CHAT_MODEL],
+        "agent": [OPENAI_MULTIMODAL_MODEL, OPENAI_PRIMARY_CHAT_MODEL],
+        "extract_text": [OPENAI_MULTIMODAL_MODEL, "claude-4.6-sonnet", "gemini-3.1-pro"],
     },
     "openrouter": {
-        "chat":      ["openai/gpt-4o-mini", "anthropic/claude-3-haiku"],
-        "answer":    ["openai/gpt-4o", "anthropic/claude-3.5-sonnet"],
-        "vision":    ["openai/gpt-4o", "anthropic/claude-3.5-sonnet", "google/gemini-pro-vision"],
-        "embedding": ["openai/text-embedding-3-large", "qwen/qwen3-embedding-8b"],
+        "extract_graph": [ROUTER_SMALL_OPENAI_MODEL, ROUTER_SMALL_ANTHROPIC_MODEL],
+        "embed_chunk": ["openai/text-embedding-3-large", "qwen/qwen3-embedding-8b"],
+        "query_compile": [ROUTER_SMALL_OPENAI_MODEL, ROUTER_SMALL_ANTHROPIC_MODEL],
+        "query_answer": [ROUTER_OPENAI_MODEL, ROUTER_ANTHROPIC_MODEL],
+        "agent": [ROUTER_OPENAI_MODEL, ROUTER_ANTHROPIC_MODEL],
+        "extract_text": [
+            ROUTER_OPENAI_MODEL,
+            ROUTER_ANTHROPIC_MODEL,
+            "google/gemini-pro-vision",
+        ],
     },
     "routerai": {
-        "chat":      ["openai/gpt-4o-mini", "anthropic/claude-3-haiku"],
-        "answer":    ["openai/gpt-4o", "anthropic/claude-3.5-sonnet"],
-        "vision":    ["openai/gpt-4o", "anthropic/claude-3.5-sonnet"],
-        "embedding": ["openai/text-embedding-3-large"],
+        "extract_graph": [ROUTER_SMALL_OPENAI_MODEL, ROUTER_SMALL_ANTHROPIC_MODEL],
+        "embed_chunk": ["openai/text-embedding-3-large"],
+        "query_compile": [ROUTER_SMALL_OPENAI_MODEL, ROUTER_SMALL_ANTHROPIC_MODEL],
+        "query_answer": [ROUTER_OPENAI_MODEL, ROUTER_ANTHROPIC_MODEL],
+        "agent": [ROUTER_OPENAI_MODEL, ROUTER_ANTHROPIC_MODEL],
+        "extract_text": [ROUTER_OPENAI_MODEL, ROUTER_ANTHROPIC_MODEL],
     },
     "minimax": {
-        "chat":      ["MiniMax-M3"],
-        "answer":    [
+        "extract_graph": ["MiniMax-M3"],
+        "embed_chunk": [],
+        "query_compile": ["MiniMax-M3"],
+        "query_answer": [
             "MiniMax-M3",
             "MiniMax-M2.7",
             "MiniMax-M2.7-highspeed",
@@ -111,25 +156,35 @@ PROVIDER_PROFILES: dict[str, dict[str, list[str]]] = {
             "MiniMax-M2.1-highspeed",
             "MiniMax-M2",
         ],
-        "vision":    ["MiniMax-M3"],
-        "embedding": [],
+        "agent": [
+            "MiniMax-M3",
+            "MiniMax-M2.7",
+            "MiniMax-M2.7-highspeed",
+            "MiniMax-M2.5",
+            "MiniMax-M2.5-highspeed",
+            "MiniMax-M2.1",
+            "MiniMax-M2.1-highspeed",
+            "MiniMax-M2",
+        ],
+        "extract_text": ["MiniMax-M3"],
     },
 }
 
-EMBED_FALLBACK_PROVIDER = "gptunnel"
+FALLBACK_PROVIDER = "gptunnel"
 EMBED_FALLBACK_MODELS = ["text-embedding-3-large"]
 
-VISION_FALLBACK_PROVIDER = "gptunnel"
-VISION_FALLBACK_MODELS = ["gpt-4o", "claude-4.6-sonnet", "gemini-3.1-pro"]
+EXTRACT_TEXT_FALLBACK_MODELS = [
+    "gpt-4o",
+    "claude-4.6-sonnet",
+    "gemini-3.1-pro",
+]
 
 # Purposes that may fall back to gptunnel when the chosen provider has
 # no native preset for that role. Embedding falls back only when the provider
-# profile has no compatible native embedding preset. Vision falls back ONLY when the
-# provider profile explicitly opts in by leaving its `vision` list
-# empty (e.g. deepseek, which has no vision API). Providers that DO
-# expose vision must use their own model — silent cross-provider
-# routing is forbidden.
-FALLBACK_PURPOSES = {"embed_chunk", "query_retrieve", "vision"}
+# profile has no compatible native embedding preset. Document understanding
+# falls back only when the profile explicitly declares no multimodal candidate.
+# Providers that do declare one must use their own model.
+FALLBACK_PURPOSES = {"embed_chunk", "extract_text"}
 
 
 def fail(msg: str, ctx=None) -> "no return":
@@ -242,7 +297,11 @@ def pick_preset(presets: list[dict], catalog: list[dict],
     matching = [p for p in presets if p["modelCatalogId"] in valid_model_ids]
     if not matching:
         return None
-    matching.sort(key=lambda p: name_priority.get(catalog_by_id[p["modelCatalogId"]]["modelName"], 999))
+    matching.sort(
+        key=lambda preset: name_priority.get(
+            catalog_by_id[preset["modelCatalogId"]]["modelName"], 999
+        )
+    )
     return matching[0]
 
 
@@ -259,20 +318,6 @@ def create_binding(s: requests.Session, workspace_id: str, library_id: str,
     })
     if r.status_code in (200, 201):
         return r.json()["id"]
-    # `embed_chunk` and `query_retrieve` are auto-paired by the canonical
-    # vector-counterpart sync (see ai_catalog_service::sync_vector_counterpart_binding):
-    # creating either implicitly upserts the partner with the same model.
-    # When that happens the explicit second POST returns 409. Treat that as
-    # success and resolve the existing binding id.
-    if r.status_code == 409 and purpose in {"embed_chunk", "query_retrieve"}:
-        listing = s.get(f"{BASE}/ai/bindings",
-                        params={"libraryId": library_id, "scopeKind": "library"})
-        if listing.status_code == 200:
-            items = listing.json() if isinstance(listing.json(), list) else listing.json().get("items", [])
-            for b in items:
-                if b.get("libraryId") == library_id and b.get("bindingPurpose") == purpose:
-                    print(f"  ↳ {purpose} reused auto-paired binding {b['id']}", flush=True)
-                    return b["id"]
     fail(f"create binding {purpose} status={r.status_code}", r.text[:500])
 
 
@@ -304,7 +349,11 @@ def wait_ingest(s: requests.Session, library_id: str, timeout_s: int = 240) -> d
             queue = metrics.get("queued", 0)
             running = metrics.get("processing", 0)
             failed = metrics.get("failed", 0)
-            print(f"  ingest: ready={ready} queued={queue} processing={running} failed={failed}", flush=True)
+            print(
+                f"  ingest: ready={ready} queued={queue} "
+                f"processing={running} failed={failed}",
+                flush=True,
+            )
             if ready >= 1 and queue == 0 and running == 0:
                 return d
             if failed > 0:
@@ -373,6 +422,252 @@ def verify(answer: dict) -> bool:
     return True
 
 
+def write_report(provider: str, report: dict) -> Path:
+    configured_directory = os.environ.get("IRONRAG_E2E_REPORT_DIR")
+    if configured_directory:
+        report_directory = Path(configured_directory).expanduser().resolve()
+        report_directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+    else:
+        report_directory = Path(tempfile.mkdtemp(prefix="ironrag-provider-e2e-"))
+    report_path = report_directory / f"multi-provider-e2e-{provider}.json"
+    report_path.write_text(json.dumps(report, indent=2, default=str), encoding="utf-8")
+    report_path.chmod(0o600)
+    return report_path
+
+
+def fallback_models_for_purpose(purpose: str) -> list[str]:
+    if purpose == "extract_text":
+        return EXTRACT_TEXT_FALLBACK_MODELS
+    return EMBED_FALLBACK_MODELS
+
+
+def ensure_fallback_credential(
+    session: requests.Session,
+    providers: list[dict],
+    workspace_id: str,
+    credential_id: str | None,
+    provider_catalog_id: str | None,
+) -> tuple[str, str]:
+    if credential_id is not None and provider_catalog_id is not None:
+        return credential_id, provider_catalog_id
+    provider_catalog_id = find_provider_catalog_id(providers, FALLBACK_PROVIDER)
+    credential_id = create_credential(
+        session,
+        FALLBACK_PROVIDER,
+        workspace_id,
+        provider_catalog_id,
+    )
+    return credential_id, provider_catalog_id
+
+
+def resolve_binding_preset(
+    session: requests.Session,
+    provider: str,
+    purpose: str,
+    candidates: list[str],
+    providers: list[dict],
+    presets: list[dict],
+    catalog: list[dict],
+    provider_catalog_id: str,
+    workspace_id: str,
+    credential_id: str,
+    fallback_credential_id: str | None,
+    fallback_provider_catalog_id: str | None,
+) -> tuple[dict, str, str | None, str | None]:
+    preset = (
+        pick_preset(presets, catalog, provider_catalog_id, candidates)
+        if candidates
+        else None
+    )
+    if preset is not None:
+        return preset, credential_id, fallback_credential_id, fallback_provider_catalog_id
+    if purpose not in FALLBACK_PURPOSES:
+        fail(f"no preset for {provider}/{purpose}", candidates)
+
+    fallback_credential_id, fallback_provider_catalog_id = ensure_fallback_credential(
+        session,
+        providers,
+        workspace_id,
+        fallback_credential_id,
+        fallback_provider_catalog_id,
+    )
+    fallback_models = fallback_models_for_purpose(purpose)
+    preset = pick_preset(
+        presets,
+        catalog,
+        fallback_provider_catalog_id,
+        fallback_models,
+    )
+    if preset is None:
+        fail(f"fallback preset missing for {purpose}", fallback_models)
+    print(f"  ↳ {purpose} falls back to {FALLBACK_PROVIDER}", flush=True)
+    return (
+        preset,
+        fallback_credential_id,
+        fallback_credential_id,
+        fallback_provider_catalog_id,
+    )
+
+
+def create_bindings(
+    session: requests.Session,
+    provider: str,
+    profile: dict[str, list[str]],
+    providers: list[dict],
+    presets: list[dict],
+    catalog: list[dict],
+    provider_catalog_id: str,
+    workspace_id: str,
+    library_id: str,
+    credential_id: str,
+) -> list[dict]:
+    bindings: list[dict] = []
+    fallback_credential_id = None
+    fallback_provider_catalog_id = None
+    for purpose, candidates in profile.items():
+        preset, binding_credential_id, fallback_credential_id, fallback_provider_catalog_id = (
+            resolve_binding_preset(
+                session,
+                provider,
+                purpose,
+                candidates,
+                providers,
+                presets,
+                catalog,
+                provider_catalog_id,
+                workspace_id,
+                credential_id,
+                fallback_credential_id,
+                fallback_provider_catalog_id,
+            )
+        )
+        binding_id = create_binding(
+            session,
+            workspace_id,
+            library_id,
+            binding_credential_id,
+            preset["id"],
+            purpose,
+        )
+        bindings.append(
+            {"purpose": purpose, "presetId": preset["id"], "bindingId": binding_id}
+        )
+    return bindings
+
+
+def summarized_provider_calls(provider_calls: list[dict]) -> list[dict]:
+    fields = ("providerKind", "modelName", "callKind", "callState")
+    return [
+        {field: call.get(field) for field in fields}
+        for call in provider_calls
+    ]
+
+
+def build_report(
+    provider: str,
+    provider_catalog_id: str,
+    workspace_id: str,
+    library_id: str,
+    credential_id: str,
+    document_id: str,
+    bindings: list[dict],
+    answer: dict,
+    provider_calls: list[dict],
+) -> dict:
+    response_turn = answer.get("responseTurn") or {}
+    provider_answer_ok = provider_answer_call_present(
+        provider_catalog_id,
+        provider_calls,
+    )
+    return {
+        "provider": provider,
+        "workspaceId": workspace_id,
+        "libraryId": library_id,
+        "credentialId": credential_id,
+        "documentId": document_id,
+        "bindings": bindings,
+        "answerExcerpt": response_turn.get("contentText"),
+        "verificationState": answer.get("verificationState"),
+        "executionId": response_turn.get("executionId"),
+        "providerCalls": summarized_provider_calls(provider_calls),
+        "providerAnswerCallPresent": provider_answer_ok,
+        "passed": verify(answer) and provider_answer_ok,
+    }
+
+
+def report_result(provider: str, report: dict, report_path: Path) -> int:
+    if report["passed"]:
+        print(f"\nPASS [{provider}] — {report_path}", flush=True)
+        return 0
+    if not report["providerAnswerCallPresent"]:
+        print(
+            f"\nFAIL-DEGRADED [{provider}] — query answer used fallback provider/runtime",
+            flush=True,
+        )
+        print(f"  provider calls: {report['providerCalls']}", flush=True)
+        print(f"  report: {report_path}", flush=True)
+        return 1
+
+    print(f"\nFAIL-VERIFY [{provider}] — required terms missing", flush=True)
+    print(f"  excerpt: {report['answerExcerpt']}", flush=True)
+    return 1
+
+
+def run_provider_smoke(provider: str) -> tuple[dict, Path]:
+    profile = PROVIDER_PROFILES[provider]
+    session = requests.Session()
+    session.headers.update({"Content-Type": "application/json"})
+
+    login(session)
+    providers = list_providers(session)
+    provider_catalog_id = find_provider_catalog_id(providers, provider)
+    workspace_id = create_workspace(session, provider)
+    library_id = create_library(session, workspace_id)
+    credential_id = create_credential(
+        session,
+        provider,
+        workspace_id,
+        provider_catalog_id,
+    )
+    presets = list_presets(session)
+    catalog = list_catalog(session)
+    bindings = create_bindings(
+        session,
+        provider,
+        profile,
+        providers,
+        presets,
+        catalog,
+        provider_catalog_id,
+        workspace_id,
+        library_id,
+        credential_id,
+    )
+
+    document_id = upload_doc(session, library_id)
+    print(f"  documentId={document_id}", flush=True)
+    wait_ingest(session, library_id)
+    answer = run_query(session, workspace_id, library_id)
+    execution_id = (answer.get("responseTurn") or {}).get("executionId")
+    provider_calls = (
+        list_query_provider_calls(session, execution_id, providers, catalog)
+        if execution_id
+        else []
+    )
+    report = build_report(
+        provider,
+        provider_catalog_id,
+        workspace_id,
+        library_id,
+        credential_id,
+        document_id,
+        bindings,
+        answer,
+        provider_calls,
+    )
+    return report, write_report(provider, report)
+
+
 def main() -> int:
     if len(sys.argv) != 2:
         print("usage: multi-provider-e2e.py PROVIDER", file=sys.stderr)
@@ -380,113 +675,8 @@ def main() -> int:
     provider = sys.argv[1]
     if provider not in PROVIDER_PROFILES:
         fail(f"unknown provider: {provider}")
-    profile = PROVIDER_PROFILES[provider]
-
-    s = requests.Session()
-    s.headers.update({"Content-Type": "application/json"})
-
-    login(s)
-    providers = list_providers(s)
-    pcid = find_provider_catalog_id(providers, provider)
-    workspace_id = create_workspace(s, provider)
-    library_id = create_library(s, workspace_id)
-    credential_id = create_credential(s, provider, workspace_id, pcid)
-    presets = list_presets(s)
-    catalog = list_catalog(s)
-
-    bindings = []
-    role_to_candidates = {
-        "extract_graph": profile["chat"],
-        "query_compile": profile["chat"],
-        "query_answer":  profile["answer"],
-        "agent":         profile["answer"],
-        "embed_chunk":     profile["embedding"],
-        "query_retrieve":  profile["embedding"],
-        "vision":          profile["vision"],
-    }
-    fallback_credential_id = None
-    fallback_provider_catalog_id = None
-    for purpose, candidates in role_to_candidates.items():
-        preset = pick_preset(presets, catalog, pcid, candidates) if candidates else None
-        cred = credential_id
-        if preset is None:
-            # Fall back to gptunnel when the chosen provider has no native
-            # preset for embedding or vision. Embedding fallback keeps the
-            # smoke runnable for providers without a native embedding lane;
-            # vision binding is required by the extract_graph stage.
-            if purpose not in FALLBACK_PURPOSES:
-                fail(f"no preset for {provider}/{purpose}", candidates)
-            if fallback_credential_id is None:
-                fallback_provider_catalog_id = find_provider_catalog_id(
-                    providers,
-                    EMBED_FALLBACK_PROVIDER,
-                )
-                fallback_credential_id = create_credential(
-                    s, EMBED_FALLBACK_PROVIDER, workspace_id, fallback_provider_catalog_id,
-                )
-            fallback_models = (
-                VISION_FALLBACK_MODELS if purpose == "vision" else EMBED_FALLBACK_MODELS
-            )
-            preset = pick_preset(presets, catalog, fallback_provider_catalog_id,
-                                 fallback_models)
-            if preset is None:
-                fail(f"fallback preset missing for {purpose}", fallback_models)
-            cred = fallback_credential_id
-            print(f"  ↳ {purpose} falls back to {EMBED_FALLBACK_PROVIDER}", flush=True)
-        bid = create_binding(s, workspace_id, library_id, cred, preset["id"], purpose)
-        bindings.append({"purpose": purpose, "presetId": preset["id"], "bindingId": bid})
-
-    document_id = upload_doc(s, library_id)
-    print(f"  documentId={document_id}", flush=True)
-    wait_ingest(s, library_id)
-    answer = run_query(s, workspace_id, library_id)
-    execution_id = (answer.get("responseTurn") or {}).get("executionId")
-    provider_calls = (
-        list_query_provider_calls(s, execution_id, providers, catalog)
-        if execution_id
-        else []
-    )
-    provider_answer_ok = provider_answer_call_present(pcid, provider_calls)
-    passed = verify(answer)
-    out = {
-        "provider": provider,
-        "workspaceId": workspace_id,
-        "libraryId": library_id,
-        "credentialId": credential_id,
-        "documentId": document_id,
-        "bindings": bindings,
-        "answerExcerpt": (answer.get("responseTurn") or {}).get("contentText"),
-        "verificationState": answer.get("verificationState"),
-        "executionId": execution_id,
-        "providerCalls": [
-            {
-                "providerKind": call.get("providerKind"),
-                "modelName": call.get("modelName"),
-                "callKind": call.get("callKind"),
-                "callState": call.get("callState"),
-            }
-            for call in provider_calls
-        ],
-        "providerAnswerCallPresent": provider_answer_ok,
-        "passed": passed and provider_answer_ok,
-    }
-    out_path = Path(f"/tmp/multi-provider-e2e-{provider}.json")
-    out_path.write_text(json.dumps(out, indent=2, default=str))
-    if passed and provider_answer_ok:
-        print(f"\nPASS [{provider}] — {out_path}", flush=True)
-        return 0
-    if not provider_answer_ok:
-        print(
-            f"\nFAIL-DEGRADED [{provider}] — query answer used fallback provider/runtime",
-            flush=True,
-        )
-        print(f"  provider calls: {out['providerCalls']}", flush=True)
-        print(f"  report: {out_path}", flush=True)
-        return 1
-
-    print(f"\nFAIL-VERIFY [{provider}] — required terms missing", flush=True)
-    print(f"  excerpt: {out['answerExcerpt']}", flush=True)
-    return 1
+    report, report_path = run_provider_smoke(provider)
+    return report_result(provider, report, report_path)
 
 
 if __name__ == "__main__":

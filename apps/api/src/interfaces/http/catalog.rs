@@ -1,3 +1,5 @@
+pub mod snapshot;
+
 use axum::{
     Json, Router,
     extract::{Path, State},
@@ -30,6 +32,7 @@ use crate::{
             CatalogDeletionAdmission, CreateLibraryCommand, CreateWorkspaceCommand,
             UpdateLibraryCommand, UpdateLibraryRecognitionPolicyCommand,
             UpdateLibraryRetrievalConfigCommand, UpdateLibraryWebIngestPolicyCommand,
+            UpdateWorkspaceCommand,
         },
         iam::audit::{AppendAuditEventCommand, AppendAuditEventSubjectCommand},
     },
@@ -84,6 +87,18 @@ pub struct CreateCatalogWorkspaceRequest {
     pub display_name: String,
 }
 
+/// Partial update for a workspace. Every field is optional (true PATCH
+/// semantics, unlike [`UpdateCatalogLibraryRequest`] below which still
+/// requires `displayName`) — an absent field leaves the current value
+/// unchanged.
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateCatalogWorkspaceRequest {
+    pub slug: Option<String>,
+    pub display_name: Option<String>,
+    pub lifecycle_state: Option<String>,
+}
+
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct CreateCatalogLibraryRequest {
@@ -125,7 +140,10 @@ pub type UpdateLibraryRetrievalConfigRequest = RetrievalConfig;
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/catalog/workspaces", get(list_workspaces).post(create_workspace))
-        .route("/catalog/workspaces/{workspace_id}", get(get_workspace).delete(delete_workspace))
+        .route(
+            "/catalog/workspaces/{workspace_id}",
+            get(get_workspace).patch(update_workspace).delete(delete_workspace),
+        )
         .route(
             "/catalog/workspaces/{workspace_id}/libraries",
             get(list_libraries).post(create_library),
@@ -144,6 +162,7 @@ pub fn router() -> Router<AppState> {
             "/catalog/libraries/{library_id}/retrieval-config",
             get(get_library_retrieval_config).put(update_library_retrieval_config),
         )
+        .merge(snapshot::routes())
 }
 
 #[tracing::instrument(level = "info", name = "http.list_workspaces", skip_all, fields(item_count))]
@@ -199,6 +218,92 @@ pub async fn get_workspace(
 ) -> Result<Json<CatalogWorkspaceResponse>, ApiError> {
     authorize_workspace_discovery(&auth, workspace_id)?;
     let workspace = state.canonical_services.catalog.get_workspace(&state, workspace_id).await?;
+    Ok(Json(map_workspace(workspace)))
+}
+
+/// Partial update of a workspace's `slug`/`displayName`/`lifecycleState`.
+/// Never existed in any prior version of this API — restricted to system
+/// admins, same authorization boundary as create/delete.
+#[utoipa::path(
+    patch,
+    path = "/v1/catalog/workspaces/{workspaceId}",
+    tag = "catalog",
+    operation_id = "updateCatalogWorkspace",
+    params(("workspaceId" = uuid::Uuid, Path, description = "Workspace identifier")),
+    request_body = UpdateCatalogWorkspaceRequest,
+    responses(
+        (status = 200, description = "Workspace after applying the update", body = CatalogWorkspaceResponse),
+        (status = 400, description = "Invalid lifecycle state"),
+        (status = 401, description = "Caller is not a system administrator"),
+        (status = 404, description = "Workspace not found"),
+    ),
+)]
+#[tracing::instrument(
+    level = "info",
+    name = "http.update_workspace",
+    skip_all,
+    fields(workspace_id = %workspace_id)
+)]
+pub async fn update_workspace(
+    auth: AuthContext,
+    State(state): State<AppState>,
+    request_id: Option<axum::Extension<RequestId>>,
+    Path(workspace_id): Path<Uuid>,
+    Json(payload): Json<UpdateCatalogWorkspaceRequest>,
+) -> Result<Json<CatalogWorkspaceResponse>, ApiError> {
+    let request_id = request_id.map(|value| value.0.0);
+    if !auth.is_system_admin {
+        record_catalog_audit_event(
+            &state,
+            &auth,
+            request_id,
+            "catalog.workspace.update",
+            "rejected",
+            Some("workspace update denied".to_string()),
+            Some(format!("principal {} was denied workspace update", auth.principal_id)),
+            Vec::new(),
+        )
+        .await;
+        return Err(ApiError::Unauthorized);
+    }
+
+    let existing = state.canonical_services.catalog.get_workspace(&state, workspace_id).await?;
+    let lifecycle_state = match payload.lifecycle_state.as_deref() {
+        Some(value) => parse_lifecycle_state_input(value)?,
+        None => existing.lifecycle_state.clone(),
+    };
+    let workspace = state
+        .canonical_services
+        .catalog
+        .update_workspace(
+            &state,
+            UpdateWorkspaceCommand {
+                workspace_id,
+                slug: Some(payload.slug.unwrap_or_else(|| existing.slug.clone())),
+                display_name: payload.display_name.unwrap_or_else(|| existing.display_name.clone()),
+                lifecycle_state,
+            },
+        )
+        .await?;
+
+    record_catalog_audit_event(
+        &state,
+        &auth,
+        request_id,
+        "catalog.workspace.update",
+        "succeeded",
+        Some(format!("workspace {} updated", workspace.display_name)),
+        Some(format!("principal {} updated workspace {}", auth.principal_id, workspace.id)),
+        vec![AppendAuditEventSubjectCommand {
+            subject_kind: "workspace".to_string(),
+            subject_id: workspace.id,
+            workspace_id: Some(workspace.id),
+            library_id: None,
+            document_id: None,
+        }],
+    )
+    .await;
+
     Ok(Json(map_workspace(workspace)))
 }
 
@@ -593,7 +698,7 @@ pub async fn update_library(
     let lifecycle_state = payload
         .lifecycle_state
         .as_deref()
-        .unwrap_or(lifecycle_state_label(&existing.lifecycle_state));
+        .unwrap_or_else(|| lifecycle_state_label(&existing.lifecycle_state));
     let library = state
         .canonical_services
         .catalog

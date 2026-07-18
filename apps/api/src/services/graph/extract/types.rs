@@ -11,7 +11,7 @@ use crate::{
 };
 
 #[derive(Debug, Clone)]
-pub struct GraphExtractionRequest {
+pub(crate) struct GraphExtractionRequest {
     pub library_id: uuid::Uuid,
     pub document: crate::infra::repositories::DocumentRow,
     pub chunk: crate::infra::repositories::ChunkRow,
@@ -30,31 +30,31 @@ pub struct GraphExtractionRequest {
 ///
 /// Empty hints (no prior `sub_type`s observed) render as nothing in the prompt.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq, utoipa::ToSchema)]
-pub struct GraphExtractionSubTypeHints {
+pub(crate) struct GraphExtractionSubTypeHints {
     pub by_node_type: Vec<GraphExtractionSubTypeHintGroup>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, utoipa::ToSchema)]
-pub struct GraphExtractionSubTypeHintGroup {
+pub(crate) struct GraphExtractionSubTypeHintGroup {
     pub node_type: String,
     pub entries: Vec<GraphExtractionSubTypeHintEntry>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, utoipa::ToSchema)]
-pub struct GraphExtractionSubTypeHintEntry {
+pub(crate) struct GraphExtractionSubTypeHintEntry {
     pub sub_type: String,
     pub occurrences: i64,
 }
 
 impl GraphExtractionSubTypeHints {
     #[must_use]
-    pub fn is_empty(&self) -> bool {
+    pub(crate) fn is_empty(&self) -> bool {
         self.by_node_type.iter().all(|group| group.entries.is_empty())
     }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq, utoipa::ToSchema)]
-pub struct GraphExtractionStructuredChunkContext {
+pub(crate) struct GraphExtractionStructuredChunkContext {
     pub chunk_kind: Option<String>,
     pub section_path: Vec<String>,
     pub heading_trail: Vec<String>,
@@ -70,26 +70,26 @@ pub struct GraphExtractionTechnicalFact {
     pub qualifiers: Vec<TechnicalFactQualifier>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, utoipa::ToSchema)]
-pub struct GraphExtractionLifecycle {
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq, utoipa::ToSchema)]
+pub(crate) struct GraphExtractionLifecycle {
     pub revision_id: Option<uuid::Uuid>,
     pub activated_by_attempt_id: Option<uuid::Uuid>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, utoipa::ToSchema)]
-pub struct GraphExtractionResumeHint {
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq, utoipa::ToSchema)]
+pub(crate) struct GraphExtractionResumeHint {
     pub replay_count: usize,
     pub downgrade_level: usize,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, utoipa::ToSchema)]
-pub struct GraphExtractionResumeState {
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, utoipa::ToSchema)]
+pub(crate) struct GraphExtractionResumeState {
     pub resumed_from_checkpoint: bool,
     pub replay_count: usize,
     pub downgrade_level: usize,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, utoipa::ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, utoipa::ToSchema)]
 pub struct GraphEntityCandidate {
     pub label: String,
     pub node_type: RuntimeNodeType,
@@ -98,7 +98,7 @@ pub struct GraphEntityCandidate {
     pub summary: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, utoipa::ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, utoipa::ToSchema)]
 pub struct GraphRelationCandidate {
     pub source_label: String,
     pub target_label: String,
@@ -114,14 +114,14 @@ pub struct GraphExtractionCandidateSet {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
-pub enum GraphExtractionTaskFailureCode {
+pub(crate) enum GraphExtractionTaskFailureCode {
     MalformedOutput,
     InvalidCandidateSet,
 }
 
 impl GraphExtractionTaskFailureCode {
     #[must_use]
-    pub const fn as_str(self) -> &'static str {
+    pub(crate) const fn as_str(self) -> &'static str {
         match self {
             Self::MalformedOutput => "malformed_output",
             Self::InvalidCandidateSet => "invalid_candidate_set",
@@ -137,7 +137,7 @@ pub struct GraphExtractionTaskFailure {
 }
 
 #[derive(Debug, Clone)]
-pub struct GraphExtractionOutcome {
+pub(crate) struct GraphExtractionOutcome {
     pub graph_extraction_id: Option<uuid::Uuid>,
     pub runtime_execution_id: Option<uuid::Uuid>,
     pub provider_kind: String,
@@ -153,7 +153,7 @@ pub struct GraphExtractionOutcome {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
-pub struct GraphExtractionRecoveryRecord {
+pub(crate) struct GraphExtractionRecoveryRecord {
     pub recovery_kind: String,
     pub trigger_reason: String,
     pub status: String,
@@ -162,7 +162,7 @@ pub struct GraphExtractionRecoveryRecord {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
-pub struct GraphExtractionUsageCall {
+pub(crate) struct GraphExtractionUsageCall {
     pub provider_call_no: i32,
     pub provider_attempt_no: i32,
     pub prompt_hash: String,
@@ -173,7 +173,7 @@ pub struct GraphExtractionUsageCall {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, utoipa::ToSchema)]
-pub struct GraphExtractionCallTiming {
+pub(crate) struct GraphExtractionCallTiming {
     pub started_at: DateTime<Utc>,
     pub finished_at: DateTime<Utc>,
     pub elapsed_ms: i64,
@@ -244,7 +244,7 @@ pub(crate) struct GraphExtractionFailureOutcome {
 }
 
 #[derive(Debug, Clone)]
-pub struct GraphExtractionExecutionError {
+pub(crate) struct GraphExtractionExecutionError {
     pub message: String,
     pub request_shape_key: String,
     pub request_size_bytes: usize,

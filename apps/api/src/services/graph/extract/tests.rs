@@ -1,4 +1,4 @@
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use anyhow::Result;
 use async_trait::async_trait;
@@ -20,9 +20,19 @@ use super::session::{
 };
 use super::types::*;
 use crate::{
+    agent_runtime::{
+        default_policy::{DefaultRuntimePolicy, DefaultRuntimePolicyRules},
+        executor::RuntimeExecutor,
+        hooks::{NoopRuntimeHooks, RuntimeHooks},
+        policy::RuntimePolicy,
+        registry::RuntimeTaskRegistry,
+        response::RuntimeTerminalOutcome,
+        task::RuntimeTaskRequest,
+        tasks::graph_extract::{GraphExtractTask, GraphExtractTaskInput},
+    },
     domains::ai::AiBindingPurpose,
     domains::{
-        provider_profiles::{EffectiveProviderProfile, ProviderModelSelection},
+        agent_runtime::{RuntimeExecutionOwner, RuntimeStageKind, RuntimeStageState},
         runtime_graph::RuntimeNodeType,
         runtime_ingestion::RuntimeProviderFailureClass,
     },
@@ -31,12 +41,15 @@ use crate::{
         ChatRequest, ChatResponse, EmbeddingBatchRequest, EmbeddingBatchResponse, EmbeddingRequest,
         EmbeddingResponse, LlmGateway, VisionRequest, VisionResponse,
     },
+    integrations::retry::ProviderCallError,
     services::{
         ai_catalog_service::ResolvedRuntimeBinding,
         ingest::extraction_recovery::ExtractionRecoveryService,
     },
     shared::extraction::technical_facts::TechnicalFactQualifier,
 };
+
+use super::recovery::{make_graph_terminal_failure_outcome, record_graph_runtime_stage};
 
 struct FakeGateway {
     responses: Mutex<Vec<Result<ChatResponse>>>,
@@ -93,35 +106,6 @@ fn sample_chunk() -> ChunkRow {
     }
 }
 
-fn sample_profile() -> EffectiveProviderProfile {
-    EffectiveProviderProfile {
-        indexing: ProviderModelSelection {
-            provider_kind: "provider-alpha".to_string(),
-            model_name: "alpha-chat-mini".to_string(),
-        },
-        embedding: ProviderModelSelection {
-            provider_kind: "provider-alpha".to_string(),
-            model_name: "alpha-embedding-small".to_string(),
-        },
-        query_retrieve: ProviderModelSelection {
-            provider_kind: "provider-alpha".to_string(),
-            model_name: "alpha-embedding-small".to_string(),
-        },
-        query_compile: ProviderModelSelection {
-            provider_kind: "provider-alpha".to_string(),
-            model_name: "alpha-chat-small".to_string(),
-        },
-        answer: ProviderModelSelection {
-            provider_kind: "provider-alpha".to_string(),
-            model_name: "alpha-chat-large".to_string(),
-        },
-        vision: Some(ProviderModelSelection {
-            provider_kind: "provider-alpha".to_string(),
-            model_name: "alpha-vision".to_string(),
-        }),
-    }
-}
-
 fn sample_runtime_binding() -> ResolvedRuntimeBinding {
     ResolvedRuntimeBinding {
         binding_id: uuid::Uuid::now_v7(),
@@ -136,6 +120,7 @@ fn sample_runtime_binding() -> ResolvedRuntimeBinding {
         api_key: Some("test-api-key".to_string()),
         model_catalog_id: uuid::Uuid::now_v7(),
         model_name: "alpha-chat-mini".to_string(),
+        effective_embedding_dimensions: None,
         system_prompt: None,
         temperature: None,
         top_p: None,
@@ -188,6 +173,80 @@ fn oversized_request() -> GraphExtractionRequest {
 }
 
 #[test]
+fn graph_terminal_failure_summary_does_not_persist_diagnostic_text() {
+    let private_diagnostic = "graph-terminal-sentinel-secret-and-private-content";
+    let outcome = make_graph_terminal_failure_outcome(GraphExtractionTaskFailure {
+        code: "graph_extract_failed".to_string(),
+        summary: private_diagnostic.to_string(),
+    });
+
+    let RuntimeTerminalOutcome::Failed { summary, .. } = outcome else {
+        panic!("graph extraction failure must remain a failed terminal outcome");
+    };
+
+    assert_eq!(summary.summary_redacted.as_deref(), Some("graph_extract_failed"));
+    assert!(!summary.summary_redacted.as_deref().unwrap_or_default().contains(private_diagnostic));
+}
+
+#[test]
+fn graph_terminal_policy_failure_does_not_trust_untyped_task_summary() {
+    let private_diagnostic = "forged-policy-sentinel-secret";
+    let outcome = make_graph_terminal_failure_outcome(GraphExtractionTaskFailure {
+        code: "runtime_policy_rejected".to_string(),
+        summary: private_diagnostic.to_string(),
+    });
+
+    let RuntimeTerminalOutcome::Canceled { summary, .. } = outcome else {
+        panic!("graph policy rejection must remain a canceled terminal outcome");
+    };
+
+    assert_eq!(summary.summary_redacted.as_deref(), Some("runtime_policy_rejected"));
+    assert!(!summary.summary_redacted.as_deref().unwrap_or_default().contains(private_diagnostic));
+}
+
+#[tokio::test]
+async fn graph_runtime_stage_failure_summary_does_not_persist_diagnostic_text() {
+    let registry = RuntimeTaskRegistry::default().register_task::<GraphExtractTask>();
+    let policy: Arc<dyn RuntimePolicy> =
+        Arc::new(DefaultRuntimePolicy::new(2_000, DefaultRuntimePolicyRules::default()));
+    let hooks: Arc<dyn RuntimeHooks> = Arc::new(NoopRuntimeHooks);
+    let executor = RuntimeExecutor::new(registry, policy, hooks);
+    let request = RuntimeTaskRequest::<GraphExtractTask>::new(
+        GraphExtractTaskInput {
+            library_id: uuid::Uuid::now_v7(),
+            document_id: uuid::Uuid::now_v7(),
+            chunk_id: uuid::Uuid::now_v7(),
+            revision_id: None,
+            normalized_text: "stage-sentinel-private-content".to_string(),
+            technical_facts: Vec::new(),
+        },
+        RuntimeExecutionOwner::graph_extraction_attempt(uuid::Uuid::now_v7()),
+    );
+    let mut session = executor.seed_session(&request).await.expect("seed graph runtime session");
+    let private_diagnostic = "graph-stage-sentinel-secret-and-private-content";
+    let failure = GraphExtractionTaskFailure {
+        code: "graph_extract_failed".to_string(),
+        summary: private_diagnostic.to_string(),
+    };
+
+    record_graph_runtime_stage(
+        &executor,
+        &mut session,
+        RuntimeStageKind::ExtractGraph,
+        RuntimeStageState::Failed,
+        false,
+        Some(&failure),
+        Some(chrono::Utc::now()),
+    );
+
+    let stage = session.trace.stages.last().expect("failed graph stage record");
+    assert_eq!(stage.failure_summary_redacted.as_deref(), Some("graph_extract_failed"));
+    assert!(
+        !stage.failure_summary_redacted.as_deref().unwrap_or_default().contains(private_diagnostic)
+    );
+}
+
+#[test]
 fn prompt_mentions_json_contract_and_chunk_text() {
     let prompt = build_graph_extraction_prompt(&sample_request());
 
@@ -196,7 +255,10 @@ fn prompt_mentions_json_contract_and_chunk_text() {
     assert!(prompt.contains("annual report graph"));
     assert!(prompt.contains("Chunk kind"));
     assert!(prompt.contains("technical_facts"));
-    assert!(prompt.contains("copied verbatim from this catalog"));
+    assert!(prompt.contains("lowercase ASCII snake_case"));
+    assert!(prompt.contains("Choose a concise `relation_type`"));
+    assert!(!prompt.contains("catalog"));
+    assert!(!prompt.contains("relation=uses"));
     assert!(!prompt.contains("`topic`, or `document`"));
 }
 
@@ -220,9 +282,9 @@ fn downgraded_prompt_plan_reduces_segment_count_and_marks_shape() {
 }
 
 #[test]
-fn response_format_enum_matches_canonical_relation_catalog() {
+fn response_format_constrains_relation_type_by_shape_and_length() {
     let response_format = graph_extraction_response_format();
-    let enum_values = response_format
+    let relation_type_schema = response_format
         .get("json_schema")
         .and_then(|value| value.get("schema"))
         .and_then(|value| value.get("properties"))
@@ -230,13 +292,17 @@ fn response_format_enum_matches_canonical_relation_catalog() {
         .and_then(|value| value.get("items"))
         .and_then(|value| value.get("properties"))
         .and_then(|value| value.get("relation_type"))
-        .and_then(|value| value.get("enum"))
-        .and_then(serde_json::Value::as_array)
-        .expect("relation_type enum");
-    let rendered =
-        enum_values.iter().map(|value| value.as_str().expect("enum string")).collect::<Vec<_>>();
+        .expect("relation_type schema");
 
-    assert_eq!(rendered, crate::services::graph::identity::canonical_relation_type_catalog());
+    assert!(relation_type_schema.get("enum").is_none());
+    assert_eq!(
+        relation_type_schema.get("pattern").and_then(serde_json::Value::as_str),
+        Some(crate::services::graph::identity::RELATION_TYPE_JSON_SCHEMA_PATTERN)
+    );
+    assert_eq!(
+        relation_type_schema.get("maxLength").and_then(serde_json::Value::as_u64),
+        Some(crate::services::graph::identity::RELATION_TYPE_MAX_LENGTH as u64)
+    );
 }
 
 #[test]
@@ -365,7 +431,7 @@ fn recovers_json_object_inside_markdown_fence() {
 }
 
 #[test]
-fn drops_empty_candidates_and_rejects_noncanonical_relation_labels() {
+fn drops_empty_candidates_and_structurally_invalid_relation_types() {
     let normalized = parse_graph_extraction_output(
         r#"{
           "entities": [
@@ -814,24 +880,23 @@ fn keeps_valid_latin1_supplement_pairs_without_repair() {
 }
 
 #[test]
-fn drops_semantically_void_relation_types_at_parse_time() {
+fn keeps_arbitrary_structurally_valid_relation_types_at_parse_time() {
     let normalized = parse_graph_extraction_output(
         r#"{
           "entities": [],
           "relations": [
-            { "source_label": "Alpha", "target_label": "Beta", "relation_type": "unknown" },
-            { "source_label": "Alpha", "target_label": "Beta", "relation_type": "supports" }
+            { "source_label": "Alpha", "target_label": "Beta", "relation_type": "opaque_predicate_7" }
           ]
         }"#,
     )
     .expect("normalize graph extraction");
 
     assert_eq!(normalized.relations.len(), 1);
-    assert_eq!(normalized.relations[0].relation_type, "supports");
+    assert_eq!(normalized.relations[0].relation_type, "opaque_predicate_7");
 }
 
 #[test]
-fn drops_non_canonical_non_ascii_relation_types_at_parse_time() {
+fn drops_non_ascii_relation_types_at_parse_time() {
     let normalized = parse_graph_extraction_output(
         r#"{
           "entities": [],
@@ -1010,7 +1075,6 @@ async fn retries_after_terminal_parse_failure_and_aggregates_usage() {
         &gateway,
         &ExtractionRecoveryService,
         &crate::services::ops::provider_failure::ProviderFailureClassificationService::default(),
-        &sample_profile(),
         &sample_runtime_binding(),
         &sample_request(),
         &CancellationToken::new(),
@@ -1052,12 +1116,11 @@ async fn retries_after_terminal_parse_failure_and_aggregates_usage() {
 
 #[tokio::test]
 async fn retries_upstream_protocol_failures_as_transient_provider_errors() {
+    let source = serde_json::Error::io(std::io::Error::other("opaque response"));
     let gateway = FakeGateway {
         responses: Mutex::new(vec![
-            Err(anyhow::anyhow!(
-                "{}",
-                "provider request failed: provider=provider-alpha status=400 body={\"error\":{\"message\":\"We could not parse the JSON body of your request. The provider API expects a JSON payload.\",\"type\":\"invalid_request_error\"}}"
-            )),
+            Err(anyhow::Error::new(ProviderCallError::json("opaque", source))
+                .context("provider boundary")),
             Ok(ChatResponse {
                 provider_kind: "provider-alpha".to_string(),
                 model_name: "alpha-chat-mini".to_string(),
@@ -1075,7 +1138,6 @@ async fn retries_upstream_protocol_failures_as_transient_provider_errors() {
         &gateway,
         &ExtractionRecoveryService,
         &crate::services::ops::provider_failure::ProviderFailureClassificationService::default(),
-        &sample_profile(),
         &sample_runtime_binding(),
         &sample_request(),
         &CancellationToken::new(),
@@ -1101,10 +1163,12 @@ async fn retries_upstream_protocol_failures_as_transient_provider_errors() {
 async fn retries_transient_upstream_rejections_as_provider_errors() {
     let gateway = FakeGateway {
         responses: Mutex::new(vec![
-            Err(anyhow::anyhow!(
-                "{}",
-                "provider request failed: provider=provider-alpha status=520 body={\"raw_body\":\"error code: 520\"}"
-            )),
+            Err(anyhow::Error::new(ProviderCallError::http_status(
+                "provider-alpha",
+                reqwest::StatusCode::SERVICE_UNAVAILABLE,
+                &reqwest::header::HeaderMap::new(),
+                "opaque",
+            ))),
             Ok(ChatResponse {
                 provider_kind: "provider-alpha".to_string(),
                 model_name: "alpha-chat-mini".to_string(),
@@ -1122,7 +1186,6 @@ async fn retries_transient_upstream_rejections_as_provider_errors() {
         &gateway,
         &ExtractionRecoveryService,
         &crate::services::ops::provider_failure::ProviderFailureClassificationService::default(),
-        &sample_profile(),
         &sample_runtime_binding(),
         &sample_request(),
         &CancellationToken::new(),
@@ -1142,6 +1205,38 @@ async fn retries_transient_upstream_rejections_as_provider_errors() {
         resolved.recovery_attempts.first().map(|attempt| attempt.trigger_reason.as_str()),
         Some("upstream_transient_rejection")
     );
+}
+
+#[tokio::test]
+async fn misleading_untyped_provider_text_is_terminal_without_retry() {
+    let gateway = FakeGateway {
+        responses: Mutex::new(vec![
+            Err(anyhow::anyhow!("provider request failed status=503 timeout connection reset")),
+            Ok(ChatResponse {
+                provider_kind: "provider-alpha".to_string(),
+                model_name: "alpha-chat-mini".to_string(),
+                output_text: r#"{"entities":["Provider Alpha"],"relations":[]}"#.to_string(),
+                usage_json: serde_json::json!({}),
+            }),
+        ]),
+    };
+
+    let failure = resolve_graph_extraction_with_gateway(
+        &gateway,
+        &ExtractionRecoveryService,
+        &crate::services::ops::provider_failure::ProviderFailureClassificationService::default(),
+        &sample_runtime_binding(),
+        &sample_request(),
+        &CancellationToken::new(),
+        true,
+        2,
+        1,
+    )
+    .await
+    .expect_err("untyped text must not trigger provider retry");
+
+    assert!(failure.provider_failure.is_none());
+    assert_eq!(gateway.responses.lock().expect("lock fake responses").len(), 1);
 }
 
 #[test]
@@ -1183,7 +1278,6 @@ async fn fails_after_retry_exhaustion_with_recovery_trace() {
         &gateway,
         &ExtractionRecoveryService,
         &crate::services::ops::provider_failure::ProviderFailureClassificationService::default(),
-        &sample_profile(),
         &sample_runtime_binding(),
         &sample_request(),
         &CancellationToken::new(),

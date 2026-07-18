@@ -35,6 +35,7 @@ pub enum AstIdentifierKind {
 }
 
 /// Parse `source` as `language` and extract named identifiers.
+#[must_use]
 pub fn extract_ast_identifiers(source: &str, language: &str) -> Option<Vec<AstIdentifier>> {
     let tree = parse_source(source, language)?;
     let root = tree.root_node();
@@ -44,6 +45,7 @@ pub fn extract_ast_identifiers(source: &str, language: &str) -> Option<Vec<AstId
 }
 
 /// Returns true if the language is supported by tree-sitter.
+#[must_use]
 pub fn is_supported_language(language: &str) -> bool {
     resolve_language(language).is_some()
 }
@@ -56,7 +58,8 @@ pub fn is_supported_language(language: &str) -> bool {
 /// This is the fallback for fenced code blocks without a language tag
 /// (` ``` ` with no annotation). A keyword pre-filter narrows the
 /// candidate set before the full parse to keep latency bounded — on a
-/// typical 10-line snippet, ≤4 grammars are tried.
+/// typical 10-line snippet, no more than six grammars are tried.
+#[must_use]
 pub fn detect_language(source: &str) -> Option<&'static str> {
     let candidates = prefilter_language_candidates(source);
     let mut best: Option<(&str, usize, usize)> = None; // (lang, identifiers, errors)
@@ -98,7 +101,7 @@ pub fn detect_language(source: &str) -> Option<&'static str> {
 }
 
 fn count_errors(node: Node<'_>) -> usize {
-    let mut errors = if node.is_error() || node.is_missing() { 1 } else { 0 };
+    let mut errors = usize::from(node.is_error() || node.is_missing());
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
         errors += count_errors(child);
@@ -106,86 +109,127 @@ fn count_errors(node: Node<'_>) -> usize {
     errors
 }
 
-/// Quick keyword scan to narrow the grammar search space. Returns
-/// ≤4 candidate language names based on syntax markers.
-fn prefilter_language_candidates(source: &str) -> Vec<&'static str> {
-    let mut candidates = Vec::new();
+type LanguageMarker = (&'static str, fn(&str) -> bool);
 
-    // Python markers
-    if source.contains("def ")
+fn has_python_marker(source: &str) -> bool {
+    source.contains("def ")
         || source.contains("import ")
         || source.contains("class ") && source.contains(":\n")
-    {
-        candidates.push("python");
-    }
-    // Rust markers
-    if source.contains("fn ")
+}
+
+fn has_rust_marker(source: &str) -> bool {
+    source.contains("fn ")
         || source.contains("let ")
         || source.contains("pub ")
         || source.contains("use ")
-    {
-        candidates.push("rust");
-    }
-    // Go markers
-    if source.contains("func ") || source.contains("package ") {
-        candidates.push("go");
-    }
-    // JavaScript/TypeScript
-    if source.contains("const ") || source.contains("function ") || source.contains("=>") {
-        candidates.push("javascript");
-    }
-    if source.contains("interface ") || source.contains(": string") || source.contains(": number") {
-        candidates.push("typescript");
-    }
-    // Java/C#
-    if source.contains("public ") || source.contains("private ") || source.contains("class ") {
-        if source.contains("System.") || source.contains("namespace ") {
-            candidates.push("csharp");
-        } else {
-            candidates.push("java");
-        }
-    }
-    // Bash
-    if source.contains("#!/") || source.contains("export ") || source.contains("echo ") {
-        candidates.push("bash");
-    }
-    // C
-    if source.contains("#include") || (source.contains("int ") && source.contains("(")) {
-        candidates.push("c");
-    }
-    // Ruby
-    if source.contains("end\n") || source.contains("do |") || source.contains("require ") {
-        candidates.push("ruby");
-    }
-    // PHP
-    if source.contains("<?php") || source.contains("$this->") {
-        candidates.push("php");
-    }
-    // Swift
-    if source.contains("let ") && source.contains("var ") || source.contains("guard ") {
-        candidates.push("swift");
-    }
+}
 
-    // Config formats: key: value patterns suggest YAML/TOML
-    if source.lines().any(|l| {
-        let t = l.trim();
-        t.contains(": ") && !t.starts_with('#') && !t.starts_with("//")
-    }) {
-        candidates.push("yaml");
-    }
-    if source.contains("[") && source.lines().any(|l| l.trim().contains(" = ")) {
-        candidates.push("toml");
-    }
-    if source.trim_start().starts_with('{') {
-        candidates.push("json");
-    }
+fn has_go_marker(source: &str) -> bool {
+    source.contains("func ") || source.contains("package ")
+}
 
-    // If no markers matched, try the top 3 most common
+fn has_javascript_marker(source: &str) -> bool {
+    source.contains("const ") || source.contains("function ") || source.contains("=>")
+}
+
+fn has_typescript_marker(source: &str) -> bool {
+    source.contains("interface ") || source.contains(": string") || source.contains(": number")
+}
+
+fn has_bash_marker(source: &str) -> bool {
+    source.contains("#!/") || source.contains("export ") || source.contains("echo ")
+}
+
+fn has_c_marker(source: &str) -> bool {
+    source.contains("#include") || source.contains("int ") && source.contains('(')
+}
+
+fn has_ruby_marker(source: &str) -> bool {
+    source.contains("end\n") || source.contains("do |") || source.contains("require ")
+}
+
+fn has_php_marker(source: &str) -> bool {
+    source.contains("<?php") || source.contains("$this->")
+}
+
+fn has_swift_marker(source: &str) -> bool {
+    source.contains("let ") && source.contains("var ") || source.contains("guard ")
+}
+
+fn has_yaml_marker(source: &str) -> bool {
+    source.lines().any(|line| {
+        let trimmed = line.trim();
+        trimmed.contains(": ") && !trimmed.starts_with('#') && !trimmed.starts_with("//")
+    })
+}
+
+fn has_toml_marker(source: &str) -> bool {
+    source.contains('[') && source.lines().any(|line| line.trim().contains(" = "))
+}
+
+fn has_json_marker(source: &str) -> bool {
+    source.trim_start().starts_with('{')
+}
+
+const LANGUAGE_MARKERS: [LanguageMarker; 13] = [
+    ("python", has_python_marker),
+    ("rust", has_rust_marker),
+    ("go", has_go_marker),
+    ("javascript", has_javascript_marker),
+    ("typescript", has_typescript_marker),
+    ("bash", has_bash_marker),
+    ("c", has_c_marker),
+    ("ruby", has_ruby_marker),
+    ("php", has_php_marker),
+    ("swift", has_swift_marker),
+    ("yaml", has_yaml_marker),
+    ("toml", has_toml_marker),
+    ("json", has_json_marker),
+];
+
+fn push_java_family_candidate(source: &str, candidates: &mut Vec<&'static str>) {
+    if !(source.contains("public ") || source.contains("private ") || source.contains("class ")) {
+        return;
+    }
+    candidates.push(if source.contains("System.") || source.contains("namespace ") {
+        "csharp"
+    } else {
+        "java"
+    });
+}
+
+const JAVA_FAMILY_PRECEDING_MARKERS: usize = 5;
+
+fn append_matching_markers(
+    source: &str,
+    markers: &[LanguageMarker],
+    candidates: &mut Vec<&'static str>,
+) {
+    candidates.extend(
+        markers.iter().filter_map(|(language, matches)| matches(source).then_some(*language)),
+    );
+}
+
+/// Quick keyword scan to narrow the grammar search space. Returns
+/// ≤6 candidate language names based on syntax markers.
+fn prefilter_language_candidates(source: &str) -> Vec<&'static str> {
+    let mut candidates = Vec::new();
+    append_matching_markers(
+        source,
+        &LANGUAGE_MARKERS[..JAVA_FAMILY_PRECEDING_MARKERS],
+        &mut candidates,
+    );
+    push_java_family_candidate(source, &mut candidates);
+    append_matching_markers(
+        source,
+        &LANGUAGE_MARKERS[JAVA_FAMILY_PRECEDING_MARKERS..],
+        &mut candidates,
+    );
+
     if candidates.is_empty() {
         candidates.extend_from_slice(&["python", "javascript", "bash"]);
     }
-
-    candidates.truncate(6); // cap to avoid excessive parsing
+    candidates.truncate(6);
     candidates
 }
 
@@ -232,27 +276,91 @@ fn node_name_text<'a>(node: Node<'_>, source: &'a str) -> Option<&'a str> {
 }
 
 fn push_named(node: Node<'_>, source: &str, kind: AstIdentifierKind, out: &mut Vec<AstIdentifier>) {
-    if let Some(name) = node_name_text(node, source) {
-        if !name.is_empty() && name.len() <= 120 {
-            out.push(AstIdentifier {
-                name: name.to_string(),
-                kind,
-                start_byte: node.start_byte(),
-                end_byte: node.end_byte(),
-            });
-        }
+    if let Some(name) = node_name_text(node, source)
+        && !name.is_empty()
+        && name.len() <= 120
+    {
+        out.push(AstIdentifier {
+            name: name.to_string(),
+            kind,
+            start_byte: node.start_byte(),
+            end_byte: node.end_byte(),
+        });
     }
+}
+
+fn push_node_slice(
+    node: Node<'_>,
+    source: &str,
+    kind: AstIdentifierKind,
+    out: &mut Vec<AstIdentifier>,
+) {
+    let name = &source[node.start_byte()..node.end_byte()];
+    if !name.is_empty() && name.len() <= 120 {
+        out.push(AstIdentifier {
+            name: name.to_string(),
+            kind,
+            start_byte: node.start_byte(),
+            end_byte: node.end_byte(),
+        });
+    }
+}
+
+fn push_function_declarator(node: Node<'_>, source: &str, out: &mut Vec<AstIdentifier>) {
+    if let Some(declarator) = node.child_by_field_name("declarator") {
+        push_node_slice(declarator, source, AstIdentifierKind::Function, out);
+    }
+}
+
+fn push_variable_declarator(node: Node<'_>, source: &str, out: &mut Vec<AstIdentifier>) {
+    let Some(name_node) = node.child_by_field_name("name") else {
+        return;
+    };
+    if name_node.kind() != "identifier" {
+        return;
+    }
+    let is_const = node.parent().is_some_and(|parent| {
+        parent.kind() == "lexical_declaration"
+            && source[parent.start_byte()..node.start_byte()].contains("const")
+    });
+    let kind = if is_const { AstIdentifierKind::Constant } else { AstIdentifierKind::Variable };
+    push_node_slice(name_node, source, kind, out);
+}
+
+fn push_assignment(node: Node<'_>, source: &str, out: &mut Vec<AstIdentifier>) {
+    let Some(left) = node.child_by_field_name("left") else {
+        return;
+    };
+    if left.kind() != "identifier" {
+        return;
+    }
+    let name = &source[left.start_byte()..left.end_byte()];
+    let kind = if name.chars().all(|character| character.is_uppercase() || character == '_') {
+        AstIdentifierKind::Constant
+    } else {
+        AstIdentifierKind::Variable
+    };
+    push_node_slice(left, source, kind, out);
+}
+
+fn push_variable_assignment(node: Node<'_>, source: &str, out: &mut Vec<AstIdentifier>) {
+    let Some(name_node) = node.child_by_field_name("name") else {
+        return;
+    };
+    let name = &source[name_node.start_byte()..name_node.end_byte()];
+    let kind = if name.chars().all(|character| character.is_uppercase() || character == '_') {
+        AstIdentifierKind::EnvVar
+    } else {
+        AstIdentifierKind::Variable
+    };
+    push_node_slice(name_node, source, kind, out);
 }
 
 /// Generic AST walker that dispatches by node kind string. This
 /// covers the common patterns across all C-family and scripting
 /// languages without requiring per-language walkers.
 fn walk_generic(node: Node<'_>, source: &str, language: &str, out: &mut Vec<AstIdentifier>) {
-    let kind = node.kind();
-
-    match kind {
-        // Functions / methods (covers Python, JS, TS, Rust, Go, Java,
-        // C#, PHP, Swift, Scala, C, Ruby)
+    match node.kind() {
         "function_definition"
         | "function_declaration"
         | "method_declaration"
@@ -263,145 +371,40 @@ fn walk_generic(node: Node<'_>, source: &str, language: &str, out: &mut Vec<AstI
         | "singleton_method" => {
             push_named(node, source, AstIdentifierKind::Function, out);
         }
-
-        // Classes (Ruby uses just "class")
         "class_definition" | "class_declaration" | "class_specifier" | "class" => {
             push_named(node, source, AstIdentifierKind::Class, out);
         }
-
-        // C/C++ function declarator — name is in `declarator` field,
-        // not `name` field like other languages.
-        "function_declarator" => {
-            if let Some(declarator) = node.child_by_field_name("declarator") {
-                let name = &source[declarator.start_byte()..declarator.end_byte()];
-                if !name.is_empty() && name.len() <= 120 {
-                    out.push(AstIdentifier {
-                        name: name.to_string(),
-                        kind: AstIdentifierKind::Function,
-                        start_byte: declarator.start_byte(),
-                        end_byte: declarator.end_byte(),
-                    });
-                }
-            }
-        }
-
-        // Structs (Rust, Go, C)
+        "function_declarator" => push_function_declarator(node, source, out),
         "struct_item" | "struct_specifier" => {
             push_named(node, source, AstIdentifierKind::Struct, out);
         }
-        "type_spec" if language == "go" || language == "golang" => {
+        "type_spec" if matches!(language, "go" | "golang") => {
             push_named(node, source, AstIdentifierKind::Struct, out);
         }
-
-        // Enums
         "enum_item" | "enum_declaration" | "enum_specifier" => {
             push_named(node, source, AstIdentifierKind::Enum, out);
         }
-
-        // Interfaces / traits / protocols
         "trait_item" | "interface_declaration" | "protocol_declaration" => {
             push_named(node, source, AstIdentifierKind::Interface, out);
         }
-
-        // Modules
         "mod_item" | "module_declaration" | "package_declaration" => {
             push_named(node, source, AstIdentifierKind::Module, out);
         }
-
-        // Type aliases
         "type_alias_declaration" | "type_item" => {
             push_named(node, source, AstIdentifierKind::Type, out);
         }
-
-        // Variables / constants
-        "variable_declarator" => {
-            if let Some(name_node) = node.child_by_field_name("name") {
-                if name_node.kind() == "identifier" {
-                    let name = &source[name_node.start_byte()..name_node.end_byte()];
-                    let is_const = node.parent().is_some_and(|p| {
-                        let pk = p.kind();
-                        pk == "lexical_declaration"
-                            && source[p.start_byte()..node.start_byte()].contains("const")
-                    });
-                    if !name.is_empty() && name.len() <= 120 {
-                        out.push(AstIdentifier {
-                            name: name.to_string(),
-                            kind: if is_const {
-                                AstIdentifierKind::Constant
-                            } else {
-                                AstIdentifierKind::Variable
-                            },
-                            start_byte: name_node.start_byte(),
-                            end_byte: name_node.end_byte(),
-                        });
-                    }
-                }
-            }
-        }
-
-        // Python / Ruby assignments
-        "assignment" => {
-            if let Some(left) = node.child_by_field_name("left") {
-                if left.kind() == "identifier" {
-                    let name = &source[left.start_byte()..left.end_byte()];
-                    let k = if name.chars().all(|c| c.is_uppercase() || c == '_') {
-                        AstIdentifierKind::Constant
-                    } else {
-                        AstIdentifierKind::Variable
-                    };
-                    if !name.is_empty() && name.len() <= 120 {
-                        out.push(AstIdentifier {
-                            name: name.to_string(),
-                            kind: k,
-                            start_byte: left.start_byte(),
-                            end_byte: left.end_byte(),
-                        });
-                    }
-                }
-            }
-        }
-
-        // Bash variable assignments
-        "variable_assignment" => {
-            if let Some(name_node) = node.child_by_field_name("name") {
-                let name = &source[name_node.start_byte()..name_node.end_byte()];
-                let k = if name.chars().all(|c| c.is_uppercase() || c == '_') {
-                    AstIdentifierKind::EnvVar
-                } else {
-                    AstIdentifierKind::Variable
-                };
-                if !name.is_empty() && name.len() <= 120 {
-                    out.push(AstIdentifier {
-                        name: name.to_string(),
-                        kind: k,
-                        start_byte: name_node.start_byte(),
-                        end_byte: name_node.end_byte(),
-                    });
-                }
-            }
-        }
-
-        // Rust const / static
+        "variable_declarator" => push_variable_declarator(node, source, out),
+        "assignment" => push_assignment(node, source, out),
+        "variable_assignment" => push_variable_assignment(node, source, out),
         "const_item" | "static_item" => {
             push_named(node, source, AstIdentifierKind::Constant, out);
         }
-
-        // Go function — already matched by the generic function_declaration above
-
-        // SQL — CREATE TABLE / CREATE VIEW
-        "create_table_statement" | "create_view_statement" => {
+        "create_table_statement" | "create_view_statement" | "message" | "service" | "rpc" => {
             push_named(node, source, AstIdentifierKind::Type, out);
         }
-
-        // Proto — message / service / rpc
-        "message" | "service" | "rpc" => {
-            push_named(node, source, AstIdentifierKind::Type, out);
-        }
-
         _ => {}
     }
 
-    // Recurse into children
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
         walk_generic(child, source, language, out);
@@ -468,6 +471,16 @@ mod tests {
         let names: Vec<&str> = ids.iter().map(|i| i.name.as_str()).collect();
         assert!(names.contains(&"UserService"), "{names:?}");
         assert!(names.contains(&"createUser"), "{names:?}");
+    }
+
+    #[test]
+    fn java_family_candidates_keep_priority_before_language_cap() {
+        let source = "public class Sample {\n  public void run() {\n    const int count = 1;\n    echo(count);\n  }\n}";
+
+        let candidates = prefilter_language_candidates(source);
+
+        assert!(candidates.contains(&"java"), "{candidates:?}");
+        assert!(candidates.len() <= 6);
     }
 
     #[test]

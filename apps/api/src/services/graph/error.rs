@@ -33,11 +33,31 @@ pub enum GraphServiceError {
 
 impl From<anyhow::Error> for GraphServiceError {
     fn from(error: anyhow::Error) -> Self {
-        let message = error.to_string();
-        match Self::from_message(message) {
-            Self::Internal(_) => Self::Internal(error),
-            classified => classified,
-        }
+        let error = match error.downcast::<Self>() {
+            Ok(error) => return error,
+            Err(error) => error,
+        };
+        let error = match error.downcast::<IngestServiceError>() {
+            Ok(error) => return error.into(),
+            Err(error) => error,
+        };
+        let error = match error.downcast::<QueryServiceError>() {
+            Ok(error) => return error.into(),
+            Err(error) => error,
+        };
+        let error = match error.downcast::<ApiError>() {
+            Ok(error) => return error.into(),
+            Err(error) => error,
+        };
+        let error = match error.downcast::<StageError>() {
+            Ok(error) => return error.into(),
+            Err(error) => error,
+        };
+        let error = match error.downcast::<sqlx::Error>() {
+            Ok(error) => return Self::Repository(error),
+            Err(error) => error,
+        };
+        Self::Internal(error)
     }
 }
 
@@ -55,45 +75,6 @@ impl GraphServiceError {
             Self::Repository(_) => "GraphServiceError::Repository",
             Self::Internal(_) => "GraphServiceError::Internal",
         }
-    }
-
-    #[must_use]
-    pub fn from_message(message: impl Into<String>) -> Self {
-        let message = message.into();
-        let normalized = message.to_ascii_lowercase();
-        if normalized.contains("library") && normalized.contains("not found") {
-            return Self::NotFound { message };
-        }
-        if normalized.contains("not found") {
-            return Self::NotFound { message };
-        }
-        if normalized.contains("graph write contention")
-            || normalized.contains("projection contention")
-            || normalized.contains("deadlock")
-            || normalized.contains("lock timeout")
-        {
-            return Self::WriteContention { message };
-        }
-        if normalized.contains("graph persistence integrity")
-            || normalized.contains("foreign key violation")
-            || normalized.contains("edge persistence skipped because node")
-        {
-            return Self::PersistenceIntegrity { message };
-        }
-        if normalized.contains("provider")
-            || normalized.contains("llm")
-            || normalized.contains("embedding")
-            || normalized.contains("upstream")
-        {
-            return Self::ProviderUnavailable { message };
-        }
-        if normalized.contains("cancelled") || normalized.contains("canceled") {
-            return Self::Cancelled;
-        }
-        if normalized.contains("conflict") || normalized.contains("invalid state") {
-            return Self::StateConflict { message };
-        }
-        Self::Internal(anyhow::anyhow!(message))
     }
 }
 
@@ -150,6 +131,7 @@ impl From<QueryServiceError> for GraphServiceError {
                 Self::ProviderUnavailable { message }
             }
             QueryServiceError::Cancelled => Self::Cancelled,
+            QueryServiceError::DeadlineExceeded => Self::Cancelled,
             QueryServiceError::Repository(error) => Self::Repository(error),
             QueryServiceError::Internal(error) => Self::Internal(error),
         }
@@ -159,5 +141,47 @@ impl From<QueryServiceError> for GraphServiceError {
 impl From<StageError> for GraphServiceError {
     fn from(_: StageError) -> Self {
         Self::Cancelled
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unknown_anyhow_messages_are_always_internal() {
+        for message in [
+            "library not found",
+            "graph write contention",
+            "foreign key violation",
+            "provider unavailable",
+            "operation cancelled",
+            "invalid state conflict",
+        ] {
+            let error = GraphServiceError::from(anyhow::anyhow!(message));
+
+            assert!(matches!(error, GraphServiceError::Internal(_)), "{message}");
+        }
+    }
+
+    #[test]
+    fn anyhow_context_preserves_typed_api_error() {
+        let error = anyhow::Error::new(ApiError::GraphWriteContention("opaque".to_string()))
+            .context("graph boundary failed");
+
+        assert!(matches!(
+            GraphServiceError::from(error),
+            GraphServiceError::WriteContention { message } if message == "opaque"
+        ));
+    }
+
+    #[test]
+    fn anyhow_context_preserves_typed_repository_error() {
+        let error = anyhow::Error::new(sqlx::Error::RowNotFound).context("graph query failed");
+
+        assert!(matches!(
+            GraphServiceError::from(error),
+            GraphServiceError::Repository(sqlx::Error::RowNotFound)
+        ));
     }
 }

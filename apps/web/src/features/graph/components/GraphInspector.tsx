@@ -1,6 +1,6 @@
-import { memo, useMemo, useState, type ReactNode } from 'react';
-import type { TFunction } from 'i18next';
-import { useNavigate } from 'react-router-dom';
+import { memo, useMemo, useState, type ReactNode } from 'react'
+import type { TFunction } from 'i18next'
+import { useNavigate } from 'react-router-dom'
 import {
   AlertTriangle,
   Clipboard,
@@ -13,52 +13,50 @@ import {
   Network,
   Tags,
   X,
-} from 'lucide-react';
-import { toast } from 'sonner';
-import { Button } from '@/shared/components/ui/button';
+} from 'lucide-react'
+import { toast } from 'sonner'
+import { Button } from '@/shared/components/ui/button'
 import {
   Tooltip,
   TooltipContent,
   TooltipProvider,
   TooltipTrigger,
-} from '@/shared/components/ui/tooltip';
-import { compactText } from '@/shared/lib/compactText';
-import { GRAPH_NODE_COLORS } from '@/features/graph/model/config';
-import type { GraphNode } from '@/shared/types';
-import type { GraphAdjacencyIndex } from '@/features/graph/hooks/useGraphAdjacency';
+} from '@/shared/components/ui/tooltip'
+import { compactText } from '@/shared/lib/compactText'
+import { GRAPH_NODE_COLORS } from '@/features/graph/model/config'
+import type { GraphNode } from '@/shared/types'
+import type { GraphAdjacencyIndex } from '@/features/graph/hooks/useGraphAdjacency'
 
-const SUMMARY_PREVIEW_CHARS = 260;
-const NEIGHBOR_FETCH_LIMIT = 32;
-const CONNECTED_ENTITIES_PREVIEW_LIMIT = 18;
-const CONNECTED_CONCEPTS_PREVIEW_LIMIT = 12;
-const SOURCE_DOCUMENTS_PREVIEW_LIMIT = 12;
+const SUMMARY_PREVIEW_CHARS = 260
+const NEIGHBOR_FETCH_LIMIT = 32
+const CONNECTED_ENTITIES_PREVIEW_LIMIT = 18
+const CONNECTED_CONCEPTS_PREVIEW_LIMIT = 12
+const SOURCE_DOCUMENTS_PREVIEW_LIMIT = 12
 
-type GraphInspectorProps = {
-  t: TFunction;
+type GraphInspectorProps = Readonly<{
+  t: TFunction
   /** The canonical selection to render (prefer `selectedDetail` with fallback to list node). */
-  selected: GraphNode;
+  selected: GraphNode
   /** Still loading enriched detail from the backend — shows a spinner in the header. */
-  detailLoading: boolean;
+  detailLoading: boolean
   /** Shared adjacency index so the inspector resolves neighbors in O(k). */
-  adjacency: GraphAdjacencyIndex;
-  detailError?: string;
-  onClose: () => void;
-  onSelectNode: (id: string) => void;
-  onFocusNeighborhood: (id: string) => void;
-};
+  adjacency: GraphAdjacencyIndex
+  detailError?: string
+  onClose: () => void
+  onSelectNode: (id: string) => void
+  onFocusNeighborhood: (id: string) => void
+}>
 
-type InspectorSection = 'neighbors' | 'details' | 'sources';
+type InspectorSection = 'neighbors' | 'details' | 'sources'
 
 type NeighborGroup = {
-  docs: GraphNode[];
-  entities: GraphNode[];
-  concepts: GraphNode[];
-  totalConnections: number;
-};
+  docs: GraphNode[]
+  entities: GraphNode[]
+  concepts: GraphNode[]
+  totalConnections: number
+}
 
-type IconComponent = {
-  (props: { className?: string }): ReactNode;
-};
+type IconComponent = (props: Readonly<{ className?: string }>) => ReactNode
 
 const PROPERTY_LABEL_KEYS = new Map<string, string>([
   ['type', 'graph.propertyLabels.type'],
@@ -71,46 +69,66 @@ const PROPERTY_LABEL_KEYS = new Map<string, string>([
   ['revision', 'graph.propertyLabels.revision'],
   ['activity', 'graph.propertyLabels.activity'],
   ['graphcoverage', 'graph.propertyLabels.graphCoverage'],
-]);
+])
 
 function defaultSectionFor(selected: GraphNode): InspectorSection {
-  return selected.type === 'document' ? 'details' : 'neighbors';
+  return selected.type === 'document' ? 'details' : 'neighbors'
 }
 
 function groupNeighbors(selected: GraphNode, adjacency: GraphAdjacencyIndex): NeighborGroup {
-  const neighborhood = adjacency.neighborhoodOf(selected.id, NEIGHBOR_FETCH_LIMIT);
-  const docs: GraphNode[] = [];
-  const entities: GraphNode[] = [];
-  const concepts: GraphNode[] = [];
+  const neighborhood = adjacency.neighborhoodOf(selected.id, NEIGHBOR_FETCH_LIMIT)
+  const docs: GraphNode[] = []
+  const entities: GraphNode[] = []
+  const concepts: GraphNode[] = []
   for (const node of neighborhood.nodes) {
-    if (node.type === 'document') docs.push(node);
-    else if (node.type === 'concept') concepts.push(node);
-    else entities.push(node);
+    if (node.type === 'document') docs.push(node)
+    else if (node.type === 'concept') concepts.push(node)
+    else entities.push(node)
   }
-  return { docs, entities, concepts, totalConnections: neighborhood.ids.length };
+  return { docs, entities, concepts, totalConnections: neighborhood.ids.length }
 }
 
 function propertyLabel(t: TFunction, key: string): string {
-  const normalized = key.trim().toLowerCase().replace(/[\s_-]+/g, '');
-  const translationKey = PROPERTY_LABEL_KEYS.get(normalized);
-  return translationKey ? t(translationKey) : key;
+  const normalized = key
+    .trim()
+    .toLowerCase()
+    .replace(/[\s_-]+/g, '')
+  const translationKey = PROPERTY_LABEL_KEYS.get(normalized)
+  return translationKey ? t(translationKey) : key
+}
+
+function structuredPropertyValue(value: object): string {
+  try {
+    return JSON.stringify(value) ?? ''
+  } catch {
+    return ''
+  }
+}
+
+function primitivePropertyValue(value: unknown): string {
+  if (value == null) return ''
+  if (typeof value === 'string') return value
+  if (typeof value === 'number' || typeof value === 'boolean' || typeof value === 'bigint') {
+    return String(value)
+  }
+  if (typeof value === 'object') return structuredPropertyValue(value)
+  return ''
 }
 
 function propertyValue(value: unknown): string {
-  if (Array.isArray(value)) return value.map((item) => String(item)).join(', ');
-  if (value == null) return '';
-  return String(value);
+  if (Array.isArray(value)) return value.map(primitivePropertyValue).join(', ')
+  return primitivePropertyValue(value)
 }
 
 function InspectorMetric({
   icon: Icon,
   label,
   value,
-}: {
-  icon: IconComponent;
-  label: string;
-  value: number;
-}) {
+}: Readonly<{
+  icon: IconComponent
+  label: string
+  value: number
+}>) {
   return (
     <div className="min-w-0 rounded-lg border border-border/60 bg-background/45 px-2.5 py-2">
       <div className="flex items-center gap-1.5 section-label">
@@ -119,18 +137,18 @@ function InspectorMetric({
       </div>
       <div className="mt-1 truncate text-sm font-bold tabular-nums text-foreground">{value}</div>
     </div>
-  );
+  )
 }
 
 function InspectorAction({
   children,
   label,
   onClick,
-}: {
-  children: ReactNode;
-  label: string;
-  onClick: () => void;
-}) {
+}: Readonly<{
+  children: ReactNode
+  label: string
+  onClick: () => void
+}>) {
   return (
     <Tooltip>
       <TooltipTrigger asChild>
@@ -148,18 +166,18 @@ function InspectorAction({
       </TooltipTrigger>
       <TooltipContent>{label}</TooltipContent>
     </Tooltip>
-  );
+  )
 }
 
 function SectionButton({
   active,
   label,
   onClick,
-}: {
-  active: boolean;
-  label: string;
-  onClick: () => void;
-}) {
+}: Readonly<{
+  active: boolean
+  label: string
+  onClick: () => void
+}>) {
   return (
     <button
       type="button"
@@ -173,7 +191,7 @@ function SectionButton({
     >
       <span className="block truncate">{label}</span>
     </button>
-  );
+  )
 }
 
 function NeighborList({
@@ -182,14 +200,14 @@ function NeighborList({
   nodes,
   onSelectNode,
   title,
-}: {
-  emptyLabel: string;
-  limit: number;
-  nodes: GraphNode[];
-  onSelectNode: (id: string) => void;
-  title: string;
-}) {
-  const visibleNodes = nodes.slice(0, limit);
+}: Readonly<{
+  emptyLabel: string
+  limit: number
+  nodes: GraphNode[]
+  onSelectNode: (id: string) => void
+  title: string
+}>) {
+  const visibleNodes = nodes.slice(0, limit)
   return (
     <div>
       <div className="mb-1.5 flex items-center justify-between gap-2">
@@ -201,7 +219,7 @@ function NeighborList({
       {visibleNodes.length > 0 ? (
         <div className="space-y-0.5">
           {visibleNodes.map((node) => {
-            const compactLabel = compactText(node.label, 52);
+            const compactLabel = compactText(node.label, 52)
             return (
               <button
                 key={node.id}
@@ -213,7 +231,10 @@ function NeighborList({
                   className="h-2 w-2 shrink-0 rounded-full"
                   style={{ background: GRAPH_NODE_COLORS[node.type] ?? GRAPH_NODE_COLORS.entity }}
                 />
-                <span className="min-w-0 flex-1 truncate font-medium text-foreground" title={compactLabel.fullText}>
+                <span
+                  className="min-w-0 flex-1 truncate font-medium text-foreground"
+                  title={compactLabel.fullText}
+                >
                   {compactLabel.text}
                 </span>
                 {node.edgeCount > 0 && (
@@ -222,19 +243,17 @@ function NeighborList({
                   </span>
                 )}
               </button>
-            );
+            )
           })}
           {nodes.length > limit && (
-            <div className="pl-4 text-xs text-muted-foreground">
-              {emptyLabel}
-            </div>
+            <div className="pl-4 text-xs text-muted-foreground">{emptyLabel}</div>
           )}
         </div>
       ) : (
         <p className="text-xs text-muted-foreground">{emptyLabel}</p>
       )}
     </div>
-  );
+  )
 }
 
 function GraphInspectorImpl({
@@ -247,71 +266,78 @@ function GraphInspectorImpl({
   onSelectNode,
   onFocusNeighborhood,
 }: GraphInspectorProps) {
-  const navigate = useNavigate();
-  const [summaryState, setSummaryState] = useState({ nodeId: selected.id, expanded: false });
+  const navigate = useNavigate()
+  const [summaryState, setSummaryState] = useState({ nodeId: selected.id, expanded: false })
   const [sectionState, setSectionState] = useState<{
-    nodeId: string;
-    section: InspectorSection;
-  }>({ nodeId: selected.id, section: defaultSectionFor(selected) });
+    nodeId: string
+    section: InspectorSection
+  }>({ nodeId: selected.id, section: defaultSectionFor(selected) })
 
   // Re-group neighbors only when the selected node or the adjacency index changes.
   // Typing in the search box or expanding the summary no longer triggers this walk.
   const neighbors = useMemo<NeighborGroup>(
     () => groupNeighbors(selected, adjacency),
     [selected, adjacency],
-  );
+  )
 
-  const summaryExpanded = summaryState.nodeId === selected.id ? summaryState.expanded : false;
+  const summaryExpanded = summaryState.nodeId === selected.id ? summaryState.expanded : false
   const activeSection =
-    sectionState.nodeId === selected.id ? sectionState.section : defaultSectionFor(selected);
+    sectionState.nodeId === selected.id ? sectionState.section : defaultSectionFor(selected)
   const setActiveSection = (section: InspectorSection) => {
-    setSectionState({ nodeId: selected.id, section });
-  };
+    setSectionState({ nodeId: selected.id, section })
+  }
 
-  const summary = selected.summary?.trim() ?? '';
-  const isLongSummary = summary.length > SUMMARY_PREVIEW_CHARS;
+  const summary = selected.summary?.trim() ?? ''
+  const isLongSummary = summary.length > SUMMARY_PREVIEW_CHARS
   const visibleSummary =
     !isLongSummary || summaryExpanded
       ? summary
-      : `${summary.slice(0, SUMMARY_PREVIEW_CHARS).trimEnd()}…`;
+      : `${summary.slice(0, SUMMARY_PREVIEW_CHARS).trimEnd()}…`
 
   const propertyEntries = useMemo(
-    () => Object.entries(selected.properties).map(([key, value]) => [key, propertyValue(value)] as const),
+    () =>
+      Object.entries(selected.properties).map(
+        ([key, value]) => [key, propertyValue(value)] as const,
+      ),
     [selected.properties],
-  );
+  )
 
   const copyNodeLink = () => {
-    if (typeof window === 'undefined') return;
-    const url = new URL(window.location.href);
-    url.searchParams.set('nodeId', selected.id);
-    void navigator.clipboard.writeText(url.toString()).then(() =>
-      toast.success(t('graph.nodeLinkCopied')),
-    );
-  };
+    if (typeof window === 'undefined') return
+    const url = new URL(window.location.href)
+    url.searchParams.set('nodeId', selected.id)
+    void navigator.clipboard
+      .writeText(url.toString())
+      .then(() => toast.success(t('graph.nodeLinkCopied')))
+      .catch(() => toast.error(t('graph.clipboardUnavailable')))
+  }
 
   const copyLabel = () => {
-    void navigator.clipboard.writeText(selected.label).then(() =>
-      toast.success(t('graph.labelCopied')),
-    );
-  };
+    void navigator.clipboard
+      .writeText(selected.label)
+      .then(() => toast.success(t('graph.labelCopied')))
+      .catch(() => toast.error(t('graph.clipboardUnavailable')))
+  }
 
   const askAboutSelected = () => {
-    void (async () => {
-      await navigator.clipboard.writeText(selected.label);
-      toast.info(t('graph.askAboutThisCopied'));
-      void navigate('/assistant');
-    })();
-  };
+    navigator.clipboard
+      .writeText(selected.label)
+      .then(() => {
+        toast.info(t('graph.askAboutThisCopied'))
+        return navigate('/assistant')
+      })
+      .catch(() => toast.error(t('graph.clipboardUnavailable')))
+  }
 
   const moreEntitiesLabel = t('common.moreCount', {
     count: Math.max(0, neighbors.entities.length - CONNECTED_ENTITIES_PREVIEW_LIMIT),
-  });
+  })
   const moreConceptsLabel = t('common.moreCount', {
     count: Math.max(0, neighbors.concepts.length - CONNECTED_CONCEPTS_PREVIEW_LIMIT),
-  });
+  })
   const moreDocumentsLabel = t('common.moreCount', {
     count: Math.max(0, neighbors.docs.length - SOURCE_DOCUMENTS_PREVIEW_LIMIT),
-  });
+  })
 
   return (
     <TooltipProvider delayDuration={180}>
@@ -326,7 +352,9 @@ function GraphInspectorImpl({
               <div className="mb-1 flex items-center gap-2">
                 <span
                   className="h-2.5 w-2.5 shrink-0 rounded-full"
-                  style={{ background: GRAPH_NODE_COLORS[selected.type] ?? GRAPH_NODE_COLORS.entity }}
+                  style={{
+                    background: GRAPH_NODE_COLORS[selected.type] ?? GRAPH_NODE_COLORS.entity,
+                  }}
                 />
                 <span className="truncate section-label">
                   {t(`graph.nodeTypes.${selected.type}`)}
@@ -341,7 +369,9 @@ function GraphInspectorImpl({
               </h3>
             </div>
             <div className="flex shrink-0 items-center gap-1">
-              {detailLoading && <Loader2 className="h-3.5 w-3.5 animate-spin text-muted-foreground" />}
+              {detailLoading && (
+                <Loader2 className="h-3.5 w-3.5 animate-spin text-muted-foreground" />
+              )}
               <Button
                 type="button"
                 variant="ghost"
@@ -358,9 +388,21 @@ function GraphInspectorImpl({
         </div>
 
         <div className="grid grid-cols-3 gap-1.5 border-b border-border/70 px-4 py-2.5 pl-5">
-          <InspectorMetric icon={Network} label={t('graph.connections')} value={neighbors.totalConnections} />
-          <InspectorMetric icon={FileText} label={t('graph.sources')} value={neighbors.docs.length} />
-          <InspectorMetric icon={Tags} label={t('graph.properties')} value={propertyEntries.length} />
+          <InspectorMetric
+            icon={Network}
+            label={t('graph.connections')}
+            value={neighbors.totalConnections}
+          />
+          <InspectorMetric
+            icon={FileText}
+            label={t('graph.sources')}
+            value={neighbors.docs.length}
+          />
+          <InspectorMetric
+            icon={Tags}
+            label={t('graph.properties')}
+            value={propertyEntries.length}
+          />
         </div>
 
         {detailError && (
@@ -377,7 +419,10 @@ function GraphInspectorImpl({
           <InspectorAction label={t('graph.copyNodeLink')} onClick={copyNodeLink}>
             <Link2 className="h-3.5 w-3.5" />
           </InspectorAction>
-          <InspectorAction label={t('graph.focusNeighborhood')} onClick={() => onFocusNeighborhood(selected.id)}>
+          <InspectorAction
+            label={t('graph.focusNeighborhood')}
+            onClick={() => onFocusNeighborhood(selected.id)}
+          >
             <LocateFixed className="h-3.5 w-3.5" />
           </InspectorAction>
           {(selected.type === 'entity' || selected.type === 'concept') && (
@@ -421,7 +466,8 @@ function GraphInspectorImpl({
         <div className="min-h-0 flex-1 overflow-y-auto px-4 py-3 pl-5">
           {activeSection === 'neighbors' && (
             <div className="space-y-4">
-              {neighbors.docs.length + neighbors.entities.length + neighbors.concepts.length === 0 && !detailLoading ? (
+              {neighbors.docs.length + neighbors.entities.length + neighbors.concepts.length ===
+                0 && !detailLoading ? (
                 <p className="text-xs text-muted-foreground">{t('graph.noConnections')}</p>
               ) : (
                 <>
@@ -519,14 +565,18 @@ function GraphInspectorImpl({
               title={t('graph.sourceDocuments')}
               nodes={neighbors.docs}
               limit={SOURCE_DOCUMENTS_PREVIEW_LIMIT}
-              emptyLabel={neighbors.docs.length > SOURCE_DOCUMENTS_PREVIEW_LIMIT ? moreDocumentsLabel : t('graph.noSources')}
+              emptyLabel={
+                neighbors.docs.length > SOURCE_DOCUMENTS_PREVIEW_LIMIT
+                  ? moreDocumentsLabel
+                  : t('graph.noSources')
+              }
               onSelectNode={onSelectNode}
             />
           )}
         </div>
       </div>
     </TooltipProvider>
-  );
+  )
 }
 
-export const GraphInspector = memo(GraphInspectorImpl);
+export const GraphInspector = memo(GraphInspectorImpl)

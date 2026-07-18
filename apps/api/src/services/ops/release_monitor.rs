@@ -95,9 +95,8 @@ async fn fetch_release_update(
     current_version: &str,
     repository: &str,
 ) -> Result<ReleaseUpdateSnapshot, reqwest::Error> {
-    let current = match parse_release_version(current_version) {
-        Some(version) => version,
-        None => return Ok(unknown_release_update(current_version, repository)),
+    let Some(current) = parse_release_version(current_version) else {
+        return Ok(unknown_release_update(current_version, repository));
     };
     let repository_url = release_repository_url(repository);
 

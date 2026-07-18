@@ -106,8 +106,30 @@ pub fn default_web_ingest_crawl_filter() -> WebIngestUrlFilter {
     }
 }
 
+/// Returns the domain-neutral blocklist used by generic web ingestion.
+///
+/// Generic crawl safety is enforced by boundary, depth, and page limits. Product-specific URL
+/// rules belong in an explicit library policy or profile.
 #[must_use]
-pub fn default_web_ingest_crawl_block_patterns() -> Vec<WebIngestPattern> {
+pub const fn default_web_ingest_crawl_block_patterns() -> Vec<WebIngestPattern> {
+    Vec::new()
+}
+
+/// Returns an opt-in policy for crawling Confluence sites.
+#[must_use]
+pub fn confluence_web_ingest_policy() -> WebIngestPolicy {
+    WebIngestPolicy {
+        crawl_filter: WebIngestUrlFilter {
+            allow_patterns: Vec::new(),
+            block_patterns: confluence_web_ingest_crawl_block_patterns(),
+        },
+        materialization_filter: WebIngestUrlFilter::default(),
+    }
+}
+
+/// Returns URL rules that suppress Confluence navigation and administrative surfaces.
+#[must_use]
+pub fn confluence_web_ingest_crawl_block_patterns() -> Vec<WebIngestPattern> {
     [
         ("path_prefix", "/aboutconfluencepage.action"),
         ("path_prefix", "/collector/pages.action"),
@@ -380,6 +402,7 @@ pub enum WebCandidateState {
     Blocked,
     Queued,
     Processing,
+    Materialized,
     Processed,
     Failed,
     Canceled,
@@ -396,6 +419,7 @@ impl WebCandidateState {
             Self::Blocked => "blocked",
             Self::Queued => "queued",
             Self::Processing => "processing",
+            Self::Materialized => "materialized",
             Self::Processed => "processed",
             Self::Failed => "failed",
             Self::Canceled => "canceled",
@@ -559,7 +583,7 @@ pub fn validate_web_run_settings(
         return Err("maxPages must be greater than or equal to 1".to_string());
     }
     if normalized_pages > MAX_WEB_CRAWL_MAX_PAGES {
-        return Err(format!("maxPages must be less than or equal to {MAX_WEB_CRAWL_MAX_PAGES}",));
+        return Err(format!("maxPages must be less than or equal to {MAX_WEB_CRAWL_MAX_PAGES}"));
     }
     Ok(ValidatedWebRunSettings {
         mode: mode.as_str().to_string(),
@@ -619,11 +643,6 @@ pub fn now_if_terminal(run_state: &str) -> Option<DateTime<Utc>> {
 /// # Errors
 ///
 /// Returns an error when the mode is not one of the canonical values.
-/// Parses the canonical web-ingest mode vocabulary.
-///
-/// # Errors
-///
-/// Returns an error when the mode is not one of the canonical values.
 fn parse_mode(mode: &str) -> Result<WebIngestMode, String> {
     match mode {
         "single_page" => Ok(WebIngestMode::SinglePage),
@@ -656,9 +675,9 @@ mod tests {
         MAX_WEB_CRAWL_MAX_PAGES, WebBoundaryPolicy, WebClassificationReason, WebIngestPattern,
         WebIngestPolicy, WebIngestUrlFilter, WebRunCounts, WebRunFailureCode, WebRunState,
         classify_web_crawl_filter_exclusion, classify_web_materialization_filter_exclusion,
-        derive_terminal_run_state, match_web_ingest_pattern, parse_web_boundary_policy,
-        validate_web_boundary_seed_host, validate_web_ingest_policy,
-        validate_web_ingest_url_filter, validate_web_run_settings,
+        confluence_web_ingest_policy, default_web_ingest_policy, derive_terminal_run_state,
+        match_web_ingest_pattern, parse_web_boundary_policy, validate_web_boundary_seed_host,
+        validate_web_ingest_policy, validate_web_ingest_url_filter, validate_web_run_settings,
     };
     use crate::shared::web::url_identity::HostClassification;
 
@@ -681,6 +700,33 @@ mod tests {
         };
         assert_eq!(settings.max_depth, DEFAULT_WEB_CRAWL_DEPTH);
         assert_eq!(settings.max_pages, DEFAULT_WEB_CRAWL_MAX_PAGES);
+    }
+
+    #[test]
+    fn generic_web_ingest_policy_has_no_product_specific_url_rules() {
+        let policy = default_web_ingest_policy();
+
+        assert!(policy.crawl_filter.allow_patterns.is_empty());
+        assert!(policy.crawl_filter.block_patterns.is_empty());
+        assert!(policy.materialization_filter.allow_patterns.is_empty());
+        assert!(policy.materialization_filter.block_patterns.is_empty());
+    }
+
+    #[test]
+    fn confluence_url_rules_are_available_only_through_an_explicit_profile() {
+        let generic_policy = default_web_ingest_policy();
+        let confluence_policy = confluence_web_ingest_policy();
+        let login_url = "https://docs.example.test/login.action";
+
+        assert!(
+            match_web_ingest_pattern(login_url, &generic_policy.crawl_filter.block_patterns)
+                .is_none()
+        );
+        assert!(
+            match_web_ingest_pattern(login_url, &confluence_policy.crawl_filter.block_patterns)
+                .is_some()
+        );
+        assert!(confluence_policy.materialization_filter.block_patterns.is_empty());
     }
 
     #[test]

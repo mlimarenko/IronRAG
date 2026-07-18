@@ -7,6 +7,8 @@ const ALLOWED_PREFIXES: &[&str] = &[
     "apps/api/src/services/*/prompts/**",
     "apps/api/src/services/*/i18n/**",
     "apps/api/src/services/*/locales/**",
+    "apps/api/src/services/**/tests/**",
+    "apps/api/src/services/**/*_tests.rs",
     "apps/api/tests/**",
 ];
 type TestResult = Result<(), Box<dyn std::error::Error>>;

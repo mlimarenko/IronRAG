@@ -3,10 +3,8 @@ use std::{collections::HashMap, sync::Arc};
 use uuid::Uuid;
 
 use crate::{
-    domains::{
-        provider_profiles::{EffectiveProviderProfile, ProviderModelSelection},
-        query::{QueryVerificationState, QueryVerificationWarning, RuntimeQueryMode},
-    },
+    agent_runtime::tasks::query_answer::QueryProviderCall,
+    domains::query::{QueryVerificationState, QueryVerificationWarning, RuntimeQueryMode},
     infra::knowledge_rows::{
         KnowledgeChunkRow, KnowledgeDocumentRow, KnowledgeStructuredBlockRow,
         KnowledgeTechnicalFactRow,
@@ -17,7 +15,6 @@ use crate::{
     services::query::planner::{QueryIntentProfile, RuntimeQueryPlan},
 };
 
-use super::embed::QuestionEmbeddingResult;
 use super::technical_literals::TechnicalLiteralIntent;
 
 #[derive(Debug, Clone, serde::Serialize, utoipa::ToSchema)]
@@ -190,7 +187,6 @@ pub(crate) struct QueryExecutionEnrichment {
 #[derive(Debug, Clone)]
 pub(crate) struct RuntimeStructuredQueryResult {
     pub(crate) planned_mode: RuntimeQueryMode,
-    pub(crate) embedding_usage: Option<QuestionEmbeddingResult>,
     pub(crate) intent_profile: QueryIntentProfile,
     pub(crate) context_text: String,
     pub(crate) technical_literals_text: Option<String>,
@@ -240,47 +236,18 @@ pub(crate) struct QueryChunkReferenceSnapshot {
     pub(crate) score: f64,
 }
 
-/// Structured provenance for a runtime answer candidate. Mirrors
-/// `AssistantAnswerCandidateProvenance` in the contracts crate; every id is
-/// optional because the clarify branches derive candidates from different
-/// evidence shapes (graph entity probe, document variant, label-only).
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct RuntimeAnswerCandidateProvenance {
-    pub entity_id: Option<Uuid>,
-    pub document_id: Option<Uuid>,
-    pub chunk_id: Option<Uuid>,
-}
-
-/// One typed disambiguation choice the clarify path surfaced. `kind` reuses
-/// the existing typed vocabulary (graph `node_type`, or `"document"`). This
-/// is a serialization of structures the clarify branch already computed — no
-/// new retrieval.
-#[derive(Debug, Clone, PartialEq)]
-pub struct RuntimeAnswerCandidate {
-    pub label: String,
-    pub kind: String,
-    pub confidence: Option<f64>,
-    pub provenance: RuntimeAnswerCandidateProvenance,
-}
-
-/// Typed clarification metadata for a grounded-answer turn. `required` is
-/// `true` only when the turn returned a clarifying answer; ordinary answers
-/// carry the default (`required: false`, empty candidates).
-#[derive(Debug, Clone, Default, PartialEq)]
-pub struct RuntimeClarification {
-    pub required: bool,
-    pub question: Option<String>,
-    pub answer_candidates: Vec<RuntimeAnswerCandidate>,
-}
-
 #[derive(Debug, Clone)]
 pub(crate) struct RuntimeAnswerQueryResult {
     pub(crate) answer: String,
-    pub(crate) provider: ProviderModelSelection,
-    pub(crate) usage_json: serde_json::Value,
-    /// Typed clarification metadata for this turn. Default (not a clarify
-    /// turn) for ordinary answers; populated at the clarify branches.
-    pub(crate) clarification: RuntimeClarification,
+    pub(crate) provider_calls: Vec<QueryProviderCall>,
+}
+
+#[derive(Debug)]
+pub(crate) struct RuntimeAnswerQueryFailure {
+    pub(crate) error: anyhow::Error,
+    /// Provider responses completed before verification, snapshot, or other
+    /// post-generation work failed.
+    pub(crate) provider_calls: Vec<QueryProviderCall>,
 }
 
 #[derive(Debug, Clone)]
@@ -290,7 +257,6 @@ pub(crate) struct AnswerGenerationStage {
     pub(crate) canonical_evidence: CanonicalAnswerEvidence,
     pub(crate) assistant_grounding: AssistantGroundingEvidence,
     pub(crate) answer: String,
-    pub(crate) provider: ProviderModelSelection,
     pub(crate) usage_json: serde_json::Value,
     /// Full text that was passed to the LLM as the grounded context. The
     /// verification step uses this to validate that backticked literals in
@@ -325,36 +291,24 @@ pub(crate) struct CanonicalAnswerEvidence {
     pub(crate) technical_facts: Vec<KnowledgeTechnicalFactRow>,
 }
 
-/// Captures the billing-relevant fields of a live QueryCompiler LLM
-/// call. `None` at the call site means the compiler served the IR from
-/// cache, so there is no token usage to bill.
-#[derive(Debug, Clone)]
-pub(crate) struct QueryCompileUsage {
-    pub(crate) provider_kind: String,
-    pub(crate) model_name: String,
-    pub(crate) usage_json: serde_json::Value,
+/// Durable execution correlation for optional semantic-rerank provider calls.
+/// A provider mode is not allowed to start a paid call without this context.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct SemanticRerankExecutionContext {
+    pub(crate) workspace_id: Uuid,
+    pub(crate) query_execution_id: Uuid,
+    pub(crate) runtime_execution_id: Uuid,
 }
 
 #[derive(Debug, Clone)]
 pub(crate) struct PreparedAnswerQueryResult {
     pub(crate) structured: RuntimeStructuredQueryResult,
     pub(crate) answer_context: String,
-    pub(crate) embedding_usage: Option<QuestionEmbeddingResult>,
-    /// Focused-document decision already applied to the retrieval bundle
-    /// before answer context assembly. Answer routing must consume this
-    /// instead of re-inferring focus from the retained tangential tail.
-    pub(crate) consolidation: super::consolidation::ConsolidationDiagnostics,
     /// Canonical typed representation of the user's question produced by
     /// `QueryCompilerService`. Downstream stages (verification, ranking,
     /// answer generation) should read routing signals from this instead
     /// of re-classifying the raw question with keyword lists.
     pub(crate) query_ir: crate::domains::query_ir::QueryIR,
-    /// Billing-relevant usage from the QueryCompiler LLM call, if any.
-    /// `None` when the IR was served from cache. Captured separately
-    /// from `embedding_usage` because the two hit different bindings
-    /// (`QueryCompile` vs `ExtractText`), different models, and
-    /// different per-call costs.
-    pub(crate) query_compile_usage: Option<QueryCompileUsage>,
     /// Fine-grained timed sub-operations (DB queries, retrieval lanes, …)
     /// captured while preparing this query, for the debug inspector. The
     /// caller stashes these by execution_id so the snapshot writer can attach
@@ -482,18 +436,23 @@ pub(crate) struct RuntimeQueryLibraryContext {
 
 #[derive(Debug, Clone)]
 pub(crate) struct RuntimeVectorSearchContext {
-    pub(crate) model_catalog_id: Uuid,
+    pub(crate) embedding_profile_key: String,
+    pub(crate) dimensions: u64,
+    pub(crate) active_vector_generation: i64,
+    pub(crate) source_truth_version: i64,
 }
 
 #[derive(Debug, Clone)]
 pub(crate) struct StructuredQueryPlanningStage {
-    pub(crate) provider_profile: EffectiveProviderProfile,
     pub(crate) planning: crate::domains::query::QueryPlanningMetadata,
     pub(crate) plan: RuntimeQueryPlan,
     pub(crate) technical_literal_intent: TechnicalLiteralIntent,
     pub(crate) question_embedding: Vec<f32>,
     pub(crate) hyde_embedding: Option<Vec<f32>>,
-    pub(crate) embedding_usage: Option<QuestionEmbeddingResult>,
+    /// Request-scoped exact-profile inventory preflight. Both chunk and
+    /// entity ANN lanes consume this same immutable result; neither lane may
+    /// rescan the full vector inventory or infer dimensions independently.
+    pub(crate) vector_search_context: Option<RuntimeVectorSearchContext>,
     pub(crate) graph_index: QueryGraphIndex,
     pub(crate) document_index: HashMap<Uuid, KnowledgeDocumentRow>,
     pub(crate) candidate_limit: usize,
@@ -511,6 +470,9 @@ pub(crate) struct StructuredQueryRetrievalStage {
 pub(crate) struct StructuredQueryRerankStage {
     pub(crate) retrieval: StructuredQueryRetrievalStage,
     pub(crate) rerank: crate::domains::query::RerankMetadata,
+    /// Provider-supplied order for the scored chunk prefix. This sidecar keeps
+    /// semantic rank distinct from the immutable retrieval/provenance score.
+    pub(crate) semantic_chunk_ranks: HashMap<Uuid, usize>,
 }
 
 #[derive(Debug, Clone)]

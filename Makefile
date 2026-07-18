@@ -1,11 +1,14 @@
 DOCKER_COMPOSE ?= docker compose
 DOCKER_COMPOSE_FILE ?= docker-compose.yml
+DOCKER ?= docker
 # Local source-build image names so `compose build` tags `:local` instead of
 # overwriting the published `pipingspace/*:latest` tags (see docker-compose.yml).
 LOCAL_BACKEND_IMAGE ?= ironrag-backend:local
 LOCAL_FRONTEND_IMAGE ?= ironrag-frontend:local
 LOCAL_IMAGE_ENV ?= IRONRAG_BACKEND_IMAGE=$(LOCAL_BACKEND_IMAGE) IRONRAG_FRONTEND_IMAGE=$(LOCAL_FRONTEND_IMAGE)
-LOCAL_DOCKER_APP_SERVICES ?= backend
+LOCAL_DOCKER_BUILD_SERVICES ?= backend frontend
+LOCAL_DOCKER_RUNTIME_SERVICES ?= startup backend worker frontend
+LOCAL_DOCKER_STEADY_SERVICES = $(filter-out startup,$(LOCAL_DOCKER_RUNTIME_SERVICES))
 LOCAL_DOCKER_ALL_SERVICES ?= postgres redis startup backend worker frontend
 export IRONRAG_BACKEND_MEMORY_LIMIT
 export IRONRAG_WORKER_MEMORY_LIMIT
@@ -16,9 +19,16 @@ IRONRAG_GOLDEN_SUITES ?= apps/api/benchmarks/grounded_query/golden_programming_s
 IRONRAG_GOLDEN_OUTPUT_DIR ?= tmp-golden-benchmarks
 IRONRAG_BENCHMARK_OUTPUT_DIR ?= tmp-grounded-benchmarks
 IRONRAG_BENCHMARK_CANONICALIZE_REUSED_LIBRARY ?= 1
+export IRONRAG_SESSION_COOKIE
 IRONRAG_BENCHMARK_LIBRARY_NAME ?= Grounded Benchmark Seed
+IRONRAG_BENCHMARK_BASELINE_DIR ?=
+IRONRAG_BENCHMARK_CANDIDATE_DIR ?=
+IRONRAG_BENCHMARK_MAX_LATENCY_REGRESSION_PERCENT ?= 10
 BACKEND_CARGO_TARGET_DIR ?= $(CURDIR)/.cargo-target/api
-FRONTEND_CARGO_TARGET_DIR ?= $(CURDIR)/.cargo-target/web
+MIGRATION_BASE_REF ?= origin/develop
+GITLEAKS ?= gitleaks
+GITLEAKS_LOG_OPTS ?=
+DUPLICATION_REPORT ?= tmp-duplication/jscpd-summary.json
 
 .PHONY: \
 	backend-fmt \
@@ -29,25 +39,43 @@ FRONTEND_CARGO_TARGET_DIR ?= $(CURDIR)/.cargo-target/web
 	backend-change-gate \
 	backend-audit \
 	backend-deny \
+	backend-unused-deps \
 	backend-audit-strict \
+	architecture-check \
+	blanket-suppression-check \
+	duplication-check \
+	duplication-report \
+	secret-check \
+	static-max \
+	migration-lint-self-test \
+	migration-check \
 	openapi-emit \
 	openapi-check \
 	openapi-coverage \
+	openapi-public-check \
+	frontend-sdk-check \
+	contract-check \
 	frontend-install \
 	frontend-lint \
 	frontend-format-check \
 	frontend-typecheck \
+	frontend-test \
 	frontend-build \
 	frontend-bundle-check \
 	frontend-size-limit \
 	frontend-coverage \
 	frontend-i18n-audit \
+	frontend-color-gate \
 	frontend-deadcode \
+	frontend-swagger-check \
 	frontend-mocks-regen \
 	frontend-e2e \
 	frontend-visual \
 	frontend-check \
+	compose-check \
 	helm-chart-check \
+	mem-budget-check \
+	install-script-check \
 	pre-commit-install \
 	check \
 	check-strict \
@@ -62,6 +90,8 @@ FRONTEND_CARGO_TARGET_DIR ?= $(CURDIR)/.cargo-target/web
 	benchmark-grounded-technical-seed \
 	benchmark-golden \
 	benchmark-golden-seed \
+	benchmark-contract-test \
+	benchmark-regression \
 	docker-local-build \
 	docker-local-rebuild \
 	docker-local-redeploy \
@@ -76,30 +106,77 @@ backend-fmt:
 	cargo fmt --all
 
 backend-build:
-	CARGO_TARGET_DIR="$(BACKEND_CARGO_TARGET_DIR)" cargo build --release -p ironrag-backend --bin ironrag-backend --bin rebuild_runtime_graph
+	CARGO_TARGET_DIR="$(BACKEND_CARGO_TARGET_DIR)" cargo build --release -p ironrag-backend --bins
 
 backend-lint:
-	CARGO_TARGET_DIR="$(BACKEND_CARGO_TARGET_DIR)" cargo clippy -p ironrag-backend --all-targets --all-features -- -D warnings
+	CARGO_TARGET_DIR="$(BACKEND_CARGO_TARGET_DIR)" cargo clippy --workspace --all-targets --all-features -- -D warnings -A clippy::expect_used -A clippy::unwrap_used -A clippy::panic
 
 backend-doc:
-	CARGO_TARGET_DIR="$(BACKEND_CARGO_TARGET_DIR)" cargo doc -p ironrag-backend --no-deps
+	RUSTDOCFLAGS="-D warnings" CARGO_TARGET_DIR="$(BACKEND_CARGO_TARGET_DIR)" cargo doc --workspace --no-deps
 
 backend-test:
-	CARGO_TARGET_DIR="$(BACKEND_CARGO_TARGET_DIR)" cargo test -p ironrag-backend
+	CARGO_TARGET_DIR="$(BACKEND_CARGO_TARGET_DIR)" cargo test --workspace --all-targets --all-features
 
 backend-change-gate:
 	cargo fmt --all --check
-	CARGO_TARGET_DIR="$(BACKEND_CARGO_TARGET_DIR)" cargo check -q -p ironrag-backend
+	CARGO_TARGET_DIR="$(BACKEND_CARGO_TARGET_DIR)" cargo check -q --workspace --all-targets --all-features
 	$(MAKE) openapi-coverage
-	CARGO_TARGET_DIR="$(BACKEND_CARGO_TARGET_DIR)" cargo test -q -p ironrag-backend
+	CARGO_TARGET_DIR="$(BACKEND_CARGO_TARGET_DIR)" cargo test -q --workspace --all-targets --all-features
 
 backend-audit:
-	CARGO_TARGET_DIR="$(BACKEND_CARGO_TARGET_DIR)" cargo audit --ignore RUSTSEC-2023-0071
+	CARGO_TARGET_DIR="$(BACKEND_CARGO_TARGET_DIR)" cargo audit
 
 backend-deny:
 	cargo deny check
 
-backend-audit-strict: backend-audit backend-deny
+backend-unused-deps:
+	cargo machete --with-metadata
+
+backend-audit-strict: backend-audit backend-deny backend-unused-deps
+
+# Keep high-risk service boundaries explicit. This fast source-only gate runs
+# before the compiler so architectural regressions fail with focused messages.
+architecture-check:
+	python3 -m unittest scripts/ops/test_lint_architecture.py
+	python3 scripts/ops/lint_architecture.py
+
+# File-wide suppressions hide debt from every downstream tool. Generated
+# frontend artifacts are excluded only at their exact generation boundaries.
+blanket-suppression-check:
+	python3 -m unittest scripts/ops/test_lint_blanket_suppressions.py
+	python3 scripts/ops/lint_blanket_suppressions.py
+
+# The tracked clone fingerprints are an exact ratchet, not a percentage
+# allowance: new/changed clones fail, while removed clones force the baseline
+# to be tightened immediately.
+duplication-check:
+	python3 -m unittest scripts/ops/test_check_duplication.py
+	cd apps/web && npm run duplication:engine-check
+	python3 scripts/ops/check_duplication.py
+
+duplication-report:
+	python3 scripts/ops/check_duplication.py --copy-report "$(DUPLICATION_REPORT)"
+
+# CI supplies an immutable commit range. Local runs inspect the current Git
+# diff. The complete tracked/non-ignored worktree is always scanned as well, so
+# historical fixtures cannot hide outside the current diff. No finding baseline
+# or inline gitleaks:allow directive is accepted.
+secret-check:
+	python3 -m unittest scripts/ops/test_scan_worktree_secrets.py
+	python3 scripts/ops/scan_worktree_secrets.py --gitleaks "$(GITLEAKS)"
+	@if [ -n "$(GITLEAKS_LOG_OPTS)" ]; then \
+		"$(GITLEAKS)" git --redact --no-banner --no-color --ignore-gitleaks-allow --log-opts="$(GITLEAKS_LOG_OPTS)" .; \
+	else \
+		"$(GITLEAKS)" git --pre-commit --redact --no-banner --no-color --ignore-gitleaks-allow .; \
+	fi
+
+# Keep both the migration policy and its scanner regression fixture executable.
+# CI overrides MIGRATION_BASE_REF with the event's immutable base commit.
+migration-lint-self-test:
+	bash scripts/ops/lint_migrations.sh --self-test
+
+migration-check: migration-lint-self-test
+	bash scripts/ops/lint_migrations.sh --strict --base-ref "$(MIGRATION_BASE_REF)"
 
 # Regenerate the canonical OpenAPI document from the utoipa annotations on
 # Rust handlers and overwrite the committed copy. Run after every public API
@@ -122,29 +199,52 @@ openapi-check:
 openapi-coverage:
 	bash apps/api/scripts/check-openapi-coverage.sh
 
+# The frontend serves a copy of the canonical contract. Keep it byte-identical
+# so users never see an API description different from the backend source.
+openapi-public-check:
+	@cmp -s apps/api/contracts/openapi.gen.yaml apps/web/public/openapi.gen.yaml || { \
+		echo "Frontend OpenAPI copy is stale. Sync apps/web/public/openapi.gen.yaml."; \
+		exit 1; \
+	}
+
+# Regenerate the TypeScript client into a disposable sibling directory and
+# compare it without touching tracked files.
+frontend-sdk-check:
+	@cd apps/web && \
+	  out=$$(mktemp -d src/shared/api/.openapi-check.XXXXXX) && \
+	  trap 'rm -rf "$$out"' EXIT INT TERM && \
+	  ./node_modules/.bin/openapi-ts --output "$$out" --silent --no-log-file && \
+	  node scripts/normalize-generated-sdk.mjs "$$out" && \
+	  diff -ru src/shared/api/generated "$$out"
+
+contract-check: openapi-coverage openapi-check openapi-public-check frontend-sdk-check
+
 frontend-install:
 	cd apps/web && npm ci
 
 frontend-lint:
-	cd apps/web && npx eslint .
+	cd apps/web && ./node_modules/.bin/eslint .
+
+frontend-format-check:
+	cd apps/web && npm run format:check
 
 frontend-typecheck:
-	cd apps/web && npx tsc -b --noEmit
+	cd apps/web && ./node_modules/.bin/tsc --noEmit
 
 frontend-test:
-	cd apps/web && npx vitest run
+	cd apps/web && ./node_modules/.bin/vitest run
 
 frontend-coverage:
 	cd apps/web && npm run test:coverage
 
 frontend-e2e:
-	cd apps/web && npx playwright test
+	cd apps/web && ./node_modules/.bin/playwright test
 
 frontend-visual:
-	cd apps/web && npm run build-storybook && npx playwright test tests/visual
+	cd apps/web && npm run build-storybook && ./node_modules/.bin/playwright test tests/visual
 
 frontend-build:
-	cd apps/web && npx vite build
+	cd apps/web && ./node_modules/.bin/vite build
 
 # Asserts the first-paint chunks stay under their hand-set ceilings. Sprint 7
 # lazy-route work brought main from ~810 KB gzip to ~85 KB gzip; this gate
@@ -172,10 +272,14 @@ frontend-color-gate:
 	fi
 
 frontend-deadcode:
-	cd apps/web && npx knip --reporter compact
+	cd apps/web && ./node_modules/.bin/knip --reporter compact
+	cd apps/web && npm run deadcode:ts-prune
+
+frontend-swagger-check:
+	cd apps/web && npm run swagger:check
 
 # Sprint 5: regenerate apps/web/src/api/mocks/handlers.ts from the canonical
-# OpenAPI doc. Run after `make backend-emit-openapi` whenever endpoints
+# OpenAPI doc. Run after `make openapi-emit` whenever endpoints
 # change. The generator emits one default `http.<method>` per operation
 # returning `HttpResponse.json({})` so MSW always has a seed handler.
 frontend-mocks-regen:
@@ -185,7 +289,13 @@ frontend-mocks-regen:
 # eslint.config.js — Sprint 2d's no-restricted-syntax + the typecheck and
 # bundle-budget gates) keep the gate green; the lint pass tolerates the
 # residual fast-refresh / strict-react-hooks warnings tracked separately.
-frontend-check: frontend-lint frontend-typecheck frontend-color-gate frontend-test frontend-build frontend-bundle-check
+frontend-check: frontend-lint frontend-typecheck frontend-color-gate frontend-i18n-audit frontend-test frontend-swagger-check frontend-build frontend-bundle-check frontend-size-limit
+
+static-max: architecture-check blanket-suppression-check backend-unused-deps frontend-format-check frontend-deadcode duplication-check
+
+# Parse the public example instead of the secret-bearing local `.env`.
+compose-check:
+	$(DOCKER_COMPOSE) --env-file .env.example -f $(DOCKER_COMPOSE_FILE) config --quiet
 
 helm-chart-check:
 	scripts/minikube/render-all.sh
@@ -202,11 +312,13 @@ mem-budget-check:
 # prompts. No Docker or network required.
 install-script-check:
 	bash -n install.sh
+	sh -n apps/api/docker/runtime-entrypoint.sh
 	bash tests/install_wizard.test.sh
+	bash tests/runtime_entrypoint.test.sh
 
-check: backend-change-gate frontend-check helm-chart-check mem-budget-check install-script-check
+check: static-max migration-check backend-change-gate contract-check frontend-check compose-check helm-chart-check mem-budget-check install-script-check benchmark-contract-test
 
-check-strict: backend-change-gate backend-doc frontend-check helm-chart-check mem-budget-check install-script-check
+check-strict: static-max migration-check backend-change-gate backend-lint backend-doc contract-check frontend-check compose-check helm-chart-check mem-budget-check install-script-check benchmark-contract-test
 
 pre-commit-install:
 	pre-commit install --install-hooks
@@ -218,13 +330,12 @@ enterprise-validate:
 audit: backend-audit-strict
 
 benchmark-grounded:
-	@test -n "$(IRONRAG_SESSION_COOKIE)" || (echo "IRONRAG_SESSION_COOKIE is required" && exit 1)
+	@test -n "$$IRONRAG_SESSION_COOKIE" || (echo "IRONRAG_SESSION_COOKIE is required" && exit 1)
 	@test -n "$(IRONRAG_BENCHMARK_WORKSPACE_ID)" || (echo "IRONRAG_BENCHMARK_WORKSPACE_ID is required" && exit 1)
 	@mkdir -p "$(IRONRAG_BENCHMARK_OUTPUT_DIR)"
 	@set -- \
 	  --base-url "$(IRONRAG_BENCHMARK_BASE_URL)" \
 	  --workspace-id "$(IRONRAG_BENCHMARK_WORKSPACE_ID)" \
-	  --session-cookie "$(IRONRAG_SESSION_COOKIE)" \
 	  --strict \
 	  --output-dir "$(IRONRAG_BENCHMARK_OUTPUT_DIR)"; \
 	for suite in $(IRONRAG_BENCHMARK_SUITES); do \
@@ -242,7 +353,7 @@ benchmark-grounded-all:
 	@$(MAKE) benchmark-grounded
 
 benchmark-grounded-seed:
-	@test -n "$(IRONRAG_SESSION_COOKIE)" || (echo "IRONRAG_SESSION_COOKIE is required" && exit 1)
+	@test -n "$$IRONRAG_SESSION_COOKIE" || (echo "IRONRAG_SESSION_COOKIE is required" && exit 1)
 	@test -n "$(IRONRAG_BENCHMARK_WORKSPACE_ID)" || (echo "IRONRAG_BENCHMARK_WORKSPACE_ID is required" && exit 1)
 	@mkdir -p "$(IRONRAG_BENCHMARK_OUTPUT_DIR)"
 	@library_name="$(IRONRAG_BENCHMARK_LIBRARY_NAME)"; \
@@ -252,7 +363,6 @@ benchmark-grounded-seed:
 	set -- \
 	  --base-url "$(IRONRAG_BENCHMARK_BASE_URL)" \
 	  --workspace-id "$(IRONRAG_BENCHMARK_WORKSPACE_ID)" \
-	  --session-cookie "$(IRONRAG_SESSION_COOKIE)" \
 	  --library-name "$$library_name" \
 	  --upload-only \
 	  --output-dir "$(IRONRAG_BENCHMARK_OUTPUT_DIR)"; \
@@ -282,17 +392,36 @@ benchmark-golden:
 benchmark-golden-seed:
 	@$(MAKE) benchmark-grounded-seed IRONRAG_BENCHMARK_SUITES="$(IRONRAG_GOLDEN_SUITES)" IRONRAG_BENCHMARK_OUTPUT_DIR="$(IRONRAG_GOLDEN_OUTPUT_DIR)" IRONRAG_BENCHMARK_LIBRARY_NAME="Golden Benchmark Seed"
 
+benchmark-contract-test:
+	python3 -m unittest discover -s apps/api/benchmarks/grounded_query -p 'test_*.py'
+	python3 -m unittest scripts/bench/test_agent_turn_p95.py
+
+benchmark-regression:
+	@test -n "$(IRONRAG_BENCHMARK_BASELINE_DIR)" || (echo "IRONRAG_BENCHMARK_BASELINE_DIR is required" && exit 1)
+	@test -n "$(IRONRAG_BENCHMARK_CANDIDATE_DIR)" || (echo "IRONRAG_BENCHMARK_CANDIDATE_DIR is required" && exit 1)
+	python3 apps/api/benchmarks/grounded_query/compare_benchmarks.py \
+		"$(IRONRAG_BENCHMARK_BASELINE_DIR)" \
+		"$(IRONRAG_BENCHMARK_CANDIDATE_DIR)" \
+		--max-latency-regression-percent "$(IRONRAG_BENCHMARK_MAX_LATENCY_REGRESSION_PERCENT)"
+
 docker-local-build:
-	$(LOCAL_IMAGE_ENV) $(DOCKER_COMPOSE) -f $(DOCKER_COMPOSE_FILE) build $(LOCAL_DOCKER_APP_SERVICES)
+	$(LOCAL_IMAGE_ENV) $(DOCKER_COMPOSE) -f $(DOCKER_COMPOSE_FILE) build $(LOCAL_DOCKER_BUILD_SERVICES)
 
 docker-local-rebuild:
-	$(LOCAL_IMAGE_ENV) $(DOCKER_COMPOSE) -f $(DOCKER_COMPOSE_FILE) build --no-cache $(LOCAL_DOCKER_APP_SERVICES)
+	$(LOCAL_IMAGE_ENV) $(DOCKER_COMPOSE) -f $(DOCKER_COMPOSE_FILE) build --no-cache $(LOCAL_DOCKER_BUILD_SERVICES)
 
 docker-local-redeploy:
-	-$(LOCAL_IMAGE_ENV) $(DOCKER_COMPOSE) -f $(DOCKER_COMPOSE_FILE) rm -f startup
-	$(LOCAL_IMAGE_ENV) $(DOCKER_COMPOSE) -f $(DOCKER_COMPOSE_FILE) up -d --force-recreate $(LOCAL_DOCKER_APP_SERVICES)
+	$(LOCAL_IMAGE_ENV) $(DOCKER_COMPOSE) -f $(DOCKER_COMPOSE_FILE) stop $(LOCAL_DOCKER_STEADY_SERVICES)
+	$(LOCAL_IMAGE_ENV) $(DOCKER_COMPOSE) -f $(DOCKER_COMPOSE_FILE) up -d --no-deps --no-build --pull never --force-recreate startup
+	@sid="$$( $(LOCAL_IMAGE_ENV) $(DOCKER_COMPOSE) -f $(DOCKER_COMPOSE_FILE) ps -aq startup )"; \
+		test -n "$$sid"; \
+		test "$$( $(DOCKER) wait "$$sid" )" = 0; \
+		test "$$( $(DOCKER) inspect -f '{{.State.ExitCode}}' "$$sid" )" = 0
+	$(LOCAL_IMAGE_ENV) $(DOCKER_COMPOSE) -f $(DOCKER_COMPOSE_FILE) up -d --no-deps --no-build --pull never --force-recreate --wait --wait-timeout 300 $(LOCAL_DOCKER_STEADY_SERVICES)
 
-docker-local-refresh: docker-local-build docker-local-redeploy
+docker-local-refresh:
+	$(MAKE) docker-local-build
+	$(MAKE) docker-local-redeploy
 
 docker-local-up:
 	$(LOCAL_IMAGE_ENV) $(DOCKER_COMPOSE) -f $(DOCKER_COMPOSE_FILE) up -d $(LOCAL_DOCKER_ALL_SERVICES)

@@ -7,6 +7,8 @@ use std::{
 use futures::StreamExt;
 use reqwest::{Client, Url};
 
+pub const PUBLIC_DNS_RESOLUTION_TIMEOUT: Duration = Duration::from_secs(5);
+
 #[derive(Debug, Clone)]
 pub struct ResolvedPublicHttpUrl {
     url: Url,
@@ -16,7 +18,7 @@ pub struct ResolvedPublicHttpUrl {
 
 impl ResolvedPublicHttpUrl {
     #[must_use]
-    pub fn url(&self) -> &Url {
+    pub const fn url(&self) -> &Url {
         &self.url
     }
 }
@@ -26,9 +28,11 @@ pub enum PublicHttpUrlError {
     InvalidUrl(String),
     HttpsRequired,
     ForbiddenScheme(String),
+    CredentialsForbidden,
     MissingHost,
     MissingPort,
-    ResolveFailed(String),
+    ResolveFailed,
+    ResolveTimedOut,
     NoAddresses,
     NonPublicAddress(IpAddr),
     ClientBuildFailed(String),
@@ -55,10 +59,16 @@ impl PublicHttpUrlError {
             Self::InvalidUrl(_)
                 | Self::HttpsRequired
                 | Self::ForbiddenScheme(_)
+                | Self::CredentialsForbidden
                 | Self::MissingHost
                 | Self::MissingPort
                 | Self::NonPublicAddress(_)
         )
+    }
+
+    #[must_use]
+    pub const fn is_retryable_resolution_failure(&self) -> bool {
+        matches!(self, Self::ResolveFailed | Self::ResolveTimedOut | Self::NoAddresses)
     }
 }
 
@@ -70,11 +80,13 @@ impl fmt::Display for PublicHttpUrlError {
             Self::ForbiddenScheme(scheme) => {
                 write!(formatter, "scheme '{scheme}' is not allowed; use http(s)")
             }
+            Self::CredentialsForbidden => formatter.write_str(
+                "must not contain URL credentials; use a protected request header instead",
+            ),
             Self::MissingHost => formatter.write_str("is missing a host component"),
             Self::MissingPort => formatter.write_str("is missing a resolvable port"),
-            Self::ResolveFailed(error) => {
-                write!(formatter, "host could not be resolved: {error}")
-            }
+            Self::ResolveFailed => formatter.write_str("host could not be resolved"),
+            Self::ResolveTimedOut => formatter.write_str("host resolution timed out"),
             Self::NoAddresses => formatter.write_str("host resolved to no addresses"),
             Self::NonPublicAddress(address) => {
                 write!(formatter, "resolves to a non-public address ({address})")
@@ -134,13 +146,18 @@ pub async fn resolve_public_http_url(
         "http" => return Err(PublicHttpUrlError::HttpsRequired),
         scheme => return Err(PublicHttpUrlError::ForbiddenScheme(scheme.to_string())),
     }
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err(PublicHttpUrlError::CredentialsForbidden);
+    }
 
     let host = parsed.host_str().ok_or(PublicHttpUrlError::MissingHost)?.to_string();
     let port = parsed.port_or_known_default().ok_or(PublicHttpUrlError::MissingPort)?;
-    let addresses: Vec<SocketAddr> = tokio::net::lookup_host((host.as_str(), port))
-        .await
-        .map_err(|error| PublicHttpUrlError::ResolveFailed(error.to_string()))?
-        .collect();
+    let addresses: Vec<SocketAddr> = await_dns_resolution(
+        tokio::net::lookup_host((host.as_str(), port)),
+        PUBLIC_DNS_RESOLUTION_TIMEOUT,
+    )
+    .await?
+    .collect();
     if addresses.is_empty() {
         return Err(PublicHttpUrlError::NoAddresses);
     }
@@ -151,6 +168,16 @@ pub async fn resolve_public_http_url(
     }
 
     Ok(ResolvedPublicHttpUrl { url: parsed, host, addresses })
+}
+
+async fn await_dns_resolution<F, T>(lookup: F, timeout: Duration) -> Result<T, PublicHttpUrlError>
+where
+    F: std::future::Future<Output = std::io::Result<T>>,
+{
+    tokio::time::timeout(timeout, lookup)
+        .await
+        .map_err(|_| PublicHttpUrlError::ResolveTimedOut)?
+        .map_err(|_| PublicHttpUrlError::ResolveFailed)
 }
 
 /// Builds a no-redirect HTTP client pinned to addresses returned by
@@ -219,6 +246,83 @@ pub async fn get_public_http_following_redirects(
     Err(PublicHttpUrlError::RedirectLimitExceeded(max_redirects))
 }
 
+/// Integration-test transport for web-ingest suites. Every hop must use
+/// plain HTTP and a literal loopback address, so enabling `test-support`
+/// cannot turn this into a general private-network escape hatch.
+#[cfg(feature = "test-support")]
+pub(crate) async fn get_loopback_test_http_following_redirects(
+    initial_url: &str,
+    max_redirects: usize,
+    timeout: Duration,
+    connect_timeout: Duration,
+    user_agent: Option<&str>,
+) -> Result<reqwest::Response, PublicHttpUrlError> {
+    let mut current_url = Url::parse(initial_url.trim())
+        .map_err(|error| PublicHttpUrlError::InvalidUrl(error.to_string()))?;
+    for redirect_count in 0..=max_redirects {
+        current_url = parse_loopback_test_http_url(current_url.as_str())?;
+        let mut client_builder = Client::builder()
+            .timeout(timeout)
+            .connect_timeout(connect_timeout)
+            .no_proxy()
+            .redirect(reqwest::redirect::Policy::none());
+        if let Some(user_agent) = user_agent.filter(|value| !value.trim().is_empty()) {
+            client_builder = client_builder.user_agent(user_agent.to_string());
+        }
+        let client = client_builder
+            .build()
+            .map_err(|error| PublicHttpUrlError::ClientBuildFailed(error.to_string()))?;
+        let response = crate::observability::inject_trace_context(client.get(current_url.clone()))
+            .send()
+            .await
+            .map_err(|error| PublicHttpUrlError::RequestFailed(error.to_string()))?;
+        if !response.status().is_redirection() {
+            return Ok(response);
+        }
+        if redirect_count >= max_redirects {
+            return Err(PublicHttpUrlError::RedirectLimitExceeded(max_redirects));
+        }
+        let location = response
+            .headers()
+            .get(reqwest::header::LOCATION)
+            .ok_or(PublicHttpUrlError::RedirectMissingLocation)?
+            .to_str()
+            .map_err(|error| PublicHttpUrlError::RedirectInvalidLocation(error.to_string()))?;
+        current_url = current_url
+            .join(location)
+            .map_err(|error| PublicHttpUrlError::RedirectInvalidUrl(error.to_string()))?;
+    }
+    Err(PublicHttpUrlError::RedirectLimitExceeded(max_redirects))
+}
+
+#[cfg(feature = "test-support")]
+fn parse_loopback_test_http_url(raw_url: &str) -> Result<Url, PublicHttpUrlError> {
+    let parsed = Url::parse(raw_url.trim())
+        .map_err(|error| PublicHttpUrlError::InvalidUrl(error.to_string()))?;
+    if parsed.scheme() != "http" {
+        return Err(PublicHttpUrlError::ForbiddenScheme(parsed.scheme().to_string()));
+    }
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err(PublicHttpUrlError::CredentialsForbidden);
+    }
+    let address = match parsed.host().ok_or(PublicHttpUrlError::MissingHost)? {
+        url::Host::Ipv4(address) => IpAddr::V4(address),
+        url::Host::Ipv6(address) => IpAddr::V6(address),
+        url::Host::Domain(_) => {
+            return Err(PublicHttpUrlError::InvalidUrl(
+                "loopback test transport requires a literal IP address".to_string(),
+            ));
+        }
+    };
+    if !address.is_loopback() {
+        return Err(PublicHttpUrlError::InvalidUrl(
+            "loopback test transport rejected a non-loopback address".to_string(),
+        ));
+    }
+    parsed.port_or_known_default().ok_or(PublicHttpUrlError::MissingPort)?;
+    Ok(parsed)
+}
+
 /// Resolves a redirect `Location` relative to `base_url` and validates that the
 /// next hop is public before the caller attempts to connect to it.
 ///
@@ -247,10 +351,10 @@ pub async fn read_response_bytes_with_limit(
     response: reqwest::Response,
     max_bytes: u64,
 ) -> Result<Vec<u8>, PublicHttpUrlError> {
-    if let Some(content_length) = response.content_length() {
-        if content_length > max_bytes {
-            return Err(PublicHttpUrlError::ContentLengthExceeded { content_length, max_bytes });
-        }
+    if let Some(content_length) = response.content_length()
+        && content_length > max_bytes
+    {
+        return Err(PublicHttpUrlError::ContentLengthExceeded { content_length, max_bytes });
     }
     let mut buffer = Vec::new();
     let mut stream = response.bytes_stream();
@@ -338,9 +442,11 @@ mod tests {
 
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
+    #[cfg(feature = "test-support")]
+    use super::parse_loopback_test_http_url;
     use super::{
-        PublicHttpUrlError, ResolvedPublicHttpUrl, build_no_redirect_public_http_client,
-        is_non_public_ip, resolve_redirect_target_url,
+        PublicHttpUrlError, ResolvedPublicHttpUrl, await_dns_resolution,
+        build_no_redirect_public_http_client, is_non_public_ip, resolve_redirect_target_url,
     };
 
     #[test]
@@ -402,6 +508,34 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn outbound_url_rejects_embedded_credentials_before_dns() {
+        let error = super::resolve_public_http_url(
+            "https://user:private-value@not-resolved.invalid/hook",
+            false,
+        )
+        .await
+        .expect_err("URL credentials must be rejected");
+
+        assert_eq!(error, PublicHttpUrlError::CredentialsForbidden);
+        assert!(!error.to_string().contains("private-value"));
+    }
+
+    #[tokio::test]
+    async fn dns_timeout_is_typed_redacted_and_retryable() {
+        let error = await_dns_resolution(
+            std::future::pending::<std::io::Result<()>>(),
+            Duration::from_millis(1),
+        )
+        .await
+        .expect_err("pending resolver must hit its explicit deadline");
+
+        assert_eq!(error, PublicHttpUrlError::ResolveTimedOut);
+        assert!(error.is_retryable_resolution_failure());
+        assert!(!error.is_terminal_policy_rejection());
+        assert_eq!(error.to_string(), "host resolution timed out");
+    }
+
+    #[tokio::test]
     async fn outbound_http_client_does_not_follow_redirects() {
         let listener =
             tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind test listener");
@@ -434,5 +568,24 @@ mod tests {
 
         assert_eq!(response.status(), reqwest::StatusCode::FOUND);
         server.await.expect("test server task");
+    }
+
+    #[cfg(feature = "test-support")]
+    #[test]
+    fn loopback_test_transport_accepts_only_literal_http_loopback_targets() {
+        assert!(parse_loopback_test_http_url("http://127.0.0.1:18080/path").is_ok());
+        assert!(parse_loopback_test_http_url("http://[::1]:18080/path").is_ok());
+
+        for forbidden in [
+            "https://127.0.0.1:18080/path",
+            "http://localhost:18080/path",
+            "http://192.0.2.10:18080/path",
+            "http://user:secret@127.0.0.1:18080/path",
+        ] {
+            assert!(
+                parse_loopback_test_http_url(forbidden).is_err(),
+                "test-only transport must reject {forbidden}"
+            );
+        }
     }
 }

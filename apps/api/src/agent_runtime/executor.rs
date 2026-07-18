@@ -56,8 +56,7 @@ impl RuntimeExecutionSession {
 
     /// # Errors
     /// Returns [`RuntimeExecutionError::TurnBudgetExhausted`] when no model or tool turns remain.
-    #[allow(clippy::missing_const_for_fn)]
-    pub fn consume_turn(&mut self) -> Result<(), RuntimeExecutionError> {
+    pub const fn consume_turn(&mut self) -> Result<(), RuntimeExecutionError> {
         if self.remaining_turns == 0 {
             return Err(RuntimeExecutionError::TurnBudgetExhausted);
         }
@@ -258,7 +257,7 @@ impl RuntimeExecutor {
 
     /// Mark a stage as entered and return the wall-clock moment the
     /// stage actually started. The caller holds on to this timestamp
-    /// and passes it back to [`complete_stage`] so the trace row
+    /// and passes it back to [`Self::complete_stage`] so the trace row
     /// records real elapsed time instead of the old `started_at == completed_at`
     /// zero.
     ///

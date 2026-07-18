@@ -8,16 +8,18 @@
 //!
 //! Ignored by default. Run explicitly when validating the schema:
 //! ```text
-//! IRONRAG_OPENAI_API_KEY=sk-... cargo test -p ironrag-backend \
+//! IRONRAG_AI_PROVIDER_API_KEYS_JSON_B64=<base64-json-map> cargo test -p ironrag-backend \
 //!   --test query_compiler_openai_smoke -- --ignored --nocapture
 //! ```
 
+use base64::{Engine as _, engine::general_purpose::STANDARD};
 use ironrag_backend::domains::ai::AiBindingPurpose;
 use ironrag_backend::integrations::llm::UnifiedGateway;
 use ironrag_backend::services::ai_catalog_service::ResolvedRuntimeBinding;
 use ironrag_backend::services::query::compiler::{CompileHistoryTurn, QueryCompilerService};
 use std::env;
 use uuid::Uuid;
+use zeroize::Zeroize as _;
 
 struct SmokeCase {
     question: &'static str,
@@ -47,7 +49,43 @@ fn cases() -> Vec<SmokeCase> {
 }
 
 fn binding_from_env() -> Option<ResolvedRuntimeBinding> {
-    let api_key = env::var("IRONRAG_OPENAI_API_KEY").ok()?;
+    let mut encoded_provider_keys = env::var("IRONRAG_AI_PROVIDER_API_KEYS_JSON_B64").ok()?;
+    if encoded_provider_keys.is_empty()
+        || encoded_provider_keys != encoded_provider_keys.trim()
+        || encoded_provider_keys.len() > 1_048_576_usize.div_ceil(3) * 4
+    {
+        encoded_provider_keys.zeroize();
+        return None;
+    }
+    let mut decoded_provider_keys = match STANDARD.decode(&encoded_provider_keys) {
+        Ok(decoded) if decoded.len() <= 1_048_576 => decoded,
+        Ok(mut decoded) => {
+            decoded.zeroize();
+            encoded_provider_keys.zeroize();
+            return None;
+        }
+        Err(_) => {
+            encoded_provider_keys.zeroize();
+            return None;
+        }
+    };
+    let mut canonical_encoding = STANDARD.encode(&decoded_provider_keys);
+    let is_canonical = canonical_encoding == encoded_provider_keys;
+    canonical_encoding.zeroize();
+    encoded_provider_keys.zeroize();
+    if !is_canonical {
+        decoded_provider_keys.zeroize();
+        return None;
+    }
+    let parsed = serde_json::from_slice::<std::collections::BTreeMap<String, String>>(
+        &decoded_provider_keys,
+    );
+    decoded_provider_keys.zeroize();
+    let mut provider_keys = parsed.ok()?;
+    let api_key = provider_keys.remove("openai")?;
+    for unused_api_key in provider_keys.values_mut() {
+        unused_api_key.zeroize();
+    }
     Some(ResolvedRuntimeBinding {
         binding_id: Uuid::now_v7(),
         workspace_id: Uuid::nil(),
@@ -62,6 +100,7 @@ fn binding_from_env() -> Option<ResolvedRuntimeBinding> {
         model_catalog_id: Uuid::now_v7(),
         model_name: env::var("IRONRAG_QUERY_COMPILE_MODEL")
             .unwrap_or_else(|_| "gpt-5.4-nano".to_string()),
+        effective_embedding_dimensions: None,
         system_prompt: None,
         temperature: None,
         top_p: None,
@@ -82,11 +121,11 @@ fn settings_stub() -> anyhow::Result<ironrag_backend::app::config::Settings> {
 #[ignore]
 async fn openai_strict_schema_round_trip() -> anyhow::Result<()> {
     let Some(binding) = binding_from_env() else {
-        tracing::info!("skipping: IRONRAG_OPENAI_API_KEY is not set");
+        tracing::info!("skipping: provider kind openai is absent from the provider API-key map");
         return Ok(());
     };
     let settings = settings_stub()?;
-    let gateway = UnifiedGateway::from_settings(&settings);
+    let gateway = UnifiedGateway::from_settings(&settings)?;
     let service = QueryCompilerService;
 
     let mut failures = Vec::<(String, String)>::new();

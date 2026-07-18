@@ -1,7 +1,4 @@
-import type {
-  AsyncOperationDetailResponse,
-  OpsAsyncOperationStatus,
-} from "./generated";
+import type { AsyncOperationDetailResponse, OpsAsyncOperationStatus } from './generated'
 
 /**
  * Canonical async-operation polling payload returned by
@@ -11,9 +8,13 @@ import type {
  * Pollers render `progress.completed / progress.total` and stop when
  * `status` transitions to `ready`, `failed`, `canceled`, or `superseded`.
  */
-export type AsyncOperationStatus = OpsAsyncOperationStatus;
-export type AsyncOperationDetail = AsyncOperationDetailResponse;
+export type AsyncOperationStatus = OpsAsyncOperationStatus
+export type AsyncOperationDetail = AsyncOperationDetailResponse
 
 /** Terminal statuses — polling must stop on any of these. */
-export const ASYNC_OPERATION_TERMINAL_STATES: ReadonlySet<AsyncOperationStatus> =
-  new Set(["ready", "failed", "canceled", "superseded"]);
+export const ASYNC_OPERATION_TERMINAL_STATES: ReadonlySet<AsyncOperationStatus> = new Set([
+  'ready',
+  'failed',
+  'canceled',
+  'superseded',
+])

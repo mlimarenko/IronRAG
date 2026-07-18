@@ -1,6 +1,7 @@
 use uuid::Uuid;
 
 use crate::{
+    agent_runtime::response::public_runtime_failure_summary,
     agent_runtime::trace::{RuntimeExecutionTraceView, build_policy_summary, policy_summary},
     app::state::AppState,
     domains::agent_runtime::{RuntimePolicyDecision, RuntimePolicySummary},
@@ -16,7 +17,7 @@ use crate::{
     },
 };
 
-pub async fn get_runtime_execution(
+pub(crate) async fn get_runtime_execution(
     auth: &AuthContext,
     state: &AppState,
     execution_id: Uuid,
@@ -35,7 +36,7 @@ pub async fn get_runtime_execution(
     ))
 }
 
-pub async fn get_runtime_execution_trace(
+pub(crate) async fn get_runtime_execution_trace(
     auth: &AuthContext,
     state: &AppState,
     execution_id: Uuid,
@@ -69,6 +70,8 @@ fn map_mcp_runtime_execution(
     execution: crate::domains::agent_runtime::RuntimeExecution,
     policy_summary: RuntimePolicySummary,
 ) -> McpRuntimeExecutionSummary {
+    let failure_summary =
+        public_runtime_failure_summary(execution.failure_code.as_deref(), &policy_summary);
     McpRuntimeExecutionSummary {
         runtime_execution_id: execution.id,
         owner_kind: execution.owner_kind,
@@ -83,7 +86,7 @@ fn map_mcp_runtime_execution(
         turn_count: execution.turn_count,
         parallel_action_limit: execution.parallel_action_limit,
         failure_code: execution.failure_code,
-        failure_summary: execution.failure_summary_redacted,
+        failure_summary,
         policy_summary,
         accepted_at: execution.accepted_at,
         completed_at: execution.completed_at,
@@ -163,4 +166,46 @@ fn map_runtime_policy_summary(
             })
             .collect::<Vec<_>>(),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use chrono::Utc;
+    use uuid::Uuid;
+
+    use super::map_mcp_runtime_execution;
+    use crate::domains::agent_runtime::{
+        RuntimeExecution, RuntimeExecutionOwnerKind, RuntimeLifecycleState, RuntimePolicySummary,
+        RuntimeSurfaceKind, RuntimeTaskKind,
+    };
+
+    #[test]
+    fn mcp_runtime_view_ignores_legacy_persisted_graph_diagnostic() {
+        let private_diagnostic = "mcp-runtime-view-sentinel-secret";
+        let now = Utc::now();
+        let execution = RuntimeExecution {
+            id: Uuid::now_v7(),
+            owner_kind: RuntimeExecutionOwnerKind::GraphExtractionAttempt,
+            owner_id: Uuid::now_v7(),
+            task_kind: RuntimeTaskKind::GraphExtract,
+            surface_kind: RuntimeSurfaceKind::Worker,
+            contract_name: "graph_extract".to_string(),
+            contract_version: "1".to_string(),
+            lifecycle_state: RuntimeLifecycleState::Failed,
+            active_stage: None,
+            turn_budget: 2,
+            turn_count: 1,
+            parallel_action_limit: 1,
+            failure_code: Some("graph_extract_failed".to_string()),
+            failure_summary_redacted: Some(private_diagnostic.to_string()),
+            accepted_at: now,
+            completed_at: Some(now),
+        };
+
+        let response = map_mcp_runtime_execution(execution, RuntimePolicySummary::default());
+        let exposed_json = serde_json::to_string(&response).expect("serialize MCP runtime view");
+
+        assert_eq!(response.failure_summary.as_deref(), Some("graph_extract_failed"));
+        assert!(!exposed_json.contains(private_diagnostic));
+    }
 }

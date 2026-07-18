@@ -734,13 +734,28 @@ pub fn focused_record_unit_excerpt(
     focus_terms: &[String],
     max_chars: usize,
 ) -> Option<String> {
-    const FIELDS_MARKER: &str = "fields: ";
     let trimmed = text.trim();
+    let (header, fields, normalized_focus) =
+        prepare_focused_excerpt(trimmed, focus_terms, max_chars)?;
+    if trimmed.chars().count() <= max_chars {
+        return Some(trimmed.to_string());
+    }
+    let scored = score_record_fields(&fields, &normalized_focus);
+    let selected = select_excerpt_fields(header, &fields, &scored, max_chars);
+    fit_excerpt_to_budget(header, &fields, &scored, selected, max_chars)
+}
+
+fn prepare_focused_excerpt<'text>(
+    trimmed: &'text str,
+    focus_terms: &[String],
+    max_chars: usize,
+) -> Option<(&'text str, Vec<&'text str>, Vec<String>)> {
+    const FIELDS_MARKER: &str = "fields: ";
     if trimmed.is_empty() || max_chars == 0 {
         return None;
     }
     if trimmed.chars().count() <= max_chars {
-        return Some(trimmed.to_string());
+        return Some((trimmed, Vec::new(), Vec::new()));
     }
     let (header, fields_body) = trimmed.split_once(FIELDS_MARKER)?;
     let fields = fields_body
@@ -748,73 +763,82 @@ pub fn focused_record_unit_excerpt(
         .map(str::trim)
         .filter(|field| !field.is_empty())
         .collect::<Vec<_>>();
-    if fields.is_empty() {
-        return None;
-    }
     let normalized_focus = focus_terms
         .iter()
         .map(|term| term.trim().to_lowercase())
         .filter(|term| term.chars().count() >= 2)
         .collect::<Vec<_>>();
-    if normalized_focus.is_empty() {
-        return None;
-    }
+    (!fields.is_empty() && !normalized_focus.is_empty()).then_some((
+        header,
+        fields,
+        normalized_focus,
+    ))
+}
 
+fn score_record_fields(fields: &[&str], normalized_focus: &[String]) -> Vec<(usize, usize)> {
     let mut scored = fields
         .iter()
         .enumerate()
         .filter_map(|(index, field)| {
             let lowered = field.to_lowercase();
-            let focus_score = normalized_focus
+            let score = normalized_focus
                 .iter()
                 .filter(|term| lowered.contains(term.as_str()))
                 .map(|term| term.chars().count().min(24))
                 .sum::<usize>();
-            let semantic_field_bonus = usize::from(
-                focus_score > 0
-                    && (lowered.contains(".description=")
-                        || lowered.contains(".summary=")
-                        || lowered.contains(".enum=")),
-            ) * 64;
-            let score = focus_score.saturating_add(semantic_field_bonus);
             (score > 0).then_some((index, score))
         })
         .collect::<Vec<_>>();
-    if scored.is_empty() {
-        return None;
-    }
     scored.sort_by(|(left_index, left_score), (right_index, right_score)| {
         right_score.cmp(left_score).then_with(|| left_index.cmp(right_index))
     });
+    scored
+}
 
-    let mut selected = BTreeSet::<usize>::new();
-    for (index, _) in &scored {
+fn select_excerpt_fields(
+    header: &str,
+    fields: &[&str],
+    scored: &[(usize, usize)],
+    max_chars: usize,
+) -> BTreeSet<usize> {
+    let mut selected = BTreeSet::new();
+    for (index, _) in scored {
         selected.insert(*index);
-        if *index > 0 {
-            selected.insert(index - 1);
-        }
-        if *index + 1 < fields.len() {
-            selected.insert(index + 1);
-        }
-        let rendered = render_record_unit_excerpt_text(header, &fields, &selected);
-        if rendered.chars().count() >= max_chars {
+        selected.extend(index.checked_sub(1));
+        selected.extend((index + 1 < fields.len()).then_some(index + 1));
+        if render_record_unit_excerpt_text(header, fields, &selected).chars().count() >= max_chars {
             break;
         }
     }
+    selected
+}
 
+fn fit_excerpt_to_budget(
+    header: &str,
+    fields: &[&str],
+    scored: &[(usize, usize)],
+    mut selected: BTreeSet<usize>,
+    max_chars: usize,
+) -> Option<String> {
     while !selected.is_empty() {
-        let rendered = render_record_unit_excerpt_text(header, &fields, &selected);
+        let rendered = render_record_unit_excerpt_text(header, fields, &selected);
         if rendered.chars().count() <= max_chars {
             return Some(rendered);
         }
-        let lowest = selected
-            .iter()
-            .copied()
-            .rfind(|index| !scored.iter().any(|(scored_index, _)| scored_index == index))
-            .or_else(|| selected.iter().next_back().copied())?;
-        selected.remove(&lowest);
+        selected.remove(&lowest_priority_selected_field(&selected, scored)?);
     }
     None
+}
+
+fn lowest_priority_selected_field(
+    selected: &BTreeSet<usize>,
+    scored: &[(usize, usize)],
+) -> Option<usize> {
+    selected
+        .iter()
+        .copied()
+        .rfind(|index| !scored.iter().any(|(scored_index, _)| scored_index == index))
+        .or_else(|| selected.iter().next_back().copied())
 }
 
 fn render_record_unit_excerpt_text(
@@ -909,6 +933,7 @@ fn value_to_string(value: &Value) -> Option<String> {
 /// (so new chunks are temporally indexed) and the runtime backfill binary
 /// (so older chunks become indexed without re-ingest). No second
 /// implementation may parse this header — keep this fn as the only authority.
+#[must_use]
 pub fn extract_chunk_temporal_bounds(text: &str) -> Option<(DateTime<Utc>, DateTime<Utc>)> {
     const HEADER_KEY: &str = "occurred_at=";
     let mut min_ts: Option<DateTime<Utc>> = None;
@@ -946,8 +971,8 @@ pub fn extract_chunk_temporal_bounds(text: &str) -> Option<(DateTime<Utc>, DateT
 /// become an entity node).
 ///
 /// Fully format- and schema-agnostic: it keys off the structural shape
-/// guaranteed by [`render_record_unit`] — the literal `fields: ` boundary, the
-/// `; ` field separator (values never contain a raw `;`; [`render_leaf_value`]
+/// guaranteed by `render_record_unit` — the literal `fields: ` boundary, the
+/// `; ` field separator (values never contain a raw `;`; `render_leaf_value`
 /// rewrites it to `,`), and the first `=` per field (path segments are
 /// sanitized to alnum/`_`/`-`, so a key never contains `=`, and a value's own
 /// `=`, e.g. in a URL, survives). No field name is ever special-cased.
@@ -1180,6 +1205,29 @@ mod tests {
 
         assert!(excerpt.contains("service.deep.port=8443"));
         assert!(!excerpt.contains("early_00=value-0"));
+    }
+
+    #[test]
+    fn focused_record_unit_excerpt_does_not_prioritize_handwritten_field_names() {
+        let text = "[unit_ordinal=0] fields: f0=aaaaaaaaaaaaaaaa; first.payload=needle; \
+                    f2=bbbbbbbbbbbbbbbb; f3=cccccccccccccccc; f4=dddddddddddddddd; \
+                    second.description=needle; f6=eeeeeeeeeeeeeeee";
+
+        let excerpt = focused_record_unit_excerpt(text, &["needle".to_string()], 70)
+            .expect("focused excerpt");
+
+        assert!(excerpt.contains("first.payload=needle"));
+        assert!(!excerpt.contains("second.description=needle"));
+    }
+
+    #[test]
+    fn focused_record_unit_excerpt_preserves_matching_field_when_neighbors_exceed_budget() {
+        let text = "[unit_ordinal=0] fields: left=aaaaaaaaaaaaaaaa; target=needle; \
+                    right=bbbbbbbbbbbbbbbb";
+
+        let excerpt = focused_record_unit_excerpt(text, &["needle".to_string()], 45);
+
+        assert_eq!(excerpt.as_deref(), Some("[unit_ordinal=0] fields: target=needle"));
     }
 
     #[test]

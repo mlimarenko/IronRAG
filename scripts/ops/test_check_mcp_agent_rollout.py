@@ -685,7 +685,7 @@ class CheckMcpAgentRolloutTests(unittest.TestCase):
         self.assertFalse(summary["ready_to_rollout"])
         self.assertIsNone(summary["bench_gate_passed"])
         self.assertIsNone(summary["bench_p95_ms"])
-        self.assertEqual(summary["bench_successes"], None)
+        self.assertIsNone(summary["bench_successes"])
         self.assertIn("gate breach or bench error", proc.stderr)
 
     def test_with_bench_rejects_inconsistent_gate_summary(self) -> None:

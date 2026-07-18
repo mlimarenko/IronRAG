@@ -1,0 +1,20 @@
+{
+  "path": ["."],
+  "minLines": 15,
+  "minTokens": 100,
+  "mode": "strict",
+  "format": ["rust", "python", "typescript", "tsx", "javascript", "jsx", "css", "bash"],
+  "reporters": ["json"],
+  "gitignore": true,
+  "maxSize": "1mb",
+  "silent": true,
+  "noTips": true,
+  "ignore": [
+    "**/.git/**",
+    "**/apps/api/contracts/openapi.gen.yaml",
+    "**/apps/web/public/openapi.gen.yaml",
+    "**/apps/web/public/swagger-ui*",
+    "**/apps/web/src/shared/api/generated/**",
+    "**/apps/web/src/shared/api/mocks/handlers.ts"
+  ]
+}

@@ -18,4 +18,4 @@ export const DOCUMENT_FILE_INPUT_ACCEPT = [
   '.ods',
   '.pptx',
   'image/*',
-].join(',');
+].join(',')

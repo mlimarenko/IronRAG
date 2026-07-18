@@ -1,5 +1,5 @@
-import type { Meta, StoryObj } from "@storybook/react";
-import { Button } from "./button";
+import type { Meta, StoryObj } from '@storybook/react'
+import { Button } from './button'
 import {
   DropdownMenu,
   DropdownMenuCheckboxItem,
@@ -15,15 +15,15 @@ import {
   DropdownMenuSubContent,
   DropdownMenuSubTrigger,
   DropdownMenuTrigger,
-} from "./dropdown-menu";
+} from './dropdown-menu'
 
 const meta = {
-  title: "UI/DropdownMenu",
+  title: 'UI/DropdownMenu',
   component: DropdownMenu,
-} satisfies Meta<typeof DropdownMenu>;
+} satisfies Meta<typeof DropdownMenu>
 
-export default meta;
-type Story = StoryObj<typeof meta>;
+export default meta
+type Story = StoryObj<typeof meta>
 
 export const Basic: Story = {
   render: () => (
@@ -43,7 +43,7 @@ export const Basic: Story = {
       </DropdownMenuContent>
     </DropdownMenu>
   ),
-};
+}
 
 export const WithCheckboxes: Story = {
   render: () => (
@@ -61,7 +61,7 @@ export const WithCheckboxes: Story = {
       </DropdownMenuContent>
     </DropdownMenu>
   ),
-};
+}
 
 export const WithRadioGroup: Story = {
   render: () => (
@@ -80,7 +80,7 @@ export const WithRadioGroup: Story = {
       </DropdownMenuContent>
     </DropdownMenu>
   ),
-};
+}
 
 export const WithSubmenu: Story = {
   render: () => (
@@ -104,4 +104,4 @@ export const WithSubmenu: Story = {
       </DropdownMenuContent>
     </DropdownMenu>
   ),
-};
+}

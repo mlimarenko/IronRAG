@@ -26,13 +26,13 @@ use uuid::Uuid;
 
 use crate::{
     app::state::AppState,
-    infra::repositories::{content_repository, ingest_repository},
+    infra::repositories::{catalog_repository, content_repository, ingest_repository},
     integrations::docling,
     interfaces::http::router_support::ApiError,
     services::{
         content::service::{
-            GRAPH_STATE_DEGRADED, MaterializeRevisionGraphCandidatesCommand, PromoteHeadCommand,
-            fail_revision_vector_graph_readiness, graph_extract_success_message,
+            GRAPH_STATE_DEGRADED, MaterializeRevisionGraphCandidatesCommand,
+            RevisionGraphCandidateMaterialization, graph_extract_success_message,
             graph_state_after_successful_extract,
         },
         ingest::cancellation::anyhow_is_cancelled,
@@ -44,6 +44,10 @@ use crate::{
             INGEST_STAGE_WEB_MATERIALIZE_PAGE, INGEST_STAGE_WEBHOOK_DELIVERY, LeaseAttemptCommand,
             RecordStageEventCommand,
         },
+        query::vector_dimensions::{
+            ensure_active_embedding_profile_key, invalidate_library_embedding_profile_inventory,
+        },
+        webhook::error::WebhookServiceError,
     },
     shared::{
         extraction::file_extract::{FileExtractionPlan, UploadAdmissionError},
@@ -92,7 +96,7 @@ struct AttemptHeartbeatGuard {
 }
 
 impl AttemptHeartbeatGuard {
-    fn new(running: Arc<AtomicBool>) -> Self {
+    const fn new(running: Arc<AtomicBool>) -> Self {
         Self { running }
     }
 }
@@ -143,6 +147,27 @@ struct JobCanceledByShutdown {
 #[error("canonical ingest job {job_id} lost its active attempt lease")]
 struct JobLeaseLost {
     job_id: Uuid,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CanonicalContentPipelineOutcome {
+    LifecyclePublished,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CanonicalGraphRefreshOutcome {
+    LifecyclePublished,
+}
+
+/// Carries structural cleanup intent across the pipeline boundary without
+/// inferring it from provider text. Only lifecycle invalidation after a
+/// successful vector write requests revision-wide deletion.
+#[derive(Debug, Error)]
+#[error("{source:#}")]
+struct CanonicalContentPipelineFailure {
+    delete_vectors: bool,
+    #[source]
+    source: anyhow::Error,
 }
 
 fn job_cancellation_error(
@@ -220,15 +245,14 @@ fn heavy_revision_pipeline_parallelism() -> usize {
         Some(value) if value.eq_ignore_ascii_case("auto") || value.is_empty() => {
             auto_heavy_revision_pipeline_parallelism()
         }
-        Some(value) => match value.parse::<usize>().ok().filter(|value| *value > 0) {
-            Some(value) => {
+        Some(value) => {
+            if let Some(value) = value.parse::<usize>().ok().filter(|value| *value > 0) {
                 tracing::info!(
                     parallelism = value,
                     "heavy revision pipeline parallelism configured"
                 );
                 value
-            }
-            None => {
+            } else {
                 tracing::warn!(
                     raw = value,
                     fallback_parallelism = 1,
@@ -236,7 +260,7 @@ fn heavy_revision_pipeline_parallelism() -> usize {
                 );
                 1
             }
-        },
+        }
         None => auto_heavy_revision_pipeline_parallelism(),
     }
 }
@@ -289,16 +313,14 @@ fn auto_heavy_revision_pipeline_parallelism_for_limits(
         .max(1)
         .saturating_mul(HEAVY_PIPELINE_AUTO_DOCLING_WAITERS_PER_PROCESS)
         .min(HEAVY_PIPELINE_AUTO_MAX_PARALLELISM);
-    let memory_bound = memory_limit_bytes
-        .map(|bytes| bytes / (1024 * 1024))
-        .map(|memory_mib| {
+    let memory_bound =
+        memory_limit_bytes.map(|bytes| bytes / (1024 * 1024)).map_or(1, |memory_mib| {
             let soft_limit_mib = memory_mib.saturating_mul(9) / 10;
             soft_limit_mib
                 .saturating_sub(HEAVY_PIPELINE_AUTO_RESERVED_MEMORY_MIB)
                 .checked_div(HEAVY_PIPELINE_AUTO_MEMORY_PER_JOB_MIB)
                 .unwrap_or(0) as usize
-        })
-        .unwrap_or(1);
+        });
 
     cpu_bound
         .min(docling_bound)
@@ -311,8 +333,43 @@ fn vision_billing_usage_items(usage_json: &serde_json::Value) -> Vec<serde_json:
         .get("embedded_picture_ocr_usage")
         .and_then(serde_json::Value::as_array)
         .filter(|items| !items.is_empty())
-        .map(|items| items.to_vec())
-        .unwrap_or_else(|| vec![usage_json.clone()])
+        .map_or_else(|| vec![usage_json.clone()], Clone::clone)
+}
+
+fn graph_stage_event_command(
+    attempt_id: Uuid,
+    materialization: &RevisionGraphCandidateMaterialization,
+    stage_state: &str,
+    message: &str,
+    details_json: serde_json::Value,
+    elapsed_ms: Option<i64>,
+) -> RecordStageEventCommand {
+    RecordStageEventCommand {
+        attempt_id,
+        stage_name: INGEST_STAGE_EXTRACT_GRAPH.to_string(),
+        stage_state: stage_state.to_string(),
+        message: Some(message.to_string()),
+        details_json,
+        provider_kind: materialization.provider_kind.clone(),
+        model_name: materialization.model_name.clone(),
+        prompt_tokens: graph_usage_token_count(&materialization.usage_json, "prompt_tokens"),
+        completion_tokens: graph_usage_token_count(
+            &materialization.usage_json,
+            "completion_tokens",
+        ),
+        total_tokens: graph_usage_token_count(&materialization.usage_json, "total_tokens"),
+        cached_tokens: None,
+        estimated_cost: None,
+        currency_code: None,
+        elapsed_ms,
+    }
+}
+
+fn graph_usage_token_count(usage_json: &serde_json::Value, field: &str) -> Option<i32> {
+    usage_json
+        .get(field)
+        .and_then(serde_json::Value::as_i64)
+        .and_then(|value| i32::try_from(value).ok())
 }
 
 fn map_stage_error(
@@ -398,6 +455,75 @@ pub(super) struct CanonicalExtractedContent {
     usage_json: serde_json::Value,
 }
 
+struct CanonicalPipelineCancellation<'a> {
+    token: &'a CancellationToken,
+    user_requested: &'a AtomicBool,
+    operator_pause_requested: &'a AtomicBool,
+    lease_lost_requested: &'a AtomicBool,
+}
+
+impl CanonicalPipelineCancellation<'_> {
+    fn check(&self, job_id: Uuid) -> anyhow::Result<()> {
+        check_job_cancellation(
+            self.token,
+            self.user_requested,
+            self.operator_pause_requested,
+            self.lease_lost_requested,
+            job_id,
+        )
+    }
+
+    fn error(&self, job_id: Uuid) -> anyhow::Error {
+        job_cancellation_error(
+            job_id,
+            self.user_requested,
+            self.operator_pause_requested,
+            self.lease_lost_requested,
+        )
+    }
+}
+
+struct CanonicalPreparedContent {
+    revision: crate::infra::knowledge_rows::KnowledgeRevisionRow,
+}
+
+struct CanonicalEmbeddingOutcome {
+    source_truth_version: i64,
+    embedding_profile_key: Option<String>,
+}
+
+struct CanonicalGraphStageOutcome {
+    graph_ready: bool,
+    graph_degraded: bool,
+    pending_summary_refresh: Option<crate::services::graph::summary::PendingGraphSummaryRefresh>,
+}
+
+#[derive(Default)]
+struct CanonicalDispatchOutcome {
+    content_ingest_finalized: bool,
+    graph_refresh_finalized: bool,
+    webhook_ingest_finalized: bool,
+}
+
+impl CanonicalDispatchOutcome {
+    const fn is_finalized(&self) -> bool {
+        self.content_ingest_finalized
+            || self.graph_refresh_finalized
+            || self.webhook_ingest_finalized
+    }
+}
+
+struct CanonicalAttemptLifecycle<'a> {
+    state: &'a Arc<AppState>,
+    worker_id: &'a str,
+    job: &'a ingest_repository::IngestJobRow,
+    attempt_id: Uuid,
+    initial_stage: &'a str,
+    expected_queue_lease_token: &'a str,
+    cancellation: CanonicalPipelineCancellation<'a>,
+}
+
+#[must_use]
 pub fn spawn_ingestion_worker(
     state: AppState,
     shutdown: broadcast::Receiver<()>,
@@ -407,7 +533,6 @@ pub fn spawn_ingestion_worker(
     })
 }
 
-#[allow(clippy::too_many_arguments)]
 fn spawn_attempt_heartbeat_observer(
     heartbeat_pg: sqlx::PgPool,
     attempt_id: Uuid,
@@ -510,6 +635,625 @@ fn spawn_attempt_heartbeat_observer(
     }
 }
 
+async fn observe_initial_queue_state(
+    lifecycle: &CanonicalAttemptLifecycle<'_>,
+) -> anyhow::Result<()> {
+    let current_job = ingest_repository::get_ingest_job_by_id(
+        &lifecycle.state.persistence.postgres,
+        lifecycle.job.id,
+    )
+    .await
+    .context("failed to reload ingest job for cancellation check")?;
+    let Some(current_job) = current_job else {
+        return Ok(());
+    };
+    match current_job.queue_state.as_str() {
+        "canceled" => lifecycle.cancellation.user_requested.store(true, Ordering::Relaxed),
+        "paused" => lifecycle.cancellation.operator_pause_requested.store(true, Ordering::Relaxed),
+        "leased" => return Ok(()),
+        _ => lifecycle.cancellation.lease_lost_requested.store(true, Ordering::Relaxed),
+    }
+    lifecycle.cancellation.token.cancel();
+    Ok(())
+}
+
+async fn dispatch_content_mutation(
+    lifecycle: &CanonicalAttemptLifecycle<'_>,
+) -> anyhow::Result<()> {
+    let revision_id = lifecycle
+        .job
+        .knowledge_revision_id
+        .context("canonical ingest job is missing knowledge_revision_id")?;
+    let document_id = lifecycle
+        .job
+        .knowledge_document_id
+        .context("canonical ingest job is missing knowledge_document_id")?;
+    let document =
+        content_repository::get_document_by_id(&lifecycle.state.persistence.postgres, document_id)
+            .await
+            .map_err(|_| anyhow::anyhow!("failed to load document"))?;
+    if !document.as_ref().is_some_and(|document| document.document_state == "deleted") {
+        run_canonical_ingest_pipeline(
+            lifecycle.state,
+            lifecycle.worker_id,
+            lifecycle.job,
+            lifecycle.attempt_id,
+            document_id,
+            revision_id,
+            lifecycle.cancellation.token,
+            lifecycle.cancellation.user_requested,
+            lifecycle.cancellation.operator_pause_requested,
+            lifecycle.cancellation.lease_lost_requested,
+        )
+        .await?;
+        return Ok(());
+    }
+    if let Some(mutation_id) = lifecycle.job.mutation_id {
+        lifecycle
+            .state
+            .canonical_services
+            .content
+            .settle_deleted_document_mutation(lifecycle.state, mutation_id)
+            .await
+            .map_err(|error| {
+                anyhow::anyhow!("failed to settle skipped mutation for deleted document: {error}")
+            })?;
+    }
+    info!(document_id = %document_id, "canceling leased ingest for deleted document");
+    Err(anyhow::Error::new(DeletedDocumentJobSkipped { document_id }))
+}
+
+async fn dispatch_graph_refresh(lifecycle: &CanonicalAttemptLifecycle<'_>) -> anyhow::Result<()> {
+    let revision_id = lifecycle
+        .job
+        .knowledge_revision_id
+        .context("graph-refresh job is missing knowledge_revision_id")?;
+    let document_id = lifecycle
+        .job
+        .knowledge_document_id
+        .context("graph-refresh job is missing knowledge_document_id")?;
+    run_canonical_graph_refresh(
+        lifecycle.state,
+        lifecycle.worker_id,
+        lifecycle.job,
+        lifecycle.attempt_id,
+        document_id,
+        revision_id,
+        lifecycle.cancellation.token,
+        lifecycle.cancellation.user_requested,
+        lifecycle.cancellation.operator_pause_requested,
+        lifecycle.cancellation.lease_lost_requested,
+    )
+    .await?;
+    Ok(())
+}
+
+async fn dispatch_webhook_delivery(
+    lifecycle: &CanonicalAttemptLifecycle<'_>,
+) -> anyhow::Result<bool> {
+    crate::services::webhook::delivery::run_webhook_delivery_job(
+        lifecycle.state,
+        lifecycle.job,
+        lifecycle.attempt_id,
+        lifecycle.expected_queue_lease_token,
+        lifecycle.cancellation.token,
+    )
+    .await
+    .map(|outcome| {
+        matches!(
+            outcome,
+            crate::services::webhook::delivery::WebhookDeliveryJobOutcome::IngestAlreadyFinalized
+        )
+    })
+    .map_err(|error| {
+        if matches!(&error, WebhookServiceError::DeliveryCanceled { .. }) {
+            lifecycle.cancellation.error(lifecycle.job.id)
+        } else {
+            error.into()
+        }
+    })
+}
+
+async fn dispatch_canonical_ingest_job(
+    lifecycle: &CanonicalAttemptLifecycle<'_>,
+) -> anyhow::Result<CanonicalDispatchOutcome> {
+    observe_initial_queue_state(lifecycle).await?;
+    lifecycle.cancellation.check(lifecycle.job.id)?;
+    let mut outcome = CanonicalDispatchOutcome::default();
+    match lifecycle.job.job_kind.as_str() {
+        "content_mutation" => {
+            dispatch_content_mutation(lifecycle).await?;
+            outcome.content_ingest_finalized = true;
+        }
+        "graph_refresh" => {
+            dispatch_graph_refresh(lifecycle).await?;
+            outcome.graph_refresh_finalized = true;
+        }
+        "web_discovery" => {
+            Box::pin(run_canonical_web_discovery_job(
+                lifecycle.state,
+                lifecycle.job,
+                lifecycle.attempt_id,
+            ))
+            .await?;
+        }
+        "web_materialize_page" => {
+            run_canonical_web_materialize_page_job(
+                lifecycle.state,
+                lifecycle.job,
+                lifecycle.attempt_id,
+            )
+            .await?;
+        }
+        "webhook_delivery" => {
+            outcome.webhook_ingest_finalized = dispatch_webhook_delivery(lifecycle).await?;
+        }
+        other => anyhow::bail!("unsupported canonical ingest job kind {other}"),
+    }
+    Ok(outcome)
+}
+
+async fn finalize_successful_canonical_job(
+    lifecycle: &CanonicalAttemptLifecycle<'_>,
+) -> anyhow::Result<()> {
+    let final_stage = match lifecycle.job.job_kind.as_str() {
+        "content_mutation" | "graph_refresh" => INGEST_STAGE_FINALIZING,
+        "web_discovery" => INGEST_STAGE_WEB_DISCOVERY,
+        "web_materialize_page" => INGEST_STAGE_WEB_MATERIALIZE_PAGE,
+        "webhook_delivery" => INGEST_STAGE_WEBHOOK_DELIVERY,
+        _ => lifecycle.initial_stage,
+    };
+    let result = lifecycle
+        .state
+        .canonical_services
+        .ingest
+        .finalize_attempt(
+            lifecycle.state,
+            FinalizeAttemptCommand {
+                attempt_id: lifecycle.attempt_id,
+                knowledge_generation_id: None,
+                attempt_state: "succeeded".to_string(),
+                current_stage: Some(final_stage.to_string()),
+                failure_class: None,
+                failure_code: None,
+                failure_message: None,
+                retryable: false,
+            },
+        )
+        .await;
+    let Err(error) = result else {
+        info!(
+            worker_id = %lifecycle.worker_id,
+            job_id = %lifecycle.job.id,
+            attempt_id = %lifecycle.attempt_id,
+            "canonical ingest job completed",
+        );
+        return Ok(());
+    };
+    if !matches!(error, ApiError::Conflict(_)) {
+        return Err(error).context("failed to finalize canonical ingest attempt as succeeded");
+    }
+    match ingest_repository::get_ingest_job_by_id(
+        &lifecycle.state.persistence.postgres,
+        lifecycle.job.id,
+    )
+    .await
+    {
+        Ok(Some(row)) if row.queue_state == "paused" => {
+            if let Err(abandon_error) = ingest_repository::abandon_paused_ingest_attempt(
+                &lifecycle.state.persistence.postgres,
+                lifecycle.attempt_id,
+            )
+            .await
+            {
+                warn!(attempt_id = %lifecycle.attempt_id, ?abandon_error, "failed to finalize paused ingest attempt after successful pipeline return");
+            }
+            info!(
+                worker_id = %lifecycle.worker_id,
+                job_id = %lifecycle.job.id,
+                attempt_id = %lifecycle.attempt_id,
+                "canonical ingest job completed after operator pause; preserving paused queue state"
+            );
+            return Ok(());
+        }
+        Err(reload_error) => {
+            warn!(attempt_id = %lifecycle.attempt_id, ?reload_error, "failed to reload ingest job after finalize conflict");
+        }
+        Ok(_) => {}
+    }
+    warn!(
+        worker_id = %lifecycle.worker_id,
+        job_id = %lifecycle.job.id,
+        attempt_id = %lifecycle.attempt_id,
+        ?error,
+        "canonical ingest job finished after losing its active lease; leaving queue state to the current owner"
+    );
+    Ok(())
+}
+
+async fn handle_cooperative_failure(
+    lifecycle: &CanonicalAttemptLifecycle<'_>,
+    error: &anyhow::Error,
+) -> anyhow::Result<bool> {
+    if error.downcast_ref::<JobCanceledByRequest>().is_some() {
+        info!(
+            worker_id = %lifecycle.worker_id,
+            job_id = %lifecycle.job.id,
+            attempt_id = %lifecycle.attempt_id,
+            "canonical ingest job observed user cancel request and stopped cooperatively",
+        );
+        return Ok(true);
+    }
+    if error.downcast_ref::<JobPausedByOperator>().is_some() {
+        if let Err(abandon_error) = ingest_repository::abandon_paused_ingest_attempt(
+            &lifecycle.state.persistence.postgres,
+            lifecycle.attempt_id,
+        )
+        .await
+        {
+            warn!(attempt_id = %lifecycle.attempt_id, ?abandon_error, "failed to finalize paused ingest attempt");
+        }
+        info!(
+            worker_id = %lifecycle.worker_id,
+            job_id = %lifecycle.job.id,
+            attempt_id = %lifecycle.attempt_id,
+            "canonical ingest job observed operator pause request and stopped cooperatively",
+        );
+        return Ok(true);
+    }
+    if error.downcast_ref::<JobLeaseLost>().is_some() {
+        warn!(
+            worker_id = %lifecycle.worker_id,
+            job_id = %lifecycle.job.id,
+            attempt_id = %lifecycle.attempt_id,
+            "canonical ingest job stopped because its attempt lease was lost"
+        );
+        return Ok(true);
+    }
+    Ok(false)
+}
+
+async fn defer_in_flight_webhook_failure(
+    lifecycle: &CanonicalAttemptLifecycle<'_>,
+    error: &anyhow::Error,
+) -> bool {
+    let Some(WebhookServiceError::DeliveryLeaseInFlight { retry_at, .. }) =
+        error.downcast_ref::<WebhookServiceError>()
+    else {
+        return false;
+    };
+    match ingest_repository::defer_webhook_delivery_in_flight(
+        &lifecycle.state.persistence.postgres,
+        lifecycle.attempt_id,
+        lifecycle.job.id,
+        lifecycle.expected_queue_lease_token,
+        *retry_at,
+    )
+    .await
+    {
+        Ok(true) => info!(
+            worker_id = %lifecycle.worker_id,
+            job_id = %lifecycle.job.id,
+            attempt_id = %lifecycle.attempt_id,
+            retry_at = %retry_at,
+            "deferred duplicate webhook job until the current delivery lease expires"
+        ),
+        Ok(false) => warn!(
+            worker_id = %lifecycle.worker_id,
+            job_id = %lifecycle.job.id,
+            attempt_id = %lifecycle.attempt_id,
+            "webhook job lease moved before in-flight delivery deferral"
+        ),
+        Err(defer_error) => {
+            warn!(
+                worker_id = %lifecycle.worker_id,
+                job_id = %lifecycle.job.id,
+                attempt_id = %lifecycle.attempt_id,
+                ?defer_error,
+                "failed to defer duplicate webhook job; using ordinary retry path"
+            );
+            return false;
+        }
+    }
+    true
+}
+
+async fn finalize_special_failure(
+    lifecycle: &CanonicalAttemptLifecycle<'_>,
+    error: &anyhow::Error,
+) -> anyhow::Result<bool> {
+    if error.downcast_ref::<JobCanceledByShutdown>().is_some() {
+        let current_job = ingest_repository::get_ingest_job_by_id(
+            &lifecycle.state.persistence.postgres,
+            lifecycle.job.id,
+        )
+        .await;
+        if current_job
+            .as_ref()
+            .is_ok_and(|row| row.as_ref().is_some_and(|row| row.queue_state == "canceled"))
+        {
+            info!(
+                worker_id = %lifecycle.worker_id,
+                job_id = %lifecycle.job.id,
+                attempt_id = %lifecycle.attempt_id,
+                "canonical ingest job stopped during shutdown after user cancel won the race",
+            );
+            return Ok(true);
+        }
+        if let Err(reload_error) = current_job {
+            warn!(attempt_id = %lifecycle.attempt_id, ?reload_error, "failed to reload ingest job while finalizing shutdown cancellation");
+        }
+        if let Err(finalize_error) = lifecycle
+            .state
+            .canonical_services
+            .ingest
+            .finalize_attempt(
+                lifecycle.state,
+                FinalizeAttemptCommand {
+                    attempt_id: lifecycle.attempt_id,
+                    knowledge_generation_id: None,
+                    attempt_state: "failed".to_string(),
+                    current_stage: Some(lifecycle.initial_stage.to_string()),
+                    failure_class: Some("worker_shutdown".to_string()),
+                    failure_code: Some("shutdown_cancelled".to_string()),
+                    failure_message: Some(
+                        "Worker shutdown canceled document processing".to_string(),
+                    ),
+                    retryable: true,
+                },
+            )
+            .await
+        {
+            warn!(attempt_id = %lifecycle.attempt_id, ?finalize_error, "failed to requeue shutdown-canceled attempt");
+        }
+        info!(
+            worker_id = %lifecycle.worker_id,
+            job_id = %lifecycle.job.id,
+            attempt_id = %lifecycle.attempt_id,
+            "canonical ingest job stopped cooperatively for worker shutdown",
+        );
+        return Ok(true);
+    }
+    if error.downcast_ref::<DeletedDocumentJobSkipped>().is_none() {
+        return Ok(false);
+    }
+    if let Err(finalize_error) = lifecycle
+        .state
+        .canonical_services
+        .ingest
+        .finalize_attempt(
+            lifecycle.state,
+            FinalizeAttemptCommand {
+                attempt_id: lifecycle.attempt_id,
+                knowledge_generation_id: None,
+                attempt_state: "canceled".to_string(),
+                current_stage: Some(lifecycle.initial_stage.to_string()),
+                failure_class: Some("content_mutation".to_string()),
+                failure_code: Some("document_deleted".to_string()),
+                failure_message: Some(
+                    "Document was deleted before processing finished".to_string(),
+                ),
+                retryable: false,
+            },
+        )
+        .await
+    {
+        warn!(attempt_id = %lifecycle.attempt_id, ?finalize_error, "failed to finalize deleted-document attempt as canceled");
+    }
+    info!(
+        worker_id = %lifecycle.worker_id,
+        job_id = %lifecycle.job.id,
+        attempt_id = %lifecycle.attempt_id,
+        "canonical ingest job canceled because document was deleted"
+    );
+    Ok(true)
+}
+
+async fn publish_content_ingest_failure(
+    lifecycle: &CanonicalAttemptLifecycle<'_>,
+    error: anyhow::Error,
+) -> anyhow::Result<()> {
+    let job = lifecycle.job;
+    let (Some(mutation_id), Some(mutation_item_id), Some(document_id), Some(revision_id)) = (
+        job.mutation_id,
+        job.mutation_item_id,
+        job.knowledge_document_id,
+        job.knowledge_revision_id,
+    ) else {
+        warn!(
+            worker_id = %lifecycle.worker_id,
+            job_id = %job.id,
+            attempt_id = %lifecycle.attempt_id,
+            "content ingest job has an incomplete lifecycle identity; refusing partial failure publication",
+        );
+        return Err(error)
+            .context("content ingest job has incomplete mutation/document/revision identity");
+    };
+    let message = format!("{error:#}");
+    let extract_error = error.downcast_ref::<CanonicalExtractContentError>();
+    let failure_class = if extract_error.is_some() { "content_extract" } else { "worker_error" };
+    let outcome = ingest_repository::fail_content_ingest_attempt(
+        &lifecycle.state.persistence.postgres,
+        &ingest_repository::FailContentIngestAttempt {
+            workspace_id: job.workspace_id,
+            library_id: job.library_id,
+            document_id,
+            revision_id,
+            mutation_id,
+            mutation_item_id,
+            attempt_id: lifecycle.attempt_id,
+            current_stage: None,
+            failure_class: Some(failure_class.to_string()),
+            failure_code: Some(extract_error.map_or_else(
+                || "canonical_pipeline_failed".to_string(),
+                |failure| failure.failure_code.clone(),
+            )),
+            failure_message: Some(message.clone()),
+            retryable: extract_error.is_none_or(|failure| failure.retryable),
+            delete_vectors: error
+                .downcast_ref::<CanonicalContentPipelineFailure>()
+                .is_some_and(|failure| failure.delete_vectors),
+            failed_at: Utc::now(),
+        },
+    )
+    .await;
+    match outcome {
+        Ok(ingest_repository::FailContentIngestAttemptOutcome::Applied {
+            deleted,
+            retry_scheduled,
+            mutation_failed,
+            ..
+        }) => {
+            invalidate_library_embedding_profile_inventory(job.library_id);
+            if !retry_scheduled
+                && let Err(settlement_error) = lifecycle
+                    .state
+                    .canonical_services
+                    .web_ingest
+                    .settle_materialized_page_for_mutation_item(lifecycle.state, mutation_item_id)
+                    .await
+            {
+                warn!(
+                    job_id = %job.id,
+                    attempt_id = %lifecycle.attempt_id,
+                    %mutation_item_id,
+                    ?settlement_error,
+                    "terminal content failure committed but web page settlement failed; read-side reconciliation will retry",
+                );
+            }
+            if retry_scheduled {
+                info!(
+                    worker_id = %lifecycle.worker_id,
+                    job_id = %job.id,
+                    attempt_id = %lifecycle.attempt_id,
+                    deleted,
+                    "canonical content ingest failed retryably and was atomically requeued",
+                );
+            } else {
+                warn!(
+                    worker_id = %lifecycle.worker_id,
+                    job_id = %job.id,
+                    attempt_id = %lifecycle.attempt_id,
+                    deleted,
+                    mutation_failed,
+                    "canonical content ingest was atomically finalized as failed",
+                );
+            }
+            Ok(())
+        }
+        Ok(ingest_repository::FailContentIngestAttemptOutcome::AuthorityLost { .. }) => {
+            warn!(
+                worker_id = %lifecycle.worker_id,
+                job_id = %job.id,
+                attempt_id = %lifecycle.attempt_id,
+                "content ingest failure arrived after attempt authority moved; preserving current owner state",
+            );
+            Ok(())
+        }
+        Err(publication_error) => {
+            warn!(
+                worker_id = %lifecycle.worker_id,
+                job_id = %job.id,
+                attempt_id = %lifecycle.attempt_id,
+                ?publication_error,
+                "failed to atomically publish canonical content ingest failure",
+            );
+            Err(error).with_context(|| {
+                format!(
+                    "atomic content-ingest failure publication also failed: {publication_error:#}; original failure: {message}"
+                )
+            })
+        }
+    }
+}
+
+async fn finalize_failed_canonical_job(
+    lifecycle: &CanonicalAttemptLifecycle<'_>,
+    error: anyhow::Error,
+) -> anyhow::Result<()> {
+    if handle_cooperative_failure(lifecycle, &error).await?
+        || defer_in_flight_webhook_failure(lifecycle, &error).await
+        || finalize_special_failure(lifecycle, &error).await?
+    {
+        return Ok(());
+    }
+    if lifecycle.job.job_kind == "content_mutation" {
+        return publish_content_ingest_failure(lifecycle, error).await;
+    }
+    let state = lifecycle.state;
+    let worker_id = lifecycle.worker_id;
+    let job = lifecycle.job;
+    let attempt_id = lifecycle.attempt_id;
+    let job_id = job.id;
+    let initial_stage = lifecycle.initial_stage.to_string();
+    let message = format!("{error:#}");
+    let extract_error = error.downcast_ref::<CanonicalExtractContentError>();
+    match state
+        .canonical_services
+        .ingest
+        .finalize_attempt(
+            state,
+            FinalizeAttemptCommand {
+                attempt_id,
+                knowledge_generation_id: None,
+                attempt_state: "failed".to_string(),
+                current_stage: Some(initial_stage.clone()),
+                failure_class: Some(
+                    match job.job_kind.as_str() {
+                        "content_mutation" if extract_error.is_some() => "content_extract",
+                        "web_discovery" => "web_discovery",
+                        "web_materialize_page" => "web_page_materialization",
+                        "graph_refresh" => "graph_refresh",
+                        _ => "worker_error",
+                    }
+                    .to_string(),
+                ),
+                failure_code: Some(extract_error.map_or_else(
+                    || match job.job_kind.as_str() {
+                        "web_discovery" => "web_discovery_failed".to_string(),
+                        "web_materialize_page" => "web_materialize_page_failed".to_string(),
+                        "graph_refresh" => "graph_refresh_failed".to_string(),
+                        _ => "canonical_pipeline_failed".to_string(),
+                    },
+                    |failure| failure.failure_code.clone(),
+                )),
+                failure_message: Some(message.clone()),
+                retryable: extract_error.is_none_or(|failure| failure.retryable),
+            },
+        )
+        .await
+    {
+        Ok(finalized) if finalized.retryable => {
+            // `finalize_attempt` already requeued the job (queue_state ->
+            // queued, available_at -> now + backoff) because the failure
+            // was retryable and the attempt budget still has room. Return
+            // Ok so the dispatcher's `handle_job_outcome` does NOT route
+            // this through `fail_canonical_ingest_job`, which would clobber
+            // the freshly requeued state back to terminal `failed` and kill
+            // the retry. The next dispatcher tick re-leases the job once the
+            // backoff window elapses.
+            info!(
+                %worker_id,
+                %job_id,
+                %attempt_id,
+                attempt_number = finalized.attempt_number,
+                "canonical ingest job failed retryably; requeued for another attempt",
+            );
+            Ok(())
+        }
+        Ok(_) => {
+            // Terminal failure (non-retryable, or retry budget exhausted).
+            // Propagate the error so the dispatcher reconciles the mutation
+            // and marks the job permanently failed.
+            Err(error).context(message)
+        }
+        Err(e) => {
+            tracing::warn!(%attempt_id, ?e, "failed to finalize attempt as failed");
+            Err(error).context(message)
+        }
+    }
+}
+
 async fn execute_canonical_ingest_job(
     state: Arc<AppState>,
     worker_id: &str,
@@ -523,6 +1267,7 @@ async fn execute_canonical_ingest_job(
         .context("claimed canonical ingest job is missing queue lease token")?;
     let initial_stage = match job.job_kind.as_str() {
         "content_mutation" => INGEST_STAGE_EXTRACT_CONTENT.to_string(),
+        "graph_refresh" => INGEST_STAGE_EXTRACT_GRAPH.to_string(),
         "web_discovery" => INGEST_STAGE_WEB_DISCOVERY.to_string(),
         "web_materialize_page" => INGEST_STAGE_WEB_MATERIALIZE_PAGE.to_string(),
         "webhook_delivery" => INGEST_STAGE_WEBHOOK_DELIVERY.to_string(),
@@ -538,7 +1283,7 @@ async fn execute_canonical_ingest_job(
                 job_id,
                 worker_principal_id: None,
                 lease_token: Some(format!("worker-{worker_id}-{}", Uuid::now_v7())),
-                expected_queue_lease_token: Some(expected_queue_lease_token),
+                expected_queue_lease_token: Some(expected_queue_lease_token.clone()),
                 knowledge_generation_id: None,
                 current_stage: Some(initial_stage.clone()),
             },
@@ -580,355 +1325,44 @@ async fn execute_canonical_ingest_job(
         Arc::clone(&lease_lost_requested),
     );
 
-    // Pre-lease cancellation guard: a job may have been canceled *between*
-    // `claim_next_queued_ingest_job` and the point where the heartbeat loop
-    // starts observing. Fold the first observation into the same path we use
-    // mid-pipeline so there is exactly one cancel handling branch.
-    let current_job = ingest_repository::get_ingest_job_by_id(&state.persistence.postgres, job.id)
-        .await
-        .context("failed to reload ingest job for cancellation check")?;
-    if current_job.as_ref().is_some_and(|j| j.queue_state == "canceled") {
-        user_cancel_requested.store(true, Ordering::Relaxed);
-        cancellation_token.cancel();
-    } else if current_job.as_ref().is_some_and(|j| j.queue_state == "paused") {
-        operator_pause_requested.store(true, Ordering::Relaxed);
-        cancellation_token.cancel();
-    } else if current_job.as_ref().is_some_and(|j| j.queue_state != "leased") {
-        lease_lost_requested.store(true, Ordering::Relaxed);
-        cancellation_token.cancel();
-    }
-
-    let result = if cancellation_token.is_cancelled() {
-        Err(job_cancellation_error(
-            job.id,
-            &user_cancel_requested,
-            &operator_pause_requested,
-            &lease_lost_requested,
-        ))
-    } else {
-        match job.job_kind.as_str() {
-            "content_mutation" => {
-                let revision_id = job
-                    .knowledge_revision_id
-                    .context("canonical ingest job is missing knowledge_revision_id")?;
-                let document_id = job
-                    .knowledge_document_id
-                    .context("canonical ingest job is missing knowledge_document_id")?;
-
-                // Check if document was deleted while job was queued
-                let document = content_repository::get_document_by_id(
-                    &state.persistence.postgres,
-                    document_id,
-                )
-                .await
-                .map_err(|_| anyhow::anyhow!("failed to load document"))?;
-                if document.as_ref().is_some_and(|d| d.document_state == "deleted") {
-                    if let Some(mutation_id) = job.mutation_id {
-                        state
-                            .canonical_services
-                            .content
-                            .settle_deleted_document_mutation(&state, mutation_id)
-                            .await
-                            .map_err(|error| {
-                                anyhow::anyhow!(
-                                    "failed to settle skipped mutation for deleted document: {error}"
-                                )
-                            })?;
-                    }
-                    info!(document_id = %document_id, "canceling leased ingest for deleted document");
-                    return Err(anyhow::Error::new(DeletedDocumentJobSkipped { document_id }));
-                }
-
-                run_canonical_ingest_pipeline(
-                    &state,
-                    worker_id,
-                    &job,
-                    attempt_id,
-                    document_id,
-                    revision_id,
-                    &cancellation_token,
-                    &user_cancel_requested,
-                    &operator_pause_requested,
-                    &lease_lost_requested,
-                )
-                .await
-            }
-            "web_discovery" => run_canonical_web_discovery_job(&state, &job, attempt_id).await,
-            "web_materialize_page" => {
-                run_canonical_web_materialize_page_job(&state, &job, attempt_id).await
-            }
-            "webhook_delivery" => {
-                crate::services::webhook::delivery::run_webhook_delivery_job(&state, &job)
-                    .await
-                    .map_err(Into::into)
-            }
-            other => Err(anyhow::anyhow!("unsupported canonical ingest job kind {other}")),
-        }
+    let cancellation = CanonicalPipelineCancellation {
+        token: &cancellation_token,
+        user_requested: &user_cancel_requested,
+        operator_pause_requested: &operator_pause_requested,
+        lease_lost_requested: &lease_lost_requested,
     };
-
+    let lifecycle = CanonicalAttemptLifecycle {
+        state: &state,
+        worker_id,
+        job: &job,
+        attempt_id,
+        initial_stage: &initial_stage,
+        expected_queue_lease_token: &expected_queue_lease_token,
+        cancellation,
+    };
+    let dispatch_result = dispatch_canonical_ingest_job(&lifecycle).await;
+    let already_finalized =
+        dispatch_result.as_ref().is_ok_and(CanonicalDispatchOutcome::is_finalized);
+    let result = dispatch_result.map(|_| ());
     drop(heartbeat_guard);
 
+    if already_finalized && result.is_ok() {
+        info!(
+            %worker_id,
+            %job_id,
+            %attempt_id,
+            "canonical job atomically finalized the current ingest lease"
+        );
+        return Ok(());
+    }
+
     match result {
-        Ok(()) => {
-            let finalize_result = state
-                .canonical_services
-                .ingest
-                .finalize_attempt(
-                    &state,
-                    FinalizeAttemptCommand {
-                        attempt_id,
-                        knowledge_generation_id: None,
-                        attempt_state: "succeeded".to_string(),
-                        current_stage: Some(match job.job_kind.as_str() {
-                            "content_mutation" => INGEST_STAGE_FINALIZING.to_string(),
-                            "web_discovery" => INGEST_STAGE_WEB_DISCOVERY.to_string(),
-                            "web_materialize_page" => INGEST_STAGE_WEB_MATERIALIZE_PAGE.to_string(),
-                            "webhook_delivery" => INGEST_STAGE_WEBHOOK_DELIVERY.to_string(),
-                            _ => initial_stage.clone(),
-                        }),
-                        failure_class: None,
-                        failure_code: None,
-                        failure_message: None,
-                        retryable: false,
-                    },
-                )
-                .await;
-            if let Err(error) = finalize_result {
-                if matches!(error, crate::interfaces::http::router_support::ApiError::Conflict(_)) {
-                    match ingest_repository::get_ingest_job_by_id(
-                        &state.persistence.postgres,
-                        job_id,
-                    )
-                    .await
-                    {
-                        Ok(Some(row)) if row.queue_state == "paused" => {
-                            if let Err(e) = ingest_repository::abandon_paused_ingest_attempt(
-                                &state.persistence.postgres,
-                                attempt_id,
-                            )
-                            .await
-                            {
-                                tracing::warn!(%attempt_id, ?e, "failed to finalize paused ingest attempt after successful pipeline return");
-                            }
-                            info!(
-                                %worker_id,
-                                %job_id,
-                                %attempt_id,
-                                "canonical ingest job completed after operator pause; preserving paused queue state"
-                            );
-                            return Ok(());
-                        }
-                        Ok(_) => {}
-                        Err(e) => {
-                            tracing::warn!(%attempt_id, ?e, "failed to reload ingest job after finalize conflict");
-                        }
-                    }
-                    warn!(
-                        %worker_id,
-                        %job_id,
-                        %attempt_id,
-                        ?error,
-                        "canonical ingest job finished after losing its active lease; leaving queue state to the current owner"
-                    );
-                    return Ok(());
-                }
-                return Err(error)
-                    .context("failed to finalize canonical ingest attempt as succeeded");
-            }
-            info!(
-                %worker_id,
-                %job_id,
-                %attempt_id,
-                "canonical ingest job completed",
-            );
-            Ok(())
-        }
-        Err(error) => {
-            if error.downcast_ref::<JobCanceledByRequest>().is_some() {
-                info!(
-                    %worker_id,
-                    %job_id,
-                    %attempt_id,
-                    "canonical ingest job observed user cancel request and stopped cooperatively",
-                );
-                return Ok(());
-            }
-            if error.downcast_ref::<JobPausedByOperator>().is_some() {
-                if let Err(e) = ingest_repository::abandon_paused_ingest_attempt(
-                    &state.persistence.postgres,
-                    attempt_id,
-                )
-                .await
-                {
-                    tracing::warn!(%attempt_id, ?e, "failed to finalize paused ingest attempt");
-                }
-                info!(
-                    %worker_id,
-                    %job_id,
-                    %attempt_id,
-                    "canonical ingest job observed operator pause request and stopped cooperatively",
-                );
-                return Ok(());
-            }
-            if error.downcast_ref::<JobLeaseLost>().is_some() {
-                warn!(
-                    %worker_id,
-                    %job_id,
-                    %attempt_id,
-                    "canonical ingest job stopped because its attempt lease was lost"
-                );
-                return Ok(());
-            }
-            if error.downcast_ref::<JobCanceledByShutdown>().is_some() {
-                match ingest_repository::get_ingest_job_by_id(&state.persistence.postgres, job_id)
-                    .await
-                {
-                    Ok(Some(row)) if row.queue_state == "canceled" => {
-                        info!(
-                            %worker_id,
-                            %job_id,
-                            %attempt_id,
-                            "canonical ingest job stopped during shutdown after user cancel won the race",
-                        );
-                        return Ok(());
-                    }
-                    Ok(_) => {}
-                    Err(e) => {
-                        tracing::warn!(
-                            %attempt_id,
-                            ?e,
-                            "failed to reload ingest job while finalizing shutdown cancellation"
-                        );
-                    }
-                }
-                if let Err(e) = state
-                    .canonical_services
-                    .ingest
-                    .finalize_attempt(
-                        &state,
-                        FinalizeAttemptCommand {
-                            attempt_id,
-                            knowledge_generation_id: None,
-                            attempt_state: "failed".to_string(),
-                            current_stage: Some(initial_stage.clone()),
-                            failure_class: Some("worker_shutdown".to_string()),
-                            failure_code: Some("shutdown_cancelled".to_string()),
-                            failure_message: Some(
-                                "Worker shutdown canceled document processing".to_string(),
-                            ),
-                            retryable: true,
-                        },
-                    )
-                    .await
-                {
-                    tracing::warn!(%attempt_id, ?e, "failed to requeue shutdown-canceled attempt");
-                }
-                info!(
-                    %worker_id,
-                    %job_id,
-                    %attempt_id,
-                    "canonical ingest job stopped cooperatively for worker shutdown",
-                );
-                return Ok(());
-            }
-            if error.downcast_ref::<DeletedDocumentJobSkipped>().is_some() {
-                if let Err(e) = state
-                    .canonical_services
-                    .ingest
-                    .finalize_attempt(
-                        &state,
-                        FinalizeAttemptCommand {
-                            attempt_id,
-                            knowledge_generation_id: None,
-                            attempt_state: "canceled".to_string(),
-                            current_stage: Some(initial_stage.clone()),
-                            failure_class: Some("content_mutation".to_string()),
-                            failure_code: Some("document_deleted".to_string()),
-                            failure_message: Some(
-                                "Document was deleted before processing finished".to_string(),
-                            ),
-                            retryable: false,
-                        },
-                    )
-                    .await
-                {
-                    tracing::warn!(%attempt_id, ?e, "failed to finalize deleted-document attempt as canceled");
-                }
-                info!(%worker_id, %job_id, %attempt_id, "canonical ingest job canceled because document was deleted");
-                return Ok(());
-            }
-            let message = format!("{error:#}");
-            let extract_error = error.downcast_ref::<CanonicalExtractContentError>();
-            match state
-                .canonical_services
-                .ingest
-                .finalize_attempt(
-                    &state,
-                    FinalizeAttemptCommand {
-                        attempt_id,
-                        knowledge_generation_id: None,
-                        attempt_state: "failed".to_string(),
-                        current_stage: Some(initial_stage.clone()),
-                        failure_class: Some(
-                            match job.job_kind.as_str() {
-                                "content_mutation" if extract_error.is_some() => "content_extract",
-                                "web_discovery" => "web_discovery",
-                                "web_materialize_page" => "web_page_materialization",
-                                _ => "worker_error",
-                            }
-                            .to_string(),
-                        ),
-                        failure_code: Some(
-                            extract_error
-                                .map(|failure| failure.failure_code.clone())
-                                .unwrap_or_else(|| match job.job_kind.as_str() {
-                                    "web_discovery" => "web_discovery_failed".to_string(),
-                                    "web_materialize_page" => {
-                                        "web_materialize_page_failed".to_string()
-                                    }
-                                    _ => "canonical_pipeline_failed".to_string(),
-                                }),
-                        ),
-                        failure_message: Some(message.clone()),
-                        retryable: extract_error.map(|failure| failure.retryable).unwrap_or(true),
-                    },
-                )
-                .await
-            {
-                Ok(finalized) if finalized.retryable => {
-                    // `finalize_attempt` already requeued the job (queue_state ->
-                    // queued, available_at -> now + backoff) because the failure
-                    // was retryable and the attempt budget still has room. Return
-                    // Ok so the dispatcher's `handle_job_outcome` does NOT route
-                    // this through `fail_canonical_ingest_job`, which would clobber
-                    // the freshly requeued state back to terminal `failed` and kill
-                    // the retry. The next dispatcher tick re-leases the job once the
-                    // backoff window elapses.
-                    info!(
-                        %worker_id,
-                        %job_id,
-                        %attempt_id,
-                        attempt_number = finalized.attempt_number,
-                        "canonical ingest job failed retryably; requeued for another attempt",
-                    );
-                    Ok(())
-                }
-                Ok(_) => {
-                    // Terminal failure (non-retryable, or retry budget exhausted).
-                    // Propagate the error so the dispatcher reconciles the mutation
-                    // and marks the job permanently failed.
-                    Err(error).context(message)
-                }
-                Err(e) => {
-                    tracing::warn!(%attempt_id, ?e, "failed to finalize attempt as failed");
-                    Err(error).context(message)
-                }
-            }
-        }
+        Ok(()) => finalize_successful_canonical_job(&lifecycle).await,
+        Err(error) => finalize_failed_canonical_job(&lifecycle, error).await,
     }
 }
 
-async fn run_canonical_ingest_pipeline(
+async fn run_canonical_graph_refresh(
     state: &AppState,
     worker_id: &str,
     job: &ingest_repository::IngestJobRow,
@@ -939,8 +1373,17 @@ async fn run_canonical_ingest_pipeline(
     user_cancel_requested: &AtomicBool,
     operator_pause_requested: &AtomicBool,
     lease_lost_requested: &AtomicBool,
-) -> anyhow::Result<()> {
-    // --- Stage: extract_content -----------------------------------------------
+) -> anyhow::Result<CanonicalGraphRefreshOutcome> {
+    anyhow::ensure!(
+        job.job_kind == "graph_refresh",
+        "graph-refresh runner received another job kind"
+    );
+    anyhow::ensure!(
+        job.mutation_id.is_none()
+            && job.mutation_item_id.is_none()
+            && job.async_operation_id.is_none(),
+        "graph-refresh maintenance must not own a content mutation or async operation"
+    );
     check_job_cancellation(
         cancellation_token,
         user_cancel_requested,
@@ -948,6 +1391,375 @@ async fn run_canonical_ingest_pipeline(
         lease_lost_requested,
         job.id,
     )?;
+
+    state
+        .canonical_services
+        .ingest
+        .record_stage_event(
+            state,
+            RecordStageEventCommand {
+                attempt_id,
+                stage_name: INGEST_STAGE_EXTRACT_GRAPH.to_string(),
+                stage_state: "started".to_string(),
+                message: Some("refreshing graph candidates for the current revision".to_string()),
+                details_json: serde_json::json!({
+                    "documentId": document_id,
+                    "revisionId": revision_id,
+                }),
+                provider_kind: None,
+                model_name: None,
+                prompt_tokens: None,
+                completion_tokens: None,
+                total_tokens: None,
+                cached_tokens: None,
+                estimated_cost: None,
+                currency_code: None,
+                elapsed_ms: None,
+            },
+        )
+        .await
+        .context("failed to record graph-refresh start stage event")?;
+
+    let started_at = Instant::now();
+    let materialization = match state
+        .canonical_services
+        .content
+        .materialize_revision_graph_candidates(
+            state,
+            MaterializeRevisionGraphCandidatesCommand {
+                workspace_id: job.workspace_id,
+                library_id: job.library_id,
+                revision_id,
+                attempt_id: Some(attempt_id),
+            },
+            cancellation_token,
+        )
+        .await
+    {
+        Ok(materialization) => materialization,
+        Err(crate::services::content::error::ContentServiceError::Cancelled) => {
+            return Err(job_cancellation_error(
+                job.id,
+                user_cancel_requested,
+                operator_pause_requested,
+                lease_lost_requested,
+            ));
+        }
+        Err(error) => return Err(error).context("graph-refresh candidate extraction failed"),
+    };
+
+    let reconcile_timeout =
+        Duration::from_secs(state.settings.runtime_graph_extract_stage_timeout_seconds.max(1));
+    let graph_outcome = match time::timeout(
+        reconcile_timeout,
+        state.canonical_services.graph.reconcile_revision_graph(
+            state,
+            job.library_id,
+            document_id,
+            revision_id,
+            Some(attempt_id),
+            cancellation_token,
+        ),
+    )
+    .await
+    {
+        Ok(Ok(outcome)) => outcome,
+        Ok(Err(crate::services::graph::error::GraphServiceError::Cancelled)) => {
+            return Err(job_cancellation_error(
+                job.id,
+                user_cancel_requested,
+                operator_pause_requested,
+                lease_lost_requested,
+            ));
+        }
+        Ok(Err(error)) => return Err(error).context("graph-refresh reconcile failed"),
+        Err(_) => anyhow::bail!(
+            "graph-refresh reconcile exceeded canonical timeout of {}s",
+            reconcile_timeout.as_secs()
+        ),
+    };
+    let graph_ready = graph_outcome.graph_ready;
+
+    state
+        .canonical_services
+        .ingest
+        .record_stage_event(
+            state,
+            RecordStageEventCommand {
+                attempt_id,
+                stage_name: INGEST_STAGE_EXTRACT_GRAPH.to_string(),
+                stage_state: "completed".to_string(),
+                message: Some(graph_extract_success_message(graph_ready).to_string()),
+                details_json: serde_json::json!({
+                    "chunksProcessed": materialization.chunk_count,
+                    "graphChunksSelected": materialization.selected_graph_chunks,
+                    "recordStreamSourceUnitsSkipped": materialization.record_stream_source_units_skipped,
+                    "extractedEntityCandidates": materialization.extracted_entities,
+                    "extractedRelationCandidates": materialization.extracted_relations,
+                    "reusedChunks": materialization.reused_chunks,
+                    "reusedPromptHashMismatches": materialization.reused_prompt_hash_mismatches,
+                    "reusedEntities": materialization.reused_entities,
+                    "reusedRelations": materialization.reused_relations,
+                    "projectedNodes": graph_outcome.projection.node_count,
+                    "projectedEdges": graph_outcome.projection.edge_count,
+                    "projectionVersion": graph_outcome.projection.projection_version,
+                    "graphStatus": graph_outcome.projection.graph_status,
+                    "graphContributionCount": graph_outcome.graph_contribution_count,
+                    "graphReady": graph_ready,
+                    "providerKind": materialization.provider_kind,
+                    "modelName": materialization.model_name,
+                }),
+                provider_kind: materialization.provider_kind.clone(),
+                model_name: materialization.model_name.clone(),
+                prompt_tokens: materialization
+                    .usage_json
+                    .get("prompt_tokens")
+                    .and_then(serde_json::Value::as_i64)
+                    .map(|value| value as i32),
+                completion_tokens: materialization
+                    .usage_json
+                    .get("completion_tokens")
+                    .and_then(serde_json::Value::as_i64)
+                    .map(|value| value as i32),
+                total_tokens: materialization
+                    .usage_json
+                    .get("total_tokens")
+                    .and_then(serde_json::Value::as_i64)
+                    .map(|value| value as i32),
+                cached_tokens: None,
+                estimated_cost: None,
+                currency_code: None,
+                elapsed_ms: Some(started_at.elapsed().as_millis() as i64),
+            },
+        )
+        .await
+        .context("failed to record graph-refresh completion stage event")?;
+
+    check_job_cancellation(
+        cancellation_token,
+        user_cancel_requested,
+        operator_pause_requested,
+        lease_lost_requested,
+        job.id,
+    )?;
+    let completed_at = Utc::now();
+    let publication = ingest_repository::publish_graph_refresh_success(
+        &state.persistence.postgres,
+        &ingest_repository::PublishGraphRefreshSuccess {
+            workspace_id: job.workspace_id,
+            library_id: job.library_id,
+            document_id,
+            revision_id,
+            attempt_id,
+            graph_state: graph_state_after_successful_extract(graph_ready).to_string(),
+            graph_ready_at: graph_ready.then_some(completed_at),
+            completed_at,
+        },
+    )
+    .await
+    .context("failed to atomically publish graph-refresh success")?;
+
+    match publication {
+        ingest_repository::PublishGraphRefreshSuccessOutcome::Applied { source_truth_version } => {
+            if let Some(pending_summary_refresh) = graph_outcome.pending_summary_refresh.as_ref()
+                && let Err(error) = state
+                    .canonical_services
+                    .graph
+                    .apply_published_summary_refresh(
+                        state,
+                        job.library_id,
+                        source_truth_version,
+                        pending_summary_refresh,
+                    )
+                    .await
+            {
+                warn!(
+                    %worker_id,
+                    job_id = %job.id,
+                    %attempt_id,
+                    %revision_id,
+                    source_truth_version,
+                    ?error,
+                    "graph-refresh lifecycle committed but canonical summary refresh failed",
+                );
+            }
+            info!(
+                %worker_id,
+                job_id = %job.id,
+                %attempt_id,
+                %revision_id,
+                "graph-refresh maintenance was atomically published",
+            );
+        }
+        ingest_repository::PublishGraphRefreshSuccessOutcome::Superseded { .. } => {
+            info!(
+                %worker_id,
+                job_id = %job.id,
+                %attempt_id,
+                %revision_id,
+                "graph-refresh maintenance was superseded by a newer readable revision",
+            );
+        }
+        ingest_repository::PublishGraphRefreshSuccessOutcome::AuthorityLost { .. } => {
+            warn!(
+                %worker_id,
+                job_id = %job.id,
+                %attempt_id,
+                %revision_id,
+                "graph-refresh publication arrived after attempt authority moved",
+            );
+        }
+    }
+
+    Ok(CanonicalGraphRefreshOutcome::LifecyclePublished)
+}
+
+async fn load_or_self_heal_knowledge_revision(
+    state: &AppState,
+    revision_row: &content_repository::ContentRevisionRow,
+) -> anyhow::Result<crate::infra::knowledge_rows::KnowledgeRevisionRow> {
+    if let Some(revision) = state
+        .document_store
+        .get_revision(revision_row.id)
+        .await
+        .context("failed to load knowledge revision from store")?
+    {
+        return Ok(revision);
+    }
+    let revision_id = revision_row.id;
+    tracing::info!(%revision_id, "revision missing from knowledge store — self-healing from Postgres");
+    let document = content_repository::get_document_by_id(
+        &state.persistence.postgres,
+        revision_row.document_id,
+    )
+    .await
+    .context("failed to load document for self-heal")?
+    .with_context(|| format!("document {} not found in Postgres", revision_row.document_id))?;
+    let document_exists = state
+        .document_store
+        .get_document(revision_row.document_id)
+        .await
+        .context("failed to check document in knowledge store")?
+        .is_some();
+    if !document_exists {
+        state
+            .canonical_services
+            .knowledge
+            .create_document_shell(
+                state,
+                crate::services::knowledge::service::CreateKnowledgeDocumentCommand {
+                    document_id: document.id,
+                    workspace_id: document.workspace_id,
+                    library_id: document.library_id,
+                    external_key: document.external_key.clone(),
+                    file_name: Some(document.external_key.clone()),
+                    title: None,
+                    document_state: document.document_state.clone(),
+                },
+            )
+            .await
+            .with_context(|| {
+                format!("failed to self-heal knowledge document {} in store", document.id)
+            })?;
+    }
+    state
+        .canonical_services
+        .knowledge
+        .write_revision(
+            state,
+            crate::services::knowledge::service::CreateKnowledgeRevisionCommand {
+                revision_id: revision_row.id,
+                workspace_id: revision_row.workspace_id,
+                library_id: revision_row.library_id,
+                document_id: revision_row.document_id,
+                revision_number: i64::from(revision_row.revision_number),
+                revision_state: "accepted".to_string(),
+                revision_kind: revision_row.content_source_kind.clone(),
+                storage_ref: revision_row.storage_key.clone(),
+                source_uri: revision_row.source_uri.clone(),
+                document_hint: revision_row.document_hint.clone(),
+                mime_type: revision_row.mime_type.clone(),
+                checksum: revision_row.checksum.clone(),
+                byte_size: revision_row.byte_size,
+                title: revision_row.title.clone(),
+                normalized_text: None,
+                text_checksum: None,
+                text_state: "accepted".to_string(),
+                vector_state: "accepted".to_string(),
+                graph_state: "accepted".to_string(),
+                text_readable_at: None,
+                vector_ready_at: None,
+                graph_ready_at: None,
+                superseded_by_revision_id: None,
+            },
+        )
+        .await
+        .with_context(|| {
+            format!("failed to self-heal knowledge revision {revision_id} in store")
+        })?;
+    state
+        .document_store
+        .get_revision(revision_id)
+        .await
+        .context("failed to load self-healed revision from knowledge store")?
+        .with_context(|| {
+            format!("self-healed revision {revision_id} was not persisted to the knowledge store")
+        })
+}
+
+async fn record_extract_content_failure(
+    state: &AppState,
+    attempt_id: Uuid,
+    revision_id: Uuid,
+    error: &CanonicalExtractContentError,
+    elapsed_ms: i64,
+) {
+    if let Err(update_error) = state
+        .canonical_services
+        .knowledge
+        .set_revision_extract_state(state, revision_id, "failed", None, None)
+        .await
+    {
+        tracing::warn!(%revision_id, ?update_error, "failed to set revision extract state to failed");
+    }
+    if let Err(event_error) = state
+        .canonical_services
+        .ingest
+        .record_stage_event(
+            state,
+            RecordStageEventCommand {
+                attempt_id,
+                stage_name: INGEST_STAGE_EXTRACT_CONTENT.to_string(),
+                stage_state: "failed".to_string(),
+                message: Some(error.to_string()),
+                details_json: serde_json::json!({ "failureCode": error.failure_code }),
+                provider_kind: None,
+                model_name: None,
+                prompt_tokens: None,
+                completion_tokens: None,
+                total_tokens: None,
+                cached_tokens: None,
+                estimated_cost: None,
+                currency_code: None,
+                elapsed_ms: Some(elapsed_ms),
+            },
+        )
+        .await
+    {
+        tracing::warn!(%attempt_id, ?event_error, "failed to record extract_content stage failure event");
+    }
+}
+
+async fn prepare_canonical_content(
+    state: &AppState,
+    worker_id: &str,
+    job: &ingest_repository::IngestJobRow,
+    attempt_id: Uuid,
+    revision_id: Uuid,
+    cancellation: &CanonicalPipelineCancellation<'_>,
+) -> anyhow::Result<CanonicalPreparedContent> {
+    // --- Stage: extract_content -----------------------------------------------
+    cancellation.check(job.id)?;
     state
         .canonical_services
         .ingest
@@ -1004,149 +1816,23 @@ async fn run_canonical_ingest_pipeline(
         );
     }
 
-    let knowledge_revision = state
-        .document_store
-        .get_revision(revision_id)
-        .await
-        .context("failed to load knowledge revision from store")?;
+    let revision = load_or_self_heal_knowledge_revision(state, &revision_row).await?;
 
-    let revision = if let Some(existing) = knowledge_revision {
-        existing
-    } else {
-        tracing::info!(
-            %revision_id,
-            "revision missing from knowledge store — self-healing from Postgres"
-        );
-
-        // Ensure the document shell exists before writing the
-        // revision — write_revision also upserts a document→revision edge
-        // which requires the document node to be present.
-        let document = content_repository::get_document_by_id(
-            &state.persistence.postgres,
-            revision_row.document_id,
-        )
-        .await
-        .context("failed to load document for self-heal")?
-        .with_context(|| format!("document {} not found in Postgres", revision_row.document_id))?;
-
-        if state
-            .document_store
-            .get_document(revision_row.document_id)
-            .await
-            .context("failed to check document in knowledge store")?
-            .is_none()
-        {
-            state
-                .canonical_services
-                .knowledge
-                .create_document_shell(
+    let extracted_content =
+        match resolve_canonical_extract_content(state, job, attempt_id, &revision).await {
+            Ok(content) => content,
+            Err(error) => {
+                record_extract_content_failure(
                     state,
-                    crate::services::knowledge::service::CreateKnowledgeDocumentCommand {
-                        document_id: document.id,
-                        workspace_id: document.workspace_id,
-                        library_id: document.library_id,
-                        external_key: document.external_key.clone(),
-                        file_name: Some(document.external_key.clone()),
-                        title: None,
-                        document_state: document.document_state.clone(),
-                    },
+                    attempt_id,
+                    revision_id,
+                    &error,
+                    extract_content_start.elapsed().as_millis() as i64,
                 )
-                .await
-                .with_context(|| {
-                    format!("failed to self-heal knowledge document {} in store", document.id)
-                })?;
-        }
-
-        let cmd = crate::services::knowledge::service::CreateKnowledgeRevisionCommand {
-            revision_id: revision_row.id,
-            workspace_id: revision_row.workspace_id,
-            library_id: revision_row.library_id,
-            document_id: revision_row.document_id,
-            revision_number: i64::from(revision_row.revision_number),
-            revision_state: "accepted".to_string(),
-            revision_kind: revision_row.content_source_kind.clone(),
-            storage_ref: revision_row.storage_key.clone(),
-            source_uri: revision_row.source_uri.clone(),
-            document_hint: revision_row.document_hint.clone(),
-            mime_type: revision_row.mime_type.clone(),
-            checksum: revision_row.checksum.clone(),
-            byte_size: revision_row.byte_size,
-            title: revision_row.title.clone(),
-            normalized_text: None,
-            text_checksum: None,
-            text_state: "accepted".to_string(),
-            vector_state: "accepted".to_string(),
-            graph_state: "accepted".to_string(),
-            text_readable_at: None,
-            vector_ready_at: None,
-            graph_ready_at: None,
-            superseded_by_revision_id: None,
+                .await;
+                return Err(anyhow::Error::new(error));
+            }
         };
-        state.canonical_services.knowledge.write_revision(state, cmd).await.with_context(|| {
-            format!("failed to self-heal knowledge revision {revision_id} in store")
-        })?;
-        // Re-read from the knowledge store so we have the canonical row.
-        state
-            .document_store
-            .get_revision(revision_id)
-            .await
-            .context("failed to load self-healed revision from knowledge store")?
-            .with_context(|| {
-                format!(
-                    "self-healed revision {revision_id} was not persisted to the knowledge store"
-                )
-            })?
-    };
-
-    let extracted_content = match resolve_canonical_extract_content(
-        state, job, attempt_id, &revision,
-    )
-    .await
-    {
-        Ok(content) => content,
-        Err(error) => {
-            let failure_message = error.to_string();
-            let failure_code = error.failure_code.clone();
-            let elapsed_ms = Some(extract_content_start.elapsed().as_millis() as i64);
-            if let Err(e) = state
-                .canonical_services
-                .knowledge
-                .set_revision_extract_state(state, revision_id, "failed", None, None)
-                .await
-            {
-                tracing::warn!(%revision_id, ?e, "failed to set revision extract state to failed");
-            }
-            if let Err(e) = state
-                .canonical_services
-                .ingest
-                .record_stage_event(
-                    state,
-                    RecordStageEventCommand {
-                        attempt_id,
-                        stage_name: INGEST_STAGE_EXTRACT_CONTENT.to_string(),
-                        stage_state: "failed".to_string(),
-                        message: Some(failure_message),
-                        details_json: serde_json::json!({
-                            "failureCode": failure_code,
-                        }),
-                        provider_kind: None,
-                        model_name: None,
-                        prompt_tokens: None,
-                        completion_tokens: None,
-                        total_tokens: None,
-                        cached_tokens: None,
-                        estimated_cost: None,
-                        currency_code: None,
-                        elapsed_ms,
-                    },
-                )
-                .await
-            {
-                tracing::warn!(%attempt_id, ?e, "failed to record extract_content stage failure event");
-            }
-            return Err(anyhow::Error::new(error));
-        }
-    };
     let normalized_text =
         extracted_content.extraction_plan.normalized_text.clone().unwrap_or_default();
 
@@ -1171,19 +1857,18 @@ async fn run_canonical_ingest_pipeline(
 
     // Persist image_checksum as a supplementary field on the knowledge revision.
     // Fire-and-forget: a write failure is non-fatal (worst case: chunk reuse skipped on next revision).
-    if let Some(ref checksum) = extracted_content.extraction_plan.image_checksum {
-        if let Err(e) = state
+    if let Some(ref checksum) = extracted_content.extraction_plan.image_checksum
+        && let Err(e) = state
             .document_store
             .update_revision_image_checksum(revision_id, Some(checksum.as_str()))
             .await
-        {
-            tracing::warn!(%revision_id, ?e, "failed to persist image_checksum");
-        }
+    {
+        tracing::warn!(%revision_id, ?e, "failed to persist image_checksum");
     }
 
     let extract_content_elapsed_ms = Some(extract_content_start.elapsed().as_millis() as i64);
 
-    // Capture vision billing if LLM was used for content extraction.
+    // Capture document-understanding billing if an LLM was used for extraction.
     if let Some(provider_kind) = extracted_content.provider_kind.clone() {
         let model_name = extracted_content.model_name.clone().unwrap_or_default();
         for usage_json in vision_billing_usage_items(&extracted_content.usage_json) {
@@ -1205,7 +1890,7 @@ async fn run_canonical_ingest_pipeline(
                 )
                 .await
             {
-                warn!(%worker_id, job_id = %job.id, ?e, "vision billing capture failed");
+                warn!(%worker_id, job_id = %job.id, ?e, "document-understanding billing capture failed");
             }
         }
     }
@@ -1226,17 +1911,17 @@ async fn run_canonical_ingest_pipeline(
                 prompt_tokens: extracted_content
                     .usage_json
                     .get("prompt_tokens")
-                    .and_then(|v| v.as_i64())
+                    .and_then(serde_json::Value::as_i64)
                     .map(|v| v as i32),
                 completion_tokens: extracted_content
                     .usage_json
                     .get("completion_tokens")
-                    .and_then(|v| v.as_i64())
+                    .and_then(serde_json::Value::as_i64)
                     .map(|v| v as i32),
                 total_tokens: extracted_content
                     .usage_json
                     .get("total_tokens")
-                    .and_then(|v| v.as_i64())
+                    .and_then(serde_json::Value::as_i64)
                     .map(|v| v as i32),
                 cached_tokens: None,
                 estimated_cost: None,
@@ -1248,13 +1933,7 @@ async fn run_canonical_ingest_pipeline(
         .context("failed to record extract_content stage event")?;
 
     // --- Stage: prepare_structure / chunk_content / extract_technical_facts ---
-    check_job_cancellation(
-        cancellation_token,
-        user_cancel_requested,
-        operator_pause_requested,
-        lease_lost_requested,
-        job.id,
-    )?;
+    cancellation.check(job.id)?;
     state
         .canonical_services
         .ingest
@@ -1291,7 +1970,7 @@ async fn run_canonical_ingest_pipeline(
             state,
             revision_id,
             &extracted_content.extraction_plan,
-            cancellation_token,
+            cancellation.token,
         )
         .await
     {
@@ -1299,9 +1978,9 @@ async fn run_canonical_ingest_pipeline(
         Err(error) => {
             let mapped_error = map_stage_error(
                 error.into(),
-                user_cancel_requested,
-                operator_pause_requested,
-                lease_lost_requested,
+                cancellation.user_requested,
+                cancellation.operator_pause_requested,
+                cancellation.lease_lost_requested,
                 job.id,
                 "failed to prepare and persist structured revision",
             );
@@ -1481,17 +2160,23 @@ async fn run_canonical_ingest_pipeline(
         );
     }
 
+    Ok(CanonicalPreparedContent { revision })
+}
+
+async fn embed_canonical_content(
+    state: &AppState,
+    worker_id: &str,
+    job: &ingest_repository::IngestJobRow,
+    attempt_id: Uuid,
+    revision: &crate::infra::knowledge_rows::KnowledgeRevisionRow,
+    revision_id: Uuid,
+    cancellation: &CanonicalPipelineCancellation<'_>,
+) -> anyhow::Result<CanonicalEmbeddingOutcome> {
     // --- Stage: embed_chunk ---------------------------------------------------
     // Chunk embedding is required for a readable revision. Failure marks
     // vector/graph readiness failed and aborts this attempt; the worker does
     // not continue into graph extraction with a partial vector inventory.
-    check_job_cancellation(
-        cancellation_token,
-        user_cancel_requested,
-        operator_pause_requested,
-        lease_lost_requested,
-        job.id,
-    )?;
+    cancellation.check(job.id)?;
     state
         .canonical_services
         .ingest
@@ -1519,6 +2204,12 @@ async fn run_canonical_ingest_pipeline(
         .await
         .context("failed to record embed_chunk started stage event")?;
 
+    let vector_write_source_truth_version = catalog_repository::get_library_source_truth_version(
+        &state.persistence.postgres,
+        revision.library_id,
+    )
+    .await
+    .context("failed to capture embed_chunk source-truth fence")?;
     let embed_chunk_start = Instant::now();
     let embed_chunk_outcome = state
         .canonical_services
@@ -1527,43 +2218,38 @@ async fn run_canonical_ingest_pipeline(
             state,
             revision.library_id,
             revision_id,
-            Some(attempt_id),
-            cancellation_token,
+            attempt_id,
+            vector_write_source_truth_version,
+            cancellation.token,
         )
         .await;
     let embed_chunk_elapsed_ms = Some(embed_chunk_start.elapsed().as_millis() as i64);
     let mut embed_chunk_failure: Option<String> = None;
-    // Whether the vectors already persisted for this revision must survive the
-    // failure so the requeued attempt can resume from them (transient provider /
-    // store blip) instead of re-embedding everything from scratch.
-    let mut embed_chunk_preserve_vectors = false;
-    let embed_chunk_success = match &embed_chunk_outcome {
+    match &embed_chunk_outcome {
         Ok(outcome) => {
             if let (Some(provider), Some(model), Some(usage_json)) = (
                 outcome.provider_kind.clone(),
                 outcome.model_name.clone(),
                 outcome.usage_json.clone(),
-            ) {
-                if let Err(e) = state
-                    .canonical_services
-                    .billing
-                    .capture_ingest_attempt(
-                        state,
-                        crate::services::ops::billing::CaptureIngestAttemptBillingCommand {
-                            workspace_id: job.workspace_id,
-                            library_id: job.library_id,
-                            attempt_id,
-                            binding_id: None,
-                            provider_kind: provider,
-                            model_name: model,
-                            call_kind: "embed_chunk".to_string(),
-                            usage_json,
-                        },
-                    )
-                    .await
-                {
-                    warn!(%worker_id, job_id = %job.id, ?e, "embed_chunk billing capture failed");
-                }
+            ) && let Err(e) = state
+                .canonical_services
+                .billing
+                .capture_ingest_attempt(
+                    state,
+                    crate::services::ops::billing::CaptureIngestAttemptBillingCommand {
+                        workspace_id: job.workspace_id,
+                        library_id: job.library_id,
+                        attempt_id,
+                        binding_id: None,
+                        provider_kind: provider,
+                        model_name: model,
+                        call_kind: "embed_chunk".to_string(),
+                        usage_json,
+                    },
+                )
+                .await
+            {
+                warn!(%worker_id, job_id = %job.id, ?e, "embed_chunk billing capture failed");
             }
             state
                 .canonical_services
@@ -1594,25 +2280,18 @@ async fn run_canonical_ingest_pipeline(
                 )
                 .await
                 .context("failed to record embed_chunk stage event")?;
-            true
         }
         Err(error) => {
             if matches!(error, crate::services::query::error::QueryServiceError::Cancelled) {
-                return Err(job_cancellation_error(
-                    job.id,
-                    user_cancel_requested,
-                    operator_pause_requested,
-                    lease_lost_requested,
-                ));
+                return Err(cancellation.error(job.id));
             }
-            embed_chunk_preserve_vectors = error.preserves_partial_vectors();
             embed_chunk_failure = Some(format!("chunk embedding failed: {error:#}"));
             warn!(
                 %worker_id,
                 job_id = %job.id,
                 revision_id = %revision_id,
                 ?error,
-                "chunk embedding failed; vector lane will remain empty for this revision",
+                "chunk embedding failed; readiness remains count-gated for retry",
             );
             state
                 .canonical_services
@@ -1640,29 +2319,35 @@ async fn run_canonical_ingest_pipeline(
                 )
                 .await
                 .context("failed to record embed_chunk failed stage event")?;
-            false
         }
     };
+    let embed_chunk_profile_key =
+        embed_chunk_outcome.as_ref().ok().and_then(|outcome| outcome.embedding_profile_key.clone());
     drop(embed_chunk_outcome);
     if let Some(reason) = embed_chunk_failure {
-        fail_revision_vector_graph_readiness(
-            state,
-            revision_id,
-            &reason,
-            !embed_chunk_preserve_vectors,
-        )
-        .await?;
+        // The embedding service owns exact attempt-ID cleanup. The outer
+        // lifecycle boundary atomically publishes failed readiness together
+        // with the attempt/job transition.
         return Err(anyhow::anyhow!(reason));
     }
+    Ok(CanonicalEmbeddingOutcome {
+        source_truth_version: vector_write_source_truth_version,
+        embedding_profile_key: embed_chunk_profile_key,
+    })
+}
 
+async fn extract_canonical_graph(
+    state: &AppState,
+    worker_id: &str,
+    job: &ingest_repository::IngestJobRow,
+    attempt_id: Uuid,
+    document_id: Uuid,
+    revision: &crate::infra::knowledge_rows::KnowledgeRevisionRow,
+    revision_id: Uuid,
+    cancellation: &CanonicalPipelineCancellation<'_>,
+) -> anyhow::Result<CanonicalGraphStageOutcome> {
     // --- Stage: extract_graph -------------------------------------------------
-    check_job_cancellation(
-        cancellation_token,
-        user_cancel_requested,
-        operator_pause_requested,
-        lease_lost_requested,
-        job.id,
-    )?;
+    cancellation.check(job.id)?;
     state
         .canonical_services
         .ingest
@@ -1712,23 +2397,19 @@ async fn run_canonical_ingest_pipeline(
                 revision_id,
                 attempt_id: Some(attempt_id),
             },
-            cancellation_token,
+            cancellation.token,
         )
         .await
     {
         Ok(materialization) => Ok(materialization),
         Err(crate::services::content::error::ContentServiceError::Cancelled) => {
-            return Err(job_cancellation_error(
-                job.id,
-                user_cancel_requested,
-                operator_pause_requested,
-                lease_lost_requested,
-            ));
+            return Err(cancellation.error(job.id));
         }
         Err(error) => Err(error),
     };
     let mut graph_ready = false;
     let mut graph_failure: Option<String> = None;
+    let mut pending_summary_refresh = None;
 
     match graph_materialization {
         Ok(graph_materialization) => {
@@ -1740,19 +2421,14 @@ async fn run_canonical_ingest_pipeline(
                     document_id,
                     revision_id,
                     Some(attempt_id),
-                    cancellation_token,
+                    cancellation.token,
                 ),
             )
             .await
             {
                 Ok(Ok(outcome)) => Ok(outcome),
                 Ok(Err(crate::services::graph::error::GraphServiceError::Cancelled)) => {
-                    return Err(job_cancellation_error(
-                        job.id,
-                        user_cancel_requested,
-                        operator_pause_requested,
-                        lease_lost_requested,
-                    ));
+                    return Err(cancellation.error(job.id));
                 }
                 Ok(Err(error)) => Err(error),
                 Err(_) => Err(crate::services::graph::error::GraphServiceError::StateConflict {
@@ -1766,6 +2442,7 @@ async fn run_canonical_ingest_pipeline(
 
             match graph_outcome {
                 Ok(outcome) => {
+                    pending_summary_refresh = outcome.pending_summary_refresh.clone();
                     let extract_graph_elapsed_ms =
                         Some(extract_graph_start.elapsed().as_millis() as i64);
                     state
@@ -1773,12 +2450,12 @@ async fn run_canonical_ingest_pipeline(
                         .ingest
                         .record_stage_event(
                             state,
-                            RecordStageEventCommand {
+                            graph_stage_event_command(
                                 attempt_id,
-                                stage_name: INGEST_STAGE_EXTRACT_GRAPH.to_string(),
-                                stage_state: "completed".to_string(),
-                                message: Some(graph_extract_success_message(graph_ready).to_string()),
-                                details_json: serde_json::json!({
+                                &graph_materialization,
+                                "completed",
+                                graph_extract_success_message(graph_ready),
+                                serde_json::json!({
                                     "chunksProcessed": graph_materialization.chunk_count,
                                     "graphChunksSelected": graph_materialization.selected_graph_chunks,
                                     "recordStreamSourceUnitsSkipped": graph_materialization.record_stream_source_units_skipped,
@@ -1797,16 +2474,8 @@ async fn run_canonical_ingest_pipeline(
                                     "providerKind": graph_materialization.provider_kind,
                                     "modelName": graph_materialization.model_name,
                                 }),
-                                provider_kind: graph_materialization.provider_kind.clone(),
-                                model_name: graph_materialization.model_name.clone(),
-                                prompt_tokens: graph_materialization.usage_json.get("prompt_tokens").and_then(|v| v.as_i64()).map(|v| v as i32),
-                                completion_tokens: graph_materialization.usage_json.get("completion_tokens").and_then(|v| v.as_i64()).map(|v| v as i32),
-                                total_tokens: graph_materialization.usage_json.get("total_tokens").and_then(|v| v.as_i64()).map(|v| v as i32),
-                                cached_tokens: None,
-                                estimated_cost: None,
-                                currency_code: None,
-                                elapsed_ms: extract_graph_elapsed_ms,
-                            },
+                                extract_graph_elapsed_ms,
+                            ),
                         )
                         .await
                         .context("failed to record extract_graph stage event")?;
@@ -1827,14 +2496,12 @@ async fn run_canonical_ingest_pipeline(
                         .ingest
                         .record_stage_event(
                             state,
-                            RecordStageEventCommand {
+                            graph_stage_event_command(
                                 attempt_id,
-                                stage_name: INGEST_STAGE_EXTRACT_GRAPH.to_string(),
-                                stage_state: "failed".to_string(),
-                                message: Some(
-                                    "graph rebuild failed".to_string(),
-                                ),
-                                details_json: serde_json::json!({
+                                &graph_materialization,
+                                "failed",
+                                "graph rebuild failed",
+                                serde_json::json!({
                                     "chunksProcessed": graph_materialization.chunk_count,
                                     "graphChunksSelected": graph_materialization.selected_graph_chunks,
                                     "recordStreamSourceUnitsSkipped": graph_materialization.record_stream_source_units_skipped,
@@ -1845,16 +2512,8 @@ async fn run_canonical_ingest_pipeline(
                                     "providerKind": graph_materialization.provider_kind,
                                     "modelName": graph_materialization.model_name,
                                 }),
-                                provider_kind: graph_materialization.provider_kind.clone(),
-                                model_name: graph_materialization.model_name.clone(),
-                                prompt_tokens: graph_materialization.usage_json.get("prompt_tokens").and_then(|v| v.as_i64()).map(|v| v as i32),
-                                completion_tokens: graph_materialization.usage_json.get("completion_tokens").and_then(|v| v.as_i64()).map(|v| v as i32),
-                                total_tokens: graph_materialization.usage_json.get("total_tokens").and_then(|v| v.as_i64()).map(|v| v as i32),
-                                cached_tokens: None,
-                                estimated_cost: None,
-                                currency_code: None,
-                                elapsed_ms: extract_graph_elapsed_ms,
-                            },
+                                extract_graph_elapsed_ms,
+                            ),
                         )
                         .await
                         .context("failed to record extract_graph failure stage event")?;
@@ -1908,27 +2567,67 @@ async fn run_canonical_ingest_pipeline(
     // the vectors, promote the document as readable, and let the idle graph
     // re-extract loop backfill the graph on a later tick. Only when the vectors
     // themselves are missing do we fail destructively (nothing to preserve).
-    let graph_degraded = if let Some(reason) = graph_failure {
-        if embed_chunk_success {
-            warn!(
-                %worker_id,
-                job_id = %job.id,
-                revision_id = %revision_id,
-                reason = %reason,
-                "graph extraction degraded after provider retries; keeping embedded chunk vectors and promoting document as searchable (graph backfilled by idle re-extract loop)",
-            );
-            true
-        } else {
-            // Reached only when chunk embedding did not succeed for this
-            // revision (the embed-failure path above returns earlier when it
-            // does fail), so there is no trustworthy partial vector state to
-            // keep — wipe it.
-            fail_revision_vector_graph_readiness(state, revision_id, &reason, true).await?;
-            return Err(anyhow::anyhow!(reason));
-        }
-    } else {
-        false
+    let graph_degraded = graph_failure.is_some();
+    if let Some(reason) = graph_failure {
+        warn!(
+            %worker_id,
+            job_id = %job.id,
+            revision_id = %revision_id,
+            reason = %reason,
+            "graph extraction degraded after provider retries; keeping embedded chunk vectors and promoting document as searchable (graph backfilled by idle re-extract loop)",
+        );
+    }
+    Ok(CanonicalGraphStageOutcome { graph_ready, graph_degraded, pending_summary_refresh })
+}
+
+async fn run_canonical_ingest_pipeline(
+    state: &AppState,
+    worker_id: &str,
+    job: &ingest_repository::IngestJobRow,
+    attempt_id: Uuid,
+    document_id: Uuid,
+    revision_id: Uuid,
+    cancellation_token: &CancellationToken,
+    user_cancel_requested: &AtomicBool,
+    operator_pause_requested: &AtomicBool,
+    lease_lost_requested: &AtomicBool,
+) -> anyhow::Result<CanonicalContentPipelineOutcome> {
+    let cancellation = CanonicalPipelineCancellation {
+        token: cancellation_token,
+        user_requested: user_cancel_requested,
+        operator_pause_requested,
+        lease_lost_requested,
     };
+    let CanonicalPreparedContent { revision } =
+        prepare_canonical_content(state, worker_id, job, attempt_id, revision_id, &cancellation)
+            .await?;
+
+    let CanonicalEmbeddingOutcome {
+        source_truth_version: vector_write_source_truth_version,
+        embedding_profile_key: embed_chunk_profile_key,
+    } = embed_canonical_content(
+        state,
+        worker_id,
+        job,
+        attempt_id,
+        &revision,
+        revision_id,
+        &cancellation,
+    )
+    .await?;
+
+    let CanonicalGraphStageOutcome { graph_ready, graph_degraded, pending_summary_refresh } =
+        extract_canonical_graph(
+            state,
+            worker_id,
+            job,
+            attempt_id,
+            document_id,
+            &revision,
+            revision_id,
+            &cancellation,
+        )
+        .await?;
 
     // --- Generate document summary from structured blocks ---------------------
     match generate_document_summary_from_blocks(state, revision_id).await {
@@ -1984,147 +2683,115 @@ async fn run_canonical_ingest_pipeline(
 
     let finalizing_start = Instant::now();
 
-    let now = Utc::now();
-    let vector_state_label = if embed_chunk_success { "ready" } else { "failed" };
-    let vector_ready_at = embed_chunk_success.then_some(now);
-    let _ = state
-        .document_store
-        .update_revision_readiness(
-            revision_id,
-            "ready",
-            vector_state_label,
-            if graph_degraded {
-                GRAPH_STATE_DEGRADED
-            } else {
-                graph_state_after_successful_extract(graph_ready)
-            },
-            Some(now),
-            vector_ready_at,
-            graph_ready.then_some(now),
-            revision.superseded_by_revision_id,
-        )
-        .await
-        .context("failed to update revision readiness")?;
-
-    // Fail-loud finalize contract. The previous `if let Err(e) { warn!; }`
-    // path silently swallowed mutation-state update failures while
-    // `promote_document_head` ran regardless — the result was documents
-    // with `readable_revision_id IS NOT NULL` on head but
-    // `mutation_state` stuck in `accepted`/`running`, which then
-    // diverged across the multiple dashboard aggregates and produced
-    // the "920 ready" frozen-counter report.
-    //
-    // Now every finalize sub-step returns its error up the stack. If
-    // any step fails, `?` bubbles out before `promote_document_head`
-    // so the document head NEVER gains a readable revision out of sync
-    // with its mutation. The attempt transitions to `failed` and the
-    // job will be retried by the scheduler — a second pass either
-    // completes atomically or stays in the failed bucket where
-    // operators can see it.
-    //
-    // Not wrapped in a larger transaction yet because `promote_document_head`
-    // coordinates multiple persistence paths. The fail-loud ordering gives us
-    // the same drift-prevention guarantee for all future ingests without
-    // changing the executor plumbing.
-    if let Some(mutation_id) = job.mutation_id {
-        let items =
-            content_repository::list_mutation_items(&state.persistence.postgres, mutation_id)
+    if let Some(embedding_profile_key) = embed_chunk_profile_key.as_deref()
+        && let Err(error) =
+            ensure_active_embedding_profile_key(state, revision.library_id, embedding_profile_key)
                 .await
-                .context("failed to list mutation items during finalize")?;
-        if let Some(item) = items.first() {
-            content_repository::update_mutation_item(
-                &state.persistence.postgres,
-                item.id,
-                Some(document_id),
-                item.base_revision_id,
-                Some(revision_id),
-                "applied",
-                Some("mutation applied by canonical worker"),
-            )
-            .await
-            .with_context(|| {
-                format!(
-                    "failed to update mutation item to applied (mutation_id={mutation_id}, item_id={})",
-                    item.id
-                )
-            })?;
-        }
-        content_repository::update_mutation_status(
-            &state.persistence.postgres,
-            mutation_id,
-            "applied",
-            Some(Utc::now()),
-            None,
-            None,
-        )
-        .await
-        .with_context(|| {
-            format!("failed to update mutation status to applied (mutation_id={mutation_id})")
-        })?;
+    {
+        let reason =
+            format!("embedding execution profile changed before revision readiness: {error:#}");
+        return Err(anyhow::Error::new(CanonicalContentPipelineFailure {
+            delete_vectors: true,
+            source: error.context(reason),
+        }));
     }
 
-    // Promote the document head through the canonical service so persistence
-    // projections stay aligned. Runs AFTER mutation updates succeed — any
-    // earlier error above has already bubbled out and prevented the head from
-    // reaching the readable-revision state.
-    state
-        .canonical_services
-        .content
-        .promote_document_head(
-            state,
-            PromoteHeadCommand {
-                document_id,
-                active_revision_id: Some(revision_id),
-                readable_revision_id: Some(revision_id),
-                latest_mutation_id: job.mutation_id,
-                latest_successful_attempt_id: Some(attempt_id),
-            },
-        )
-        .await
-        .with_context(|| {
-            format!(
-                "failed to promote document head (document_id={document_id}, revision_id={revision_id})"
+    let mutation_id =
+        job.mutation_id.context("canonical content ingest job is missing mutation_id")?;
+    let mutation_item_id =
+        job.mutation_item_id.context("canonical content ingest job is missing mutation_item_id")?;
+    let now = Utc::now();
+    let graph_state = if graph_degraded {
+        GRAPH_STATE_DEGRADED
+    } else {
+        graph_state_after_successful_extract(graph_ready)
+    };
+    let publication = ingest_repository::publish_content_ingest_success(
+        &state.persistence.postgres,
+        &ingest_repository::PublishContentIngestSuccess {
+            workspace_id: job.workspace_id,
+            library_id: job.library_id,
+            document_id,
+            revision_id,
+            mutation_id,
+            mutation_item_id,
+            attempt_id,
+            expected_source_truth_version: vector_write_source_truth_version,
+            embedding_profile_key: embed_chunk_profile_key,
+            text_state: "text_readable".to_string(),
+            graph_state: graph_state.to_string(),
+            text_readable_at: Some(now),
+            graph_ready_at: graph_ready.then_some(now),
+            completed_at: now,
+        },
+    )
+    .await
+    .context("failed to atomically publish canonical content ingest success")?;
+    let (mutation_completed, source_truth_version) = match publication {
+        ingest_repository::PublishContentIngestSuccessOutcome::Applied {
+            mutation_completed,
+            source_truth_version,
+        } => (mutation_completed, source_truth_version),
+        ingest_repository::PublishContentIngestSuccessOutcome::AuthorityLost { .. } => {
+            return Err(anyhow::Error::new(JobLeaseLost { job_id: job.id }));
+        }
+    };
+
+    if let Some(pending_summary_refresh) = pending_summary_refresh
+        && let Err(error) = state
+            .canonical_services
+            .graph
+            .apply_published_summary_refresh(
+                state,
+                revision.library_id,
+                source_truth_version,
+                &pending_summary_refresh,
             )
-        })?;
-    state
+            .await
+    {
+        warn!(
+            %worker_id,
+            job_id = %job.id,
+            %attempt_id,
+            %revision_id,
+            source_truth_version,
+            ?error,
+            "content lifecycle committed but canonical summary refresh failed",
+        );
+    }
+
+    invalidate_library_embedding_profile_inventory(revision.library_id);
+    if let Err(error) = state
+        .canonical_services
+        .web_ingest
+        .settle_materialized_page_for_mutation_item(state, mutation_item_id)
+        .await
+    {
+        warn!(
+            job_id = %job.id,
+            %attempt_id,
+            %mutation_item_id,
+            ?error,
+            "content publication committed but web page settlement failed; read-side reconciliation will retry",
+        );
+    }
+    if let Err(error) = state
         .canonical_services
         .content
         .converge_document_technical_facts(state, document_id, Some(revision_id))
         .await
-        .context("failed to converge typed technical facts for current revision")?;
-
-    // Fire-and-forget outbound webhook fanout for `revision.ready`.
-    // Errors are logged at WARN level and do NOT fail the ingest job.
     {
-        let event = crate::domains::webhook::WebhookEvent {
-            event_type: "revision.ready".to_string(),
-            event_id: format!("revision.ready:{}:{}", revision_id, uuid::Uuid::now_v7()),
-            workspace_id: job.workspace_id,
-            library_id: Some(job.library_id),
-            payload_json: serde_json::json!({
-                "document_id": document_id,
-                "revision_id": revision_id,
-                "library_id": job.library_id,
-            }),
-        };
-        let errors = crate::services::webhook::outbound::publish_webhook_event(
-            &state.persistence.postgres,
-            &event,
-        )
-        .await;
-        for err in &errors {
-            warn!(
-                %document_id,
-                %revision_id,
-                error = %err,
-                "outbound webhook publish error after promote_document_head"
-            );
-        }
+        warn!(
+            %document_id,
+            %revision_id,
+            ?error,
+            "post-publication technical fact convergence failed",
+        );
     }
 
     let finalizing_elapsed_ms = Some(finalizing_start.elapsed().as_millis() as i64);
 
-    state
+    if let Err(error) = state
         .canonical_services
         .ingest
         .record_stage_event(
@@ -2150,9 +2817,22 @@ async fn run_canonical_ingest_pipeline(
             },
         )
         .await
-        .context("failed to record finalizing stage event")?;
+    {
+        warn!(
+            %attempt_id,
+            %revision_id,
+            ?error,
+            "failed to record post-publication finalizing completion event",
+        );
+    }
 
-    Ok(())
+    info!(
+        %attempt_id,
+        %revision_id,
+        mutation_completed,
+        "canonical content ingest publication committed",
+    );
+    Ok(CanonicalContentPipelineOutcome::LifecyclePublished)
 }
 
 #[cfg(test)]

@@ -41,13 +41,12 @@ import subprocess
 import sys
 import tempfile
 import time
-import urllib.parse
 import urllib.request
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Iterable
 
 PROBE_PASSWORD_ENV = "IRONRAG_PROBE_PASSWORD"  # pragma: allowlist secret
+DOCUMENTS_PATH = "/v1/content/documents"
 
 # --- Probe target definition ----------------------------------------------
 #
@@ -93,27 +92,27 @@ PROBES: list[Probe] = [
     # Documents
     Probe(
         "documents.list.default",
-        "/v1/content/documents",
+        DOCUMENTS_PATH,
         "/v1/content/documents?libraryId={library_id}&limit=50",
     ),
     Probe(
         "documents.list.with_total",
-        "/v1/content/documents",
+        DOCUMENTS_PATH,
         "/v1/content/documents?libraryId={library_id}&limit=50&includeTotal=true",
     ),
     Probe(
         "documents.list.page_100",
-        "/v1/content/documents",
+        DOCUMENTS_PATH,
         "/v1/content/documents?libraryId={library_id}&limit=100",
     ),
     Probe(
         "documents.list.search",
-        "/v1/content/documents",
+        DOCUMENTS_PATH,
         "/v1/content/documents?libraryId={library_id}&search=pdf&limit=50",
     ),
     Probe(
         "documents.list.status_failed",
-        "/v1/content/documents",
+        DOCUMENTS_PATH,
         "/v1/content/documents?libraryId={library_id}&status=failed&limit=50",
     ),
     Probe(
@@ -273,55 +272,72 @@ class CurlClient:
 
 # --- Prometheus histogram parsing ------------------------------------------
 
+def parse_metric_labels(label_block: str) -> dict[str, str]:
+    labels: dict[str, str] = {}
+    for item in label_block.split(","):
+        key, separator, value = item.partition("=")
+        if separator:
+            labels[key.strip()] = value.strip().strip('"')
+    return labels
+
+
+def parse_histogram_metric_line(
+    line: str,
+) -> tuple[str, dict[str, str], float] | None:
+    brace_open = line.find("{")
+    brace_close = line.find("}", brace_open)
+    if brace_open < 0 or brace_close < 0:
+        return None
+    value = float(line[brace_close + 1 :].strip())
+    metric_name = line[:brace_open]
+    labels = parse_metric_labels(line[brace_open + 1 : brace_close])
+    return metric_name, labels, value
+
+
+def update_histogram_entry(
+    entry: dict,
+    metric_name: str,
+    labels: dict[str, str],
+    value: float,
+) -> None:
+    if metric_name.endswith("_bucket"):
+        bucket_limit = labels.get("le", "")
+        try:
+            limit = float("inf") if bucket_limit == "+Inf" else float(bucket_limit)
+        except ValueError:
+            return
+        entry["buckets"].append((limit, value))
+    elif metric_name.endswith("_sum"):
+        entry["sum"] = value
+    elif metric_name.endswith("_count"):
+        entry["count"] = int(value)
+
+
 def scrape_histogram(metrics_url: str) -> dict[tuple[str, str, str], dict]:
-    """
-    Returns `{(method, endpoint, status): {"buckets": [(le, count)], "sum":, "count":}}`
-    extracted from `axum_http_requests_duration_seconds`.
-    """
-    req = urllib.request.Request(metrics_url.rstrip("/") + "/metrics")
-    with urllib.request.urlopen(req, timeout=10) as response:
+    """Return HTTP duration histogram entries keyed by method, endpoint, status."""
+    request = urllib.request.Request(metrics_url.rstrip("/") + "/metrics")
+    with urllib.request.urlopen(request, timeout=10) as response:
         body = response.read().decode()
 
-    out: dict[tuple[str, str, str], dict] = {}
+    output: dict[tuple[str, str, str], dict] = {}
+    metric_prefix = "axum_http_requests_duration_seconds"
     for line in body.splitlines():
-        if not line.startswith("axum_http_requests_duration_seconds"):
+        if not line.startswith(metric_prefix) or line.startswith("#"):
             continue
-        if line.startswith("#"):
+        parsed = parse_histogram_metric_line(line)
+        if parsed is None:
             continue
-        # Parse: metric{labels} value
-        brace_open = line.find("{")
-        brace_close = line.find("}", brace_open)
-        if brace_open < 0 or brace_close < 0:
-            continue
-        metric_name = line[:brace_open]
-        label_block = line[brace_open + 1:brace_close]
-        value = float(line[brace_close + 1:].strip())
-        labels = {}
-        for kv in label_block.split(","):
-            if "=" not in kv:
-                continue
-            k, v = kv.split("=", 1)
-            labels[k.strip()] = v.strip().strip('"')
-        method = labels.get("method", "")
-        endpoint = labels.get("endpoint", "")
-        status = labels.get("status", "")
-        key = (method, endpoint, status)
-        entry = out.setdefault(key, {"buckets": [], "sum": 0.0, "count": 0})
-        if metric_name.endswith("_bucket"):
-            le = labels.get("le", "")
-            try:
-                le_val = float("inf") if le == "+Inf" else float(le)
-            except ValueError:
-                continue
-            entry["buckets"].append((le_val, value))
-        elif metric_name.endswith("_sum"):
-            entry["sum"] = value
-        elif metric_name.endswith("_count"):
-            entry["count"] = int(value)
-    for entry in out.values():
+        metric_name, labels, value = parsed
+        key = (
+            labels.get("method", ""),
+            labels.get("endpoint", ""),
+            labels.get("status", ""),
+        )
+        entry = output.setdefault(key, {"buckets": [], "sum": 0.0, "count": 0})
+        update_histogram_entry(entry, metric_name, labels, value)
+    for entry in output.values():
         entry["buckets"].sort()
-    return out
-
+    return output
 
 def histogram_quantile(entry: dict, quantile: float) -> float | None:
     """

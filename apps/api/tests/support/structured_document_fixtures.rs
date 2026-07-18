@@ -4,7 +4,7 @@ use uuid::Uuid;
 use ironrag_backend::services::ingest::structured_preparation::PrepareStructuredRevisionCommand;
 use ironrag_backend::shared::extraction::build_text_layout_from_content;
 
-pub fn canonical_prepare_command() -> PrepareStructuredRevisionCommand {
+pub(crate) fn canonical_prepare_command() -> PrepareStructuredRevisionCommand {
     let text = concat!(
         "# REST API\n\n",
         "Base URL: http://demo.local:8080\n\n",

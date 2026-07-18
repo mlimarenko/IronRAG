@@ -2,6 +2,8 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::domains::ai::AiBindingPurpose;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum RuntimeExecutionOwnerKind {
@@ -98,6 +100,20 @@ impl RuntimeTaskKind {
             Self::GraphExtract => "graph_extract",
             Self::StructuredPrepare => "structured_prepare",
             Self::TechnicalFactExtract => "technical_fact_extract",
+        }
+    }
+
+    #[must_use]
+    pub const fn binding_purpose(self) -> Option<AiBindingPurpose> {
+        match self {
+            Self::QueryCompile => Some(AiBindingPurpose::QueryCompile),
+            Self::QueryAnswer => Some(AiBindingPurpose::QueryAnswer),
+            Self::QueryRerank => Some(AiBindingPurpose::QueryCompile),
+            Self::GraphExtract => Some(AiBindingPurpose::ExtractGraph),
+            Self::QueryPlan
+            | Self::QueryVerify
+            | Self::StructuredPrepare
+            | Self::TechnicalFactExtract => None,
         }
     }
 }
@@ -618,6 +634,27 @@ impl From<&RuntimeExecution> for RuntimeExecutionSummary {
             policy_summary: RuntimePolicySummary::default(),
             accepted_at: value.accepted_at,
             completed_at: value.completed_at,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::RuntimeTaskKind;
+    use crate::domains::ai::AiBindingPurpose;
+
+    #[test]
+    fn query_rerank_uses_query_compile_binding_purpose() {
+        assert_eq!(
+            RuntimeTaskKind::QueryRerank.binding_purpose(),
+            Some(AiBindingPurpose::QueryCompile),
+        );
+    }
+
+    #[test]
+    fn deterministic_query_tasks_do_not_require_provider_bindings() {
+        for task_kind in [RuntimeTaskKind::QueryPlan, RuntimeTaskKind::QueryVerify] {
+            assert_eq!(task_kind.binding_purpose(), None);
         }
     }
 }

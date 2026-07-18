@@ -2,6 +2,7 @@ use rand::RngExt as _;
 use std::{future::Future, time::Duration};
 use thiserror::Error;
 
+use crate::shared::outbound_http::PublicHttpUrlError;
 use reqwest::{
     StatusCode,
     header::{HeaderMap, RETRY_AFTER},
@@ -103,6 +104,12 @@ pub enum ProviderCallError {
         source: reqwest::Error,
     },
     #[error("{context}: {source}")]
+    ResponsePolicy {
+        context: String,
+        #[source]
+        source: PublicHttpUrlError,
+    },
+    #[error("{context}: {source}")]
     ResponseJson {
         context: String,
         #[source]
@@ -134,6 +141,11 @@ impl ProviderCallError {
     #[must_use]
     pub fn response_body(context: impl Into<String>, source: reqwest::Error) -> Self {
         Self::ResponseBody { context: context.into(), source }
+    }
+
+    #[must_use]
+    pub fn response_policy(context: impl Into<String>, source: PublicHttpUrlError) -> Self {
+        Self::ResponsePolicy { context: context.into(), source }
     }
 
     #[must_use]
@@ -186,23 +198,14 @@ pub fn provider_http_status_error(
 
 #[must_use]
 pub fn sanitize_provider_error_detail(message: &str) -> String {
-    for marker in ["sk-", "Bearer ", "Authorization", "api_key", "apiKey"] {
-        if message.contains(marker) {
-            return "upstream provider request failed; response details were redacted".to_string();
-        }
-    }
-    // Preserve the upstream body so 4xx debugging is actually possible.
-    // The marker scan above already redacts payloads that look like they
-    // could leak credentials; everything else is a structured provider
-    // error message that operators need to read.
     if message.is_empty() {
         "upstream provider request failed; response body was empty".to_string()
     } else {
-        message.to_string()
+        "upstream provider request failed; response details were redacted".to_string()
     }
 }
 
-fn abort_retry<E>(_error: &E) -> RetryDecision {
+const fn abort_retry<E>(_error: &E) -> RetryDecision {
     RetryDecision::Abort
 }
 
@@ -211,6 +214,13 @@ fn classify_provider_call_error(error: &ProviderCallError) -> RetryDecision {
         ProviderCallError::Transport { source, .. }
         | ProviderCallError::ResponseBody { source, .. } => {
             if is_retryable_transport_error(source) {
+                RetryDecision::Retry
+            } else {
+                RetryDecision::Abort
+            }
+        }
+        ProviderCallError::ResponsePolicy { source, .. } => {
+            if matches!(source, PublicHttpUrlError::BodyReadFailed(_)) {
                 RetryDecision::Retry
             } else {
                 RetryDecision::Abort
@@ -260,23 +270,7 @@ fn retry_after_from_headers(headers: &HeaderMap) -> Option<Duration> {
 }
 
 fn is_retryable_transport_error(error: &reqwest::Error) -> bool {
-    error.is_timeout()
-        || error.is_connect()
-        || error.is_body()
-        || is_retryable_transport_error_text(&error.to_string())
-}
-
-fn is_retryable_transport_error_text(message: &str) -> bool {
-    let normalized = message.to_ascii_lowercase();
-    normalized.contains("connection closed before message completed")
-        || normalized.contains("connection reset")
-        || normalized.contains("broken pipe")
-        || normalized.contains("unexpected eof")
-        || normalized.contains("http2")
-        || normalized.contains("sendrequest")
-        || normalized.contains("error sending request")
-        || normalized.contains("peer closed connection")
-        || normalized.contains("close_notify")
+    error.is_timeout() || error.is_connect() || error.is_body()
 }
 
 #[cfg(test)]
@@ -428,16 +422,18 @@ mod tests {
     }
 
     #[test]
-    fn recognizes_retryable_transport_error_strings() {
-        assert!(is_retryable_transport_error_text(
-            "client error (SendRequest): connection closed before message completed"
-        ));
-        assert!(is_retryable_transport_error_text(
-            "error sending request for url (...): connection reset by peer"
-        ));
-        assert!(is_retryable_transport_error_text(
-            "error decoding response body: peer closed connection without sending TLS close_notify"
-        ));
-        assert!(!is_retryable_transport_error_text("missing provider API key"));
+    fn protocol_message_text_never_controls_retryability() {
+        let error = ProviderCallError::protocol(
+            "connection reset unexpected eof http2 sendrequest error sending request",
+        );
+
+        assert_eq!(classify_provider_call_error(&error), RetryDecision::Abort);
+    }
+
+    #[test]
+    fn provider_error_detail_is_redacted_without_a_marker_dictionary() {
+        let detail = sanitize_provider_error_detail("arbitrary upstream response payload");
+
+        assert!(!detail.contains("arbitrary upstream response payload"));
     }
 }

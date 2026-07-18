@@ -1,4 +1,4 @@
-import type { Meta, StoryObj } from "@storybook/react";
+import type { Meta, StoryObj } from '@storybook/react'
 import {
   Select,
   SelectContent,
@@ -8,16 +8,16 @@ import {
   SelectSeparator,
   SelectTrigger,
   SelectValue,
-} from "./select";
-import { Label } from "./label";
+} from './select'
+import { Label } from './label'
 
 const meta = {
-  title: "UI/Select",
+  title: 'UI/Select',
   component: Select,
-} satisfies Meta<typeof Select>;
+} satisfies Meta<typeof Select>
 
-export default meta;
-type Story = StoryObj<typeof meta>;
+export default meta
+type Story = StoryObj<typeof meta>
 
 export const Basic: Story = {
   render: () => (
@@ -35,7 +35,7 @@ export const Basic: Story = {
       </Select>
     </div>
   ),
-};
+}
 
 export const GroupedOptions: Story = {
   render: () => (
@@ -61,7 +61,7 @@ export const GroupedOptions: Story = {
       </Select>
     </div>
   ),
-};
+}
 
 export const Disabled: Story = {
   render: () => (
@@ -77,7 +77,7 @@ export const Disabled: Story = {
       </Select>
     </div>
   ),
-};
+}
 
 export const Placeholder: Story = {
   render: () => (
@@ -95,4 +95,4 @@ export const Placeholder: Story = {
       </Select>
     </div>
   ),
-};
+}

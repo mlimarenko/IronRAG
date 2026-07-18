@@ -1,32 +1,25 @@
-import type {
-  AssistantContentSourceAccess,
-  ContentSourceAccess,
-} from '@/shared/api/generated';
-import type { SourceAccess } from '@/shared/types';
+import type { AssistantContentSourceAccess, ContentSourceAccess } from '@/shared/api/generated'
+import type { SourceAccess } from '@/shared/types'
 
 type SourceAccessTransport =
-  | AssistantContentSourceAccess
-  | ContentSourceAccess
-  | SourceAccess
-  | null
-  | undefined;
+  AssistantContentSourceAccess | ContentSourceAccess | SourceAccess | null | undefined
 
 export function mapSourceAccess(raw: SourceAccessTransport): SourceAccess | undefined {
   if (!raw) {
-    return undefined;
+    return undefined
   }
 
-  const { kind } = raw;
+  const { kind } = raw
   if (typeof raw.href !== 'string') {
-    return undefined;
+    return undefined
   }
-  const href = raw.href.trim();
+  const href = raw.href.trim()
   if (href.length === 0) {
-    return undefined;
+    return undefined
   }
   if (kind !== 'stored_document' && kind !== 'external_url') {
-    return undefined;
+    return undefined
   }
 
-  return { kind, href };
+  return { kind, href }
 }

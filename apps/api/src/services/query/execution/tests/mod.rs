@@ -3,9 +3,14 @@ use std::collections::{HashMap, HashSet};
 use super::*;
 use serde_json::json;
 
+use super::context::build_grouped_reference_candidates;
+use super::preflight::select_technical_literal_chunks;
+use super::retrieve::expanded_candidate_limit;
+use super::technical_literals::{TechnicalLiteralIntent, technical_literal_candidate_limit};
+use super::types::QueryExecutionEnrichment;
 use crate::domains::query_ir::{
     ComparisonSpec, DocumentHint, EntityMention, EntityRole, LiteralKind, LiteralSpan, QueryAct,
-    QueryIR, QueryLanguage, QueryScope, TemporalConstraint,
+    QueryIR, QueryLanguage, QueryScope, QueryTargetKind, TemporalConstraint,
 };
 use crate::infra::knowledge_rows::{
     KnowledgeChunkRow, KnowledgeDocumentRow, KnowledgeEvidenceRow, KnowledgeLibraryGenerationRow,
@@ -27,7 +32,9 @@ mod answer_pipeline_tests;
 mod focused_document_tests;
 mod grounded_answer_tests;
 mod misc_tests;
+mod post_retrieval_selection_tests;
 mod preflight_tests;
+mod setup_configuration_variant_tests;
 mod technical_literal_tests;
 mod verification_tests;
 
@@ -58,7 +65,12 @@ fn query_ir_with_scope_and_target_types<const N: usize>(
 ) -> QueryIR {
     QueryIR {
         scope,
-        target_types: target_types.into_iter().map(str::to_string).collect(),
+        target_types: target_types
+            .into_iter()
+            .map(|value| {
+                QueryTargetKind::from_wire(value).expect("test target kind must use the wire enum")
+            })
+            .collect(),
         ..generic_query_ir()
     }
 }
@@ -97,7 +109,12 @@ fn query_ir_with_scope_literals_and_target_types<const L: usize, const T: usize>
             .into_iter()
             .map(|phrase| LiteralSpan { text: phrase.to_string(), kind: LiteralKind::Other })
             .collect(),
-        target_types: target_types.into_iter().map(str::to_string).collect(),
+        target_types: target_types
+            .into_iter()
+            .map(|value| {
+                QueryTargetKind::from_wire(value).expect("test target kind must use the wire enum")
+            })
+            .collect(),
         scope,
         ..generic_query_ir()
     }

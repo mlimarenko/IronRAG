@@ -19,20 +19,20 @@ component-name.stories.tsx
 Use CSF3 only:
 
 ```tsx
-import type { Meta, StoryObj } from "@storybook/react";
-import { Component } from "./component";
+import type { Meta, StoryObj } from '@storybook/react'
+import { Component } from './component'
 
 const meta = {
-  title: "UI/Component",
+  title: 'UI/Component',
   component: Component,
-} satisfies Meta<typeof Component>;
+} satisfies Meta<typeof Component>
 
-export default meta;
-type Story = StoryObj<typeof meta>;
+export default meta
+type Story = StoryObj<typeof meta>
 
 export const Default: Story = {
   args: {},
-};
+}
 ```
 
 Storybook imports `src/index.css`, so Tailwind v4 classes and app tokens match Vite.
@@ -44,15 +44,13 @@ MSW is initialized globally from `src/shared/api/mocks/handlers`. Override handl
 per story with `parameters.msw.handlers`:
 
 ```tsx
-import { http, HttpResponse } from "msw";
+import { http, HttpResponse } from 'msw'
 
 export const Loaded: Story = {
   parameters: {
     msw: {
-      handlers: [
-        http.get("/v1/health", () => HttpResponse.json({ status: "ok" })),
-      ],
+      handlers: [http.get('/v1/health', () => HttpResponse.json({ status: 'ok' }))],
     },
   },
-};
+}
 ```

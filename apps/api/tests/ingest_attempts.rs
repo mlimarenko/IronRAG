@@ -1,3 +1,4 @@
+#[cfg(feature = "test-support")]
 #[path = "support/web_ingest_support.rs"]
 mod web_ingest_support;
 
@@ -8,10 +9,7 @@ use uuid::Uuid;
 
 use ironrag_backend::{
     app::{config::Settings, state::AppState},
-    infra::{
-        persistence::Persistence,
-        repositories::ingest_repository::{self, NewWebDiscoveredPage},
-    },
+    infra::{persistence::Persistence, repositories::ingest_repository},
     services::{
         catalog_service::{CreateLibraryCommand, CreateWorkspaceCommand},
         content::service::{CreateDocumentCommand, CreateRevisionCommand, PromoteHeadCommand},
@@ -20,9 +18,14 @@ use ironrag_backend::{
             INGEST_STAGE_EXTRACT_CONTENT, INGEST_STAGE_FINALIZING, LeaseAttemptCommand,
             RecordStageEventCommand,
         },
-        ingest::web::CreateWebIngestRunCommand,
         knowledge::service::CreateKnowledgeRevisionCommand,
     },
+};
+
+#[cfg(feature = "test-support")]
+use ironrag_backend::{
+    infra::repositories::ingest_repository::NewWebDiscoveredPage,
+    services::ingest::web::CreateWebIngestRunCommand,
 };
 
 struct TempDatabase {
@@ -200,7 +203,7 @@ impl IngestAttemptsFixture {
                             .to_string(),
                     ),
                     text_checksum: Some(format!("text-checksum-{revision_id}")),
-                    text_state: "readable".to_string(),
+                    text_state: "text_readable".to_string(),
                     vector_state: "pending".to_string(),
                     graph_state: "pending".to_string(),
                     text_readable_at: Some(Utc::now()),
@@ -290,6 +293,7 @@ async fn canonical_ingest_attempts_preserve_queue_state_retry_and_stage_ordering
                     workspace_id: fixture.workspace_id,
                     library_id: fixture.library_id,
                     mutation_id,
+                    mutation_item_id: None,
                     connector_id: None,
                     async_operation_id: None,
                     knowledge_document_id: Some(fixture.document_id),
@@ -322,6 +326,7 @@ async fn canonical_ingest_attempts_preserve_queue_state_retry_and_stage_ordering
                     workspace_id: fixture.workspace_id,
                     library_id: fixture.library_id,
                     mutation_id,
+                    mutation_item_id: None,
                     connector_id: None,
                     async_operation_id: None,
                     knowledge_document_id: Some(fixture.document_id),
@@ -589,13 +594,15 @@ async fn canonical_ingest_attempts_preserve_queue_state_retry_and_stage_ordering
     result
 }
 
+#[cfg(feature = "test-support")]
 #[tokio::test]
 #[ignore = "requires local postgres with canonical extensions"]
 async fn canonical_web_ingest_jobs_queue_page_materialization_only_after_discovery() -> Result<()> {
-    let fixture = IngestAttemptsFixture::create().await?;
+    let mut fixture = IngestAttemptsFixture::create().await?;
+    web_ingest_support::enable_loopback_test_transport(&mut fixture.state);
     let server = web_ingest_support::WebTestServer::start().await?;
 
-    let result = async {
+    let result = Box::pin(async {
         let web_policy = ironrag_backend::shared::web::ingest::default_web_ingest_policy();
         let run = fixture
             .state
@@ -660,13 +667,15 @@ async fn canonical_web_ingest_jobs_queue_page_materialization_only_after_discove
         .await
         .context("failed to preseed eligible discovered web page")?;
 
-        fixture
-            .state
-            .canonical_services
-            .web_ingest
-            .execute_recursive_discovery_job(&fixture.state, run.run_id)
-            .await
-            .context("failed to execute recursive discovery job directly")?;
+        Box::pin(
+            fixture
+                .state
+                .canonical_services
+                .web_ingest
+                .execute_recursive_discovery_job(&fixture.state, run.run_id),
+        )
+        .await
+        .context("failed to execute recursive discovery job directly")?;
 
         let queued_jobs = fixture
             .state
@@ -697,10 +706,90 @@ async fn canonical_web_ingest_jobs_queue_page_materialization_only_after_discove
         assert!(refreshed_run.counts.queued > 0);
 
         Ok(())
-    }
+    })
     .await;
 
     server.shutdown().await?;
+    fixture.cleanup().await?;
+    result
+}
+
+#[tokio::test]
+#[ignore = "requires local postgres and redis"]
+async fn concurrent_inline_attempt_claim_is_one_atomic_job_lease() -> Result<()> {
+    let fixture = IngestAttemptsFixture::create().await?;
+    let result = async {
+        let ingest = &fixture.state.canonical_services.ingest;
+        let job = ingest
+            .admit_job(
+                &fixture.state,
+                AdmitIngestJobCommand {
+                    workspace_id: fixture.workspace_id,
+                    library_id: fixture.library_id,
+                    mutation_id: None,
+                    mutation_item_id: None,
+                    connector_id: None,
+                    async_operation_id: None,
+                    knowledge_document_id: Some(fixture.document_id),
+                    knowledge_revision_id: Some(fixture.revision_id),
+                    job_kind: "content_mutation".to_string(),
+                    priority: 50,
+                    dedupe_key: Some(format!("inline-lease-race-{}", Uuid::now_v7())),
+                    available_at: None,
+                },
+            )
+            .await?;
+        let first = ingest.lease_attempt(
+            &fixture.state,
+            LeaseAttemptCommand {
+                job_id: job.id,
+                worker_principal_id: None,
+                lease_token: Some("inline-race-a".to_string()),
+                expected_queue_lease_token: None,
+                knowledge_generation_id: Some(fixture.generation_id),
+                current_stage: Some(INGEST_STAGE_EXTRACT_CONTENT.to_string()),
+            },
+        );
+        let second = ingest.lease_attempt(
+            &fixture.state,
+            LeaseAttemptCommand {
+                job_id: job.id,
+                worker_principal_id: None,
+                lease_token: Some("inline-race-b".to_string()),
+                expected_queue_lease_token: None,
+                knowledge_generation_id: Some(fixture.generation_id),
+                current_stage: Some(INGEST_STAGE_EXTRACT_CONTENT.to_string()),
+            },
+        );
+        let (first, second) = tokio::join!(first, second);
+        let results = [first, second];
+        assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+        assert_eq!(results.iter().filter(|result| result.is_err()).count(), 1);
+
+        let attempt_count = sqlx::query_scalar::<_, i64>(
+            "select count(*)::bigint
+             from ingest_attempt
+             where job_id = $1",
+        )
+        .bind(job.id)
+        .fetch_one(&fixture.state.persistence.postgres)
+        .await?;
+        let lease_shape = sqlx::query_as::<_, (String, bool, bool, bool)>(
+            "select queue_state::text,
+                    queue_leased_at is not null,
+                    queue_lease_token is not null,
+                    queue_lease_owner is not null
+             from ingest_job
+             where id = $1",
+        )
+        .bind(job.id)
+        .fetch_one(&fixture.state.persistence.postgres)
+        .await?;
+        assert_eq!(attempt_count, 1);
+        assert_eq!(lease_shape, ("leased".to_string(), true, true, true));
+        Ok(())
+    }
+    .await;
     fixture.cleanup().await?;
     result
 }
@@ -719,6 +808,7 @@ async fn ingest_attempt_emits_stage_events_for_worker_progress() -> Result<()> {
                     workspace_id: fixture.workspace_id,
                     library_id: fixture.library_id,
                     mutation_id: None,
+                    mutation_item_id: None,
                     connector_id: None,
                     async_operation_id: None,
                     knowledge_document_id: Some(fixture.document_id),

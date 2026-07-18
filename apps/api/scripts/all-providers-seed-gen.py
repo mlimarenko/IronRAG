@@ -4,12 +4,15 @@ OpenAI / DeepSeek / Qwen / GPTunnel / OpenRouter / RouterAI /
 MiniMax / Ollama cloud.
 
 Usage:
-    IRONRAG_<PROVIDER>_API_KEY=... python3 all-providers-seed-gen.py PROVIDER
+    IRONRAG_AI_PROVIDER_API_KEYS_JSON_B64=... python3 all-providers-seed-gen.py PROVIDER
 where PROVIDER ∈ {openai, deepseek, qwen, gptunnel, openrouter, routerai,
 minimax, ollama-cloud}.
 
 Catalog rows are auto-discovered from /models (or fallback list if no
-key / endpoint). Pricing is from a hand-curated table keyed on a
+key / endpoint). Model capabilities are accepted only from typed provider
+metadata or the operator-supplied
+IRONRAG_AI_MODEL_CAPABILITIES_JSON_B64 manifest; unknown models are skipped
+fail-closed. Pricing is from a hand-curated table keyed on a
 fnmatch-style glob → (input_per_1m, output_per_1m, currency, optionally
 cached_input_per_1m).
 
@@ -29,10 +32,10 @@ Idempotent: ON CONFLICT on the natural-key indexes.
 
 from __future__ import annotations
 
+import base64
 import fnmatch
 import json
 import os
-import re
 import sys
 import uuid
 from decimal import Decimal
@@ -196,6 +199,23 @@ RANGE_PRICES_USD: dict[str, dict[str, list[tuple[str, int | None, int | None, fl
     },
 }
 
+MODEL_CAPABILITY_ENV = "IRONRAG_AI_MODEL_CAPABILITIES_JSON_B64"
+PROVIDER_API_KEYS_ENV = "IRONRAG_AI_PROVIDER_API_KEYS_JSON_B64"
+MAX_CAPABILITY_MANIFEST_BYTES = 4_194_304
+MAX_CAPABILITY_MODELS = 100_000
+MAX_PROVIDER_KEY_MAP_BYTES = 1_048_576
+MAX_PROVIDER_KEYS = 256
+MAX_PROVIDER_KEY_BYTES = 65_536
+MODEL_CAPABILITY_KINDS = frozenset({"chat", "embedding"})
+MODEL_MODALITY_KINDS = frozenset({"text", "multimodal"})
+TEXT_CHAT_ROLES = (
+    "extract_graph",
+    "query_compile",
+    "query_answer",
+    "agent",
+)
+EMBEDDING_ROLES = ("embed_chunk",)
+
 
 def stable_uuid(*parts: str) -> str:
     return str(uuid.uuid5(NS_DNS, ":".join(parts)))
@@ -205,126 +225,46 @@ def sql_escape(value: str) -> str:
     return value.replace("'", "''")
 
 
-def classify(model_id: str) -> tuple[str, str, list[str]]:
-    """Return (capability_kind, modality_kind, default_roles).
+def typed_metadata_candidates(
+    model: dict,
+    manifest_entry: object | None,
+) -> list[object]:
+    if manifest_entry is not None:
+        return [manifest_entry]
+    return [model.get("ironragCapabilities"), model.get("metadata"), model]
 
-    Strict bucket split (per UX feedback — no audio/image/legacy
-    completion models in chat-stage dropdowns):
 
-    embedding (capability_kind=embedding, modality=text)
-      → roles: embed_chunk, query_retrieve
-      Match: model name contains 'embedding' or ends with '-embed' /
-      ':embed' / '-emb'.
+def parse_typed_signature(typed: dict) -> tuple[str, str, list[str]] | None:
+    capability = typed.get("capabilityKind", typed.get("capability_kind"))
+    modality = typed.get("modalityKind", typed.get("modality_kind"))
+    if capability not in MODEL_CAPABILITY_KINDS or modality not in MODEL_MODALITY_KINDS:
+        return None
+    if capability == "embedding":
+        if modality != "text":
+            return None
+        return capability, modality, list(EMBEDDING_ROLES)
 
-    chat-multimodal (capability_kind=chat, modality=multimodal)
-      → roles: query_answer + extract_graph + query_compile + vision
-      Match: vision-capable chat models (claude/gemini/gpt-4o/4.1/5*,
-      qwen-vl, pixtral, molmo, kimi-vl, internvl, llama-vision, etc.).
+    roles = list(TEXT_CHAT_ROLES)
+    if modality == "multimodal":
+        roles.append("extract_text")
+    return capability, modality, roles
 
-    chat-text (capability_kind=chat, modality=text)
-      → roles: query_answer + extract_graph + query_compile
-      Match: pure text chat models that follow JSON-schema-ish format.
 
-    Excluded entirely (capability='', skipped from catalog):
-      - audio: whisper, tts, transcribe, audio-preview, realtime, audio-
-      - image: dall-e, gpt-image, *image-1, image-edit, stable-diffusion,
-        flux, midjourney
-      - video: video-, sora, runway-
-      - legacy completion-only: davinci, babbage, ada, curie, gpt-3,
-        text-completion (these aren't chat-format).
-      - specialized agent: computer-use, search-api, deep-research
-        (purpose-bound, not free-form chat).
-      - moderation: moderation, omni-moderation, safety
-      - reranker: -rerank, /rerank-
-
-    Strictness rationale: every model visible under a chat-stage
-    role (extract_graph / query_compile / query_answer) must accept
-    arbitrary system+user messages and return free-form chat with
-    structured-output capability. Audio/image/legacy/agent models
-    cannot.
-    """
-    low = model_id.lower()
-
-    if low == "minimax-m3" or low.endswith("/minimax-m3"):
-        return (
-            "chat",
-            "multimodal",
-            ["extract_text", "extract_graph", "query_compile", "query_answer", "vision", "agent"],
-        )
-    if low.startswith("minimax-m2") or "/minimax-m2" in low:
-        return ("chat", "text", ["query_answer"])
-
-    # Embeddings.
-    if (
-        "embedding" in low
-        or low.endswith("-embed")
-        or low.endswith(":embed")
-        or low.endswith("-emb")
-        or "/embeddings" in low
-    ):
-        return ("embedding", "text", ["embed_chunk", "query_retrieve"])
-
-    # Hard exclusions: families that are NOT free-form chat.
-    audio_markers = (
-        "whisper", "/tts", "-tts", "transcribe", "audio-preview",
-        "realtime", "-audio", "audio-",
-    )
-    image_markers = (
-        "dall-e", "dalle", "gpt-image", "image-1", "image-2",
-        "image-3", "image-edit", "image-gen", "stable-diffusion",
-        "/flux", "flux-", "midjourney", "playground-",
-        "mj-", "ideogram", "recraft", "faceswap", "face-swap",
-    )
-    video_markers = (
-        "video-", "sora", "runway-", "veo-", "kling-",
-        "mj-video", "haiper", "luma-",
-    )
-    legacy_completion_markers = (
-        "davinci", "babbage", "ada-", "curie", "gpt-3-",
-        "text-completion", "text-davinci",
-    )
-    specialized_agent_markers = (
-        "computer-use", "search-api", "deep-research",
-        "browser-use", "operator",
-    )
-    moderation_markers = ("moderation", "omni-moderation", "safety-")
-    reranker_markers = ("rerank", "-reranker")
-    skip_groups = (
-        audio_markers,
-        image_markers,
-        video_markers,
-        legacy_completion_markers,
-        specialized_agent_markers,
-        moderation_markers,
-        reranker_markers,
-    )
-    for group in skip_groups:
-        for marker in group:
-            if marker in low:
-                return ("", "", [])
-
-    # Vision-capable chat models. Reasonably exhaustive provider matrix
-    # as of 2026-05; treat anything matching as multimodal.
-    vision_markers = (
-        "gpt-4o", "gpt-4.1", "gpt-5",
-        "claude-3", "claude-4", "claude-5", "claude-opus", "claude-sonnet",
-        "claude-haiku",
-        "gemini", "imagen-vision",
-        "grok-2-vision", "grok-3-vision", "grok-4", "grok-vision",
-        "qwen-vl", "qwen2-vl", "qwen2.5-vl", "qwen3-vl", "qwen3.5-vl",
-        "qwen3.6-vl", "qwen3.7-vl",
-        "vl-", "-vl-", "-vl:",
-        "pixtral", "mistral-medium", "mistral-large",
-        "molmo", "kimi-vl", "internvl", "yi-vision",
-        "llama-3.2-vision", "llama-3.3-vision", "llama-vision",
-        "llama4", "step-3", "phi-vision", "phi-4-vision", "lfm-vision",
-    )
-    is_multimodal = any(m in low for m in vision_markers)
-    chat_roles = ["query_answer", "extract_graph", "query_compile"]
-    if is_multimodal:
-        return ("chat", "multimodal", chat_roles + ["vision"])
-
-    return ("chat", "text", chat_roles)
+def typed_model_signature(
+    model: dict,
+    manifest_entry: object | None = None,
+) -> tuple[str, str, list[str]] | None:
+    """Return a validated typed model signature without inspecting its name."""
+    typed_fields = {
+        "capabilityKind",
+        "capability_kind",
+        "modalityKind",
+        "modality_kind",
+    }
+    for typed in typed_metadata_candidates(model, manifest_entry):
+        if isinstance(typed, dict) and typed_fields.intersection(typed):
+            return parse_typed_signature(typed)
+    return None
 
 
 def fetch_models(provider: str, api_key: str | None) -> list[dict]:
@@ -383,118 +323,248 @@ def find_range_prices(
     ]
 
 
-def emit(provider: str, models: list[dict]) -> str:
+def model_catalog_row(
+    catalog_id: str,
+    provider: str,
+    model_id: str,
+    signature: tuple[str, str, list[str]],
+) -> str:
+    capability, modality, roles = signature
+    model_catalog_id = stable_uuid("ironrag", provider, "model", model_id, capability)
+    metadata = json.dumps(
+        {"defaultRoles": roles, "seedSource": "provider_catalog"},
+        separators=(",", ":"),
+    )
+    return (
+        f"    ('{model_catalog_id}'::uuid, '{catalog_id}'::uuid, "
+        f"'{sql_escape(model_id)}', '{capability}'::ai_model_capability_kind, "
+        f"'{modality}'::ai_model_modality_kind, "
+        f"'active'::ai_model_lifecycle_state, "
+        f"'{sql_escape(metadata)}'::jsonb)"
+    )
+
+
+def range_price_rows(
+    provider: str,
+    model_id: str,
+) -> list[str]:
+    rows: list[str] = []
+    for unit, min_tokens, max_tokens, value in find_range_prices(provider, model_id):
+        min_sql = "NULL" if min_tokens is None else str(min_tokens)
+        max_sql = "NULL" if max_tokens is None else str(max_tokens)
+        price_id = stable_uuid(
+            "ironrag", provider, "price", model_id, unit, min_sql, max_sql
+        )
+        rows.append(
+            f"        ('{price_id}'::uuid, '{sql_escape(model_id)}', "
+            f"'{unit}'::billing_unit, {min_sql}, {max_sql}, {value:f}, 'USD')"
+        )
+    return rows
+
+
+def model_prices(
+    provider: str,
+    model: dict,
+) -> tuple[Decimal | None, Decimal | None, Decimal | None] | None:
+    live_prices = live_pricing_per_million(model)
+    if live_prices is not None:
+        input_price, output_price = live_prices
+        return input_price, output_price, None
+
+    static_prices = find_price(provider, model["id"])
+    if static_prices is None:
+        return None
+    return tuple(
+        Decimal(str(value)) if value is not None else None
+        for value in static_prices
+    )
+
+
+def flat_price_rows(
+    provider: str,
+    model_id: str,
+    prices: tuple[Decimal | None, Decimal | None, Decimal | None],
+) -> list[str]:
+    rows: list[str] = []
+    units = (
+        "per_1m_input_tokens",
+        "per_1m_output_tokens",
+        "per_1m_cached_input_tokens",
+    )
+    for unit, value in zip(units, prices, strict=True):
+        if value is None:
+            continue
+        price_id = stable_uuid("ironrag", provider, "price", model_id, unit)
+        rows.append(
+            f"        ('{price_id}'::uuid, '{sql_escape(model_id)}', "
+            f"'{unit}'::billing_unit, NULL, NULL, {value:f}, 'USD')"
+        )
+    return rows
+
+
+def model_price_rows(provider: str, model: dict) -> list[str]:
+    model_id = model["id"]
+    ranged_rows = range_price_rows(provider, model_id)
+    if ranged_rows:
+        return ranged_rows
+    prices = model_prices(provider, model)
+    return [] if prices is None else flat_price_rows(provider, model_id, prices)
+
+
+def append_catalog_insert(lines: list[str], catalog_rows: list[str]) -> None:
+    if not catalog_rows:
+        return
+    lines.extend([
+        "INSERT INTO ai_model_catalog (",
+        "    id, provider_catalog_id, model_name, capability_kind,",
+        "    modality_kind, lifecycle_state, metadata_json",
+        ") VALUES",
+        ",\n".join(catalog_rows),
+        "ON CONFLICT (provider_catalog_id, model_name, capability_kind) DO NOTHING;",
+        "",
+    ])
+
+
+def append_price_insert(
+    lines: list[str],
+    provider: str,
+    catalog_id: str,
+    price_rows: list[str],
+) -> None:
+    if not price_rows:
+        return
+    effective_from = EFFECTIVE_FROM_BY_PROVIDER.get(provider, EFFECTIVE_FROM)
+    lines.extend([
+        "INSERT INTO ai_price_catalog (",
+        "    id, model_catalog_id, billing_unit, price_variant_key,",
+        "    request_input_tokens_min, request_input_tokens_max,",
+        "    unit_price, currency_code, effective_from, catalog_scope, workspace_id",
+        ")",
+        "SELECT",
+        "    p.price_id, m.id, p.billing_unit, 'default',",
+        "    p.request_input_tokens_min, p.request_input_tokens_max,",
+        "    p.unit_price, p.currency_code,",
+        f"    '{effective_from}'::timestamptz, 'system'::ai_price_catalog_scope, NULL",
+        "FROM ai_model_catalog m",
+        "JOIN (VALUES",
+        ",\n".join(price_rows),
+        (
+            ") AS p(price_id, model_name, billing_unit, request_input_tokens_min, "
+            "request_input_tokens_max, unit_price, currency_code)"
+        ),
+        "    ON p.model_name = m.model_name",
+        f"WHERE m.provider_catalog_id = '{catalog_id}'::uuid",
+        "ON CONFLICT DO NOTHING;",
+        "",
+    ])
+
+
+def emit(
+    provider: str,
+    models: list[dict],
+    capability_manifest: dict[str, object] | None = None,
+) -> str:
     catalog_id = PROVIDER_CATALOG_IDS[provider]
     catalog_rows: list[str] = []
     price_rows: list[str] = []
+    skipped_without_typed_capability = 0
+    manifest = capability_manifest or {}
+
     for model in models:
         model_id = model["id"]
-        capability, modality, roles = classify(model_id)
-        if not capability:
+        signature = typed_model_signature(model, manifest.get(model_id))
+        if signature is None:
+            skipped_without_typed_capability += 1
             continue
-        cid = stable_uuid("ironrag", provider, "model", model_id, capability)
-        metadata = json.dumps(
-            {"defaultRoles": roles, "seedSource": "provider_catalog"},
-            separators=(",", ":"),
-        )
-        catalog_rows.append(
-            f"    ('{cid}'::uuid, '{catalog_id}'::uuid, '{sql_escape(model_id)}', "
-            f"'{capability}'::ai_model_capability_kind, "
-            f"'{modality}'::ai_model_modality_kind, "
-            f"'active'::ai_model_lifecycle_state, "
-            f"'{sql_escape(metadata)}'::jsonb)"
-        )
-        range_prices = find_range_prices(provider, model_id)
-        for unit, min_tokens, max_tokens, val in range_prices:
-            min_sql = "NULL" if min_tokens is None else str(min_tokens)
-            max_sql = "NULL" if max_tokens is None else str(max_tokens)
-            pid = stable_uuid("ironrag", provider, "price", model_id, unit, min_sql, max_sql)
-            price_rows.append(
-                f"        ('{pid}'::uuid, '{sql_escape(model_id)}', "
-                f"'{unit}'::billing_unit, {min_sql}, {max_sql}, {val:f}, 'USD')"
-            )
-        if range_prices:
-            continue
-        # Live per-token pricing (openrouter / routerai expose pricing.prompt+completion)
-        # takes precedence over the static USD glob table; fall back to the static
-        # table only when the live feed is silent.
-        live = live_pricing_per_million(model)
-        if live is not None:
-            input_p, output_p = live
-            cached_p = None
-        else:
-            static = find_price(provider, model_id)
-            if static is None:
-                continue
-            input_p_f, output_p_f, cached_p_f = static
-            input_p = Decimal(str(input_p_f)) if input_p_f is not None else None
-            output_p = Decimal(str(output_p_f)) if output_p_f is not None else None
-            cached_p = Decimal(str(cached_p_f)) if cached_p_f is not None else None
-        for unit, val in (
-            ("per_1m_input_tokens", input_p),
-            ("per_1m_output_tokens", output_p),
-            ("per_1m_cached_input_tokens", cached_p),
-        ):
-            if val is None:
-                continue
-            pid = stable_uuid("ironrag", provider, "price", model_id, unit)
-            price_rows.append(
-                f"        ('{pid}'::uuid, '{sql_escape(model_id)}', "
-                f"'{unit}'::billing_unit, NULL, NULL, {val:f}, 'USD')"
-            )
+        catalog_rows.append(model_catalog_row(catalog_id, provider, model_id, signature))
+        price_rows.extend(model_price_rows(provider, model))
 
     lines: list[str] = [
         f"-- Auto-generated {provider} catalog + price seed.",
         f"-- Source: scripts/all-providers-seed-gen.py {provider}",
-        f"-- Idempotent: ON CONFLICT on natural-key indexes.",
+        "-- Idempotent: ON CONFLICT on natural-key indexes.",
         "",
     ]
-    if catalog_rows:
-        lines.extend([
-            "INSERT INTO ai_model_catalog (",
-            "    id, provider_catalog_id, model_name, capability_kind,",
-            "    modality_kind, lifecycle_state, metadata_json",
-            ") VALUES",
-            ",\n".join(catalog_rows),
-            "ON CONFLICT (provider_catalog_id, model_name, capability_kind) DO NOTHING;",
-            "",
-        ])
-    if price_rows:
-        lines.extend([
-            "INSERT INTO ai_price_catalog (",
-            "    id, model_catalog_id, billing_unit, price_variant_key,",
-            "    request_input_tokens_min, request_input_tokens_max,",
-            "    unit_price, currency_code, effective_from, catalog_scope, workspace_id",
-            ")",
-            "SELECT",
-            "    p.price_id, m.id, p.billing_unit, 'default',",
-            "    p.request_input_tokens_min, p.request_input_tokens_max,",
-            "    p.unit_price, p.currency_code,",
-            f"    '{EFFECTIVE_FROM_BY_PROVIDER.get(provider, EFFECTIVE_FROM)}'::timestamptz, 'system'::ai_price_catalog_scope, NULL",
-            "FROM ai_model_catalog m",
-            "JOIN (VALUES",
-            ",\n".join(price_rows),
-            ") AS p(price_id, model_name, billing_unit, request_input_tokens_min, request_input_tokens_max, unit_price, currency_code)",
-            "    ON p.model_name = m.model_name",
-            f"WHERE m.provider_catalog_id = '{catalog_id}'::uuid",
-            "ON CONFLICT DO NOTHING;",
-            "",
-        ])
+    append_catalog_insert(lines, catalog_rows)
+    append_price_insert(lines, provider, catalog_id, price_rows)
 
+    if skipped_without_typed_capability:
+        print(
+            f"WARN: skipped {skipped_without_typed_capability} models "
+            "without typed capability metadata",
+            file=sys.stderr,
+        )
     return "\n".join(lines)
 
 
+def unique_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    result: dict[str, object] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("duplicate JSON object key")
+        result[key] = value
+    return result
+
+
+def decode_json_object(encoded: str, max_decoded_bytes: int) -> dict[str, object]:
+    max_encoded_bytes = ((max_decoded_bytes + 2) // 3) * 4
+    if len(encoded.encode("utf-8")) > max_encoded_bytes:
+        raise ValueError("encoded JSON payload is too large")
+    decoded = base64.b64decode(encoded, validate=True)
+    if len(decoded) > max_decoded_bytes:
+        raise ValueError("decoded JSON payload is too large")
+    if base64.b64encode(decoded).decode("ascii") != encoded:
+        raise ValueError("non-canonical base64")
+    payload = json.loads(decoded.decode("utf-8"), object_pairs_hook=unique_object)
+    if not isinstance(payload, dict):
+        raise ValueError("JSON payload is not an object")
+    return payload
+
+
+def load_model_capability_manifest(provider: str) -> dict[str, object]:
+    encoded = os.environ.get(MODEL_CAPABILITY_ENV, "")
+    if not encoded:
+        return {}
+
+    try:
+        payload = decode_json_object(encoded, MAX_CAPABILITY_MANIFEST_BYTES)
+        provider_entries = payload.get(provider, {})
+        if not isinstance(provider_entries, dict):
+            raise ValueError("provider capability manifest is not an object")
+        if len(provider_entries) > MAX_CAPABILITY_MODELS:
+            raise ValueError("provider capability manifest has too many models")
+        return provider_entries
+    except ValueError as error:
+        raise SystemExit(f"{MODEL_CAPABILITY_ENV} is invalid") from error
+
+
+def read_env_value(env_name: str, env_path: Path) -> str:
+    value = os.environ.get(env_name, "")
+    if value or not env_path.exists():
+        return value
+    for line in env_path.read_text().splitlines():
+        if line.startswith(f"{env_name}="):
+            return line.split("=", 1)[1]
+    return ""
+
+
 def load_api_key(provider: str) -> str | None:
-    env_name = f"IRONRAG_{provider.upper()}_API_KEY"
-    val = os.environ.get(env_name)
-    if val:
-        return val
-    env_path = REPO_ROOT / ".env"
-    if env_path.exists():
-        for line in env_path.read_text().splitlines():
-            if line.startswith(f"{env_name}="):
-                return line.split("=", 1)[1].strip()
-    return None
+    encoded_map = read_env_value(PROVIDER_API_KEYS_ENV, REPO_ROOT / ".env")
+    if not encoded_map:
+        return None
+
+    try:
+        provider_keys = decode_json_object(encoded_map, MAX_PROVIDER_KEY_MAP_BYTES)
+        if len(provider_keys) > MAX_PROVIDER_KEYS:
+            raise ValueError("provider key payload has too many entries")
+        value = provider_keys.get(provider)
+        if value is not None and not isinstance(value, str):
+            raise ValueError("provider key is not a string")
+        if value is not None and len(value.encode("utf-8")) > MAX_PROVIDER_KEY_BYTES:
+            raise ValueError("provider key is too large")
+    except ValueError as error:
+        raise SystemExit(f"{PROVIDER_API_KEYS_ENV} is invalid") from error
+    return value if value else None
 
 
 def main() -> int:
@@ -507,8 +577,9 @@ def main() -> int:
         return 1
     api_key = load_api_key(provider)
     models = fetch_models(provider, api_key)
+    capability_manifest = load_model_capability_manifest(provider)
     print(f"-- {provider}: discovered {len(models)} models", file=sys.stderr)
-    sys.stdout.write(emit(provider, models))
+    sys.stdout.write(emit(provider, models, capability_manifest))
     return 0
 
 

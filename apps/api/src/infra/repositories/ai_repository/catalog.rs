@@ -243,26 +243,21 @@ pub async fn update_provider_catalog(
     .await
 }
 
-pub async fn disable_provider_catalog(
+/// Real hard delete. The provider row's `on delete restrict` foreign keys
+/// (models, accounts) surface as a foreign-key violation that
+/// `map_ai_delete_error` maps to a 409 conflict. The reversible pause is
+/// `update_provider_catalog` with `lifecycleState: "disabled"`, a distinct
+/// operation from this irreversible delete (see the AI section of
+/// `memory/2026-07-17-rest-api-query-refactor-plan.md`).
+pub async fn delete_provider_catalog(
     postgres: &PgPool,
     provider_id: Uuid,
-) -> Result<Option<AiProviderCatalogRow>, sqlx::Error> {
-    sqlx::query_as::<_, AiProviderCatalogRow>(
-        "update ai_provider_catalog
-         set lifecycle_state = 'disabled'::ai_provider_lifecycle_state
-         where id = $1
-         returning
-            id,
-            provider_kind,
-            display_name,
-            api_style::text as api_style,
-            lifecycle_state::text as lifecycle_state,
-            default_base_url,
-            capability_flags_json",
-    )
-    .bind(provider_id)
-    .fetch_optional(postgres)
-    .await
+) -> Result<bool, sqlx::Error> {
+    let result = sqlx::query("delete from ai_provider_catalog where id = $1")
+        .bind(provider_id)
+        .execute(postgres)
+        .await?;
+    Ok(result.rows_affected() > 0)
 }
 
 pub async fn get_model_catalog_by_provider_name_and_capability(
@@ -404,28 +399,18 @@ pub async fn update_model_catalog(
     .await
 }
 
-pub async fn disable_model_catalog(
-    postgres: &PgPool,
-    model_id: Uuid,
-) -> Result<Option<AiModelCatalogRow>, sqlx::Error> {
-    sqlx::query_as::<_, AiModelCatalogRow>(
-        "update ai_model_catalog
-         set lifecycle_state = 'disabled'::ai_model_lifecycle_state
-         where id = $1
-         returning
-            id,
-            provider_catalog_id,
-            model_name,
-            capability_kind::text as capability_kind,
-            modality_kind::text as modality_kind,
-            context_window,
-            max_output_tokens,
-            lifecycle_state::text as lifecycle_state,
-            metadata_json",
-    )
-    .bind(model_id)
-    .fetch_optional(postgres)
-    .await
+/// Real hard delete. The model row's `on delete restrict` foreign keys
+/// (bindings, price overrides — see migration 0017) surface as a
+/// foreign-key violation that `map_ai_delete_error` maps to a 409 conflict.
+/// The reversible pause is `update_model_catalog` with
+/// `lifecycleState: "disabled"`, a distinct operation from this
+/// irreversible delete.
+pub async fn delete_model_catalog(postgres: &PgPool, model_id: Uuid) -> Result<bool, sqlx::Error> {
+    let result = sqlx::query("delete from ai_model_catalog where id = $1")
+        .bind(model_id)
+        .execute(postgres)
+        .await?;
+    Ok(result.rows_affected() > 0)
 }
 
 pub async fn upsert_model_catalog(
@@ -460,14 +445,20 @@ pub async fn upsert_model_catalog(
             $5
          )
          -- Seed migration is the canonical source of `modality_kind` and
-         -- `metadata_json.defaultRoles` (incl. `vision` role for multimodal
-         -- chat models). Runtime provider-discovery cannot classify per
+         -- `metadata_json.defaultRoles` (including the `extract_text` role for
+         -- multimodal chat models). Runtime provider-discovery cannot classify per
          -- model — its signature is keyed on capability_kind only — so we
          -- must NOT let it overwrite the seed. On conflict only refresh
-         -- lifecycle so re-discovered models bounce back to `active`.
+         -- lifecycle. A historical model whose canonical role array is empty
+         -- remains disabled because discovery cannot infer a new purpose.
          on conflict (provider_catalog_id, model_name, capability_kind) do update
          set
-            lifecycle_state = 'active'::ai_model_lifecycle_state
+            lifecycle_state = case
+                when jsonb_typeof(ai_model_catalog.metadata_json -> 'defaultRoles') = 'array'
+                 and jsonb_array_length(ai_model_catalog.metadata_json -> 'defaultRoles') = 0
+                    then 'disabled'::ai_model_lifecycle_state
+                else 'active'::ai_model_lifecycle_state
+            end
          returning
             id,
             provider_catalog_id,

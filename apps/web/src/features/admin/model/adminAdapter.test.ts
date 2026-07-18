@@ -1,11 +1,11 @@
-import { describe, expect, it, vi } from 'vitest';
+import { describe, expect, it, vi } from 'vitest'
 
 import {
   adminApi,
   adminModelCatalogOptions,
   parseModelCatalogResponse,
   parseProviderCatalogResponse,
-} from '@/shared/api/admin';
+} from '@/shared/api/admin'
 import type {
   AiAccountResponse,
   AiBindingResponse,
@@ -14,9 +14,9 @@ import type {
   ModelCatalogEntryResponse,
   OpsLibraryStateResponse,
   TokenResponse,
-} from '@/shared/api/generated';
-import { mapAudit, mapAuditPage, mapOps, mapToken } from "./adminAdapter";
-import { mapAccountList, mapBindingList, mapModelList, mapProviderList } from "./aiAdapter";
+} from '@/shared/api/generated'
+import { mapAudit, mapAuditPage, mapOps, mapToken } from './adminAdapter'
+import { mapAccountList, mapBindingList, mapModelList, mapProviderList } from './aiAdapter'
 
 describe('mapToken', () => {
   it('maps generated token responses without a raw shadow type', () => {
@@ -45,7 +45,7 @@ describe('mapToken', () => {
           library: { id: 'library-1', workspaceId: 'workspace-1', displayName: 'Library 1' },
         },
       ],
-    } satisfies TokenResponse);
+    } satisfies TokenResponse)
 
     expect(token).toMatchObject({
       id: 'principal-1',
@@ -57,8 +57,8 @@ describe('mapToken', () => {
         libraries: [{ id: 'library-1', workspaceId: 'workspace-1', displayName: 'Library 1' }],
       },
       grants: [{ resourceKind: 'library', permission: 'library_read' }],
-    });
-  });
+    })
+  })
 
   it('rejects malformed token status instead of rewriting it', () => {
     expect(() =>
@@ -70,9 +70,9 @@ describe('mapToken', () => {
         scope: { kind: 'system', libraries: [] },
         grants: [],
       }),
-    ).toThrow('invalid status');
-  });
-});
+    ).toThrow('invalid status')
+  })
+})
 
 describe('mapOps', () => {
   it('maps generated operations responses without optional raw defaults', () => {
@@ -98,7 +98,7 @@ describe('mapOps', () => {
         },
       ],
       knowledgeGenerations: [],
-    } satisfies OpsLibraryStateResponse);
+    } satisfies OpsLibraryStateResponse)
 
     expect(ops).toMatchObject({
       queueDepth: 2,
@@ -107,9 +107,9 @@ describe('mapOps', () => {
       failedDocCount: 1,
       status: 'processing',
       warnings: [{ id: 'warning-1', warningKind: 'index_lag' }],
-    });
-  });
-});
+    })
+  })
+})
 
 describe('mapAudit', () => {
   it('maps assistant call summaries from the audit payload', () => {
@@ -140,7 +140,7 @@ describe('mapAudit', () => {
         currencyCode: 'USD',
         providerCallCount: 2,
       },
-    } satisfies AuditEventResponse);
+    } satisfies AuditEventResponse)
 
     expect(audit.assistantCall).toEqual({
       queryExecutionId: 'exec-1',
@@ -150,9 +150,9 @@ describe('mapAudit', () => {
       totalCost: '0.0123',
       currencyCode: 'USD',
       providerCallCount: 2,
-    });
-    expect(audit.actor).toBe('Operator One (operator.one)');
-  });
+    })
+    expect(audit.actor).toBe('Operator One (operator.one)')
+  })
 
   it('maps generated audit pages canonically', () => {
     const page = mapAuditPage({
@@ -172,16 +172,16 @@ describe('mapAudit', () => {
       total: 1,
       limit: 50,
       offset: 0,
-    } satisfies AuditEventPageResponse);
+    } satisfies AuditEventPageResponse)
 
     expect(page).toMatchObject({
       total: 1,
       limit: 50,
       offset: 0,
       items: [{ id: 'evt-1', action: 'token.mint', resultKind: 'succeeded' }],
-    });
-  });
-});
+    })
+  })
+})
 
 describe('mapProviderList', () => {
   it('maps provider metadata and keeps generic derived conveniences', () => {
@@ -252,8 +252,8 @@ describe('mapProviderList', () => {
         runtime: { kind: 'compatible_chat' },
         uiHints: { baseUrlHint: 'Use the hosted endpoint.' },
       },
-    ]);
-  });
+    ])
+  })
 
   it('does not invent provider credential source from provider catalog metadata', () => {
     const providers = mapProviderList([
@@ -277,7 +277,10 @@ describe('mapProviderList', () => {
           allowPrivateNetwork: false,
           trimSuffixes: [],
         },
-        modelDiscovery: { mode: 'credential', paths: [{ capabilityKind: 'chat', path: '/models' }] },
+        modelDiscovery: {
+          mode: 'credential',
+          paths: [{ capabilityKind: 'chat', path: '/models' }],
+        },
         capabilities: {
           chat: 'supported',
           embeddings: 'unsupported',
@@ -296,11 +299,11 @@ describe('mapProviderList', () => {
         },
         uiHints: {},
       },
-    ]);
+    ])
 
-    expect(providers[0]).not.toHaveProperty('credentialSource');
-  });
-});
+    expect(providers[0]).not.toHaveProperty('credentialSource')
+  })
+})
 
 describe('parseProviderCatalogResponse', () => {
   it('rejects non-canonical provider policy vocabulary from untyped payloads', () => {
@@ -324,7 +327,10 @@ describe('parseProviderCatalogResponse', () => {
             allowPrivateNetwork: false,
             trimSuffixes: [],
           },
-          modelDiscovery: { mode: 'credential', paths: [{ capabilityKind: 'chat', path: '/models' }] },
+          modelDiscovery: {
+            mode: 'credential',
+            paths: [{ capabilityKind: 'chat', path: '/models' }],
+          },
           capabilities: {
             chat: 'supported',
             embeddings: 'unsupported',
@@ -337,9 +343,9 @@ describe('parseProviderCatalogResponse', () => {
           uiHints: {},
         },
       ]),
-    ).toThrow('credentialPolicy.baseUrlMode');
-  });
-});
+    ).toThrow('credentialPolicy.baseUrlMode')
+  })
+})
 
 describe('parseModelCatalogResponse', () => {
   it('rejects malformed model catalog entries missing required availability fields', () => {
@@ -351,10 +357,10 @@ describe('parseModelCatalogResponse', () => {
           modelName: 'alpha-chat',
           capabilityKind: 'chat',
           modalityKind: 'text',
-          allowedBindingPurposes: ['extract_text', 'query_retrieve', 'query_answer'],
+          allowedBindingPurposes: ['extract_text', 'query_compile', 'query_answer'],
         },
       ]),
-    ).toThrow('availabilityState');
+    ).toThrow('availabilityState')
 
     expect(() =>
       parseModelCatalogResponse([
@@ -364,13 +370,13 @@ describe('parseModelCatalogResponse', () => {
           modelName: 'alpha-chat',
           capabilityKind: 'chat',
           modalityKind: 'text',
-          allowedBindingPurposes: ['extract_text', 'query_retrieve', 'query_answer'],
+          allowedBindingPurposes: ['extract_text', 'query_compile', 'query_answer'],
           availabilityState: 'available',
         },
       ]),
-    ).toThrow('availableAccountIds');
-  });
-});
+    ).toThrow('availableAccountIds')
+  })
+})
 
 describe('adminModelCatalogOptions', () => {
   it('routes model catalog queries through the validated adminApi boundary', async () => {
@@ -381,26 +387,26 @@ describe('adminModelCatalogOptions', () => {
         modelName: 'alpha-chat',
         capabilityKind: 'chat',
         modalityKind: 'text',
-        allowedBindingPurposes: ['extract_text', 'query_retrieve', 'query_answer'],
+        allowedBindingPurposes: ['extract_text', 'query_compile', 'query_answer'],
         availabilityState: 'available',
         availableAccountIds: ['account-alpha'],
         lifecycleState: 'active',
       },
-    ];
-    const listModels = vi.spyOn(adminApi, 'listModels').mockResolvedValueOnce(catalog);
+    ]
+    const listModels = vi.spyOn(adminApi, 'listModels').mockResolvedValueOnce(catalog)
 
     const options = adminModelCatalogOptions({
       providerCatalogId: 'provider-alpha',
       accountId: 'account-alpha',
-    });
+    })
 
-    await expect(options.queryFn()).resolves.toBe(catalog);
+    await expect(options.queryFn()).resolves.toBe(catalog)
     expect(listModels).toHaveBeenCalledWith({
       providerCatalogId: 'provider-alpha',
       accountId: 'account-alpha',
-    });
-  });
-});
+    })
+  })
+})
 
 describe('mapModelList', () => {
   it('maps generated model catalog availability without inventing defaults', () => {
@@ -411,21 +417,21 @@ describe('mapModelList', () => {
         modelName: 'alpha-chat',
         capabilityKind: 'chat',
         modalityKind: 'text',
-        allowedBindingPurposes: ['extract_text', 'query_retrieve', 'query_answer'],
+        allowedBindingPurposes: ['extract_text', 'query_compile', 'query_answer'],
         availabilityState: 'unknown',
         availableAccountIds: ['account-alpha'],
         lifecycleState: 'active',
       } satisfies ModelCatalogEntryResponse,
-    ]);
+    ])
 
     expect(models[0]).toMatchObject({
       id: 'model-alpha',
-      allowedBindingPurposes: ['extract_text', 'query_retrieve', 'query_answer'],
+      allowedBindingPurposes: ['extract_text', 'query_compile', 'query_answer'],
       availabilityState: 'unknown',
       availableAccountIds: ['account-alpha'],
-    });
-  });
-});
+    })
+  })
+})
 
 describe('mapBindingList', () => {
   it('keeps every generated binding purpose without local narrowing casts, including inline parameters', () => {
@@ -433,36 +439,71 @@ describe('mapBindingList', () => {
       {
         id: 'binding-alpha',
         scopeKind: 'workspace',
-        bindingPurpose: 'query_retrieve',
+        bindingPurpose: 'embed_chunk',
         bindingState: 'active',
         accountId: 'account-alpha',
         modelCatalogId: 'model-alpha',
         extraParametersJson: { response_format: { type: 'json_object' } },
       } satisfies AiBindingResponse,
-    ]);
+    ])
 
-    expect(bindings[0]?.purpose).toBe('query_retrieve');
-    expect(bindings[0]?.accountId).toBe('account-alpha');
-    expect(bindings[0]?.modelCatalogId).toBe('model-alpha');
-    expect(bindings[0]?.extraParams).toEqual({ response_format: { type: 'json_object' } });
-  });
+    expect(bindings[0]?.purpose).toBe('embed_chunk')
+    expect(bindings[0]?.accountId).toBe('account-alpha')
+    expect(bindings[0]?.modelCatalogId).toBe('model-alpha')
+    expect(bindings[0]?.extraParams).toEqual({ response_format: { type: 'json_object' } })
+  })
 
   it('does not parse legacy JSON strings as extra parameter objects', () => {
     const bindings = mapBindingList([
       {
         id: 'binding-alpha',
         scopeKind: 'workspace',
-        bindingPurpose: 'query_retrieve',
+        bindingPurpose: 'embed_chunk',
         bindingState: 'active',
         accountId: 'account-alpha',
         modelCatalogId: 'model-alpha',
         extraParametersJson: '{"response_format":{"type":"json_object"}}',
       } satisfies AiBindingResponse,
-    ]);
+    ])
 
-    expect(bindings[0]).not.toHaveProperty('extraParams');
-  });
-});
+    expect(bindings[0]).not.toHaveProperty('extraParams')
+  })
+
+  it.each(['active', 'invalid', 'disabled'] as const)(
+    'preserves the canonical %s binding state in the view model',
+    (bindingState) => {
+      const bindings = mapBindingList([
+        {
+          id: `binding-${bindingState}`,
+          scopeKind: 'instance',
+          bindingPurpose: 'extract_text',
+          bindingState,
+          accountId: 'account-alpha',
+          modelCatalogId: 'model-alpha',
+          extraParametersJson: {},
+        } satisfies AiBindingResponse,
+      ])
+
+      expect(bindings[0]?.state).toBe(bindingState)
+    },
+  )
+
+  it('rejects a non-canonical inactive binding state', () => {
+    expect(() =>
+      mapBindingList([
+        {
+          id: 'binding-malformed',
+          scopeKind: 'instance',
+          bindingPurpose: 'extract_text',
+          bindingState: 'inactive',
+          accountId: 'account-alpha',
+          modelCatalogId: 'model-alpha',
+          extraParametersJson: {},
+        } satisfies AiBindingResponse,
+      ]),
+    ).toThrow('invalid bindingState')
+  })
+})
 
 describe('AI scope handling', () => {
   it('throws on malformed generated scopeKind instead of defaulting to workspace', () => {
@@ -481,6 +522,6 @@ describe('AI scope handling', () => {
         ],
         [],
       ),
-    ).toThrow('invalid scopeKind');
-  });
-});
+    ).toThrow('invalid scopeKind')
+  })
+})

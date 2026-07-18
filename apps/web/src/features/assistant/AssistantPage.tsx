@@ -1,157 +1,154 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
-import { useTranslation } from 'react-i18next';
-import { useNavigate } from 'react-router-dom';
-import { MessageSquare, PanelLeftOpen, X } from 'lucide-react';
-import { AssistantDebugInspector } from '@/features/assistant/components/AssistantDebugInspector';
-import { EvidencePanel } from '@/features/assistant/components/EvidencePanel';
-import { SessionRail } from '@/features/assistant/components/SessionRail';
-import { DataView } from '@/shared/components/layout/DataView';
-import { PageShell } from '@/shared/components/layout/PageShell';
-import { Button } from '@/shared/components/ui/button';
-import { useApp } from '@/shared/contexts/app-context';
-import { useDeveloperMode } from '@/shared/contexts/preferences-context';
-import { useCan } from '@/shared/auth/useCan';
-import { useLocalStorageState } from '@/shared/hooks/useLocalStorageState';
-import type { AssistantMessage, EvidenceBundle } from '@/shared/types';
-import { NoLibraryState, QueryNotConfiguredState } from './components/assistant-page/AssistantUnavailableState';
-import { ChatThread } from './components/assistant-page/ChatThread';
-import { Composer } from './components/assistant-page/Composer';
-import { useAssistantSession } from './components/assistant-page/useAssistantSession';
-import { useSessionOverrides } from './components/assistant-page/useSessionOverrides';
+import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useTranslation } from 'react-i18next'
+import { useNavigate } from 'react-router-dom'
+import { MessageSquare, PanelLeftOpen, X } from 'lucide-react'
+import { AssistantDebugInspector } from '@/features/assistant/components/AssistantDebugInspector'
+import { EvidencePanel } from '@/features/assistant/components/EvidencePanel'
+import { SessionRail } from '@/features/assistant/components/SessionRail'
+import { DataWorkspaceView } from '@/shared/components/layout/DataView'
+import { PageShell } from '@/shared/components/layout/PageShell'
+import { Button } from '@/shared/components/ui/button'
+import { useApp } from '@/shared/contexts/app-context'
+import { useDeveloperMode } from '@/shared/contexts/preferences-context'
+import { useCan } from '@/shared/auth/useCan'
+import { useLocalStorageState } from '@/shared/hooks/useLocalStorageState'
+import type { AssistantMessage, EvidenceBundle } from '@/shared/types'
+import {
+  NoLibraryState,
+  QueryNotConfiguredState,
+} from './components/assistant-page/AssistantUnavailableState'
+import { ChatThread } from './components/assistant-page/ChatThread'
+import { Composer } from './components/assistant-page/Composer'
+import { useAssistantSession } from './components/assistant-page/useAssistantSession'
 
-const SESSION_RAIL_ID = 'assistant-session-rail';
-const DEBUG_PANEL_DEFAULT_WIDTH = 560;
-const DEBUG_PANEL_MIN_WIDTH = 420;
-const DEBUG_PANEL_MAX_WIDTH = 960;
+const SESSION_RAIL_ID = 'assistant-session-rail'
+const DEBUG_PANEL_DEFAULT_WIDTH = 560
+const DEBUG_PANEL_MIN_WIDTH = 420
+const DEBUG_PANEL_MAX_WIDTH = 960
 
 function parseBoolean(raw: unknown): boolean {
-  return raw === true;
+  return raw === true
 }
 
 function parseDebugPanelWidth(raw: unknown): number {
-  const value = typeof raw === 'number' && Number.isFinite(raw)
-    ? raw
-    : DEBUG_PANEL_DEFAULT_WIDTH;
-  return Math.min(DEBUG_PANEL_MAX_WIDTH, Math.max(DEBUG_PANEL_MIN_WIDTH, Math.round(value)));
+  const value = typeof raw === 'number' && Number.isFinite(raw) ? raw : DEBUG_PANEL_DEFAULT_WIDTH
+  return Math.min(DEBUG_PANEL_MAX_WIDTH, Math.max(DEBUG_PANEL_MIN_WIDTH, Math.round(value)))
+}
+
+function latestUserMessageTimestamp(
+  messages: readonly AssistantMessage[],
+  assistantIndex: number,
+): string | undefined {
+  for (let index = assistantIndex - 1; index >= 0; index -= 1) {
+    const message = messages[index]
+    if (message?.role === 'user') return message.timestamp
+  }
+  return undefined
+}
+
+function latestTurnWallClock(messages: readonly AssistantMessage[]): number | undefined {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index]
+    if (message?.role !== 'assistant') continue
+    if (typeof message.durationMs === 'number' && message.durationMs > 0) return message.durationMs
+    if (!message.timestamp) return undefined
+
+    const userTimestamp = latestUserMessageTimestamp(messages, index)
+    if (!userTimestamp) return undefined
+    const delta = Date.parse(message.timestamp) - Date.parse(userTimestamp)
+    return Number.isFinite(delta) && delta > 0 ? delta : undefined
+  }
+  return undefined
 }
 
 export default function AssistantPage() {
-  const { t } = useTranslation();
-  const { activeLibrary, activeWorkspace, locale } = useApp();
-  const navigate = useNavigate();
-  const developerMode = useDeveloperMode();
-  const { isAdmin } = useCan();
+  const { t } = useTranslation()
+  const { activeLibrary, activeWorkspace, locale } = useApp()
+  const navigate = useNavigate()
+  const developerMode = useDeveloperMode()
+  const { isAdmin } = useCan()
   // Debug surfaces are an operator/dev tool: only admins or users who flipped
   // developer mode see them, instead of every viewer at core-action weight.
-  const showDebug = developerMode || isAdmin;
+  const showDebug = developerMode || isAdmin
 
-  const [inputText, setInputText] = useState('');
-  const [evidenceMessageId, setEvidenceMessageId] = useState<string | null>(null);
+  const [inputText, setInputText] = useState('')
+  const [evidenceMessageId, setEvidenceMessageId] = useState<string | null>(null)
   const [sessionRailCollapsed, setSessionRailCollapsed] = useLocalStorageState({
     key: 'ironrag_assistant_sessions_collapsed',
     defaultValue: true,
     parse: parseBoolean,
-  });
+  })
   const [debugInspectorOpen, setDebugInspectorOpen] = useLocalStorageState({
     key: 'ironrag_assistant_debug_open',
     defaultValue: false,
     parse: parseBoolean,
-  });
+  })
   const [debugPanelWidth, setDebugPanelWidth] = useLocalStorageState({
     key: 'ironrag_assistant_debug_width',
     defaultValue: DEBUG_PANEL_DEFAULT_WIDTH,
     parse: parseDebugPanelWidth,
-  });
-  const workspaceId = activeWorkspace?.id ?? activeLibrary?.workspaceId;
-  const libraryScopeKey =
-    workspaceId && activeLibrary?.id ? `${workspaceId}:${activeLibrary.id}` : null;
-  const assistant = useAssistantSession({ workspaceId, libraryId: activeLibrary?.id, t });
-  const { applyOverrides, renameSession, deleteSession } = useSessionOverrides(libraryScopeKey);
+  })
+  const workspaceId = activeWorkspace?.id ?? activeLibrary?.workspaceId
+  const assistant = useAssistantSession({ workspaceId, libraryId: activeLibrary?.id, t })
+  const sessions = assistant.sessions
 
-  const sessions = useMemo(
-    () => applyOverrides(assistant.sessions),
-    [applyOverrides, assistant.sessions],
-  );
-
-  const { newSession, selectSession, activeSession } = assistant;
+  const { activeSession, deleteSession, newSession, renameSession, selectSession } = assistant
   const activeSessionTitle = useMemo(() => {
-    if (!activeSession) return t('assistant.newQuestionSession');
-    const session = sessions.find((candidate) => candidate.id === activeSession);
-    return session?.title || t('assistant.untitledSession');
-  }, [activeSession, sessions, t]);
-  const [evidenceOpen, setEvidenceOpen] = useState(false);
-  const [sessionsOpen, setSessionsOpen] = useState(false);
+    if (!activeSession) return t('assistant.newQuestionSession')
+    const session = sessions.find((candidate) => candidate.id === activeSession)
+    return session?.title || t('assistant.untitledSession')
+  }, [activeSession, sessions, t])
+  const [evidenceOpen, setEvidenceOpen] = useState(false)
+  const [sessionsOpen, setSessionsOpen] = useState(false)
 
   const handleNewSession = useCallback(() => {
-    newSession();
-    setSessionsOpen(false);
-  }, [newSession]);
+    newSession()
+    setSessionsOpen(false)
+  }, [newSession])
 
   const handleSelectSession = useCallback(
     (sessionId: string) => {
-      selectSession(sessionId);
-      setSessionsOpen(false);
+      selectSession(sessionId)
+      setSessionsOpen(false)
     },
     [selectSession],
-  );
+  )
 
   const handleDeleteSession = useCallback(
     (sessionId: string) => {
-      deleteSession(sessionId);
-      if (activeSession === sessionId) newSession();
+      deleteSession(sessionId)
     },
-    [activeSession, deleteSession, newSession],
-  );
+    [deleteSession],
+  )
 
   const handleSend = useCallback(() => {
-    if (assistant.sendQuestion(inputText)) setInputText('');
-  }, [assistant, inputText]);
+    if (assistant.sendQuestion(inputText)) setInputText('')
+  }, [assistant, inputText])
 
   // Retry now auto-resends the failed question rather than merely repopulating
   // the textarea, matching the "retry" mental model.
   const handleRetry = useCallback(() => {
-    const question = assistant.prepareRetry();
-    if (question) assistant.sendQuestion(question);
-  }, [assistant]);
+    const question = assistant.prepareRetry()
+    if (question) assistant.sendQuestion(question)
+  }, [assistant])
 
   const latestAssistantExecutionId = useMemo(() => {
     for (let i = assistant.messages.length - 1; i >= 0; i -= 1) {
-      const message = assistant.messages[i];
-      if (!message) continue;
-      if (message.role === 'user') return null;
-      if (message.role === 'assistant' && message.content.trim().length === 0) return null;
+      const message = assistant.messages[i]
+      if (!message) continue
+      if (message.role === 'user') return null
+      if (message.role === 'assistant' && message.content.trim().length === 0) return null
       if (message.role === 'assistant' && !message.isStreaming && message.executionId) {
-        return message.executionId;
+        return message.executionId
       }
     }
-    return null;
-  }, [assistant.messages]);
+    return null
+  }, [assistant.messages])
 
-  const latestTurnWallClockMs = useMemo(() => {
-    const messages = assistant.messages;
-    for (let i = messages.length - 1; i >= 0; i -= 1) {
-      const msg = messages[i];
-      if (!msg) continue;
-      if (msg.role !== 'assistant') continue;
-      // Server-authoritative wall-clock; immune to client↔server clock skew.
-      if (typeof msg.durationMs === 'number' && msg.durationMs > 0) {
-        return msg.durationMs;
-      }
-      if (msg.timestamp) {
-        // Reload path: both timestamps are server-stamped (single clock).
-        const assistantMs = Date.parse(msg.timestamp);
-        for (let j = i - 1; j >= 0; j -= 1) {
-          const prev = messages[j];
-          if (prev?.role === 'user' && prev.timestamp) {
-            const delta = assistantMs - Date.parse(prev.timestamp);
-            return Number.isFinite(delta) && delta > 0 ? delta : undefined;
-          }
-        }
-      }
-      return undefined;
-    }
-    return undefined;
-  }, [assistant.messages]);
+  const latestTurnWallClockMs = useMemo(
+    () => latestTurnWallClock(assistant.messages),
+    [assistant.messages],
+  )
 
   const {
     openDebugFor,
@@ -162,58 +159,59 @@ export default function AssistantPage() {
     debugError,
     debugErrorExecutionId,
     debugLoadingId,
-  } = assistant;
+  } = assistant
 
   // The evidence panel scopes to the chosen message, falling back to the most
   // recent answer with evidence so the panel always has something to show.
   const evidenceForPanel = useMemo<EvidenceBundle | null>(() => {
     if (evidenceMessageId) {
-      const match = assistant.messages.find(
-        (m: AssistantMessage) => m.id === evidenceMessageId,
-      );
-      return match?.evidence ?? null;
+      const match = assistant.messages.find((m: AssistantMessage) => m.id === evidenceMessageId)
+      return match?.evidence ?? null
     }
-    return assistant.latestEvidence ?? null;
-  }, [assistant.latestEvidence, assistant.messages, evidenceMessageId]);
+    return assistant.latestEvidence ?? null
+  }, [assistant.latestEvidence, assistant.messages, evidenceMessageId])
 
-  const handleOpenEvidence = useCallback((message: AssistantMessage) => {
-    setEvidenceMessageId(message.id);
-    setDebugInspectorOpen(false);
-    setEvidenceOpen(true);
-  }, [setDebugInspectorOpen]);
+  const handleOpenEvidence = useCallback(
+    (message: AssistantMessage) => {
+      setEvidenceMessageId(message.id)
+      setDebugInspectorOpen(false)
+      setEvidenceOpen(true)
+    },
+    [setDebugInspectorOpen],
+  )
 
   const handleInspect = useCallback(
-    (executionId: string) => {
-      setEvidenceOpen(false);
-      setDebugInspectorOpen(true);
-      void openDebugFor(executionId);
+    async (executionId: string) => {
+      setEvidenceOpen(false)
+      setDebugInspectorOpen(true)
+      await openDebugFor(executionId)
     },
     [openDebugFor, setDebugInspectorOpen],
-  );
+  )
 
   const handleCloseDebug = useCallback(() => {
-    setDebugInspectorOpen(false);
-    assistant.setDebugError(null);
-  }, [assistant, setDebugInspectorOpen]);
+    setDebugInspectorOpen(false)
+    assistant.setDebugError(null)
+  }, [assistant, setDebugInspectorOpen])
 
   useEffect(() => {
     if (!debugInspectorOpen) {
-      return;
+      return
     }
     if (!latestAssistantExecutionId) {
-      setDebugContext(null);
-      setDebugError(null);
-      setDebugErrorExecutionId(null);
-      return;
+      setDebugContext(null)
+      setDebugError(null)
+      setDebugErrorExecutionId(null)
+      return
     }
     if (
       debugContext?.executionId === latestAssistantExecutionId ||
       debugErrorExecutionId === latestAssistantExecutionId ||
       debugLoadingId === latestAssistantExecutionId
     ) {
-      return;
+      return
     }
-    void openDebugFor(latestAssistantExecutionId);
+    openDebugFor(latestAssistantExecutionId).catch(() => undefined)
   }, [
     debugContext?.executionId,
     debugErrorExecutionId,
@@ -224,25 +222,23 @@ export default function AssistantPage() {
     setDebugContext,
     setDebugError,
     setDebugErrorExecutionId,
-  ]);
+  ])
 
   const visibleDebugError = useMemo(() => {
-    if (!latestAssistantExecutionId) return null;
-    return debugErrorExecutionId === latestAssistantExecutionId ? debugError : null;
-  }, [debugError, debugErrorExecutionId, latestAssistantExecutionId]);
+    if (!latestAssistantExecutionId) return null
+    return debugErrorExecutionId === latestAssistantExecutionId ? debugError : null
+  }, [debugError, debugErrorExecutionId, latestAssistantExecutionId])
 
-  if (!activeLibrary) return <NoLibraryState t={t} onOpenDocuments={() => navigate('/documents')} />;
+  if (!activeLibrary) return <NoLibraryState t={t} onOpenDocuments={() => navigate('/documents')} />
 
   if (activeLibrary.missingBindingPurposes.includes('query_answer')) {
-    return <QueryNotConfiguredState t={t} onOpenAdmin={() => navigate('/admin/ai')} />;
+    return <QueryNotConfiguredState t={t} onOpenAdmin={() => navigate('/admin/ai')} />
   }
 
-  const showEvidencePanel = evidenceOpen && evidenceForPanel != null && !debugInspectorOpen;
+  const showEvidencePanel = evidenceOpen && evidenceForPanel != null && !debugInspectorOpen
 
   return (
-    <PageShell
-      bodyClassName="flex min-h-0 flex-col overflow-hidden p-2 md:flex-row md:gap-3 md:p-3"
-    >
+    <PageShell bodyClassName="flex min-h-0 flex-col overflow-hidden p-2 md:flex-row md:gap-3 md:p-3">
       <div className={`relative z-10 hidden min-h-0 ${sessionRailCollapsed ? '' : 'md:flex'}`}>
         <SessionRail
           id={SESSION_RAIL_ID}
@@ -252,7 +248,7 @@ export default function AssistantPage() {
           sessions={sessions}
           activeSession={assistant.activeSession}
           collapsed={false}
-          disabled={assistant.isExecuting}
+          disabled={assistant.isExecuting || assistant.isSessionMutationPending}
           sessionSearch={assistant.sessionSearch}
           onCollapsedChange={setSessionRailCollapsed}
           onSessionSearchChange={assistant.setSessionSearch}
@@ -263,7 +259,7 @@ export default function AssistantPage() {
         />
       </div>
 
-      <DataView
+      <DataWorkspaceView
         className="relative z-10 min-h-0 min-w-0 flex-1 overflow-hidden"
         inspector={
           showEvidencePanel ? (
@@ -282,7 +278,7 @@ export default function AssistantPage() {
         inspectorOpen={showEvidencePanel}
         showDrawerHeader={false}
         onInspectorOpenChange={(open) => {
-          if (!open) setEvidenceOpen(false);
+          if (!open) setEvidenceOpen(false)
         }}
       >
         <div className="grid min-h-0 min-w-0 flex-1 grid-rows-[auto_minmax(0,1fr)_auto] overflow-hidden workbench-surface">
@@ -314,10 +310,11 @@ export default function AssistantPage() {
                 <MessageSquare className="h-5 w-5" aria-hidden="true" />
               </div>
               <div className="min-w-0">
-                <div className="section-label">
-                  {t('assistant.currentSession')}
-                </div>
-                <div className="min-w-0 truncate text-base font-bold tracking-tight" title={activeSessionTitle}>
+                <div className="section-label">{t('assistant.currentSession')}</div>
+                <div
+                  className="min-w-0 truncate text-base font-bold tracking-tight"
+                  title={activeSessionTitle}
+                >
                   {activeSessionTitle}
                 </div>
               </div>
@@ -343,7 +340,7 @@ export default function AssistantPage() {
             onSend={handleSend}
           />
         </div>
-      </DataView>
+      </DataWorkspaceView>
 
       {sessionsOpen && (
         <>
@@ -361,7 +358,7 @@ export default function AssistantPage() {
               sessions={sessions}
               activeSession={assistant.activeSession}
               collapsed={false}
-              disabled={assistant.isExecuting}
+              disabled={assistant.isExecuting || assistant.isSessionMutationPending}
               sessionSearch={assistant.sessionSearch}
               onCollapsedChange={() => setSessionsOpen(false)}
               onSessionSearchChange={assistant.setSessionSearch}
@@ -397,5 +394,5 @@ export default function AssistantPage() {
         onWidthChange={setDebugPanelWidth}
       />
     </PageShell>
-  );
+  )
 }

@@ -1,10 +1,15 @@
-import { defineConfig } from '@hey-api/openapi-ts';
+import { defineConfig } from '@hey-api/openapi-ts'
 
 export default defineConfig({
   input: '../api/contracts/openapi.gen.yaml',
   output: {
     path: 'src/shared/api/generated',
-    postProcess: [],
+    postProcess: [
+      {
+        command: 'node',
+        args: ['scripts/normalize-generated-sdk.mjs', '{{path}}'],
+      },
+    ],
   },
   plugins: [
     '@hey-api/typescript',
@@ -18,4 +23,4 @@ export default defineConfig({
     },
     '@tanstack/react-query',
   ],
-});
+})

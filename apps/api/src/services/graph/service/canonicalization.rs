@@ -47,11 +47,8 @@ pub(super) fn placeholder_entity_parts_from_key(
     if normalization_key.is_empty() {
         return None;
     }
-    let canonical_label = normalization_key
-        .split_once(':')
-        .map(|(_, label)| label)
-        .unwrap_or(normalization_key)
-        .trim();
+    let canonical_label =
+        normalization_key.split_once(':').map_or(normalization_key, |(_, label)| label).trim();
     if canonical_label.is_empty() {
         return None;
     }
@@ -319,7 +316,7 @@ pub(super) fn relation_candidate_keys_are_materializable(
 
 #[cfg(test)]
 pub(super) fn canonical_entity_normalization_key(entity: &GraphEntityCandidate) -> String {
-    crate::services::graph::identity::canonical_node_key(entity.node_type.clone(), &entity.label)
+    crate::services::graph::identity::canonical_node_key(entity.node_type, &entity.label)
 }
 
 #[cfg(test)]
@@ -357,7 +354,7 @@ pub(super) fn build_relation_entity_key_index(
 ) -> crate::services::graph::identity::GraphLabelNodeTypeIndex {
     let mut index = crate::services::graph::identity::GraphLabelNodeTypeIndex::new();
     for entity in &candidates.entities {
-        index.insert_aliases(&entity.label, &entity.aliases, entity.node_type.clone());
+        index.insert_aliases(&entity.label, &entity.aliases, entity.node_type);
     }
     index
 }
@@ -427,7 +424,7 @@ pub(super) fn canonical_evidence_id(
 ) -> Uuid {
     stable_uuid(&format!(
         "knowledge-evidence:{library_id}:{revision_id}:{}:{support_kind}:{canonical_key}",
-        chunk_id.map(|value| value.to_string()).unwrap_or_else(|| "none".to_string())
+        chunk_id.map_or_else(|| "none".to_string(), |value| value.to_string())
     ))
 }
 

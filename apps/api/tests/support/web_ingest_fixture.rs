@@ -66,15 +66,15 @@ impl TempDatabase {
     }
 }
 
-pub struct WebIngestFixture {
-    pub state: AppState,
+pub(crate) struct WebIngestFixture {
+    pub(crate) state: AppState,
     temp_database: TempDatabase,
-    pub workspace_id: Uuid,
-    pub library_id: Uuid,
+    pub(crate) workspace_id: Uuid,
+    pub(crate) library_id: Uuid,
 }
 
 impl WebIngestFixture {
-    pub async fn create(prefix: &str) -> Result<Self> {
+    pub(crate) async fn create(prefix: &str) -> Result<Self> {
         let mut settings = Settings::from_env().context("failed to load settings for fixture")?;
         let temp_database = TempDatabase::create(&settings.database_url, prefix).await?;
         settings.database_url = temp_database.database_url.clone();
@@ -92,7 +92,8 @@ impl WebIngestFixture {
         let redis = redis::Client::open(settings.redis_url.clone())
             .context("failed to build redis client")?;
         let persistence = Persistence::for_tests(postgres, redis);
-        let state = AppState::from_dependencies(settings, persistence)?;
+        let mut state = AppState::from_dependencies(settings, persistence)?;
+        crate::web_ingest_support::enable_loopback_test_transport(&mut state);
         let workspace = state
             .canonical_services
             .catalog
@@ -125,12 +126,15 @@ impl WebIngestFixture {
         Ok(Self { state, temp_database, workspace_id: workspace.id, library_id: library.id })
     }
 
-    #[allow(dead_code)]
-    pub async fn submit_single_page_run(&self, seed_url: String) -> Result<WebIngestRun> {
+    #[allow(
+        dead_code,
+        reason = "shared fixture methods are compiled into integration binaries that exercise different subsets"
+    )]
+    pub(crate) async fn submit_single_page_run(&self, seed_url: String) -> Result<WebIngestRun> {
         self.submit_run(seed_url, "single_page", None, None, None).await
     }
 
-    pub async fn submit_recursive_run(
+    pub(crate) async fn submit_recursive_run(
         &self,
         seed_url: String,
         boundary_policy: &str,
@@ -147,8 +151,11 @@ impl WebIngestFixture {
         .await
     }
 
-    #[allow(dead_code)]
-    pub async fn submit_recursive_run_with_filters(
+    #[allow(
+        dead_code,
+        reason = "shared fixture methods are compiled into integration binaries that exercise different subsets"
+    )]
+    pub(crate) async fn submit_recursive_run_with_filters(
         &self,
         seed_url: String,
         boundary_policy: &str,
@@ -216,8 +223,11 @@ impl WebIngestFixture {
             .context("failed to submit web ingest run")
     }
 
-    #[allow(dead_code)]
-    pub async fn wait_for_document_ready(
+    #[allow(
+        dead_code,
+        reason = "shared fixture methods are compiled into integration binaries that exercise different subsets"
+    )]
+    pub(crate) async fn wait_for_document_ready(
         &self,
         document_id: Uuid,
         timeout: Duration,
@@ -248,8 +258,11 @@ impl WebIngestFixture {
         }
     }
 
-    #[allow(dead_code)]
-    pub async fn wait_for_run_terminal(
+    #[allow(
+        dead_code,
+        reason = "shared fixture methods are compiled into integration binaries that exercise different subsets"
+    )]
+    pub(crate) async fn wait_for_run_terminal(
         &self,
         run_id: Uuid,
         timeout: Duration,
@@ -276,7 +289,7 @@ impl WebIngestFixture {
         }
     }
 
-    pub async fn cleanup(self) -> Result<()> {
+    pub(crate) async fn cleanup(self) -> Result<()> {
         self.state.persistence.postgres.close().await;
         self.temp_database.drop().await
     }

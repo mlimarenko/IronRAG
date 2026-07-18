@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -7,43 +5,43 @@ use uuid::Uuid;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct GreenfieldWorkspace {
-    pub id: Uuid,
-    pub slug: String,
-    pub name: String,
-    pub status: String,
-    pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
+pub(crate) struct GreenfieldWorkspace {
+    pub(crate) id: Uuid,
+    pub(crate) slug: String,
+    pub(crate) name: String,
+    pub(crate) status: String,
+    pub(crate) created_at: DateTime<Utc>,
+    pub(crate) updated_at: DateTime<Utc>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct GreenfieldLibrary {
-    pub id: Uuid,
-    pub workspace_id: Uuid,
-    pub slug: String,
-    pub name: String,
-    pub status: String,
-    pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
+pub(crate) struct GreenfieldLibrary {
+    pub(crate) id: Uuid,
+    pub(crate) workspace_id: Uuid,
+    pub(crate) slug: String,
+    pub(crate) name: String,
+    pub(crate) status: String,
+    pub(crate) created_at: DateTime<Utc>,
+    pub(crate) updated_at: DateTime<Utc>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct GreenfieldPrincipal {
-    pub id: Uuid,
-    pub kind: String,
-    pub login: String,
-    pub email: String,
-    pub display_name: String,
-    pub status: String,
-    pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
+pub(crate) struct GreenfieldPrincipal {
+    pub(crate) id: Uuid,
+    pub(crate) kind: String,
+    pub(crate) login: String,
+    pub(crate) email: String,
+    pub(crate) display_name: String,
+    pub(crate) status: String,
+    pub(crate) created_at: DateTime<Utc>,
+    pub(crate) updated_at: DateTime<Utc>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub enum GreenfieldGrantTargetKind {
+pub(crate) enum GreenfieldGrantTargetKind {
     Workspace,
     Library,
     Document,
@@ -54,84 +52,84 @@ pub enum GreenfieldGrantTargetKind {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct GreenfieldGrant {
-    pub id: Uuid,
-    pub principal_id: Uuid,
-    pub target_kind: GreenfieldGrantTargetKind,
-    pub target_id: Uuid,
-    pub permission: String,
-    pub created_at: DateTime<Utc>,
+pub(crate) struct GreenfieldGrant {
+    pub(crate) id: Uuid,
+    pub(crate) principal_id: Uuid,
+    pub(crate) target_kind: GreenfieldGrantTargetKind,
+    pub(crate) target_id: Uuid,
+    pub(crate) permission: String,
+    pub(crate) created_at: DateTime<Utc>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct GreenfieldDocument {
-    pub id: Uuid,
-    pub workspace_id: Uuid,
-    pub library_id: Uuid,
-    pub external_key: String,
-    pub title: String,
-    pub mime_type: String,
-    pub status: String,
-    pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
+pub(crate) struct GreenfieldDocument {
+    pub(crate) id: Uuid,
+    pub(crate) workspace_id: Uuid,
+    pub(crate) library_id: Uuid,
+    pub(crate) external_key: String,
+    pub(crate) title: String,
+    pub(crate) mime_type: String,
+    pub(crate) status: String,
+    pub(crate) created_at: DateTime<Utc>,
+    pub(crate) updated_at: DateTime<Utc>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct GreenfieldRevision {
-    pub id: Uuid,
-    pub document_id: Uuid,
-    pub revision_no: i64,
-    pub checksum: String,
-    pub body_text: String,
-    pub created_at: DateTime<Utc>,
+pub(crate) struct GreenfieldRevision {
+    pub(crate) id: Uuid,
+    pub(crate) document_id: Uuid,
+    pub(crate) revision_no: i64,
+    pub(crate) checksum: String,
+    pub(crate) body_text: String,
+    pub(crate) created_at: DateTime<Utc>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct GreenfieldAttempt {
-    pub id: Uuid,
-    pub document_id: Uuid,
-    pub operation_kind: String,
-    pub status: String,
-    pub stage: String,
-    pub retry_count: i32,
-    pub started_at: Option<DateTime<Utc>>,
-    pub finished_at: Option<DateTime<Utc>>,
-    pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
+pub(crate) struct GreenfieldAttempt {
+    pub(crate) id: Uuid,
+    pub(crate) document_id: Uuid,
+    pub(crate) operation_kind: String,
+    pub(crate) status: String,
+    pub(crate) stage: String,
+    pub(crate) retry_count: i32,
+    pub(crate) started_at: Option<DateTime<Utc>>,
+    pub(crate) finished_at: Option<DateTime<Utc>>,
+    pub(crate) created_at: DateTime<Utc>,
+    pub(crate) updated_at: DateTime<Utc>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct GreenfieldAuditEvent {
-    pub id: Uuid,
-    pub request_id: String,
-    pub actor_principal_id: Option<Uuid>,
-    pub action_kind: String,
-    pub subject_kind: String,
-    pub subject_id: Option<Uuid>,
-    pub result_kind: String,
-    pub details: Value,
-    pub created_at: DateTime<Utc>,
+pub(crate) struct GreenfieldAuditEvent {
+    pub(crate) id: Uuid,
+    pub(crate) request_id: String,
+    pub(crate) actor_principal_id: Option<Uuid>,
+    pub(crate) action_kind: String,
+    pub(crate) subject_kind: String,
+    pub(crate) subject_id: Option<Uuid>,
+    pub(crate) result_kind: String,
+    pub(crate) details: Value,
+    pub(crate) created_at: DateTime<Utc>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct GreenfieldFixtureBundle {
-    pub workspace: GreenfieldWorkspace,
-    pub library: GreenfieldLibrary,
-    pub principal: GreenfieldPrincipal,
-    pub grant: GreenfieldGrant,
-    pub document: GreenfieldDocument,
-    pub revision: GreenfieldRevision,
-    pub attempt: GreenfieldAttempt,
-    pub audit_event: GreenfieldAuditEvent,
+pub(crate) struct GreenfieldFixtureBundle {
+    pub(crate) workspace: GreenfieldWorkspace,
+    pub(crate) library: GreenfieldLibrary,
+    pub(crate) principal: GreenfieldPrincipal,
+    pub(crate) grant: GreenfieldGrant,
+    pub(crate) document: GreenfieldDocument,
+    pub(crate) revision: GreenfieldRevision,
+    pub(crate) attempt: GreenfieldAttempt,
+    pub(crate) audit_event: GreenfieldAuditEvent,
 }
 
 #[must_use]
-pub fn sample_workspace() -> GreenfieldWorkspace {
+pub(crate) fn sample_workspace() -> GreenfieldWorkspace {
     let now = Utc::now();
     GreenfieldWorkspace {
         id: Uuid::now_v7(),
@@ -144,7 +142,7 @@ pub fn sample_workspace() -> GreenfieldWorkspace {
 }
 
 #[must_use]
-pub fn sample_library(workspace_id: Uuid) -> GreenfieldLibrary {
+pub(crate) fn sample_library(workspace_id: Uuid) -> GreenfieldLibrary {
     let now = Utc::now();
     GreenfieldLibrary {
         id: Uuid::now_v7(),
@@ -158,7 +156,7 @@ pub fn sample_library(workspace_id: Uuid) -> GreenfieldLibrary {
 }
 
 #[must_use]
-pub fn sample_principal() -> GreenfieldPrincipal {
+pub(crate) fn sample_principal() -> GreenfieldPrincipal {
     let now = Utc::now();
     GreenfieldPrincipal {
         id: Uuid::now_v7(),
@@ -173,7 +171,7 @@ pub fn sample_principal() -> GreenfieldPrincipal {
 }
 
 #[must_use]
-pub fn sample_grant(
+pub(crate) fn sample_grant(
     principal_id: Uuid,
     target_kind: GreenfieldGrantTargetKind,
     target_id: Uuid,
@@ -189,7 +187,7 @@ pub fn sample_grant(
 }
 
 #[must_use]
-pub fn sample_document(workspace_id: Uuid, library_id: Uuid) -> GreenfieldDocument {
+pub(crate) fn sample_document(workspace_id: Uuid, library_id: Uuid) -> GreenfieldDocument {
     let now = Utc::now();
     GreenfieldDocument {
         id: Uuid::now_v7(),
@@ -205,7 +203,7 @@ pub fn sample_document(workspace_id: Uuid, library_id: Uuid) -> GreenfieldDocume
 }
 
 #[must_use]
-pub fn sample_revision(document_id: Uuid) -> GreenfieldRevision {
+pub(crate) fn sample_revision(document_id: Uuid) -> GreenfieldRevision {
     GreenfieldRevision {
         id: Uuid::now_v7(),
         document_id,
@@ -217,7 +215,7 @@ pub fn sample_revision(document_id: Uuid) -> GreenfieldRevision {
 }
 
 #[must_use]
-pub fn sample_attempt(document_id: Uuid) -> GreenfieldAttempt {
+pub(crate) fn sample_attempt(document_id: Uuid) -> GreenfieldAttempt {
     let now = Utc::now();
     GreenfieldAttempt {
         id: Uuid::now_v7(),
@@ -234,7 +232,7 @@ pub fn sample_attempt(document_id: Uuid) -> GreenfieldAttempt {
 }
 
 #[must_use]
-pub fn sample_audit_event(
+pub(crate) fn sample_audit_event(
     subject_kind: impl Into<String>,
     subject_id: Option<Uuid>,
 ) -> GreenfieldAuditEvent {
@@ -254,7 +252,7 @@ pub fn sample_audit_event(
 }
 
 #[must_use]
-pub fn sample_fixture_bundle() -> GreenfieldFixtureBundle {
+pub(crate) fn sample_fixture_bundle() -> GreenfieldFixtureBundle {
     let workspace = sample_workspace();
     let library = sample_library(workspace.id);
     let principal = sample_principal();

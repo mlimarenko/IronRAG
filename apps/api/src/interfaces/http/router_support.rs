@@ -22,28 +22,53 @@ use crate::{
         query::error::QueryServiceError, webhook::error::WebhookServiceError,
     },
     shared::extraction::file_extract::{UploadAdmissionError, UploadRejectionDetails},
+    shared::secret_encryption::SecretEncryptionError,
 };
 
 pub const REQUEST_ID_HEADER: &str = "x-request-id";
-pub const FORBIDDEN_VOCABULARY_TOKENS: [(&str, &str); 6] = [
-    ("project", "library"),
-    ("projects", "libraries"),
-    ("collection", "library"),
-    ("collections", "libraries"),
-    ("provider_account", "provider credential"),
-    ("model_profile", "model preset"),
-];
 
+/// URN prefix for the RFC 9457 `type` member. IronRAG does not host a
+/// documentation page per error code, so `type` is a stable, dereferenceable-
+/// in-name-only identifier rather than a browsable URL — RFC 9457 only
+/// requires it to be a URI reference, not a live resource.
+const PROBLEM_TYPE_PREFIX: &str = "urn:ironrag:error:";
+
+pub const PROBLEM_JSON_CONTENT_TYPE: &str = "application/problem+json";
+
+/// RFC 9457 `application/problem+json` response body. `title` is derived
+/// mechanically from `code` (stable per code, satisfying RFC 9457's "SHOULD
+/// NOT change from occurrence to occurrence" guidance) rather than hand
+/// authored per variant. `extensions` carries error-specific structured
+/// data (e.g. `existingDocumentId` on a duplicate-content conflict) as
+/// flattened top-level members, per RFC 9457 §3.2.
 #[derive(Debug, Serialize, utoipa::ToSchema)]
-#[serde(rename_all = "camelCase")]
 pub struct ApiErrorBody {
-    pub error: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub error_kind: Option<&'static str>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub details: Option<UploadRejectionDetails>,
+    #[serde(rename = "type")]
+    pub problem_type: String,
+    pub title: String,
+    pub status: u16,
+    pub detail: String,
+    pub code: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub request_id: Option<String>,
+    #[serde(flatten, skip_serializing_if = "Option::is_none")]
+    pub extensions: Option<serde_json::Map<String, serde_json::Value>>,
+}
+
+/// Humanizes a stable machine `code` slug (e.g. `duplicate_content`) into an
+/// RFC 9457 `title` (e.g. `"Duplicate Content"`). Deterministic and stable
+/// per code, so it satisfies the "SHOULD NOT change" guidance without
+/// requiring a hand-authored title string per error variant.
+fn humanize_problem_title(code: &str) -> String {
+    code.split('_')
+        .map(|word| {
+            let mut chars = word.chars();
+            chars.next().map_or_else(String::new, |first| {
+                first.to_uppercase().collect::<String>() + chars.as_str()
+            })
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 #[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
@@ -63,6 +88,8 @@ pub enum ApiError {
     InvalidMcpToolCall(String),
     #[error("bad request: {0}")]
     InvalidContinuationToken(String),
+    #[error("unsupported media type: {0}")]
+    UnsupportedMediaType(String),
     #[error("unauthorized")]
     Unauthorized,
     #[error("unauthorized: {0}")]
@@ -71,10 +98,6 @@ pub enum ApiError {
     NotFound(String),
     #[error("conflict: {0}")]
     BootstrapAlreadyClaimed(String),
-    #[error(
-        "bad request: forbidden vocabulary '{rejected}' is not allowed for {field}; use '{canonical}'"
-    )]
-    ForbiddenVocabulary { field: &'static str, rejected: &'static str, canonical: &'static str },
     #[error("conflict: {0}")]
     Conflict(String),
     #[error("conflict: {0}")]
@@ -85,12 +108,16 @@ pub enum ApiError {
     ConflictingMutation(String),
     #[error("conflict: {0}")]
     IdempotencyConflict(String),
+    #[error("{message}")]
+    DuplicateContent { message: String, existing_document_id: Uuid },
     #[error("conflict: {0}")]
     MissingPrice(String),
     #[error("conflict: {0}")]
     KnowledgeNotReady(String),
     #[error("service unavailable: {message}")]
     ServiceUnavailable { message: String, kind: &'static str },
+    #[error("gateway timeout: {message}")]
+    GatewayTimeout { message: String, kind: &'static str },
     #[error("conflict: {0}")]
     GraphWriteContention(String),
     #[error("conflict: {0}")]
@@ -112,6 +139,40 @@ pub enum ApiError {
 }
 
 impl ApiError {
+    #[must_use]
+    pub fn credential_encryption_writes_disabled() -> Self {
+        Self::service_unavailable(
+            "credential writes are disabled until the encrypted-storage rollout is activated",
+            "credential_encryption_writes_disabled",
+        )
+    }
+
+    #[must_use]
+    pub fn from_secret_encryption(error: SecretEncryptionError) -> Self {
+        match error {
+            SecretEncryptionError::InvalidPlaintext => {
+                Self::BadRequest("secret must be non-empty and at most 4096 bytes".to_string())
+            }
+            SecretEncryptionError::MasterKeyNotConfigured
+            | SecretEncryptionError::InvalidMasterKey
+            | SecretEncryptionError::InvalidKeyId
+            | SecretEncryptionError::InvalidPreviousKeyMap => Self::service_unavailable(
+                "credential encryption is not configured",
+                "credential_encryption_unavailable",
+            ),
+            SecretEncryptionError::InvalidEnvelope
+            | SecretEncryptionError::UnsupportedEnvelope
+            | SecretEncryptionError::UnknownKeyId
+            | SecretEncryptionError::DecryptionFailed => Self::service_unavailable(
+                "stored credential cannot be decrypted",
+                "credential_decryption_unavailable",
+            ),
+            SecretEncryptionError::EncryptionFailed => {
+                Self::internal_with_log(error, "credential encryption failed")
+            }
+        }
+    }
+
     pub fn internal_with_log(error: impl std::fmt::Debug, context: &str) -> Self {
         tracing::error!(?error, "{context}");
         Self::Internal
@@ -125,6 +186,11 @@ impl ApiError {
     #[must_use]
     pub fn invalid_continuation_token(message: impl Into<String>) -> Self {
         Self::InvalidContinuationToken(message.into())
+    }
+
+    #[must_use]
+    pub fn unsupported_media_type(message: impl Into<String>) -> Self {
+        Self::UnsupportedMediaType(message.into())
     }
 
     #[must_use]
@@ -158,6 +224,14 @@ impl ApiError {
     }
 
     #[must_use]
+    pub fn query_deadline_exceeded() -> Self {
+        Self::GatewayTimeout {
+            message: "query answer exceeded its execution deadline".to_string(),
+            kind: "query_deadline_exceeded",
+        }
+    }
+
+    #[must_use]
     pub fn bootstrap_already_claimed(message: impl Into<String>) -> Self {
         Self::BootstrapAlreadyClaimed(message.into())
     }
@@ -172,22 +246,13 @@ impl ApiError {
         Self::NotFound(format!("knowledge_bundle {id} not found"))
     }
 
-    #[must_use]
-    pub fn forbidden_vocabulary(
-        field: &'static str,
-        rejected: &'static str,
-        canonical: &'static str,
-    ) -> Self {
-        Self::ForbiddenVocabulary { field, rejected, canonical }
-    }
-
-    fn status_code(&self) -> StatusCode {
+    const fn status_code(&self) -> StatusCode {
         match self {
             Self::BadRequest(_)
-            | Self::ForbiddenVocabulary { .. }
             | Self::InvalidMcpToolCall(_)
             | Self::InvalidContinuationToken(_)
             | Self::UploadRejected { .. } => StatusCode::BAD_REQUEST,
+            Self::UnsupportedMediaType(_) => StatusCode::UNSUPPORTED_MEDIA_TYPE,
             Self::Unauthorized | Self::InaccessibleMemoryScope(_) => StatusCode::UNAUTHORIZED,
             Self::Forbidden(_) => StatusCode::FORBIDDEN,
             Self::NotFound(_) => StatusCode::NOT_FOUND,
@@ -197,6 +262,7 @@ impl ApiError {
             | Self::StaleRevision(_)
             | Self::ConflictingMutation(_)
             | Self::IdempotencyConflict(_)
+            | Self::DuplicateContent { .. }
             | Self::MissingPrice(_)
             | Self::KnowledgeNotReady(_)
             | Self::GraphWriteContention(_)
@@ -204,29 +270,32 @@ impl ApiError {
             | Self::SettlementRefreshFailed(_) => StatusCode::CONFLICT,
             Self::ProviderFailure(_) => StatusCode::BAD_GATEWAY,
             Self::ServiceUnavailable { .. } => StatusCode::SERVICE_UNAVAILABLE,
+            Self::GatewayTimeout { .. } => StatusCode::GATEWAY_TIMEOUT,
             Self::Internal | Self::InternalMessage(_) => StatusCode::INTERNAL_SERVER_ERROR,
         }
     }
 
-    pub(crate) fn kind(&self) -> &'static str {
+    pub(crate) const fn kind(&self) -> &'static str {
         match self {
             Self::BadRequest(_) => "bad_request",
             Self::Forbidden(_) => "forbidden",
             Self::InvalidMcpToolCall(_) => "invalid_mcp_tool_call",
             Self::InvalidContinuationToken(_) => "invalid_continuation_token",
+            Self::UnsupportedMediaType(_) => "unsupported_media_type",
             Self::Unauthorized => "unauthorized",
             Self::InaccessibleMemoryScope(_) => "inaccessible_memory_scope",
             Self::NotFound(_) => "not_found",
             Self::BootstrapAlreadyClaimed(_) => "bootstrap_already_claimed",
-            Self::ForbiddenVocabulary { .. } => "forbidden_vocabulary",
             Self::Conflict(_) => "conflict",
             Self::UnreadableDocument(_) => "unreadable_document",
             Self::StaleRevision(_) => "stale_revision",
             Self::ConflictingMutation(_) => "conflicting_mutation",
             Self::IdempotencyConflict(_) => "idempotency_conflict",
+            Self::DuplicateContent { .. } => "duplicate_content",
             Self::MissingPrice(_) => "missing_price",
             Self::KnowledgeNotReady(_) => "knowledge_not_ready",
             Self::ServiceUnavailable { kind, .. } => kind,
+            Self::GatewayTimeout { kind, .. } => kind,
             Self::GraphWriteContention(_) => "graph_write_contention",
             Self::GraphPersistenceIntegrity(_) => "graph_persistence_integrity",
             Self::SettlementRefreshFailed(_) => "graph_state_refresh_failed",
@@ -236,11 +305,25 @@ impl ApiError {
         }
     }
 
-    fn details(&self) -> Option<UploadRejectionDetails> {
-        match self {
-            Self::UploadRejected { details, .. } => Some(details.as_ref().clone()),
-            _ => None,
-        }
+    /// RFC 9457 extension members for this error occurrence, flattened into
+    /// the top level of the response body. Empty `Map`/`None` for variants
+    /// with no error-specific structured payload.
+    fn extensions(&self) -> Option<serde_json::Map<String, serde_json::Value>> {
+        let value = match self {
+            Self::UploadRejected { details, .. } => serde_json::to_value(details.as_ref()),
+            Self::DuplicateContent { existing_document_id, .. } => {
+                serde_json::to_value(serde_json::json!({
+                    "existingDocumentId": existing_document_id,
+                }))
+            }
+            _ => return None,
+        };
+        value.ok().and_then(|value| value.as_object().cloned())
+    }
+
+    #[must_use]
+    pub fn duplicate_content(message: impl Into<String>, existing_document_id: Uuid) -> Self {
+        Self::DuplicateContent { message: message.into(), existing_document_id }
     }
 
     #[must_use]
@@ -366,6 +449,7 @@ impl From<QueryServiceError> for ApiError {
                 Self::ServiceUnavailable { message, kind: "cache_unavailable" }
             }
             QueryServiceError::Cancelled => Self::Conflict("query operation cancelled".to_string()),
+            QueryServiceError::DeadlineExceeded => Self::query_deadline_exceeded(),
             QueryServiceError::Repository(error) => {
                 Self::internal_with_log(error, "query service repository failure")
             }
@@ -386,19 +470,63 @@ impl From<WebhookServiceError> for ApiError {
             WebhookServiceError::SubscriptionNotFound { subscription_id } => {
                 Self::resource_not_found("webhook_subscription", subscription_id)
             }
-            WebhookServiceError::StateConflict { message } => Self::Conflict(message),
-            WebhookServiceError::Repository(error) => {
-                Self::internal_with_log(error, "webhook service repository failure")
+            WebhookServiceError::DeliveryLeaseInFlight { retry_at, .. } => Self::Conflict(format!(
+                "webhook delivery lease is still in flight until {retry_at}"
+            )),
+            WebhookServiceError::DeliveryCanceled { .. } => {
+                Self::Conflict("webhook delivery operation cancelled".to_string())
             }
-            WebhookServiceError::Internal(error) => {
-                Self::internal_with_log(error, "webhook service internal failure")
+            WebhookServiceError::StateConflict { message } => Self::Conflict(message),
+            WebhookServiceError::Repository(_) => {
+                tracing::error!(
+                    error_kind = "WebhookServiceError::Repository",
+                    "webhook service repository failure (detail redacted)"
+                );
+                Self::Internal
+            }
+            WebhookServiceError::CredentialProtection(error) => Self::from_secret_encryption(error),
+            WebhookServiceError::Internal(_) => {
+                tracing::error!(
+                    error_kind = "WebhookServiceError::Internal",
+                    "webhook service internal failure (detail redacted)"
+                );
+                Self::Internal
             }
         }
     }
 }
 
 pub fn map_runtime_lifecycle_error(error: AnyhowError) -> ApiError {
-    map_runtime_lifecycle_error_message(error.to_string())
+    let error = match error.downcast::<ApiError>() {
+        Ok(error) => return error,
+        Err(error) => error,
+    };
+    let error = match error.downcast::<ContentServiceError>() {
+        Ok(error) => return error.into(),
+        Err(error) => error,
+    };
+    let error = match error.downcast::<GraphServiceError>() {
+        Ok(error) => return error.into(),
+        Err(error) => error,
+    };
+    let error = match error.downcast::<IngestServiceError>() {
+        Ok(error) => return error.into(),
+        Err(error) => error,
+    };
+    let error = match error.downcast::<KnowledgeServiceError>() {
+        Ok(error) => return error.into(),
+        Err(error) => error,
+    };
+    let error = match error.downcast::<QueryServiceError>() {
+        Ok(error) => return error.into(),
+        Err(error) => error,
+    };
+    let error = match error.downcast::<WebhookServiceError>() {
+        Ok(error) => return error.into(),
+        Err(error) => error,
+    };
+    error!(error = ?error, "runtime lifecycle handler failed with unexpected internal error");
+    ApiError::Internal
 }
 
 pub fn map_runtime_upload_error(error: AnyhowError) -> ApiError {
@@ -411,6 +539,7 @@ pub fn map_runtime_upload_error(error: AnyhowError) -> ApiError {
     }
 }
 
+#[must_use]
 pub fn map_runtime_write_error(error: AnyhowError) -> ApiError {
     match error.downcast::<UploadAdmissionError>() {
         Ok(upload_error) => ApiError::from_upload_admission(upload_error),
@@ -418,55 +547,7 @@ pub fn map_runtime_write_error(error: AnyhowError) -> ApiError {
     }
 }
 
-pub fn map_runtime_lifecycle_error_message(message: String) -> ApiError {
-    let normalized = message.to_ascii_lowercase();
-    if normalized.contains("stale revision") {
-        return ApiError::StaleRevision(message);
-    }
-    if normalized.contains("graph write contention")
-        || normalized.contains("projection contention")
-        || normalized.contains("deadlock")
-        || normalized.contains("lock timeout")
-    {
-        return ApiError::GraphWriteContention(message);
-    }
-    if normalized.contains("graph persistence integrity")
-        || normalized.contains("foreign key violation")
-        || normalized.contains("edge persistence skipped because node")
-    {
-        return ApiError::GraphPersistenceIntegrity(message);
-    }
-    if normalized.contains("settlement refresh failed")
-        || normalized.contains("failed to persist collection settlement")
-        || normalized.contains("failed to persist collection terminal outcome")
-    {
-        return ApiError::SettlementRefreshFailed(message);
-    }
-    if normalized.contains("provider failure")
-        || normalized.contains("upstream timeout")
-        || normalized.contains("upstream rejection")
-        || normalized.contains("invalid model output")
-        || normalized.contains("invalid_request")
-        || normalized.contains("invalid request")
-    {
-        return ApiError::ProviderFailure(message);
-    }
-    if normalized.contains("missing price") || normalized.contains("unpriced") {
-        return ApiError::MissingPrice(message);
-    }
-    if normalized.contains("document mutation conflict")
-        || normalized.contains("another mutation is already active")
-        || normalized.contains("logical document has been deleted")
-        || normalized.contains("still processing")
-    {
-        return ApiError::ConflictingMutation(message);
-    }
-    if normalized.contains("conflict") {
-        return ApiError::Conflict(message);
-    }
-    ApiError::BadRequest(message)
-}
-
+#[must_use]
 pub fn map_workspace_create_error(error: SqlxError, slug: &str) -> ApiError {
     match error {
         SqlxError::Database(database_error) if database_error.is_unique_violation() => {
@@ -476,6 +557,7 @@ pub fn map_workspace_create_error(error: SqlxError, slug: &str) -> ApiError {
     }
 }
 
+#[must_use]
 pub fn map_library_create_error(error: SqlxError, workspace_id: Uuid, slug: &str) -> ApiError {
     match error {
         SqlxError::Database(database_error) if database_error.is_unique_violation() => {
@@ -625,15 +707,15 @@ pub fn graph_refresh_fallback_warning(message: impl Into<String>) -> ApiWarningB
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         let status = self.status_code();
-        let error_kind = self.kind();
+        let code = self.kind();
         let message = self.to_string();
         let request_id = None::<String>;
-        let details = self.details();
+        let extensions = self.extensions();
 
         if status.is_server_error() {
             error!(
                 %status,
-                error_kind,
+                error_kind = code,
                 error_message = %message,
                 request_id = request_id.as_deref().unwrap_or("-"),
                 "http request failed in handler",
@@ -641,23 +723,27 @@ impl IntoResponse for ApiError {
         } else {
             warn!(
                 %status,
-                error_kind,
+                error_kind = code,
                 error_message = %message,
                 request_id = request_id.as_deref().unwrap_or("-"),
                 "http request rejected in handler",
             );
         }
 
-        let mut response = (
-            status,
-            Json(ApiErrorBody {
-                error: message,
-                error_kind: Some(error_kind),
-                details,
-                request_id: request_id.clone(),
-            }),
-        )
-            .into_response();
+        let body = ApiErrorBody {
+            problem_type: format!("{PROBLEM_TYPE_PREFIX}{code}"),
+            title: humanize_problem_title(code),
+            status: status.as_u16(),
+            detail: message,
+            code,
+            request_id: request_id.clone(),
+            extensions,
+        };
+
+        let mut response = (status, Json(body)).into_response();
+        response
+            .headers_mut()
+            .insert(header::CONTENT_TYPE, HeaderValue::from_static(PROBLEM_JSON_CONTENT_TYPE));
 
         if let Some(request_id) = request_id {
             attach_request_id_header(response.headers_mut(), &request_id);
@@ -674,30 +760,13 @@ pub fn ensure_or_generate_request_id(headers: &HeaderMap) -> String {
         .and_then(|value| value.to_str().ok())
         .map(str::trim)
         .filter(|value| !value.is_empty())
-        .map(std::string::ToString::to_string)
-        .unwrap_or_else(|| Uuid::now_v7().to_string())
+        .map_or_else(|| Uuid::now_v7().to_string(), std::string::ToString::to_string)
 }
 
 pub fn attach_request_id_header(headers: &mut HeaderMap, request_id: &str) {
     if let Ok(value) = HeaderValue::from_str(request_id) {
         headers.insert(header::HeaderName::from_static(REQUEST_ID_HEADER), value);
     }
-}
-
-#[must_use]
-pub fn detect_forbidden_vocabulary(value: &str) -> Option<(&'static str, &'static str)> {
-    let normalized = value.to_ascii_lowercase();
-    FORBIDDEN_VOCABULARY_TOKENS
-        .iter()
-        .copied()
-        .find(|(rejected, _canonical)| normalized.contains(rejected))
-}
-
-pub fn ensure_canonical_vocabulary(field: &'static str, value: &str) -> Result<(), ApiError> {
-    if let Some((rejected, canonical)) = detect_forbidden_vocabulary(value) {
-        return Err(ApiError::forbidden_vocabulary(field, rejected, canonical));
-    }
-    Ok(())
 }
 
 #[derive(Clone, Debug)]
@@ -707,17 +776,20 @@ pub struct RequestId(pub String);
 mod tests {
     use std::{borrow::Cow, error::Error as StdError, fmt};
 
-    use axum::http::StatusCode;
+    use axum::{body::to_bytes, http::StatusCode, response::IntoResponse};
+    use chrono::Utc;
     use sqlx::error::{DatabaseError, ErrorKind};
     use uuid::Uuid;
 
     use super::{
-        ApiError, detect_forbidden_vocabulary, ensure_canonical_vocabulary,
-        extraction_recovery_warning, graph_refresh_fallback_warning, map_library_create_error,
-        map_runtime_lifecycle_error_message, map_runtime_upload_error, map_workspace_create_error,
-        query_intent_degradation_warning, rerank_failure_warning,
+        ApiError, extraction_recovery_warning, graph_refresh_fallback_warning,
+        map_library_create_error, map_runtime_lifecycle_error, map_runtime_upload_error,
+        map_workspace_create_error, query_intent_degradation_warning, rerank_failure_warning,
     };
-    use crate::shared::extraction::file_extract::UploadAdmissionError;
+    use crate::{
+        services::{graph::error::GraphServiceError, webhook::error::WebhookServiceError},
+        shared::extraction::file_extract::UploadAdmissionError,
+    };
 
     #[derive(Debug)]
     struct FakeDatabaseError {
@@ -771,61 +843,21 @@ mod tests {
     }
 
     #[test]
-    fn maps_stale_revision_errors_to_specific_kind() {
-        let error = map_runtime_lifecycle_error_message(
-            "stale revision attempt rejected: expected active revision 2, found 3".to_string(),
-        );
-        assert!(matches!(error, ApiError::StaleRevision(_)));
-    }
-
-    #[test]
-    fn maps_conflicting_mutation_errors_to_specific_kind() {
-        let error = map_runtime_lifecycle_error_message(
-            "document mutation conflict: another mutation is already active".to_string(),
-        );
-        assert!(matches!(error, ApiError::ConflictingMutation(_)));
-    }
-
-    #[test]
-    fn maps_missing_price_errors_to_specific_kind() {
-        let error = map_runtime_lifecycle_error_message(
-            "missing price for provider/model/capability".to_string(),
-        );
-        assert!(matches!(error, ApiError::MissingPrice(_)));
-    }
-
-    #[test]
-    fn maps_graph_write_contention_errors_to_specific_kind() {
-        let error = map_runtime_lifecycle_error_message(
-            "graph write contention: graph-store deadlock detected during graph refresh"
-                .to_string(),
-        );
+    fn maps_typed_graph_write_contention_to_specific_kind() {
+        let error =
+            map_runtime_lifecycle_error(anyhow::Error::new(GraphServiceError::WriteContention {
+                message: "opaque".to_string(),
+            }));
         assert!(matches!(error, ApiError::GraphWriteContention(_)));
     }
 
     #[test]
-    fn maps_graph_integrity_errors_to_specific_kind() {
-        let error = map_runtime_lifecycle_error_message(
-            "graph persistence integrity failure: foreign key violation on runtime_graph_edge"
-                .to_string(),
-        );
-        assert!(matches!(error, ApiError::GraphPersistenceIntegrity(_)));
-    }
+    fn unknown_runtime_lifecycle_message_is_always_internal() {
+        let error = map_runtime_lifecycle_error(anyhow::anyhow!(
+            "stale revision conflict provider failure upstream timeout missing price deadlock"
+        ));
 
-    #[test]
-    fn maps_settlement_refresh_errors_to_specific_kind() {
-        let error = map_runtime_lifecycle_error_message(
-            "failed to persist collection settlement snapshot".to_string(),
-        );
-        assert!(matches!(error, ApiError::SettlementRefreshFailed(_)));
-    }
-
-    #[test]
-    fn maps_provider_failures_to_specific_kind() {
-        let error = map_runtime_lifecycle_error_message(
-            "provider failure: upstream timeout while extracting graph".to_string(),
-        );
-        assert!(matches!(error, ApiError::ProviderFailure(_)));
+        assert!(matches!(error, ApiError::Internal));
     }
 
     #[test]
@@ -874,6 +906,102 @@ mod tests {
         assert_eq!(error.kind(), "internal");
         assert_eq!(error.status_code(), StatusCode::INTERNAL_SERVER_ERROR);
         assert_eq!(error.to_string(), "internal server error: knowledge mirror sync failed");
+    }
+
+    #[tokio::test]
+    async fn gateway_timeout_has_stable_safe_contract() -> Result<(), Box<dyn StdError>> {
+        let error = ApiError::query_deadline_exceeded();
+
+        assert_eq!(error.kind(), "query_deadline_exceeded");
+        assert_eq!(error.status_code(), StatusCode::GATEWAY_TIMEOUT);
+        assert_eq!(
+            error.to_string(),
+            "gateway timeout: query answer exceeded its execution deadline"
+        );
+
+        let response = error.into_response();
+        assert_eq!(response.status(), StatusCode::GATEWAY_TIMEOUT);
+        assert_eq!(
+            response.headers().get(axum::http::header::CONTENT_TYPE).and_then(|v| v.to_str().ok()),
+            Some(super::PROBLEM_JSON_CONTENT_TYPE),
+        );
+        let body = to_bytes(response.into_body(), 4096).await?;
+        let json: serde_json::Value = serde_json::from_slice(&body)?;
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "type": "urn:ironrag:error:query_deadline_exceeded",
+                "title": "Query Deadline Exceeded",
+                "status": 504,
+                "detail": "gateway timeout: query answer exceeded its execution deadline",
+                "code": "query_deadline_exceeded",
+            })
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn duplicate_content_conflict_carries_existing_document_id_extension()
+    -> Result<(), Box<dyn StdError>> {
+        let existing_document_id = Uuid::now_v7();
+        let error = ApiError::duplicate_content(
+            "an active document with this external key already exists",
+            existing_document_id,
+        );
+
+        assert_eq!(error.kind(), "duplicate_content");
+        assert_eq!(error.status_code(), StatusCode::CONFLICT);
+
+        let response = error.into_response();
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        let body = to_bytes(response.into_body(), 4096).await?;
+        let json: serde_json::Value = serde_json::from_slice(&body)?;
+        assert_eq!(
+            json.get("existingDocumentId").and_then(serde_json::Value::as_str),
+            Some(existing_document_id.to_string().as_str()),
+        );
+        assert_eq!(json.get("code").and_then(serde_json::Value::as_str), Some("duplicate_content"));
+
+        Ok(())
+    }
+
+    #[test]
+    fn humanizes_problem_titles_from_stable_codes() {
+        assert_eq!(super::humanize_problem_title("bad_request"), "Bad Request");
+        assert_eq!(super::humanize_problem_title("duplicate_content"), "Duplicate Content");
+        assert_eq!(super::humanize_problem_title("internal"), "Internal");
+    }
+
+    #[test]
+    fn maps_webhook_delivery_lease_contention_to_conflict_without_internal_ids() {
+        let retry_at = Utc::now();
+        let attempt_id = Uuid::now_v7();
+        let job_id = Uuid::now_v7();
+        let error = ApiError::from(WebhookServiceError::DeliveryLeaseInFlight {
+            attempt_id,
+            job_id,
+            retry_at,
+        });
+
+        assert_eq!(error.kind(), "conflict");
+        assert_eq!(error.status_code(), StatusCode::CONFLICT);
+        assert!(error.to_string().contains(&retry_at.to_string()));
+        assert!(!error.to_string().contains(&attempt_id.to_string()));
+        assert!(!error.to_string().contains(&job_id.to_string()));
+    }
+
+    #[test]
+    fn maps_webhook_delivery_cancellation_to_conflict_without_internal_ids() {
+        let attempt_id = Uuid::now_v7();
+        let job_id = Uuid::now_v7();
+        let error = ApiError::from(WebhookServiceError::DeliveryCanceled { attempt_id, job_id });
+
+        assert_eq!(error.kind(), "conflict");
+        assert_eq!(error.status_code(), StatusCode::CONFLICT);
+        assert_eq!(error.to_string(), "conflict: webhook delivery operation cancelled");
+        assert!(!error.to_string().contains(&attempt_id.to_string()));
+        assert!(!error.to_string().contains(&job_id.to_string()));
     }
 
     #[test]
@@ -950,22 +1078,6 @@ mod tests {
     fn builds_graph_refresh_fallback_warning() {
         let warning = graph_refresh_fallback_warning("targeted refresh fell back to broad rebuild");
         assert_eq!(warning.warning_kind, "graph_refresh_fallback");
-    }
-
-    #[test]
-    fn detects_forbidden_vocabulary_tokens() {
-        assert_eq!(detect_forbidden_vocabulary("projectSlug"), Some(("project", "library")));
-        assert_eq!(detect_forbidden_vocabulary("collection_name"), Some(("collection", "library")));
-        assert_eq!(detect_forbidden_vocabulary("librarySlug"), None);
-    }
-
-    #[test]
-    fn rejects_forbidden_vocabulary_in_canonical_fields() {
-        let error = ensure_canonical_vocabulary("path", "/v1/projects")
-            .expect_err("legacy vocabulary should be rejected");
-
-        assert!(matches!(error, ApiError::ForbiddenVocabulary { .. }));
-        assert_eq!(error.kind(), "forbidden_vocabulary");
     }
 
     #[test]

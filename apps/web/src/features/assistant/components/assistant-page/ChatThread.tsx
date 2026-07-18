@@ -1,19 +1,38 @@
-import { useEffect, useRef } from 'react';
-import type { TFunction } from 'i18next';
-import { Brain } from 'lucide-react';
-import { WorkbenchEmptyState } from '@/shared/components/layout/WorkbenchEmptyState';
-import type { AssistantMessage } from '@/shared/types';
-import { ChatMessage } from '../ChatMessage';
-import { countDistinctSources, STARTER_PROMPT_IDS } from './assistantPageState';
+import { useEffect, useRef } from 'react'
+import type { TFunction } from 'i18next'
+import { Brain } from 'lucide-react'
+import { WorkbenchEmptyState } from '@/shared/components/layout/WorkbenchEmptyState'
+import type { AssistantMessage } from '@/shared/types'
+import { ChatMessage } from '../ChatMessage'
+import { countDistinctSources, STARTER_PROMPT_IDS } from './assistantPageState'
 
 type ChatThreadProps = {
-  t: TFunction;
-  messages: AssistantMessage[];
-  developerMode?: boolean;
-  onStarterPromptSelect: (prompt: string) => void;
-  onOpenEvidence: (message: AssistantMessage) => void;
-  onInspect: (executionId: string) => void;
-};
+  t: TFunction
+  messages: AssistantMessage[]
+  developerMode?: boolean
+  onStarterPromptSelect: (prompt: string) => void
+  onOpenEvidence: (message: AssistantMessage) => void
+  onInspect: (executionId: string) => void
+}
+
+function messageResponseMs(
+  messages: readonly AssistantMessage[],
+  index: number,
+): number | undefined {
+  const message = messages[index]
+  if (message?.role !== 'assistant') return undefined
+  if (typeof message.durationMs === 'number' && message.durationMs > 0) return message.durationMs
+  if (!message.timestamp) return undefined
+
+  const assistantMs = Date.parse(message.timestamp)
+  for (let previousIndex = index - 1; previousIndex >= 0; previousIndex -= 1) {
+    const previousMessage = messages[previousIndex]
+    if (previousMessage?.role !== 'user' || !previousMessage.timestamp) continue
+    const delta = assistantMs - Date.parse(previousMessage.timestamp)
+    return Number.isFinite(delta) && delta > 0 ? delta : undefined
+  }
+  return undefined
+}
 
 export function ChatThread({
   t,
@@ -22,9 +41,9 @@ export function ChatThread({
   onStarterPromptSelect,
   onOpenEvidence,
   onInspect,
-}: ChatThreadProps) {
-  const scrollRef = useRef<HTMLDivElement>(null);
-  const lastMessage = messages[messages.length - 1];
+}: Readonly<ChatThreadProps>) {
+  const scrollRef = useRef<HTMLDivElement>(null)
+  const lastMessage = messages[messages.length - 1]
   const scrollSignature = lastMessage
     ? [
         messages.length,
@@ -33,23 +52,26 @@ export function ChatThread({
         lastMessage.activityEvents?.length ?? 0,
         lastMessage.executionId ?? '',
       ].join(':')
-    : '';
+    : ''
 
   useEffect(() => {
-    if (messages.length === 0) return;
+    if (messages.length === 0) return
     const frame = requestAnimationFrame(() => {
-      const container = scrollRef.current;
-      if (!container) return;
+      const container = scrollRef.current
+      if (!container) return
       container.scrollTo({
         top: container.scrollHeight,
         behavior: 'smooth',
-      });
-    });
-    return () => cancelAnimationFrame(frame);
-  }, [messages.length, scrollSignature]);
+      })
+    })
+    return () => cancelAnimationFrame(frame)
+  }, [messages.length, scrollSignature])
 
   return (
-    <div ref={scrollRef} className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-3 py-4 sm:px-5">
+    <div
+      ref={scrollRef}
+      className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-3 py-4 sm:px-5"
+    >
       {messages.length === 0 ? (
         <div className="mx-auto flex min-h-full w-full max-w-5xl flex-col items-center justify-center py-8 animate-fade-in">
           <WorkbenchEmptyState
@@ -59,7 +81,7 @@ export function ChatThread({
             action={
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 max-w-md w-full">
                 {STARTER_PROMPT_IDS.map((id) => {
-                  const prompt = t(`assistant.starterPrompts.${id}`);
+                  const prompt = t(`assistant.starterPrompts.${id}`)
                   return (
                     <button
                       key={id}
@@ -68,7 +90,7 @@ export function ChatThread({
                     >
                       {prompt}
                     </button>
-                  );
+                  )
                 })}
               </div>
             }
@@ -77,29 +99,8 @@ export function ChatThread({
       ) : (
         <div className="mx-auto flex w-full max-w-5xl flex-col gap-4">
           {messages.map((message, index) => {
-            let responseMs: number | undefined;
-            if (message.role === 'assistant') {
-              if (typeof message.durationMs === 'number' && message.durationMs > 0) {
-                // Server-authoritative wall-clock; immune to client↔server skew.
-                responseMs = message.durationMs;
-              } else if (message.timestamp) {
-                // Reload path: both timestamps are server-stamped, so their
-                // delta is a single-clock measurement.
-                const assistantMs = Date.parse(message.timestamp);
-                for (let i = index - 1; i >= 0; i -= 1) {
-                  const prev = messages[i];
-                  if (prev?.role === 'user' && prev.timestamp) {
-                    const userMs = Date.parse(prev.timestamp);
-                    const delta = assistantMs - userMs;
-                    if (Number.isFinite(delta) && delta > 0) {
-                      responseMs = delta;
-                    }
-                    break;
-                  }
-                }
-              }
-            }
-            const executionId = message.executionId ?? undefined;
+            const responseMs = messageResponseMs(messages, index)
+            const executionId = message.executionId ?? undefined
             return (
               <ChatMessage
                 key={message.id}
@@ -121,10 +122,10 @@ export function ChatThread({
                     : undefined
                 }
               />
-            );
+            )
           })}
         </div>
       )}
     </div>
-  );
+  )
 }

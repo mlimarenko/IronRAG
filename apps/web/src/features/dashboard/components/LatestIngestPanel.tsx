@@ -1,18 +1,18 @@
-import { memo } from 'react';
-import type { TFunction } from 'i18next';
-import { Globe } from 'lucide-react';
-import { StatusBadge } from '@/shared/components/StatusBadge';
-import type { RecentWebRun } from "../model/types";
-import { formatDateTime, hostnameFromUrl, runStateClass, toStatusTone } from "../model/format";
+import { memo } from 'react'
+import type { TFunction } from 'i18next'
+import { Globe } from 'lucide-react'
+import { StatusBadge } from '@/shared/components/StatusBadge'
+import type { RecentWebRun } from '../model/types'
+import { formatDateTime, hostnameFromUrl, runStateClass, toStatusTone } from '../model/format'
 
-type LatestIngestPanelProps = {
-  t: TFunction;
-  locale: string;
-  latestRun: RecentWebRun | undefined;
-};
+type LatestIngestPanelProps = Readonly<{
+  t: TFunction
+  locale: string
+  latestRun: RecentWebRun | undefined
+}>
 
 function LatestIngestPanelImpl({ t, locale, latestRun }: LatestIngestPanelProps) {
-  const emptyLabel = t('dashboard.notAvailable');
+  const emptyLabel = t('dashboard.notAvailable')
   return (
     <div className="workbench-surface h-full p-4">
       <div className="flex items-center justify-between gap-3">
@@ -52,13 +52,8 @@ function LatestIngestPanelImpl({ t, locale, latestRun }: LatestIngestPanelProps)
                 className: 'text-status-failed',
               },
             ].map((item) => (
-              <div
-                key={item.label}
-                className="rounded-md bg-surface-sunken p-2.5"
-              >
-                <div className="section-label">
-                  {item.label}
-                </div>
+              <div key={item.label} className="rounded-md bg-surface-sunken p-2.5">
+                <div className="section-label">{item.label}</div>
                 <div
                   className={`mt-2 text-xl font-bold tracking-tight tabular-nums ${item.className}`}
                 >
@@ -81,7 +76,7 @@ function LatestIngestPanelImpl({ t, locale, latestRun }: LatestIngestPanelProps)
         </div>
       )}
     </div>
-  );
+  )
 }
 
-export const LatestIngestPanel = memo(LatestIngestPanelImpl);
+export const LatestIngestPanel = memo(LatestIngestPanelImpl)

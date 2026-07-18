@@ -6,6 +6,29 @@ pub(crate) fn normalized_alnum_tokens(value: &str, min_chars: usize) -> BTreeSet
     normalized_alnum_token_sequence(value, min_chars).into_iter().collect()
 }
 
+/// Returns the text found between each matching pair of backticks in
+/// `text`, in order. An unterminated trailing backtick is ignored (no
+/// closing tick to pair it with). Shared by the answer-provenance literal
+/// detector (MCP `grounded_answer`) and the agent loop's own literal
+/// detection, which both need to recognize inline-code spans the same way.
+pub(crate) fn backtick_literal_spans(text: &str) -> Vec<String> {
+    let mut spans = Vec::new();
+    let mut span_start: Option<usize> = None;
+    for (index, ch) in text.char_indices() {
+        if ch != '`' {
+            continue;
+        }
+        if let Some(start) = span_start.take() {
+            if start < index {
+                spans.push(text[start..index].to_string());
+            }
+        } else {
+            span_start = Some(index + ch.len_utf8());
+        }
+    }
+    spans
+}
+
 pub(crate) fn normalized_alnum_token_sequence(value: &str, min_chars: usize) -> Vec<String> {
     normalized_alnum_token_sequence_by(value, |token| token.chars().count() >= min_chars, None)
 }
@@ -72,7 +95,7 @@ pub(crate) fn literal_wildcard_prefixes(value: &str, min_alnum_chars: usize) -> 
     prefixes
 }
 
-fn is_literal_wildcard_prefix_separator(ch: char) -> bool {
+const fn is_literal_wildcard_prefix_separator(ch: char) -> bool {
     matches!(ch, '-' | '_' | '.' | '/' | ':' | '@')
 }
 

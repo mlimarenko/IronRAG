@@ -1,6 +1,767 @@
 # Changelog
 
-## Unreleased
+## 0.5.10 — 2026-07-18
+
+### Added
+
+- **A zero-cost upgrade path for pre-hardening vector inventories.**
+  `ironrag-maintenance migrate vector-profile-keys` re-keys legacy vector
+  lanes (bare model-catalog keys) onto the canonical embedding-execution
+  profile fingerprint instead of forcing a paid provider re-embed. A library
+  is re-keyed only when its active embed-chunk binding still targets the same
+  model catalog entry and the lane dimensions match; mixed or retargeted
+  states are skipped with a warning that prescribes the full
+  `rebuild vector-plane`. Supports `--dry-run`, `--library`, and `--json`,
+  and is idempotent. Operators upgrading existing deployments should run it
+  once before serving queries; without it every pre-upgrade library fails
+  closed at the exact-profile inventory check.
+- **Projection-parity repair commands unblock libraries stuck in
+  `query_content_projection_converging`.**
+  `ironrag-maintenance repair orphan-knowledge-documents` purges
+  knowledge-plane documents whose canonical row no longer exists (sweeping
+  their chunk vectors and graph evidence in the same transaction and
+  re-projecting the runtime graph), and
+  `repair knowledge-projection-metadata` reconciles drifted projection
+  metadata field-for-field from the canonical content plane. Either kind of
+  historical inconsistency previously wedged its whole library behind the
+  strict parity gate with no operator remedy. Both commands advance the
+  library source-truth generation so running processes re-evaluate parity
+  immediately, support `--dry-run`/`--library`/`--json`, and are idempotent.
+- **Foreign-key indexes for the knowledge-plane delete cascade.** Deleting a
+  document cascades through revisions, chunks, and their dependents, and
+  several referencing columns had no usable index, so each parent delete
+  sequential-scanned the referencing tables; on a populated library a single
+  delete could run for minutes and an orphan purge effectively never
+  finished. Migration 0018 adds one index per uncovered foreign-key column
+  (partial indexes for the nullable set-null columns), turning those
+  cascades into index probes.
+- **The public REST API now gives every domain entity complete CRUD
+  coverage.** Previously partial or missing operations were filled in rather
+  than left absent for lack of a current caller: user removal, API-token
+  detail/rename, AI provider and model hard-delete alongside the existing
+  disable toggle, an addressable binding-validation resource, ingest job and
+  attempt history lists, per-execution billing cost detail, knowledge
+  relation/context-bundle/generation lists, and an addressable query-turn
+  read.
+- **Errors are RFC 9457 `application/problem+json`.** Every error response
+  now carries a stable machine `code`, a mechanically derived human-readable
+  `title`, and, where relevant, typed extension members — for example a
+  duplicate-document conflict now carries the conflicting document's id
+  directly in the error body — replacing the previous bespoke error shape.
+- **Document creation and revisions are single, content-negotiated
+  endpoints.** One route accepts either a JSON metadata body or a multipart
+  file upload for document creation; a second route replaces three separate
+  append/edit/replace endpoints with one, discriminated by request shape.
+  Both return `202 Accepted` with a `Location` header pointing at the
+  canonical async-operation resource.
+
+- **Assistant session management is durable and server-authoritative.** The web
+  session rail now renames and deletes UI conversations through canonical
+  authenticated API mutations instead of browser-local title/visibility
+  overlays. Title validation is shared by create and rename paths; ownership,
+  write capability, UI-surface isolation, active-execution state, and external
+  replay provenance are enforced atomically in PostgreSQL. Query-owned child
+  state cascades on deletion, while independent runtime and audit retention
+  records remain intact.
+
+- **Content and web-ingest admission now have transactional units of work.**
+  Mutation identity and fingerprinting, canonical document/revision/head
+  projections, async operations, mutation items, queue jobs, web runs, and
+  discovery seeds commit together. Scoped idempotency replays the complete
+  bundle, rejects payload conflicts, repairs only structurally unambiguous
+  legacy gaps, and is covered by rollback failpoints and concurrent database
+  races.
+
+- **Release publication is gated by a reusable quality workflow.** Pull
+  requests, protected branches, and Docker releases share formatting, Clippy,
+  tests, migration immutability, OpenAPI/SDK drift, frontend, Compose, Helm,
+  installer, and benchmark-contract checks. A parallel supply-chain gate runs
+  pinned Rust audit tools and the npm lockfile audit; database-backed admission
+  races run against real PostgreSQL and Redis services.
+  Gitleaks scans both every introduced commit and the complete tracked or
+  non-ignored worktree with fully redacted output; synthetic token-shaped
+  fixtures are generated at test time instead of being hidden behind a finding
+  baseline or inline allow directive.
+
+- **UI and external MCP agents share a versioned answer-tool contract.** The
+  ordered tool names, descriptions, and canonical schemas now carry a stable
+  SHA-256 contract hash. Grounded answers expose bounded `compact` and diagnostic
+  `full` profiles, typed completion/readiness state, preserve spans, trace IDs,
+  and a one-call `repairPolicy` for external agent runtimes. The MCP descriptor
+  explicitly advertises both `repairPolicy.required` and
+  `repairPolicy.maxAdditionalGroundedAnswerCalls`, so clients can enforce the
+  bounded repair loop before their first answer call.
+
+- **Optional provider-backed semantic reranking has bounded shadow and active
+  modes.** Operators can keep it off, compare provider scoring against the
+  existing deterministic order without changing answers, or apply it with
+  bounded candidates, prompt size, concurrency, and a deterministic lexical
+  fallback. The decision deadline covers binding resolution, durable billing
+  reservation, the provider request, and usage accounting.
+
+- **AI-account and webhook secrets can be encrypted at rest.** New
+  row-and-purpose-bound XChaCha20-Poly1305 envelopes support explicit key IDs,
+  a bounded previous-key ring, authenticated rotation, redacted diagnostics,
+  and best-effort memory zeroization. The maintenance CLI inventories,
+  migrates, and rewraps legacy values through a dry-run/apply/dry-run workflow.
+
+- **Outbound webhooks have a durable delivery control plane.** A transactional
+  outbox, lease-token ownership, heartbeats, bounded retry scheduling, dead
+  letters, operator resolution, scoped pagination, and workspace quotas replace
+  best-effort publication. Delivery history keeps typed status and failure
+  summaries without persisting remote response bodies or transport URLs.
+
+- **Release benchmarks carry a fail-closed integrity and latency contract.**
+  Result schema v3 fingerprints suites, cases, corpus bytes, runtime knobs,
+  artifacts, cache policy, round order, and host identity. The comparator pairs
+  identical cases, rejects correctness/ranking regressions, and enforces both
+  relative p50/p95/p99 budgets and absolute answer-latency ceilings. MCP probes
+  issue a unique JSON-RPC request ID per sample, so one timed-out server request
+  cannot invalidate the remaining cases as duplicate requests.
+
+- **The Helm chart exposes production availability and network controls.** New
+  HPA, PodDisruptionBudget, NetworkPolicy, runtime-secret, security-context,
+  and resource-schema surfaces keep the simple bundled profile while allowing
+  hardened and externally managed deployments.
+
+### Changed
+
+- **BREAKING: the public REST API was redesigned across every domain for REST
+  consistency.** No compatibility shims are kept. Scoped resources move
+  required identifiers from query strings into the path, list responses use
+  one cursor-pagination envelope everywhere, and endpoints that acted like
+  RPC verbs became `PATCH` state transitions or resource-shaped sub-endpoints.
+  HTTP QUERY (RFC 10008) was evaluated for the handful of endpoints with
+  complex structured filters and deliberately not adopted in favor of staying
+  on plain REST. See the redesign plan checked into this repo's `memory/`
+  history for the full endpoint-by-endpoint disposition and rationale.
+- **The MCP tool contract was renamed and consolidated for naming consistency
+  with the REST redesign.** Four tool families were renamed to match the new
+  REST resource nouns; the JSON-RPC transport, mount paths, and every other
+  tool name are unchanged. A single tool registry and a mandatory
+  audit-emission wrapper around every tool call replace several
+  independently-maintained, duplicated implementations of the same
+  visibility/audit logic.
+- **The connector SDK client was rewritten against the redesigned REST
+  shapes.** Typed response models and a real poll-to-terminal helper for
+  async operations replace untyped dict responses and ad hoc timeout
+  handling; the legacy per-connector cursor-migration subsystem was removed
+  outright rather than kept behind a compatibility flag.
+
+- **MCP Streamable HTTP is session-bound and version-strict.** `initialize`
+  negotiates every well-formed client request to the single canonical
+  `2025-11-25` version and issues an authenticated, TTL-bounded distributed
+  session; every later
+  `POST`, `GET`, and `DELETE` must present both that owned session and the exact
+  negotiated protocol header. Missing, malformed, expired, terminated, or
+  foreign sessions fail closed, session teardown cancels local and remote
+  in-flight work, and the former token-scoped/stateless coordination path is
+  deleted. Every MCP transport connection with an `Origin` header is also
+  checked against the operator-configured canonical origin set before auth,
+  session lookup, or body parsing; malformed, duplicate, and untrusted origins
+  fail with HTTP 403 while native clients may omit the header. Configured
+  browser origins may preflight both mandatory MCP request headers, and the
+  initialize response exposes `Mcp-Session-Id` so browser transports can bind
+  their subsequent requests. The canonical probes and private eval harness
+  perform the same initialize/use/terminate handshake as external clients.
+  Compact grounded
+  answers no longer carry a compatibility copy of `executionDetail`; verifier,
+  warnings, readiness, repair policy, bounded references, and trace IDs each
+  have one canonical compact field, while the full diagnostic profile retains
+  the complete execution object.
+
+- **AI configuration is consolidated around five required profiles and one
+  optional profile.** Indexing and query search use one canonical Embeddings
+  model, Query Understanding owns both typed compilation and semantic rerank,
+  and multimodal Document Understanding owns complex extraction and visual
+  analysis. The redundant `query_retrieve`, `rerank`, and `vision` binding
+  purposes are removed from runtime binding resolution, API, UI, and the final
+  PostgreSQL enum; the forward migration folds existing configuration into
+  canonical profiles, with no compatibility aliases or advanced overrides left
+  behind.
+  Before catalog rewrites can fire library-generation triggers, the upgrade
+  path also clears historical creator references whose principals no longer
+  exist, so valid pre-release databases cannot fail the canonical-purpose
+  migration on an already-orphaned optional foreign key. Versioned migration
+  regressions cover both the pre-policy and pre-purpose upgrade paths. Vector
+  storage and lookup use a secret-free execution-profile fingerprint, fail
+  closed when the active profile has no exact vector inventory, and require an
+  explicit rebuild after any incompatible profile change even when dimensions
+  match. Empty libraries skip embedding and ANN work, while rebuilds stream
+  keyset pages, write vectors in batches, and reconcile manifests once per
+  lane instead of recounting after every row. Operators must complete that
+  atomic maintenance rebuild before serving the affected library; upgrades do
+  not silently reuse vectors from a different execution profile.
+
+- **The six AI purposes are one strict public contract, not a compatibility
+  layer.** Backend bootstrap, runtime resolution, OpenAPI, the generated web
+  client, and the administration UI consume the same canonical purpose type.
+  Non-canonical spellings and removed purpose names fail validation instead of
+  being normalized through aliases. `Agent` has its own explicit bootstrap
+  configuration and never inherits or synthesizes a `QueryAnswer` binding.
+  Snapshot restore accepts only the canonical AI-account, model-catalog, and
+  binding tables; the pre-simplification credential, preset, and assignment
+  import path is deleted. The administration client likewise keeps the
+  canonical `active`, `invalid`, and `disabled` binding states and rejects
+  unknown state spellings instead of translating compatibility aliases.
+  Agent discovery, bootstrap, writes, and runtime resolution require an
+  Agent-role chat model plus provider-declared `chat` and `tools` support;
+  unknown tool capability fails closed. The one-time migration materializes
+  Agent eligibility from historical answer configuration only under that typed
+  contract while preserving existing dedicated Agent configuration.
+  Catalog models whose migrated roles collapse to an empty set are retained
+  only as disabled historical billing references and cannot be reactivated by
+  provider discovery without a canonical role.
+
+- **Query provider usage is durably attributed per actual call.** Runtime query
+  compilation, question embedding, HyDE, primary agent turns, direct answer
+  generation, and both accepted and rejected revisions reserve a stable local
+  event ID before provider I/O. Provider failures terminalize that reservation,
+  while every returned response commits its canonical usage before parsing,
+  verification, answer selection, or terminal query persistence. Repeating the
+  same local reservation or completion is idempotent. A response guard owns the exact
+  usage before its first database write and retries transient or ambiguous
+  completion failures by the same event ID; only pre-response failures may be
+  terminalized without usage. Cost rollups remain a repairable derived
+  projection, and the runtime ledger carries the committed event ID through
+  completed, recovered, failed, and canceled outcomes for diagnostics. The
+  former terminal batch projection has been removed. A process crash in the
+  narrow response-before-usage-commit window still leaves an observable
+  `started` reservation whose exact usage cannot be reconstructed locally;
+  this does not claim provider-side exactly-once execution.
+
+- **Vector rebuilds publish atomically without taking search offline.** A
+  library rebuild writes chunk and entity vectors under an opaque staging
+  profile while queries continue using the previous canonical inventory. A
+  short library-scoped promotion transaction verifies the source generation,
+  exact lane counts, profile, and dimensions before replacing canonical rows
+  and manifests together; a failed rebuild removes only staging data.
+  Library-scoped coordination replaces the former global exclusion, and
+  generation-fenced inventory checks are singleflight-cached for one minute
+  with a short error cooldown.
+
+- **Embedding dimensions and filtered HNSW search use one fail-closed runtime
+  contract.** A validated effective dimension is resolved once per binding;
+  explicit binding parameters override model-catalog metadata, while invalid or
+  unsupported values are rejected instead of falling through to a different
+  vector space. Dimension resolution uses only typed configuration or canonical
+  vector inventory and never issues a hidden paid probe. Runtime query
+  embeddings, including cache hits, are validated directly against the
+  request-scoped exact-profile inventory, while mixed persisted dimensions
+  fail closed instead of selecting an arbitrary vector lane. Catalog-only
+  dimensions fence the execution-profile key without being injected into
+  provider requests, and dimension lookup no longer rereads the model catalog.
+  When a new profile has no declared or previously observed dimension, its
+  first ordinary chunk batch establishes the dimension without a separate
+  provider probe; that exact response is validated and persisted once before
+  the remaining batches continue. Embedding responses now fail closed on
+  missing, non-numeric, non-finite, empty, oversized, count-mismatched, or
+  mixed-width vectors. Exact-profile manifest dimension claims are unique per
+  library and vector kind, while an empty source library atomically purges stale
+  vectors and manifests without invoking an embedding provider. Filtered
+  canonical writes, staged lane writes/reconciliation, destructive revision or
+  entity cleanup, empty purges, and staged cleanup/promotion share a per-library
+  cross-process serializer. Source and effective-profile generation is checked
+  in the same short transaction as manifest, vector, and count updates, with no
+  data-plane lock held during provider calls. A failed embedding attempt removes
+  only vector UUIDs created by that attempt; pre-existing/replacement-attempt
+  rows survive, and cancellation or lease loss preserves committed batches for
+  count-gated retry/GC. Cleanup also proves that the attempt is still the latest
+  leased authority in the delete transaction; after a retry takes ownership,
+  even an adopted UUID is preserved. Inline job leasing and attempt creation now
+  commit as one library/job-locked transaction. Physical vector lanes enforce
+  one row per object, exact profile, kind, and freshness generation; a newer
+  authoritative write atomically replaces the stored UUID and vector. Migration
+  `0014_vector_logical_identity.sql` installs this uniqueness and aborts with an
+  explicit repair requirement if existing duplicates make provenance ambiguous,
+  rather than choosing rows to delete. Architecture lint rejects raw
+  revision/library/exact-ID vector delete APIs in production call sites. Filtered
+  pgvector searches now use bounded iterative HNSW scans with
+  operator-configurable tuple and memory
+  ceilings, structured underfill diagnostics, and one optional exact retry
+  limited to small logical lanes. The storage contract now describes the actual
+  shared per-dimension relations rather than claiming physical per-library
+  shards.
+
+- **Semantic routing is typed and domain-neutral.** Query compilation produces
+  one schema-validated `QueryIR`; retrieval, intent, clarification, structural
+  coverage, literal probes, and reranking consume its typed entities, literals,
+  targets, and document focus instead of reclassifying raw questions with
+  language dictionaries, casing rules, manual stems, or prefix guesses. The
+  provider-free path recognizes only formal syntax and protocol structure.
+
+- **Grounded-answer readiness has one finalizer-owned typed contract.** The
+  finalizer persists `factual_ready`, `safe_fallback`, `clarification`, or
+  `non_terminal` with typed clarification metadata; live reads, cache replay,
+  HTTP, MCP, and the UI agent consume that disposition without reconstructing
+  readiness from verifier prose or warning lists. Strict safe fallbacks and
+  clarifications terminate without another answer-tool call, while conflicting,
+  unsupported, missing-evidence, and empty candidates remain non-terminal.
+  Conversation history remains typed end to end, including multiline turns,
+  and model capabilities come from explicit catalog metadata rather than model
+  names.
+
+- **Clarification and verification are terminal, evidence-driven states.** A
+  compiler-requested clarification is returned directly without a futile
+  focused retry. Ordinary generated prose can no longer become `Verified`
+  merely because some evidence exists: exact canonical answers may verify,
+  supported formal claims plus unchecked prose are partial, and prose without
+  a checkable claim remains not-run. Assignments must be grounded in one source
+  line or structured fact, including bracketed qualifiers.
+
+- **Cache-write token accounting no longer inflates ordinary input cost.**
+  Provider-reported cache creation is stored as a distinct typed billing unit.
+  When the operator has not configured an explicit cache-write catalog price,
+  usage remains auditable with `pricing_missing` semantics and no charge is
+  fabricated from the ordinary input rate.
+
+- **Environment-managed provider credentials use one generic, reversible
+  contract.** A canonical standard-base64 JSON map replaces provider-specific
+  environment-variable tables across the backend, installer, Compose, Helm,
+  Ansible, and smoke tooling. Exact provider kinds are preserved without alias
+  guessing, credential strings remain byte-exact, bounded duplicate/malformed
+  maps fail closed, ordering is deterministic, and secret values remain out of
+  diagnostics.
+
+- **Provider traffic is fail-closed and backpressured per endpoint.** Every LLM,
+  embedding, vision, batch, stream, and model-discovery request uses one
+  no-proxy/no-redirect transport with DNS pinning, exact-origin credential
+  binding, bounded response/SSE bodies, and explicit private-network opt-in.
+  Gateway-local concurrency registries reserve query capacity, bound identity
+  cardinality and idle lifetime, reject deadlocking configurations at startup,
+  and return a typed timeout instead of waiting forever or silently bypassing a
+  closed limiter.
+
+- **Critical background tasks are supervised as part of the service role.** An
+  unexpected worker, maintenance, or webhook-outbox exit triggers coordinated
+  shutdown and a non-zero process result; normal shutdown drains tasks for a
+  bounded grace period and aborts a hung task instead of leaving a partially
+  alive process.
+
+- **Graph merge and projection coordination works across replicas.**
+  Library-scoped PostgreSQL advisory locks replace the unbounded process-local
+  merge-lock map. Support recalculation, node/edge pruning, and orphan-summary
+  cleanup use atomic transactions, while topology/prewarm, hint, dimension,
+  debounce, and terminal-marker registries now have TTL/cardinality eviction.
+
+- **Query architecture debt is ratcheted in CI.** Production query stages may
+  not use glob imports/re-exports or reverse dependencies into retrieval;
+  newly extracted modules have an 800-line ceiling, and every oversized legacy
+  module has a fixed ratchet ceiling until it is split behind an explicit
+  stage API.
+
+- **Handwritten query-semantic dictionaries are rejected by CI.** The
+  architecture gate now catches constant, static, and function-local string
+  tables in production query code while excluding comments and test fixtures.
+  Semantic intent remains the responsibility of validated `QueryIR`; local
+  deterministic code is limited to formal syntax, protocol structure, typed
+  state, evidence ordering, and literal fidelity.
+
+- **Backend linting is warning-free without project-wide Clippy exceptions.**
+  Large enum payloads and upload rejection details use explicit indirection,
+  mechanical control-flow and borrowing debt is removed across every target,
+  and a deny-by-default `large_futures` ratchet puts heap boundaries around
+  oversized MCP, UI-agent, ingest, retrieval, snapshot, and test futures. The
+  release MCP request frame is reduced from about 1.21 MiB to 23 KiB, removing
+  the Tokio worker stack-overflow crash without increasing thread stacks. Rust
+  documentation is built with broken links and invalid markup denied.
+  Deterministic repair, partial-answer, and assistant-tail copy now lives in the
+  query localization catalog instead of language-specific execution branches,
+  and the language compliance scan distinguishes production code from test-only
+  fixtures. Exact dependency-license exceptions are synchronized with the
+  lockfile so supply-chain checks fail on stale or newly introduced license
+  decisions.
+
+- **Frontend artifacts and budgets are reproducible.** Swagger UI assets are
+  synchronized from the pinned package with license files and a drift check;
+  generated SDK normalization, unused dependency/export scans, RU/EN key
+  parity, coverage thresholds, and per-chunk bundle limits are enforced by the
+  same release quality workflow. The production image installs dependencies
+  before version-specific build arguments, so release-only version changes
+  reuse the lockfile layer without reusing stale application assets; local
+  reports, test artifacts, environment files, and logs stay outside the Docker
+  context.
+
+- **Question intent and focused retrieval preserve the requested answer shape.**
+  Provider-compiled typed intent retains procedures,
+  troubleshooting/remediation intent, exact quoted diagnostics, and ordered
+  latest-N inventories; provider-free fallback stays formal and does not guess
+  natural-language intent. Optional code/transport lanes are limited to the
+  first retrieved candidate documents and fail softly only when primary
+  evidence is already available. Directional version-transition guides are
+  excluded from release inventories without excluding compound release
+  headings that publish parallel versions.
+
+- **Deterministic answer shortcuts are intent-safe.** Generic how-to questions
+  continue to grounded procedure synthesis instead of being replaced by a
+  configuration inventory, while troubleshooting questions stay on evidence
+  that contains issue-local remediation instead of entering generic update
+  runbooks. Short structured identities require action-bound evidence before a
+  sibling procedure can be selected, including when the identity originates
+  from a typed literal rather than an entity. Configuration variants use mutual
+  structural discriminators, so a shared path or package cannot merge distinct
+  provider sections into one direct answer; focused single variants remain on
+  the fast path. The compiler no longer invents a document target for an
+  otherwise self-contained procedure request.
+
+- **Completion and output boundaries follow structural answer evidence.**
+  Release inventories distinguish a release identifier even when every item
+  shares the same product-version prefix, while troubleshooting completion is
+  driven by typed intent and action-bearing evidence rather than a
+  language-specific phrase list. A bare trailing media source token is removed
+  only after an already complete sentence, while action-bearing filenames
+  remain untouched.
+
+- **The UI answer contour starts with the canonical MCP answer path.** The first
+  `grounded_answer` call is runtime-dispatched before any model round. An
+  incomplete procedure, remediation, clarification, or ordered inventory gets
+  at most one non-identical focused retry, capped at 45 seconds; a ready repair
+  is returned directly without another synthesis call. Initial failures stop
+  without a hidden model retry, while an unresolved repair can return a clearly
+  marked completed partial result instead of an opaque tool error.
+
+- **Grounded answers are verified from explicit evidence before they can be
+  returned or cached.** Verification now separates policy, claim extraction,
+  evidence matching, and support assembly; exact literals, ordered procedures,
+  tables, quoted clauses, temporal facts, and citations fail closed when their
+  supporting source cannot be proven.
+
+- **Retrieval is scope-safe, bounded, and deterministic.** PostgreSQL search
+  lanes apply tenant, readable-revision, state, vector-dimension, and legacy
+  summary filters before their limits. Typed reciprocal-rank fusion and bounded
+  reranking replace permissive post-filtering and unbounded candidate work.
+  Unresolved entity labels no longer launch a corpus-wide content-anchor lane.
+  Broad multi-revision searches reserve bounded per-revision GIN pools before
+  exact substring rescoring, apply a database-side statement deadline so a
+  disconnected caller cannot leave an orphaned scan, hydrate at most 256
+  diverse candidates, and keep exhaustive semantics for small or mixed
+  unindexable requests. Release identity selection excludes attached context
+  and image artifacts, including media URLs with query/fragment suffixes,
+  before they can consume ordered inventory slots.
+
+- **PostgreSQL is the canonical grounded-answer cache.** Cache identity now
+  includes runtime, policy, content, graph, and binding generations. Redis is
+  limited to fill coordination and notifications; a Redis outage cannot invent
+  or extend a winner, and PostgreSQL's clock owns expiry and replacement.
+
+- **Provider billing supports reservation-first, repairable stages.** Stages
+  that opt into the reservation API receive a durable caller-known reservation
+  before network I/O, atomic usage and charge completion, idempotent
+  terminalization, monotonic dirty generations, bounded rollup repair,
+  stale-reservation reaping, and explicit mixed-currency failure instead of
+  silently combining incompatible totals. Query compilation, embedding,
+  semantic reranking, query-agent turns, direct answers, and answer revisions
+  all use that reservation contract; the former terminal best-effort usage
+  projection has been removed. Historical query charges now reconcile from
+  their durable workspace/library scope after
+  conversation retention removes the query execution, preventing an orphaned
+  generation from retrying forever and blocking library/document reads with
+  `billing_rollup_pending`.
+
+- **Readable content and graph publication use durable generations and fencing.**
+  Document/revision/chunk parity is checked against the readable projection,
+  cached by generation with per-library singleflight, and invalidated only by a
+  real truth change. Graph builds use a durable build epoch, monotonic projection
+  versions, compare-and-set publication, and an explicit mixed-writer protocol
+  fence. Reconciliation stages no longer advance source truth independently:
+  the atomic terminal lifecycle publisher performs the single authoritative
+  graph-generation bump, and the deferred summary refresh holds a generation
+  fence so stale post-commit work is skipped instead of publishing mixed truth.
+
+- **Knowledge revision projections use one canonical state vocabulary.** A
+  forward-only migration rewrites historical text, vector, and graph spellings,
+  rejects unknown rows before changing data, and installs validated database
+  constraints. Runtime readers and writers no longer accept readiness aliases
+  or silently map unknown extraction states to `accepted`.
+
+- **AI configuration changes invalidate affected answer generations in the
+  same transaction.** Statement-level triggers compute the affected library
+  set, lock parents in deterministic order, and advance source truth before a
+  stale cache writer can publish or replay an answer under an obsolete binding.
+
+- **Telemetry is opt-in.** Backend OTLP traces and metrics, content-bearing
+  logs, and browser tracing stay disabled unless an operator explicitly
+  configures them and supplies a collector endpoint. Query developer tools are
+  a separate local preference and remain disabled until the user enables them.
+
+- **The installer commits `.env` updates atomically.** It writes a restrictive
+  same-directory staging file, validates secret preservation, and renames it
+  only after the full batch succeeds. EXIT, INT, and TERM cleanup removes an
+  uncommitted secret-bearing stage; no full `.env.bak` is retained.
+
+- **Generated frontend API code remains strict and reproducible.** OpenAPI
+  normalization handles exact optional properties without weakening TypeScript,
+  generated output is checked for drift, and shared table pagination keeps one
+  typed set of supported page sizes.
+
+- **Operator dashboards expose one canonical metrics projection.** The API,
+  OpenAPI contract, generated client, fixtures, and UI now consume only
+  `documentMetrics`; the duplicate preformatted `overview` and `metrics`
+  projections and their transport type are removed.
+
+- **Literal-fidelity answer revisions share one fixed-context provider path.**
+  Direct grounded answers and both revision modes use the same binding,
+  reservation, usage-commit, debug, and failure semantics instead of carrying
+  parallel copies that could drift.
+
+- **Pre-release HTTP inputs have one canonical wire name.** Knowledge search
+  accepts `query` only; the hidden `q` deserialization alias is removed and an
+  architecture gate rejects new production `serde` compatibility aliases.
+
+### Removed
+
+- **Duplicate REST surfaces were removed in favor of their canonical
+  replacement.** The generic content-mutation list/create/get endpoints are
+  superseded by the typed document/revision endpoints and the audit log; the
+  imperative IAM-grants collection is superseded by the existing declarative
+  per-user access document, which now carries optimistic concurrency instead;
+  several knowledge-domain endpoints that exactly duplicated the canonical
+  content-document list and detail were removed with no replacement needed.
+
+- **The dormant RAPTOR summary builder and CLI command are removed.** Existing
+  RAPTOR rows still cannot prove revision-safe leaf lineage or atomic
+  publication, so every retrieval lane continues to exclude them until an
+  explicit maintenance operation deletes the retired data.
+
+- **The placeholder inbound-webhook endpoint is removed.** It previously
+  advertised a route that could only return `501 Not Implemented`. External
+  source middleware should use the documented upload, replace, and delete APIs.
+
+### Fixed
+
+- **Duplicate-document creation returns a clean `409 Conflict` instead of a
+  masked `500`.** A duplicate `externalKey` on document creation previously
+  surfaced as either an opaque internal error, or — past the point where the
+  underlying unique-constraint violation aborted the surrounding database
+  transaction — a second, unrelated-looking internal error when the server
+  tried and failed to look up the conflicting document inside the now-aborted
+  transaction. The conflict is now caught and reported cleanly, with the
+  existing document's id included in the response.
+- **Multipart document upload no longer requires a redundant scope field.**
+  The multipart form previously still required an independent `library_id`
+  field left over from before the target library became a path segment,
+  rejecting every multipart upload with a spurious `400`.
+
+- **Local image builds and redeploys use one deterministic service graph.**
+  Compose builds the shared backend image only through the backend service;
+  startup and worker execute that exact image instead of racing duplicate
+  builds into one tag. The local workflow always builds both backend and
+  frontend, runs the one-shot startup migration to a verified zero exit, and
+  only then recreates API, worker, and frontend without restarting PostgreSQL
+  or Redis.
+
+- **Transient MCP conversation titles respect the aggregate domain limit.** The
+  fixed prefix and Unicode-safe truncated question now fit the canonical
+  72-character boundary together, so a valid long question cannot fail before
+  grounded retrieval starts.
+
+- **The container runtime entrypoint preserves maintenance command arguments.**
+  Its unprivileged `su` handoff forwards option-prefixed `argv` verbatim, so
+  `docker compose run` maintenance commands no longer have their flags parsed
+  by `su` itself.
+
+- **Release fixtures and frontend images pass the high-severity supply-chain
+  gate.** Frontend base images are digest-pinned and upgrade the patched Alpine
+  `c-ares` and `libexpat` packages; the neutral benchmark Compose fixture reads
+  its synthetic payment token from the environment instead of embedding a
+  secret-shaped literal.
+
+- **Detached MCP and assistant-stream work owns every value captured by its
+  spawned future.** Request IDs, JSON arguments, application/auth state, query
+  services, and audit commands no longer borrow handler stack frames across a
+  task boundary; the strict `test-support` build now checks the same `Send +
+  'static` contract used by production spawning.
+
+- **Ingest admission and terminal publication preserve one lock order and one
+  transaction.** Job attempts, queue or inline leases, and linked async
+  operations are created together under library-then-job locks. A terminal
+  operation can no longer be reopened by a replay, a waiter revalidates the
+  library after acquiring the parent lock, and injected failures roll back the
+  complete admission bundle instead of leaving orphan work.
+
+- **Configuration preflight preserves already retrieved setup evidence.** When
+  exact-scope canonical selection is empty for a setup question, the answer
+  stage now reuses only the bounded document-identity setup lanes and leaves
+  ordinary relevance tails out. Technical-fact selection also diversifies
+  repeated occurrences by document, revision, kind, canonical value, and
+  qualifiers before filling the answer budget, so duplicate rows cannot crowd
+  distinct facts out while their provenance remains intact in storage.
+
+- **Ordinary prose can no longer pass as a verified named claim.** The verifier
+  verifies exact canonical evidence and typed formal literals, marks a mixture
+  of supported claims and unchecked prose as partial, and leaves prose without
+  checkable claims not-run. Markdown numbering or capitalization does not
+  change that contract.
+
+- **Malformed persisted graph extraction can no longer publish an empty
+  success.** Blocking-task panics and candidate-contract decode failures now
+  propagate with document/chunk context, preserving the previous ready graph
+  instead of turning corrupt normalized JSON into `GraphExtractionCandidateSet::default()`.
+
+- **UI and external MCP default to the same compact grounded-answer profile.**
+  An omitted response profile no longer expands one surface while compacting
+  the other; explicit debug requests remain the only path to full diagnostics.
+
+- **Grounded-answer readiness and synthesis fail closed without discarding good
+  evidence.** Empty bodies, clarification prompts, generic troubleshooting
+  advice, truncated latest-N lists, non-verified results, and blocking warnings
+  cannot be marked final. Readiness follows typed intent and evidence structure
+  without language-specific action morphology, while newly invented operations
+  still fall back to verified evidence.
+
+- **Latest-N inventories use grounded release identities and version order.**
+  Versions found in source text are ordered newest-first before retrieval score
+  and chunk position. Retrieval deduplicates only the same canonical document
+  revision, while answer assembly deduplicates only the same document,
+  revision, and formal version. Distinct sources are therefore never collapsed
+  because their labels or version literals happen to match, and completion
+  counts the same top-level source units that the renderer emits.
+
+- **Latest-N inventories preserve source provenance while selecting formal
+  release evidence.** Release markers are matched to their own adjacent
+  versions, compound release identifiers select the newest grounded value, and
+  dates, addresses, and later dependency versions are ignored. Eligible source
+  and context evidence is merged without title-token families, dominant-family
+  filters, or cross-document title deduplication.
+
+- **Delete replay and legacy mutation repair are scope-safe under concurrency.**
+  A fresh idempotency key on an already deleted document creates and durably
+  binds its own canonical mutation instead of borrowing the previous delete.
+  Legacy unbound mutation items are claimed with a compare-and-set update over
+  the exact mutation and item identity; concurrent losers re-read and fail
+  closed, and structurally ambiguous multi-item repairs are rejected. Missing
+  documents, deleted targets, scope conflicts, and reference-integrity failures
+  now remain distinct typed repository outcomes instead of being inferred from
+  a generic database `RowNotFound`. Successful-attempt lookup proves that the
+  attempt belongs to the exact mutation item, document, and revision selected
+  by the current head, so an attempt from a sibling item in the same mutation
+  cannot satisfy publication.
+
+- **Procedural answers fail closed on ambiguous product identity and incomplete
+  instructions.** Acronyms remain useful retrieval hints but cannot impersonate
+  an exact document target; deterministic lists require action-bound identity
+  corroboration and completion-policy coverage. Configuration section names and
+  natural-language sentences are no longer misclassified as executable commands.
+
+- **Exact troubleshooting remediations are not downgraded by procedure-only
+  coverage checks.** Verified issue-local fixes can finalize without a false
+  partial-coverage warning, and answer cleanup no longer appends a bare target
+  name as a cosmetic final sentence.
+
+- **Ordered revision inventories and acronym-prefixed literals keep their
+  completion guarantees.** Provider-compiled typed inventory intent prevents a
+  verified but truncated list from finalizing. Exact-literal recovery uses only
+  compiler-supplied literals, entities, and document focus; capitalization no
+  longer promotes raw question tokens into the literal retrieval lane.
+
+- **The UI MCP dispatcher cannot execute tools outside its advertised answer
+  surface.** Hallucinated or prompt-injected write/diagnostic calls are rejected
+  before argument parsing or dispatch, matching external MCP preflight. Runtime
+  repair calls bypass ordinary query compaction without leaking their private
+  marker to the handler, so the second call cannot collapse into a replay of the
+  first.
+
+- **UI and external MCP agents now receive the same canonical ready-answer
+  contract.** The UI returns a single fresh, complete, verified
+  `grounded_answer` byte-for-byte after local evidence verification and
+  persistence, without an extra parent-model rewrite or literal-revision pass;
+  external MCP clients receive the same answer/readiness contract. Incomplete,
+  repair, replay, and multi-tool UI turns continue through the bounded
+  composition path.
+
+- **External MCP agents can start safely without a preconfigured library ref.**
+  When `library` is omitted, IronRAG infers it only if the caller has
+  `query_run` on exactly one library; zero and ambiguous matches fail closed
+  with the same non-disclosing error. Explicit library calls retain their
+  direct authorization path and add no catalog lookup.
+
+- **Long MCP tool calls stream transport progress before the answer is ready.**
+  SSE calls flush an immediate readiness comment and bounded keepalives before
+  one final JSON-RPC message and disable proxy buffering. Bounded Redis leases
+  coordinate duplicate ownership and explicit cancellation across API replicas;
+  transient disconnects do not cancel work, while deadlines, process caps, and
+  generation-safe cleanup bound every detached execution. JSON responses retain
+  their existing shape.
+
+- **External MCP inputs and evaluation probes are bounded and secret-safe.**
+  Unknown grounded-answer fields, empty or oversized text, invalid `topK`, and
+  excessive conversation history are rejected deterministically; debug requests
+  cannot silently use a compact response. Profiling runners pass credentials and
+  the private suite runner's case inputs through protected stdin/files instead
+  of process arguments, and verify identical tool contracts before comparing
+  answer surfaces.
+
+- **Cached-answer replay cannot authorize stale or ungrounded output.** Replay
+  locks and rechecks the exact fresh cache winner, source generation, completed
+  runtime, verified context bundle, canonical assistant answer, grounding
+  references, request scope, and target conversation in one transaction. Turn
+  creation and replay provenance commit or roll back together.
+
+- **Replay provenance survives source-conversation retention races.** Automatic
+  conversation eviction skips sources referenced by another conversation, an
+  isolated source deletion is rejected, and deferred constraints still permit
+  a complete workspace or library cascade in one transaction.
+
+- **Provider base-URL policy can no longer expose a hidden API key.**
+  `allowOverride=false` is enforced by create, update, bootstrap, validation,
+  and runtime resolution, including legacy or direct-SQL rows. Even when an
+  override is allowed, moving an existing hidden key to a different scheme,
+  host, or port requires the caller to submit the replacement key explicitly.
+
+- **Optional semantic reranking cannot extend answer latency past its configured
+  decision budget.** Slow binding lookup and billing reservation now time out
+  from the answer path, while owned reconciliation tasks safely finalize late
+  or ambiguous reservations and preserve paid-call usage accounting.
+
+- **Webhook delivery is fenced against duplicates, stale workers, and unsafe
+  targets.** Subscription/event identity is serialized, current workers must
+  present the lease token, DNS and redirect targets are revalidated against the
+  outbound policy, custom headers remain bounded, and mixed-version writers
+  cannot persist remote-controlled diagnostics.
+
+- **Content projection drift fails closed without causing scan storms.** The
+  parity fingerprint covers canonical document, revision, chunk text, checksum,
+  offsets, metadata, readiness, and scope. Negative parity results are cached
+  until the durable generation changes, and concurrent checks share one scan.
+
+- **Stale graph/config writers cannot overwrite newer truth or deadlock catalog
+  deletion.** Terminal graph publication compares the durable epoch, old
+  protocol writers receive a serialization failure after the v2 boundary, and
+  configuration moves/deletes share a deterministic serializer and parent-lock
+  order.
+
+- **Result-cache maintenance is bounded and observable.** Garbage collection
+  deletes oldest expired winners with `SKIP LOCKED` in fixed-size batches,
+  performs a bounded indexed backlog probe instead of a full count, and reports
+  progress, oldest expiry age, budget exhaustion, and failures.
+
+- **Projection-transition retries no longer leave orphan user turns or start a
+  paid query on stale content.** Generation changes during cache fill/wait
+  return a retryable convergence error and remove only the still-unexecuted
+  request turn atomically.
+
+- **Credential and webhook error paths no longer leak protected material.**
+  Secret-bearing domain objects have redacted debug/serialization surfaces,
+  encrypted envelopes are bound to their stable record and field purpose, and
+  persisted webhook failures use bounded static summaries rather than remote
+  response content or raw request errors.
+
+- **Maintenance repairs preserve canonical/readable parity and invalidate stale
+  answers exactly once.** Parent-role and temporal backfills lock the library
+  first, update both content planes transactionally, reject missing or
+  wrong-scope readable mirrors, and advance source truth only after a real
+  answer-visible change. The duplicate-content healer is dry-run by default,
+  repairs both planes in one transaction, and remains idempotent on retries.
+
+- **Assistant execution deadlines have a stable, non-leaking HTTP contract.**
+  A turn that exhausts its own end-to-end deadline now returns `504` with the
+  `query_deadline_exceeded` kind instead of exposing the question, execution
+  identifier, or an internal failure chain as a generic `500`.
+
+- **Environment-managed AI accounts no longer make startup depend on credential
+  migration mode.** Bootstrap defers secret-bearing account writes while
+  encrypted credential writes are intentionally disabled, allowing a staged
+  key rollout without preventing migrations or application readiness.
 
 ## 0.5.9 — 2026-07-10
 
@@ -782,13 +1543,10 @@ restore is required.
 
 ### Observability
 
-- **Anonymous performance telemetry on by default.** The backend ships
-  OpenTelemetry traces and metrics to the project's default collector to help
-  improve performance. These signals carry request timings, stage durations,
-  counters and identifiers (library/document/chunk UUIDs) — not your documents,
-  queries, answers or credentials. Disable with `IRONRAG_OTEL_ENABLED=false`, or
-  redirect to your own collector with `OTEL_EXPORTER_OTLP_ENDPOINT`; the shipped
-  default lives in `apps/api/observability.toml`.
+- **OpenTelemetry remains operator opt-in.** The backend exports traces and
+  metrics only when `IRONRAG_OTEL_ENABLED=true` and an explicit
+  operator-controlled `OTEL_EXPORTER_OTLP_ENDPOINT` are configured. Distribution
+  defaults do not embed a project-owner collector.
 - **Logs off by default.** Logs are the only content-bearing signal, so the
   Compose and Helm defaults set `OTEL_LOGS_EXPORTER=none`; set it to `otlp` to
   ship logs to a collector you control.
@@ -2673,15 +3431,15 @@ The IronRAG UI assistant is the reference implementation of grounded Q&A. Every 
 - MCP tool registry in `apps/api/src/interfaces/http/mcp.rs` extended; `visible_tool_names` advertises `grounded_answer` when the token has `query_run` somewhere.
 - Docs updated (`docs/ru/MCP.md`, `docs/en/MCP.md`) — `grounded_answer` is now the top-of-list tool, with explicit guidance "prefer this over `search_documents` + `read_document` for knowledge questions". Admin UI (`apps/web/src/components/admin/McpTab.tsx`) shows an MCP–UI parity disclosure card and updates the recommended system-prompt description so every external client (Claude Code, Claude Desktop, Cursor, Codex, OpenClaw, VS Code) is told to call `grounded_answer` first.
 
-### MCP Streamable HTTP transport (spec 2025-06-18)
+### MCP Streamable HTTP transport (spec 2025-11-25)
 
 - The `/v1/mcp` endpoint now implements the current MCP Streamable HTTP transport and nothing else — no legacy HTTP+SSE split, no parallel POST-only alias, no ad-hoc JSON-RPC surface. One URL handles the full client lifecycle:
   - `POST /v1/mcp` carries JSON-RPC requests, notifications, and batches. Content is negotiated from the `Accept` header: `application/json` → single JSON body (default, curl-friendly); `text/event-stream` (optionally alongside JSON) → one-shot SSE frame `event: message\ndata: …\n\n` so SDK clients that advertise both formats get the transport they expect. Notification-only requests (no `id`) are acknowledged with a bare `202 Accepted`.
-  - `GET /v1/mcp` returns a well-formed but silent SSE stream (`200 OK`, `Content-Type: text/event-stream`, one `: ready` comment, connection idle). Spec 2025-06-18 permits either a 405 or a zero-event SSE stream; we choose the latter because some bundled MCP clients (notably OpenClaw's `bundle-mcp`, which spawns a fresh subprocess per chat session) treat any non-200 handshake as fatal and drop the whole MCP server for that agent context. A valid empty stream satisfies them without introducing real event traffic.
+  - `GET /v1/mcp` returns a well-formed but silent SSE stream (`200 OK`, `Content-Type: text/event-stream`, one `: ready` comment, connection idle). Spec 2025-11-25 permits either a 405 or a zero-event SSE stream; we choose the latter because some bundled MCP clients (notably OpenClaw's `bundle-mcp`, which spawns a fresh subprocess per chat session) treat any non-200 handshake as fatal and drop the whole MCP server for that agent context. A valid empty stream satisfies them without introducing real event traffic.
   - `DELETE /v1/mcp` returns `200 OK`. The server is stateless between requests — session termination is a no-op — but cleanup flows in SDK clients succeed instead of erroring.
 - The `initialize` response now includes a freshly minted `Mcp-Session-Id` header (UUIDv7). Clients that pin the session via this header on subsequent calls are accepted without additional validation; the server does not correlate calls across the id because no state depends on it, but the header satisfies every compliant client (Claude Code remote, Cursor, OpenAI Responses API tools, the official `@modelcontextprotocol/sdk`, OpenClaw bundle-mcp).
-- Protocol version is `2025-06-18`. An optional `Mcp-Protocol-Version` request header is tolerated but not required — the server advertises its version via the `initialize` response payload.
-- `GET /v1/mcp` and `DELETE /v1/mcp` no longer run the Bearer-auth extractor; both answer with their unauthenticated handshake responses immediately. Bundled MCP clients (notably OpenClaw's `bundle-mcp`, spawned fresh per chat session) speculatively open the SSE stream before carrying the session Bearer, and the earlier 401 response made them drop the whole MCP server registration — group-chat agents were left without tools even though direct-message agents worked. Spec 2025-06-18 allows answering without auth on these methods.
+- Protocol version is `2025-11-25`. An optional `Mcp-Protocol-Version` request header is tolerated but not required — the server advertises its version via the `initialize` response payload.
+- `GET /v1/mcp` and `DELETE /v1/mcp` no longer run the Bearer-auth extractor; both answer with their unauthenticated handshake responses immediately. Bundled MCP clients (notably OpenClaw's `bundle-mcp`, spawned fresh per chat session) speculatively open the SSE stream before carrying the session Bearer, and the earlier 401 response made them drop the whole MCP server registration — group-chat agents were left without tools even though direct-message agents worked. Spec 2025-11-25 allows answering without auth on these methods.
 - Smoke-tested end-to-end from the compose stack and from production with OpenClaw on a group chat: `application/json` returns `content-type: application/json` + valid JSON-RPC; `application/json, text/event-stream` returns `content-type: text/event-stream` with one `event: message` frame; `GET` returns 200 + silent SSE handshake (`: ready`); `DELETE` returns 200. Group-chat MCP tool calls now work identically to direct-message ones.
 
 ## 0.3.0 — 2026-04-16

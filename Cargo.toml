@@ -6,9 +6,9 @@ members = [
 ]
 
 [workspace.package]
-version = "0.5.9"
+version = "0.5.10"
 edition = "2024"
-rust-version = "1.96"
+rust-version = "1.97"
 license = "MIT"
 
 [workspace.dependencies]

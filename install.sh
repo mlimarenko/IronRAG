@@ -49,7 +49,8 @@ set -euo pipefail
 # Secrets (admin password, provider API keys) are intentionally NOT accepted as
 # flags: argv is visible to other processes (`ps`, /proc/<pid>/cmdline) and leaks
 # into shell history and CI logs. Pass them via environment variables or a
-# pre-seeded .env instead — e.g. IRONRAG_ADMIN_PASSWORD, IRONRAG_OPENAI_API_KEY.
+# pre-seeded .env instead — e.g. IRONRAG_ADMIN_PASSWORD or
+# IRONRAG_AI_PROVIDER_API_KEYS_JSON_B64.
 #
 # Test seams (used by tests/install_wizard.test.sh; harmless in production):
 #   IRONRAG_INSTALL_SOURCE_ONLY=1  Define functions but do not run main (for sourcing).
@@ -64,33 +65,34 @@ DEFAULT_PORT="${IRONRAG_DEFAULT_PORT:-19000}"
 OFFICIAL_BACKEND_IMAGE="pipingspace/ironrag-backend"
 OFFICIAL_FRONTEND_IMAGE="pipingspace/ironrag-frontend"
 
-# Provider key env vars the wizard can prompt for and must never clobber.
-PROVIDER_KEYS=(
-  IRONRAG_OPENAI_API_KEY
-  IRONRAG_DEEPSEEK_API_KEY
-  IRONRAG_QWEN_API_KEY
-  IRONRAG_GPTUNNEL_API_KEY
-  IRONRAG_OPENROUTER_API_KEY
-  IRONRAG_ROUTERAI_API_KEY
-  IRONRAG_MINIMAX_API_KEY
-)
-# Human labels for the provider keys (same order).
-PROVIDER_LABELS=(
-  "OpenAI"
-  "DeepSeek"
-  "Qwen / DashScope"
-  "GPTunnel"
-  "OpenRouter"
-  "RouterAI"
-  "MiniMax"
-)
+PROVIDER_API_KEYS_JSON_B64_ENV="IRONRAG_AI_PROVIDER_API_KEYS_JSON_B64"
+PROVIDER_KEYS=("${PROVIDER_API_KEYS_JSON_B64_ENV}")
 # Machine secrets that are minted once and must survive every re-run.
 SECRET_KEYS=(
   IRONRAG_POSTGRES_PASSWORD
   IRONRAG_BOOTSTRAP_TOKEN
+  IRONRAG_CREDENTIAL_MASTER_KEY
   IRONRAG_UI_BOOTSTRAP_ADMIN_PASSWORD
   IRONRAG_UI_BOOTSTRAP_ADMIN_API_TOKEN
 )
+
+# Full .env staging files contain secrets. Keep the live file untouched until
+# every write and preservation assertion succeeds, and remove the stage on all
+# ordinary error/signal exits. SIGKILL/power loss cannot run shell cleanup, so
+# the same-directory stage is always mode 0600 and has an unmistakable suffix.
+IRONRAG_ENV_STAGE_FILE=""
+cleanup_env_stage() {
+  if [ -n "${IRONRAG_ENV_STAGE_FILE:-}" ]; then
+    rm -f -- "$IRONRAG_ENV_STAGE_FILE"
+    IRONRAG_ENV_STAGE_FILE=""
+  fi
+}
+
+install_env_cleanup_traps() {
+  trap cleanup_env_stage EXIT
+  trap 'cleanup_env_stage; exit 130' INT
+  trap 'cleanup_env_stage; exit 143' TERM
+}
 
 # ─── Output helpers ─────────────────────────────────────────────────────────
 # Colour only when fd 1 is a terminal and NO_COLOR is unset. ASCII-safe always.
@@ -221,11 +223,6 @@ ask_yes_no() {
   esac
 }
 
-mask_secret() {
-  local v="$1" n=${#1}
-  if [ "$n" -le 4 ]; then printf '****'; else printf '****%s' "${v: -4}"; fi
-}
-
 # ─── Value resolution (flag > env > prompt) ─────────────────────────────────
 # One resolver so every prompt is answerable from automation. A flag value (read
 # from parse_args into a FLAG_* var) wins outright — even with a TTY — so a
@@ -344,7 +341,122 @@ rand_hex_bytes() {
   LC_ALL=C tr -dc 'a-f0-9' </dev/urandom | head -c "$((nbytes * 2))"
 }
 
+# Canonical standard-base64 encoding of exactly 32 random bytes. The value is
+# written directly to .env and never printed.
+rand_credential_master_key() {
+  if command -v openssl >/dev/null 2>&1; then
+    openssl rand -base64 32 | tr -d '\n'; return
+  fi
+  head -c 32 /dev/urandom | base64 | tr -d '\n'
+}
+
 # ─── .env read / atomic write ───────────────────────────────────────────────
+is_removed_provider_api_key_env_name() {
+  [[ "$1" =~ ^IRONRAG_[A-Z][A-Z0-9_]*_API_KEY$ ]]
+}
+
+# Reject removed provider-specific env names without guessing an alias. The
+# exact provider kind is data inside the JSON map and cannot be reconstructed
+# safely from a normalized shell variable name.
+validate_removed_provider_api_key_env_names() {
+  local env_file="$1" line key
+
+  if [ -f "$env_file" ]; then
+    while IFS= read -r line || [ -n "$line" ]; do
+      case "$line" in
+        IRONRAG_*_API_KEY=*)
+          key="${line%%=*}"
+          if is_removed_provider_api_key_env_name "$key"; then
+            err "${key} uses the removed provider-specific credential convention."
+            err "move the exact catalog provider kind and credential into ${PROVIDER_API_KEYS_JSON_B64_ENV}; aliases are not guessed."
+            return 2
+          fi
+          ;;
+      esac
+    done <"$env_file"
+  fi
+
+  while IFS= read -r key; do
+    case "$key" in
+      IRONRAG_*_API_KEY)
+        if is_removed_provider_api_key_env_name "$key"; then
+          err "${key} uses the removed provider-specific credential convention."
+          err "move the exact catalog provider kind and credential into ${PROVIDER_API_KEYS_JSON_B64_ENV}; aliases are not guessed."
+          return 2
+        fi
+        ;;
+      esac
+  done < <(compgen -e)
+}
+
+# Validates and canonicalizes the provider map without ever placing its value
+# in argv or diagnostics. Python is required only when an env-managed provider
+# map is actually configured; users who configure credentials in the UI do not
+# need it. Exact provider-kind keys are preserved, sorted, and duplicate keys
+# fail closed.
+canonicalize_provider_api_keys_b64() {
+  local encoded_map="$1"
+  [ -n "$encoded_map" ] || { printf ''; return 0; }
+  if ! command -v python3 >/dev/null 2>&1; then
+    err "python3 is required to validate ${PROVIDER_API_KEYS_JSON_B64_ENV}."
+    return 2
+  fi
+  if ! printf '%s' "$encoded_map" | python3 -c '
+import base64
+import binascii
+import json
+import sys
+import unicodedata
+
+MAX_JSON_BYTES = 1_048_576
+MAX_BASE64_BYTES = ((MAX_JSON_BYTES + 2) // 3) * 4
+MAX_ENTRIES = 256
+MAX_PROVIDER_KIND_BYTES = 128
+MAX_CREDENTIAL_BYTES = 65_536
+
+def unique_object(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("duplicate key")
+        result[key] = value
+    return result
+
+try:
+    encoded = sys.stdin.read()
+    if len(encoded.encode("utf-8")) > MAX_BASE64_BYTES:
+        raise ValueError("encoded map is too large")
+    decoded = base64.b64decode(encoded, validate=True)
+    if len(decoded) > MAX_JSON_BYTES:
+        raise ValueError("decoded map is too large")
+    if base64.b64encode(decoded).decode("ascii") != encoded:
+        raise ValueError("non-canonical base64")
+    value = json.loads(decoded.decode("utf-8"), object_pairs_hook=unique_object)
+    if not isinstance(value, dict):
+        raise ValueError("not an object")
+    if len(value) > MAX_ENTRIES:
+        raise ValueError("too many entries")
+    for provider_kind, api_key in value.items():
+        if not isinstance(provider_kind, str) or not isinstance(api_key, str):
+            raise ValueError("invalid entry type")
+        if not provider_kind or len(provider_kind.encode("utf-8")) > MAX_PROVIDER_KIND_BYTES:
+            raise ValueError("invalid provider kind length")
+        if any(char.isspace() or unicodedata.category(char) == "Cc" for char in provider_kind):
+            raise ValueError("invalid provider kind character")
+        if len(api_key.encode("utf-8")) > MAX_CREDENTIAL_BYTES:
+            raise ValueError("credential is too large")
+    canonical_json = json.dumps(
+        value, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")
+    sys.stdout.write(base64.b64encode(canonical_json).decode("ascii"))
+except (OSError, UnicodeError, ValueError, json.JSONDecodeError, TypeError, binascii.Error):
+    raise SystemExit(2)
+' 2>/dev/null; then
+    err "${PROVIDER_API_KEYS_JSON_B64_ENV} must be canonical standard-base64 of a JSON object mapping exact provider kinds to string credentials."
+    return 2
+  fi
+}
+
 # Value of KEY= from the last matching line (empty if missing).
 env_get() {
   local key="$1" file="$2"
@@ -487,6 +599,7 @@ recommend_profile() {
 #   REC_{DB,BACKEND,WORKER,CACHE,FRONTEND}_MEM   (MiB, e.g. 4096M written later)
 #   REC_{DB,BACKEND,WORKER,CACHE,FRONTEND}_CPUS  (formatted X.XX)
 #   REC_DATABASE_MAX_CONNECTIONS REC_EMBED_PARALLELISM REC_GRAPH_PARALLELISM
+#   REC_PROVIDER_MAX_OUTBOUND REC_PROVIDER_QUERY_RESERVED
 #   REC_REDIS_MAXMEMORY (MiB) REC_POSTGRES_SHM (MiB)
 #   REC_STEADY_MIB REC_HEADROOM_MIB REC_FITS (0/1)
 compute_plan() {
@@ -497,24 +610,24 @@ compute_plan() {
   # mem (MiB) and cpu (centi-cpus) per role, per profile.
   local db_mem be_mem wk_mem ca_mem fe_mem
   local db_cc be_cc wk_cc ca_cc fe_cc
-  local dbconn embed graph redis shm
+  local dbconn embed graph provider_max provider_reserve redis shm
   case "$profile" in
     micro)
       db_mem=1024; be_mem=1024; wk_mem=768;  ca_mem=192;  fe_mem=192
       db_cc=100;   be_cc=200;   wk_cc=200;   ca_cc=50;    fe_cc=50
-      dbconn=20; embed=8;  graph=16; redis=128;  shm=256 ;;
+      dbconn=20; embed=8;  graph=16; provider_max=8;  provider_reserve=2; redis=128;  shm=256 ;;
     small)
       db_mem=2048; be_mem=1792; wk_mem=1536; ca_mem=384;  fe_mem=192
       db_cc=200;   be_cc=400;   wk_cc=400;   ca_cc=100;   fe_cc=50
-      dbconn=25; embed=12; graph=16; redis=320;  shm=512 ;;
+      dbconn=25; embed=12; graph=16; provider_max=12; provider_reserve=3; redis=320;  shm=512 ;;
     medium)
       db_mem=4096; be_mem=3584; wk_mem=3072; ca_mem=768;  fe_mem=256
       db_cc=200;   be_cc=600;   wk_cc=600;   ca_cc=100;   fe_cc=100
-      dbconn=30; embed=16; graph=16; redis=640;  shm=1024 ;;
+      dbconn=30; embed=16; graph=16; provider_max=16; provider_reserve=4; redis=640;  shm=1024 ;;
     large)
       db_mem=8192; be_mem=6144; wk_mem=6144; ca_mem=1536; fe_mem=512
       db_cc=400;   be_cc=800;   wk_cc=800;   ca_cc=200;   fe_cc=100
-      dbconn=32; embed=24; graph=24; redis=1280; shm=2048 ;;
+      dbconn=32; embed=24; graph=24; provider_max=24; provider_reserve=6; redis=1280; shm=2048 ;;
     *) err "unknown profile: $profile"; exit 1 ;;
   esac
 
@@ -528,6 +641,8 @@ compute_plan() {
   REC_DATABASE_MAX_CONNECTIONS=$dbconn
   REC_EMBED_PARALLELISM=$embed
   REC_GRAPH_PARALLELISM=$graph
+  REC_PROVIDER_MAX_OUTBOUND=$provider_max
+  REC_PROVIDER_QUERY_RESERVED=$provider_reserve
   REC_REDIS_MAXMEMORY=$redis
   REC_POSTGRES_SHM=$shm
 
@@ -563,9 +678,10 @@ print_plan_table() {
   printf '  %-10s %-9s %-6s\n' "redis"    "${REC_CACHE_MEM}M"    "$REC_CACHE_CPUS"
   printf '  %-10s %-9s %-6s\n' "frontend" "${REC_FRONTEND_MEM}M" "$REC_FRONTEND_CPUS"
   printf '  %s\n' "${C_DIM}─────────────────────────────────${C_RESET}"
-  printf '  steady ≈ %s GiB  (parallelism: embed %s, graph/doc %s, db budget %s)\n' \
+  printf '  steady ≈ %s GiB  (parallelism: embed %s, graph/doc %s, provider %s/%s, db budget %s)\n' \
     "$(mib_to_gib_str "$REC_STEADY_MIB")" "$REC_EMBED_PARALLELISM" \
-    "$REC_GRAPH_PARALLELISM" "$REC_DATABASE_MAX_CONNECTIONS"
+    "$REC_GRAPH_PARALLELISM" "$REC_PROVIDER_MAX_OUTBOUND" \
+    "$REC_PROVIDER_QUERY_RESERVED" "$REC_DATABASE_MAX_CONNECTIONS"
 }
 
 # Write the computed resource plan into the env file.
@@ -586,6 +702,8 @@ write_resource_plan() {
   env_file_set IRONRAG_DATABASE_MAX_CONNECTIONS "$REC_DATABASE_MAX_CONNECTIONS" "$file"
   env_file_set IRONRAG_INGESTION_EMBEDDING_PARALLELISM "$REC_EMBED_PARALLELISM" "$file"
   env_file_set IRONRAG_INGESTION_GRAPH_EXTRACT_PARALLELISM_PER_DOC "$REC_GRAPH_PARALLELISM" "$file"
+  env_file_set IRONRAG_PROVIDER_CONCURRENCY_MAX_OUTBOUND "$REC_PROVIDER_MAX_OUTBOUND" "$file"
+  env_file_set IRONRAG_PROVIDER_CONCURRENCY_QUERY_RESERVED "$REC_PROVIDER_QUERY_RESERVED" "$file"
 }
 
 sync_frontend_origin_to_port() {
@@ -709,7 +827,7 @@ print_configuration_summary() {
   hr
   printf '%s\n' "${C_BOLD}Configuration${C_RESET}"
   if [ "${IRONRAG_NEW_ENV_SECRETS:-0}" = "1" ]; then
-    ok "New .env created with random Postgres password + bootstrap token (not printed)."
+    ok "New .env created with random Postgres password, bootstrap token, and credential encryption key (not printed)."
   elif [ "${IRONRAG_IMAGE_PINS_UPDATED:-0}" = "1" ]; then
     ok "Existing .env preserved; official IronRAG images pinned to ${IRONRAG_TARGET_IMAGE_TAG}."
     info "Secrets, resource caps, and custom image overrides were left unchanged."
@@ -722,10 +840,7 @@ print_configuration_summary() {
     info "Admin: create the first account in the UI on first visit."
   fi
   local found=""
-  local k
-  for k in "${PROVIDER_KEYS[@]}"; do
-    if env_value_nonempty "$k" "$env_file"; then found="yes"; break; fi
-  done
+  env_value_nonempty "$PROVIDER_API_KEYS_JSON_B64_ENV" "$env_file" && found="yes"
   if [ -n "$found" ]; then
     info "LLM providers: at least one API key set in .env."
   else
@@ -762,13 +877,9 @@ Environment variables (answer every prompt without a TTY):
   IRONRAG_PROFILE                Resource profile (micro|small|medium|large).
   IRONRAG_ADMIN_LOGIN            Bootstrap admin login.
   IRONRAG_ADMIN_PASSWORD         Bootstrap admin password (secret; env only).
-  IRONRAG_OPENAI_API_KEY         Provider API key (secret; env only).
-  IRONRAG_DEEPSEEK_API_KEY       Provider API key (secret; env only).
-  IRONRAG_QWEN_API_KEY           Provider API key (secret; env only).
-  IRONRAG_GPTUNNEL_API_KEY       Provider API key (secret; env only).
-  IRONRAG_OPENROUTER_API_KEY     Provider API key (secret; env only).
-  IRONRAG_ROUTERAI_API_KEY       Provider API key (secret; env only).
-  IRONRAG_MINIMAX_API_KEY        Provider API key or Token Plan key (secret; env only).
+  IRONRAG_AI_PROVIDER_API_KEYS_JSON_B64
+                                 Canonical standard-base64 of a JSON object
+                                 mapping exact provider kinds to API keys.
   IRONRAG_NONINTERACTIVE=1       Same as --non-interactive.
   IRONRAG_RESET_VOLUMES=1        Same as --reset-volumes.
   IRONRAG_RECOMPUTE_RESOURCES=1  Same as --recompute-resources.
@@ -782,13 +893,13 @@ variables or a pre-seeded .env only — never as flags, because argv is visible 
 other processes (ps, /proc/<pid>/cmdline) and leaks into shell history and CI logs.
 
 The wizard inspects the host (CPU + RAM), recommends a resource profile, and
-prompts for port, admin bootstrap, and provider API keys. A re-run preserves the
-existing .env secrets and tuned caps while advancing official IronRAG image pins
-to the selected release tag.
+prompts for port and admin bootstrap. Provider keys come from the validated map
+above or the UI. A re-run preserves existing .env secrets and tuned caps while
+advancing official IronRAG image pins to the selected release tag.
 
 Non-interactive example (no TTY, env-driven):
   IRONRAG_PORT=8080 IRONRAG_PROFILE=small \
-  IRONRAG_OPENAI_API_KEY=sk-... \
+  IRONRAG_AI_PROVIDER_API_KEYS_JSON_B64="$(printf '%s' '{"provider-alpha":"secret-value"}' | base64 | tr -d '\n')" \
     ./install.sh --non-interactive
 USAGE
 }
@@ -850,6 +961,7 @@ resolve_interactivity() {
 
 # ─── Main ───────────────────────────────────────────────────────────────────
 run_main() {
+  install_env_cleanup_traps
   setup_colors
   parse_args "$@"
   resolve_interactivity
@@ -859,8 +971,8 @@ run_main() {
   mem_mib="$(detect_mem_mib)"
 
   # Total wizard steps for the "step i/N" progress headers (interactive only):
-  # 1 host+profile, 2 port, 3 admin, 4 provider keys, 5 summary.
-  STEP_TOTAL=5
+  # 1 host+profile, 2 port, 3 admin, 4 summary.
+  STEP_TOTAL=4
   STEP_NUM=0
 
   banner
@@ -931,9 +1043,7 @@ run_main() {
     resolve_secret admin_pass "${IRONRAG_ADMIN_PASSWORD:-}" "  Admin password" ""
   fi
   if [ "$INTERACTIVE" = "1" ]; then
-    say ""
-    step "Provider API keys"
-    info "${C_DIM}(Enter to keep existing / skip)${C_RESET}"
+    info "${C_DIM}Provider credentials: pre-seed ${PROVIDER_API_KEYS_JSON_B64_ENV} or configure them in the UI.${C_RESET}"
   fi
 
   # ── Resolve version + download artifacts (skipped in plan-only) ──
@@ -1011,13 +1121,21 @@ run_main() {
       fi
     fi
     cp "${INSTALL_DIR}/.env.example" "$env_file"
+    chmod 600 "$env_file"
     IRONRAG_NEW_ENV_SECRETS=1
     env_file_set "IRONRAG_POSTGRES_PASSWORD" "$(rand_hex_bytes 24)" "$env_file"
     env_file_set "IRONRAG_BOOTSTRAP_TOKEN" "$(rand_hex_bytes 24)" "$env_file"
+    env_file_set "IRONRAG_CREDENTIAL_MASTER_KEY" "$(rand_credential_master_key)" "$env_file"
+    # A fresh install has no older pods, so encrypted writes are safe from the
+    # first start. Existing upgrades preserve their explicit staged value.
+    env_file_set "IRONRAG_CREDENTIAL_ENCRYPTION_WRITE_ENABLED" "true" "$env_file"
     ok "Created ${env_file} with fresh machine secrets."
   else
     ok "Existing ${env_file} found — preserving it."
   fi
+
+  # Reject the removed provider-specific convention before any staged write.
+  validate_removed_provider_api_key_env_names "$env_file" || exit $?
 
   # Snapshot every secret/provider value BEFORE writing, to assert preservation.
   declare -A SECRET_BEFORE=()
@@ -1026,39 +1144,23 @@ run_main() {
     SECRET_BEFORE["$k"]="$(env_get "$k" "$env_file")"
   done
 
-  # Back up the .env once before the write batch.
-  cp "$env_file" "${env_file}.bak"
-
-  # ── Provider keys: only write when the operator supplies a NEW value, so an
-  #    existing key is literally never touched. Secrets have no flag tier — a key
-  #    is taken from its env var (IRONRAG_<PROVIDER>_API_KEY) or, interactively,
-  #    typed at the prompt. A blank/unset value keeps whatever is already in .env. ──
-  local i label key existing reply env_val
-  for i in "${!PROVIDER_KEYS[@]}"; do
-    key="${PROVIDER_KEYS[$i]}"
-    label="${PROVIDER_LABELS[$i]}"
+  # Provider credentials have one generic, typed JSON-map path. An exported
+  # value wins over the existing .env entry; an unset/blank value preserves the file.
+  # Interactive provider setup belongs to the UI and does not require a
+  # hardcoded provider catalog in this installer.
+  local key existing env_val
+  for key in "${PROVIDER_KEYS[@]}"; do
     existing="$(env_get "$key" "$env_file")"
     env_val="${!key:-}"
     if [ -n "$env_val" ]; then
-      # Env-provided key wins, even under a TTY (scripted runs stay deterministic).
-      # Only record it as a change when it actually differs from what's on disk.
+      env_val="$(canonicalize_provider_api_keys_b64 "$env_val")" || exit $?
       [ "$env_val" != "$existing" ] && NEW_PROVIDER["$key"]="$env_val"
-      continue
-    fi
-    [ "$INTERACTIVE" = "1" ] || continue
-    if [ -n "$existing" ]; then
-      # Silent input even when rotating: the masked current value stays in the
-      # prompt, but a freshly typed replacement key must not echo to screen.
-      ask_secret reply "  ${label} key (current $(mask_secret "$existing"))" ""
-      # Blank reply => keep current (do not write).
-      [ -n "$reply" ] && NEW_PROVIDER["$key"]="$reply"
-    else
-      ask_secret reply "  ${label} key" ""
-      [ -n "$reply" ] && NEW_PROVIDER["$key"]="$reply"
+    elif [ -n "$existing" ]; then
+      canonicalize_provider_api_keys_b64 "$existing" >/dev/null || exit $?
     fi
   done
 
-  # ── Step 5: review screen — show the resolved choices before touching .env so
+  # ── Step 4: review screen — show the resolved choices before touching .env so
   #    an interactive operator can abort. Scripted (non-interactive) runs skip the
   #    pause and just proceed, keeping the unattended path silent and fast. ──
   if [ "$INTERACTIVE" = "1" ]; then
@@ -1073,15 +1175,15 @@ run_main() {
     else
       printf '  %-18s %s\n' "Admin" "create in the UI on first visit"
     fi
-    local pk pl pi
-    for pi in "${!PROVIDER_KEYS[@]}"; do
-      pk="${PROVIDER_KEYS[$pi]}"; pl="${PROVIDER_LABELS[$pi]}"
-      if [ -n "${NEW_PROVIDER[$pk]:-}" ]; then
-        printf '  %-18s %s\n' "${pl}" "will be set"
-      elif env_value_nonempty "$pk" "$env_file"; then
-        printf '  %-18s %s\n' "${pl}" "kept (existing)"
+    local provider_configured=0 provider_updated=0 provider_key
+    for provider_key in "${PROVIDER_KEYS[@]}"; do
+      if [ -n "${NEW_PROVIDER[$provider_key]:-}" ]; then
+        provider_updated=$((provider_updated + 1))
+      elif env_value_nonempty "$provider_key" "$env_file"; then
+        provider_configured=$((provider_configured + 1))
       fi
     done
+    printf '  %-18s %s\n' "Provider keys" "${provider_updated} updated, ${provider_configured} kept"
     hr
     if ! ask_yes_no "Apply this configuration?" "y"; then
       err "aborted by user"; exit 1
@@ -1090,10 +1192,26 @@ run_main() {
   fi
 
   # ── Apply writes ──
+  # Work on a restrictive same-directory copy and atomically rename it only
+  # after the complete batch validates. The EXIT/INT/TERM traps remove this
+  # secret-bearing stage on every pre-commit failure.
+  local live_env_file="$env_file"
+  IRONRAG_ENV_STAGE_FILE="$(mktemp "${live_env_file}.next.XXXXXX")"
+  cp "$live_env_file" "$IRONRAG_ENV_STAGE_FILE"
+  chmod 600 "$IRONRAG_ENV_STAGE_FILE"
+  env_file="$IRONRAG_ENV_STAGE_FILE"
+
   # Port + derived frontend origin.
   env_file_set "IRONRAG_PORT" "$IRONRAG_PORT" "$env_file"
   sync_frontend_origin_to_port "$env_file" "$IRONRAG_PORT"
   sync_release_image_pins "$env_file" "$VERSION" || true
+
+  # Deterministic signal seam for the offline installer regression test. It is
+  # inert unless explicitly set by tests and exercises the actual TERM trap
+  # after the staged file has already diverged from the live one.
+  if [ "${IRONRAG_INSTALL_TEST_SIGNAL_AFTER_ENV_STAGE:-}" = "TERM" ]; then
+    kill -TERM "$$"
+  fi
 
   # Admin bootstrap (only when freshly provided this run).
   if [ -n "$admin_login" ]; then
@@ -1106,8 +1224,10 @@ run_main() {
   # `set -u` on bash < 4.4 (RHEL/CentOS 7 ships 4.2), and on the unattended
   # path NEW_PROVIDER is always empty. `${#arr[@]}` is safe on every version.
   if [ "${#NEW_PROVIDER[@]}" -gt 0 ]; then
-    for k in "${!NEW_PROVIDER[@]}"; do
-      env_file_set "$k" "${NEW_PROVIDER[$k]}" "$env_file"
+    for k in "${PROVIDER_KEYS[@]}"; do
+      if [ -n "${NEW_PROVIDER[$k]:-}" ]; then
+        env_file_set "$k" "${NEW_PROVIDER[$k]}" "$env_file"
+      fi
     done
   fi
 
@@ -1133,12 +1253,13 @@ run_main() {
     # the password unchanged, so its integrity check must still run.
     if [ -n "$admin_pass" ] && [ "$k" = "IRONRAG_UI_BOOTSTRAP_ADMIN_PASSWORD" ]; then continue; fi
     if [ "$before" != "$after" ]; then
-      err "secret ${k} changed unexpectedly during .env write. Restoring backup."
-      mv "${env_file}.bak" "$env_file"
+      err "secret ${k} changed unexpectedly during staged .env write."
       exit 1
     fi
   done
-  rm -f "${env_file}.bak"
+  mv -f -- "$env_file" "$live_env_file"
+  IRONRAG_ENV_STAGE_FILE=""
+  env_file="$live_env_file"
 
   # ── Deploy ──
   if [ "${IRONRAG_INSTALL_SKIP_DEPLOY:-0}" = "1" ]; then

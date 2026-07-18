@@ -1,4 +1,5 @@
-#![allow(clippy::unwrap_used, clippy::expect_used)]
+#[path = "support/mcp_tool_call_support.rs"]
+mod mcp_tool_call_support;
 
 use anyhow::{Context, Result};
 use axum::{
@@ -310,7 +311,7 @@ impl AuditEventsFixture {
                     .header(header::AUTHORIZATION, format!("Bearer {token}"))
                     .header(header::CONTENT_TYPE, "application/json")
                     .body(Body::from(payload.to_string()))
-                    .expect("build audit events POST request"),
+                    .context("failed to build audit events POST request")?,
             )
             .await
             .with_context(|| format!("POST {path} failed"))?;
@@ -327,7 +328,7 @@ impl AuditEventsFixture {
                     .uri(path)
                     .header(header::AUTHORIZATION, format!("Bearer {token}"))
                     .body(Body::empty())
-                    .expect("build audit events GET request"),
+                    .context("failed to build audit events GET request")?,
             )
             .await
             .with_context(|| format!("GET {path} failed"))?;
@@ -336,22 +337,15 @@ impl AuditEventsFixture {
     }
 
     async fn mcp_call(&self, token: &str, method: &str, params: Option<Value>) -> Result<Value> {
-        let (status, json) = self
-            .rest_post(
-                token,
-                "/v1/mcp",
-                json!({
-                    "jsonrpc": "2.0",
-                    "id": format!("audit-{}", method.replace('/', "-")),
-                    "method": method,
-                    "params": params,
-                }),
-            )
-            .await?;
-        if status != StatusCode::OK && status != StatusCode::ACCEPTED {
-            anyhow::bail!("unexpected status {status} for MCP {method}");
-        }
-        Ok(json)
+        mcp_tool_call_support::call_rpc(
+            self.app(),
+            "/v1/mcp",
+            token,
+            &format!("audit-{}", method.replace('/', "-")),
+            method,
+            params.unwrap_or(Value::Null),
+        )
+        .await
     }
 
     async fn append_audit_event(
@@ -476,6 +470,7 @@ impl AuditEventsFixture {
         billing_repository::create_provider_call(
             self.pool(),
             &billing_repository::NewBillingProviderCall {
+                id: Uuid::now_v7(),
                 workspace_id: self.workspace_id,
                 library_id: self.library_id,
                 binding_id: None,
@@ -670,6 +665,35 @@ async fn token_mint_with_library_ids_creates_library_grants() -> Result<()> {
     result
 }
 
+/// Asserts a `POST /v1/iam/tokens` mint request carrying `body` is rejected
+/// with `400 bad_request` and leaves the `iam_api_token` row count for
+/// `label` unchanged — the shared assertion behind every
+/// `token_mint_with_library_ids_rejects_*`/`_requires_*` negative case below,
+/// which differ only in which validation rule they exercise.
+async fn assert_token_mint_rejected_with_unchanged_count(
+    fixture: &AuditEventsFixture,
+    token: &str,
+    label: &str,
+    body: Value,
+) -> Result<()> {
+    let before_count: i64 =
+        sqlx::query_scalar::<_, i64>("select count(*) from iam_api_token where label = $1")
+            .bind(label)
+            .fetch_one(fixture.pool())
+            .await?;
+    let (status, response_body) = fixture.rest_post(token, "/v1/iam/tokens", body).await?;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(response_body["code"].as_str().context("expected api error kind")?, "bad_request");
+
+    let after_count: i64 =
+        sqlx::query_scalar::<_, i64>("select count(*) from iam_api_token where label = $1")
+            .bind(label)
+            .fetch_one(fixture.pool())
+            .await?;
+    assert_eq!(before_count, after_count);
+    Ok(())
+}
+
 #[tokio::test]
 #[ignore = "requires local postgres and redis services"]
 async fn token_mint_with_library_ids_rejects_cross_workspace_library_ids() -> Result<()> {
@@ -697,34 +721,18 @@ async fn token_mint_with_library_ids_rejects_cross_workspace_library_ids() -> Re
         .context("failed to create foreign library")?;
 
         let label = format!("mint-multi-lib-fail-{}", Uuid::now_v7());
-        let before_count: i64 =
-            sqlx::query_scalar::<_, i64>("select count(*) from iam_api_token where label = $1")
-                .bind(&label)
-                .fetch_one(fixture.pool())
-                .await?;
-        let (status, body) = fixture
-            .rest_post(
-                &system_admin,
-                "/v1/iam/tokens",
-                json!({
-                    "workspaceId": fixture.workspace_id,
-                    "label": label,
-                    "libraryIds": [fixture.library_id, foreign_library.id],
-                    "permissionKinds": ["library_read"]
-                }),
-            )
-            .await?;
-        assert_eq!(status, StatusCode::BAD_REQUEST);
-        assert_eq!(body["errorKind"].as_str().context("expected api error kind")?, "bad_request");
-
-        let after_count: i64 =
-            sqlx::query_scalar::<_, i64>("select count(*) from iam_api_token where label = $1")
-                .bind(&label)
-                .fetch_one(fixture.pool())
-                .await?;
-        assert_eq!(before_count, after_count);
-
-        Ok(())
+        assert_token_mint_rejected_with_unchanged_count(
+            &fixture,
+            &system_admin,
+            &label,
+            json!({
+                "workspaceId": fixture.workspace_id,
+                "label": label,
+                "libraryIds": [fixture.library_id, foreign_library.id],
+                "permissionKinds": ["library_read"]
+            }),
+        )
+        .await
     }
     .await;
 
@@ -740,34 +748,17 @@ async fn token_mint_with_library_ids_requires_permissions() -> Result<()> {
     let result = async {
         let system_admin = fixture.mint_system_admin_token("system-admin").await?;
         let label = format!("mint-multi-lib-missing-permissions-{}", Uuid::now_v7());
-
-        let before_count: i64 =
-            sqlx::query_scalar::<_, i64>("select count(*) from iam_api_token where label = $1")
-                .bind(&label)
-                .fetch_one(fixture.pool())
-                .await?;
-        let (status, body) = fixture
-            .rest_post(
-                &system_admin,
-                "/v1/iam/tokens",
-                json!({
-                    "workspaceId": fixture.workspace_id,
-                    "label": label,
-                    "libraryIds": [fixture.library_id],
-                }),
-            )
-            .await?;
-        assert_eq!(status, StatusCode::BAD_REQUEST);
-        assert_eq!(body["errorKind"].as_str().context("expected api error kind")?, "bad_request");
-
-        let after_count: i64 =
-            sqlx::query_scalar::<_, i64>("select count(*) from iam_api_token where label = $1")
-                .bind(&label)
-                .fetch_one(fixture.pool())
-                .await?;
-        assert_eq!(before_count, after_count);
-
-        Ok(())
+        assert_token_mint_rejected_with_unchanged_count(
+            &fixture,
+            &system_admin,
+            &label,
+            json!({
+                "workspaceId": fixture.workspace_id,
+                "label": label,
+                "libraryIds": [fixture.library_id],
+            }),
+        )
+        .await
     }
     .await;
 
@@ -783,35 +774,18 @@ async fn token_mint_with_library_ids_rejects_invalid_permissions() -> Result<()>
     let result = async {
         let system_admin = fixture.mint_system_admin_token("system-admin").await?;
         let label = format!("mint-multi-lib-invalid-permission-{uuid}", uuid = Uuid::now_v7());
-
-        let before_count: i64 =
-            sqlx::query_scalar::<_, i64>("select count(*) from iam_api_token where label = $1")
-                .bind(&label)
-                .fetch_one(fixture.pool())
-                .await?;
-        let (status, body) = fixture
-            .rest_post(
-                &system_admin,
-                "/v1/iam/tokens",
-                json!({
-                    "workspaceId": fixture.workspace_id,
-                    "label": label,
-                    "libraryIds": [fixture.library_id],
-                    "permissionKinds": ["iam_admin"]
-                }),
-            )
-            .await?;
-        assert_eq!(status, StatusCode::BAD_REQUEST);
-        assert_eq!(body["errorKind"].as_str().context("expected api error kind")?, "bad_request");
-
-        let after_count: i64 =
-            sqlx::query_scalar::<_, i64>("select count(*) from iam_api_token where label = $1")
-                .bind(&label)
-                .fetch_one(fixture.pool())
-                .await?;
-        assert_eq!(before_count, after_count);
-
-        Ok(())
+        assert_token_mint_rejected_with_unchanged_count(
+            &fixture,
+            &system_admin,
+            &label,
+            json!({
+                "workspaceId": fixture.workspace_id,
+                "label": label,
+                "libraryIds": [fixture.library_id],
+                "permissionKinds": ["iam_admin"]
+            }),
+        )
+        .await
     }
     .await;
 
@@ -900,7 +874,7 @@ async fn governance_actions_and_denials_append_expected_audit_subjects() -> Resu
                 }),
             )
             .await?;
-        assert_eq!(credential_response.0, StatusCode::OK);
+        assert_eq!(credential_response.0, StatusCode::CREATED);
         let credential_id = Uuid::parse_str(
             credential_response.1["id"].as_str().context("expected provider credential id")?,
         )?;
@@ -927,7 +901,7 @@ async fn governance_actions_and_denials_append_expected_audit_subjects() -> Resu
                 }),
             )
             .await?;
-        assert_eq!(binding_response.0, StatusCode::OK);
+        assert_eq!(binding_response.0, StatusCode::CREATED);
         let binding_id = Uuid::parse_str(
             binding_response.1["id"].as_str().context("expected library binding id")?,
         )?;

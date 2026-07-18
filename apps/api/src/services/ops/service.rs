@@ -90,19 +90,14 @@ pub(crate) struct DocumentKnowledgeSignals<'a> {
     pub typed_fact_count: Option<i32>,
 }
 
-#[must_use]
-pub(crate) fn classify_document_knowledge_signals(
+fn document_readiness_kind(
     signals: DocumentKnowledgeSignals<'_>,
-) -> DocumentKnowledgeCoverageState {
-    let readable = signals.preparation_ready || signals.revision_text_ready;
-    let graph_ready = signals.preparation_ready && signals.revision_graph_ready;
-    let graph_sparse =
-        readable && !graph_ready && (signals.preparation_ready || signals.revision_graph_ready);
-    let failed = (signals.hard_failure || signals.canceled_terminal || signals.preparation_failed)
-        && !readable;
-    let graph_coverage_failed = failed || signals.graph_failed || signals.preparation_failed;
-
-    let readiness_kind = if failed {
+    failed: bool,
+    readable: bool,
+    graph_ready: bool,
+    graph_sparse: bool,
+) -> DocumentReadiness {
+    if failed {
         DocumentReadiness::Failed
     } else if signals.processing_active && readable {
         DocumentReadiness::Readable
@@ -116,8 +111,11 @@ pub(crate) fn classify_document_knowledge_signals(
         DocumentReadiness::Readable
     } else {
         DocumentReadiness::Processing
-    };
-    let graph_coverage_kind = if graph_coverage_failed {
+    }
+}
+
+fn graph_coverage_kind(failed: bool, graph_ready: bool, graph_sparse: bool) -> &'static str {
+    if failed {
         "failed"
     } else if graph_ready {
         "graph_ready"
@@ -125,37 +123,66 @@ pub(crate) fn classify_document_knowledge_signals(
         "graph_sparse"
     } else {
         "processing"
-    };
-    let preparation_state =
-        signals.observed_preparation_state.map(str::to_string).unwrap_or_else(|| {
+    }
+}
+
+fn preparation_state(signals: DocumentKnowledgeSignals<'_>, failed: bool) -> String {
+    signals.observed_preparation_state.map_or_else(
+        || {
             if failed {
-                "failed".to_string()
+                "failed"
             } else if signals.processing_active {
-                "building".to_string()
+                "building"
             } else if signals.preparation_ready {
-                "prepared".to_string()
+                "prepared"
             } else {
-                "pending".to_string()
+                "pending"
             }
-        });
-    let typed_fact_coverage = signals.block_count.map(|block_count| {
+            .to_string()
+        },
+        str::to_string,
+    )
+}
+
+fn typed_fact_coverage(block_count: Option<i32>, typed_fact_count: Option<i32>) -> Option<f64> {
+    block_count.map(|block_count| {
         if block_count <= 0 {
             0.0
         } else {
-            let typed_fact_count = signals.typed_fact_count.unwrap_or_default();
-            (f64::from(typed_fact_count) / f64::from(block_count)).clamp(0.0, 1.0)
+            (f64::from(typed_fact_count.unwrap_or_default()) / f64::from(block_count))
+                .clamp(0.0, 1.0)
         }
-    });
+    })
+}
+
+#[must_use]
+pub(crate) fn classify_document_knowledge_signals(
+    signals: DocumentKnowledgeSignals<'_>,
+) -> DocumentKnowledgeCoverageState {
+    let readable = signals.preparation_ready || signals.revision_text_ready;
+    let graph_ready = signals.preparation_ready && signals.revision_graph_ready;
+    let graph_sparse =
+        readable && !graph_ready && (signals.preparation_ready || signals.revision_graph_ready);
+    let failed = (signals.hard_failure || signals.canceled_terminal || signals.preparation_failed)
+        && !readable;
+    let graph_coverage_failed = failed || signals.graph_failed || signals.preparation_failed;
 
     DocumentKnowledgeCoverageState {
         processing_active: signals.processing_active,
         failed,
         readable,
         graph_ready,
-        readiness_kind,
-        preparation_state,
-        graph_coverage_kind: graph_coverage_kind.to_string(),
-        typed_fact_coverage,
+        readiness_kind: document_readiness_kind(
+            signals,
+            failed,
+            readable,
+            graph_ready,
+            graph_sparse,
+        ),
+        preparation_state: preparation_state(signals, failed),
+        graph_coverage_kind: graph_coverage_kind(graph_coverage_failed, graph_ready, graph_sparse)
+            .to_string(),
+        typed_fact_coverage: typed_fact_coverage(signals.block_count, signals.typed_fact_count),
     }
 }
 
@@ -364,8 +391,7 @@ impl OpsService {
                 matches!(mutation.mutation_state.as_str(), "failed" | "conflicted")
             })
             || effective_readiness_row.as_ref().is_some_and(|revision| {
-                matches!(revision.text_state.as_str(), "failed" | "unavailable")
-                    || revision.vector_state == "failed"
+                revision.text_state == "failed" || revision.vector_state == "failed"
             })
             || prepared_revision
                 .as_ref()
@@ -378,9 +404,9 @@ impl OpsService {
         let revision_text_ready = effective_readiness_row
             .as_ref()
             .is_some_and(|revision| revision_text_state_is_readable(&revision.text_state));
-        let revision_graph_ready = effective_readiness_row.as_ref().is_some_and(|revision| {
-            matches!(revision.graph_state.as_str(), "ready" | "graph_ready")
-        });
+        let revision_graph_ready = effective_readiness_row
+            .as_ref()
+            .is_some_and(|revision| revision.graph_state == "ready");
         let graph_failed = effective_readiness_row
             .as_ref()
             .is_some_and(|revision| revision.graph_state == "failed");
@@ -406,6 +432,7 @@ impl OpsService {
         })
     }
 
+    #[must_use]
     pub fn derive_document_readiness_summary(
         &self,
         state: &AppState,

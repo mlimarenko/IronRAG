@@ -130,7 +130,7 @@ impl ContentStorageService {
     }
 
     #[must_use]
-    pub fn diagnostics(&self) -> &ContentStorageDiagnostics {
+    pub const fn diagnostics(&self) -> &ContentStorageDiagnostics {
         &self.diagnostics
     }
 
@@ -171,10 +171,10 @@ impl ContentStorageService {
             Self::build_revision_storage_key(workspace_id, library_id, file_name, checksum);
         match &self.backend {
             ContentStorageBackend::Filesystem(provider) => {
-                provider.persist(&storage_key, file_bytes).await?
+                provider.persist(&storage_key, file_bytes).await?;
             }
             ContentStorageBackend::S3(provider) => {
-                provider.persist(&storage_key, file_bytes).await?
+                provider.persist(&storage_key, file_bytes).await?;
             }
         }
         Ok(storage_key)
@@ -229,7 +229,7 @@ impl ContentStorageService {
     /// restore blobs under the storage keys recorded in the source
     /// deployment, preserving referential integrity with the
     /// `content_revision.storage_key` column. Callers outside the
-    /// snapshot path should use [`persist_revision_source`] which
+    /// snapshot path should use [`Self::persist_revision_source`] which
     /// computes the key deterministically.
     pub async fn write_revision_source_raw(
         &self,
@@ -278,26 +278,27 @@ impl ContentStorageService {
         &self,
         stashed_directory: &StashedContentDirectory,
     ) -> Result<(), ContentServiceError> {
-        match &self.backend {
-            ContentStorageBackend::Filesystem(provider) => {
-                provider.restore_stashed_directory(stashed_directory).await
-            }
-            ContentStorageBackend::S3(provider) => {
-                provider.restore_stashed_directory(stashed_directory).await
-            }
-        }
+        self.restore_stashed_directory_with_policy(stashed_directory, false).await
     }
 
     pub async fn restore_stashed_directory_replacing_current(
         &self,
         stashed_directory: &StashedContentDirectory,
     ) -> Result<(), ContentServiceError> {
+        self.restore_stashed_directory_with_policy(stashed_directory, true).await
+    }
+
+    async fn restore_stashed_directory_with_policy(
+        &self,
+        stashed_directory: &StashedContentDirectory,
+        replace_current: bool,
+    ) -> Result<(), ContentServiceError> {
         match &self.backend {
             ContentStorageBackend::Filesystem(provider) => {
-                provider.restore_stashed_directory_replacing_current(stashed_directory).await
+                provider.restore_stashed_directory(stashed_directory, replace_current).await
             }
             ContentStorageBackend::S3(provider) => {
-                provider.restore_stashed_directory_replacing_current(stashed_directory).await
+                provider.restore_stashed_directory(stashed_directory, replace_current).await
             }
         }
     }
@@ -367,11 +368,13 @@ fn build_web_snapshot_file_name(source_uri: &str) -> String {
     let parsed = reqwest::Url::parse(source_uri).ok();
     let file_name = parsed
         .as_ref()
-        .and_then(|url| url.path_segments())
+        .and_then(url::Url::path_segments)
         .and_then(|mut segments| segments.rfind(|segment| !segment.is_empty()))
         .filter(|segment| !segment.trim().is_empty())
-        .map(|segment| percent_decode_str(segment).decode_utf8_lossy().into_owned())
-        .unwrap_or_else(|| "index.html".to_string());
+        .map_or_else(
+            || "index.html".to_string(),
+            |segment| percent_decode_str(segment).decode_utf8_lossy().into_owned(),
+        );
     sanitize_file_name(&file_name)
 }
 

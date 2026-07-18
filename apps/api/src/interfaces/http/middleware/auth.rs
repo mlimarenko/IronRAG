@@ -21,15 +21,15 @@ pub struct RequestAuth {
 }
 
 impl RequestAuth {
-    fn anonymous() -> Self {
+    const fn anonymous() -> Self {
         Self { state: RequestAuthState::Anonymous }
     }
 
-    fn authenticated(auth: AuthContext) -> Self {
+    const fn authenticated(auth: AuthContext) -> Self {
         Self { state: RequestAuthState::Authenticated(auth) }
     }
 
-    fn invalid(error: AuthResolutionError) -> Self {
+    const fn invalid(error: AuthResolutionError) -> Self {
         Self { state: RequestAuthState::Invalid(error) }
     }
 

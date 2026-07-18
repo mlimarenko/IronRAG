@@ -1,11 +1,11 @@
-import { memo, useState } from 'react';
-import type { TFunction } from 'i18next';
-import { ChevronDown } from 'lucide-react';
-import type { VerificationState } from '@/shared/types';
-import { cn } from '@/shared/lib/utils';
-import { VERIFICATION_CONFIG, verificationLabel } from '../model/verificationConfig';
+import { memo, useState } from 'react'
+import type { TFunction } from 'i18next'
+import { ChevronDown } from 'lucide-react'
+import type { VerificationState } from '@/shared/types'
+import { cn } from '@/shared/lib/utils'
+import { VERIFICATION_CONFIG, verificationLabel } from '../model/verificationConfig'
 
-type VerificationTone = 'ready' | 'warning' | 'failed' | 'sparse' | 'muted';
+type VerificationTone = 'ready' | 'warning' | 'failed' | 'sparse' | 'muted'
 
 const TONE_BY_STATE: Record<VerificationState, VerificationTone> = {
   passed: 'ready',
@@ -14,7 +14,7 @@ const TONE_BY_STATE: Record<VerificationState, VerificationTone> = {
   insufficient_evidence: 'sparse',
   failed: 'failed',
   not_run: 'muted',
-};
+}
 
 /**
  * Token-driven chip surface. Each tone maps to a status colour family from the
@@ -47,22 +47,31 @@ const TONE_STYLE: Record<VerificationTone, { wrap: string; ring: string; icon: s
     ring: 'hsl(var(--border) / 0.7)',
     icon: 'text-muted-foreground',
   },
-};
+}
 
 type VerificationChipProps = {
-  t: TFunction;
-  state: VerificationState;
-  warnings?: string[];
-  className?: string;
-};
+  t: TFunction
+  state: VerificationState
+  warnings?: string[]
+  className?: string
+}
 
-function VerificationChipImpl({ t, state, warnings = [], className }: VerificationChipProps) {
-  const [expanded, setExpanded] = useState(false);
-  const config = VERIFICATION_CONFIG[state];
-  const tone = TONE_STYLE[TONE_BY_STATE[state]];
-  const Icon = config.icon;
-  const label = verificationLabel(state, t);
-  const hasWarnings = state !== 'passed' && state !== 'not_run' && warnings.length > 0;
+function VerificationChipImpl({
+  t,
+  state,
+  warnings = [],
+  className,
+}: Readonly<VerificationChipProps>) {
+  const [expanded, setExpanded] = useState(false)
+  const config = VERIFICATION_CONFIG[state]
+  const tone = TONE_STYLE[TONE_BY_STATE[state]]
+  const Icon = config.icon
+  const label = verificationLabel(state, t)
+  const hasWarnings = state !== 'passed' && state !== 'not_run' && warnings.length > 0
+  const warningEntries = warnings.map((warning, index) => ({
+    key: `${warning}-${warnings.slice(0, index).filter((item) => item === warning).length}`,
+    warning,
+  }))
 
   return (
     <div className={cn('flex flex-col gap-1.5', className)}>
@@ -95,16 +104,19 @@ function VerificationChipImpl({ t, state, warnings = [], className }: Verificati
       </button>
       {hasWarnings && expanded && (
         <ul className="animate-fade-in space-y-1 workbench-surface border-border/60 px-3 py-2.5 text-xs leading-relaxed text-muted-foreground">
-          {warnings.map((warning, index) => (
-            <li key={index} className="flex gap-1.5">
-              <span aria-hidden="true" className={cn('mt-1.5 h-1 w-1 shrink-0 rounded-full', tone.icon)} />
+          {warningEntries.map(({ key, warning }) => (
+            <li key={key} className="flex gap-1.5">
+              <span
+                aria-hidden="true"
+                className={cn('mt-1.5 h-1 w-1 shrink-0 rounded-full', tone.icon)}
+              />
               <span className="min-w-0 break-words">{warning}</span>
             </li>
           ))}
         </ul>
       )}
     </div>
-  );
+  )
 }
 
-export const VerificationChip = memo(VerificationChipImpl);
+export const VerificationChip = memo(VerificationChipImpl)

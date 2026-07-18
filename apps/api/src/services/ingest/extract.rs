@@ -71,7 +71,7 @@ impl ExtractService {
             .ok_or_else(|| ApiError::resource_not_found("knowledge_revision", revision_id))?;
         Ok(ExtractContent {
             revision_id,
-            extract_state: map_text_state_to_extract_state(&revision.text_state).to_string(),
+            extract_state: map_text_state_to_extract_state(&revision.text_state)?.to_string(),
             normalized_text: revision.normalized_text,
             text_checksum: revision.text_checksum,
             updated_at: revision.text_readable_at.unwrap_or(revision.created_at),
@@ -313,12 +313,16 @@ impl ExtractService {
     }
 }
 
-fn map_text_state_to_extract_state(text_state: &str) -> &'static str {
+fn map_text_state_to_extract_state(text_state: &str) -> Result<&'static str, ApiError> {
     match text_state {
-        "text_readable" => "ready",
-        "failed" => "failed",
-        "extracting_text" => "processing",
-        _ => "accepted",
+        "accepted" => Ok("accepted"),
+        "extracting_text" => Ok("processing"),
+        "text_readable" => Ok("ready"),
+        "failed" => Ok("failed"),
+        unsupported => Err(ApiError::internal_with_log(
+            unsupported,
+            "knowledge revision has a non-canonical text state",
+        )),
     }
 }
 
@@ -337,7 +341,9 @@ fn map_extract_chunk_result_row(
     }
 }
 
-fn map_resume_cursor_row(row: extract_repository::ExtractResumeCursorRow) -> ExtractResumeCursor {
+const fn map_resume_cursor_row(
+    row: extract_repository::ExtractResumeCursorRow,
+) -> ExtractResumeCursor {
     ExtractResumeCursor {
         attempt_id: row.attempt_id,
         last_completed_chunk_index: row.last_completed_chunk_index,
@@ -375,7 +381,10 @@ fn prepare_materialized_node_candidates(
         if display_label.is_empty() {
             continue;
         }
-        entity_key_index.insert(display_label, parse_materialized_node_type(&candidate.node_kind));
+        let Some(node_type) = parse_materialized_node_type(&candidate.node_kind) else {
+            continue;
+        };
+        entity_key_index.insert(display_label, node_type);
     }
     node_candidates
         .iter()
@@ -384,6 +393,7 @@ fn prepare_materialized_node_candidates(
             if display_label.is_empty() {
                 return None;
             }
+            let _node_type = parse_materialized_node_type(&candidate.node_kind)?;
             let canonical_key = entity_key_index.canonical_node_key_for_label(display_label);
             let node_type =
                 crate::services::graph::identity::runtime_node_type_from_key(&canonical_key);
@@ -409,15 +419,17 @@ fn prepare_materialized_edge_candidates(
 ) -> Vec<PreparedMaterializedEdgeCandidate> {
     let mut entity_key_index = crate::services::graph::identity::GraphLabelNodeTypeIndex::new();
     for candidate in node_candidates {
-        entity_key_index
-            .insert(&candidate.display_label, parse_materialized_node_type(&candidate.node_kind));
+        if let Some(node_type) = parse_materialized_node_type(&candidate.node_kind) {
+            entity_key_index.insert(&candidate.display_label, node_type);
+        }
     }
 
     edge_candidates
         .iter()
         .filter_map(|candidate| {
-            let relation_type = candidate.edge_kind.trim().to_ascii_lowercase();
-            if !crate::services::graph::identity::is_canonical_relation_type(&relation_type) {
+            let relation_type =
+                crate::services::graph::identity::normalize_relation_type(&candidate.edge_kind);
+            if relation_type.is_empty() {
                 return None;
             }
             let from_display_label = candidate.from_display_label.trim();
@@ -450,33 +462,83 @@ fn prepare_materialized_edge_candidates(
         .collect()
 }
 
-fn parse_materialized_node_type(node_kind: &str) -> RuntimeNodeType {
-    match node_kind.trim().to_ascii_lowercase().as_str() {
-        "document" => RuntimeNodeType::Document,
-        "person" => RuntimeNodeType::Person,
-        "organization" => RuntimeNodeType::Organization,
-        "location" => RuntimeNodeType::Location,
-        "event" => RuntimeNodeType::Event,
-        "artifact" => RuntimeNodeType::Artifact,
-        "natural" => RuntimeNodeType::Natural,
-        "process" => RuntimeNodeType::Process,
-        "concept" => RuntimeNodeType::Concept,
-        "attribute" => RuntimeNodeType::Attribute,
-        // Backward compatibility
-        "topic" => RuntimeNodeType::Concept,
-        "technology" => RuntimeNodeType::Artifact,
-        "api" => RuntimeNodeType::Artifact,
-        "code_symbol" => RuntimeNodeType::Artifact,
-        "natural_kind" => RuntimeNodeType::Natural,
-        "metric" => RuntimeNodeType::Attribute,
-        "regulation" => RuntimeNodeType::Artifact,
-        _ => RuntimeNodeType::Entity,
+fn parse_materialized_node_type(node_kind: &str) -> Option<RuntimeNodeType> {
+    match node_kind {
+        "document" => Some(RuntimeNodeType::Document),
+        "person" => Some(RuntimeNodeType::Person),
+        "organization" => Some(RuntimeNodeType::Organization),
+        "location" => Some(RuntimeNodeType::Location),
+        "event" => Some(RuntimeNodeType::Event),
+        "artifact" => Some(RuntimeNodeType::Artifact),
+        "natural" => Some(RuntimeNodeType::Natural),
+        "process" => Some(RuntimeNodeType::Process),
+        "concept" => Some(RuntimeNodeType::Concept),
+        "attribute" => Some(RuntimeNodeType::Attribute),
+        "entity" => Some(RuntimeNodeType::Entity),
+        _ => None,
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn text_projection_states_map_only_from_the_canonical_vocabulary() {
+        for (projection, extract) in [
+            ("accepted", "accepted"),
+            ("extracting_text", "processing"),
+            ("text_readable", "ready"),
+            ("failed", "failed"),
+        ] {
+            assert_eq!(map_text_state_to_extract_state(projection).ok(), Some(extract));
+        }
+    }
+
+    #[test]
+    fn text_projection_state_mapping_rejects_historical_aliases_and_unknown_values() {
+        for invalid in ["readable", "ready", "vector_ready", "graph_ready", "unknown", ""] {
+            assert!(map_text_state_to_extract_state(invalid).is_err(), "{invalid:?}");
+        }
+    }
+
+    #[test]
+    fn parse_materialized_node_type_accepts_exact_protocol_literals() {
+        for (literal, expected) in [
+            ("document", RuntimeNodeType::Document),
+            ("person", RuntimeNodeType::Person),
+            ("organization", RuntimeNodeType::Organization),
+            ("location", RuntimeNodeType::Location),
+            ("event", RuntimeNodeType::Event),
+            ("artifact", RuntimeNodeType::Artifact),
+            ("natural", RuntimeNodeType::Natural),
+            ("process", RuntimeNodeType::Process),
+            ("concept", RuntimeNodeType::Concept),
+            ("attribute", RuntimeNodeType::Attribute),
+            ("entity", RuntimeNodeType::Entity),
+        ] {
+            assert_eq!(parse_materialized_node_type(literal), Some(expected), "{literal}");
+        }
+    }
+
+    #[test]
+    fn parse_materialized_node_type_rejects_legacy_aliases_and_normalized_variants() {
+        for invalid in ["topic", "technology", "metric", " Entity ", "ENTITY", ""] {
+            assert_eq!(parse_materialized_node_type(invalid), None, "{invalid:?}");
+        }
+    }
+
+    #[test]
+    fn prepare_materialized_node_candidates_drops_unknown_node_types() {
+        let candidates = vec![NewNodeCandidate {
+            canonical_key: String::new(),
+            node_kind: "topic".to_string(),
+            display_label: "Synthetic Node".to_string(),
+            summary: None,
+        }];
+
+        assert!(prepare_materialized_node_candidates(&candidates).is_empty());
+    }
 
     #[test]
     fn prepare_materialized_node_candidates_recanonicalizes_unicode_labels() {
@@ -496,7 +558,7 @@ mod tests {
     }
 
     #[test]
-    fn prepare_materialized_edge_candidates_uses_labels_to_build_canonical_keys() {
+    fn prepare_materialized_edge_candidates_accepts_structural_relation_types() {
         let nodes = prepare_materialized_node_candidates(&[
             NewNodeCandidate {
                 canonical_key: String::new(),
@@ -506,7 +568,7 @@ mod tests {
             },
             NewNodeCandidate {
                 canonical_key: String::new(),
-                node_kind: "topic".to_string(),
+                node_kind: "concept".to_string(),
                 display_label: "Register".to_string(),
                 summary: None,
             },
@@ -514,7 +576,7 @@ mod tests {
         let edges = vec![
             NewEdgeCandidate {
                 canonical_key: String::new(),
-                edge_kind: "mentions".to_string(),
+                edge_kind: "opaque_predicate_7".to_string(),
                 from_display_label: "Acme Print House".to_string(),
                 from_canonical_key: String::new(),
                 to_display_label: "Register".to_string(),
@@ -530,6 +592,15 @@ mod tests {
                 to_canonical_key: String::new(),
                 summary: None,
             },
+            NewEdgeCandidate {
+                canonical_key: String::new(),
+                edge_kind: "Invalid_Predicate".to_string(),
+                from_display_label: "Acme Print House".to_string(),
+                from_canonical_key: String::new(),
+                to_display_label: "Register".to_string(),
+                to_canonical_key: String::new(),
+                summary: None,
+            },
         ];
 
         let prepared = prepare_materialized_edge_candidates(&nodes, &edges);
@@ -537,9 +608,9 @@ mod tests {
         assert_eq!(prepared.len(), 1);
         assert_eq!(
             prepared[0].canonical_key,
-            "entity:acme_print_house--mentions--concept:register"
+            "entity:acme_print_house--opaque_predicate_7--concept:register"
         );
-        assert_eq!(prepared[0].edge_kind, "mentions");
+        assert_eq!(prepared[0].edge_kind, "opaque_predicate_7");
         assert_eq!(prepared[0].from_canonical_key, "entity:acme_print_house");
         assert_eq!(prepared[0].to_canonical_key, "concept:register");
     }
@@ -549,7 +620,7 @@ mod tests {
         let prepared = prepare_materialized_node_candidates(&[
             NewNodeCandidate {
                 canonical_key: String::new(),
-                node_kind: "topic".to_string(),
+                node_kind: "concept".to_string(),
                 display_label: "Register".to_string(),
                 summary: None,
             },

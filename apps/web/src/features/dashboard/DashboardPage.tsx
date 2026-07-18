@@ -1,93 +1,78 @@
-import { Suspense, useCallback, useMemo } from 'react';
-import { useTranslation } from 'react-i18next';
-import { useNavigate } from 'react-router-dom';
-import {
-  Activity,
-  FileText,
-  MessageSquare,
-  RefreshCw,
-  XCircle,
-} from 'lucide-react';
+import { Suspense, useCallback, useMemo } from 'react'
+import { useTranslation } from 'react-i18next'
+import { useNavigate } from 'react-router-dom'
+import { Activity, FileText, MessageSquare, RefreshCw, XCircle } from 'lucide-react'
 
-import { Button } from '@/shared/components/ui/button';
-import { PageHeader } from '@/shared/components/layout/PageHeader';
-import { PageShell } from '@/shared/components/layout/PageShell';
-import { useApp } from '@/shared/contexts/app-context';
-import { useLibraryMetrics } from '@/features/dashboard/hooks/useLibraryMetrics';
+import { Button } from '@/shared/components/ui/button'
+import { PageHeader } from '@/shared/components/layout/PageHeader'
+import { PageShell } from '@/shared/components/layout/PageShell'
+import { useApp } from '@/shared/contexts/app-context'
+import { useLibraryMetrics } from '@/features/dashboard/hooks/useLibraryMetrics'
 
-import { SummaryCards, type SummaryCard } from "./components/SummaryCards";
-import { LibraryHealthPanel, type HealthRow } from "./components/LibraryHealthPanel";
-import { RecentDocumentsList } from "./components/RecentDocumentsList";
-import { AttentionPanel } from "./components/AttentionPanel";
-import { LatestIngestPanel } from "./components/LatestIngestPanel";
-import { DashboardSkeleton } from "./components/DashboardSkeleton";
-import { DashboardEmptyState } from "./components/DashboardEmptyState";
-import type { RecentWebRun } from "./model/types";
-import { buildDocumentsPath } from "./model/types";
+import { SummaryCards, type SummaryCard } from './components/SummaryCards'
+import { LibraryHealthPanel, type HealthRow } from './components/LibraryHealthPanel'
+import { RecentDocumentsList } from './components/RecentDocumentsList'
+import { AttentionPanel } from './components/AttentionPanel'
+import { LatestIngestPanel } from './components/LatestIngestPanel'
+import { DashboardSkeleton } from './components/DashboardSkeleton'
+import { DashboardEmptyState } from './components/DashboardEmptyState'
+import type { RecentWebRun } from './model/types'
+import { buildDocumentsPath } from './model/types'
 
 function pickLatestRun(runs: RecentWebRun[]): RecentWebRun | undefined {
-  let latest: RecentWebRun | undefined;
-  let latestTs = -Infinity;
+  let latest: RecentWebRun | undefined
+  let latestTs = -Infinity
   for (const run of runs) {
-    const ts = run.lastActivityAt ? new Date(run.lastActivityAt).getTime() : 0;
+    const ts = run.lastActivityAt ? new Date(run.lastActivityAt).getTime() : 0
     if (ts > latestTs) {
-      latestTs = ts;
-      latest = run;
+      latestTs = ts
+      latest = run
     }
   }
-  return latest;
+  return latest
 }
 
 function DashboardContent({
   activeLibraryId,
   queryReady,
-}: {
-  activeLibraryId: string;
-  queryReady: boolean;
-}) {
-  const { t, i18n } = useTranslation();
-  const navigate = useNavigate();
+}: Readonly<{
+  activeLibraryId: string
+  queryReady: boolean
+}>) {
+  const { t, i18n } = useTranslation()
+  const navigate = useNavigate()
 
   // Canonical live-metrics path: a shared hook polls the dashboard
   // endpoint every 2.5 s while the tab is visible, pauses on hide,
   // and fires an immediate refresh when the tab resumes. That stops
   // the "number frozen since yesterday" class of bugs — operators
   // see live-changing counts without any refresh clicks.
-  const { data, isRefreshing, refresh } = useLibraryMetrics(activeLibraryId);
+  const { data, isRefreshing, refresh } = useLibraryMetrics(activeLibraryId)
 
   const handleRefresh = useCallback(async () => {
-    if (isRefreshing) return;
-    await refresh();
-  }, [isRefreshing, refresh]);
-  const refreshing = isRefreshing;
+    if (isRefreshing) return
+    await refresh()
+  }, [isRefreshing, refresh])
+  const refreshing = isRefreshing
 
   // All derived values depend on `data`; useMemo stabilizes them so the
   // extracted widgets (wrapped in React.memo) only re-render when their
   // own data slice changes, not on every dashboard-level state flip.
   const derived = useMemo(() => {
-    const { overview, graph, recentWebRuns, recentDocuments, attention } = data;
+    const { documentMetrics, graph, recentWebRuns, recentDocuments, attention } = data
 
-    const totalDocuments = overview.totalDocuments;
-    const graphReadyCount = graph.graphReadyDocumentCount;
-    const graphSparseCount = graph.graphSparseDocumentCount;
-    const failedCount = overview.failedDocuments;
-    const processingCount = overview.processingDocuments;
-    const readyCount = overview.readyDocuments;
-    const readableWithoutGraphCount = Math.max(
-      0,
-      readyCount - graphReadyCount - graphSparseCount,
-    );
-    // `in_flight` is a derived value — `processing + queued`, both
-    // already rolled into `overview.processingDocuments` by the
-    // canonical aggregator on the backend. The old `metricValue(…,
-    // 'in_flight', processingCount)` fallback was a two-source
-    // drift trap: the `metrics[]` value came from a separate
-    // queue_depth + running_attempts calculation and could diverge
-    // from the document-level `processingCount` during rebuilds.
-    // Read straight from the overview so dashboard numbers stay
-    // internally consistent.
-    const inFlightCount = processingCount;
-    const latestRun = pickLatestRun(recentWebRuns);
+    const totalDocuments = documentMetrics.total
+    const graphReadyCount = graph.graphReadyDocumentCount
+    const graphSparseCount = graph.graphSparseDocumentCount
+    const failedCount = documentMetrics.failed
+    const processingCount = documentMetrics.processing + documentMetrics.queued
+    const readyCount = documentMetrics.ready
+    const readableWithoutGraphCount = Math.max(0, readyCount - graphReadyCount - graphSparseCount)
+    // In-flight is derived from the canonical mutually exclusive
+    // document lifecycle buckets. It is intentionally not a separate
+    // server field, so retries cannot introduce a second source of truth.
+    const inFlightCount = processingCount
+    const latestRun = pickLatestRun(recentWebRuns)
 
     const summaryCards: SummaryCard[] = [
       {
@@ -126,7 +111,7 @@ function DashboardContent({
         tone: failedCount > 0 ? 'failed' : 'ready',
         actionPath: buildDocumentsPath({ status: 'failed' }),
       },
-    ];
+    ]
 
     const healthRows: HealthRow[] = [
       {
@@ -168,7 +153,7 @@ function DashboardContent({
         className: 'bg-status-failed',
         actionPath: buildDocumentsPath({ status: 'failed' }),
       },
-    ];
+    ]
 
     return {
       totalDocuments,
@@ -181,8 +166,8 @@ function DashboardContent({
       graph,
       recentDocuments,
       attention,
-    };
-  }, [data, t]);
+    }
+  }, [data, t])
 
   return (
     <PageShell
@@ -193,7 +178,11 @@ function DashboardContent({
           actions={
             <>
               {queryReady && (
-                <Button size="sm" onClick={() => navigate('/assistant')} className="h-8 px-3 text-xs">
+                <Button
+                  size="sm"
+                  onClick={() => navigate('/assistant')}
+                  className="h-8 px-3 text-xs"
+                >
                   <MessageSquare className="h-4 w-4 mr-2" />
                   {t('dashboard.askAssistant')}
                 </Button>
@@ -205,7 +194,9 @@ function DashboardContent({
                 disabled={refreshing}
                 className="h-8 px-2.5 text-xs sm:px-3"
               >
-                <RefreshCw className={`h-3.5 w-3.5 sm:mr-1.5 ${refreshing ? 'animate-spin' : ''}`} />
+                <RefreshCw
+                  className={`h-3.5 w-3.5 sm:mr-1.5 ${refreshing ? 'animate-spin' : ''}`}
+                />
                 <span className="sr-only sm:not-sr-only">{t('dashboard.refresh')}</span>
               </Button>
             </>
@@ -242,38 +233,27 @@ function DashboardContent({
           </div>
 
           <div className="flex flex-col gap-4">
-            <AttentionPanel
-              t={t}
-              attention={derived.attention}
-              onNavigate={navigate}
-            />
+            <AttentionPanel t={t} attention={derived.attention} onNavigate={navigate} />
             <div className="flex-1">
-              <LatestIngestPanel
-                t={t}
-                locale={i18n.language}
-                latestRun={derived.latestRun}
-              />
+              <LatestIngestPanel t={t} locale={i18n.language} latestRun={derived.latestRun} />
             </div>
           </div>
         </div>
       </div>
     </PageShell>
-  );
+  )
 }
 
 export default function DashboardPage() {
-  const { activeLibrary } = useApp();
+  const { activeLibrary } = useApp()
 
   if (!activeLibrary) {
-    return <DashboardEmptyState />;
+    return <DashboardEmptyState />
   }
 
   return (
     <Suspense fallback={<DashboardSkeleton />}>
-      <DashboardContent
-        activeLibraryId={activeLibrary.id}
-        queryReady={activeLibrary.queryReady}
-      />
+      <DashboardContent activeLibraryId={activeLibrary.id} queryReady={activeLibrary.queryReady} />
     </Suspense>
-  );
+  )
 }

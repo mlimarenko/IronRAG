@@ -79,6 +79,31 @@ impl std::str::FromStr for RuntimeQueryMode {
     }
 }
 
+/// Controls the optional provider-backed semantic reranker.
+///
+/// The deterministic structural ranker remains the fail-safe path in
+/// every mode. `Off` is deliberately the default so an upgrade cannot add a
+/// provider round-trip or change answer ordering without operator intent.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum SemanticRerankMode {
+    #[default]
+    Off,
+    Shadow,
+    Active,
+}
+
+impl SemanticRerankMode {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Shadow => "shadow",
+            Self::Active => "active",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum QueryIntentCacheStatus {
@@ -113,12 +138,47 @@ pub enum RerankStatus {
     Failed,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum SemanticRerankStrategy {
+    ProviderSemantic,
+    LexicalHeuristicWithProviderShadow,
+    LexicalHeuristicFallback,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum SemanticRerankOutcome {
+    ShadowScheduled,
+    ShadowCapacitySkipped,
+    Applied,
+    MissingBinding,
+    TimedOut,
+    ProviderFailure,
+    InvalidResponse,
+    NotApplicable,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct SemanticRerankMetadata {
+    pub mode: SemanticRerankMode,
+    pub strategy: SemanticRerankStrategy,
+    pub outcome: SemanticRerankOutcome,
+    /// Candidates prepared within the configured text budgets. This is not a
+    /// claim that a provider request started: shadow scheduling can be skipped
+    /// and active mode can fail while resolving its optional binding.
+    pub prepared_candidate_count: usize,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct RerankMetadata {
     pub status: RerankStatus,
     pub candidate_count: usize,
     pub reordered_count: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub semantic_rerank: Option<SemanticRerankMetadata>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
@@ -348,6 +408,77 @@ pub enum QueryVerificationState {
     Failed,
 }
 
+/// Finalizer-owned public disposition for an answer body.
+///
+/// Verification state describes evidence analysis; disposition describes what
+/// callers may do with the body after visibility policy has run. Keeping these
+/// concepts separate prevents transports from treating an inapplicable prose
+/// verifier as a failure or a strict safe fallback as a factual answer.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum QueryAnswerDisposition {
+    #[default]
+    NonTerminal,
+    FactualReady,
+    SafeFallback,
+    Clarification,
+}
+
+impl QueryAnswerDisposition {
+    #[must_use]
+    pub const fn is_factual_ready(self) -> bool {
+        matches!(self, Self::FactualReady)
+    }
+
+    #[must_use]
+    pub const fn is_terminal(self) -> bool {
+        matches!(self, Self::FactualReady | Self::SafeFallback | Self::Clarification)
+    }
+
+    #[must_use]
+    pub const fn requires_repair(self) -> bool {
+        matches!(self, Self::NonTerminal)
+    }
+
+    #[must_use]
+    pub const fn storage_label(self) -> &'static str {
+        match self {
+            Self::NonTerminal => "non_terminal",
+            Self::FactualReady => "factual_ready",
+            Self::SafeFallback => "safe_fallback",
+            Self::Clarification => "clarification",
+        }
+    }
+}
+
+/// Structured provenance for one typed clarification candidate.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct QueryAnswerCandidateProvenance {
+    pub entity_id: Option<Uuid>,
+    pub document_id: Option<Uuid>,
+    pub chunk_id: Option<Uuid>,
+}
+
+/// One typed disambiguation choice surfaced by the answer pipeline.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct QueryAnswerCandidate {
+    pub label: String,
+    pub kind: String,
+    pub confidence: Option<f64>,
+    pub provenance: QueryAnswerCandidateProvenance,
+}
+
+/// Typed clarification metadata persisted with a query answer outcome.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct QueryClarification {
+    pub required: bool,
+    pub question: Option<String>,
+    pub answer_candidates: Vec<QueryAnswerCandidate>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct QueryVerificationWarning {
@@ -378,4 +509,36 @@ pub struct QueryExecutionDetail {
     pub graph_edge_references: Vec<QueryGraphEdgeReference>,
     pub verification_state: QueryVerificationState,
     pub verification_warnings: Vec<QueryVerificationWarning>,
+    /// Persisted finalizer-owned disposition of the public response body.
+    #[serde(default)]
+    pub answer_disposition: QueryAnswerDisposition,
+    /// Persisted typed clarification, when the disposition is
+    /// [`QueryAnswerDisposition::Clarification`].
+    #[serde(default)]
+    pub clarification: QueryClarification,
+    /// Canonical compiler output used by the execution. This is an internal
+    /// runtime hand-off for typed completion policy and cache replay; it is
+    /// intentionally absent from public HTTP/OpenAPI payloads.
+    #[serde(skip)]
+    #[schema(ignore)]
+    pub query_ir: Option<crate::domains::query_ir::QueryIR>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{RerankMetadata, RerankStatus};
+
+    #[test]
+    fn semantic_rerank_metadata_is_absent_for_legacy_off_path() {
+        let metadata = RerankMetadata {
+            status: RerankStatus::Applied,
+            candidate_count: 4,
+            reordered_count: Some(2),
+            semantic_rerank: None,
+        };
+
+        let value = serde_json::to_value(metadata).expect("metadata should serialize");
+
+        assert!(value.get("semanticRerank").is_none());
+    }
 }

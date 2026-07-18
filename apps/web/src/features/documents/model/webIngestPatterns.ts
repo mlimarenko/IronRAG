@@ -1,205 +1,181 @@
-import type { WebIngestPattern, WebIngestUrlFilter } from "@/shared/api/admin";
+import type { WebIngestPattern, WebIngestUrlFilter } from '@/shared/api/admin'
 
-const PATTERN_KINDS: readonly WebIngestPattern["kind"][] = [
-  "url_prefix",
-  "path_prefix",
-  "glob",
-];
+const PATTERN_KINDS: readonly string[] = ['url_prefix', 'path_prefix', 'glob']
+const PATTERN_KIND_VALUES = new Set<string>(PATTERN_KINDS)
 
-function isWebIngestPatternKind(value: string): value is WebIngestPattern["kind"] {
-  return PATTERN_KINDS.some((kind) => kind === value);
+function isWebIngestPatternKind(value: string): value is WebIngestPattern['kind'] {
+  return PATTERN_KIND_VALUES.has(value)
 }
 
-function inferPatternKind(value: string): WebIngestPattern["kind"] {
+function inferPatternKind(value: string): WebIngestPattern['kind'] {
   if (/^https?:\/\//i.test(value)) {
-    return "url_prefix";
+    return 'url_prefix'
   }
-  if (value.startsWith("/")) {
-    return "path_prefix";
+  if (value.startsWith('/')) {
+    return 'path_prefix'
   }
-  return "glob";
+  return 'glob'
 }
 
-function validatePatternValue(
-  kind: WebIngestPattern["kind"],
-  value: string,
-): string {
-  const normalized = value.trim();
+function validatePatternValue(kind: WebIngestPattern['kind'], value: string): string {
+  const normalized = value.trim()
   if (!normalized) {
-    throw new Error(`${kind} value is empty`);
+    throw new Error(`${kind} value is empty`)
   }
   if (normalized.length > 2048) {
-    throw new Error(`${kind} value is longer than 2048 characters`);
+    throw new Error(`${kind} value is longer than 2048 characters`)
   }
-  if (kind === "path_prefix" && !normalized.startsWith("/")) {
-    throw new Error("path_prefix value must start with /");
+  if (kind === 'path_prefix' && !normalized.startsWith('/')) {
+    throw new Error('path_prefix value must start with /')
   }
-  if (kind === "url_prefix") {
+  if (kind === 'url_prefix') {
     try {
-      new URL(normalized);
+      new URL(normalized)
     } catch {
-      throw new Error("url_prefix value must be an absolute URL");
+      throw new Error('url_prefix value must be an absolute URL')
     }
   }
-  return normalized;
+  return normalized
 }
 
-export function formatWebIngestPatterns(
-  patterns: WebIngestPattern[] | undefined,
-): string {
-  return (patterns ?? [])
-    .map((pattern) => `${pattern.kind}:${pattern.value}`)
-    .join("\n");
+export function formatWebIngestPatterns(patterns: WebIngestPattern[] | undefined): string {
+  return (patterns ?? []).map((pattern) => `${pattern.kind}:${pattern.value}`).join('\n')
 }
 
-export function parseWebIngestPatternText(
-  text: string,
-): WebIngestPattern[] {
-  const seen = new Set<string>();
-  const patterns: WebIngestPattern[] = [];
+export function parseWebIngestPatternText(text: string): WebIngestPattern[] {
+  const seen = new Set<string>()
+  const patterns: WebIngestPattern[] = []
   for (const line of text
     .split(/\r?\n/)
     .map((line) => line.trim())
     .filter(Boolean)) {
-    const separator = line.indexOf(":");
-    let kind: WebIngestPattern["kind"];
-    let value: string;
+    const separator = line.indexOf(':')
+    let kind: WebIngestPattern['kind']
+    let value: string
     if (separator > 0 && !/^https?:\/\//i.test(line)) {
-      const rawKind = line.slice(0, separator).trim();
+      const rawKind = line.slice(0, separator).trim()
       if (!isWebIngestPatternKind(rawKind)) {
-        throw new Error(`${rawKind} is not a supported pattern kind`);
+        throw new Error(`${rawKind} is not a supported pattern kind`)
       }
-      kind = rawKind;
-      value = line.slice(separator + 1).trim();
+      kind = rawKind
+      value = line.slice(separator + 1).trim()
     } else {
-      kind = inferPatternKind(line);
-      value = line;
+      kind = inferPatternKind(line)
+      value = line
     }
-    const normalizedValue = validatePatternValue(kind, value);
-    const dedupeKey = `${kind}\u0000${normalizedValue}`;
+    const normalizedValue = validatePatternValue(kind, value)
+    const dedupeKey = `${kind}\u0000${normalizedValue}`
     if (!seen.has(dedupeKey)) {
-      seen.add(dedupeKey);
-      patterns.push({ kind, value: normalizedValue });
+      seen.add(dedupeKey)
+      patterns.push({ kind, value: normalizedValue })
     }
   }
-  return patterns;
+  return patterns
 }
 
-export function buildWebIngestUrlFilter(
-  allowText: string,
-  blockText: string,
-): WebIngestUrlFilter {
+export function buildWebIngestUrlFilter(allowText: string, blockText: string): WebIngestUrlFilter {
   return {
     allowPatterns: parseWebIngestPatternText(allowText),
     blockPatterns: parseWebIngestPatternText(blockText),
-  };
+  }
 }
-
-export type WebIngestFilterMatchKind = "allow" | "block";
 
 export type WebIngestFilterEvaluation =
   | {
-      status: "invalid_url";
-      passes: false;
-      normalizedUrl: null;
-      matchKind: null;
-      matchedPattern: null;
+      status: 'invalid_url'
+      passes: false
+      normalizedUrl: null
+      matchKind: null
+      matchedPattern: null
     }
   | {
-      status: "blocked";
-      passes: false;
-      normalizedUrl: string;
-      matchKind: "block";
-      matchedPattern: WebIngestPattern;
+      status: 'blocked'
+      passes: false
+      normalizedUrl: string
+      matchKind: 'block'
+      matchedPattern: WebIngestPattern
     }
   | {
-      status: "no_allow_match";
-      passes: false;
-      normalizedUrl: string;
-      matchKind: null;
-      matchedPattern: null;
+      status: 'no_allow_match'
+      passes: false
+      normalizedUrl: string
+      matchKind: null
+      matchedPattern: null
     }
   | {
-      status: "allowed";
-      passes: true;
-      normalizedUrl: string;
-      matchKind: "allow";
-      matchedPattern: WebIngestPattern;
+      status: 'allowed'
+      passes: true
+      normalizedUrl: string
+      matchKind: 'allow'
+      matchedPattern: WebIngestPattern
     }
   | {
-      status: "allowed_without_rules";
-      passes: true;
-      normalizedUrl: string;
-      matchKind: null;
-      matchedPattern: null;
-    };
+      status: 'allowed_without_rules'
+      passes: true
+      normalizedUrl: string
+      matchKind: null
+      matchedPattern: null
+    }
 
 type EvaluationUrl = {
-  parsedUrl: URL;
-  url: string;
-};
+  parsedUrl: URL
+  url: string
+}
 
 function normalizeEvaluationUrl(value: string): EvaluationUrl | null {
-  const trimmed = value.trim();
-  if (!trimmed) return null;
-  const candidate = /^https?:\/\//i.test(trimmed)
-    ? trimmed
-    : `https://${trimmed}`;
+  const trimmed = value.trim()
+  if (!trimmed) return null
+  const candidate = /^https?:\/\//i.test(trimmed) ? trimmed : `https://${trimmed}`
   try {
-    return { parsedUrl: new URL(candidate), url: candidate };
+    return { parsedUrl: new URL(candidate), url: candidate }
   } catch {
-    return null;
+    return null
   }
 }
 
 function wildcardMatches(pattern: string, candidate: string): boolean {
-  let patternIndex = 0;
-  let candidateIndex = 0;
-  let starIndex = -1;
-  let starCandidateIndex = 0;
+  let patternIndex = 0
+  let candidateIndex = 0
+  let starIndex = -1
+  let starCandidateIndex = 0
 
   while (candidateIndex < candidate.length) {
     if (
       patternIndex < pattern.length &&
-      (pattern[patternIndex] === candidate[candidateIndex] ||
-        pattern[patternIndex] === "?")
+      (pattern[patternIndex] === candidate[candidateIndex] || pattern[patternIndex] === '?')
     ) {
-      patternIndex += 1;
-      candidateIndex += 1;
-    } else if (patternIndex < pattern.length && pattern[patternIndex] === "*") {
-      starIndex = patternIndex;
-      patternIndex += 1;
-      starCandidateIndex = candidateIndex;
+      patternIndex += 1
+      candidateIndex += 1
+    } else if (patternIndex < pattern.length && pattern[patternIndex] === '*') {
+      starIndex = patternIndex
+      patternIndex += 1
+      starCandidateIndex = candidateIndex
     } else if (starIndex >= 0) {
-      patternIndex = starIndex + 1;
-      starCandidateIndex += 1;
-      candidateIndex = starCandidateIndex;
+      patternIndex = starIndex + 1
+      starCandidateIndex += 1
+      candidateIndex = starCandidateIndex
     } else {
-      return false;
+      return false
     }
   }
 
-  while (patternIndex < pattern.length && pattern[patternIndex] === "*") {
-    patternIndex += 1;
+  while (patternIndex < pattern.length && pattern[patternIndex] === '*') {
+    patternIndex += 1
   }
 
-  return patternIndex === pattern.length;
+  return patternIndex === pattern.length
 }
 
-function matchWebIngestPattern(
-  url: string,
-  parsedUrl: URL,
-  pattern: WebIngestPattern,
-): boolean {
+function matchWebIngestPattern(url: string, parsedUrl: URL, pattern: WebIngestPattern): boolean {
   switch (pattern.kind) {
-    case "url_prefix":
-      return url.startsWith(pattern.value);
-    case "path_prefix":
-      return parsedUrl.pathname.startsWith(pattern.value);
-    case "glob":
-      return wildcardMatches(pattern.value, url);
+    case 'url_prefix':
+      return url.startsWith(pattern.value)
+    case 'path_prefix':
+      return parsedUrl.pathname.startsWith(pattern.value)
+    case 'glob':
+      return wildcardMatches(pattern.value, url)
     default:
-      return false;
+      return false
   }
 }
 
@@ -208,69 +184,66 @@ function findMatchedPattern(
   parsedUrl: URL,
   patterns: WebIngestPattern[],
 ): WebIngestPattern | null {
-  return (
-    patterns.find((pattern) => matchWebIngestPattern(url, parsedUrl, pattern)) ??
-    null
-  );
+  return patterns.find((pattern) => matchWebIngestPattern(url, parsedUrl, pattern)) ?? null
 }
 
 export function formatWebIngestPattern(pattern: WebIngestPattern): string {
-  return `${pattern.kind}:${pattern.value}`;
+  return `${pattern.kind}:${pattern.value}`
 }
 
 export function evaluateWebIngestUrlFilter(
   urlText: string,
   filter: WebIngestUrlFilter,
 ): WebIngestFilterEvaluation {
-  const evaluationUrl = normalizeEvaluationUrl(urlText);
+  const evaluationUrl = normalizeEvaluationUrl(urlText)
   if (evaluationUrl == null) {
     return {
-      status: "invalid_url",
+      status: 'invalid_url',
       passes: false,
       normalizedUrl: null,
       matchKind: null,
       matchedPattern: null,
-    };
+    }
   }
-  const { parsedUrl, url } = evaluationUrl;
+  const { parsedUrl, url } = evaluationUrl
 
-  const blockedPattern = findMatchedPattern(url, parsedUrl, filter.blockPatterns);
+  const blockedPattern = findMatchedPattern(url, parsedUrl, filter.blockPatterns)
   if (blockedPattern) {
     return {
-      status: "blocked",
+      status: 'blocked',
       passes: false,
       normalizedUrl: url,
-      matchKind: "block",
+      matchKind: 'block',
       matchedPattern: blockedPattern,
-    };
+    }
   }
 
   if (filter.allowPatterns.length === 0) {
     return {
-      status: "allowed_without_rules",
+      status: 'allowed_without_rules',
       passes: true,
       normalizedUrl: url,
       matchKind: null,
       matchedPattern: null,
-    };
+    }
   }
 
-  const allowedPattern = findMatchedPattern(url, parsedUrl, filter.allowPatterns);
+  const allowedPattern = findMatchedPattern(url, parsedUrl, filter.allowPatterns)
   if (allowedPattern) {
     return {
-      status: "allowed",
+      status: 'allowed',
       passes: true,
       normalizedUrl: url,
-      matchKind: "allow",
+      matchKind: 'allow',
       matchedPattern: allowedPattern,
-    };
+    }
   }
 
   return {
-    status: "no_allow_match",
+    status: 'no_allow_match',
     passes: false,
     normalizedUrl: url,
     matchKind: null,
     matchedPattern: null,
-  };
+  }
 }

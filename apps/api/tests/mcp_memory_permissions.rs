@@ -1,7 +1,7 @@
-#![allow(clippy::unwrap_used, clippy::expect_used)]
-
 #[path = "support/iam_token_support.rs"]
 mod iam_token_support;
+#[path = "support/mcp_tool_call_support.rs"]
+mod mcp_tool_call_support;
 
 use anyhow::Context;
 use axum::{
@@ -136,7 +136,7 @@ impl McpPermissionsFixture {
                     .uri(uri)
                     .header(header::AUTHORIZATION, format!("Bearer {token}"))
                     .body(Body::empty())
-                    .expect("build mcp capabilities request"),
+                    .context("failed to build MCP capabilities request")?,
             )
             .await
             .context("MCP capabilities request failed")?;
@@ -163,38 +163,15 @@ impl McpPermissionsFixture {
     }
 
     async fn mcp_tools_list_at(&self, token: &str, uri: &str) -> anyhow::Result<Value> {
-        let response = self
-            .app()
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri(uri)
-                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
-                    .header(header::CONTENT_TYPE, "application/json")
-                    .body(Body::from(
-                        json!({
-                            "jsonrpc": "2.0",
-                            "id": "permissions-tools-list",
-                            "method": "tools/list",
-                        })
-                        .to_string(),
-                    ))
-                    .expect("build mcp tools/list request"),
-            )
-            .await
-            .context("MCP tools/list request failed")?;
-
-        if response.status() != StatusCode::OK {
-            anyhow::bail!("unexpected status {} for tools/list", response.status());
-        }
-
-        let bytes = response
-            .into_body()
-            .collect()
-            .await
-            .context("failed to collect tools/list response body")?
-            .to_bytes();
-        serde_json::from_slice(&bytes).context("failed to decode tools/list response json")
+        mcp_tool_call_support::call_rpc(
+            self.app(),
+            uri,
+            token,
+            "permissions-tools-list",
+            "tools/list",
+            json!({}),
+        )
+        .await
     }
 
     async fn mcp_tool_call(
@@ -222,42 +199,15 @@ impl McpPermissionsFixture {
         tool_name: &str,
         arguments: Value,
     ) -> anyhow::Result<Value> {
-        let response = self
-            .app()
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri(uri)
-                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
-                    .header(header::CONTENT_TYPE, "application/json")
-                    .body(Body::from(
-                        json!({
-                            "jsonrpc": "2.0",
-                            "id": "permissions-test",
-                            "method": "tools/call",
-                            "params": {
-                                "name": tool_name,
-                                "arguments": arguments,
-                            },
-                        })
-                        .to_string(),
-                    ))
-                    .expect("build mcp permissions request"),
-            )
-            .await
-            .with_context(|| format!("MCP permissions tool call {tool_name} failed"))?;
-
-        if response.status() != StatusCode::OK {
-            anyhow::bail!("unexpected status {} for tool {tool_name}", response.status());
-        }
-
-        let bytes = response
-            .into_body()
-            .collect()
-            .await
-            .context("failed to collect permissions response body")?
-            .to_bytes();
-        serde_json::from_slice(&bytes).context("failed to decode mcp permissions response json")
+        mcp_tool_call_support::call_tool(
+            self.app(),
+            uri,
+            token,
+            "permissions-test",
+            tool_name,
+            arguments,
+        )
+        .await
     }
 
     async fn create_foreign_document(&self, external_key: &str) -> anyhow::Result<Uuid> {
@@ -379,10 +329,10 @@ async fn read_only_tokens_do_not_receive_writable_tool_descriptors() -> anyhow::
         assert!(tool_names.contains(&"get_runtime_execution_trace"));
         assert!(!tool_names.contains(&"create_workspace"));
         assert!(!tool_names.contains(&"create_library"));
-        assert!(!tool_names.contains(&"upload_documents"));
-        assert!(!tool_names.contains(&"update_document"));
+        assert!(!tool_names.contains(&"create_documents"));
+        assert!(!tool_names.contains(&"create_document_revision"));
         assert!(!tool_names.contains(&"delete_document"));
-        assert!(!tool_names.contains(&"get_mutation_status"));
+        assert!(!tool_names.contains(&"get_operation"));
 
         Ok(())
     }
@@ -559,10 +509,10 @@ async fn mcp_tool_visibility_matches_token_scope() -> anyhow::Result<()> {
 
         for expected in [
             "search_documents",
-            "upload_documents",
-            "update_document",
+            "create_documents",
+            "create_document_revision",
             "delete_document",
-            "get_mutation_status",
+            "get_operation",
             "read_document",
         ] {
             assert!(tool_names.contains(&expected));

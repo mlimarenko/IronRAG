@@ -28,7 +28,7 @@ pub(crate) fn normalize_graph_extraction_output(
         .map_err(|error| FailedNormalizationAttempt { parse_error: error.to_string() })
 }
 
-pub fn parse_graph_extraction_output(
+pub(super) fn parse_graph_extraction_output(
     output_text: &str,
 ) -> std::result::Result<GraphExtractionCandidateSet, GraphServiceError> {
     let parsed = extract_json_payload(output_text).map_err(|error| {
@@ -64,14 +64,13 @@ pub fn parse_graph_extraction_output(
         .unwrap_or_default();
 
     let candidate_set = GraphExtractionCandidateSet { entities, relations };
-    validate_graph_extraction_candidate_set(&candidate_set).map_err(|failure| {
-        GraphServiceError::ProviderUnavailable { message: failure.summary.clone() }
-    })?;
+    validate_graph_extraction_candidate_set(&candidate_set)
+        .map_err(|failure| GraphServiceError::ProviderUnavailable { message: failure.summary })?;
     Ok(candidate_set)
 }
 
 #[must_use]
-pub fn sanitize_graph_extraction_candidate_set(
+pub(super) fn sanitize_graph_extraction_candidate_set(
     candidate_set: GraphExtractionCandidateSet,
     source_text: &str,
 ) -> GraphExtractionCandidateSet {
@@ -149,7 +148,7 @@ pub(crate) fn repair_graph_extraction_candidate_set(
                 .as_deref()
                 .map(repair_extracted_text)
                 .filter(|value| !value.is_empty() && !contains_control_or_mojibake(value));
-            Some(GraphEntityCandidate { label, aliases, sub_type, summary, ..entity })
+            Some(GraphEntityCandidate { label, sub_type, aliases, summary, ..entity })
         })
         .collect::<Vec<_>>();
 
@@ -264,7 +263,7 @@ fn is_short_mixed_script_alpha_label(value: &str) -> bool {
     if !(2..=4).contains(&chars.len()) || !chars.iter().all(|ch| ch.is_alphabetic()) {
         return false;
     }
-    chars.iter().any(|ch| ch.is_ascii_alphabetic())
+    chars.iter().any(char::is_ascii_alphabetic)
         && chars.iter().any(|ch| ch.is_alphabetic() && !ch.is_ascii_alphabetic())
 }
 
@@ -283,7 +282,7 @@ fn has_numeric_measurement_value_before(text: &str) -> bool {
     {
         index -= 1;
     }
-    if index == end || !chars[index..end].iter().any(|ch| ch.is_ascii_digit()) {
+    if index == end || !chars[index..end].iter().any(char::is_ascii_digit) {
         return false;
     }
     if index == 0 {
@@ -293,107 +292,31 @@ fn has_numeric_measurement_value_before(text: &str) -> bool {
     !preceding.is_alphanumeric() && !matches!(preceding, '_' | '-')
 }
 
-fn is_formula_operator(ch: char) -> bool {
+const fn is_formula_operator(ch: char) -> bool {
     matches!(ch, '=' | ':' | '+' | '-' | '*' | '/' | '<' | '>' | '(' | ')' | '[' | ']' | '{' | '}')
 }
 
-pub fn validate_graph_extraction_candidate_set(
+pub(super) fn validate_graph_extraction_candidate_set(
     candidate_set: &GraphExtractionCandidateSet,
 ) -> std::result::Result<(), GraphExtractionTaskFailure> {
     if candidate_set.entities.iter().any(|entity| entity.label.trim().is_empty())
         || candidate_set.relations.iter().any(|relation| {
             relation.source_label.trim().is_empty()
                 || relation.target_label.trim().is_empty()
-                || relation.relation_type.trim().is_empty()
+                || !crate::services::graph::identity::is_valid_relation_type(
+                    relation.relation_type.trim(),
+                )
         })
     {
         return Err(GraphExtractionTaskFailure {
             code: GraphExtractionTaskFailureCode::InvalidCandidateSet.as_str().to_string(),
-            summary: "graph extraction candidate set contains empty labels or relation fields"
-                .to_string(),
+            summary:
+                "graph extraction candidate set contains invalid labels or relation type syntax"
+                    .to_string(),
         });
     }
 
     Ok(())
-}
-
-fn refine_entity_type(label: &str, current_type: RuntimeNodeType) -> RuntimeNodeType {
-    // Only refine generic "entity" types
-    if current_type != RuntimeNodeType::Entity {
-        return current_type;
-    }
-
-    let label_trimmed = label.trim();
-
-    // Environment variables: ALL_CAPS_WITH_UNDERSCORES → Attribute (configuration parameters)
-    if label_trimmed.len() > 2
-        && label_trimmed.chars().all(|c| c.is_ascii_uppercase() || c == '_' || c.is_ascii_digit())
-        && label_trimmed.contains('_')
-    {
-        return RuntimeNodeType::Attribute;
-    }
-
-    // URL paths: /api/v1/users → Artifact (human-made endpoints)
-    if label_trimmed.starts_with('/') && label_trimmed.len() > 1 {
-        return RuntimeNodeType::Artifact;
-    }
-
-    // HTTP methods → Artifact
-    if matches!(label_trimmed, "GET" | "POST" | "PUT" | "DELETE" | "PATCH" | "OPTIONS" | "HEAD") {
-        return RuntimeNodeType::Artifact;
-    }
-
-    // HTTP status codes: 3 digits 100-599 → Attribute (status indicators)
-    if label_trimmed.len() == 3 {
-        if let Ok(code) = label_trimmed.parse::<u16>() {
-            if (100..600).contains(&code) {
-                return RuntimeNodeType::Attribute;
-            }
-        }
-    }
-
-    // File paths: ends with known extension → Artifact (human-made files)
-    if label_trimmed.contains('.') {
-        let ext = label_trimmed.rsplit('.').next().unwrap_or("");
-        if matches!(
-            ext,
-            "py" | "rs"
-                | "ts"
-                | "tsx"
-                | "js"
-                | "go"
-                | "java"
-                | "kt"
-                | "sql"
-                | "md"
-                | "json"
-                | "yaml"
-                | "yml"
-                | "toml"
-                | "xml"
-                | "html"
-                | "css"
-                | "tf"
-                | "pdf"
-                | "docx"
-                | "xls"
-                | "xlsx"
-                | "xlsb"
-                | "ods"
-                | "pptx"
-                | "pkl"
-                | "csv"
-        ) {
-            return RuntimeNodeType::Artifact;
-        }
-    }
-
-    // URLs → Artifact
-    if label_trimmed.starts_with("http://") || label_trimmed.starts_with("https://") {
-        return RuntimeNodeType::Artifact;
-    }
-
-    current_type
 }
 
 fn parse_entity_candidate(value: &serde_json::Value) -> Option<GraphEntityCandidate> {
@@ -416,7 +339,6 @@ fn parse_entity_candidate(value: &serde_json::Value) -> Option<GraphEntityCandid
         })
         .unwrap_or_default();
 
-    let node_type = refine_entity_type(&label, node_type);
     let sub_type = value
         .get("sub_type")
         .and_then(serde_json::Value::as_str)
@@ -447,12 +369,7 @@ fn parse_relation_candidate(value: &serde_json::Value) -> Option<GraphRelationCa
     {
         return None;
     }
-    let relation_slug =
-        crate::services::graph::identity::normalize_graph_identity_component(relation_type);
-    if crate::services::graph::identity::is_noise_relation_type(&relation_slug) {
-        return None;
-    }
-    let normalized_relation_type = canonical_relation_candidate_type(relation_type)?;
+    let normalized_relation_type = validated_relation_candidate_type(relation_type)?;
 
     Some(GraphRelationCandidate {
         source_label,
@@ -467,18 +384,9 @@ fn parse_relation_candidate(value: &serde_json::Value) -> Option<GraphRelationCa
     })
 }
 
-fn canonical_relation_candidate_type(relation_type: &str) -> Option<String> {
-    if relation_type.is_empty()
-        || !relation_type_is_canonical_ascii(relation_type)
-        || !crate::services::graph::identity::is_canonical_relation_type(relation_type)
-    {
-        return None;
-    }
-    Some(relation_type.to_string())
-}
-
-fn relation_type_is_canonical_ascii(relation_type: &str) -> bool {
-    relation_type.bytes().all(|byte| matches!(byte, b'a'..=b'z' | b'0'..=b'9' | b'_'))
+fn validated_relation_candidate_type(relation_type: &str) -> Option<String> {
+    let normalized = crate::services::graph::identity::normalize_relation_type(relation_type);
+    (!normalized.is_empty()).then_some(normalized)
 }
 
 fn parse_canonical_node_type(raw: &str) -> Option<RuntimeNodeType> {
@@ -527,10 +435,10 @@ fn extract_json_payload(output_text: &str) -> AnyhowResult<serde_json::Value> {
     if let Ok(value) = serde_json::from_str::<serde_json::Value>(unfenced.trim()) {
         return Ok(value);
     }
-    if let Some(candidate) = extract_first_balanced_json(unfenced) {
-        if let Ok(value) = serde_json::from_str::<serde_json::Value>(&candidate) {
-            return Ok(value);
-        }
+    if let Some(candidate) = extract_first_balanced_json(unfenced)
+        && let Ok(value) = serde_json::from_str::<serde_json::Value>(&candidate)
+    {
+        return Ok(value);
     }
 
     // Nothing recoverable (e.g. the model truncated the JSON mid-document).
@@ -565,36 +473,52 @@ fn strip_markdown_code_fence(text: &str) -> &str {
 /// when no balanced region exists (e.g. truncated output).
 fn extract_first_balanced_json(text: &str) -> Option<String> {
     let bytes = text.as_bytes();
-    let start = bytes.iter().position(|&byte| byte == b'{' || byte == b'[')?;
-    let open = bytes[start];
-    let close = if open == b'{' { b'}' } else { b']' };
-    let mut depth = 0i32;
-    let mut in_string = false;
-    let mut escaped = false;
-    for (idx, &byte) in bytes.iter().enumerate().skip(start) {
-        if in_string {
-            if escaped {
-                escaped = false;
-            } else if byte == b'\\' {
-                escaped = true;
-            } else if byte == b'"' {
-                in_string = false;
-            }
-            continue;
+    let start = bytes.iter().position(|&byte| matches!(byte, b'{' | b'['))?;
+    let delimiters = json_delimiters(bytes[start]);
+    let mut state = JsonScanState::default();
+    bytes
+        .iter()
+        .enumerate()
+        .skip(start)
+        .find_map(|(index, &byte)| state.consume(byte, delimiters).then_some(index))
+        .map(|end| text[start..=end].to_string())
+}
+
+#[derive(Default)]
+struct JsonScanState {
+    depth: i32,
+    is_in_string: bool,
+    is_escaped: bool,
+}
+
+impl JsonScanState {
+    fn consume(&mut self, byte: u8, (open, close): (u8, u8)) -> bool {
+        if self.is_in_string {
+            self.consume_string_byte(byte);
+            return false;
         }
         match byte {
-            b'"' => in_string = true,
-            b if b == open => depth += 1,
-            b if b == close => {
-                depth -= 1;
-                if depth == 0 {
-                    return Some(text[start..=idx].to_string());
-                }
-            }
+            b'"' => self.is_in_string = true,
+            byte if byte == open => self.depth += 1,
+            byte if byte == close => self.depth -= 1,
             _ => {}
         }
+        self.depth == 0
     }
-    None
+
+    fn consume_string_byte(&mut self, byte: u8) {
+        if self.is_escaped {
+            self.is_escaped = false;
+        } else if byte == b'\\' {
+            self.is_escaped = true;
+        } else if byte == b'"' {
+            self.is_in_string = false;
+        }
+    }
+}
+
+const fn json_delimiters(open: u8) -> (u8, u8) {
+    if open == b'{' { (b'{', b'}') } else { (b'[', b']') }
 }
 
 #[cfg(test)]
@@ -602,10 +526,30 @@ mod tests {
     use crate::{
         domains::runtime_graph::RuntimeNodeType,
         services::graph::extract::{
-            parse::{has_symbolic_measurement_context, sanitize_graph_extraction_candidate_set},
+            parse::{
+                has_symbolic_measurement_context, parse_graph_extraction_output,
+                sanitize_graph_extraction_candidate_set,
+            },
             types::{GraphEntityCandidate, GraphExtractionCandidateSet, GraphRelationCandidate},
         },
     };
+
+    #[test]
+    fn parser_preserves_llm_node_type_without_label_dictionary_overrides() {
+        let payload = serde_json::json!({
+            "entities": [
+                {"label": "GET", "node_type": "entity", "aliases": [], "sub_type": null, "summary": "opaque"},
+                {"label": "ALPHA_VALUE", "node_type": "entity", "aliases": [], "sub_type": null, "summary": "opaque"},
+                {"label": "/api/v1/items", "node_type": "entity", "aliases": [], "sub_type": null, "summary": "opaque"},
+                {"label": "artifact.json", "node_type": "entity", "aliases": [], "sub_type": null, "summary": "opaque"}
+            ],
+            "relations": []
+        });
+
+        let parsed = parse_graph_extraction_output(&payload.to_string()).expect("valid graph");
+
+        assert!(parsed.entities.iter().all(|entity| entity.node_type == RuntimeNodeType::Entity));
+    }
 
     #[test]
     fn graph_sanitizer_removes_short_ocr_noise_labels_without_dropping_identifiers() {

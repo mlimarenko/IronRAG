@@ -214,57 +214,15 @@ fn find_html_charset_assignment(prefix: &str) -> Option<String> {
 }
 
 fn select_content_root(document: &Html) -> Option<ElementRef<'_>> {
-    const HIGH_CONFIDENCE_SELECTORS: [&str; 5] = [
-        "#main-content.wiki-content",
-        "#main-content",
-        ".wiki-content",
-        "#mw-content-text",
-        ".mw-parser-output",
-    ];
-    const CANDIDATE_SELECTORS: [&str; 13] = [
-        "#main-content.wiki-content",
-        "#main-content",
-        ".wiki-content",
-        "#mw-content-text",
-        ".mw-parser-output",
-        "main",
-        "article",
-        "[role='main']",
-        "#content",
-        "#main",
-        ".content",
-        ".main-content",
-        ".article-content",
-    ];
-
-    let mut high_confidence_best: Option<(usize, ElementRef<'_>)> = None;
-    for (priority, query) in HIGH_CONFIDENCE_SELECTORS.iter().enumerate() {
-        let Some(selector) = parse_selector(query) else {
-            continue;
-        };
-        for element in document.select(&selector) {
-            if !content_root_has_readable_content(element) {
-                continue;
-            }
-            let score = content_root_score(element, priority, HIGH_CONFIDENCE_SELECTORS.len())
-                .max(HIGH_CONFIDENCE_SELECTORS.len().saturating_sub(priority));
-            match high_confidence_best {
-                Some((best_score, _)) if best_score >= score => {}
-                _ => high_confidence_best = Some((score, element)),
-            }
-        }
-    }
-    if let Some((_, element)) = high_confidence_best {
-        return Some(element);
-    }
+    const CONTENT_ROOT_SELECTORS: [&str; 3] = ["main", "article", "[role='main']"];
 
     let mut best: Option<(usize, ElementRef<'_>)> = None;
-    for (priority, query) in CANDIDATE_SELECTORS.iter().enumerate() {
+    for query in CONTENT_ROOT_SELECTORS {
         let Some(selector) = parse_selector(query) else {
             continue;
         };
         for element in document.select(&selector) {
-            let score = content_root_score(element, priority, CANDIDATE_SELECTORS.len());
+            let score = content_root_score(element);
             if score == 0 {
                 continue;
             }
@@ -463,36 +421,17 @@ fn heading_level(tag_name: &str) -> usize {
         .clamp(1, 6)
 }
 
-fn content_root_score(element: ElementRef<'_>, priority: usize, selector_count: usize) -> usize {
+fn content_root_score(element: ElementRef<'_>) -> usize {
     let text_len = normalized_text_from_element(element).chars().count();
     let heading_count = count_descendants(element, "h1, h2, h3");
     let link_count = count_descendants(element, "a[href]");
     let image_count = count_descendants(element, "img");
-    let layout_count = count_descendants(element, "[data-layout], .contentLayout2, .columnLayout");
 
-    let has_meaningful_content = text_len >= 80
-        || heading_count > 0
-        || layout_count > 0
-        || (link_count >= 3 && image_count >= 1);
-    if !has_meaningful_content {
+    if text_len == 0 && heading_count == 0 && link_count == 0 && image_count == 0 {
         return 0;
     }
 
-    let priority_bonus = selector_count.saturating_sub(priority) * 240;
-    priority_bonus
-        + text_len
-        + heading_count * 120
-        + link_count * 18
-        + image_count * 24
-        + layout_count * 160
-}
-
-fn content_root_has_readable_content(element: ElementRef<'_>) -> bool {
-    let text_len = normalized_text_from_element(element).chars().count();
-    text_len >= 20
-        || count_descendants(element, "h1, h2, h3") > 0
-        || count_descendants(element, "a[href]") > 0
-        || count_descendants(element, "img") > 0
+    text_len + heading_count * 120 + link_count * 18 + image_count * 24
 }
 
 fn count_descendants(element: ElementRef<'_>, query: &str) -> usize {
@@ -699,34 +638,26 @@ fn push_list_block(blocks: &mut Vec<String>, element: ElementRef<'_>, ordered: b
 }
 
 fn derive_link_label(element: ElementRef<'_>, href: &str) -> String {
-    for attribute in ["aria-label", "title"] {
-        if let Some(value) = element.value().attr(attribute) {
-            let normalized = normalize_whitespace(value);
-            if !normalized.is_empty() {
-                return normalized;
-            }
-        }
-    }
+    link_label_from_attributes(element)
+        .or_else(|| link_label_from_images(element))
+        .unwrap_or_else(|| fallback_link_label_from_href(href))
+}
 
-    let Some(image_selector) = parse_selector("img") else {
-        return fallback_link_label_from_href(href);
-    };
-    for image in element.select(&image_selector) {
-        if let Some(alt) = image.value().attr("alt") {
-            let normalized = normalize_whitespace(alt);
-            if !normalized.is_empty() {
-                return normalized;
-            }
-        }
-        if let Some(src) = image.value().attr("src") {
-            let stem = media_label_from_path(src);
-            if !stem.is_empty() {
-                return stem;
-            }
-        }
-    }
+fn link_label_from_attributes(element: ElementRef<'_>) -> Option<String> {
+    ["aria-label", "title"].into_iter().find_map(|attribute| {
+        element.value().attr(attribute).map(normalize_whitespace).filter(|value| !value.is_empty())
+    })
+}
 
-    fallback_link_label_from_href(href)
+fn link_label_from_images(element: ElementRef<'_>) -> Option<String> {
+    let image_selector = parse_selector("img")?;
+    element.select(&image_selector).find_map(link_label_from_image)
+}
+
+fn link_label_from_image(image: ElementRef<'_>) -> Option<String> {
+    image.value().attr("alt").map(normalize_whitespace).filter(|value| !value.is_empty()).or_else(
+        || image.value().attr("src").map(media_label_from_path).filter(|value| !value.is_empty()),
+    )
 }
 
 fn fallback_link_label_from_href(href: &str) -> String {
@@ -843,11 +774,7 @@ fn preferred_image_source(element: ElementRef<'_>) -> Option<String> {
     .find(|source| is_candidate_image_resource(source));
     let src =
         image_url_attribute(element, "src").filter(|source| is_candidate_image_resource(source));
-    match (lazy_sources, src) {
-        (Some(lazy), Some(src)) if is_placeholder_image_source(&src) => Some(lazy),
-        (Some(lazy), _) => Some(lazy),
-        (None, src) => src,
-    }
+    lazy_sources.or(src)
 }
 
 fn best_srcset_candidate(srcset: Option<&str>) -> Option<String> {
@@ -939,16 +866,6 @@ fn extract_css_url_values(style: &str) -> Vec<String> {
     values
 }
 
-fn is_placeholder_image_source(source: &str) -> bool {
-    let normalized = source.to_ascii_lowercase();
-    normalized.contains("/-/empty/")
-        || normalized.contains("/empty/")
-        || normalized.contains("placeholder")
-        || normalized.contains("transparent")
-        || normalized.contains("blank.")
-        || normalized.ends_with("/spacer.gif")
-}
-
 fn is_ingestable_image_resource(element: ElementRef<'_>, source: &str) -> bool {
     if element_or_ancestor_hidden(element) {
         return false;
@@ -979,13 +896,11 @@ fn is_candidate_image_resource(source: &str) -> bool {
         .unwrap_or(trimmed)
         .trim_end_matches('/')
         .to_ascii_lowercase();
-    if path.ends_with(".svg") || path.ends_with(".ico") {
+    let extension = path.rsplit('.').next();
+    if matches!(extension, Some("svg" | "ico")) {
         return false;
     }
-    matches!(
-        path.rsplit('.').next(),
-        Some("png" | "jpg" | "jpeg" | "webp" | "gif" | "bmp" | "tif" | "tiff")
-    )
+    matches!(extension, Some("png" | "jpg" | "jpeg" | "webp" | "gif" | "bmp" | "tif" | "tiff"))
 }
 
 fn image_label(element: ElementRef<'_>, figure_caption: Option<&str>) -> Option<String> {
@@ -1043,25 +958,7 @@ fn is_hidden_element(element: ElementRef<'_>) -> bool {
             .value()
             .attr("aria-hidden")
             .is_some_and(|value| value.eq_ignore_ascii_case("true"))
-        || element.value().attr("class").is_some_and(class_hides_element)
         || element.value().attr("style").is_some_and(style_hides_element)
-}
-
-fn class_hides_element(class_value: &str) -> bool {
-    class_value.split_ascii_whitespace().map(|token| token.trim().to_ascii_lowercase()).any(
-        |token| {
-            matches!(
-                token.as_str(),
-                "hidden"
-                    | "is-hidden"
-                    | "u-hidden"
-                    | "d-none"
-                    | "sr-only"
-                    | "visually-hidden"
-                    | "screen-reader-text"
-            )
-        },
-    )
 }
 
 fn style_hides_element(style: &str) -> bool {
@@ -1074,8 +971,7 @@ fn style_hides_element(style: &str) -> bool {
             .trim()
             .trim_end_matches(|ch: char| ch.is_ascii_whitespace())
             .strip_suffix("!important")
-            .map(str::trim)
-            .unwrap_or_else(|| value.trim());
+            .map_or_else(|| value.trim(), str::trim);
         property.eq_ignore_ascii_case("display") && value.eq_ignore_ascii_case("none")
             || property.eq_ignore_ascii_case("visibility")
                 && (value.eq_ignore_ascii_case("hidden") || value.eq_ignore_ascii_case("collapse"))
@@ -1089,7 +985,7 @@ fn declared_image_dimensions(element: ElementRef<'_>) -> Option<(u32, u32)> {
 }
 
 fn parse_dimension_attribute(value: &str) -> Option<u32> {
-    let digits = value.trim().chars().take_while(|ch| ch.is_ascii_digit()).collect::<String>();
+    let digits = value.trim().chars().take_while(char::is_ascii_digit).collect::<String>();
     digits.parse().ok()
 }
 
@@ -1159,22 +1055,9 @@ fn collect_outbound_links(root: ElementRef<'_>) -> Vec<String> {
 
 fn is_ignored_href(href: &str) -> bool {
     if let Ok(url) = Url::parse(href) {
-        return !matches!(url.scheme(), "http" | "https")
-            || url.query().is_some_and(query_has_non_content_action);
+        return !matches!(url.scheme(), "http" | "https");
     }
-    if matches!(href.split_once(':'), Some((scheme, _)) if !matches!(scheme, "http" | "https")) {
-        return true;
-    }
-    href.split_once('?').map(|(_, query)| query_has_non_content_action(query)).unwrap_or(false)
-}
-
-fn query_has_non_content_action(query: &str) -> bool {
-    query.split('&').any(|part| {
-        let Some((name, value)) = part.split_once('=') else {
-            return false;
-        };
-        matches!(name, "action" | "veaction") && value.eq_ignore_ascii_case("edit")
-    })
+    matches!(href.split_once(':'), Some((scheme, _)) if !matches!(scheme, "http" | "https"))
 }
 
 #[cfg(test)]
@@ -1671,21 +1554,21 @@ mod tests {
     }
 
     #[test]
-    fn scopes_outbound_links_to_selected_main_content() {
+    fn scopes_outbound_links_to_selected_formal_content_root() {
         let html = r##"
             <!DOCTYPE html>
             <html>
               <head><title>Article Page</title></head>
               <body>
                 <nav><a href="/account/login">Login</a></nav>
-                <div id="mw-content-text">
-                  <div class="mw-parser-output">
+                <article>
+                  <div>
                     <p>Article body.</p>
                     <a href="/docs/topic">Topic</a>
                     <a href="/docs/reference">Reference</a>
                     <a href="#local">Local</a>
                   </div>
-                </div>
+                </article>
                 <footer><a href="/privacy">Privacy</a></footer>
               </body>
             </html>
@@ -1703,7 +1586,7 @@ mod tests {
     }
 
     #[test]
-    fn ignores_edit_action_links_as_page_chrome() {
+    fn preserves_http_links_regardless_of_query_names() {
         let html = r##"
             <!DOCTYPE html>
             <html>
@@ -1722,25 +1605,42 @@ mod tests {
         let output =
             extract_html_main_content(html.as_bytes(), Some("text/html")).expect("html extraction");
 
-        assert!(!output.content_text.contains("edit]("));
+        assert!(
+            output
+                .content_text
+                .contains("[edit](/w/index.php?title=Article&action=edit&section=1)")
+        );
+        assert!(
+            output
+                .content_text
+                .contains("[visual edit](https://editor.example.test/page?veaction=edit)")
+        );
         assert_eq!(
             output.source_map.get("outboundLinks"),
-            Some(&serde_json::json!(["/docs/topic?mode=read"]))
+            Some(&serde_json::json!([
+                "/docs/topic?mode=read",
+                "/w/index.php?title=Article&action=edit&section=1",
+                "https://editor.example.test/page?veaction=edit"
+            ]))
         );
     }
 
     #[test]
-    fn chooses_stronger_high_confidence_content_root() {
+    fn cms_selector_names_do_not_override_formal_article_root() {
         let html = r#"
             <!DOCTYPE html>
             <html>
               <head><title>Article Page</title></head>
               <body>
-                <div id="main-content"><a href="/account/login">Login</a></div>
+                <div id="main-content" class="wiki-content">
+                  <a href="/account/login">CMS selector decoy</a>
+                </div>
+                <article>
                 <div class="mw-parser-output">
                   <p>This article body has enough readable content to outrank a short account link block inside another high-confidence container.</p>
                   <a href="/docs/topic">Topic</a>
                 </div>
+                </article>
               </body>
             </html>
         "#;
@@ -1749,7 +1649,7 @@ mod tests {
             extract_html_main_content(html.as_bytes(), Some("text/html")).expect("html extraction");
 
         assert!(output.content_text.contains("This article body has enough readable content"));
-        assert!(!output.content_text.contains("Login"));
+        assert!(!output.content_text.contains("CMS selector decoy"));
         assert_eq!(
             output.source_map.get("outboundLinks"),
             Some(&serde_json::json!(["/docs/topic"]))
@@ -1785,7 +1685,7 @@ mod tests {
     }
 
     #[test]
-    fn excludes_common_hidden_class_and_important_style_text() {
+    fn arbitrary_class_names_do_not_hide_content() {
         let html = r#"
             <!DOCTYPE html>
             <html>
@@ -1805,7 +1705,7 @@ mod tests {
             extract_html_main_content(html.as_bytes(), Some("text/html")).expect("html extraction");
 
         assert!(output.content_text.contains("Visible body text."));
-        assert!(!output.content_text.contains("Screen reader duplicate heading"));
+        assert!(output.content_text.contains("Screen reader duplicate heading"));
         assert!(!output.content_text.contains("Collapsed duplicate text"));
         assert!(!output.content_text.contains("Collapsed table text"));
     }
@@ -1899,7 +1799,7 @@ mod tests {
     }
 
     #[test]
-    fn prefers_confluence_main_content_over_outer_container() {
+    fn prefers_formal_main_content_over_outer_container() {
         let html = r#"
             <!DOCTYPE html>
             <html>
@@ -1909,7 +1809,7 @@ mod tests {
               <body>
                 <div id="content">
                   <div class="page-metadata">Created by Alice</div>
-                  <div id="main-content" class="wiki-content">
+                  <main>
                     <div class="contentLayout2">
                       <div class="columnLayout">
                         <div class="cell">
@@ -1924,7 +1824,7 @@ mod tests {
                         </div>
                       </div>
                     </div>
-                  </div>
+                  </main>
                   <div id="labels-section">No labels</div>
                 </div>
               </body>
@@ -1968,7 +1868,7 @@ mod tests {
     }
 
     #[test]
-    fn prefers_dense_confluence_main_content_even_when_outer_container_has_more_chrome() {
+    fn prefers_dense_formal_main_content_even_when_outer_container_has_more_chrome() {
         let html = r#"
             <!DOCTYPE html>
             <html>
@@ -1980,11 +1880,11 @@ mod tests {
                   <div class="page-metadata">Created by Alice</div>
                   <div id="page-metadata-banner">3 attachments</div>
                   <div id="breadcrumbs">Docs / Products / Operations Console</div>
-                  <div id="main-content" class="wiki-content">
+                  <main>
                     <h1>Acme Operations Console</h1>
                     <p>Operations Console is used to manage distributed workflows.</p>
                     <p>It centralizes settings, notifications, and remote administration flows.</p>
-                  </div>
+                  </main>
                 </div>
               </body>
             </html>

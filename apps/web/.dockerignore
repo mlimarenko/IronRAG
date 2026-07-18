@@ -1,5 +1,14 @@
 node_modules
 dist
+coverage
+playwright-report
+test-results
+storybook-static
+.env
+.env.*
+!.env.example
+*.log
+*.tsbuildinfo
 .git
 *.md
 playwright-fixture.ts

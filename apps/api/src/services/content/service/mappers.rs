@@ -132,8 +132,8 @@ pub(super) fn map_web_page_provenance_row(
     WebPageProvenance {
         run_id: Some(row.run_id),
         candidate_id: Some(row.id),
-        source_uri: row.final_url.clone().or(row.discovered_url.clone()),
-        canonical_url: row.canonical_url.clone().or(row.final_url.clone()),
+        source_uri: row.final_url.clone().or_else(|| row.discovered_url.clone()),
+        canonical_url: row.canonical_url.clone().or_else(|| row.final_url.clone()),
     }
 }
 
@@ -269,8 +269,8 @@ mod tests {
             text_checksum: Some("sha256:text".to_string()),
             image_checksum: None,
             text_state: "text_readable".to_string(),
-            vector_state: "vector_ready".to_string(),
-            graph_state: "graph_ready".to_string(),
+            vector_state: "ready".to_string(),
+            graph_state: "ready".to_string(),
             text_readable_at: Some(now),
             vector_ready_at: Some(now),
             graph_ready_at: Some(now),

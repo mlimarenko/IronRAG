@@ -5,7 +5,7 @@ use uuid::Uuid;
 
 use crate::{
     app::state::AppState,
-    domains::query_ir::{QueryAct, QueryIR, QueryScope},
+    domains::query_ir::{QueryAct, QueryIR, QueryScope, QueryTargetKind},
     infra::knowledge_rows::{KnowledgeChunkRow, KnowledgeDocumentRow},
     services::query::effective_query::structured_current_question_segment,
     services::query::text_match::{near_token_match, normalized_alnum_tokens},
@@ -22,7 +22,7 @@ use super::{
     question_asks_table_value_inventory, render_canonical_chunk_section,
     render_canonical_technical_fact_section, render_prepared_segment_section,
     render_table_summary_chunk_section, requested_initial_table_row_count, score_desc_chunks,
-    score_value, technical_literal_focus_keywords,
+    score_value,
     technical_literals::technical_chunk_selection_score,
     technical_literals::{extract_explicit_path_literals, extract_parameter_literals},
 };
@@ -31,6 +31,7 @@ const MAX_DIRECT_TABLE_ANALYTICS_ROWS: usize = 2_000;
 const MAX_CANONICAL_ANSWER_TECHNICAL_FACTS: usize = 24;
 const SOURCE_COVERAGE_DOCUMENT_LIMIT: usize = 3;
 const SOURCE_COVERAGE_CHUNKS_PER_DOCUMENT: usize = 12;
+const SOURCE_COVERAGE_CANDIDATE_CHUNKS_PER_DOCUMENT: usize = 24;
 const SOURCE_PROFILE_SCORE: f32 = 0.65;
 const SOURCE_COVERAGE_SCORE_BASE: f32 = 0.95;
 const SOURCE_COVERAGE_SCORE_STEP: f32 = 0.001;
@@ -111,6 +112,84 @@ pub(crate) async fn load_direct_targeted_table_answer(
     Ok(build_table_row_grounded_answer(question, ir, &initial_rows))
 }
 
+struct CanonicalTableChunks {
+    summaries: Vec<RuntimeMatchedChunk>,
+    rows: Vec<RuntimeMatchedChunk>,
+    initial_rows: Option<Vec<RuntimeMatchedChunk>>,
+}
+
+async fn load_canonical_table_chunks(
+    state: &AppState,
+    question: &str,
+    query_ir: &QueryIR,
+    focused_document_id: Option<Uuid>,
+    document_index: &HashMap<Uuid, KnowledgeDocumentRow>,
+    plan_keywords: &[String],
+) -> anyhow::Result<CanonicalTableChunks> {
+    let Some(document_id) = focused_document_id else {
+        return Ok(CanonicalTableChunks {
+            summaries: Vec::new(),
+            rows: Vec::new(),
+            initial_rows: None,
+        });
+    };
+    let targeted_document_ids = BTreeSet::from([document_id]);
+    let (summaries, rows) = if question_asks_table_aggregation(question, Some(query_ir)) {
+        let summaries = load_table_summary_chunks_for_documents(
+            state,
+            document_index,
+            &targeted_document_ids,
+            32,
+            plan_keywords,
+        )
+        .await
+        .context("failed to load focused table summaries for canonical answer")?;
+        let rows = load_table_rows_for_documents(
+            state,
+            document_index,
+            &targeted_document_ids,
+            MAX_DIRECT_TABLE_ANALYTICS_ROWS,
+            plan_keywords,
+        )
+        .await
+        .context("failed to load focused table rows for canonical aggregate answer")?;
+        (summaries, rows)
+    } else {
+        (Vec::new(), Vec::new())
+    };
+    let initial_rows = load_requested_initial_table_rows(
+        state,
+        query_ir,
+        document_index,
+        &targeted_document_ids,
+        plan_keywords,
+    )
+    .await?;
+    Ok(CanonicalTableChunks { summaries, rows, initial_rows })
+}
+
+async fn load_requested_initial_table_rows(
+    state: &AppState,
+    query_ir: &QueryIR,
+    document_index: &HashMap<Uuid, KnowledgeDocumentRow>,
+    targeted_document_ids: &BTreeSet<Uuid>,
+    plan_keywords: &[String],
+) -> anyhow::Result<Option<Vec<RuntimeMatchedChunk>>> {
+    let Some(row_count) = requested_initial_table_row_count(Some(query_ir)) else {
+        return Ok(None);
+    };
+    let initial_rows = load_initial_table_rows_for_documents(
+        state,
+        document_index,
+        targeted_document_ids,
+        row_count,
+        plan_keywords,
+    )
+    .await
+    .context("failed to load direct initial table rows for canonical answer")?;
+    Ok((initial_rows.len() >= row_count).then_some(initial_rows))
+}
+
 pub(crate) async fn load_canonical_answer_chunks(
     state: &AppState,
     execution_id: Uuid,
@@ -138,129 +217,120 @@ pub(crate) async fn load_canonical_answer_chunks(
         .then(|| explicit_targeted_document_ids.iter().next().copied())
         .flatten()
         .or_else(|| query_ir_canonical_context_document_id(query_ir, document_values));
-    let aggregation_summary_chunks = if question_asks_table_aggregation(question, Some(query_ir))
-        && let Some(document_id) = focused_document_id
-    {
-        let plan_keywords = crate::services::query::planner::extract_keywords(question);
-        let targeted_document_ids = BTreeSet::from([document_id]);
-        load_table_summary_chunks_for_documents(
-            state,
-            document_index,
-            &targeted_document_ids,
-            32,
-            &plan_keywords,
-        )
-        .await
-        .context("failed to load focused table summaries for canonical answer")?
-    } else {
-        Vec::new()
-    };
-    let aggregation_row_chunks = if question_asks_table_aggregation(question, Some(query_ir))
-        && let Some(document_id) = focused_document_id
-    {
-        let plan_keywords = crate::services::query::planner::extract_keywords(question);
-        let targeted_document_ids = BTreeSet::from([document_id]);
-        load_table_rows_for_documents(
-            state,
-            document_index,
-            &targeted_document_ids,
-            MAX_DIRECT_TABLE_ANALYTICS_ROWS,
-            &plan_keywords,
-        )
-        .await
-        .context("failed to load focused table rows for canonical aggregate answer")?
-    } else {
-        Vec::new()
-    };
-    let explicit_initial_table_rows = if let Some(row_count) =
-        requested_initial_table_row_count(Some(query_ir))
-        && let Some(document_id) = focused_document_id
-    {
-        let plan_keywords = crate::services::query::planner::extract_keywords(question);
-        let targeted_document_ids = BTreeSet::from([document_id]);
-        let initial_rows = load_initial_table_rows_for_documents(
-            state,
-            document_index,
-            &targeted_document_ids,
-            row_count,
-            &plan_keywords,
-        )
-        .await
-        .context("failed to load direct initial table rows for canonical answer")?;
-        (initial_rows.len() >= row_count).then_some(initial_rows)
-    } else {
-        None
-    };
-    if let Some(mut initial_rows) = explicit_initial_table_rows {
-        if !aggregation_summary_chunks.is_empty() {
+    let plan_keywords = crate::services::query::planner::extract_keywords(question);
+    let mut table_chunks = load_canonical_table_chunks(
+        state,
+        question,
+        query_ir,
+        focused_document_id,
+        document_index,
+        &plan_keywords,
+    )
+    .await?;
+    if let Some(mut initial_rows) = table_chunks.initial_rows.take() {
+        if !table_chunks.summaries.is_empty() {
             let chunk_limit = initial_rows.len().saturating_add(32);
-            initial_rows = merge_chunks(initial_rows, aggregation_summary_chunks, chunk_limit);
+            initial_rows = merge_chunks(initial_rows, table_chunks.summaries, chunk_limit);
         }
         initial_rows.sort_by(score_desc_chunks);
         return Ok(initial_rows);
     }
 
-    let Some(bundle_refs) = state
+    let bundle_refs = state
         .context_store
         .get_bundle_reference_set_by_query_execution(execution_id)
         .await
         .with_context(|| {
             format!("failed to load context bundle for canonical answer chunks {execution_id}")
-        })?
-    else {
-        if !aggregation_summary_chunks.is_empty() || !aggregation_row_chunks.is_empty() {
-            let mut aggregate_chunks = merge_chunks(
-                aggregation_summary_chunks,
-                aggregation_row_chunks,
-                MAX_DIRECT_TABLE_ANALYTICS_ROWS.saturating_add(32),
-            );
-            aggregate_chunks.sort_by(score_desc_chunks);
-            return Ok(aggregate_chunks);
-        }
-        return augment_with_source_coverage_chunks(
-            state,
-            question,
-            query_ir,
-            focused_document_id,
-            document_index,
-            &crate::services::query::planner::extract_keywords(question),
-            fallback_chunks.to_vec(),
-        )
-        .await;
-    };
-    let chunk_ids =
-        bundle_refs.chunk_references.iter().map(|reference| reference.chunk_id).collect::<Vec<_>>();
+        })?;
+    let chunk_ids = bundle_refs
+        .as_ref()
+        .map(|refs| {
+            refs.chunk_references.iter().map(|reference| reference.chunk_id).collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
     if chunk_ids.is_empty() {
-        if !aggregation_summary_chunks.is_empty() || !aggregation_row_chunks.is_empty() {
-            let mut aggregate_chunks = merge_chunks(
-                aggregation_summary_chunks,
-                aggregation_row_chunks,
-                MAX_DIRECT_TABLE_ANALYTICS_ROWS.saturating_add(32),
-            );
-            aggregate_chunks.sort_by(score_desc_chunks);
-            return Ok(aggregate_chunks);
-        }
-        return augment_with_source_coverage_chunks(
+        return canonical_chunks_without_bundle(
             state,
             question,
             query_ir,
             focused_document_id,
             document_index,
-            &crate::services::query::planner::extract_keywords(question),
-            fallback_chunks.to_vec(),
+            &plan_keywords,
+            fallback_chunks,
+            table_chunks.summaries,
+            table_chunks.rows,
         )
         .await;
     }
-    let plan_keywords = crate::services::query::planner::extract_keywords(question);
+    load_canonical_bundle_chunks(
+        state,
+        question,
+        query_ir,
+        focused_document_id,
+        document_index,
+        &plan_keywords,
+        fallback_chunks,
+        chunk_ids,
+        table_chunks.summaries,
+        table_chunks.rows,
+    )
+    .await
+}
+
+async fn canonical_chunks_without_bundle(
+    state: &AppState,
+    question: &str,
+    query_ir: &QueryIR,
+    focused_document_id: Option<Uuid>,
+    document_index: &HashMap<Uuid, KnowledgeDocumentRow>,
+    plan_keywords: &[String],
+    fallback_chunks: &[RuntimeMatchedChunk],
+    aggregation_summary_chunks: Vec<RuntimeMatchedChunk>,
+    aggregation_row_chunks: Vec<RuntimeMatchedChunk>,
+) -> anyhow::Result<Vec<RuntimeMatchedChunk>> {
+    if !aggregation_summary_chunks.is_empty() || !aggregation_row_chunks.is_empty() {
+        let mut aggregate_chunks = merge_chunks(
+            aggregation_summary_chunks,
+            aggregation_row_chunks,
+            MAX_DIRECT_TABLE_ANALYTICS_ROWS.saturating_add(32),
+        );
+        aggregate_chunks.sort_by(score_desc_chunks);
+        return Ok(aggregate_chunks);
+    }
+    augment_with_source_coverage_chunks(
+        state,
+        question,
+        query_ir,
+        focused_document_id,
+        document_index,
+        plan_keywords,
+        fallback_chunks.to_vec(),
+    )
+    .await
+}
+
+async fn load_canonical_bundle_chunks(
+    state: &AppState,
+    question: &str,
+    query_ir: &QueryIR,
+    focused_document_id: Option<Uuid>,
+    document_index: &HashMap<Uuid, KnowledgeDocumentRow>,
+    plan_keywords: &[String],
+    fallback_chunks: &[RuntimeMatchedChunk],
+    chunk_ids: Vec<Uuid>,
+    aggregation_summary_chunks: Vec<RuntimeMatchedChunk>,
+    aggregation_row_chunks: Vec<RuntimeMatchedChunk>,
+) -> anyhow::Result<Vec<RuntimeMatchedChunk>> {
     let rows = state
         .document_store
         .list_chunks_by_ids(&chunk_ids)
         .await
         .context("failed to load canonical answer chunks")?;
-    let mut chunks: Vec<RuntimeMatchedChunk> = rows
+    let mut chunks = rows
         .into_iter()
-        .filter_map(|chunk| map_chunk_hit(chunk, 1.0, document_index, &plan_keywords))
-        .collect();
+        .filter_map(|chunk| map_chunk_hit(chunk, 1.0, document_index, plan_keywords))
+        .collect::<Vec<_>>();
     merge_runtime_context_chunks(&mut chunks, fallback_chunks);
     if question_asks_table_aggregation(question, Some(query_ir))
         && let Some(document_id) = focused_document_id
@@ -285,34 +355,27 @@ pub(crate) async fn load_canonical_answer_chunks(
             query_ir,
             focused_document_id,
             document_index,
-            &plan_keywords,
+            plan_keywords,
             fallback_chunks.to_vec(),
         )
         .await;
     }
-    if let Some(row_count) = requested_initial_table_row_count(Some(query_ir))
-        && let Some(document_id) = focused_document_id
-    {
-        let targeted_document_ids = BTreeSet::from([document_id]);
-        let chunk_limit = chunks.len().max(row_count);
-        let initial_rows = load_initial_table_rows_for_documents(
-            state,
-            document_index,
-            &targeted_document_ids,
-            row_count,
-            &plan_keywords,
-        )
-        .await
-        .context("failed to load focused initial table rows for canonical answer")?;
-        chunks = merge_chunks(chunks, initial_rows, chunk_limit);
-    }
+    chunks = merge_additional_initial_rows(
+        state,
+        query_ir,
+        focused_document_id,
+        document_index,
+        plan_keywords,
+        chunks,
+    )
+    .await?;
     chunks = augment_with_source_coverage_chunks(
         state,
         question,
         query_ir,
         focused_document_id,
         document_index,
-        &plan_keywords,
+        plan_keywords,
         chunks,
     )
     .await?;
@@ -323,6 +386,34 @@ pub(crate) async fn load_canonical_answer_chunks(
     Ok(chunks)
 }
 
+async fn merge_additional_initial_rows(
+    state: &AppState,
+    query_ir: &QueryIR,
+    focused_document_id: Option<Uuid>,
+    document_index: &HashMap<Uuid, KnowledgeDocumentRow>,
+    plan_keywords: &[String],
+    chunks: Vec<RuntimeMatchedChunk>,
+) -> anyhow::Result<Vec<RuntimeMatchedChunk>> {
+    let Some(row_count) = requested_initial_table_row_count(Some(query_ir)) else {
+        return Ok(chunks);
+    };
+    let Some(document_id) = focused_document_id else {
+        return Ok(chunks);
+    };
+    let targeted_document_ids = BTreeSet::from([document_id]);
+    let chunk_limit = chunks.len().max(row_count);
+    let initial_rows = load_initial_table_rows_for_documents(
+        state,
+        document_index,
+        &targeted_document_ids,
+        row_count,
+        plan_keywords,
+    )
+    .await
+    .context("failed to load focused initial table rows for canonical answer")?;
+    Ok(merge_chunks(chunks, initial_rows, chunk_limit))
+}
+
 pub(crate) fn apply_runtime_chunk_overlays(
     chunks: &mut [RuntimeMatchedChunk],
     runtime_chunks: &[RuntimeMatchedChunk],
@@ -330,38 +421,49 @@ pub(crate) fn apply_runtime_chunk_overlays(
     let runtime_by_chunk_id =
         runtime_chunks.iter().map(|chunk| (chunk.chunk_id, chunk)).collect::<HashMap<_, _>>();
     for chunk in chunks {
-        let Some(runtime_chunk) = runtime_by_chunk_id.get(&chunk.chunk_id) else {
-            continue;
-        };
-        if runtime_chunk.score_kind == RuntimeChunkScoreKind::GraphEvidence {
-            chunk.score_kind = RuntimeChunkScoreKind::GraphEvidence;
-            if runtime_chunk.score.is_some() {
-                chunk.score = runtime_chunk.score;
-            }
-            if !runtime_chunk.source_text.trim().is_empty() {
-                chunk.source_text = runtime_chunk.source_text.clone();
-            }
-            if !runtime_chunk.excerpt.trim().is_empty() {
-                chunk.excerpt = runtime_chunk.excerpt.clone();
-            }
-            continue;
+        if let Some(runtime_chunk) = runtime_by_chunk_id.get(&chunk.chunk_id) {
+            apply_runtime_chunk_overlay(chunk, runtime_chunk);
         }
-        if runtime_chunk.score_kind != RuntimeChunkScoreKind::Relevance {
-            chunk.score_kind = runtime_chunk.score_kind;
-        }
-        if runtime_chunk.score.is_some() {
-            chunk.score = runtime_chunk.score;
-        }
-        if runtime_chunk.source_text.trim().chars().count()
-            > chunk.source_text.trim().chars().count()
-        {
-            chunk.source_text = runtime_chunk.source_text.clone();
-        }
-        if runtime_chunk.excerpt.trim().chars().count() > chunk.excerpt.trim().chars().count()
-            || runtime_chunk.score_kind != RuntimeChunkScoreKind::Relevance
-        {
-            chunk.excerpt = runtime_chunk.excerpt.clone();
-        }
+    }
+}
+
+fn apply_runtime_chunk_overlay(
+    chunk: &mut RuntimeMatchedChunk,
+    runtime_chunk: &RuntimeMatchedChunk,
+) {
+    if runtime_chunk.score_kind == RuntimeChunkScoreKind::GraphEvidence {
+        apply_graph_evidence_overlay(chunk, runtime_chunk);
+        return;
+    }
+    if runtime_chunk.score_kind != RuntimeChunkScoreKind::Relevance {
+        chunk.score_kind = runtime_chunk.score_kind;
+    }
+    if runtime_chunk.score.is_some() {
+        chunk.score = runtime_chunk.score;
+    }
+    if runtime_chunk.source_text.trim().chars().count() > chunk.source_text.trim().chars().count() {
+        chunk.source_text = runtime_chunk.source_text.clone();
+    }
+    if runtime_chunk.excerpt.trim().chars().count() > chunk.excerpt.trim().chars().count()
+        || runtime_chunk.score_kind != RuntimeChunkScoreKind::Relevance
+    {
+        chunk.excerpt = runtime_chunk.excerpt.clone();
+    }
+}
+
+fn apply_graph_evidence_overlay(
+    chunk: &mut RuntimeMatchedChunk,
+    runtime_chunk: &RuntimeMatchedChunk,
+) {
+    chunk.score_kind = RuntimeChunkScoreKind::GraphEvidence;
+    if runtime_chunk.score.is_some() {
+        chunk.score = runtime_chunk.score;
+    }
+    if !runtime_chunk.source_text.trim().is_empty() {
+        chunk.source_text = runtime_chunk.source_text.clone();
+    }
+    if !runtime_chunk.excerpt.trim().is_empty() {
+        chunk.excerpt = runtime_chunk.excerpt.clone();
     }
 }
 
@@ -405,22 +507,11 @@ async fn augment_with_source_coverage_chunks(
         return Ok(chunks);
     }
     let initial_chunk_count = chunks.len();
-    let mut document_ids = Vec::<Uuid>::new();
-    let mut seen_document_ids = HashSet::<Uuid>::new();
-    if let Some(document_id) = focused_document_id
-        && seen_document_ids.insert(document_id)
-    {
-        document_ids.push(document_id);
-    }
-    let document_limit = source_coverage_document_limit(query_ir);
-    for chunk in &chunks {
-        if document_ids.len() >= document_limit {
-            break;
-        }
-        if seen_document_ids.insert(chunk.document_id) {
-            document_ids.push(chunk.document_id);
-        }
-    }
+    let document_ids = source_coverage_document_ids(
+        focused_document_id,
+        &chunks,
+        source_coverage_document_limit(query_ir),
+    );
     if document_ids.is_empty() {
         return Ok(chunks);
     }
@@ -435,32 +526,19 @@ async fn augment_with_source_coverage_chunks(
             continue;
         };
         let rows =
-            state.document_store.list_chunks_by_revision(revision_id).await.with_context(|| {
-                format!(
-                    "failed to load source coverage chunks for document {} revision {}",
-                    document_id, revision_id
-                )
-            })?;
-        for row in select_source_coverage_chunk_rows(
-            rows,
-            SOURCE_COVERAGE_CHUNKS_PER_DOCUMENT,
+            load_source_coverage_rows(state, document_id, revision_id, plan_keywords).await?;
+        append_source_coverage_chunks(
+            select_source_coverage_chunk_rows(
+                rows,
+                SOURCE_COVERAGE_CHUNKS_PER_DOCUMENT,
+                plan_keywords,
+            ),
+            document_index,
             plan_keywords,
-        ) {
-            if !seen_chunk_ids.insert(row.chunk_id) {
-                continue;
-            }
-            let is_source_profile = is_source_profile_chunk(&row);
-            let score = if is_source_profile {
-                SOURCE_PROFILE_SCORE
-            } else {
-                SOURCE_COVERAGE_SCORE_BASE - coverage_rank as f32 * SOURCE_COVERAGE_SCORE_STEP
-            };
-            coverage_rank = coverage_rank.saturating_add(1);
-            if let Some(mut chunk) = map_chunk_hit(row, score, document_index, plan_keywords) {
-                chunk.score = Some(score);
-                chunks.push(chunk);
-            }
-        }
+            &mut seen_chunk_ids,
+            &mut coverage_rank,
+            &mut chunks,
+        );
     }
     tracing::info!(
         stage = "source_coverage_augmented",
@@ -474,7 +552,111 @@ async fn augment_with_source_coverage_chunks(
     Ok(chunks)
 }
 
+fn source_coverage_document_ids(
+    focused_document_id: Option<Uuid>,
+    chunks: &[RuntimeMatchedChunk],
+    document_limit: usize,
+) -> Vec<Uuid> {
+    let candidates =
+        focused_document_id.into_iter().chain(chunks.iter().map(|chunk| chunk.document_id));
+    let mut seen = HashSet::new();
+    candidates.filter(|document_id| seen.insert(*document_id)).take(document_limit).collect()
+}
+
+async fn load_source_coverage_rows(
+    state: &AppState,
+    document_id: Uuid,
+    revision_id: Uuid,
+    plan_keywords: &[String],
+) -> anyhow::Result<Vec<KnowledgeChunkRow>> {
+    let mut rows = state
+        .document_store
+        .list_head_chunks_by_revision(revision_id, SOURCE_COVERAGE_CANDIDATE_CHUNKS_PER_DOCUMENT)
+        .await
+        .with_context(|| {
+            format!(
+                "failed to load source coverage sample for document {} revision {}",
+                document_id, revision_id
+            )
+        })?;
+    let tail_rows = state
+        .document_store
+        .list_tail_chunks_by_revision(revision_id, SOURCE_COVERAGE_CHUNKS_PER_DOCUMENT)
+        .await
+        .with_context(|| {
+            format!(
+                "failed to load source coverage tail for document {} revision {}",
+                document_id, revision_id
+            )
+        })?;
+    extend_unique_source_coverage_rows(&mut rows, tail_rows);
+    if plan_keywords.is_empty() {
+        return Ok(rows);
+    }
+
+    let focused_rows = state
+        .document_store
+        .list_chunks_by_revision_matching_terms(
+            revision_id,
+            plan_keywords,
+            SOURCE_COVERAGE_CANDIDATE_CHUNKS_PER_DOCUMENT,
+        )
+        .await
+        .with_context(|| {
+            format!(
+                "failed to load focused source coverage chunks for document {} revision {}",
+                document_id, revision_id
+            )
+        })?;
+    extend_unique_source_coverage_rows(&mut rows, focused_rows);
+    Ok(rows)
+}
+
+fn extend_unique_source_coverage_rows(
+    rows: &mut Vec<KnowledgeChunkRow>,
+    additional_rows: Vec<KnowledgeChunkRow>,
+) {
+    let mut row_ids = rows.iter().map(|row| row.chunk_id).collect::<HashSet<_>>();
+    rows.extend(additional_rows.into_iter().filter(|row| row_ids.insert(row.chunk_id)));
+}
+
+fn append_source_coverage_chunks(
+    rows: Vec<KnowledgeChunkRow>,
+    document_index: &HashMap<Uuid, KnowledgeDocumentRow>,
+    plan_keywords: &[String],
+    seen_chunk_ids: &mut HashSet<Uuid>,
+    coverage_rank: &mut usize,
+    chunks: &mut Vec<RuntimeMatchedChunk>,
+) {
+    for row in rows {
+        if !seen_chunk_ids.insert(row.chunk_id) {
+            continue;
+        }
+        let score = source_coverage_row_score(&row, *coverage_rank);
+        *coverage_rank = coverage_rank.saturating_add(1);
+        if let Some(mut chunk) = map_chunk_hit(row, score, document_index, plan_keywords) {
+            chunk.score = Some(score);
+            chunks.push(chunk);
+        }
+    }
+}
+
+fn source_coverage_row_score(row: &KnowledgeChunkRow, coverage_rank: usize) -> f32 {
+    if is_source_profile_chunk(row) {
+        SOURCE_PROFILE_SCORE
+    } else {
+        SOURCE_COVERAGE_SCORE_BASE - coverage_rank as f32 * SOURCE_COVERAGE_SCORE_STEP
+    }
+}
+
+fn broad_unfocused_procedure_source_coverage(query_ir: &QueryIR) -> bool {
+    query_ir.requests_broad_procedure_variant_coverage()
+}
+
 fn source_coverage_document_limit(query_ir: &QueryIR) -> usize {
+    if broad_unfocused_procedure_source_coverage(query_ir) {
+        return 5;
+    }
     let requested_sources =
         query_ir.target_entities.len().saturating_add(query_ir.literal_constraints.len()).max(
             match query_ir.scope {
@@ -500,6 +682,33 @@ fn should_request_source_coverage_chunks(_question: &str, query_ir: &QueryIR) ->
 #[cfg(test)]
 mod runtime_context_merge_tests {
     use super::*;
+
+    #[test]
+    fn broad_procedure_requests_five_source_documents() {
+        let query_ir = QueryIR {
+            act: QueryAct::ConfigureHow,
+            scope: QueryScope::SingleDocument,
+            language: crate::domains::query_ir::QueryLanguage::Auto,
+            target_types: vec![
+                QueryTargetKind::ConfigurationFile,
+                QueryTargetKind::ConfigKey,
+                QueryTargetKind::Procedure,
+            ],
+            target_entities: Vec::new(),
+            literal_constraints: Vec::new(),
+            temporal_constraints: Vec::new(),
+            comparison: None,
+            document_focus: None,
+            conversation_refs: Vec::new(),
+            needs_clarification: None,
+            source_slice: None,
+            retrieval_query: None,
+            confidence: 0.95,
+        };
+
+        assert!(query_ir_requests_setup_source_coverage(&query_ir));
+        assert_eq!(source_coverage_document_limit(&query_ir), 5);
+    }
 
     #[test]
     fn merge_runtime_context_chunks_keeps_focused_document_refs() {
@@ -539,15 +748,13 @@ fn query_ir_requests_setup_source_coverage(query_ir: &QueryIR) -> bool {
         return false;
     }
 
-    let has_config_target = query_ir.target_types.iter().any(|target_type| {
-        matches!(
-            target_type.trim().to_ascii_lowercase().as_str(),
-            "configuration_file" | "config_key"
-        )
-    });
-    let has_package_or_parameter_target = query_ir.target_types.iter().any(|target_type| {
-        matches!(target_type.trim().to_ascii_lowercase().as_str(), "package" | "parameter")
-    });
+    if broad_unfocused_procedure_source_coverage(query_ir) {
+        return true;
+    }
+    let has_config_target =
+        query_ir.targets_any(&[QueryTargetKind::ConfigurationFile, QueryTargetKind::ConfigKey]);
+    let has_package_or_parameter_target =
+        query_ir.targets_any(&[QueryTargetKind::Package, QueryTargetKind::Parameter]);
 
     // Original gate: configuration_file/config_key + package/parameter
     // both present (matches a high-confidence "configure this parameter
@@ -596,12 +803,21 @@ fn select_source_coverage_chunk_rows(
         left.chunk_index.cmp(&right.chunk_index).then_with(|| left.chunk_id.cmp(&right.chunk_id))
     });
 
-    let mut selected = BTreeSet::<usize>::new();
-    for (index, row) in rows.iter().enumerate() {
-        if is_source_profile_chunk(row) {
-            selected.insert(index);
-        }
-    }
+    let mut selected = source_coverage_anchor_indices(&rows, limit, plan_keywords);
+    fill_source_coverage_indices(&mut selected, rows.len(), limit);
+    selected.into_iter().take(limit).filter_map(|index| rows.get(index).cloned()).collect()
+}
+
+fn source_coverage_anchor_indices(
+    rows: &[KnowledgeChunkRow],
+    limit: usize,
+    plan_keywords: &[String],
+) -> BTreeSet<usize> {
+    let mut selected = rows
+        .iter()
+        .enumerate()
+        .filter_map(|(index, row)| is_source_profile_chunk(row).then_some(index))
+        .collect::<BTreeSet<_>>();
     let mut focus_rows = rows
         .iter()
         .enumerate()
@@ -611,69 +827,42 @@ fn select_source_coverage_chunk_rows(
         })
         .collect::<Vec<_>>();
     focus_rows.sort_by(|left, right| right.0.cmp(&left.0).then_with(|| left.1.cmp(&right.1)));
-    for (_, index) in focus_rows.into_iter().take(limit.saturating_div(2).clamp(2, 6)) {
-        selected.insert(index);
-    }
-    for index in 0..rows.len().min(2) {
-        selected.insert(index);
-    }
+    selected.extend(
+        focus_rows.into_iter().take(limit.saturating_div(2).clamp(2, 6)).map(|(_, index)| index),
+    );
+    selected.extend(0..rows.len().min(2));
     if rows.len() > 4 {
         let middle = rows.len() / 2;
-        selected.insert(middle.saturating_sub(1));
-        selected.insert(middle);
+        selected.extend([middle.saturating_sub(1), middle]);
     }
     if rows.len() > 2 {
-        selected.insert(rows.len() - 2);
-        selected.insert(rows.len() - 1);
+        selected.extend([rows.len() - 2, rows.len() - 1]);
     }
-    // Greedy max-min coverage fill: after the forced anchors (head,
-    // middle, tail), the remaining slots used to come from a fixed
-    // `slot * (rows.len()-1) / (limit-1)` stride. That stride enumerated
-    // candidate indices from 0 upward and stopped on the first
-    // `selected.len() >= limit`, which on long documents produced a
-    // tight cluster of head-side indices and an arbitrary gap somewhere
-    // in the middle or tail.
-    //
-    // Worked example for a 27-chunk source document at limit=12:
-    // forced anchors select indices {0, 1, 12, 13, 25, 26}; the old
-    // stride then added {2, 4, 7, 9, 11, 14} and stopped, leaving
-    // indices 15-24 entirely unrepresented. For configuration-style
-    // documents whose canonical content sits in that range, that
-    // gap pushed the answering model into honest-but-incomplete
-    // responses.
-    //
-    // The greedy fill below picks the unused index that is farthest
-    // from any already-selected index, breaking ties toward the smaller
-    // index. Each addition shrinks the largest remaining gap, so the
-    // final selection covers the document's full index range — the
-    // canonical "maximum dispersion" sampler. Pure data-driven, no
-    // language or dataset assumptions; deterministic for unit tests.
-    while selected.len() < limit && selected.len() < rows.len() {
-        let mut best_index: Option<usize> = None;
-        let mut best_distance: usize = 0;
-        for candidate in 0..rows.len() {
-            if selected.contains(&candidate) {
-                continue;
-            }
+    selected
+}
+
+fn fill_source_coverage_indices(selected: &mut BTreeSet<usize>, row_count: usize, limit: usize) {
+    while selected.len() < limit && selected.len() < row_count {
+        let Some(index) = farthest_unselected_index(selected, row_count) else {
+            break;
+        };
+        selected.insert(index);
+    }
+}
+
+fn farthest_unselected_index(selected: &BTreeSet<usize>, row_count: usize) -> Option<usize> {
+    (0..row_count)
+        .filter(|candidate| !selected.contains(candidate))
+        .map(|candidate| {
             let nearest = selected
                 .iter()
                 .map(|chosen| candidate.abs_diff(*chosen))
                 .min()
                 .unwrap_or(usize::MAX);
-            if nearest > best_distance || best_index.is_none() {
-                best_distance = nearest;
-                best_index = Some(candidate);
-            }
-        }
-        match best_index {
-            Some(index) => {
-                selected.insert(index);
-            }
-            None => break,
-        }
-    }
-
-    selected.into_iter().take(limit).filter_map(|index| rows.get(index).cloned()).collect()
+            (candidate, nearest)
+        })
+        .max_by(|left, right| left.1.cmp(&right.1).then_with(|| right.0.cmp(&left.0)))
+        .map(|(candidate, _)| candidate)
 }
 
 fn source_coverage_focus_row_score(row: &KnowledgeChunkRow, plan_keywords: &[String]) -> usize {
@@ -749,49 +938,14 @@ pub(crate) async fn load_canonical_answer_evidence(
         state.document_store.list_technical_facts_by_chunk_ids(&chunk_ids).await.context(
             "failed to load chunk-supported technical facts for canonical answer context",
         )?;
-    let mut fact_ids = selected_fact_ids_for_canonical_evidence(
+    let fact_ids = selected_fact_ids_for_canonical_evidence(
         &bundle_refs.bundle.selected_fact_ids,
         &evidence_rows,
         &chunk_supported_facts,
     );
-    for evidence in &evidence_rows {
-        if let Some(fact_id) = evidence.fact_id
-            && !fact_ids.contains(&fact_id)
-            && fact_ids.len() < MAX_CANONICAL_ANSWER_TECHNICAL_FACTS
-        {
-            fact_ids.push(fact_id);
-        }
-    }
-    let mut technical_facts = state
-        .document_store
-        .list_technical_facts_by_ids(&fact_ids)
-        .await
-        .context("failed to load technical facts for canonical answer context")?;
-    let mut seen_fact_ids = technical_facts.iter().map(|fact| fact.fact_id).collect::<HashSet<_>>();
-    for fact in chunk_supported_facts {
-        if fact_ids.contains(&fact.fact_id) && seen_fact_ids.insert(fact.fact_id) {
-            technical_facts.push(fact);
-        }
-    }
-    technical_facts.sort_by(|left, right| {
-        left.fact_kind.cmp(&right.fact_kind).then_with(|| left.fact_id.cmp(&right.fact_id))
-    });
-    let mut block_ids =
-        evidence_rows.iter().filter_map(|evidence| evidence.block_id).collect::<Vec<_>>();
-    for chunk in &chunk_rows {
-        for block_id in &chunk.support_block_ids {
-            if !block_ids.contains(block_id) {
-                block_ids.push(*block_id);
-            }
-        }
-    }
-    for fact in &technical_facts {
-        for block_id in &fact.support_block_ids {
-            if !block_ids.contains(block_id) {
-                block_ids.push(*block_id);
-            }
-        }
-    }
+    let technical_facts =
+        load_canonical_technical_facts(state, &fact_ids, chunk_supported_facts).await?;
+    let block_ids = canonical_answer_block_ids(&evidence_rows, &chunk_rows, &technical_facts);
     let structured_blocks = state
         .document_store
         .list_structured_blocks_by_ids(&block_ids)
@@ -803,6 +957,46 @@ pub(crate) async fn load_canonical_answer_evidence(
         structured_blocks,
         technical_facts,
     })
+}
+
+async fn load_canonical_technical_facts(
+    state: &AppState,
+    fact_ids: &[Uuid],
+    chunk_supported_facts: Vec<crate::infra::knowledge_rows::KnowledgeTechnicalFactRow>,
+) -> anyhow::Result<Vec<crate::infra::knowledge_rows::KnowledgeTechnicalFactRow>> {
+    let mut technical_facts = state
+        .document_store
+        .list_technical_facts_by_ids(fact_ids)
+        .await
+        .context("failed to load technical facts for canonical answer context")?;
+    let mut seen_fact_ids = technical_facts.iter().map(|fact| fact.fact_id).collect::<HashSet<_>>();
+    technical_facts.extend(
+        chunk_supported_facts
+            .into_iter()
+            .filter(|fact| fact_ids.contains(&fact.fact_id) && seen_fact_ids.insert(fact.fact_id)),
+    );
+    technical_facts.sort_by(|left, right| {
+        left.fact_kind.cmp(&right.fact_kind).then_with(|| left.fact_id.cmp(&right.fact_id))
+    });
+    Ok(technical_facts)
+}
+
+fn canonical_answer_block_ids(
+    evidence_rows: &[crate::infra::knowledge_rows::KnowledgeEvidenceRow],
+    chunk_rows: &[KnowledgeChunkRow],
+    technical_facts: &[crate::infra::knowledge_rows::KnowledgeTechnicalFactRow],
+) -> Vec<Uuid> {
+    let mut block_ids =
+        evidence_rows.iter().filter_map(|evidence| evidence.block_id).collect::<Vec<_>>();
+    let mut seen = block_ids.iter().copied().collect::<HashSet<_>>();
+    block_ids.extend(
+        chunk_rows
+            .iter()
+            .flat_map(|chunk| chunk.support_block_ids.iter().copied())
+            .chain(technical_facts.iter().flat_map(|fact| fact.support_block_ids.iter().copied()))
+            .filter(|block_id| seen.insert(*block_id)),
+    );
+    block_ids
 }
 
 pub(crate) fn selected_fact_ids_for_canonical_evidence(
@@ -979,21 +1173,12 @@ fn render_graph_evidence_context_lines(graph_evidence_context_lines: &[String]) 
 }
 
 fn render_graph_evidence_context_lines_for_focus(
-    question: &str,
+    _question: &str,
     graph_evidence_context_lines: &[String],
     focused_document_label: Option<&str>,
     query_ir: &QueryIR,
 ) -> String {
     let Some(focused_document_label) = focused_document_label else {
-        if low_confidence_short_technical_context(query_ir, question) {
-            let short_keywords = short_technical_focus_keywords(question, query_ir);
-            let focused_lines = graph_evidence_context_lines
-                .iter()
-                .filter(|line| line_contains_any_focus_keyword(line, &short_keywords))
-                .cloned()
-                .collect::<Vec<_>>();
-            return render_graph_evidence_context_lines(&focused_lines);
-        }
         return render_graph_evidence_context_lines(graph_evidence_context_lines);
     };
     if !matches!(query_ir.scope, QueryScope::SingleDocument) {
@@ -1013,33 +1198,6 @@ fn render_graph_evidence_context_lines_for_focus(
         .cloned()
         .collect::<Vec<_>>();
     render_graph_evidence_context_lines(&focused_lines)
-}
-
-fn low_confidence_short_technical_context(query_ir: &QueryIR, question: &str) -> bool {
-    query_ir.confidence <= 0.3
-        && matches!(query_ir.scope, QueryScope::SingleDocument)
-        && matches!(query_ir.act, QueryAct::Describe | QueryAct::ConfigureHow)
-        && query_ir.source_slice.is_none()
-        && query_ir.document_focus.is_none()
-        && query_ir.target_types.is_empty()
-        && query_ir.target_entities.is_empty()
-        && query_ir.literal_constraints.is_empty()
-        && !short_technical_focus_keywords(question, query_ir).is_empty()
-}
-
-fn short_technical_focus_keywords(question: &str, query_ir: &QueryIR) -> Vec<String> {
-    technical_literal_focus_keywords(question, Some(query_ir))
-        .into_iter()
-        .filter(|keyword| keyword.chars().count() < 4)
-        .collect()
-}
-
-fn line_contains_any_focus_keyword(line: &str, keywords: &[String]) -> bool {
-    if keywords.is_empty() {
-        return false;
-    }
-    let lower = line.to_lowercase();
-    keywords.iter().any(|keyword| lower.contains(keyword))
 }
 
 fn canonical_context_document_id(
@@ -1109,19 +1267,12 @@ fn dominant_single_document_context_allowed(
     if document_count <= 1 {
         return true;
     }
-    if matches!(query_ir.act, QueryAct::RetrieveValue | QueryAct::Enumerate | QueryAct::Compare) {
+    if matches!(query_ir.act, QueryAct::RetrieveValue | QueryAct::Enumerate | QueryAct::Compare)
+        || broad_unfocused_procedure_source_coverage(query_ir)
+    {
         return false;
     }
-    let target_types = query_ir
-        .target_types
-        .iter()
-        .map(|target_type| {
-            crate::services::query::execution::question_intent::canonical_target_type_tag(
-                target_type,
-            )
-        })
-        .collect::<HashSet<_>>();
-    !target_types.contains("table_row") && !target_types.contains("table_summary")
+    !query_ir.targets(QueryTargetKind::TableRow) && !query_ir.targets(QueryTargetKind::TableSummary)
 }
 
 fn contextual_low_confidence_setup_context_should_stay_broad(
@@ -1320,468 +1471,8 @@ pub(crate) fn deprioritize_image_source_chunks(
 }
 
 #[cfg(test)]
-mod source_coverage_tests {
-    use super::*;
-    use crate::domains::query_ir::{
-        EntityMention, EntityRole, LiteralKind, LiteralSpan, QueryAct, QueryIR, QueryLanguage,
-        QueryScope,
-    };
-
-    fn chunk_row(chunk_index: i32, text: &str) -> KnowledgeChunkRow {
-        let chunk_id = Uuid::now_v7();
-        KnowledgeChunkRow {
-            chunk_id,
-            workspace_id: Uuid::now_v7(),
-            library_id: Uuid::now_v7(),
-            document_id: Uuid::now_v7(),
-            revision_id: Uuid::now_v7(),
-            chunk_index,
-            chunk_kind: if text.contains("[source_profile ") {
-                Some("source_profile".to_string())
-            } else {
-                Some("paragraph".to_string())
-            },
-            content_text: text.to_string(),
-            normalized_text: text.to_string(),
-            span_start: None,
-            span_end: None,
-            token_count: None,
-            support_block_ids: Vec::new(),
-            section_path: Vec::new(),
-            heading_trail: Vec::new(),
-            literal_digest: None,
-            chunk_state: "ready".to_string(),
-            text_generation: Some(1),
-            vector_generation: Some(1),
-            quality_score: Some(1.0),
-            window_text: None,
-            raptor_level: None,
-            occurred_at: None,
-            occurred_until: None,
-        }
-    }
-
-    fn exact_literal_query_ir() -> QueryIR {
-        QueryIR {
-            act: QueryAct::RetrieveValue,
-            scope: QueryScope::SingleDocument,
-            language: QueryLanguage::Auto,
-            target_types: vec!["config_key".to_string()],
-            target_entities: Vec::new(),
-            literal_constraints: vec![LiteralSpan {
-                text: "route_map".to_string(),
-                kind: LiteralKind::Identifier,
-            }],
-            temporal_constraints: Vec::new(),
-            comparison: None,
-            document_focus: None,
-            conversation_refs: Vec::new(),
-            needs_clarification: None,
-            source_slice: None,
-            retrieval_query: None,
-            confidence: 1.0,
-        }
-    }
-
-    fn low_confidence_short_token_ir() -> QueryIR {
-        QueryIR {
-            act: QueryAct::Describe,
-            scope: QueryScope::SingleDocument,
-            language: QueryLanguage::Auto,
-            target_types: Vec::new(),
-            target_entities: Vec::new(),
-            literal_constraints: Vec::new(),
-            temporal_constraints: Vec::new(),
-            comparison: None,
-            document_focus: None,
-            conversation_refs: Vec::new(),
-            needs_clarification: None,
-            source_slice: None,
-            retrieval_query: None,
-            confidence: 0.25,
-        }
-    }
-
-    #[test]
-    fn low_confidence_short_token_graph_evidence_keeps_only_focused_lines() {
-        let lines = vec![
-            "[graph-evidence target=\"QX\"] QX alphaFlag = true".to_string(),
-            "[graph-evidence target=\"ZZ\"] ZZ betaFlag = true".to_string(),
-        ];
-
-        let rendered = render_graph_evidence_context_lines_for_focus(
-            "QX settings",
-            &lines,
-            None,
-            &low_confidence_short_token_ir(),
-        );
-
-        assert!(rendered.contains("QX alphaFlag"));
-        assert!(!rendered.contains("ZZ betaFlag"));
-    }
-
-    #[test]
-    fn contextual_low_confidence_setup_context_keeps_related_parameter_chunks() {
-        let setup_document_id = Uuid::now_v7();
-        let parameter_document_id = Uuid::now_v7();
-        let setup_revision_id = Uuid::now_v7();
-        let parameter_revision_id = Uuid::now_v7();
-        let question = "scope: Provider Alpha setup was selected earlier\nliteral anchors: `https://alpha.local/api`\nquestion: provider_alpha_setup.md Provider Alpha module configuration all parameters url";
-        let chunks = vec![
-            RuntimeMatchedChunk {
-                chunk_id: Uuid::now_v7(),
-                revision_id: setup_revision_id,
-                chunk_index: 0,
-                chunk_kind: None,
-                document_id: setup_document_id,
-                document_label: "provider_alpha_setup.md".to_string(),
-                excerpt: "Install alpha-module and edit /opt/alpha/alpha.conf.".to_string(),
-                score_kind: RuntimeChunkScoreKind::Relevance,
-                score: Some(0.96),
-                source_text:
-                    "Install alpha-module. Edit /opt/alpha/alpha.conf in [Main]. url = https://alpha.local/api."
-                        .to_string(),
-            },
-            RuntimeMatchedChunk {
-                chunk_id: Uuid::now_v7(),
-                revision_id: parameter_revision_id,
-                chunk_index: 0,
-                chunk_kind: None,
-                document_id: parameter_document_id,
-                document_label: "provider_alpha_change_notes.md".to_string(),
-                excerpt: "Provider Alpha parameter table.".to_string(),
-                score_kind: RuntimeChunkScoreKind::Relevance,
-                score: Some(0.95),
-                source_text:
-                    "| alphaPrintSlip | boolean | true false | Print the slip | | alphaFillDetails | boolean | true false | Fill detail fields |"
-                        .to_string(),
-            },
-        ];
-        let context = build_canonical_answer_context(
-            question,
-            &low_confidence_short_token_ir(),
-            None,
-            &CanonicalAnswerEvidence {
-                bundle: None,
-                chunk_rows: Vec::new(),
-                structured_blocks: Vec::new(),
-                technical_facts: Vec::new(),
-            },
-            &chunks,
-            &[],
-        );
-
-        assert!(context.contains("/opt/alpha/alpha.conf"), "{context}");
-        assert!(context.contains("alphaPrintSlip"), "{context}");
-        assert!(context.contains("alphaFillDetails"), "{context}");
-    }
-
-    #[test]
-    fn source_coverage_is_enabled_for_exact_literal_queries() {
-        assert!(should_request_source_coverage_chunks("route_map", &exact_literal_query_ir()));
-        assert!(should_request_source_coverage_chunks(
-            "configure package",
-            &QueryIR {
-                act: QueryAct::ConfigureHow,
-                scope: QueryScope::SingleDocument,
-                language: QueryLanguage::Auto,
-                target_types: vec![
-                    "package".to_string(),
-                    "configuration_file".to_string(),
-                    "config_key".to_string(),
-                ],
-                target_entities: Vec::new(),
-                literal_constraints: Vec::new(),
-                temporal_constraints: Vec::new(),
-                comparison: None,
-                document_focus: None,
-                conversation_refs: Vec::new(),
-                needs_clarification: None,
-                source_slice: None,
-                retrieval_query: None,
-                confidence: 1.0,
-            }
-        ));
-        assert!(!should_request_source_coverage_chunks(
-            "how to update Sample Target",
-            &QueryIR {
-                act: QueryAct::ConfigureHow,
-                scope: QueryScope::SingleDocument,
-                language: QueryLanguage::Auto,
-                target_types: vec!["procedure".to_string(), "concept".to_string()],
-                target_entities: Vec::new(),
-                literal_constraints: Vec::new(),
-                temporal_constraints: Vec::new(),
-                comparison: None,
-                document_focus: None,
-                conversation_refs: Vec::new(),
-                needs_clarification: None,
-                source_slice: None,
-                retrieval_query: Some("how to update Sample Target".to_string()),
-                confidence: 0.9,
-            }
-        ));
-        assert!(!should_request_source_coverage_chunks(
-            "compare these documents",
-            &QueryIR {
-                act: QueryAct::Compare,
-                scope: QueryScope::MultiDocument,
-                language: QueryLanguage::Auto,
-                target_types: Vec::new(),
-                target_entities: Vec::new(),
-                literal_constraints: Vec::new(),
-                temporal_constraints: Vec::new(),
-                comparison: None,
-                document_focus: None,
-                conversation_refs: Vec::new(),
-                needs_clarification: None,
-                source_slice: None,
-                retrieval_query: None,
-                confidence: 1.0,
-            }
-        ));
-    }
-
-    #[test]
-    fn source_coverage_is_enabled_for_bounded_inventory_queries() {
-        assert!(should_request_source_coverage_chunks(
-            "what values are exposed?",
-            &QueryIR {
-                act: QueryAct::Describe,
-                scope: QueryScope::SingleDocument,
-                language: QueryLanguage::Auto,
-                target_types: vec!["attribute".to_string(), "record".to_string()],
-                target_entities: Vec::new(),
-                literal_constraints: Vec::new(),
-                temporal_constraints: Vec::new(),
-                comparison: None,
-                document_focus: None,
-                conversation_refs: Vec::new(),
-                needs_clarification: None,
-                source_slice: None,
-                retrieval_query: None,
-                confidence: 1.0,
-            }
-        ));
-        assert!(should_request_source_coverage_chunks(
-            "what entries are defined?",
-            &QueryIR {
-                act: QueryAct::Describe,
-                scope: QueryScope::SingleDocument,
-                language: QueryLanguage::Auto,
-                target_types: Vec::new(),
-                target_entities: vec![EntityMention {
-                    label: "Subject Alpha".to_string(),
-                    role: EntityRole::Subject,
-                }],
-                literal_constraints: Vec::new(),
-                temporal_constraints: Vec::new(),
-                comparison: None,
-                document_focus: None,
-                conversation_refs: Vec::new(),
-                needs_clarification: None,
-                source_slice: None,
-                retrieval_query: None,
-                confidence: 1.0,
-            }
-        ));
-        assert!(should_request_source_coverage_chunks(
-            "which exact value is defined?",
-            &QueryIR {
-                act: QueryAct::Describe,
-                scope: QueryScope::SingleDocument,
-                language: QueryLanguage::Auto,
-                target_types: Vec::new(),
-                target_entities: Vec::new(),
-                literal_constraints: vec![LiteralSpan {
-                    text: "alpha_key".to_string(),
-                    kind: LiteralKind::Identifier,
-                }],
-                temporal_constraints: Vec::new(),
-                comparison: None,
-                document_focus: None,
-                conversation_refs: Vec::new(),
-                needs_clarification: None,
-                source_slice: None,
-                retrieval_query: None,
-                confidence: 0.25,
-            }
-        ));
-        assert!(!query_ir_requests_inventory_source_coverage(&QueryIR {
-            act: QueryAct::Describe,
-            scope: QueryScope::SingleDocument,
-            language: QueryLanguage::Auto,
-            target_types: Vec::new(),
-            target_entities: Vec::new(),
-            literal_constraints: Vec::new(),
-            temporal_constraints: Vec::new(),
-            comparison: None,
-            document_focus: None,
-            conversation_refs: Vec::new(),
-            needs_clarification: None,
-            source_slice: None,
-            retrieval_query: None,
-            confidence: 0.25,
-        }));
-        assert!(!query_ir_requests_inventory_source_coverage(&QueryIR {
-            act: QueryAct::Meta,
-            scope: QueryScope::SingleDocument,
-            language: QueryLanguage::Auto,
-            target_types: vec!["facet".to_string()],
-            target_entities: Vec::new(),
-            literal_constraints: Vec::new(),
-            temporal_constraints: Vec::new(),
-            comparison: None,
-            document_focus: None,
-            conversation_refs: Vec::new(),
-            needs_clarification: None,
-            source_slice: None,
-            retrieval_query: None,
-            confidence: 1.0,
-        }));
-        assert!(!query_ir_requests_inventory_source_coverage(&QueryIR {
-            act: QueryAct::Describe,
-            scope: QueryScope::SingleDocument,
-            language: QueryLanguage::Auto,
-            target_types: Vec::new(),
-            target_entities: Vec::new(),
-            literal_constraints: Vec::new(),
-            temporal_constraints: Vec::new(),
-            comparison: None,
-            document_focus: None,
-            conversation_refs: Vec::new(),
-            needs_clarification: None,
-            source_slice: None,
-            retrieval_query: None,
-            confidence: 0.25,
-        }));
-    }
-
-    #[test]
-    fn source_coverage_selection_keeps_profile_edges_and_middle() {
-        let rows = (0..10)
-            .map(|index| {
-                if index == 5 {
-                    chunk_row(index, "[source_profile source_format=record_jsonl unit_count=42]")
-                } else {
-                    chunk_row(index, &format!("chunk {index}"))
-                }
-            })
-            .collect::<Vec<_>>();
-
-        let selected = select_source_coverage_chunk_rows(rows, 8, &[]);
-        let selected_indexes = selected.iter().map(|row| row.chunk_index).collect::<Vec<_>>();
-
-        assert!(selected_indexes.contains(&0));
-        assert!(selected_indexes.contains(&1));
-        assert!(selected_indexes.contains(&4));
-        assert!(selected_indexes.contains(&5));
-        assert!(selected_indexes.contains(&8));
-        assert!(selected_indexes.contains(&9));
-        assert!(selected.iter().any(is_source_profile_chunk));
-    }
-
-    /// Regression guard for the long-document configuration retrieval
-    /// gap. A 27-chunk source document at limit=12 used to produce a
-    /// gap from index 14 to index 25 because the stride fill stopped
-    /// once it accumulated 12 indices counting the forced head/middle/
-    /// tail anchors. On real data this skipped exactly the chunk
-    /// holding the canonical INI block, so the model truthfully
-    /// reported the context as incomplete.
-    ///
-    /// With greedy max-min coverage the selector must hit at least
-    /// one index in every quartile of the document, so a long-doc
-    /// config query covers the full index range.
-    #[test]
-    fn select_source_coverage_chunk_rows_covers_long_document_without_quartile_gap() {
-        let total = 27_usize;
-        let limit = 12;
-        let rows = (0..total)
-            .map(|index| chunk_row(i32::try_from(index).expect("index in i32 range"), "body"))
-            .collect::<Vec<_>>();
-
-        let selected = select_source_coverage_chunk_rows(rows, limit, &[]);
-        let mut selected_indexes = selected.iter().map(|row| row.chunk_index).collect::<Vec<_>>();
-        selected_indexes.sort();
-
-        assert_eq!(selected_indexes.len(), limit);
-
-        let quartile = total / 4;
-        let in_q1 = selected_indexes.iter().any(|index| (*index as usize) < quartile);
-        let in_q2 = selected_indexes
-            .iter()
-            .any(|index| (*index as usize) >= quartile && (*index as usize) < 2 * quartile);
-        let in_q3 = selected_indexes
-            .iter()
-            .any(|index| (*index as usize) >= 2 * quartile && (*index as usize) < 3 * quartile);
-        let in_q4 = selected_indexes.iter().any(|index| (*index as usize) >= 3 * quartile);
-
-        assert!(in_q1, "first quartile must be represented: {selected_indexes:?}");
-        assert!(in_q2, "second quartile must be represented: {selected_indexes:?}");
-        assert!(
-            in_q3,
-            "third quartile must be represented (regression of stride-fill gap that skipped this range): {selected_indexes:?}"
-        );
-        assert!(in_q4, "fourth quartile must be represented: {selected_indexes:?}");
-
-        // Maximum gap between consecutive selected indices must stay
-        // bounded — on a 27-chunk document at limit=12 no run of
-        // unselected indices should exceed `total / (limit - 1) + 2`
-        // which is roughly the spacing of an even partition.
-        let max_gap = selected_indexes.windows(2).map(|pair| pair[1] - pair[0]).max().unwrap_or(0);
-        let upper_bound = (total / (limit - 1) + 2) as i32;
-        assert!(
-            max_gap <= upper_bound,
-            "max gap {max_gap} must stay within {upper_bound} for total={total} limit={limit}: {selected_indexes:?}"
-        );
-    }
-
-    #[test]
-    fn source_coverage_selection_prioritizes_focused_keyword_rows() {
-        let rows = (0..18)
-            .map(|index| {
-                if index == 12 {
-                    chunk_row(index, "resource threshold RATE_LIMIT_REQUESTS exact anchor")
-                } else {
-                    chunk_row(index, &format!("chunk {index}"))
-                }
-            })
-            .collect::<Vec<_>>();
-        let plan_keywords = vec!["RATE_LIMIT_REQUESTS".to_string()];
-
-        let selected = select_source_coverage_chunk_rows(rows, 8, &plan_keywords);
-        let selected_indexes = selected.iter().map(|row| row.chunk_index).collect::<Vec<_>>();
-
-        assert!(
-            selected_indexes.contains(&12),
-            "focused exact keyword row must be retained: {selected_indexes:?}"
-        );
-    }
-
-    #[test]
-    fn source_coverage_selection_prefers_late_structural_anchor_rows() {
-        let rows = (0..24)
-            .map(|index| match index {
-                2 => chunk_row(index, "generic cloudwatch alarms and threshold overview"),
-                19 => chunk_row(
-                    index,
-                    "resource aws_cloudwatch_metric_alarm ecs_cpu_high metric_name CPUUtilization threshold 85",
-                ),
-                _ => chunk_row(index, &format!("chunk {index}")),
-            })
-            .collect::<Vec<_>>();
-        let plan_keywords =
-            vec!["cloudwatch".to_string(), "cpu".to_string(), "CPUUtilization".to_string()];
-
-        let selected = select_source_coverage_chunk_rows(rows, 8, &plan_keywords);
-        let selected_indexes = selected.iter().map(|row| row.chunk_index).collect::<Vec<_>>();
-
-        assert!(
-            selected_indexes.contains(&19),
-            "late exact structural row must be retained: {selected_indexes:?}"
-        );
-    }
-}
+#[path = "canonical_answer_source_coverage_tests.rs"]
+mod source_coverage_tests;
 
 #[cfg(test)]
 mod image_deprioritization_tests {

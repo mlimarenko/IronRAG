@@ -197,6 +197,29 @@ pub async fn list_web_discovered_pages(
     .await
 }
 
+/// Returns only exact mutation-item links whose child content job is already
+/// terminal while the page is still waiting in `materialized`. This is the
+/// bounded recovery path for a process crash between child publication and the
+/// post-publication web callback.
+pub async fn list_terminal_materialized_web_page_item_ids(
+    postgres: &PgPool,
+    run_id: Uuid,
+) -> Result<Vec<Uuid>, sqlx::Error> {
+    sqlx::query_scalar::<_, Uuid>(
+        "select page.mutation_item_id
+         from content_web_discovered_page page
+         join content_mutation_item item
+           on item.id = page.mutation_item_id
+         where page.run_id = $1
+           and page.candidate_state = 'materialized'
+           and item.item_state in ('applied', 'failed', 'conflicted', 'skipped')
+         order by page.id",
+    )
+    .bind(run_id)
+    .fetch_all(postgres)
+    .await
+}
+
 pub async fn get_web_discovered_page_by_result_revision_id(
     postgres: &PgPool,
     result_revision_id: Uuid,

@@ -3,12 +3,13 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use uuid::Uuid;
 
 use crate::services::query::text_match::{
-    add_label_terms_with_acronyms, label_term_sequence, label_terms,
-    normalized_alnum_token_sequence, normalized_alnum_tokens, token_sequence_contains_tokens,
-    token_sequence_exact_or_contains_tokens,
+    label_terms, normalized_alnum_token_sequence, normalized_alnum_tokens,
+    token_sequence_contains_tokens, token_sequence_exact_or_contains_tokens,
 };
 use crate::{
-    domains::query_ir::{EntityRole, LiteralKind, QueryAct, QueryIR, QueryLanguage, QueryScope},
+    domains::query_ir::{
+        EntityRole, LiteralKind, QueryAct, QueryIR, QueryLanguage, QueryScope, QueryTargetKind,
+    },
     infra::knowledge_rows::{
         KnowledgeDocumentRow, KnowledgeStructuredBlockRow, KnowledgeTechnicalFactRow,
     },
@@ -26,19 +27,27 @@ use super::endpoint_answer::{
 pub(crate) use super::focused_document_answer::build_focused_document_answer;
 use super::port_answer::{build_port_and_protocol_answer_from_facts, build_port_answer_from_facts};
 use super::question_intent::{
-    QuestionIntent, canonical_target_type_tag, classify_question_or_ir_intents,
-    query_ir_allows_procedure_runbook_target, query_ir_has_setup_configuration_target,
-    query_ir_is_unambiguous_versioned_procedure,
+    QuestionIntent, classify_question_or_ir_intents, query_ir_allows_procedure_runbook_target,
+    query_ir_has_setup_configuration_target, query_ir_is_unambiguous_versioned_procedure,
+    query_ir_requires_remediation_synthesis,
 };
-use super::transport_answer::build_transport_contract_comparison_answer;
+use crate::services::query::completion_policy::AnswerCompletionContract;
 use crate::services::query::effective_query::current_question_segment;
 use crate::shared::extraction::text_render::repair_technical_layout_noise;
 
-use super::retrieve::{
+use super::chunk_support::{
     chunk_is_setup_focus_command_path_anchor, command_dense_excerpt_for, excerpt_for,
     focused_excerpt_for,
 };
-use super::source_context::{salient_source_excerpt_for, structured_literal_excerpt_for};
+use super::command_shape::{
+    procedure_line_has_command_start, procedure_line_has_list_marker,
+    shellish_token_file_artifact_name, shellish_token_has_artifact_preparation_signal,
+    shellish_token_has_executable_name_shape, shellish_token_is_command_argument_signal,
+    shellish_token_is_invocable_head, shellish_token_is_local_artifact,
+    shellish_token_is_path_command_start, shellish_tokens_start_command,
+    split_concatenated_local_artifact_token, strip_leading_numeric_order_marker,
+};
+use super::source_excerpt::{salient_source_excerpt_for, structured_literal_excerpt_for};
 use super::technical_answer::build_exact_technical_literal_answer;
 #[cfg(test)]
 use super::technical_literals::technical_chunk_selection_score;
@@ -47,14 +56,15 @@ use super::technical_literals::{
     extract_package_command_literals, extract_parameter_literals, extract_prefix_literals,
     extract_url_literals, select_document_balanced_chunks, technical_literal_focus_keywords,
 };
-use super::types::*;
+use super::types::{CanonicalAnswerEvidence, RuntimeChunkScoreKind, RuntimeMatchedChunk};
 use super::{
     build_table_row_grounded_answer, build_table_summary_grounded_answer,
     focus_token_overlap_count, query_ir_document_focus_tokens, question_asks_table_aggregation,
 };
 use crate::services::query::latest_versions::{
-    compare_version_desc, extract_release_context_version, extract_semver_like_version,
-    latest_version_family_key, query_requests_latest_versions, requested_latest_version_count,
+    ReleaseSourceIdentity, compare_version_desc, extract_release_context_version,
+    extract_semver_like_version, is_version_token_continuation, query_requests_latest_versions,
+    requested_latest_version_count,
 };
 
 const SOURCE_COVERAGE_MAX_TOTAL_CHUNKS: usize = 32;
@@ -169,21 +179,12 @@ pub(crate) fn build_deterministic_technical_answer(
     chunks: &[RuntimeMatchedChunk],
 ) -> Option<String> {
     accept_deterministic_technical_candidate(
-        build_transport_contract_comparison_answer(question, query_ir, chunks),
+        build_port_and_protocol_answer_from_facts(question, query_ir, evidence, chunks),
         question,
         query_ir,
         evidence,
         chunks,
     )
-    .or_else(|| {
-        accept_deterministic_technical_candidate(
-            build_port_and_protocol_answer_from_facts(question, query_ir, evidence, chunks),
-            question,
-            query_ir,
-            evidence,
-            chunks,
-        )
-    })
     .or_else(|| {
         accept_deterministic_technical_candidate(
             build_port_answer_from_facts(question, query_ir, evidence, chunks),
@@ -342,9 +343,17 @@ pub(crate) fn build_deterministic_grounded_answer(
     evidence: &CanonicalAnswerEvidence,
     chunks: &[RuntimeMatchedChunk],
 ) -> Option<String> {
+    if query_ir_requires_remediation_synthesis(query_ir) {
+        return None;
+    }
     let answer = build_table_summary_grounded_answer(question, Some(query_ir), chunks)
         .or_else(|| build_table_row_grounded_answer(question, Some(query_ir), chunks))
-        .or_else(|| build_setup_configuration_anchor_answer(question, query_ir, chunks))
+        .or_else(|| build_multi_document_evidence_comparison_answer(query_ir, chunks))
+        .or_else(|| {
+            build_setup_configuration_anchor_candidate(question, query_ir, chunks)
+                .filter(|candidate| candidate.should_use_as_preflight_answer(query_ir, chunks))
+                .map(SetupConfigurationAnchorCandidate::into_answer)
+        })
         .or_else(|| build_structured_list_grounded_answer(question, query_ir, chunks))
         .or_else(|| build_update_procedure_sequence_answer(question, query_ir, chunks))
         .or_else(|| build_focused_document_answer(question, query_ir, chunks))
@@ -363,6 +372,57 @@ pub(super) fn augment_deterministic_grounded_answer_with_evidence(
     answer
 }
 
+fn build_multi_document_evidence_comparison_answer(
+    query_ir: &QueryIR,
+    chunks: &[RuntimeMatchedChunk],
+) -> Option<String> {
+    if !matches!(query_ir.act, QueryAct::Compare)
+        || !matches!(query_ir.scope, QueryScope::MultiDocument)
+    {
+        return None;
+    }
+    let mut best_by_document = HashMap::<Uuid, &RuntimeMatchedChunk>::new();
+    for chunk in chunks {
+        let text = chunk.source_text.trim();
+        if text.is_empty() {
+            continue;
+        }
+        best_by_document
+            .entry(chunk.document_id)
+            .and_modify(|current| {
+                if score_value(chunk.score) > score_value(current.score)
+                    || score_value(chunk.score) == score_value(current.score)
+                        && chunk.chunk_index < current.chunk_index
+                {
+                    *current = chunk;
+                }
+            })
+            .or_insert(chunk);
+    }
+    if best_by_document.len() < 2 {
+        return None;
+    }
+    let mut selected = best_by_document.into_values().collect::<Vec<_>>();
+    selected.sort_by(|left, right| {
+        score_value(right.score)
+            .total_cmp(&score_value(left.score))
+            .then_with(|| left.document_label.cmp(&right.document_label))
+            .then_with(|| left.chunk_index.cmp(&right.chunk_index))
+    });
+    let sections = selected
+        .into_iter()
+        .take(8)
+        .map(|chunk| {
+            format!(
+                "### {}\n{}",
+                chunk.document_label.trim(),
+                excerpt_for(chunk.source_text.trim(), 1_200)
+            )
+        })
+        .collect::<Vec<_>>();
+    (sections.len() >= 2).then(|| sections.join("\n\n"))
+}
+
 fn build_structured_list_grounded_answer(
     _question: &str,
     query_ir: &QueryIR,
@@ -372,8 +432,15 @@ fn build_structured_list_grounded_answer(
         return None;
     }
     let focus_terms = structured_list_focus_terms(query_ir);
+    let procedure_focus = matches!(query_ir.act, QueryAct::ConfigureHow)
+        .then(|| update_procedure_focus_model(query_ir));
     let mut candidates = chunks
         .iter()
+        .filter(|chunk| {
+            procedure_focus.as_ref().is_none_or(|focus| {
+                structured_list_chunk_has_acceptable_procedure_identity(chunk, focus)
+            })
+        })
         .filter_map(|chunk| extract_structured_list_candidate(chunk, &focus_terms))
         .collect::<Vec<_>>();
     candidates.sort_by(|left, right| {
@@ -387,6 +454,17 @@ fn build_structured_list_grounded_answer(
     if candidate.items.len() < 2 {
         return None;
     }
+    if matches!(query_ir.act, QueryAct::ConfigureHow)
+        && candidate
+            .items
+            .iter()
+            .filter(|item| structured_list_item_has_procedure_shape(item))
+            .take(2)
+            .count()
+            < 2
+    {
+        return None;
+    }
     let mut lines = Vec::with_capacity(candidate.items.len().min(16));
     for (index, item) in candidate.items.into_iter().take(16).enumerate() {
         if candidate.ordered {
@@ -395,7 +473,31 @@ fn build_structured_list_grounded_answer(
             lines.push(format!("- {item}"));
         }
     }
-    Some(lines.join("\n"))
+    let answer = lines.join("\n");
+    AnswerCompletionContract::from_query_ir(query_ir).evaluate(&answer).complete.then_some(answer)
+}
+
+fn structured_list_item_has_procedure_shape(item: &str) -> bool {
+    if line_has_command_signal(item) {
+        return true;
+    }
+    let trimmed = item.trim();
+    matches!(trimmed.chars().next_back(), Some('.' | ';' | ':' | '!' | '?'))
+        && normalized_alnum_tokens(trimmed, 1).len() >= 2
+}
+
+fn structured_list_chunk_has_acceptable_procedure_identity(
+    chunk: &RuntimeMatchedChunk,
+    focus_model: &UpdateProcedureFocusModel,
+) -> bool {
+    if focus_model.target_identity_sequences.is_empty() {
+        return true;
+    }
+    let text = repair_technical_layout_noise(&chunk.source_text);
+    update_procedure_text_target_identity_priority(&chunk.document_label, focus_model) > 0
+        || text
+            .lines()
+            .any(|line| update_procedure_text_target_identity_priority(line, focus_model) > 0)
 }
 
 #[derive(Debug)]
@@ -430,9 +532,6 @@ fn structured_list_focus_terms(query_ir: &QueryIR) -> BTreeSet<String> {
     let mut terms = BTreeSet::new();
     if let Some(retrieval_query) = query_ir.retrieval_query.as_deref() {
         terms.extend(normalized_alnum_tokens(retrieval_query, 3));
-    }
-    for target_type in &query_ir.target_types {
-        terms.extend(normalized_alnum_tokens(target_type, 3));
     }
     for entity in &query_ir.target_entities {
         terms.extend(normalized_alnum_tokens(&entity.label, 3));
@@ -473,37 +572,56 @@ fn extract_marked_list_candidates(
 ) -> Vec<StructuredListCandidate> {
     let mut candidates = Vec::new();
     for (line_index, line) in lines.iter().enumerate() {
-        if !line.ends_with(':') {
+        let Some(candidate) =
+            marked_list_candidate(lines, line_index, line, focus_terms, chunk_index)
+        else {
             continue;
-        }
-        let heading_score = structured_list_line_focus_score(line, focus_terms);
-        if heading_score == 0 && !focus_terms.is_empty() {
-            continue;
-        }
-        let mut items = Vec::new();
-        let mut ordered = false;
-        for following in lines.iter().skip(line_index + 1) {
-            if let Some((item_ordered, item)) = parse_structured_list_item(following) {
-                ordered |= item_ordered;
-                push_unique_structured_list_item(&mut items, item);
-                continue;
-            }
-            if !items.is_empty() {
-                break;
-            }
-        }
-        if items.len() >= 2 {
-            let item_score =
-                items.iter().map(|item| structured_list_line_focus_score(item, focus_terms)).sum();
-            candidates.push(StructuredListCandidate {
-                items,
-                ordered,
-                score: heading_score.saturating_mul(4).saturating_add(item_score),
-                first_chunk_index: chunk_index,
-            });
-        }
+        };
+        candidates.push(candidate);
     }
     candidates
+}
+
+fn marked_list_candidate(
+    lines: &[&str],
+    line_index: usize,
+    line: &str,
+    focus_terms: &BTreeSet<String>,
+    chunk_index: i32,
+) -> Option<StructuredListCandidate> {
+    if !line.ends_with(':') {
+        return None;
+    }
+    let heading_score = structured_list_line_focus_score(line, focus_terms);
+    if heading_score == 0 && !focus_terms.is_empty() {
+        return None;
+    }
+    let (items, ordered) = marked_list_items_after_heading(lines, line_index);
+    if items.len() < 2 {
+        return None;
+    }
+    let item_score =
+        items.iter().map(|item| structured_list_line_focus_score(item, focus_terms)).sum();
+    Some(StructuredListCandidate {
+        items,
+        ordered,
+        score: heading_score.saturating_mul(4).saturating_add(item_score),
+        first_chunk_index: chunk_index,
+    })
+}
+
+fn marked_list_items_after_heading(lines: &[&str], line_index: usize) -> (Vec<String>, bool) {
+    let mut items = Vec::new();
+    let mut ordered = false;
+    for following in lines.iter().skip(line_index + 1) {
+        if let Some((item_ordered, item)) = parse_structured_list_item(following) {
+            ordered |= item_ordered;
+            push_unique_structured_list_item(&mut items, item);
+        } else if !items.is_empty() {
+            break;
+        }
+    }
+    (items, ordered)
 }
 
 fn extract_comment_list_candidates(
@@ -640,35 +758,36 @@ impl SetupConfigurationAnchorCandidate {
     pub(super) fn into_answer(self) -> String {
         self.answer
     }
-
     pub(super) fn is_multi_variant(&self) -> bool {
         self.is_multi_variant
     }
-
     pub(super) fn has_parameter_details(&self) -> bool {
         self.has_parameter_details
     }
-
     pub(super) fn should_use_as_direct_answer(
         &self,
         query_ir: &QueryIR,
         chunks: &[RuntimeMatchedChunk],
     ) -> bool {
-        self.should_use_as_preflight_answer(query_ir, chunks)
-            || (query_ir_has_setup_configuration_target(query_ir) && self.has_actionable_anchor)
+        !query_ir_requires_remediation_synthesis(query_ir)
+            && !self.is_multi_variant()
+            && query_ir_has_setup_configuration_target(query_ir)
+            && (self.should_use_as_preflight_answer(query_ir, chunks) || self.has_actionable_anchor)
     }
-
     pub(super) fn should_use_as_preflight_answer(
         &self,
         query_ir: &QueryIR,
         chunks: &[RuntimeMatchedChunk],
     ) -> bool {
-        query_has_multi_document_setup_anchors(query_ir, chunks)
-            || (query_ir.document_focus.is_none() && self.is_multi_variant())
-            || self.has_parameter_details()
+        !query_ir_requires_remediation_synthesis(query_ir)
+            && !self.is_multi_variant()
+            && query_ir_has_setup_configuration_target(query_ir)
+            && (query_has_multi_document_setup_anchors(query_ir, chunks)
+                || self.has_parameter_details())
     }
 }
 
+#[cfg(test)]
 pub(super) fn build_setup_configuration_anchor_answer(
     question: &str,
     query_ir: &QueryIR,
@@ -677,14 +796,12 @@ pub(super) fn build_setup_configuration_anchor_answer(
     build_setup_configuration_anchor_candidate(question, query_ir, chunks)
         .map(SetupConfigurationAnchorCandidate::into_answer)
 }
-
 pub(super) fn build_setup_configuration_anchor_candidate(
     question: &str,
     query_ir: &QueryIR,
     chunks: &[RuntimeMatchedChunk],
 ) -> Option<SetupConfigurationAnchorCandidate> {
     const SETUP_CONFIGURATION_RENDER_VARIANT_LIMIT: usize = 8;
-
     if !query_ir_requests_setup_configuration_answer(question, query_ir) {
         return None;
     }
@@ -705,42 +822,8 @@ pub(super) fn build_setup_configuration_anchor_candidate(
         lines.push(format!("**{}:**", labels.variants));
         lines.push(String::new());
     }
-
     for variant in variants.iter().take(SETUP_CONFIGURATION_RENDER_VARIANT_LIMIT) {
-        lines.push(format!("**{}:** **{}**", labels.source, variant.source));
-        if !variant.packages.is_empty() {
-            lines.push(format!("- **{}:** `{}`", labels.package, variant.packages.join("`, `")));
-        }
-        if !variant.reconfigure_packages.is_empty() {
-            let commands = variant.reconfigure_packages.join("`, `");
-            lines.push(format!("- **{}:** `{commands}`", labels.reconfigure));
-        }
-        if !variant.paths.is_empty() {
-            lines.push(format!("- **{}:** `{}`", labels.path, variant.paths.join("`, `")));
-        }
-        if !variant.sections.is_empty() {
-            let sections = variant
-                .sections
-                .iter()
-                .map(|section| format!("[{section}]"))
-                .collect::<Vec<_>>()
-                .join("`, `");
-            lines.push(format!("- **{}:** `{sections}`", labels.section));
-        }
-        if !variant.parameters.is_empty() {
-            lines.push(format!(
-                "- **{}:** `{}`",
-                labels.parameter,
-                variant.parameters.join("`, `")
-            ));
-        }
-        if !variant.parameter_rows.is_empty() {
-            lines.push(format!("- **{}:**", labels.parameter_details));
-            for row in &variant.parameter_rows {
-                lines.push(format!("  - `{}` — {}", row.name, row.render_details(labels)));
-            }
-        }
-        lines.push(String::new());
+        render_setup_configuration_variant(&mut lines, variant, labels);
     }
     while lines.last().is_some_and(|line| line.is_empty()) {
         lines.pop();
@@ -751,6 +834,39 @@ pub(super) fn build_setup_configuration_anchor_candidate(
         has_parameter_details,
         has_actionable_anchor,
     })
+}
+
+fn render_setup_configuration_variant(
+    lines: &mut Vec<String>,
+    variant: &SetupConfigurationVariant,
+    labels: DeterministicAnswerLabels,
+) {
+    lines.push(format!("**{}:** **{}**", labels.source, variant.source));
+    push_setup_configuration_values(lines, labels.package, &variant.packages);
+    push_setup_configuration_values(lines, labels.reconfigure, &variant.reconfigure_packages);
+    push_setup_configuration_values(lines, labels.path, &variant.paths);
+    if !variant.sections.is_empty() {
+        let sections =
+            variant.sections.iter().map(|section| format!("[{section}]")).collect::<Vec<_>>();
+        push_setup_configuration_values(lines, labels.section, &sections);
+    }
+    push_setup_configuration_values(lines, labels.parameter, &variant.parameters);
+    if !variant.parameter_rows.is_empty() {
+        lines.push(format!("- **{}:**", labels.parameter_details));
+        lines.extend(
+            variant
+                .parameter_rows
+                .iter()
+                .map(|row| format!("  - `{}` — {}", row.name, row.render_details(labels))),
+        );
+    }
+    lines.push(String::new());
+}
+
+fn push_setup_configuration_values(lines: &mut Vec<String>, label: &str, values: &[String]) {
+    if !values.is_empty() {
+        lines.push(format!("- **{label}:** `{}`", values.join("`, `")));
+    }
 }
 
 fn query_ir_requests_setup_configuration_answer(question: &str, query_ir: &QueryIR) -> bool {
@@ -775,17 +891,15 @@ fn query_ir_requests_setup_configuration_answer(question: &str, query_ir: &Query
     !question_requests_lifecycle_update_procedure(question, query_ir)
 }
 
-fn question_requests_lifecycle_update_procedure(question: &str, query_ir: &QueryIR) -> bool {
+fn question_requests_lifecycle_update_procedure(_question: &str, query_ir: &QueryIR) -> bool {
     if query_ir_is_unambiguous_versioned_procedure(query_ir) {
         return true;
     }
-    if query_ir.target_types.iter().any(|target_type| {
-        let normalized = target_type.trim().to_lowercase();
-        matches!(
-            canonical_target_type_tag(target_type).as_str(),
-            "version" | "release" | "changelog"
-        ) || matches!(normalized.as_str(), "version" | "release" | "changelog")
-    }) {
+    if query_ir.targets_any(&[
+        QueryTargetKind::Version,
+        QueryTargetKind::Release,
+        QueryTargetKind::Changelog,
+    ]) {
         return true;
     }
     if query_ir.source_slice.as_ref().is_some_and(|slice| {
@@ -793,44 +907,18 @@ fn question_requests_lifecycle_update_procedure(question: &str, query_ir: &Query
     }) {
         return true;
     }
-    if extract_semver_like_version(question).is_some()
-        || extract_release_context_version(question).is_some()
-        || query_ir.retrieval_query.as_deref().is_some_and(|query| {
-            extract_semver_like_version(query).is_some()
-                || extract_release_context_version(query).is_some()
-        })
+    if query_ir
+        .literal_constraints
+        .iter()
+        .any(|literal| matches!(literal.kind, LiteralKind::Version))
+        || query_ir
+            .retrieval_query
+            .as_deref()
+            .is_some_and(|query| extract_semver_like_version(query).is_some())
     {
         return true;
     }
-    update_procedure_focus_model(question, query_ir)
-        .procedure_terms
-        .iter()
-        .any(|term| lifecycle_update_action_term(term))
-}
-
-fn lifecycle_update_action_term(term: &str) -> bool {
-    let term = term.trim().to_lowercase();
-    matches!(
-        term.as_str(),
-        "update"
-            | "updates"
-            | "updated"
-            | "updating"
-            | "upgrade"
-            | "upgrades"
-            | "upgraded"
-            | "upgrading"
-            | "version"
-            | "versions"
-            | "release"
-            | "releases"
-            | "релиз"
-            | "релизы"
-            | "релизов"
-            | "версия"
-            | "версии"
-            | "версий"
-    ) || term.starts_with("обнов")
+    false
 }
 
 fn query_ir_has_relational_focus(query_ir: &QueryIR) -> bool {
@@ -845,11 +933,12 @@ fn query_ir_has_subject_focus_identity(query_ir: &QueryIR) -> bool {
 }
 
 fn query_ir_requests_service_port_answer(query_ir: &QueryIR) -> bool {
-    query_ir
-        .target_types
-        .iter()
-        .map(|target_type| canonical_target_type_tag(target_type))
-        .any(|tag| matches!(tag.as_str(), "connection" | "port" | "protocol" | "service"))
+    query_ir.targets_any(&[
+        QueryTargetKind::Connection,
+        QueryTargetKind::Port,
+        QueryTargetKind::Protocol,
+        QueryTargetKind::Service,
+    ])
 }
 
 #[derive(Debug, Clone)]
@@ -870,30 +959,32 @@ struct SetupConfigurationVariant {
 struct SetupConfigurationParameterRow {
     name: String,
     details: Vec<(String, String)>,
+    positional_assignment_value: Option<String>,
 }
 
 impl SetupConfigurationParameterRow {
     fn render_details(&self, _labels: DeterministicAnswerLabels) -> String {
-        self.details
+        let mut rendered = self
+            .details
             .iter()
             .filter(|(_, value)| !value.is_empty())
             .map(|(key, value)| format!("{key}: {value}"))
             .collect::<Vec<_>>()
-            .join("; ")
+            .join("; ");
+        if rendered.is_empty()
+            && let Some(value) = self.positional_assignment_value.as_deref()
+        {
+            rendered.push_str(value);
+        }
+        rendered
     }
 
-    fn simple_default_assignment(&self) -> Option<String> {
-        let default = self
-            .details
-            .iter()
-            .find_map(|(key, value)| {
-                (setup_configuration_literal_key(key) == "default").then_some(value.as_str())
-            })?
-            .trim();
-        if !setup_configuration_default_value_is_assignment_scalar(default) {
+    fn positional_assignment(&self) -> Option<String> {
+        let value = self.positional_assignment_value.as_deref()?.trim();
+        if !setup_configuration_default_value_is_assignment_scalar(value) {
             return None;
         }
-        Some(format!("{} = {default}", self.name))
+        Some(format!("{} = {value}", self.name))
     }
 }
 
@@ -910,89 +1001,16 @@ fn setup_configuration_variants_from_chunks(
     let subject_tokens = setup_configuration_subject_tokens(query_ir);
     let mut variants = BTreeMap::<Uuid, SetupConfigurationVariant>::new();
     for chunk in chunks {
-        let text =
-            repair_technical_layout_noise(&format!("{}\n{}", chunk.source_text, chunk.excerpt));
-        let packages = extract_package_command_literals(&text, 4);
-        let paths = extract_configuration_path_literals(&text, 4);
-        let sections = extract_configuration_section_literals(&text, 4);
-        let reconfigure_packages = extract_setup_configuration_command_literals(&text, 6);
-        let parameter_rows = extract_setup_configuration_parameter_rows(
-            &text,
-            SETUP_CONFIGURATION_PARAMETER_ROW_LIMIT,
-        );
-        let parameters = filter_setup_configuration_parameters(
-            extract_config_assignment_literals(&text, SETUP_CONFIGURATION_PARAMETER_LITERAL_LIMIT)
-                .into_iter()
-                .chain(parameter_rows.iter().filter_map(|row| row.simple_default_assignment()))
-                .chain(extract_parameter_literals(
-                    &text,
-                    SETUP_CONFIGURATION_PARAMETER_LITERAL_LIMIT,
-                ))
-                .chain(parameter_rows.iter().map(|row| row.name.clone()))
-                .collect(),
-            &packages,
-            &reconfigure_packages,
-            &paths,
-            &sections,
-        );
-        let focus_score = setup_configuration_focus_score(&focus_tokens, chunk, &text);
-        let label_focus_score =
-            setup_configuration_label_focus_score(&subject_label_sequences, chunk);
-        if packages.is_empty()
-            && reconfigure_packages.is_empty()
-            && paths.is_empty()
-            && sections.is_empty()
-            && parameters.is_empty()
-        {
+        let Some(contribution) =
+            setup_configuration_variant_from_chunk(chunk, &focus_tokens, &subject_label_sequences)
+        else {
             continue;
-        }
-        if !focus_tokens.is_empty() && focus_score == 0 && label_focus_score == 0 {
-            continue;
-        }
-        let score = setup_configuration_variant_score(
-            &packages,
-            &reconfigure_packages,
-            &paths,
-            &sections,
-            &parameters,
-            &parameter_rows,
+        };
+        merge_setup_configuration_variant(
+            &mut variants,
             chunk,
-        );
-        let parameter_only_chunk = packages.is_empty()
-            && reconfigure_packages.is_empty()
-            && paths.is_empty()
-            && sections.is_empty();
-        if score < 16 && !parameter_only_chunk {
-            continue;
-        }
-        let entry =
-            variants.entry(chunk.document_id).or_insert_with(|| SetupConfigurationVariant {
-                source: chunk.document_label.clone(),
-                score: 0,
-                focus_score: 0,
-                label_focus_score: 0,
-                packages: Vec::new(),
-                reconfigure_packages: Vec::new(),
-                paths: Vec::new(),
-                sections: Vec::new(),
-                parameters: Vec::new(),
-                parameter_rows: Vec::new(),
-            });
-        entry.score = entry.score.saturating_add(score);
-        entry.focus_score = entry.focus_score.saturating_add(focus_score);
-        entry.label_focus_score = entry.label_focus_score.max(label_focus_score);
-        push_unique_values(&mut entry.packages, packages, 4);
-        push_unique_values(&mut entry.reconfigure_packages, reconfigure_packages, 4);
-        push_unique_values(&mut entry.paths, paths, 4);
-        push_unique_values(&mut entry.sections, sections, 4);
-        push_unique_values(
-            &mut entry.parameters,
-            parameters,
+            contribution,
             SETUP_CONFIGURATION_PARAMETER_LITERAL_LIMIT,
-        );
-        push_unique_parameter_rows(
-            &mut entry.parameter_rows,
-            parameter_rows,
             SETUP_CONFIGURATION_PARAMETER_ROW_LIMIT,
         );
     }
@@ -1027,6 +1045,120 @@ fn setup_configuration_variants_from_chunks(
     diversify_setup_configuration_variants(variants, diversity_terms)
 }
 
+struct SetupConfigurationVariantContribution {
+    score: usize,
+    focus_score: usize,
+    label_focus_score: usize,
+    packages: Vec<String>,
+    reconfigure_packages: Vec<String>,
+    paths: Vec<String>,
+    sections: Vec<String>,
+    parameters: Vec<String>,
+    parameter_rows: Vec<SetupConfigurationParameterRow>,
+}
+
+fn setup_configuration_variant_from_chunk(
+    chunk: &RuntimeMatchedChunk,
+    focus_tokens: &BTreeSet<String>,
+    subject_label_sequences: &[Vec<String>],
+) -> Option<SetupConfigurationVariantContribution> {
+    const PARAMETER_LITERAL_LIMIT: usize = 24;
+    const PARAMETER_ROW_LIMIT: usize = 16;
+    let text = repair_technical_layout_noise(&format!("{}\n{}", chunk.source_text, chunk.excerpt));
+    let packages = extract_package_command_literals(&text, 4);
+    let paths = extract_configuration_path_literals(&text, 4);
+    let sections = extract_configuration_section_literals(&text, 4);
+    let reconfigure_packages = extract_setup_configuration_command_literals(&text, 6);
+    let parameter_rows = extract_setup_configuration_parameter_rows(&text, PARAMETER_ROW_LIMIT);
+    let parameters = filter_setup_configuration_parameters(
+        extract_config_assignment_literals(&text, PARAMETER_LITERAL_LIMIT)
+            .into_iter()
+            .chain(
+                parameter_rows
+                    .iter()
+                    .filter_map(SetupConfigurationParameterRow::positional_assignment),
+            )
+            .chain(extract_parameter_literals(&text, PARAMETER_LITERAL_LIMIT))
+            .chain(parameter_rows.iter().map(|row| row.name.clone()))
+            .collect(),
+        &packages,
+        &reconfigure_packages,
+        &paths,
+        &sections,
+    );
+    if packages.is_empty()
+        && reconfigure_packages.is_empty()
+        && paths.is_empty()
+        && sections.is_empty()
+        && parameters.is_empty()
+    {
+        return None;
+    }
+    let focus_score = setup_configuration_focus_score(focus_tokens, chunk, &text);
+    let label_focus_score = setup_configuration_label_focus_score(subject_label_sequences, chunk);
+    if !focus_tokens.is_empty() && focus_score == 0 && label_focus_score == 0 {
+        return None;
+    }
+    let score = setup_configuration_variant_score(
+        &packages,
+        &reconfigure_packages,
+        &paths,
+        &sections,
+        &parameters,
+        &parameter_rows,
+        chunk,
+    );
+    let parameter_only = packages.is_empty()
+        && reconfigure_packages.is_empty()
+        && paths.is_empty()
+        && sections.is_empty();
+    (score >= 16 || parameter_only).then_some(SetupConfigurationVariantContribution {
+        score,
+        focus_score,
+        label_focus_score,
+        packages,
+        reconfigure_packages,
+        paths,
+        sections,
+        parameters,
+        parameter_rows,
+    })
+}
+
+fn merge_setup_configuration_variant(
+    variants: &mut BTreeMap<Uuid, SetupConfigurationVariant>,
+    chunk: &RuntimeMatchedChunk,
+    contribution: SetupConfigurationVariantContribution,
+    parameter_limit: usize,
+    parameter_row_limit: usize,
+) {
+    let entry = variants.entry(chunk.document_id).or_insert_with(|| SetupConfigurationVariant {
+        source: chunk.document_label.clone(),
+        score: 0,
+        focus_score: 0,
+        label_focus_score: 0,
+        packages: Vec::new(),
+        reconfigure_packages: Vec::new(),
+        paths: Vec::new(),
+        sections: Vec::new(),
+        parameters: Vec::new(),
+        parameter_rows: Vec::new(),
+    });
+    entry.score = entry.score.saturating_add(contribution.score);
+    entry.focus_score = entry.focus_score.saturating_add(contribution.focus_score);
+    entry.label_focus_score = entry.label_focus_score.max(contribution.label_focus_score);
+    push_unique_values(&mut entry.packages, contribution.packages, 4);
+    push_unique_values(&mut entry.reconfigure_packages, contribution.reconfigure_packages, 4);
+    push_unique_values(&mut entry.paths, contribution.paths, 4);
+    push_unique_values(&mut entry.sections, contribution.sections, 4);
+    push_unique_values(&mut entry.parameters, contribution.parameters, parameter_limit);
+    push_unique_parameter_rows(
+        &mut entry.parameter_rows,
+        contribution.parameter_rows,
+        parameter_row_limit,
+    );
+}
+
 fn setup_configuration_variant_has_anchor(variant: &SetupConfigurationVariant) -> bool {
     !variant.packages.is_empty()
         || !variant.reconfigure_packages.is_empty()
@@ -1041,30 +1173,34 @@ fn setup_configuration_has_distinct_variants(variants: &[SetupConfigurationVaria
     }
     let anchor_sets =
         variants.iter().map(setup_configuration_variant_anchor_keys).collect::<Vec<_>>();
-    for left_index in 0..anchor_sets.len() {
-        for right_index in (left_index + 1)..anchor_sets.len() {
-            if anchor_sets[left_index]
-                .iter()
-                .any(|anchor| !anchor.is_empty() && anchor_sets[right_index].contains(anchor))
-            {
-                return false;
-            }
-        }
-    }
-    true
+    anchor_sets.iter().enumerate().any(|(left_index, left)| {
+        anchor_sets.iter().skip(left_index + 1).any(|right| {
+            left.iter().any(|anchor| !right.contains(anchor))
+                && right.iter().any(|anchor| !left.contains(anchor))
+        })
+    })
 }
 
 fn setup_configuration_variant_anchor_keys(
     variant: &SetupConfigurationVariant,
 ) -> BTreeSet<String> {
-    variant
+    let identity_anchors = variant
         .packages
         .iter()
         .chain(&variant.reconfigure_packages)
-        .chain(&variant.paths)
+        .chain(&variant.sections)
         .map(|value| setup_configuration_literal_key(value))
         .filter(|value| !value.is_empty())
-        .collect()
+        .collect::<BTreeSet<_>>();
+    if identity_anchors.is_empty() {
+        return variant
+            .paths
+            .iter()
+            .map(|value| setup_configuration_literal_key(value))
+            .filter(|value| !value.is_empty())
+            .collect();
+    }
+    identity_anchors
 }
 
 fn diversify_setup_configuration_variants(
@@ -1307,8 +1443,15 @@ fn extract_setup_configuration_command_literals(text: &str, limit: usize) -> Vec
 }
 
 fn setup_configuration_command_literal_candidates(line: &str) -> Vec<String> {
+    if setup_configuration_text_starts_with_artifact(line) {
+        return Vec::new();
+    }
     let mut candidates = Vec::new();
-    let command = strip_leading_order_marker(line).trim().to_string();
+    let command = strip_leading_order_marker(line)
+        .trim()
+        .trim_end_matches(['.', ',', ';'])
+        .trim()
+        .to_string();
     if setup_configuration_command_literal_is_usable(&command) {
         candidates.push(command);
     }
@@ -1320,6 +1463,17 @@ fn setup_configuration_command_literal_candidates(line: &str) -> Vec<String> {
     candidates
 }
 
+fn setup_configuration_text_starts_with_artifact(text: &str) -> bool {
+    let Some(head) = strip_leading_order_marker(text)
+        .split_whitespace()
+        .next()
+        .map(trim_command_boundary_token_decorations)
+    else {
+        return false;
+    };
+    head.contains("://") || shellish_token_is_path_command_start(head)
+}
+
 fn setup_configuration_embedded_command_literals(line: &str) -> Vec<String> {
     let tokens = line.split_whitespace().collect::<Vec<_>>();
     if tokens.len() < 3 {
@@ -1327,9 +1481,6 @@ fn setup_configuration_embedded_command_literals(line: &str) -> Vec<String> {
     }
     let mut commands = Vec::new();
     for start in 1..tokens.len() {
-        if !setup_configuration_embedded_command_start_is_plausible(tokens[start]) {
-            continue;
-        }
         let candidate = tokens[start..].join(" ");
         if candidate.split_whitespace().count() < 2 || !line_has_command_signal(&candidate) {
             continue;
@@ -1351,71 +1502,28 @@ fn setup_configuration_embedded_command_literals(line: &str) -> Vec<String> {
     commands
 }
 
-fn setup_configuration_embedded_command_start_is_plausible(token: &str) -> bool {
-    let normalized = trim_command_boundary_token_decorations(token).to_ascii_lowercase();
-    matches!(normalized.as_str(), "sudo" | "su" | "doas")
-        || token_is_command_start(&normalized)
-        || token_is_local_script_command_start(&normalized)
-}
-
 fn setup_configuration_command_literal_is_usable(command: &str) -> bool {
     !command.is_empty()
         && !setup_configuration_command_is_table_row(command)
         && !setup_configuration_command_is_commented_fragment(command)
         && !setup_configuration_command_is_standalone_path(command)
         && !setup_configuration_command_is_standalone_assignment(command)
-        && setup_configuration_command_has_invocable_head(command)
+        && setup_configuration_command_has_invocable_structural_head(command)
         && line_has_command_signal(command)
 }
 
-fn setup_configuration_command_has_invocable_head(command: &str) -> bool {
-    let mut tokens = strip_leading_order_marker(command)
-        .split_whitespace()
-        .map(|token| {
-            trim_command_boundary_token_decorations(token)
-                .trim_matches(|ch| matches!(ch, '[' | ']'))
-                .to_ascii_lowercase()
-        })
-        .filter(|token| !token.is_empty())
-        .collect::<Vec<_>>();
-    while tokens
-        .first()
-        .is_some_and(|token| matches!(token.as_str(), "sudo" | "su" | "env" | "command"))
-    {
-        tokens.remove(0);
-    }
-    let Some(head) = tokens.first() else {
+fn setup_configuration_command_has_invocable_structural_head(command: &str) -> bool {
+    let tokens = command_token_values(strip_leading_order_marker(command));
+    let Some(head) = tokens.first().map(String::as_str) else {
         return false;
     };
-    if !setup_configuration_command_head_is_ascii_invocable(head) {
-        return false;
-    }
-    if matches!(head.as_str(), "sudo" | "su" | "doas") || token_is_local_script_command_start(head)
-    {
-        return true;
-    }
-    setup_configuration_command_has_near_structural_argument(&tokens, token_is_command_start(head))
-}
-
-fn setup_configuration_command_has_near_structural_argument(
-    tokens: &[String],
-    executable_shaped_head: bool,
-) -> bool {
-    if tokens.get(1).is_some_and(|token| command_token_is_structural_argument(token)) {
-        return true;
-    }
-    executable_shaped_head
-        && tokens.get(2).is_some_and(|token| command_token_is_structural_argument(token))
-}
-
-fn setup_configuration_command_head_is_ascii_invocable(head: &str) -> bool {
-    let head = trim_command_boundary_token_decorations(head);
-    !head.is_empty()
-        && !head.starts_with('-')
-        && !head.contains("://")
-        && head.chars().any(|ch| ch.is_ascii_alphabetic())
-        && head.chars().all(|ch| {
-            ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-' | '+' | '/' | '\\')
+    shellish_token_has_executable_name_shape(head)
+        && !shellish_token_is_path_command_start(head)
+        && tokens.iter().skip(1).any(|token| {
+            token.starts_with('-')
+                || token.contains('=')
+                || token.contains("://")
+                || token.contains('|')
         })
 }
 
@@ -1478,21 +1586,8 @@ fn filter_setup_configuration_parameters(
 }
 
 fn setup_configuration_command_head_key(command: &str) -> Option<String> {
-    let mut tokens = strip_leading_order_marker(command)
-        .split_whitespace()
-        .map(|token| {
-            token.trim_matches(|ch: char| {
-                matches!(
-                    ch,
-                    '`' | '\'' | '"' | '(' | ')' | '[' | ']' | '{' | '}' | '<' | '>' | ';' | ','
-                )
-            })
-        })
-        .filter(|token| !token.is_empty());
-    let mut head = tokens.next()?;
-    while matches!(head, "sudo" | "su") {
-        head = tokens.next()?;
-    }
+    let tokens = command_token_values(strip_leading_order_marker(command));
+    let head = structural_command_head_token(&tokens)?;
     let key = setup_configuration_literal_key(head);
     (!key.is_empty()).then_some(key)
 }
@@ -1544,6 +1639,11 @@ fn parse_setup_configuration_parameter_row(line: &str) -> Option<SetupConfigurat
                 .position(|(_, value)| setup_configuration_row_value_can_name_parameter(value))
         })?;
     let name = cells[name_index].1.clone();
+    let positional_assignment_value =
+        cells.iter().enumerate().rev().find_map(|(index, (_, value))| {
+            (index != name_index && setup_configuration_default_value_is_assignment_scalar(value))
+                .then(|| value.clone())
+        });
     let details = cells
         .into_iter()
         .enumerate()
@@ -1557,7 +1657,7 @@ fn parse_setup_configuration_parameter_row(line: &str) -> Option<SetupConfigurat
     if key.is_empty() || details.is_empty() {
         return None;
     }
-    Some(SetupConfigurationParameterRow { name, details })
+    Some(SetupConfigurationParameterRow { name, details, positional_assignment_value })
 }
 
 fn parse_setup_configuration_plain_parameter_row(
@@ -1582,7 +1682,11 @@ fn parse_setup_configuration_plain_parameter_row(
     if !setup_configuration_default_value_is_assignment_scalar(&default) {
         return None;
     }
-    Some(SetupConfigurationParameterRow { name, details: vec![("Default".to_string(), default)] })
+    Some(SetupConfigurationParameterRow {
+        name,
+        details: Vec::new(),
+        positional_assignment_value: Some(default),
+    })
 }
 
 fn setup_configuration_default_value_is_assignment_scalar(value: &str) -> bool {
@@ -1697,8 +1801,11 @@ pub(super) fn build_update_procedure_sequence_answer(
     if !matches!(query_ir.act, QueryAct::ConfigureHow | QueryAct::Describe) {
         return None;
     }
-    let focus_model = update_procedure_focus_model(question, query_ir);
-    if !question_requests_update_procedure_answer(query_ir, &focus_model) {
+    if query_ir_requires_remediation_synthesis(query_ir) {
+        return None;
+    }
+    let focus_model = update_procedure_focus_model(query_ir);
+    if !question_requests_update_procedure_answer(query_ir) {
         return None;
     }
     let selection = update_procedure_steps_from_chunks(&focus_model, chunks)?;
@@ -1715,62 +1822,59 @@ pub(super) fn build_update_procedure_sequence_answer(
     for (index, step) in selection.steps.iter().enumerate() {
         lines.push(render_update_procedure_step(index + 1, step));
     }
-    Some(lines.join("\n"))
+    let answer = lines.join("\n");
+    let has_executable_sequence =
+        selection.steps.iter().filter(|step| line_has_command_signal(step)).take(2).count() >= 2;
+    (has_executable_sequence
+        || AnswerCompletionContract::from_query_ir(query_ir).evaluate(&answer).complete)
+        .then_some(answer)
 }
 
 fn render_update_procedure_step(index: usize, step: &str) -> String {
     let stripped = strip_leading_order_marker(step).trim();
     if line_has_command_signal(stripped) {
-        let command = stripped.trim_end_matches(['.', ',', ';']).trim();
+        let command = stripped.trim_matches('`').trim_end_matches(['.', ',', ';']).trim();
         format!("{index}. `{command}`")
     } else {
         format!("{index}. {stripped}")
     }
 }
 
-fn question_requests_update_procedure_answer(
-    query_ir: &QueryIR,
-    focus_model: &UpdateProcedureFocusModel,
-) -> bool {
+fn question_requests_update_procedure_answer(query_ir: &QueryIR) -> bool {
     let allows_retrieved_single_document =
         query_ir_allows_retrieved_single_document_procedure_sequence(query_ir);
-    let allows_raw_retrieved_single_document =
-        query_ir_allows_raw_retrieved_single_document_procedure_sequence(query_ir, focus_model);
-    let has_typed_procedure_action = query_ir_has_typed_procedure_action(query_ir, focus_model);
+    let has_typed_procedure_action = query_ir_has_typed_procedure_action(query_ir);
     query_ir.source_slice.is_none()
-        && (query_ir_has_explicit_procedure_focus(query_ir)
-            || allows_retrieved_single_document
-            || allows_raw_retrieved_single_document)
+        && (query_ir_has_explicit_procedure_focus(query_ir) || allows_retrieved_single_document)
         && ((has_typed_procedure_action && !query_ir_has_setup_configuration_target(query_ir))
             || query_ir_allows_procedure_runbook_target(query_ir)
-            || allows_retrieved_single_document
-            || allows_raw_retrieved_single_document)
+            || allows_retrieved_single_document)
 }
 
 fn query_ir_has_explicit_procedure_focus(query_ir: &QueryIR) -> bool {
     !query_ir.target_entities.is_empty() || query_ir.document_focus.is_some()
 }
 
-fn query_ir_has_typed_procedure_action(
-    query_ir: &QueryIR,
-    focus_model: &UpdateProcedureFocusModel,
-) -> bool {
-    if focus_model.procedure_terms.is_empty()
-        || !query_ir_has_explicit_procedure_focus(query_ir)
+fn query_ir_has_typed_procedure_action(query_ir: &QueryIR) -> bool {
+    if !query_ir_has_explicit_procedure_focus(query_ir)
         || query_ir_has_setup_configuration_target(query_ir)
     {
         return false;
     }
     let mut has_procedure = false;
+    let mut has_version_or_release = false;
     let mut has_concept = false;
     for target_type in &query_ir.target_types {
-        match canonical_target_type_tag(target_type).as_str() {
-            "procedure" => has_procedure = true,
-            "concept" => has_concept = true,
+        match target_type {
+            QueryTargetKind::Procedure => has_procedure = true,
+            QueryTargetKind::Version | QueryTargetKind::Release => {
+                has_version_or_release = true;
+            }
+            QueryTargetKind::Concept => has_concept = true,
             _ => {}
         }
     }
-    has_procedure && !has_concept
+    has_procedure && has_version_or_release && !has_concept
 }
 
 fn query_ir_allows_retrieved_single_document_procedure_sequence(query_ir: &QueryIR) -> bool {
@@ -1785,11 +1889,16 @@ fn query_ir_allows_retrieved_single_document_procedure_sequence(query_ir: &Query
     let mut has_concept = false;
     let mut has_document_or_revision_signal = false;
     for target_type in &query_ir.target_types {
-        match canonical_target_type_tag(target_type).as_str() {
-            "procedure" => has_procedure = true,
-            "concept" => has_concept = true,
-            "artifact" | "document" | "entity" | "primary_heading" | "secondary_heading"
-            | "version" | "release" => {
+        match target_type {
+            QueryTargetKind::Procedure => has_procedure = true,
+            QueryTargetKind::Concept => has_concept = true,
+            QueryTargetKind::Artifact
+            | QueryTargetKind::Document
+            | QueryTargetKind::Entity
+            | QueryTargetKind::PrimaryHeading
+            | QueryTargetKind::SecondaryHeading
+            | QueryTargetKind::Version
+            | QueryTargetKind::Release => {
                 has_document_or_revision_signal = true;
             }
             _ => {}
@@ -1798,36 +1907,14 @@ fn query_ir_allows_retrieved_single_document_procedure_sequence(query_ir: &Query
     let has_explicit_subject_focus =
         query_ir.document_focus.is_some() || !query_ir.target_entities.is_empty();
     let has_literal_focus = !query_ir.literal_constraints.is_empty();
-    has_procedure
-        && ((!has_concept && has_document_or_revision_signal)
-            || (has_concept && (has_explicit_subject_focus || has_literal_focus)))
-}
-
-fn query_ir_allows_raw_retrieved_single_document_procedure_sequence(
-    query_ir: &QueryIR,
-    focus_model: &UpdateProcedureFocusModel,
-) -> bool {
-    matches!(query_ir.scope, QueryScope::SingleDocument)
-        && matches!(query_ir.act, QueryAct::ConfigureHow | QueryAct::Describe)
-        && query_ir.source_slice.is_none()
-        && query_ir.needs_clarification.is_none()
-        && query_ir.comparison.is_none()
-        && query_ir.target_types.is_empty()
-        && query_ir.target_entities.is_empty()
-        && query_ir.document_focus.is_none()
-        && query_ir.literal_constraints.is_empty()
-        && !query_ir_has_setup_configuration_target(query_ir)
-        && focus_model.query_terms.len() >= 2
-        && !focus_model.procedure_terms.is_empty()
-        && !focus_model.target_identity_sequences.is_empty()
+    let has_typed_subject_focus = has_explicit_subject_focus || has_literal_focus;
+    has_procedure && has_typed_subject_focus && (has_concept || has_document_or_revision_signal)
 }
 
 struct UpdateProcedureFocusModel {
-    query_terms: BTreeSet<String>,
     subject_terms: BTreeSet<String>,
-    subject_acronym_terms: BTreeSet<String>,
-    procedure_terms: BTreeSet<String>,
     target_identity_sequences: Vec<UpdateProcedureIdentitySequence>,
+    requires_exact_document_subject: bool,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, Ord, PartialOrd)]
@@ -1835,106 +1922,31 @@ struct UpdateProcedureIdentitySequence {
     tokens: Vec<String>,
     priority: usize,
 }
-
-fn update_procedure_focus_model(question: &str, query_ir: &QueryIR) -> UpdateProcedureFocusModel {
-    let current_question =
-        crate::services::query::effective_query::current_question_segment(question);
-    let mut query_terms =
-        normalized_alnum_tokens(current_question, 3).into_iter().collect::<BTreeSet<_>>();
-    let mut action_candidate_terms =
-        normalized_alnum_tokens(current_question, PROCEDURE_ACTION_TOKEN_MIN_CHARS)
-            .into_iter()
-            .collect::<BTreeSet<_>>();
+fn update_procedure_focus_model(query_ir: &QueryIR) -> UpdateProcedureFocusModel {
     let mut subject_terms = BTreeSet::<String>::new();
-    let mut subject_acronym_terms = BTreeSet::<String>::new();
     for entity in &query_ir.target_entities {
-        add_label_terms_with_acronyms(
-            &mut subject_terms,
-            &mut subject_acronym_terms,
-            &entity.label,
-            2,
-        );
+        subject_terms.extend(label_terms(&entity.label, 2));
     }
     if let Some(document_focus) = query_ir.document_focus.as_ref() {
-        add_label_terms_with_acronyms(
-            &mut subject_terms,
-            &mut subject_acronym_terms,
-            &document_focus.hint,
-            2,
-        );
+        subject_terms.extend(label_terms(&document_focus.hint, 2));
     }
-    if let Some(retrieval_query) = query_ir.retrieval_query.as_deref() {
-        let current_retrieval_query =
-            crate::services::query::effective_query::current_question_segment(retrieval_query);
-        query_terms.extend(normalized_alnum_tokens(current_retrieval_query, 3));
-        action_candidate_terms.extend(normalized_alnum_tokens(
-            current_retrieval_query,
-            PROCEDURE_ACTION_TOKEN_MIN_CHARS,
-        ));
-    }
-    query_terms.extend(subject_terms.iter().cloned());
-    query_terms.extend(subject_acronym_terms.iter().cloned());
-    let target_identity_sequences = update_procedure_target_identity_token_sequences(
-        current_question,
-        query_ir.retrieval_query.as_deref(),
-        query_ir,
-    );
-    let mut identity_exclusion_terms = BTreeSet::<String>::new();
-    let mut identity_exclusion_acronym_terms = BTreeSet::<String>::new();
-    for identity in &target_identity_sequences {
-        let has_structured_identity = identity.priority > 10;
-        let has_distinctive_raw_surface =
-            update_procedure_raw_identity_sequence_has_distinctive_surface(
-                current_question,
-                &identity.tokens,
-            ) || query_ir.retrieval_query.as_deref().is_some_and(|retrieval_query| {
-                update_procedure_raw_identity_sequence_has_distinctive_surface(
-                    retrieval_query,
-                    &identity.tokens,
-                )
-            });
-        if has_structured_identity || has_distinctive_raw_surface {
-            add_label_terms_with_acronyms(
-                &mut identity_exclusion_terms,
-                &mut identity_exclusion_acronym_terms,
-                &identity.tokens.join(" "),
-                2,
-            );
-        }
-        if has_structured_identity {
-            add_label_terms_with_acronyms(
-                &mut subject_terms,
-                &mut subject_acronym_terms,
-                &identity.tokens.join(" "),
-                2,
-            );
+    for literal in &query_ir.literal_constraints {
+        if matches!(literal.kind, LiteralKind::Identifier | LiteralKind::Other) {
+            subject_terms.extend(label_terms(&literal.text, 1));
         }
     }
-    let mut all_subject_terms = subject_terms.clone();
-    all_subject_terms.extend(subject_acronym_terms.iter().cloned());
-    all_subject_terms.extend(identity_exclusion_terms);
-    all_subject_terms.extend(identity_exclusion_acronym_terms);
-    let procedure_terms = action_candidate_terms
-        .iter()
-        .filter(|term| {
-            !all_subject_terms
-                .iter()
-                .any(|subject_term| procedure_terms_match(term.as_str(), subject_term.as_str()))
-        })
-        .cloned()
-        .collect::<BTreeSet<_>>();
+    let target_identity_sequences = update_procedure_target_identity_token_sequences(query_ir);
+    let requires_exact_document_subject = (query_ir.document_focus.is_some()
+        || !query_ir.target_entities.is_empty())
+        && query_ir.targets(QueryTargetKind::Document);
     UpdateProcedureFocusModel {
-        query_terms,
         subject_terms,
-        subject_acronym_terms,
-        procedure_terms,
         target_identity_sequences,
+        requires_exact_document_subject,
     }
 }
 
 fn update_procedure_target_identity_token_sequences(
-    question: &str,
-    retrieval_query: Option<&str>,
     query_ir: &QueryIR,
 ) -> Vec<UpdateProcedureIdentitySequence> {
     let mut seen = BTreeSet::<Vec<String>>::new();
@@ -1945,6 +1957,7 @@ fn update_procedure_target_identity_token_sequences(
             &mut seen,
             &entity.label,
             30,
+            false,
         );
     }
     if let Some(document_focus) = query_ir.document_focus.as_ref() {
@@ -1953,6 +1966,7 @@ fn update_procedure_target_identity_token_sequences(
             &mut seen,
             &document_focus.hint,
             20,
+            false,
         );
     }
     for literal in &query_ir.literal_constraints {
@@ -1962,74 +1976,11 @@ fn update_procedure_target_identity_token_sequences(
                 &mut seen,
                 &literal.text,
                 50,
-            );
-        }
-    }
-    if sequences.is_empty() {
-        if let Some(retrieval_query) = retrieval_query {
-            for sequence in update_procedure_raw_target_identity_token_sequences(retrieval_query) {
-                push_update_procedure_target_identity_sequence_tokens(
-                    &mut sequences,
-                    &mut seen,
-                    sequence,
-                    10,
-                );
-            }
-        }
-        for sequence in update_procedure_raw_target_identity_token_sequences(question) {
-            push_update_procedure_target_identity_sequence_tokens(
-                &mut sequences,
-                &mut seen,
-                sequence,
-                10,
+                true,
             );
         }
     }
     sequences
-}
-
-fn update_procedure_raw_identity_sequence_has_distinctive_surface(
-    text: &str,
-    sequence: &[String],
-) -> bool {
-    if sequence.is_empty() {
-        return false;
-    }
-    let surface_tokens = text
-        .split_whitespace()
-        .filter_map(|token| {
-            let normalized = normalized_alnum_token_sequence(token, 1);
-            (!normalized.is_empty()).then(|| {
-                let distinctive = token.chars().any(|ch| {
-                    ch.is_uppercase()
-                        || ch.is_ascii_digit()
-                        || matches!(ch, '-' | '_' | '.' | '/' | '\\')
-                });
-                (normalized, distinctive)
-            })
-        })
-        .collect::<Vec<_>>();
-    for start in 0..surface_tokens.len() {
-        let mut tokens = Vec::<String>::new();
-        let mut surface_count = 0usize;
-        let mut distinctive_surface_count = 0usize;
-        for (normalized, token_is_distinctive) in surface_tokens.iter().skip(start) {
-            tokens.extend(normalized.iter().cloned());
-            surface_count = surface_count.saturating_add(1);
-            if *token_is_distinctive {
-                distinctive_surface_count = distinctive_surface_count.saturating_add(1);
-            }
-            if tokens.len() > sequence.len() {
-                break;
-            }
-            if tokens == sequence {
-                return distinctive_surface_count > 0
-                    && ((surface_count == 1 && sequence.len() >= 2)
-                        || distinctive_surface_count == surface_count);
-            }
-        }
-    }
-    false
 }
 
 fn push_update_procedure_target_identity_sequence(
@@ -2037,12 +1988,10 @@ fn push_update_procedure_target_identity_sequence(
     seen: &mut BTreeSet<Vec<String>>,
     label: &str,
     priority: usize,
+    allow_single_token: bool,
 ) {
-    let mut sequence = normalized_alnum_token_sequence(label, 1);
-    if sequence.len() < 2 {
-        sequence = label_term_sequence(label, 1);
-    }
-    if sequence.len() < 2 {
+    let sequence = normalized_alnum_token_sequence(label, 1);
+    if sequence.is_empty() || (sequence.len() < 2 && !allow_single_token) {
         return;
     }
     if !seen.insert(sequence.clone()) {
@@ -2052,52 +2001,6 @@ fn push_update_procedure_target_identity_sequence(
         return;
     }
     sequences.push(UpdateProcedureIdentitySequence { tokens: sequence, priority });
-}
-
-fn push_update_procedure_target_identity_sequence_tokens(
-    sequences: &mut Vec<UpdateProcedureIdentitySequence>,
-    seen: &mut BTreeSet<Vec<String>>,
-    sequence: Vec<String>,
-    priority: usize,
-) {
-    if !update_procedure_target_identity_sequence_is_usable(&sequence) {
-        return;
-    }
-    if !seen.insert(sequence.clone()) {
-        if let Some(existing) = sequences.iter_mut().find(|existing| existing.tokens == sequence) {
-            existing.priority = existing.priority.max(priority);
-        }
-        return;
-    }
-    sequences.push(UpdateProcedureIdentitySequence { tokens: sequence, priority });
-}
-
-fn update_procedure_raw_target_identity_token_sequences(question: &str) -> Vec<Vec<String>> {
-    let current = current_question_segment(question);
-    let tokens = normalized_alnum_token_sequence(current, 1);
-    if tokens.is_empty() {
-        return Vec::new();
-    }
-    let mut seen = BTreeSet::<Vec<String>>::new();
-    let mut sequences = Vec::<Vec<String>>::new();
-    let max_window = tokens.len().min(6);
-    for window_len in (2..=max_window).rev() {
-        for window in tokens.windows(window_len) {
-            let sequence = window.to_vec();
-            if update_procedure_target_identity_sequence_is_usable(&sequence)
-                && seen.insert(sequence.clone())
-            {
-                sequences.push(sequence);
-            }
-        }
-    }
-    sequences
-}
-
-fn update_procedure_target_identity_sequence_is_usable(sequence: &[String]) -> bool {
-    sequence.len() >= 2
-        && sequence.iter().map(|token| token.chars().count()).sum::<usize>() >= 7
-        && sequence.iter().any(|token| token.chars().count() >= 3)
 }
 
 fn update_procedure_text_target_identity_priority(
@@ -2113,18 +2016,12 @@ fn update_procedure_text_target_identity_priority(
         .iter()
         .filter(|target_sequence| {
             token_sequence_contains_tokens(&text_sequence, &target_sequence.tokens)
-                || update_procedure_fuzzy_token_sequence_contains_tokens(
-                    &text_sequence,
-                    &target_sequence.tokens,
-                )
         })
         .map(|target_sequence| target_sequence.priority)
         .max()
         .unwrap_or_default()
 }
 
-const PROCEDURE_ACTION_TOKEN_MIN_CHARS: usize = 5;
-const PROCEDURE_TARGET_IDENTITY_PREFIX_MIN_CHARS: usize = 5;
 const UPDATE_PROCEDURE_BOUND_TARGET_LINE_WINDOW_MAX_CHARS: usize = 480;
 const UPDATE_PROCEDURE_BOUND_TARGET_LINE_WINDOW_MAX_LINES: usize = 6;
 
@@ -2132,49 +2029,17 @@ fn update_procedure_text_has_bound_target_identity_runbook(
     text: &str,
     focus_model: &UpdateProcedureFocusModel,
 ) -> bool {
-    if focus_model.target_identity_sequences.is_empty() || focus_model.procedure_terms.is_empty() {
+    if focus_model.target_identity_sequences.is_empty() {
         return false;
     }
     update_procedure_bound_target_identity_windows(text).into_iter().any(|window| {
-        if update_procedure_text_target_identity_priority(&window, focus_model) == 0 {
-            return false;
-        }
-        let tokens = normalized_alnum_tokens(&window, 2).into_iter().collect::<BTreeSet<_>>();
-        procedure_term_overlap_score(&focus_model.procedure_terms, &tokens) > 0
-            && update_procedure_window_has_bound_target_action_line(&window, focus_model)
-            && (window.lines().any(line_has_command_signal)
-                || !extract_explicit_path_literals(&window, 2).is_empty()
-                || !extract_package_command_literals(&window, 2).is_empty())
-    })
-}
-
-fn update_procedure_window_has_bound_target_action_line(
-    window: &str,
-    focus_model: &UpdateProcedureFocusModel,
-) -> bool {
-    let lines = window.lines().collect::<Vec<_>>();
-    if lines.iter().any(|line| {
-        if update_procedure_text_target_identity_priority(line, focus_model) == 0 {
-            return false;
-        }
-        let tokens = normalized_alnum_tokens(line, 2).into_iter().collect::<BTreeSet<_>>();
-        procedure_term_overlap_score(&focus_model.procedure_terms, &tokens) > 0
-    }) {
-        return true;
-    }
-    lines.windows(2).any(|pair| {
-        let [left, right] = pair else {
-            return false;
-        };
-        if update_procedure_line_has_sentence_boundary(left) {
-            return false;
-        }
-        let merged = format!("{left} {right}");
-        if update_procedure_text_target_identity_priority(&merged, focus_model) == 0 {
-            return false;
-        }
-        let tokens = normalized_alnum_tokens(&merged, 2).into_iter().collect::<BTreeSet<_>>();
-        procedure_term_overlap_score(&focus_model.procedure_terms, &tokens) > 0
+        update_procedure_text_target_identity_priority(&window, focus_model) > 0
+            && window
+                .lines()
+                .filter(|line| update_procedure_step_is_structural(line))
+                .take(2)
+                .count()
+                >= 2
     })
 }
 
@@ -2196,14 +2061,14 @@ fn update_procedure_bound_target_identity_windows(text: &str) -> Vec<String> {
                 push_update_procedure_bound_target_identity_window(&mut windows, &mut seen, window);
             }
         }
-    } else if let Some(line) = lines.first() {
-        if !update_procedure_line_has_sentence_boundary(line) {
-            push_update_procedure_bound_target_identity_window(
-                &mut windows,
-                &mut seen,
-                (*line).to_string(),
-            );
-        }
+    } else if let Some(line) = lines.first()
+        && !update_procedure_line_has_sentence_boundary(line)
+    {
+        push_update_procedure_bound_target_identity_window(
+            &mut windows,
+            &mut seen,
+            (*line).to_string(),
+        );
     }
 
     for line in &lines {
@@ -2271,28 +2136,6 @@ fn update_procedure_is_sentence_boundary(text: &str, index: usize, ch: char) -> 
     }
 }
 
-fn update_procedure_fuzzy_token_sequence_contains_tokens(
-    haystack_tokens: &[String],
-    needle_tokens: &[String],
-) -> bool {
-    if needle_tokens.is_empty() || haystack_tokens.len() < needle_tokens.len() {
-        return false;
-    }
-    haystack_tokens.windows(needle_tokens.len()).any(|window| {
-        window.iter().zip(needle_tokens).all(|(haystack_token, needle_token)| {
-            update_procedure_identity_tokens_match(haystack_token, needle_token)
-        })
-    })
-}
-
-fn update_procedure_identity_tokens_match(left: &str, right: &str) -> bool {
-    left == right
-        || (left.chars().count() >= PROCEDURE_TARGET_IDENTITY_PREFIX_MIN_CHARS
-            && right.chars().count() >= PROCEDURE_TARGET_IDENTITY_PREFIX_MIN_CHARS
-            && shared_procedure_prefix_len(left, right)
-                >= PROCEDURE_TARGET_IDENTITY_PREFIX_MIN_CHARS)
-}
-
 #[derive(Debug, Clone)]
 struct UpdateProcedureSelection {
     source: String,
@@ -2306,10 +2149,7 @@ struct UpdateProcedureExtract {
     score: usize,
     steps: Vec<String>,
     block_text: String,
-    action_text: String,
     command_count: usize,
-    action_command_score: usize,
-    script_artifact_family_score: usize,
     preparatory_command_score: usize,
     focus_aligned_command_score: usize,
     unfocused_command_score: usize,
@@ -2319,7 +2159,6 @@ struct UpdateProcedureExtract {
 
 #[derive(Debug, Clone)]
 struct UpdateProcedureCandidate {
-    exact_target_identity: bool,
     label_target_identity: bool,
     target_identity_priority: usize,
     target_identity_focus_score: usize,
@@ -2333,179 +2172,285 @@ fn update_procedure_steps_from_chunks(
     focus_model: &UpdateProcedureFocusModel,
     chunks: &[RuntimeMatchedChunk],
 ) -> Option<UpdateProcedureSelection> {
-    let mut candidates = Vec::<UpdateProcedureCandidate>::new();
-    for chunk in chunks {
-        let label_target_identity_priority =
-            update_procedure_text_target_identity_priority(&chunk.document_label, focus_model);
-        let text = repair_technical_layout_noise(&update_procedure_chunk_text(chunk, &focus_model));
-        let raw_extracts = update_procedure_extracts_from_text(&text, focus_model);
-        let mut extracts = raw_extracts
-            .iter()
-            .filter(|&extract| {
-                update_procedure_selection_matches_action(
-                    extract,
-                    focus_model,
-                    &chunk.document_label,
-                )
-            })
-            .cloned()
-            .collect::<Vec<_>>();
-        if let Some(aggregate) = update_procedure_focus_aligned_command_aggregate(
-            &raw_extracts,
-            focus_model,
-            &chunk.document_label,
-        ) {
-            extracts.push(aggregate);
-        }
-        let extracts = extracts.into_iter().collect::<Vec<_>>();
-        let has_richer_extract = extracts.iter().any(|extract| extract.steps.len() >= 4);
-        for extract in extracts {
-            if has_richer_extract && extract.steps.len() < 4 {
-                continue;
-            }
-            let label_focus_score =
-                update_procedure_text_focus_score(&chunk.document_label, focus_model);
-            let block_focus_score =
-                update_procedure_text_focus_score(&extract.block_text, focus_model);
-            let focused_structural_score =
-                update_procedure_focused_structural_score(&extract.block_text, focus_model);
-            let raw_block_target_identity_priority =
-                update_procedure_text_target_identity_priority(&extract.block_text, focus_model);
-            let block_target_identity_is_bound = raw_block_target_identity_priority > 0
+    let document_bindings = update_procedure_document_bindings(focus_model, chunks);
+    let mut candidates = chunks
+        .iter()
+        .flat_map(|chunk| {
+            update_procedure_candidates_from_chunk(
+                focus_model,
+                chunk,
+                document_bindings.get(&chunk.document_id).copied().unwrap_or_default(),
+            )
+        })
+        .collect::<Vec<_>>();
+    select_update_procedure_candidate(focus_model, &mut candidates)
+}
+
+fn update_procedure_candidates_from_chunk(
+    focus_model: &UpdateProcedureFocusModel,
+    chunk: &RuntimeMatchedChunk,
+    document_binding: UpdateProcedureDocumentBinding,
+) -> Vec<UpdateProcedureCandidate> {
+    let label_target_identity_priority =
+        update_procedure_text_target_identity_priority(&chunk.document_label, focus_model);
+    let text = repair_technical_layout_noise(&update_procedure_chunk_text(chunk, focus_model));
+    let raw_extracts = update_procedure_extracts_from_text(&text, focus_model);
+    let mut extracts = raw_extracts
+        .iter()
+        .filter(|extract| {
+            update_procedure_extract_is_typed_evidence(extract, focus_model, &chunk.document_label)
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    if let Some(aggregate) = update_procedure_focus_aligned_command_aggregate(
+        &raw_extracts,
+        focus_model,
+        &chunk.document_label,
+    )
+    .filter(|extract| {
+        update_procedure_extract_is_typed_evidence(extract, focus_model, &chunk.document_label)
+    }) {
+        extracts.push(aggregate);
+    }
+    let has_richer_extract = extracts.iter().any(|extract| extract.steps.len() >= 4);
+    extracts
+        .into_iter()
+        .filter(|extract| !has_richer_extract || extract.steps.len() >= 4)
+        .filter_map(|extract| {
+            update_procedure_candidate_from_extract(
+                focus_model,
+                chunk,
+                document_binding,
+                label_target_identity_priority,
+                extract,
+            )
+        })
+        .collect()
+}
+
+fn update_procedure_candidate_from_extract(
+    focus_model: &UpdateProcedureFocusModel,
+    chunk: &RuntimeMatchedChunk,
+    document_binding: UpdateProcedureDocumentBinding,
+    label_target_identity_priority: usize,
+    extract: UpdateProcedureExtract,
+) -> Option<UpdateProcedureCandidate> {
+    let label_focus_score = update_procedure_text_focus_score(&chunk.document_label, focus_model);
+    let block_focus_score = update_procedure_text_focus_score(&extract.block_text, focus_model);
+    let focused_structural_score =
+        update_procedure_focused_structural_score(&extract.block_text, focus_model);
+    let raw_block_target_identity_priority =
+        update_procedure_text_target_identity_priority(&extract.block_text, focus_model);
+    let block_target_identity_is_bound = raw_block_target_identity_priority > 0
+        && (document_binding.strong_body_target_binding
+            || (label_target_identity_priority > 0
                 && update_procedure_text_has_bound_target_identity_runbook(
                     &extract.block_text,
                     focus_model,
-                );
-            if label_target_identity_priority == 0
-                && raw_block_target_identity_priority > 0
-                && !block_target_identity_is_bound
-                && extract.command_count >= 2
-            {
-                continue;
-            }
-            let block_target_identity_priority =
-                if block_target_identity_is_bound || extract.command_count < 2 {
-                    raw_block_target_identity_priority
-                } else {
-                    0
-                };
-            let target_identity_priority =
-                label_target_identity_priority.max(block_target_identity_priority);
-            let exact_target_identity = target_identity_priority > 0;
-            let target_identity_focus_score = if label_target_identity_priority > 0 {
-                label_focus_score
-            } else if block_target_identity_priority > 0 {
-                block_focus_score
-            } else {
-                0
-            };
-            let exact_target_identity_bonus = if exact_target_identity
-                && extract.steps.len() >= 4
-                && extract.command_count >= 2
-            {
-                32768usize
-            } else {
-                8192usize
-            };
-            let unfocused_command_penalty =
-                if extract.focus_aligned_command_score > 0 { 4096 } else { 256 };
-            let score = extract
-                .score
-                .saturating_add(
-                    usize::from(extract.is_focus_projection && extract.command_count >= 2)
-                        .saturating_mul(65_536),
-                )
-                .saturating_add(
-                    usize::from(exact_target_identity).saturating_mul(exact_target_identity_bonus),
-                )
-                .saturating_add(label_focus_score.saturating_mul(96))
-                .saturating_add(target_identity_focus_score.saturating_mul(1024))
-                .saturating_add(focused_structural_score.saturating_mul(160))
-                .saturating_add(extract.steps.len().saturating_mul(24))
-                .saturating_add(extract.command_count.saturating_mul(512))
-                .saturating_add(update_procedure_command_candidate_bonus(extract.command_count))
-                .saturating_add(extract.action_command_score.saturating_mul(2048))
-                .saturating_add(
-                    usize::from(
-                        extract.script_artifact_family_score > 0 && extract.command_count >= 2,
-                    )
-                    .saturating_mul(32_768),
-                )
-                .saturating_add(extract.script_artifact_family_score.saturating_mul(4096))
-                .saturating_add(extract.preparatory_command_score.saturating_mul(512))
-                .saturating_add(extract.focus_aligned_command_score.saturating_mul(4096))
-                .saturating_sub(
-                    extract.unfocused_command_score.saturating_mul(unfocused_command_penalty),
-                );
-            let steps = update_procedure_steps_with_adjacent_same_head_preparation(
-                extract.steps,
-                &extract.block_text,
-            );
-            let anchors = update_procedure_evidence_anchors(&steps, &extract.block_text, 8);
-            candidates.push(UpdateProcedureCandidate {
-                exact_target_identity,
-                label_target_identity: label_target_identity_priority > 0,
-                target_identity_priority,
-                target_identity_focus_score,
-                score,
-                command_count: extract.command_count,
-                focused_structural_score,
-                selection: UpdateProcedureSelection {
-                    source: chunk.document_label.clone(),
-                    steps,
-                    anchors,
-                },
-            });
-        }
+                )));
+    if label_target_identity_priority == 0
+        && raw_block_target_identity_priority > 0
+        && !block_target_identity_is_bound
+    {
+        return None;
     }
-    let preferred_target_identity_priority = candidates
+    let block_target_identity_priority =
+        raw_block_target_identity_priority * usize::from(block_target_identity_is_bound);
+    let target_identity_priority =
+        label_target_identity_priority.max(block_target_identity_priority);
+    if target_identity_priority == 0 {
+        return None;
+    }
+    let target_identity_focus_score =
+        if label_target_identity_priority > 0 { label_focus_score } else { block_focus_score };
+    let score = update_procedure_candidate_score(
+        &extract,
+        label_focus_score,
+        target_identity_focus_score,
+        focused_structural_score,
+    );
+    let command_count = extract.command_count;
+    let steps = update_procedure_steps_with_adjacent_same_head_preparation(
+        extract.steps,
+        &extract.block_text,
+    );
+    let anchors = update_procedure_evidence_anchors(&steps, &extract.block_text, 8);
+    Some(UpdateProcedureCandidate {
+        label_target_identity: label_target_identity_priority > 0,
+        target_identity_priority,
+        target_identity_focus_score,
+        score,
+        command_count,
+        focused_structural_score,
+        selection: UpdateProcedureSelection {
+            source: chunk.document_label.clone(),
+            steps,
+            anchors,
+        },
+    })
+}
+
+fn update_procedure_candidate_score(
+    extract: &UpdateProcedureExtract,
+    label_focus_score: usize,
+    target_identity_focus_score: usize,
+    focused_structural_score: usize,
+) -> usize {
+    let exact_target_identity_bonus =
+        if extract.steps.len() >= 4 && extract.command_count >= 2 { 32768 } else { 8192 };
+    let unfocused_command_penalty =
+        if extract.focus_aligned_command_score > 0 { 4096 } else { 256 };
+    extract
+        .score
+        .saturating_add(
+            usize::from(extract.is_focus_projection && extract.command_count >= 2)
+                .saturating_mul(65_536),
+        )
+        .saturating_add(exact_target_identity_bonus)
+        .saturating_add(label_focus_score.saturating_mul(96))
+        .saturating_add(target_identity_focus_score.saturating_mul(1024))
+        .saturating_add(focused_structural_score.saturating_mul(160))
+        .saturating_add(extract.steps.len().saturating_mul(24))
+        .saturating_add(extract.command_count.saturating_mul(512))
+        .saturating_add(update_procedure_command_candidate_bonus(extract.command_count))
+        .saturating_add(extract.preparatory_command_score.saturating_mul(512))
+        .saturating_add(extract.focus_aligned_command_score.saturating_mul(4096))
+        .saturating_sub(extract.unfocused_command_score.saturating_mul(unfocused_command_penalty))
+}
+
+fn select_update_procedure_candidate(
+    focus_model: &UpdateProcedureFocusModel,
+    candidates: &mut Vec<UpdateProcedureCandidate>,
+) -> Option<UpdateProcedureSelection> {
+    if focus_model.requires_exact_document_subject
+        && !candidates.iter().any(update_procedure_candidate_has_target_identity_preference)
+    {
+        return None;
+    }
+    retain_preferred_update_procedure_candidates(candidates);
+    candidates
+        .drain(..)
+        .max_by(compare_update_procedure_candidates)
+        .map(|candidate| candidate.selection)
+}
+
+fn retain_preferred_update_procedure_candidates(candidates: &mut Vec<UpdateProcedureCandidate>) {
+    let preferred_priority = candidates
         .iter()
-        .filter(|candidate| {
-            candidate.exact_target_identity
-                && update_procedure_candidate_has_target_identity_preference(candidate)
-        })
+        .filter(|candidate| update_procedure_candidate_has_target_identity_preference(candidate))
         .map(|candidate| candidate.target_identity_priority)
         .max()
         .unwrap_or_default();
-    if preferred_target_identity_priority > 0 {
+    if preferred_priority > 0 {
         candidates.retain(|candidate| {
-            candidate.target_identity_priority == preferred_target_identity_priority
+            candidate.target_identity_priority == preferred_priority
                 && update_procedure_candidate_has_target_identity_preference(candidate)
         });
     }
-    let has_label_target_identity = candidates.iter().any(|candidate| {
+    if candidates.iter().any(|candidate| {
         candidate.label_target_identity
             && update_procedure_candidate_has_target_identity_preference(candidate)
-    });
-    if has_label_target_identity {
+    }) {
         candidates.retain(|candidate| {
             candidate.label_target_identity
                 && update_procedure_candidate_has_target_identity_preference(candidate)
         });
     }
-    let has_actionable_command_candidate =
-        candidates.iter().any(update_procedure_candidate_has_actionable_command_preference);
-    if has_actionable_command_candidate {
-        candidates.retain(update_procedure_candidate_has_actionable_command_preference);
+    if candidates.iter().any(update_procedure_candidate_has_structural_command_preference) {
+        candidates.retain(update_procedure_candidate_has_structural_command_preference);
+    }
+}
+
+fn compare_update_procedure_candidates(
+    left: &UpdateProcedureCandidate,
+    right: &UpdateProcedureCandidate,
+) -> std::cmp::Ordering {
+    left.score
+        .cmp(&right.score)
+        .then_with(|| left.target_identity_priority.cmp(&right.target_identity_priority))
+        .then_with(|| left.target_identity_focus_score.cmp(&right.target_identity_focus_score))
+        .then_with(|| left.focused_structural_score.cmp(&right.focused_structural_score))
+        .then_with(|| left.selection.steps.len().cmp(&right.selection.steps.len()))
+        .then_with(|| left.command_count.cmp(&right.command_count))
+        .then_with(|| right.selection.source.cmp(&left.selection.source))
+        .then_with(|| right.selection.anchors.cmp(&left.selection.anchors))
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct UpdateProcedureDocumentBinding {
+    strong_body_target_binding: bool,
+}
+
+fn update_procedure_document_bindings(
+    focus_model: &UpdateProcedureFocusModel,
+    chunks: &[RuntimeMatchedChunk],
+) -> HashMap<Uuid, UpdateProcedureDocumentBinding> {
+    let mut chunks_by_document = HashMap::<Uuid, Vec<&RuntimeMatchedChunk>>::new();
+    for chunk in chunks {
+        chunks_by_document.entry(chunk.document_id).or_default().push(chunk);
+    }
+    chunks_by_document
+        .into_iter()
+        .map(|(document_id, mut document_chunks)| {
+            document_chunks.sort_by(|left, right| {
+                left.chunk_index
+                    .cmp(&right.chunk_index)
+                    .then_with(|| left.chunk_id.cmp(&right.chunk_id))
+            });
+            let mut seen_fragments = HashSet::<String>::new();
+            let mut body_fragments = Vec::<&str>::new();
+            for chunk in &document_chunks {
+                for fragment in [chunk.source_text.as_str(), chunk.excerpt.as_str()] {
+                    let fragment = fragment.trim();
+                    if !fragment.is_empty() && seen_fragments.insert(fragment.to_string()) {
+                        body_fragments.push(fragment);
+                    }
+                }
+            }
+            let body = repair_technical_layout_noise(&body_fragments.join("\n"));
+            let strong_body_target_binding =
+                update_procedure_text_has_strong_target_procedure_binding(&body, focus_model);
+            (document_id, UpdateProcedureDocumentBinding { strong_body_target_binding })
+        })
+        .collect()
+}
+
+fn update_procedure_text_has_strong_target_procedure_binding(
+    text: &str,
+    focus_model: &UpdateProcedureFocusModel,
+) -> bool {
+    if focus_model.target_identity_sequences.is_empty() {
+        return false;
+    }
+    let lines = text.lines().map(str::trim).filter(|line| !line.is_empty()).collect::<Vec<_>>();
+    let distinct_target_steps = lines
+        .iter()
+        .filter(|line| {
+            update_procedure_text_target_identity_priority(line, focus_model) > 0
+                && update_procedure_step_is_structural(line)
+        })
+        .map(|line| update_procedure_normalized_step(line).to_lowercase())
+        .collect::<BTreeSet<_>>();
+    if distinct_target_steps.len() >= 2 {
+        return true;
     }
 
-    candidates
-        .into_iter()
-        .max_by(|left, right| {
-            left.score
-                .cmp(&right.score)
-                .then_with(|| left.exact_target_identity.cmp(&right.exact_target_identity))
-                .then_with(|| left.target_identity_priority.cmp(&right.target_identity_priority))
-                .then_with(|| {
-                    left.target_identity_focus_score.cmp(&right.target_identity_focus_score)
-                })
-                .then_with(|| left.focused_structural_score.cmp(&right.focused_structural_score))
-                .then_with(|| left.selection.steps.len().cmp(&right.selection.steps.len()))
-                .then_with(|| left.command_count.cmp(&right.command_count))
-                .then_with(|| right.selection.source.cmp(&left.selection.source))
-                .then_with(|| right.selection.anchors.cmp(&left.selection.anchors))
-        })
-        .map(|candidate| candidate.selection)
+    lines.iter().enumerate().any(|(heading_index, heading)| {
+        if strip_leading_order_marker(heading).trim() != *heading
+            || line_has_command_signal(heading)
+            || update_procedure_text_target_identity_priority(heading, focus_model) == 0
+        {
+            return false;
+        }
+        lines
+            .iter()
+            .skip(heading_index + 1)
+            .take(8)
+            .filter(|line| update_procedure_step_is_structural(line))
+            .take(2)
+            .count()
+            >= 2
+    })
 }
 
 fn update_procedure_steps_with_adjacent_same_head_preparation(
@@ -2579,24 +2524,7 @@ fn update_procedure_previous_same_head_command_from_dense_text(
         if token != head {
             continue;
         }
-        let mut start = index;
-        if start > 0 {
-            let previous =
-                trim_command_boundary_token_decorations(tokens[start - 1]).to_ascii_lowercase();
-            if matches!(previous.as_str(), "sudo" | "su") {
-                start -= 1;
-            }
-            if start > 0 {
-                let previous =
-                    trim_command_boundary_token_decorations(tokens[start - 1]).to_ascii_lowercase();
-                if previous == "sudo"
-                    && trim_command_boundary_token_decorations(tokens[start]) == "su"
-                {
-                    start -= 1;
-                }
-            }
-        }
-        let candidate = update_procedure_normalized_step(&tokens[start..].join(" "));
+        let candidate = update_procedure_normalized_step(&tokens[index..].join(" "));
         if !candidate.is_empty()
             && candidate != first_key
             && line_has_command_signal(&candidate)
@@ -2613,7 +2541,7 @@ fn update_procedure_block_structural_lines(block_text: &str) -> Vec<String> {
         .into_iter()
         .flatten()
         .filter(|line| line.has_command || line.has_order_marker || line.has_version)
-        .map(|line| line.text)
+        .map(|line| update_procedure_step_from_line(&line))
         .collect()
 }
 
@@ -2624,6 +2552,7 @@ fn update_procedure_step_key(step: &str) -> String {
 fn update_procedure_normalized_step(step: &str) -> String {
     strip_leading_order_marker(step)
         .trim()
+        .trim_matches('`')
         .trim_end_matches(['.', ',', ';'])
         .split_whitespace()
         .collect::<Vec<_>>()
@@ -2638,12 +2567,11 @@ fn update_procedure_candidate_has_target_identity_preference(
         || candidate.focused_structural_score > 0
 }
 
-fn update_procedure_candidate_has_actionable_command_preference(
+fn update_procedure_candidate_has_structural_command_preference(
     candidate: &UpdateProcedureCandidate,
 ) -> bool {
     candidate.command_count >= 2
-        && (candidate.exact_target_identity
-            || candidate.label_target_identity
+        && (candidate.label_target_identity
             || candidate.target_identity_focus_score > 0
             || candidate.focused_structural_score > 0)
 }
@@ -2660,104 +2588,14 @@ fn update_procedure_focus_aligned_command_aggregate(
         .max()
         .unwrap_or_default();
     let aggregate_focus_score = label_focus_score.max(body_focus_score);
-    if aggregate_focus_score == 0
-        || !extracts.iter().any(|extract| {
-            update_procedure_selection_matches_action(extract, focus_model, document_label)
-        })
-    {
+    if aggregate_focus_score == 0 {
         return None;
     }
-    let action_match_indexes = extracts
-        .iter()
-        .filter(|extract| {
-            extract.action_command_score > 0
-                || update_procedure_selection_matches_action(extract, focus_model, document_label)
-        })
-        .map(|extract| extract.block_index)
-        .collect::<Vec<_>>();
-    let last_action_match_index = action_match_indexes.iter().copied().max()?;
-    let focus_aligned_range = extracts
-        .iter()
-        .filter(|extract| extract.focus_aligned_command_score > 0)
-        .map(|extract| extract.block_index)
-        .fold(None::<(usize, usize)>, |range, index| match range {
-            Some((start, end)) => Some((start.min(index), end.max(index))),
-            None => Some((index, index)),
-        });
-    let body_target_action_range = extracts
-        .iter()
-        .filter(|extract| {
-            update_procedure_text_target_identity_priority(&extract.block_text, focus_model) > 0
-        })
-        .map(|extract| extract.block_index)
-        .min()
-        .and_then(|target_start| {
-            let action_end = action_match_indexes.iter().copied().max()?;
-            (target_start < action_end).then_some((target_start, action_end))
-        });
-    let (aligned_range, selection_start_index, allow_unfocused_inside_range) =
-        if let Some(range) = focus_aligned_range.filter(|range| range.0 < range.1) {
-            (range, last_action_match_index, false)
-        } else if let Some(range) = body_target_action_range {
-            (range, range.0, true)
-        } else {
-            return None;
-        };
-    let mut selected = extracts
-        .iter()
-        .filter(|extract| {
-            extract.block_index >= aligned_range.0.saturating_sub(4)
-                && extract.block_index >= selection_start_index
-                && extract.block_index <= aligned_range.1
-                && (extract.focus_aligned_command_score > 0
-                    || extract.action_command_score > 0
-                    || extract.preparatory_command_score > 0
-                    || extract.command_count > 0)
-                && (allow_unfocused_inside_range
-                    || extract.unfocused_command_score == 0
-                    || extract.block_index >= last_action_match_index)
-                && (!extract.has_setup_script_signature
-                    || update_procedure_selection_matches_action(
-                        extract,
-                        focus_model,
-                        document_label,
-                    ))
-        })
-        .collect::<Vec<_>>();
-    let preparatory_indexes = selected
-        .iter()
-        .filter(|extract| extract.preparatory_command_score > 0)
-        .map(|extract| extract.block_index)
-        .collect::<Vec<_>>();
-    if preparatory_indexes.len() > 2
-        && let Some(keep_from) = preparatory_indexes.get(preparatory_indexes.len() - 2)
-    {
-        selected.retain(|extract| {
-            extract.action_command_score > 0
-                || extract.focus_aligned_command_score > 0
-                || extract.block_index >= *keep_from
-        });
-    }
-    selected.sort_by_key(|extract| extract.block_index);
+    let selected = selected_update_procedure_extracts(extracts, focus_model, document_label);
     if selected.len() < 2 {
         return None;
     }
-
-    let mut seen = std::collections::HashSet::new();
-    let mut steps = Vec::<String>::new();
-    for extract in &selected {
-        for step in &extract.steps {
-            if seen.insert(step.to_lowercase()) {
-                steps.push(step.clone());
-                if steps.len() >= 16 {
-                    break;
-                }
-            }
-        }
-        if steps.len() >= 16 {
-            break;
-        }
-    }
+    let steps = unique_update_procedure_steps(&selected, 16);
     if steps.iter().filter(|step| update_procedure_step_is_structural(step)).count() < 2 {
         return None;
     }
@@ -2778,22 +2616,9 @@ fn update_procedure_focus_aligned_command_aggregate(
             .map(|extract| extract.block_text.as_str())
             .collect::<Vec<_>>()
             .join("\n"),
-        action_text: selected
-            .iter()
-            .map(|extract| extract.action_text.as_str())
-            .collect::<Vec<_>>()
-            .join("\n"),
         command_count: update_procedure_capped_command_score(
             selected.iter().map(|extract| extract.command_count).sum(),
         ),
-        action_command_score: update_procedure_capped_command_score(
-            selected.iter().map(|extract| extract.action_command_score).sum(),
-        ),
-        script_artifact_family_score: selected
-            .iter()
-            .map(|extract| extract.script_artifact_family_score)
-            .max()
-            .unwrap_or_default(),
         preparatory_command_score: update_procedure_capped_command_score(
             selected.iter().map(|extract| extract.preparatory_command_score).sum(),
         ),
@@ -2801,9 +2626,62 @@ fn update_procedure_focus_aligned_command_aggregate(
             selected.iter().map(|extract| extract.focus_aligned_command_score).sum(),
         ),
         unfocused_command_score: 0,
-        has_setup_script_signature: false,
+        has_setup_script_signature: selected
+            .iter()
+            .any(|extract| extract.has_setup_script_signature),
         is_focus_projection: false,
     })
+}
+
+fn selected_update_procedure_extracts<'a>(
+    extracts: &'a [UpdateProcedureExtract],
+    focus_model: &UpdateProcedureFocusModel,
+    document_label: &str,
+) -> Vec<&'a UpdateProcedureExtract> {
+    let mut selected_by_block = BTreeMap::<usize, &UpdateProcedureExtract>::new();
+    for extract in extracts.iter().filter(|extract| {
+        extract.command_count > 0
+            && update_procedure_extract_is_typed_evidence(extract, focus_model, document_label)
+    }) {
+        selected_by_block
+            .entry(extract.block_index)
+            .and_modify(|current| {
+                if (extract.score, extract.steps.len(), extract.is_focus_projection)
+                    > (current.score, current.steps.len(), current.is_focus_projection)
+                {
+                    *current = extract;
+                }
+            })
+            .or_insert(extract);
+    }
+    let mut selected = selected_by_block.into_values().collect::<Vec<_>>();
+    let preparatory_indexes = selected
+        .iter()
+        .filter(|extract| extract.preparatory_command_score > 0)
+        .map(|extract| extract.block_index)
+        .collect::<Vec<_>>();
+    if preparatory_indexes.len() > 2
+        && let Some(keep_from) = preparatory_indexes.get(preparatory_indexes.len() - 2)
+    {
+        selected.retain(|extract| {
+            extract.focus_aligned_command_score > 0 || extract.block_index >= *keep_from
+        });
+    }
+    selected
+}
+
+fn unique_update_procedure_steps(
+    extracts: &[&UpdateProcedureExtract],
+    limit: usize,
+) -> Vec<String> {
+    let mut seen = HashSet::new();
+    extracts
+        .iter()
+        .flat_map(|extract| &extract.steps)
+        .filter(|step| seen.insert(step.to_lowercase()))
+        .take(limit)
+        .cloned()
+        .collect()
 }
 
 fn update_procedure_command_candidate_bonus(command_count: usize) -> usize {
@@ -2846,11 +2724,22 @@ fn update_procedure_focused_source_text(
     if lines.is_empty() {
         return None;
     }
-    let mut selected = BTreeSet::<usize>::new();
+    let selected = update_procedure_focused_line_indexes(&lines, focus_model);
+    if selected.is_empty() {
+        return None;
+    }
+    render_update_procedure_focused_lines(&lines, selected, UPDATE_PROCEDURE_SOURCE_VIEW_CHARS)
+}
+
+fn update_procedure_focused_line_indexes(
+    lines: &[&str],
+    focus_model: &UpdateProcedureFocusModel,
+) -> BTreeSet<usize> {
+    let mut selected = BTreeSet::new();
     for (index, line) in lines.iter().enumerate() {
-        let target_priority = update_procedure_text_target_identity_priority(line, focus_model);
-        let focus_score = update_procedure_text_focus_score(line, focus_model);
-        if target_priority == 0 && focus_score == 0 {
+        if update_procedure_text_target_identity_priority(line, focus_model) == 0
+            && update_procedure_text_focus_score(line, focus_model) == 0
+        {
             continue;
         }
         selected.insert(index);
@@ -2860,40 +2749,51 @@ fn update_procedure_focused_source_text(
         {
             selected.insert(index - 1);
         }
-        for lookahead in 1..=2 {
-            let next_index = index + lookahead;
-            let Some(next_line) = lines.get(next_index) else {
-                break;
-            };
-            if line_has_order_marker(next_line)
-                || line_has_command_signal(next_line)
-                || update_procedure_text_target_identity_priority(next_line, focus_model) > 0
-                || update_procedure_text_focus_score(next_line, focus_model) > 0
-            {
-                selected.insert(next_index);
-            } else {
-                break;
-            }
+        select_update_procedure_lookahead(lines, index, focus_model, &mut selected);
+    }
+    selected
+}
+
+fn select_update_procedure_lookahead(
+    lines: &[&str],
+    index: usize,
+    focus_model: &UpdateProcedureFocusModel,
+    selected: &mut BTreeSet<usize>,
+) {
+    for next_index in (index + 1)..=(index + 2) {
+        let Some(next_line) = lines.get(next_index) else {
+            break;
+        };
+        let relevant = line_has_order_marker(next_line)
+            || line_has_command_signal(next_line)
+            || update_procedure_text_target_identity_priority(next_line, focus_model) > 0
+            || update_procedure_text_focus_score(next_line, focus_model) > 0;
+        if !relevant {
+            break;
         }
+        selected.insert(next_index);
     }
-    if selected.is_empty() {
-        return None;
-    }
+}
+
+fn render_update_procedure_focused_lines(
+    lines: &[&str],
+    selected: BTreeSet<usize>,
+    max_chars: usize,
+) -> Option<String> {
     let mut focused = String::new();
-    let mut previous_index = None::<usize>;
+    let mut previous_index = None;
     for index in selected {
-        let line = lines[index];
         if !focused.is_empty() {
-            if previous_index.is_some_and(|previous| index > previous + 1) {
-                focused.push_str("\n...\n");
+            focused.push_str(if previous_index.is_some_and(|previous| index > previous + 1) {
+                "\n...\n"
             } else {
-                focused.push('\n');
-            }
+                "\n"
+            });
         }
-        focused.push_str(line);
+        focused.push_str(lines[index]);
         previous_index = Some(index);
-        if focused.chars().count() >= UPDATE_PROCEDURE_SOURCE_VIEW_CHARS {
-            return Some(excerpt_for(&focused, UPDATE_PROCEDURE_SOURCE_VIEW_CHARS));
+        if focused.chars().count() >= max_chars {
+            return Some(excerpt_for(&focused, max_chars));
         }
     }
     (!focused.trim().is_empty()).then_some(focused)
@@ -2944,14 +2844,6 @@ fn update_procedure_extracts_from_text(
                 focus_model,
                 &extract,
             );
-            if let Some(action_extract) = update_procedure_action_command_projection_from_block(
-                block_index,
-                &block,
-                focus_model,
-                &extract,
-            ) {
-                extracts.push(action_extract);
-            }
             if let Some(maintenance_extract) = focus_projection {
                 extracts.push(maintenance_extract);
             }
@@ -2993,7 +2885,7 @@ fn update_procedure_extract_from_block(
             continue;
         }
         if seen.insert(line.text.to_lowercase()) {
-            steps.push(line.text.clone());
+            steps.push(update_procedure_step_from_line(line));
         }
         if steps.len() >= 16 {
             break;
@@ -3004,10 +2896,6 @@ fn update_procedure_extract_from_block(
     }
     let command_count =
         update_procedure_capped_command_score(block.iter().filter(|line| line.has_command).count());
-    let action_command_score = update_procedure_capped_command_score(
-        update_procedure_action_command_score(block, focus_model),
-    );
-    let script_artifact_family_score = update_procedure_script_artifact_family_score(block);
     let preparatory_command_score = update_procedure_capped_command_score(
         update_procedure_preparatory_command_score(block, focus_model),
     );
@@ -3018,165 +2906,19 @@ fn update_procedure_extract_from_block(
         update_procedure_unfocused_command_score(block, focus_model),
     );
     let block_text = block.iter().map(|line| line.text.as_str()).collect::<Vec<_>>().join("\n");
-    let action_text = update_procedure_block_action_match_text(block);
-    let has_setup_script_signature =
-        update_procedure_block_has_setup_script_signature(block, &focus_model.procedure_terms);
+    let has_setup_script_signature = update_procedure_block_has_setup_script_signature(block);
     Some(UpdateProcedureExtract {
         block_index,
         score,
         steps,
         block_text,
-        action_text,
         command_count,
-        action_command_score,
-        script_artifact_family_score,
         preparatory_command_score,
         focus_aligned_command_score,
         unfocused_command_score,
         has_setup_script_signature,
         is_focus_projection: false,
     })
-}
-
-fn update_procedure_action_command_projection_from_block(
-    block_index: usize,
-    block: &[UpdateProcedureLine],
-    focus_model: &UpdateProcedureFocusModel,
-    source_extract: &UpdateProcedureExtract,
-) -> Option<UpdateProcedureExtract> {
-    if source_extract.action_command_score == 0 || source_extract.command_count < 2 {
-        return None;
-    }
-    if source_extract.action_command_score >= 2 || source_extract.script_artifact_family_score >= 2
-    {
-        return None;
-    }
-    if update_procedure_action_artifact_token_count(block, focus_model) >= 2 {
-        return None;
-    }
-    let last_action_index = block
-        .iter()
-        .enumerate()
-        .filter(|(_, line)| line.has_command)
-        .filter_map(|(index, line)| {
-            let command = strip_leading_order_marker(&line.text);
-            let action_text = command_action_match_text(command);
-            let action_tokens =
-                normalized_alnum_tokens(&action_text, 2).into_iter().collect::<BTreeSet<_>>();
-            (procedure_term_overlap_score(&focus_model.procedure_terms, &action_tokens) > 0)
-                .then_some(index)
-        })
-        .last()?;
-    if source_extract.focus_aligned_command_score > 0
-        && let Some(first_focus_aligned_index) = block.iter().position(|line| {
-            line.has_command
-                && update_procedure_command_focus_aligned_score(
-                    strip_leading_order_marker(&line.text),
-                    focus_model,
-                ) > 0
-        })
-        && last_action_index < first_focus_aligned_index
-    {
-        return None;
-    }
-    let has_prior_non_privilege_command = block
-        .iter()
-        .take(last_action_index)
-        .any(|line| line.has_command && !update_procedure_line_is_privilege_prefix(&line.text));
-    let projection_start_index = if has_prior_non_privilege_command {
-        update_procedure_action_projection_start_index(block, last_action_index)
-    } else {
-        0
-    };
-    let mut seen = std::collections::HashSet::new();
-    let mut steps = Vec::<String>::new();
-    for line in block.iter().skip(projection_start_index).filter(|line| {
-        line.has_command || (!has_prior_non_privilege_command && line.has_order_marker)
-    }) {
-        if seen.insert(line.text.to_lowercase()) {
-            steps.push(line.text.clone());
-            if steps.len() >= 16 {
-                break;
-            }
-        }
-    }
-    if steps.len() < 2
-        || steps.iter().filter(|step| update_procedure_step_is_structural(step)).count() < 2
-    {
-        return None;
-    }
-    let block_text = source_extract.block_text.clone();
-    let action_text = steps
-        .iter()
-        .map(|step| command_action_match_text(strip_leading_order_marker(step)))
-        .filter(|text| !text.trim().is_empty())
-        .collect::<Vec<_>>()
-        .join("\n");
-    let action_command_score =
-        update_procedure_capped_command_score(update_procedure_action_command_score(
-            &steps
-                .iter()
-                .map(|step| UpdateProcedureLine {
-                    text: step.clone(),
-                    has_order_marker: line_has_order_marker(step),
-                    has_version: update_procedure_line_has_version(step),
-                    has_command: line_has_command_signal(step),
-                })
-                .collect::<Vec<_>>(),
-            focus_model,
-        ));
-    let focus_aligned_command_score = update_procedure_capped_command_score(
-        steps
-            .iter()
-            .map(|step| update_procedure_command_focus_aligned_score(step, focus_model))
-            .sum(),
-    );
-    let command_count = update_procedure_capped_command_score(steps.len());
-    Some(UpdateProcedureExtract {
-        block_index,
-        score: source_extract
-            .score
-            .saturating_add(action_command_score.saturating_mul(8192))
-            .saturating_add(command_count.saturating_mul(1024))
-            .saturating_add(focus_aligned_command_score.saturating_mul(2048)),
-        command_count,
-        steps,
-        block_text,
-        action_text,
-        action_command_score,
-        script_artifact_family_score: source_extract.script_artifact_family_score,
-        preparatory_command_score: usize::from(projection_start_index < last_action_index),
-        focus_aligned_command_score,
-        unfocused_command_score: 0,
-        has_setup_script_signature: source_extract.has_setup_script_signature,
-        is_focus_projection: false,
-    })
-}
-
-fn update_procedure_action_projection_start_index(
-    block: &[UpdateProcedureLine],
-    last_action_index: usize,
-) -> usize {
-    let mut start_index = last_action_index;
-    if start_index > 0
-        && block[start_index - 1].has_command
-        && update_procedure_line_is_privilege_prefix(&block[start_index - 1].text)
-    {
-        start_index -= 1;
-    }
-    let mut preparatory_commands = 0usize;
-    while start_index > 0 && preparatory_commands < 2 {
-        let previous_index = start_index - 1;
-        let previous = &block[previous_index];
-        if !previous.has_command {
-            break;
-        }
-        start_index = previous_index;
-        if !update_procedure_line_is_privilege_prefix(&previous.text) {
-            preparatory_commands = preparatory_commands.saturating_add(1);
-        }
-    }
-    start_index
 }
 
 fn update_procedure_focus_aligned_command_projection_from_block(
@@ -3191,85 +2933,162 @@ fn update_procedure_focus_aligned_command_projection_from_block(
     {
         return None;
     }
-    let mut seen = std::collections::HashSet::new();
-    let mut steps = Vec::<String>::new();
-    let mut preparatory_command_score = 0usize;
-    let mut focus_aligned_command_score = 0usize;
-    let mut pending_preparatory = Vec::<&UpdateProcedureLine>::new();
+    let mut projection = UpdateProcedureCommandProjection::default();
+    projection.prepend_ordered_context(block, focus_model);
     for line in block.iter().filter(|line| line.has_command) {
-        let command = strip_leading_order_marker(&line.text);
-        let aligned_score = update_procedure_command_focus_aligned_score(command, focus_model);
-        if aligned_score == 0 {
-            pending_preparatory.push(line);
-            if pending_preparatory.len() > 3 {
-                pending_preparatory.remove(0);
-            }
-            continue;
-        }
-        for preparatory in pending_preparatory.drain(..).rev().take(2).rev() {
-            if seen.insert(preparatory.text.to_lowercase()) {
-                preparatory_command_score = update_procedure_capped_command_score(
-                    preparatory_command_score.saturating_add(1),
-                );
-                steps.push(preparatory.text.clone());
-            }
-        }
-        focus_aligned_command_score = update_procedure_capped_command_score(
-            focus_aligned_command_score.saturating_add(aligned_score),
-        );
-        if seen.insert(line.text.to_lowercase()) {
-            steps.push(line.text.clone());
-            if steps.len() >= 16 {
-                break;
-            }
+        projection.push_command(line, focus_model);
+        if projection.steps.len() >= 16 {
+            break;
         }
     }
-    if focus_aligned_command_score == 0 || steps.len() < 2 {
+    append_trailing_artifact_chain_steps(
+        &mut projection.steps,
+        &mut projection.seen,
+        &projection.pending_preparatory,
+    );
+    if projection.focus_aligned_command_score == 0 || projection.steps.len() < 2 {
         return None;
     }
-    if steps.iter().filter(|step| update_procedure_step_is_structural(step)).count() < 2 {
+    if projection.steps.iter().filter(|step| update_procedure_step_is_structural(step)).count() < 2
+    {
         return None;
     }
     let block_text = source_extract.block_text.clone();
-    let action_text = steps
-        .iter()
-        .map(|step| {
-            if line_has_command_signal(step) {
-                command_action_match_text(strip_leading_order_marker(step))
-            } else {
-                prose_step_action_match_text(strip_leading_order_marker(step))
-            }
-        })
-        .filter(|text| !text.trim().is_empty())
-        .collect::<Vec<_>>()
-        .join("\n");
     let focused_structural_score =
         update_procedure_focused_structural_score(&block_text, focus_model);
     let score = source_extract
         .score
         .saturating_add(focused_structural_score.saturating_mul(160))
         .saturating_add(
-            update_procedure_capped_command_score(preparatory_command_score).saturating_mul(2048),
+            update_procedure_capped_command_score(projection.preparatory_command_score)
+                .saturating_mul(2048),
         )
         .saturating_add(
-            update_procedure_capped_command_score(focus_aligned_command_score).saturating_mul(8192),
+            update_procedure_capped_command_score(projection.focus_aligned_command_score)
+                .saturating_mul(8192),
         )
-        .saturating_add(update_procedure_command_candidate_bonus(steps.len()));
+        .saturating_add(update_procedure_command_candidate_bonus(projection.steps.len()));
     Some(UpdateProcedureExtract {
         block_index,
         score,
-        command_count: update_procedure_capped_command_score(steps.len()),
-        steps,
+        command_count: update_procedure_capped_command_score(projection.steps.len()),
+        steps: projection.steps,
         block_text,
-        action_text,
-        action_command_score: preparatory_command_score,
-        script_artifact_family_score: 0,
-        preparatory_command_score,
-        focus_aligned_command_score,
+        preparatory_command_score: projection.preparatory_command_score,
+        focus_aligned_command_score: projection.focus_aligned_command_score,
         unfocused_command_score: 0,
         has_setup_script_signature: source_extract.has_setup_script_signature,
         is_focus_projection: true,
     })
+}
+
+#[derive(Default)]
+struct UpdateProcedureCommandProjection<'a> {
+    seen: HashSet<String>,
+    steps: Vec<String>,
+    preparatory_command_score: usize,
+    focus_aligned_command_score: usize,
+    pending_preparatory: Vec<&'a UpdateProcedureLine>,
+}
+
+impl<'a> UpdateProcedureCommandProjection<'a> {
+    fn prepend_ordered_context(
+        &mut self,
+        block: &'a [UpdateProcedureLine],
+        focus_model: &UpdateProcedureFocusModel,
+    ) {
+        let Some(first_aligned_index) = block.iter().position(|line| {
+            line.has_command
+                && update_procedure_command_focus_aligned_score(
+                    strip_leading_order_marker(&line.text),
+                    focus_model,
+                ) > 0
+        }) else {
+            return;
+        };
+        if block.iter().take(first_aligned_index).any(|line| line.has_command) {
+            return;
+        }
+        for line in block.iter().take(first_aligned_index).filter(|line| line.has_order_marker) {
+            self.push_unique_step(line);
+        }
+    }
+
+    fn push_command(
+        &mut self,
+        line: &'a UpdateProcedureLine,
+        focus_model: &UpdateProcedureFocusModel,
+    ) {
+        let aligned_score = update_procedure_command_focus_aligned_score(
+            strip_leading_order_marker(&line.text),
+            focus_model,
+        );
+        if aligned_score == 0 {
+            self.pending_preparatory.push(line);
+            if self.pending_preparatory.len() > 3 {
+                self.pending_preparatory.remove(0);
+            }
+            return;
+        }
+        let preparatory =
+            self.pending_preparatory.drain(..).rev().take(2).rev().collect::<Vec<_>>();
+        for preparatory in preparatory {
+            if self.push_unique_step(preparatory) {
+                self.preparatory_command_score = update_procedure_capped_command_score(
+                    self.preparatory_command_score.saturating_add(1),
+                );
+            }
+        }
+        self.focus_aligned_command_score = update_procedure_capped_command_score(
+            self.focus_aligned_command_score.saturating_add(aligned_score),
+        );
+        self.push_unique_step(line);
+    }
+
+    fn push_unique_step(&mut self, line: &UpdateProcedureLine) -> bool {
+        if !self.seen.insert(line.text.to_lowercase()) {
+            return false;
+        }
+        self.steps.push(update_procedure_step_from_line(line));
+        true
+    }
+}
+
+fn append_trailing_artifact_chain_steps(
+    steps: &mut Vec<String>,
+    seen: &mut HashSet<String>,
+    trailing: &[&UpdateProcedureLine],
+) {
+    let mut artifacts =
+        steps.iter().flat_map(|step| command_local_artifact_keys(step)).collect::<BTreeSet<_>>();
+    if artifacts.is_empty() {
+        return;
+    }
+    for line in trailing {
+        let line_artifacts = command_local_artifact_keys(&line.text);
+        if line_artifacts.is_empty() || line_artifacts.is_disjoint(&artifacts) {
+            continue;
+        }
+        artifacts.extend(line_artifacts);
+        if seen.insert(line.text.to_lowercase()) {
+            steps.push(update_procedure_step_from_line(line));
+        }
+    }
+}
+
+fn command_local_artifact_keys(command: &str) -> BTreeSet<String> {
+    command_token_values(strip_leading_order_marker(command))
+        .into_iter()
+        .enumerate()
+        .filter_map(|(index, token)| {
+            let usable = if index == 0 {
+                shellish_token_is_path_command_start(&token)
+            } else {
+                token_has_local_command_artifact(&token)
+            };
+            usable.then(|| trim_command_boundary_token_decorations(&token).to_ascii_lowercase())
+        })
+        .collect()
 }
 
 fn update_procedure_command_tail_projection_from_block(
@@ -3323,19 +3142,13 @@ fn update_procedure_command_tail_projection_from_block(
     let steps = projection_block
         .iter()
         .filter(|line| seen.insert(line.text.to_lowercase()))
-        .map(|line| line.text.clone())
+        .map(update_procedure_step_from_line)
         .collect::<Vec<_>>();
     if steps.len() < 4 {
         return None;
     }
     let block_text = steps.join("\n");
-    let action_text = update_procedure_projection_action_text(source_extract, &projection_block);
     let command_count = update_procedure_capped_command_score(projection_block.len());
-    let action_command_score = update_procedure_capped_command_score(
-        update_procedure_action_command_score(&projection_block, focus_model),
-    );
-    let script_artifact_family_score =
-        update_procedure_script_artifact_family_score(&projection_block);
     let preparatory_command_score =
         usize::from(first_target_command_offset.is_some_and(|offset| start_offset < offset));
     let focus_aligned_command_score = update_procedure_capped_command_score(
@@ -3349,8 +3162,6 @@ fn update_procedure_command_tail_projection_from_block(
     let score = source_extract
         .score
         .saturating_add(command_count.saturating_mul(2048))
-        .saturating_add(action_command_score.saturating_mul(8192))
-        .saturating_add(script_artifact_family_score.saturating_mul(1024))
         .saturating_add(focus_aligned_command_score.saturating_mul(4096))
         .saturating_add(target_identity_priority.saturating_mul(2048))
         .saturating_sub(unfocused_command_score.saturating_mul(512));
@@ -3359,30 +3170,13 @@ fn update_procedure_command_tail_projection_from_block(
         score,
         steps,
         block_text,
-        action_text,
         command_count,
-        action_command_score,
-        script_artifact_family_score,
         preparatory_command_score,
         focus_aligned_command_score,
         unfocused_command_score,
         has_setup_script_signature: source_extract.has_setup_script_signature,
         is_focus_projection: true,
     })
-}
-
-fn update_procedure_projection_action_text(
-    source_extract: &UpdateProcedureExtract,
-    projection_block: &[UpdateProcedureLine],
-) -> String {
-    let projection_action_text = update_procedure_block_action_match_text(projection_block);
-    if source_extract.action_text.trim().is_empty() {
-        return projection_action_text;
-    }
-    if projection_action_text.trim().is_empty() {
-        return source_extract.action_text.clone();
-    }
-    format!("{}\n{}", source_extract.action_text, projection_action_text)
 }
 
 fn update_procedure_block_is_qualified(block: &[UpdateProcedureLine]) -> bool {
@@ -3393,15 +3187,6 @@ fn update_procedure_block_is_qualified(block: &[UpdateProcedureLine]) -> bool {
         || command_count >= 2
         || (ordered_count >= 1 && command_count >= 1)
         || (ordered_count >= 1 && version_count >= 1)
-}
-
-fn update_procedure_line_is_privilege_prefix(line: &str) -> bool {
-    let tokens = line
-        .split_whitespace()
-        .map(|token| trim_command_boundary_token_decorations(token).to_ascii_lowercase())
-        .collect::<Vec<_>>();
-    matches!(tokens.as_slice(), [value] if value == "sudo" || value == "su")
-        || matches!(tokens.as_slice(), [left, right] if left == "sudo" && right == "su")
 }
 
 fn update_procedure_block_score(
@@ -3426,15 +3211,7 @@ fn update_procedure_text_focus_score(text: &str, focus_model: &UpdateProcedureFo
     if tokens.is_empty() {
         return 0;
     }
-    let subject_overlap = procedure_term_overlap_score(&focus_model.subject_terms, &tokens);
-    let subject_acronym_overlap = focus_model.subject_acronym_terms.intersection(&tokens).count();
-    let procedure_overlap = procedure_term_overlap_score(&focus_model.procedure_terms, &tokens);
-    let query_overlap = procedure_term_overlap_score(&focus_model.query_terms, &tokens);
-    subject_overlap
-        .saturating_mul(16)
-        .saturating_add(subject_acronym_overlap.saturating_mul(12))
-        .saturating_add(procedure_overlap.saturating_mul(4))
-        .saturating_add(query_overlap)
+    focus_model.subject_terms.intersection(&tokens).count().saturating_mul(16)
 }
 
 fn update_procedure_focused_structural_score(
@@ -3454,172 +3231,28 @@ fn update_procedure_focused_structural_score(
         .sum::<usize>()
 }
 
-fn update_procedure_selection_matches_action(
+fn update_procedure_extract_is_typed_evidence(
     extract: &UpdateProcedureExtract,
     focus_model: &UpdateProcedureFocusModel,
     document_label: &str,
 ) -> bool {
-    if focus_model.procedure_terms.is_empty() {
-        return true;
-    }
-    let action_tokens =
-        normalized_alnum_tokens(&extract.action_text, 2).into_iter().collect::<BTreeSet<_>>();
-    if procedure_term_overlap_score(&focus_model.procedure_terms, &action_tokens) > 0 {
-        if extract.has_setup_script_signature
-            && extract.action_command_score == 0
-            && extract.script_artifact_family_score == 0
-            && !update_procedure_setup_signature_is_action_bound(
-                extract,
-                focus_model,
-                document_label,
-            )
-        {
-            return false;
-        }
-        return true;
-    }
-    if extract.has_setup_script_signature {
-        return false;
-    }
-    if extract.is_focus_projection
-        && update_procedure_focused_structural_score(&extract.block_text, focus_model) > 0
-    {
-        return true;
-    }
-    if extract.command_count > 0 {
-        return false;
-    }
-    let label_tokens =
-        normalized_alnum_tokens(document_label, 2).into_iter().collect::<BTreeSet<_>>();
-    procedure_term_overlap_score(&focus_model.procedure_terms, &label_tokens) > 0
-}
-
-fn update_procedure_setup_signature_is_action_bound(
-    extract: &UpdateProcedureExtract,
-    focus_model: &UpdateProcedureFocusModel,
-    document_label: &str,
-) -> bool {
-    if !extract.has_setup_script_signature {
-        return true;
-    }
     let has_target_identity =
         update_procedure_text_target_identity_priority(&extract.block_text, focus_model) > 0
             || update_procedure_text_target_identity_priority(document_label, focus_model) > 0;
     if !has_target_identity {
         return false;
     }
-    let label_tokens =
-        normalized_alnum_tokens(document_label, 2).into_iter().collect::<BTreeSet<_>>();
-    let label_target_identity =
-        update_procedure_text_target_identity_priority(document_label, focus_model) > 0;
-    let has_label_action_binding = label_target_identity
-        && procedure_term_overlap_score(&focus_model.procedure_terms, &label_tokens) > 0;
-    let has_command_action_binding =
-        extract.action_command_score > 0 || extract.script_artifact_family_score > 0;
-    let has_action_binding = has_label_action_binding || has_command_action_binding;
-    has_action_binding
-        && (extract.command_count > 0
-            || update_procedure_focused_structural_score(&extract.block_text, focus_model) > 0)
-}
-
-fn update_procedure_block_action_match_text(block: &[UpdateProcedureLine]) -> String {
-    let mut lines = Vec::<String>::new();
-    let mut structural_seen = false;
-    for line in block {
-        let is_structural = line.has_version || line.has_order_marker || line.has_command;
-        if !is_structural && structural_seen {
-            continue;
-        }
-        let trimmed = strip_leading_order_marker(&line.text).trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        if line.has_command {
-            let command_text = command_action_match_text(trimmed);
-            if !command_text.trim().is_empty() {
-                lines.push(command_text);
-            }
-        } else {
-            let prose_text = prose_step_action_match_text(trimmed);
-            if !prose_text.trim().is_empty() {
-                lines.push(prose_text);
-            }
-        }
-        if is_structural {
-            structural_seen = true;
-        }
+    if !extract.has_setup_script_signature {
+        return true;
     }
-    lines.join("\n")
-}
-
-fn update_procedure_action_command_score(
-    block: &[UpdateProcedureLine],
-    focus_model: &UpdateProcedureFocusModel,
-) -> usize {
-    block
-        .iter()
-        .filter(|line| line.has_command)
-        .map(|line| {
-            let command = strip_leading_order_marker(&line.text);
-            let action_text = command_action_match_text(command);
-            let action_tokens =
-                normalized_alnum_tokens(&action_text, 2).into_iter().collect::<BTreeSet<_>>();
-            procedure_term_overlap_score(&focus_model.procedure_terms, &action_tokens)
-        })
-        .sum()
-}
-
-fn update_procedure_script_artifact_family_score(block: &[UpdateProcedureLine]) -> usize {
-    let mut stems = BTreeSet::<String>::new();
-    for line in block {
-        if !line.has_command {
-            continue;
-        }
-        let command = strip_leading_order_marker(&line.text);
-        for token in command_token_values(command) {
-            let Some(file_name) = command_token_file_artifact_name(&token) else {
-                continue;
-            };
-            if let Some(stem) = script_artifact_family_stem(file_name) {
-                stems.insert(stem);
-            }
-        }
-    }
-    if stems.len() < 2 {
-        return 0;
-    }
-    let stems = stems.into_iter().collect::<Vec<_>>();
-    let mut best = 0usize;
-    for (index, left) in stems.iter().enumerate() {
-        for right in stems.iter().skip(index + 1) {
-            best = best.max(shared_script_artifact_family_prefix_len(left, right));
-        }
-    }
-    best
-}
-
-fn update_procedure_action_artifact_token_count(
-    block: &[UpdateProcedureLine],
-    focus_model: &UpdateProcedureFocusModel,
-) -> usize {
-    let mut artifacts = BTreeSet::<String>::new();
-    for line in block {
-        if !line.has_command {
-            continue;
-        }
-        let command = strip_leading_order_marker(&line.text);
-        for token in command_token_values(command) {
-            let Some(file_name) = command_token_file_artifact_name(&token) else {
-                continue;
-            };
-            let artifact_tokens =
-                normalized_alnum_tokens(file_name, 3).into_iter().collect::<BTreeSet<_>>();
-            if procedure_term_overlap_score(&focus_model.procedure_terms, &artifact_tokens) > 0 {
-                artifacts.insert(token);
-            }
-        }
-    }
-    artifacts.len()
+    extract.command_count > 0
+        && extract
+            .block_text
+            .lines()
+            .filter(|line| line_has_order_marker(line) && !line_has_command_signal(line))
+            .take(2)
+            .count()
+            >= 2
 }
 
 fn update_procedure_preparatory_command_score(
@@ -3689,149 +3322,48 @@ fn update_procedure_command_focus_aligned_score(
     if tokens.is_empty() {
         return 0;
     }
-    let subject_overlap = focus_model.subject_terms.intersection(&tokens).count();
-    let subject_acronym_overlap = focus_model.subject_acronym_terms.intersection(&tokens).count();
-    let procedure_overlap = procedure_term_overlap_score(&focus_model.procedure_terms, &tokens);
-    let query_overlap = focus_model.query_terms.intersection(&tokens).count();
-    let target_score =
-        subject_overlap.saturating_mul(8).saturating_add(subject_acronym_overlap.saturating_mul(6));
-    if target_score == 0 {
-        return 0;
-    }
-    target_score
-        .saturating_add(procedure_overlap.saturating_mul(2))
-        .saturating_add(query_overlap.min(2))
+    focus_model.subject_terms.intersection(&tokens).count().saturating_mul(8)
 }
 
-const SCRIPT_ARTIFACT_FAMILY_PREFIX_MIN_CHARS: usize = 4;
-
-fn script_artifact_family_stem(file_name: &str) -> Option<String> {
-    let stem = file_name
-        .split(['?', '#'])
-        .next()?
-        .trim()
-        .strip_suffix(".sh")
-        .unwrap_or(file_name)
-        .chars()
-        .flat_map(char::to_lowercase)
-        .collect::<String>();
-    stem.chars().any(char::is_alphanumeric).then_some(stem)
+fn update_procedure_block_has_setup_script_signature(block: &[UpdateProcedureLine]) -> bool {
+    let signature = block
+        .iter()
+        .filter(|line| line.has_command)
+        .map(|line| command_token_values(strip_leading_order_marker(&line.text)))
+        .filter(|tokens| !tokens.is_empty())
+        .fold(UpdateProcedureSetupScriptSignature::default(), |signature, tokens| {
+            signature.with_command_tokens(&tokens)
+        });
+    signature.is_complete()
 }
 
-fn shared_script_artifact_family_prefix_len(left: &str, right: &str) -> usize {
-    let shared = shared_procedure_prefix_len(left, right);
-    if shared < SCRIPT_ARTIFACT_FAMILY_PREFIX_MIN_CHARS {
-        return 0;
-    }
-    let left_next = left.chars().nth(shared);
-    let right_next = right.chars().nth(shared);
-    if left_next.is_none_or(is_script_artifact_family_boundary)
-        || right_next.is_none_or(is_script_artifact_family_boundary)
-    {
-        shared
-    } else {
-        0
-    }
+#[derive(Default)]
+struct UpdateProcedureSetupScriptSignature {
+    has_external_artifact_materialization: bool,
+    has_local_artifact_preparation: bool,
+    has_local_artifact: bool,
+    has_local_artifact_run: bool,
 }
 
-fn is_script_artifact_family_boundary(ch: char) -> bool {
-    matches!(ch, '-' | '_' | '.') || ch.is_ascii_digit()
-}
-
-fn prose_step_action_match_text(line: &str) -> String {
-    let without_quoted_titles = strip_quoted_prose_spans(line);
-    leading_action_sentence(&without_quoted_titles)
-}
-
-fn strip_quoted_prose_spans(text: &str) -> String {
-    let mut result = String::with_capacity(text.len());
-    let mut quote_stack = Vec::<char>::new();
-    for ch in text.chars() {
-        if let Some(expected_close) = quote_stack.last().copied() {
-            if ch == expected_close {
-                quote_stack.pop();
-                result.push(' ');
-            }
-            continue;
-        }
-        let close = match ch {
-            '"' => Some('"'),
-            '«' => Some('»'),
-            '“' => Some('”'),
-            _ => None,
-        };
-        if let Some(close) = close {
-            quote_stack.push(close);
-            result.push(' ');
-        } else {
-            result.push(ch);
-        }
-    }
-    result.split_whitespace().collect::<Vec<_>>().join(" ")
-}
-
-fn leading_action_sentence(text: &str) -> String {
-    let trimmed = text.trim();
-    let mut previous = None::<char>;
-    for (index, ch) in trimmed.char_indices() {
-        if matches!(ch, '.' | '!' | '?') && previous.is_some_and(|prev| !prev.is_ascii_digit()) {
-            let end = index + ch.len_utf8();
-            return trimmed[..end].trim().to_string();
-        }
-        previous = Some(ch);
-    }
-    trimmed.to_string()
-}
-
-fn command_action_match_text(command_line: &str) -> String {
-    command_line.split_whitespace().filter_map(command_action_token).collect::<Vec<_>>().join(" ")
-}
-
-fn update_procedure_block_has_setup_script_signature(
-    block: &[UpdateProcedureLine],
-    procedure_terms: &BTreeSet<String>,
-) -> bool {
-    let mut has_external_artifact_materialization = false;
-    let mut has_local_artifact_preparation = false;
-    let mut has_local_artifact = false;
-    let mut has_local_artifact_run = false;
-    let mut has_action_specific_command = false;
-    for line in block {
-        if !line.has_command {
-            continue;
-        }
-        let command = strip_leading_order_marker(&line.text);
-        let command_tokens = command_token_values(command);
-        if command_tokens.is_empty() {
-            continue;
-        }
-        let action_tokens = normalized_alnum_tokens(&command_action_match_text(command), 2)
-            .into_iter()
-            .collect::<BTreeSet<_>>();
-        if procedure_term_overlap_score(procedure_terms, &action_tokens) > 0 {
-            has_action_specific_command = true;
-        }
-        if command_tokens_have_external_artifact_materialization(&command_tokens) {
-            has_external_artifact_materialization = true;
-        }
+impl UpdateProcedureSetupScriptSignature {
+    fn with_command_tokens(mut self, tokens: &[String]) -> Self {
+        self.has_external_artifact_materialization |=
+            command_tokens_have_external_artifact_materialization(tokens);
         let line_has_local_artifact =
-            command_tokens.iter().any(|token| token_has_local_command_artifact(token));
-        if line_has_local_artifact {
-            has_local_artifact = true;
-        }
-        if line_has_local_artifact
-            && command_tokens.iter().any(|token| command_token_has_preparation_signal(token))
-        {
-            has_local_artifact_preparation = true;
-        }
-        if command_tokens.first().is_some_and(|token| token_is_local_command_artifact_start(token))
-        {
-            has_local_artifact_run = true;
-        }
+            tokens.iter().any(|token| token_has_local_command_artifact(token));
+        self.has_local_artifact |= line_has_local_artifact;
+        self.has_local_artifact_preparation |= line_has_local_artifact
+            && tokens.iter().any(|token| shellish_token_has_artifact_preparation_signal(token));
+        self.has_local_artifact_run |=
+            tokens.first().is_some_and(|token| shellish_token_is_path_command_start(token));
+        self
     }
-    has_external_artifact_materialization
-        && (has_local_artifact_run || (has_local_artifact_preparation && has_local_artifact))
-        && !has_action_specific_command
+
+    fn is_complete(&self) -> bool {
+        self.has_external_artifact_materialization
+            && (self.has_local_artifact_run
+                || (self.has_local_artifact_preparation && self.has_local_artifact))
+    }
 }
 
 fn command_tokens_have_external_artifact_materialization(tokens: &[String]) -> bool {
@@ -3843,41 +3375,18 @@ fn command_tokens_have_external_artifact_materialization(tokens: &[String]) -> b
 
 fn token_has_local_command_artifact(token: &str) -> bool {
     let normalized = trim_command_token_decorations(token);
-    if normalized.starts_with('-') || normalized.starts_with('+') || normalized.contains("://") {
+    if normalized.contains("://") {
         return false;
     }
-    token_is_local_command_artifact_start(normalized)
-        || command_token_file_artifact_name(normalized).is_some()
-}
-
-fn token_is_local_command_artifact_start(token: &str) -> bool {
-    (token.starts_with("./")
-        || token.starts_with("../")
-        || token.starts_with('/')
-        || token.contains('/'))
-        && !token.contains("://")
-        && token.chars().any(|ch| ch.is_alphanumeric())
-}
-
-fn command_token_file_artifact_name(token: &str) -> Option<&str> {
-    let file_name =
-        token.rsplit('/').next()?.split(['?', '#']).next()?.trim_end_matches(|ch: char| {
-            command_token_char_is_invisible_format(ch) || ch.is_ascii_punctuation()
-        });
-    let has_extension = file_name
-        .rsplit_once('.')
-        .is_some_and(|(_, extension)| (2..=12).contains(&extension.len()));
-    let has_structural_name = file_name.contains('-')
-        || file_name.contains('_')
-        || file_name.chars().any(|ch| ch.is_ascii_digit());
-    (has_extension || has_structural_name).then_some(file_name)
-}
-
-fn command_token_has_preparation_signal(token: &str) -> bool {
-    token.starts_with('+')
-        || token.contains("+x")
-        || token.chars().all(|ch| ch.is_ascii_digit())
-        || token.starts_with('-')
+    if let Some((_, value)) = normalized.split_once('=')
+        && !value.is_empty()
+    {
+        return shellish_token_is_local_artifact(value);
+    }
+    if normalized.starts_with('-') || normalized.starts_with('+') {
+        return false;
+    }
+    shellish_token_is_local_artifact(normalized)
 }
 
 fn trim_command_token_decorations(token: &str) -> &str {
@@ -3888,7 +3397,7 @@ fn trim_command_token_decorations(token: &str) -> &str {
 }
 
 fn trim_command_boundary_token_decorations(token: &str) -> &str {
-    trim_command_token_decorations(token).trim_end_matches(|ch: char| matches!(ch, '.' | ',' | ';'))
+    trim_command_token_decorations(token).trim_end_matches(['.', ',', ';'])
 }
 
 fn command_token_char_is_invisible_format(ch: char) -> bool {
@@ -3899,7 +3408,7 @@ fn command_token_char_is_invisible_format(ch: char) -> bool {
 }
 
 fn command_token_values(command_line: &str) -> Vec<String> {
-    let mut tokens = command_line
+    command_line
         .split_whitespace()
         .map(|token| {
             token
@@ -3910,15 +3419,19 @@ fn command_token_values(command_line: &str) -> Vec<String> {
                 .to_ascii_lowercase()
         })
         .filter(|token| !token.is_empty())
-        .collect::<Vec<_>>();
-    while tokens.first().is_some_and(|token| matches!(token.as_str(), "sudo" | "su")) {
-        tokens.remove(0);
-    }
-    tokens
+        .collect()
+}
+
+fn structural_command_head_token(tokens: &[String]) -> Option<&str> {
+    shellish_tokens_start_command(tokens).then(|| tokens.first().map(String::as_str)).flatten()
 }
 
 fn update_procedure_command_head(command_line: &str) -> Option<String> {
-    command_token_values(strip_leading_order_marker(command_line)).into_iter().next()
+    if !procedure_line_has_command_start(command_line) {
+        return None;
+    }
+    let tokens = command_token_values(strip_leading_order_marker(command_line));
+    tokens.first().filter(|head| shellish_token_is_invocable_head(head)).map(ToString::to_string)
 }
 
 fn update_procedure_command_heads_match(left: &str, right: &str) -> bool {
@@ -3929,56 +3442,6 @@ fn update_procedure_command_heads_match(left: &str, right: &str) -> bool {
         return false;
     };
     left_head == right_head
-}
-
-fn command_action_token(token: &str) -> Option<String> {
-    let trimmed = token.trim_matches(|ch: char| {
-        ch.is_ascii_punctuation() && ch != '/' && ch != '-' && ch != '_' && ch != '.'
-    });
-    if trimmed.is_empty() || trimmed.starts_with('-') {
-        return None;
-    }
-    if let Some(scheme_index) = trimmed.find("://") {
-        let after_scheme = &trimmed[scheme_index + 3..];
-        return after_scheme.find('/').and_then(|path_index| {
-            let path = after_scheme[path_index..].trim_matches(|ch: char| {
-                ch.is_ascii_punctuation() && ch != '/' && ch != '-' && ch != '_' && ch != '.'
-            });
-            (!path.is_empty()).then(|| path.to_string())
-        });
-    }
-    Some(trimmed.to_string())
-}
-
-fn procedure_term_overlap_score(
-    expected: &BTreeSet<String>,
-    available: &BTreeSet<String>,
-) -> usize {
-    expected
-        .iter()
-        .filter(|term| {
-            available
-                .iter()
-                .any(|candidate| procedure_terms_match(term.as_str(), candidate.as_str()))
-        })
-        .count()
-}
-
-fn procedure_terms_match(left: &str, right: &str) -> bool {
-    left == right || shared_procedure_prefix_len(left, right) >= PROCEDURE_TERM_PREFIX_MIN_CHARS
-}
-
-const PROCEDURE_TERM_PREFIX_MIN_CHARS: usize = 5;
-
-fn shared_procedure_prefix_len(left: &str, right: &str) -> usize {
-    let mut count = 0usize;
-    for (left_ch, right_ch) in left.chars().zip(right.chars()) {
-        if left_ch != right_ch {
-            break;
-        }
-        count += 1;
-    }
-    count
 }
 
 fn update_procedure_step_is_structural(step: &str) -> bool {
@@ -3995,54 +3458,105 @@ struct UpdateProcedureLine {
     has_command: bool,
 }
 
+fn update_procedure_step_from_line(line: &UpdateProcedureLine) -> String {
+    if !line.has_command || line_has_command_signal(&line.text) {
+        return line.text.clone();
+    }
+    let command = update_procedure_normalized_step(&line.text);
+    format!("`{command}`")
+}
+
 fn update_procedure_line_blocks(text: &str) -> Vec<Vec<UpdateProcedureLine>> {
-    let mut blocks = Vec::<Vec<UpdateProcedureLine>>::new();
-    let mut current = Vec::<UpdateProcedureLine>::new();
+    let mut blocks = Vec::new();
+    let mut state = UpdateProcedureBlockBuilder::default();
     for raw_line in text.lines() {
-        let expanded_lines = split_dense_procedure_line(raw_line);
-        let expanded_lines = if expanded_lines.is_empty() {
-            vec![raw_line.trim().to_string()]
-        } else {
-            expanded_lines
-        };
-        for trimmed in expanded_lines {
-            let trimmed = trimmed.trim();
-            if trimmed.is_empty() {
-                if !current.is_empty() {
-                    blocks.push(std::mem::take(&mut current));
-                }
-                continue;
-            }
-            let has_order_marker = line_has_order_marker(trimmed);
-            let line = trimmed.trim_matches(['-', '*', '•', ' ']).trim();
-            if line.chars().count() < 8 && !line_has_command_signal(line) {
-                continue;
-            }
-            let normalized = line.split_whitespace().collect::<Vec<_>>().join(" ");
-            let has_version = !line_looks_data_record(&normalized)
-                && update_procedure_line_has_version(&normalized);
-            let has_command = line_has_command_signal(&normalized);
-            if update_procedure_line_is_section_heading(
-                &normalized,
-                has_order_marker,
-                has_version,
-                has_command,
-            ) && update_procedure_block_has_setup_script_signature(&current, &BTreeSet::new())
-            {
-                blocks.push(std::mem::take(&mut current));
-            }
-            current.push(UpdateProcedureLine {
-                has_version,
-                has_order_marker,
-                has_command,
-                text: normalized,
-            });
+        let segments = split_dense_procedure_segments(raw_line);
+        if segments.is_empty() {
+            state.push_segment(
+                DenseProcedureSegment {
+                    text: raw_line.trim().to_string(),
+                    explicit_command_context: false,
+                },
+                &mut blocks,
+            );
+            continue;
+        }
+        for segment in segments {
+            state.push_segment(segment, &mut blocks);
         }
     }
-    if !current.is_empty() {
-        blocks.push(current);
-    }
+    state.finish(&mut blocks);
     blocks
+}
+
+#[derive(Default)]
+struct UpdateProcedureBlockBuilder {
+    current: Vec<UpdateProcedureLine>,
+    preceding_line_opens_command_context: bool,
+}
+
+impl UpdateProcedureBlockBuilder {
+    fn push_segment(
+        &mut self,
+        segment: DenseProcedureSegment,
+        blocks: &mut Vec<Vec<UpdateProcedureLine>>,
+    ) {
+        let trimmed = segment.text.trim();
+        if trimmed.is_empty() || line_is_markdown_atx_heading(trimmed) {
+            self.finish(blocks);
+            return;
+        }
+        let has_order_marker = line_has_order_marker(trimmed);
+        let line = trimmed.trim_matches(['-', '*', '•', ' ']).trim();
+        let has_contextual_command = !has_order_marker
+            && (segment.explicit_command_context || self.preceding_line_opens_command_context)
+            && contextual_procedure_command_shape(line);
+        if line.chars().count() < 8 && !line_has_command_signal(line) && !has_contextual_command {
+            return;
+        }
+        let normalized = line.split_whitespace().collect::<Vec<_>>().join(" ");
+        let has_version =
+            !line_looks_data_record(&normalized) && update_procedure_line_has_version(&normalized);
+        let has_command = line_has_command_signal(&normalized) || has_contextual_command;
+        if update_procedure_line_is_section_heading(
+            &normalized,
+            has_order_marker,
+            has_version,
+            has_command,
+        ) && update_procedure_block_has_setup_script_signature(&self.current)
+        {
+            self.finish(blocks);
+        }
+        self.current.push(UpdateProcedureLine {
+            has_version,
+            has_order_marker,
+            has_command,
+            text: normalized,
+        });
+        self.preceding_line_opens_command_context = !has_command
+            && self.current.last().is_some_and(|line| {
+                line.text.ends_with(':') && line.text.split_whitespace().count() <= 16
+            });
+    }
+
+    fn finish(&mut self, blocks: &mut Vec<Vec<UpdateProcedureLine>>) {
+        if !self.current.is_empty() {
+            blocks.push(std::mem::take(&mut self.current));
+        }
+        self.preceding_line_opens_command_context = false;
+    }
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+struct DenseProcedureSegment {
+    text: String,
+    explicit_command_context: bool,
+}
+
+fn line_is_markdown_atx_heading(line: &str) -> bool {
+    let trimmed = line.trim_start();
+    let marker_len = trimmed.chars().take_while(|ch| *ch == '#').count();
+    (1..=6).contains(&marker_len) && trimmed.chars().nth(marker_len).is_none_or(char::is_whitespace)
 }
 
 fn update_procedure_line_is_section_heading(
@@ -4060,68 +3574,128 @@ fn update_procedure_line_is_section_heading(
 }
 
 fn split_dense_procedure_line(line: &str) -> Vec<String> {
-    let mut segments = Vec::<String>::new();
+    split_dense_procedure_segments(line).into_iter().map(|segment| segment.text).collect()
+}
+
+fn split_dense_procedure_segments(line: &str) -> Vec<DenseProcedureSegment> {
+    let mut segments = Vec::<DenseProcedureSegment>::new();
     let mut current = Vec::<String>::new();
-    let tokens =
-        line.split_whitespace().flat_map(split_joined_local_script_token).collect::<Vec<_>>();
-    for (token_index, token) in tokens.iter().enumerate() {
-        let next_token = tokens.get(token_index + 1).copied();
-        if matches!(current.as_slice(), [value] if value == "sudo") {
-            if let Some(command_suffix) = joined_privilege_command_suffix(token) {
-                current.push("su".to_string());
-                segments.push(current.join(" "));
-                current.clear();
-                current.push(command_suffix);
-                continue;
-            }
-        }
-        let is_command_start = token_is_inline_command_boundary_start(token, next_token, &current);
-        let is_order_start = token_is_inline_order_marker(token);
-        let current_is_privilege_prefix = matches!(current.as_slice(), [value] if value == "sudo");
-        if matches!(current.as_slice(), [left, right] if left == "sudo" && right == "su")
-            && is_command_start
+    let mut current_has_explicit_command_context = false;
+    let tokens = line
+        .split_whitespace()
+        .flat_map(|token| {
+            split_concatenated_local_artifact_token(token)
+                .into_iter()
+                .enumerate()
+                .map(|(segment_index, token)| (token, segment_index > 0))
+        })
+        .collect::<Vec<_>>();
+    for (token_index, (token, follows_concatenated_artifact_boundary)) in
+        tokens.iter().copied().enumerate()
+    {
+        let next_token = tokens.get(token_index + 1).map(|(token, _)| *token);
+        if current_has_explicit_command_context
+            && contextual_command_segment_is_complete(&current)
+            && !contextual_command_token_continues(&current, token)
         {
-            segments.push(current.join(" "));
-            current.clear();
+            push_dense_procedure_segment(
+                &mut segments,
+                &mut current,
+                current_has_explicit_command_context,
+            );
+            current_has_explicit_command_context = false;
         }
-        let starts_new_prose_after_command =
-            current_starts_with_command(&current) && token_starts_prose_after_command(token);
-        if (is_command_start || is_order_start || starts_new_prose_after_command)
-            && !current.is_empty()
-            && !current_is_privilege_prefix
-        {
-            segments.push(current.join(" "));
-            current.clear();
+        let inside_square_delimiter = tokens_have_unclosed_square_delimiter(&current);
+        let follows_inline_command_delimiter =
+            !inside_square_delimiter && current_ends_with_inline_command_delimiter(&current);
+        let is_command_start = !inside_square_delimiter
+            && (follows_concatenated_artifact_boundary
+                || token_is_inline_command_boundary_start(token, next_token, &current));
+        let is_order_start = !inside_square_delimiter && token_is_inline_order_marker(token);
+        if (is_command_start || is_order_start) && !current.is_empty() {
+            push_dense_procedure_segment(
+                &mut segments,
+                &mut current,
+                current_has_explicit_command_context,
+            );
+            current_has_explicit_command_context = is_command_start
+                && (follows_inline_command_delimiter || follows_concatenated_artifact_boundary);
         }
         current.push(token.to_string());
     }
     if !current.is_empty() {
-        segments.push(current.join(" "));
+        push_dense_procedure_segment(
+            &mut segments,
+            &mut current,
+            current_has_explicit_command_context,
+        );
     }
     segments
         .into_iter()
-        .map(|segment| segment.trim_matches(['-', '*', '•', ' ']).trim().to_string())
-        .filter(|segment| !segment.is_empty())
+        .map(|segment| {
+            let text = segment.text.trim_matches(['-', '*', '•', ' ']).trim();
+            DenseProcedureSegment {
+                text: compact_bracketed_identifier_spacing(text),
+                explicit_command_context: segment.explicit_command_context,
+            }
+        })
+        .filter(|segment| !segment.text.is_empty())
         .collect()
 }
 
-fn split_joined_local_script_token(token: &str) -> Vec<&str> {
-    let mut segments = Vec::new();
-    let mut start = 0usize;
-    for (index, _) in token.char_indices().skip(1) {
-        let rest = &token[index..];
-        if (rest.starts_with("/tmp/") || rest.starts_with("./"))
-            && token_has_local_command_artifact(&token[start..index])
-        {
-            segments.push(&token[start..index]);
-            start = index;
+fn push_dense_procedure_segment(
+    segments: &mut Vec<DenseProcedureSegment>,
+    current: &mut Vec<String>,
+    explicit_command_context: bool,
+) {
+    if current.is_empty() {
+        return;
+    }
+    segments.push(DenseProcedureSegment { text: current.join(" "), explicit_command_context });
+    current.clear();
+}
+
+fn tokens_have_unclosed_square_delimiter(tokens: &[String]) -> bool {
+    tokens.iter().flat_map(|token| token.chars()).fold(0usize, |depth, ch| match ch {
+        '[' => depth.saturating_add(1),
+        ']' => depth.saturating_sub(1),
+        _ => depth,
+    }) > 0
+}
+
+fn compact_bracketed_identifier_spacing(text: &str) -> String {
+    let chars = text.chars().collect::<Vec<_>>();
+    let mut output = String::with_capacity(text.len());
+    let mut index = 0usize;
+    while index < chars.len() {
+        if chars[index] != '[' {
+            output.push(chars[index]);
+            index += 1;
+            continue;
+        }
+        let Some(relative_end) = chars[index + 1..].iter().position(|ch| *ch == ']') else {
+            output.push(chars[index]);
+            index += 1;
+            continue;
         };
+        let end = index + 1 + relative_end;
+        let inner = &chars[index + 1..end];
+        let inner_text = inner.iter().collect::<String>();
+        let identifier = inner_text.trim();
+        let identifier_shaped = identifier.chars().any(char::is_alphanumeric)
+            && !identifier.chars().any(char::is_whitespace)
+            && identifier.chars().all(|ch| ch.is_alphanumeric() || matches!(ch, '.' | '_' | '-'));
+        if !identifier_shaped {
+            output.extend(chars[index..=end].iter());
+            index = end + 1;
+            continue;
+        }
+        output.push('[');
+        output.push_str(identifier);
+        output.push(']');
+        index = end + 1;
     }
-    if start == 0 {
-        return vec![token];
-    }
-    segments.push(&token[start..]);
-    segments.into_iter().filter(|segment| !segment.is_empty()).collect()
+    output
 }
 
 fn token_is_inline_command_boundary_start(
@@ -4131,74 +3705,131 @@ fn token_is_inline_command_boundary_start(
 ) -> bool {
     let cleaned = token.trim_matches(|ch: char| matches!(ch, '`' | '\'' | '"' | '(' | ')' | ';'));
     let normalized = trim_command_boundary_token_decorations(cleaned).to_ascii_lowercase();
-    if matches!(normalized.as_str(), "sudo" | "doas") {
-        return true;
-    }
     if !current.is_empty()
         && !current_ends_with_inline_command_delimiter(current)
-        && !token_is_local_script_command_start(cleaned)
-        && !matches!(current, [left, right] if left == "sudo" && right == "su")
+        && !shellish_token_is_path_command_start(cleaned)
         && current_is_plain_invocation_with_structural_argument(current, &normalized)
     {
         return false;
-    }
-    if token_is_local_script_command_start(cleaned) {
-        if cleaned.starts_with("./") {
-            return current.is_empty()
-                || current_ends_with_inline_command_delimiter(current)
-                || current.first().is_some_and(|previous| previous == "cd")
-                || current
-                    .last()
-                    .is_some_and(|previous| token_is_local_script_command_start(previous));
-        }
-        return current.is_empty()
-            || current_ends_with_inline_command_delimiter(current)
-            || current
-                .last()
-                .is_some_and(|previous| token_is_local_script_command_start(previous));
-    }
-    if current_ends_with_inline_command_delimiter(current)
-        && command_token_is_invocable_head(&normalized)
-    {
-        return true;
-    }
-    if matches!(current, [left, right] if left == "sudo" && right == "su")
-        && token_is_command_start(cleaned)
-    {
-        return true;
-    }
-    if current_starts_with_command(current)
-        && current_command_has_external_materialization(current)
-        && command_token_is_invocable_head(&normalized)
-    {
-        return true;
     }
     if current_command_prepares_local_artifact(current)
         && token_has_local_command_artifact(&normalized)
     {
         return true;
     }
-    if current_command_expects_structural_value(current)
-        && token_has_local_command_artifact(&normalized)
-    {
-        return false;
+    if shellish_token_is_path_command_start(cleaned) {
+        return path_token_starts_inline_command(current, cleaned);
     }
-    if !current.is_empty()
-        && command_token_has_executable_name_shape(&normalized)
-        && next_token
-            .map(|token| {
-                let next = trim_command_boundary_token_decorations(token).to_ascii_lowercase();
-                command_token_is_structural_argument(&next)
-                    || command_token_has_executable_name_shape(&next)
-            })
-            .unwrap_or(false)
+    if invocable_token_starts_inline_command(current, &normalized, next_token) {
+        return true;
+    }
+    false
+}
+
+fn path_token_starts_inline_command(current: &[String], token: &str) -> bool {
+    current.is_empty()
+        || current_ends_with_formal_shell_delimiter(current)
+        || current_ends_with_directory_shaped_path_before_executable_artifact(current, token)
+}
+
+fn invocable_token_starts_inline_command(
+    current: &[String],
+    normalized: &str,
+    next_token: Option<&str>,
+) -> bool {
+    if current_ends_with_inline_command_delimiter(current)
+        && shellish_token_is_invocable_head(normalized)
     {
         return true;
     }
-    if !current.is_empty() && !current_ends_with_inline_command_delimiter(current) {
+    if current_starts_with_command(current)
+        && current_command_has_external_materialization(current)
+        && shellish_token_is_invocable_head(normalized)
+    {
+        return true;
+    }
+    if current_command_expects_structural_value(current)
+        && token_has_local_command_artifact(normalized)
+    {
         return false;
     }
-    token_is_command_start(cleaned)
+    !current.is_empty()
+        && shellish_token_is_invocable_head(normalized)
+        && shellish_token_has_executable_name_shape(normalized)
+        && next_token.is_some_and(|token| {
+            let next = trim_command_boundary_token_decorations(token).to_ascii_lowercase();
+            shellish_token_is_command_argument_signal(&next)
+        })
+}
+
+fn contextual_command_segment_is_complete(current: &[String]) -> bool {
+    let tokens = current
+        .iter()
+        .map(|token| trim_command_boundary_token_decorations(token).to_ascii_lowercase())
+        .filter(|token| !token.is_empty())
+        .collect::<Vec<_>>();
+    shellish_tokens_start_command(&tokens)
+        || tokens.iter().any(|token| {
+            shellish_token_has_executable_name_shape(token)
+                || shellish_token_is_path_command_start(token)
+        })
+}
+
+fn contextual_command_token_continues(current: &[String], token: &str) -> bool {
+    let token = trim_command_boundary_token_decorations(token).to_ascii_lowercase();
+    if shellish_token_is_command_argument_signal(&token)
+        || shellish_token_is_local_artifact(&token)
+        || current_command_expects_structural_value(current)
+    {
+        return true;
+    }
+    let normalized = current
+        .iter()
+        .map(|value| trim_command_boundary_token_decorations(value).to_ascii_lowercase())
+        .filter(|value| !value.is_empty())
+        .collect::<Vec<_>>();
+    if normalized.len() < 2 {
+        return true;
+    }
+    let Some(last) = normalized.last() else {
+        return false;
+    };
+    !shellish_token_is_path_command_start(last)
+        && shellish_token_has_executable_name_shape(last)
+        && normalized.iter().take(normalized.len().saturating_sub(1)).all(|value| {
+            shellish_token_is_invocable_head(value)
+                && !shellish_token_has_executable_name_shape(value)
+        })
+}
+
+fn current_ends_with_directory_shaped_path_before_executable_artifact(
+    current: &[String],
+    token: &str,
+) -> bool {
+    if shellish_token_file_artifact_name(token).is_none() {
+        return false;
+    }
+    let Some(previous) = current
+        .last()
+        .map(|value| trim_command_boundary_token_decorations(value).to_ascii_lowercase())
+    else {
+        return false;
+    };
+    shellish_token_is_path_command_start(&previous)
+        && shellish_token_file_artifact_name(&previous).is_none()
+        && current_starts_with_command(current)
+}
+
+fn contextual_procedure_command_shape(line: &str) -> bool {
+    let tokens = command_token_values(strip_leading_order_marker(line));
+    let Some(head) = tokens.first() else {
+        return false;
+    };
+    tokens.len() >= 2
+        && tokens.len() <= 12
+        && shellish_token_is_invocable_head(head)
+        && (shellish_tokens_start_command(&tokens)
+            || tokens.iter().all(|token| shellish_token_is_invocable_head(token)))
 }
 
 fn current_is_plain_invocation_with_structural_argument(current: &[String], token: &str) -> bool {
@@ -4208,18 +3839,10 @@ fn current_is_plain_invocation_with_structural_argument(current: &[String], toke
     else {
         return false;
     };
-    !token_is_command_start(&head)
-        && command_token_is_invocable_head(&head)
-        && command_token_is_structural_argument(token)
-}
-
-fn joined_privilege_command_suffix(token: &str) -> Option<String> {
-    let cleaned = trim_command_token_decorations(token).to_ascii_lowercase();
-    let suffix = cleaned.strip_prefix("su")?;
-    (!suffix.is_empty()
-        && command_token_is_invocable_head(suffix)
-        && command_token_has_executable_name_shape(suffix))
-    .then(|| suffix.to_string())
+    !shellish_token_is_path_command_start(&head)
+        && !shellish_token_has_executable_name_shape(&head)
+        && shellish_token_is_invocable_head(&head)
+        && shellish_token_is_command_argument_signal(token)
 }
 
 fn current_ends_with_inline_command_delimiter(tokens: &[String]) -> bool {
@@ -4230,44 +3853,19 @@ fn current_ends_with_inline_command_delimiter(tokens: &[String]) -> bool {
     })
 }
 
+fn current_ends_with_formal_shell_delimiter(tokens: &[String]) -> bool {
+    tokens.last().is_some_and(|token| {
+        let token = token.trim_matches(|ch: char| matches!(ch, '`' | '\'' | '"' | '(' | ')'));
+        ["&&", "||", ";", "|", "&"].iter().any(|delimiter| token.ends_with(delimiter))
+    })
+}
+
 fn current_starts_with_command(tokens: &[String]) -> bool {
-    let Some(first) = tokens.first() else {
-        return false;
-    };
-    if token_is_command_start(first) {
-        return true;
-    }
     let normalized = tokens
         .iter()
         .map(|token| trim_command_boundary_token_decorations(token).to_ascii_lowercase())
         .collect::<Vec<_>>();
-    if command_tokens_have_structural_shape(&normalized) {
-        return true;
-    }
-    if first != "sudo" {
-        return false;
-    }
-    if tokens.get(1).is_some_and(|token| token_is_command_start(token)) {
-        return true;
-    }
-    tokens.get(1).is_some_and(|token| token == "su")
-        && tokens.get(2).is_some_and(|token| token_is_command_start(token))
-}
-
-fn token_starts_prose_after_command(token: &str) -> bool {
-    let cleaned =
-        token.trim_matches(|ch: char| matches!(ch, '`' | '\'' | '"' | '(' | ')' | ';' | ',' | ':'));
-    let Some(first) = cleaned.chars().next() else {
-        return false;
-    };
-    let char_count = cleaned.chars().count();
-    first.is_uppercase()
-        && (cleaned.chars().skip(1).any(char::is_lowercase)
-            || (char_count == 1 && !first.is_ascii()))
-        && !cleaned.contains('=')
-        && !cleaned.contains('/')
-        && !cleaned.contains('.')
-        && !cleaned.starts_with('-')
+    shellish_tokens_start_command(&normalized)
 }
 
 fn token_is_inline_order_marker(token: &str) -> bool {
@@ -4284,104 +3882,6 @@ fn token_is_inline_order_marker(token: &str) -> bool {
     }
 }
 
-fn token_is_command_start(token: &str) -> bool {
-    let token = trim_command_boundary_token_decorations(token).to_ascii_lowercase();
-    if token.starts_with('-')
-        || token.contains("://")
-        || !token.chars().any(|ch| ch.is_alphabetic())
-    {
-        return false;
-    }
-    token_is_local_script_command_start(&token) || command_token_has_executable_name_shape(&token)
-}
-
-fn token_is_local_script_command_start(token: &str) -> bool {
-    token.starts_with("/tmp/") || token.starts_with("./") || token.starts_with("../")
-}
-
-fn command_token_has_executable_name_shape(token: &str) -> bool {
-    let token = trim_command_boundary_token_decorations(token);
-    if token.starts_with('-')
-        || !token.chars().any(|ch| ch.is_alphabetic())
-        || token.contains("://")
-    {
-        return false;
-    }
-    let has_ascii_alpha = token.chars().any(|ch| ch.is_ascii_alphabetic());
-    command_token_is_path_like(token)
-        || (token.contains('-') && has_ascii_alpha)
-        || token.contains('_')
-        || token.contains('.')
-        || token.chars().any(|ch| ch.is_ascii_digit())
-}
-
-fn command_token_is_path_like(token: &str) -> bool {
-    (token.starts_with("./")
-        || token.starts_with("../")
-        || token.starts_with('/')
-        || token.contains('/'))
-        && !token.contains("://")
-        && token.chars().any(|ch| ch.is_alphanumeric())
-}
-
-fn command_token_is_structural_argument(token: &str) -> bool {
-    let token = trim_command_boundary_token_decorations(token);
-    token.starts_with('-')
-        || token.starts_with('+')
-        || token.contains('=')
-        || token.contains("://")
-        || command_token_is_path_like(token)
-        || command_token_has_executable_name_shape(token)
-}
-
-fn command_token_is_invocable_head(token: &str) -> bool {
-    let token = trim_command_boundary_token_decorations(token);
-    !token.is_empty()
-        && !token.starts_with('-')
-        && !token.contains("://")
-        && !token.contains('=')
-        && token.chars().any(|ch| ch.is_alphabetic())
-        && token
-            .chars()
-            .all(|ch| ch.is_alphanumeric() || matches!(ch, '.' | '_' | '-' | '+' | '/' | '\\'))
-}
-
-fn command_token_is_subcommand_word(token: &str) -> bool {
-    let len = token.chars().count();
-    (2..=32).contains(&len)
-        && !token.starts_with('-')
-        && token.chars().all(|ch| ch.is_alphanumeric() || matches!(ch, '-' | '_'))
-}
-
-fn command_tokens_have_structural_shape(tokens: &[String]) -> bool {
-    let Some(head) = tokens.first() else {
-        return false;
-    };
-    if token_is_command_start(head) {
-        return true;
-    }
-    if !command_token_is_invocable_head(head) {
-        return false;
-    }
-    if !head.chars().all(|ch| ch.is_ascii_lowercase() || matches!(ch, '-' | '_' | '.')) {
-        return false;
-    }
-    let Some(first_arg) = tokens.get(1) else {
-        return false;
-    };
-    if command_token_is_structural_argument(first_arg) {
-        return true;
-    }
-    if tokens.len() >= 3
-        && command_token_is_subcommand_word(first_arg)
-        && tokens.get(2).is_some_and(|token| command_token_is_subcommand_word(token))
-    {
-        return true;
-    }
-    command_token_is_subcommand_word(first_arg)
-        && tokens.iter().skip(1).take(6).any(|token| command_token_is_structural_argument(token))
-}
-
 fn current_command_has_external_materialization(tokens: &[String]) -> bool {
     let normalized = tokens
         .iter()
@@ -4394,72 +3894,61 @@ fn current_command_has_external_materialization(tokens: &[String]) -> bool {
 }
 
 fn current_command_prepares_local_artifact(tokens: &[String]) -> bool {
-    let normalized = tokens
+    let command_tokens = if tokens.first().is_some_and(|token| token_is_inline_order_marker(token))
+    {
+        &tokens[1..]
+    } else {
+        tokens
+    };
+    let normalized = command_tokens
         .iter()
         .map(|token| trim_command_boundary_token_decorations(token).to_ascii_lowercase())
         .collect::<Vec<_>>();
-    normalized.iter().any(|token| command_token_has_preparation_signal(token))
+    normalized.iter().any(|token| shellish_token_has_artifact_preparation_signal(token))
         && normalized.iter().skip(1).any(|token| token_has_local_command_artifact(token))
 }
 
 fn current_command_expects_structural_value(tokens: &[String]) -> bool {
     tokens.last().is_some_and(|token| {
         let token = trim_command_boundary_token_decorations(token).to_ascii_lowercase();
-        token.starts_with('-')
-            || token.starts_with('+')
-            || token.contains("+")
-            || token.ends_with('=')
+        if let Some((_, value)) = token.split_once('=') {
+            return value.is_empty();
+        }
+        token.starts_with('-') || token.starts_with('+') || token.contains("+")
     })
 }
 
 fn line_has_command_signal(line: &str) -> bool {
     let trimmed = strip_leading_order_marker(line).trim();
-    if command_line_starts_like_sentence(trimmed) {
+    if compact_configuration_section_header(trimmed) {
         return false;
     }
-    let mut tokens = trimmed
-        .split_whitespace()
-        .map(|token| trim_command_boundary_token_decorations(token).to_ascii_lowercase())
-        .filter(|token| !token.is_empty())
-        .collect::<Vec<_>>();
-    if matches!(tokens.as_slice(), [value] if value == "sudo" || value == "su") {
-        return true;
-    }
-    if matches!(tokens.as_slice(), [left, right] if left == "sudo" && right == "su") {
-        return true;
-    }
-    while tokens.first().is_some_and(|token| matches!(token.as_str(), "sudo" | "su")) {
-        tokens.remove(0);
-    }
-    command_tokens_have_structural_shape(&tokens)
+    let code_delimited = trimmed.len() >= 2
+        && trimmed.starts_with('`')
+        && trimmed.ends_with('`')
+        && !trimmed.trim_matches('`').trim().is_empty();
+    let command = trimmed.trim_matches('`').trim();
+    let tokens = command_token_values(command);
+    let Some(head) = tokens.first().map(String::as_str) else {
+        return false;
+    };
+    shellish_tokens_start_command(&tokens)
+        || (code_delimited && shellish_token_is_invocable_head(head))
+        || (shellish_token_has_executable_name_shape(head)
+            && (tokens.len() == 1 || procedure_line_has_list_marker(line)))
 }
 
-fn command_line_starts_like_sentence(line: &str) -> bool {
-    let Some(first_token) = line.split_whitespace().next() else {
+fn compact_configuration_section_header(line: &str) -> bool {
+    let Some(inner) = line.strip_prefix('[').and_then(|line| line.strip_suffix(']')) else {
         return false;
     };
-    let cleaned = trim_command_boundary_token_decorations(first_token);
-    let Some(first_char) = cleaned.chars().next() else {
-        return false;
-    };
-    first_char.is_uppercase()
-        && cleaned.chars().skip(1).any(char::is_lowercase)
-        && !cleaned.contains(['/', '\\', '.', '_', '-'])
-        && !cleaned.contains("://")
+    !inner.is_empty()
+        && !inner.chars().any(char::is_whitespace)
+        && inner.chars().all(|ch| ch.is_alphanumeric() || matches!(ch, '.' | '_' | '-'))
 }
 
 fn line_has_order_marker(line: &str) -> bool {
-    let trimmed = line.trim_start();
-    if trimmed.starts_with(['-', '*', '•']) {
-        return true;
-    }
-    let mut chars = trimmed.chars().peekable();
-    let mut digit_count = 0usize;
-    while chars.peek().is_some_and(|ch| ch.is_ascii_digit()) {
-        digit_count = digit_count.saturating_add(1);
-        chars.next();
-    }
-    digit_count > 0 && chars.peek().is_some_and(|ch| matches!(ch, '.' | ')'))
+    procedure_line_has_list_marker(line)
 }
 
 fn update_procedure_line_has_version(line: &str) -> bool {
@@ -4477,7 +3966,7 @@ fn version_token_has_structured_separator(token: &str) -> bool {
         return false;
     }
     let numeric_groups = cleaned
-        .split(|ch| matches!(ch, '.' | '-' | '_'))
+        .split(['.', '-', '_'])
         .filter(|part| !part.is_empty() && part.chars().all(|ch| ch.is_ascii_digit()))
         .count();
     numeric_groups >= 2
@@ -4521,17 +4010,7 @@ fn line_looks_data_record(line: &str) -> bool {
 }
 
 fn strip_leading_order_marker(line: &str) -> &str {
-    let trimmed = line.trim();
-    let without_digits = trimmed.trim_start_matches(|ch: char| ch.is_ascii_digit());
-    if without_digits.len() == trimmed.len() {
-        return trimmed;
-    }
-    without_digits
-        .strip_prefix('.')
-        .or_else(|| without_digits.strip_prefix(')'))
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .unwrap_or(trimmed)
+    strip_leading_numeric_order_marker(line)
 }
 
 pub(super) fn build_structured_source_unit_inventory_answer(
@@ -4579,37 +4058,32 @@ fn query_ir_allows_structured_source_unit_inventory(query_ir: &QueryIR) -> bool 
         return false;
     }
 
-    query_ir.target_types.iter().map(|target_type| canonical_target_type_tag(target_type)).any(
-        |target_type| {
-            matches!(
-                target_type.as_str(),
-                "attribute"
-                    | "base_url"
-                    | "config_key"
-                    | "connection"
-                    | "credential"
-                    | "endpoint"
-                    | "entry"
-                    | "env_var"
-                    | "error_code"
-                    | "event"
-                    | "field"
-                    | "flag"
-                    | "group"
-                    | "item"
-                    | "parameter"
-                    | "port"
-                    | "record"
-                    | "service"
-                    | "state"
-                    | "status"
-                    | "table_row"
-                    | "table_summary"
-                    | "url"
-                    | "value"
-            )
-        },
-    )
+    query_ir.targets_any(&[
+        QueryTargetKind::Attribute,
+        QueryTargetKind::BaseUrl,
+        QueryTargetKind::ConfigKey,
+        QueryTargetKind::Connection,
+        QueryTargetKind::Credential,
+        QueryTargetKind::Endpoint,
+        QueryTargetKind::Entry,
+        QueryTargetKind::EnvVar,
+        QueryTargetKind::ErrorCode,
+        QueryTargetKind::Event,
+        QueryTargetKind::Field,
+        QueryTargetKind::Flag,
+        QueryTargetKind::Group,
+        QueryTargetKind::Item,
+        QueryTargetKind::Parameter,
+        QueryTargetKind::Port,
+        QueryTargetKind::Record,
+        QueryTargetKind::Service,
+        QueryTargetKind::State,
+        QueryTargetKind::Status,
+        QueryTargetKind::TableRow,
+        QueryTargetKind::TableSummary,
+        QueryTargetKind::Url,
+        QueryTargetKind::Value,
+    ])
 }
 
 fn query_ir_has_typed_table_column_inventory_intent(query_ir: &QueryIR) -> bool {
@@ -4621,12 +4095,7 @@ fn query_ir_has_typed_table_column_inventory_intent(query_ir: &QueryIR) -> bool 
     {
         return false;
     }
-    let target_types = query_ir
-        .target_types
-        .iter()
-        .map(|target_type| canonical_target_type_tag(target_type))
-        .collect::<HashSet<_>>();
-    target_types.contains("table_row") && target_types.contains("table_summary")
+    query_ir.targets(QueryTargetKind::TableRow) && query_ir.targets(QueryTargetKind::TableSummary)
 }
 
 #[derive(Debug, Clone)]
@@ -4886,7 +4355,7 @@ fn source_unit_document_focus_score(
     focus: &StructuredSourceUnitFocus,
 ) -> SourceUnitDocumentFocusScore {
     let field_terms = structured_source_unit_field_terms(field);
-    let label_terms = label_terms_with_simple_variants(&field.document_label, 2);
+    let label_terms = exact_label_terms(&field.document_label, 2);
     let field_text =
         format!("{}\n{}\n{}", field.document_label, field.path, field.value).to_lowercase();
     let specific = focus
@@ -5049,7 +4518,7 @@ fn structured_source_unit_value_specificity_score(value: &str) -> usize {
     if trimmed.is_empty() {
         return 0;
     }
-    let token_score = label_terms_with_simple_variants(trimmed, 2).len().min(5);
+    let token_score = exact_label_terms(trimmed, 2).len().min(5);
     let syntax_score =
         if trimmed.chars().any(|ch| matches!(ch, '.' | '-' | '_' | '/' | ':' | '@' | '#')) {
             3
@@ -5074,24 +4543,21 @@ fn structured_source_unit_inventory_focus_terms(
     query_ir: &QueryIR,
 ) -> BTreeSet<String> {
     let mut terms = BTreeSet::<String>::new();
-    extend_label_terms_with_simple_variants(&mut terms, &current_question_segment(question), 3);
-    for target_type in &query_ir.target_types {
-        extend_label_terms_with_simple_variants(&mut terms, target_type, 2);
-    }
+    extend_exact_label_terms(&mut terms, current_question_segment(question), 3);
     for entity in &query_ir.target_entities {
-        extend_label_terms_with_simple_variants(&mut terms, &entity.label, 2);
+        extend_exact_label_terms(&mut terms, &entity.label, 2);
     }
     for literal in &query_ir.literal_constraints {
-        extend_label_terms_with_simple_variants(&mut terms, &literal.text, 2);
+        extend_exact_label_terms(&mut terms, &literal.text, 2);
     }
     if let Some(comparison) = query_ir.comparison.as_ref() {
         if let Some(a) = comparison.a.as_deref() {
-            extend_label_terms_with_simple_variants(&mut terms, a, 2);
+            extend_exact_label_terms(&mut terms, a, 2);
         }
         if let Some(b) = comparison.b.as_deref() {
-            extend_label_terms_with_simple_variants(&mut terms, b, 2);
+            extend_exact_label_terms(&mut terms, b, 2);
         }
-        extend_label_terms_with_simple_variants(&mut terms, &comparison.dimension, 2);
+        extend_exact_label_terms(&mut terms, &comparison.dimension, 2);
     }
     terms
 }
@@ -5137,7 +4603,7 @@ impl StructuredSourceUnitFocus {
         let root_terms = fields
             .iter()
             .filter_map(source_unit_field_root_term)
-            .flat_map(|segment| label_terms_with_simple_variants(&segment, 2))
+            .flat_map(|segment| exact_label_terms(&segment, 2))
             .filter(|term| terms.contains(term))
             .collect::<BTreeSet<_>>();
 
@@ -5179,20 +4645,20 @@ fn structured_source_unit_specific_terms(question: &str, query_ir: &QueryIR) -> 
         terms.insert(term);
     }
     if let Some(document_focus) = query_ir.document_focus.as_ref() {
-        extend_label_terms_with_simple_variants(&mut terms, &document_focus.hint, 3);
+        extend_exact_label_terms(&mut terms, &document_focus.hint, 3);
     }
     for entity in &query_ir.target_entities {
-        extend_label_terms_with_simple_variants(&mut terms, &entity.label, 3);
+        extend_exact_label_terms(&mut terms, &entity.label, 3);
     }
     for literal in &query_ir.literal_constraints {
-        extend_label_terms_with_simple_variants(&mut terms, &literal.text, 2);
+        extend_exact_label_terms(&mut terms, &literal.text, 2);
     }
     if let Some(comparison) = query_ir.comparison.as_ref() {
         if let Some(a) = comparison.a.as_deref() {
-            extend_label_terms_with_simple_variants(&mut terms, a, 3);
+            extend_exact_label_terms(&mut terms, a, 3);
         }
         if let Some(b) = comparison.b.as_deref() {
-            extend_label_terms_with_simple_variants(&mut terms, b, 3);
+            extend_exact_label_terms(&mut terms, b, 3);
         }
     }
     terms
@@ -5234,9 +4700,9 @@ fn distinctive_surface_terms(text: &str) -> BTreeSet<String> {
 }
 
 fn structured_source_unit_field_terms(field: &SourceUnitField) -> BTreeSet<String> {
-    label_terms_with_simple_variants(&field.path, 2)
+    exact_label_terms(&field.path, 2)
         .into_iter()
-        .chain(label_terms_with_simple_variants(&field.value, 2))
+        .chain(exact_label_terms(&field.value, 2))
         .collect()
 }
 
@@ -5248,8 +4714,8 @@ fn structured_source_unit_field_overlap_score(
     field: &SourceUnitField,
     focus: &StructuredSourceUnitFocus,
 ) -> usize {
-    let path_terms = label_terms_with_simple_variants(&field.path, 2);
-    let value_terms = label_terms_with_simple_variants(&field.value, 2);
+    let path_terms = exact_label_terms(&field.path, 2);
+    let value_terms = exact_label_terms(&field.value, 2);
     let path_score = path_terms.intersection(&focus.scoring_terms).count() * 4;
     let value_score = value_terms.intersection(&focus.scoring_terms).count() * 3;
     path_score + value_score
@@ -5269,39 +4735,16 @@ fn structured_source_unit_compact_root_inventory_score(
         + source_unit_path_specificity_score(&field.path).min(3)
 }
 
-fn label_terms_with_simple_variants(text: &str, min_token_chars: usize) -> BTreeSet<String> {
+fn exact_label_terms(text: &str, min_token_chars: usize) -> BTreeSet<String> {
     let mut terms = BTreeSet::<String>::new();
-    extend_label_terms_with_simple_variants(&mut terms, text, min_token_chars);
+    extend_exact_label_terms(&mut terms, text, min_token_chars);
     terms
 }
 
-fn extend_label_terms_with_simple_variants(
-    terms: &mut BTreeSet<String>,
-    text: &str,
-    min_token_chars: usize,
-) {
+fn extend_exact_label_terms(terms: &mut BTreeSet<String>, text: &str, min_token_chars: usize) {
     for term in label_terms(text, min_token_chars) {
-        insert_term_with_simple_variants(terms, term, min_token_chars);
-    }
-}
-
-fn insert_term_with_simple_variants(
-    terms: &mut BTreeSet<String>,
-    term: String,
-    min_token_chars: usize,
-) {
-    if term.chars().count() < min_token_chars {
-        return;
-    }
-    terms.insert(term.clone());
-
-    for suffix in ["ies", "es", "s"] {
-        let Some(stem) = term.strip_suffix(suffix) else {
-            continue;
-        };
-        let variant = if suffix == "ies" { format!("{stem}y") } else { stem.to_string() };
-        if variant.chars().count() >= min_token_chars {
-            terms.insert(variant);
+        if term.chars().count() >= min_token_chars {
+            terms.insert(term);
         }
     }
 }
@@ -5391,11 +4834,11 @@ pub(crate) fn build_exact_version_change_summary_answer(
     {
         return None;
     }
-    if !query_ir
-        .target_types
-        .iter()
-        .any(|target_type| matches!(target_type.as_str(), "version" | "release" | "changelog"))
-    {
+    if !query_ir.targets_any(&[
+        QueryTargetKind::Version,
+        QueryTargetKind::Release,
+        QueryTargetKind::Changelog,
+    ]) {
         return None;
     }
     let version_literals = query_ir
@@ -5512,13 +4955,9 @@ fn contains_exact_version_literal(text: &str, literal: &str) -> bool {
         let end = start + literal.len();
         let before = text[..start].chars().next_back();
         let after = text[end..].chars().next();
-        !before.is_some_and(is_version_literal_boundary_blocker)
-            && !after.is_some_and(is_version_literal_boundary_blocker)
+        !before.is_some_and(is_version_token_continuation)
+            && !after.is_some_and(is_version_token_continuation)
     })
-}
-
-fn is_version_literal_boundary_blocker(ch: char) -> bool {
-    ch.is_alphanumeric() || matches!(ch, '.' | '-')
 }
 
 fn collect_change_bullets(text: &str) -> Vec<String> {
@@ -5548,10 +4987,6 @@ pub(crate) struct OrderedSourceSliceAnswer {
     pub(crate) answer: String,
     pub(crate) unit_count: usize,
     pub(crate) used_context_fallback: bool,
-    /// Chunk ids of the exact units the deterministic answer was built from
-    /// (post filtering, dedup, dominant-family retention and truncation).
-    /// Downstream probes must scope to these, not the wider context set.
-    pub(crate) unit_chunk_ids: Vec<Uuid>,
 }
 
 pub(crate) fn build_ordered_source_slice_answer(
@@ -5559,16 +4994,12 @@ pub(crate) fn build_ordered_source_slice_answer(
     source_units: &[RuntimeMatchedChunk],
     context_chunks: &[RuntimeMatchedChunk],
 ) -> Option<OrderedSourceSliceAnswer> {
-    let used_context_fallback = source_units.is_empty();
     let units = source_slice_answer_units(query_ir, source_units, context_chunks);
     let answer = build_ordered_source_units_answer(query_ir, &units)?;
-    let unit_chunk_ids = units.iter().map(|unit| unit.chunk_id).collect();
-    Some(OrderedSourceSliceAnswer {
-        answer,
-        unit_count: units.len(),
-        used_context_fallback,
-        unit_chunk_ids,
-    })
+    let source_unit_ids = source_units.iter().map(|unit| unit.chunk_id).collect::<HashSet<_>>();
+    let used_context_fallback = source_units.is_empty()
+        || units.iter().any(|unit| !source_unit_ids.contains(&unit.chunk_id));
+    Some(OrderedSourceSliceAnswer { answer, unit_count: units.len(), used_context_fallback })
 }
 
 fn source_slice_answer_units(
@@ -5576,29 +5007,14 @@ fn source_slice_answer_units(
     source_units: &[RuntimeMatchedChunk],
     context_chunks: &[RuntimeMatchedChunk],
 ) -> Vec<RuntimeMatchedChunk> {
-    let explicit_latest_version_inventory = query_requests_latest_versions(query_ir);
-    let inferred_latest_version_inventory = !explicit_latest_version_inventory
-        && context_supports_latest_version_inventory(query_ir, context_chunks);
-    let source_units_latest_version_inventory = !source_units.is_empty()
-        && context_supports_latest_version_inventory(query_ir, source_units);
-    let latest_version_inventory = explicit_latest_version_inventory
-        || inferred_latest_version_inventory
-        || source_units_latest_version_inventory;
+    let latest_version_inventory = query_requests_latest_versions(query_ir);
     if query_ir.source_slice.is_none() && !latest_version_inventory {
         return Vec::new();
     }
-    if !source_units.is_empty() {
+    if !source_units.is_empty() && !latest_version_inventory {
         let mut units = source_units.to_vec();
         sort_source_slice_answer_units(query_ir, &mut units);
-        let requested_count = if latest_version_inventory {
-            latest_source_slice_requested_count(query_ir)
-        } else {
-            super::source_slice_requested_count(query_ir).unwrap_or(units.len())
-        };
-        if latest_version_inventory {
-            dedupe_latest_source_slice_answer_units(query_ir, &mut units);
-            retain_dominant_latest_version_family(&mut units, requested_count);
-        }
+        let requested_count = super::source_slice_requested_count(query_ir).unwrap_or(units.len());
         if requested_count > 0 && units.len() > requested_count {
             units.truncate(requested_count);
         }
@@ -5609,23 +5025,24 @@ fn source_slice_answer_units(
     }
 
     let requested_count = latest_source_slice_requested_count(query_ir);
-    let mut units = context_chunks
+    let mut units = source_units
         .iter()
-        .filter(|chunk| !is_source_profile_runtime_chunk(chunk))
-        .filter(|chunk| {
-            if explicit_latest_version_inventory {
-                chunk_supports_explicit_latest_version_inventory(chunk)
-            } else {
-                latest_source_slice_answer_unit_version(chunk).is_some()
-            }
-        })
-        .filter(|chunk| source_slice_answer_unit_evidence(query_ir, chunk).is_some())
+        .filter(|unit| source_slice_answer_unit_evidence(query_ir, unit).is_some())
         .cloned()
         .collect::<Vec<_>>();
+    let mut seen_chunk_ids = units.iter().map(|unit| unit.chunk_id).collect::<HashSet<_>>();
+    units.extend(
+        context_chunks
+            .iter()
+            .filter(|chunk| !is_source_profile_runtime_chunk(chunk))
+            .filter(|chunk| chunk_supports_explicit_latest_version_inventory(chunk))
+            .filter(|chunk| source_slice_answer_unit_evidence(query_ir, chunk).is_some())
+            .filter(|chunk| seen_chunk_ids.insert(chunk.chunk_id))
+            .cloned(),
+    );
     sort_source_slice_answer_units(query_ir, &mut units);
 
     dedupe_latest_source_slice_answer_units(query_ir, &mut units);
-    retain_dominant_latest_version_family(&mut units, requested_count);
     if requested_count > 0 && units.len() > requested_count {
         units.truncate(requested_count);
     }
@@ -5636,9 +5053,7 @@ fn sort_source_slice_answer_units(
     query_ir: &crate::domains::query_ir::QueryIR,
     units: &mut [RuntimeMatchedChunk],
 ) {
-    if query_requests_latest_versions(query_ir)
-        || context_supports_latest_version_inventory(query_ir, units)
-    {
+    if query_requests_latest_versions(query_ir) {
         units.sort_by(|left, right| latest_source_slice_answer_unit_order(query_ir, left, right));
     } else {
         units
@@ -5646,92 +5061,17 @@ fn sort_source_slice_answer_units(
     }
 }
 
-pub(crate) fn context_supports_latest_version_inventory(
-    query_ir: &crate::domains::query_ir::QueryIR,
-    chunks: &[RuntimeMatchedChunk],
-) -> bool {
-    if query_ir_is_unambiguous_versioned_procedure(query_ir)
-        || query_ir_allows_procedure_runbook_target(query_ir)
-    {
-        return false;
-    }
-    if !query_ir_allows_latest_version_context_fallback(query_ir) {
-        return false;
-    }
-
-    let mut family_documents = HashMap::<String, HashSet<Uuid>>::new();
-    let mut family_chunk_counts = HashMap::<String, usize>::new();
-    for chunk in chunks.iter().filter(|chunk| !is_source_profile_runtime_chunk(chunk)) {
-        if latest_source_slice_answer_unit_version(chunk).is_none() {
-            continue;
-        }
-        let family_key = latest_version_family_key(&chunk.document_label);
-        family_documents.entry(family_key.clone()).or_default().insert(chunk.document_id);
-        *family_chunk_counts.entry(family_key).or_default() += 1;
-    }
-
-    let mut candidates = family_documents
-        .iter()
-        .map(|(family_key, document_ids)| {
-            (
-                family_key.clone(),
-                document_ids.len(),
-                family_chunk_counts.get(family_key).copied().unwrap_or_default(),
-            )
-        })
-        .collect::<Vec<_>>();
-    candidates.sort_by(|left, right| {
-        right.1.cmp(&left.1).then_with(|| right.2.cmp(&left.2)).then_with(|| left.0.cmp(&right.0))
-    });
-    let Some((_family_key, document_count, chunk_count)) = candidates.first() else {
-        return false;
-    };
-    let runner_up_document_count = candidates.get(1).map(|candidate| candidate.1).unwrap_or(0);
-    *document_count >= 2 && *document_count > runner_up_document_count && *chunk_count >= 2
-}
-
-fn query_ir_allows_latest_version_context_fallback(query_ir: &QueryIR) -> bool {
-    query_ir.confidence <= 0.35
-        && matches!(query_ir.act, QueryAct::Describe | QueryAct::Enumerate | QueryAct::Meta)
-        && query_ir.source_slice.is_none()
-        && query_ir.document_focus.is_none()
-        && query_ir.target_entities.is_empty()
-        && query_ir.comparison.is_none()
-        && query_ir.temporal_constraints.is_empty()
-        && !query_ir
-            .literal_constraints
-            .iter()
-            .any(|literal| matches!(literal.kind, LiteralKind::Version))
-        && query_ir
-            .literal_constraints
-            .iter()
-            .all(|literal| matches!(literal.kind, LiteralKind::NumericCode))
-        && query_ir.target_types.iter().all(|target_type| {
-            matches!(
-                canonical_target_type_tag(target_type).as_str(),
-                "concept" | "document" | "release" | "version" | "changelog"
-            )
-        })
-}
-
 fn latest_source_slice_answer_unit_order(
     query_ir: &crate::domains::query_ir::QueryIR,
     left: &RuntimeMatchedChunk,
     right: &RuntimeMatchedChunk,
 ) -> std::cmp::Ordering {
-    match (
-        matches!(left.score_kind, RuntimeChunkScoreKind::LatestVersion),
-        matches!(right.score_kind, RuntimeChunkScoreKind::LatestVersion),
-    ) {
-        (true, true) => {
-            let score_order = score_value(right.score).total_cmp(&score_value(left.score));
-            if !score_order.is_eq() {
-                return score_order;
-            }
-        }
+    let left_is_attested = latest_source_slice_answer_unit_is_attested(left);
+    let right_is_attested = latest_source_slice_answer_unit_is_attested(right);
+    match (left_is_attested, right_is_attested) {
         (true, false) => return std::cmp::Ordering::Less,
         (false, true) => return std::cmp::Ordering::Greater,
-        (false, false) => {}
+        (true, true) | (false, false) => {}
     }
 
     match (
@@ -5747,6 +5087,13 @@ fn latest_source_slice_answer_unit_order(
         (Some(_), None) => return std::cmp::Ordering::Less,
         (None, Some(_)) => return std::cmp::Ordering::Greater,
         (None, None) => {}
+    }
+
+    if left_is_attested && right_is_attested {
+        let score_order = score_value(right.score).total_cmp(&score_value(left.score));
+        if !score_order.is_eq() {
+            return score_order;
+        }
     }
 
     score_value(right.score)
@@ -5769,7 +5116,6 @@ fn source_slice_answer_unit_version(
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 struct LatestSourceSliceEvidence {
-    family_key: String,
     version: Vec<u32>,
 }
 
@@ -5778,73 +5124,50 @@ fn source_slice_answer_unit_evidence(
     chunk: &RuntimeMatchedChunk,
 ) -> Option<LatestSourceSliceEvidence> {
     if query_requests_latest_versions(query_ir) {
-        return explicit_latest_source_slice_answer_unit_version(chunk).map(|version| {
-            LatestSourceSliceEvidence {
-                family_key: latest_version_family_key(&chunk.document_label),
-                version,
-            }
-        });
+        return explicit_latest_source_slice_answer_unit_version(chunk)
+            .map(|version| LatestSourceSliceEvidence { version });
     }
-    latest_source_slice_answer_unit_version(chunk).map(|version| LatestSourceSliceEvidence {
-        family_key: latest_version_family_key(&chunk.document_label),
-        version,
-    })
+    latest_source_slice_answer_unit_version(chunk)
+        .map(|version| LatestSourceSliceEvidence { version })
 }
 
 fn explicit_latest_source_slice_answer_unit_version(
     chunk: &RuntimeMatchedChunk,
 ) -> Option<Vec<u32>> {
-    if !latest_source_slice_chunk_has_release_change_marker(chunk) {
-        return None;
-    }
-    latest_source_slice_answer_unit_version(chunk)
-        .or_else(|| extract_release_context_version(&chunk.source_text))
-        .or_else(|| extract_release_context_version(&chunk.excerpt))
+    latest_source_slice_answer_unit_version(chunk).or_else(|| {
+        if !latest_source_slice_answer_unit_is_attested(chunk) {
+            return None;
+        }
+        let source = parse_source_unit_text(&chunk.source_text);
+        let excerpt = parse_source_unit_text(&chunk.excerpt);
+        source
+            .field("version")
+            .and_then(extract_semver_like_version)
+            .or_else(|| excerpt.field("version").and_then(extract_semver_like_version))
+            .or_else(|| extract_release_context_version(&chunk.source_text))
+            .or_else(|| extract_release_context_version(&chunk.excerpt))
+    })
+}
+
+fn latest_source_slice_answer_unit_is_attested(chunk: &RuntimeMatchedChunk) -> bool {
+    matches!(chunk.score_kind, RuntimeChunkScoreKind::LatestVersion)
+        || (matches!(chunk.score_kind, RuntimeChunkScoreKind::SourceContext)
+            && is_structured_source_unit_runtime_chunk(chunk))
 }
 
 fn chunk_supports_explicit_latest_version_inventory(chunk: &RuntimeMatchedChunk) -> bool {
+    if latest_source_slice_answer_unit_is_attested(chunk) {
+        return explicit_latest_source_slice_answer_unit_version(chunk).is_some();
+    }
     match chunk.score_kind {
-        RuntimeChunkScoreKind::LatestVersion => true,
-        RuntimeChunkScoreKind::DocumentIdentity => {
-            latest_source_slice_answer_unit_version(chunk).is_some()
-        }
-        RuntimeChunkScoreKind::QueryIrFocus | RuntimeChunkScoreKind::SourceContext => {
-            explicit_latest_source_slice_answer_unit_version(chunk).is_some()
-        }
-        RuntimeChunkScoreKind::Relevance => {
+        RuntimeChunkScoreKind::DocumentIdentity
+        | RuntimeChunkScoreKind::QueryIrFocus
+        | RuntimeChunkScoreKind::SourceContext
+        | RuntimeChunkScoreKind::Relevance => {
             latest_source_slice_answer_unit_version(chunk).is_some()
         }
         _ => false,
     }
-}
-
-fn latest_source_slice_chunk_has_release_change_marker(chunk: &RuntimeMatchedChunk) -> bool {
-    [chunk.document_label.as_str(), chunk.source_text.as_str(), chunk.excerpt.as_str()]
-        .into_iter()
-        .any(latest_source_slice_text_has_release_change_marker)
-}
-
-fn latest_source_slice_text_has_release_change_marker(text: &str) -> bool {
-    text.lines().any(latest_source_slice_line_has_release_change_marker)
-}
-
-fn latest_source_slice_line_has_release_change_marker(line: &str) -> bool {
-    let lowered = line.to_lowercase();
-    let has_release_word = [
-        "release",
-        "version",
-        "build",
-        "changelog",
-        "change",
-        "релиз",
-        "версия",
-        "сборка",
-        "изменен",
-        "изменения",
-    ]
-    .iter()
-    .any(|marker| lowered.contains(marker));
-    has_release_word && extract_release_context_version(line).is_some()
 }
 
 fn dedupe_latest_source_slice_answer_units(
@@ -5852,11 +5175,12 @@ fn dedupe_latest_source_slice_answer_units(
     units: &mut Vec<RuntimeMatchedChunk>,
 ) {
     if query_requests_latest_versions(query_ir) {
-        let mut seen_versions = HashSet::<LatestSourceSliceEvidence>::new();
+        let mut seen_versions = HashSet::<(ReleaseSourceIdentity, Vec<u32>)>::new();
         let mut seen_revisions = HashSet::<Uuid>::new();
         units.retain(|unit| {
-            if let Some(evidence) = source_slice_answer_unit_evidence(query_ir, &unit) {
-                return seen_versions.insert(evidence);
+            if let Some(evidence) = source_slice_answer_unit_evidence(query_ir, unit) {
+                let source = ReleaseSourceIdentity::new(unit.document_id, unit.revision_id);
+                return seen_versions.insert((source, evidence.version));
             }
             seen_revisions.insert(unit.revision_id)
         });
@@ -5867,32 +5191,6 @@ fn dedupe_latest_source_slice_answer_units(
     units.retain(|unit| seen_revisions.insert(unit.revision_id));
 }
 
-fn retain_dominant_latest_version_family(
-    units: &mut Vec<RuntimeMatchedChunk>,
-    requested_count: usize,
-) {
-    if requested_count <= 1 || units.len() <= requested_count {
-        return;
-    }
-    let family_sizes = units.iter().fold(HashMap::<String, usize>::new(), |mut acc, unit| {
-        *acc.entry(latest_version_family_key(&unit.document_label)).or_default() += 1;
-        acc
-    });
-    let mut counts = family_sizes.values().copied().collect::<Vec<_>>();
-    counts.sort_unstable_by(|left, right| right.cmp(left));
-    let Some((family_key, family_count)) = family_sizes
-        .iter()
-        .max_by(|left, right| left.1.cmp(right.1).then_with(|| left.0.cmp(right.0)))
-        .map(|(family_key, count)| (family_key.clone(), *count))
-    else {
-        return;
-    };
-    let runner_up = counts.get(1).copied().unwrap_or(0);
-    if family_count >= requested_count && family_count > runner_up {
-        units.retain(|unit| latest_version_family_key(&unit.document_label) == family_key);
-    }
-}
-
 fn score_value(score: Option<f32>) -> f32 {
     score.unwrap_or(f32::NEG_INFINITY)
 }
@@ -5901,8 +5199,7 @@ fn build_ordered_source_units_answer(
     query_ir: &crate::domains::query_ir::QueryIR,
     source_units: &[RuntimeMatchedChunk],
 ) -> Option<String> {
-    let latest_version_inventory = query_requests_latest_versions(query_ir)
-        || context_supports_latest_version_inventory(query_ir, source_units);
+    let latest_version_inventory = query_requests_latest_versions(query_ir);
     if query_ir.source_slice.is_none() && !latest_version_inventory {
         return None;
     }
@@ -5925,54 +5222,80 @@ fn build_ordered_source_units_answer(
         .map(|unit| unit.document_label.trim())
         .filter(|label| !label.is_empty())
         .collect::<std::collections::BTreeSet<_>>();
-
-    let mut lines = Vec::<String>::new();
-    if document_labels.len() == 1 {
-        let label = document_labels.iter().next().copied().unwrap_or("source");
-        lines.push(format!("`{}` - {}/{}", label, units.len(), requested_count));
-    } else {
-        lines.push(format!("{}/{}", units.len(), requested_count));
-    }
+    let source_identities = units
+        .iter()
+        .map(|unit| ReleaseSourceIdentity::new(unit.document_id, unit.revision_id))
+        .collect::<HashSet<_>>();
+    let single_source = source_identities.len() == 1;
+    let include_document_label = !single_source;
+    let mut lines = vec![ordered_source_units_summary(
+        &units,
+        requested_count,
+        single_source,
+        &document_labels,
+    )];
     lines.push(String::new());
-
-    let include_document_label = document_labels.len() > 1;
     for (index, unit) in units.iter().enumerate() {
-        let parsed = parse_source_unit_text(&unit.source_text);
-        let mut heading_parts = Vec::<String>::new();
-        if include_document_label {
-            heading_parts.push(format!("source=`{}`", unit.document_label.trim()));
-        }
-        if let Some(heading) = latest_inventory_source_unit_heading(
+        lines.extend(render_ordered_source_unit(
+            index,
+            unit,
             latest_version_inventory,
             include_document_label,
-            unit,
-        ) {
-            heading_parts.push(format!("**{}**", heading));
-        }
-        if let Some(timestamp) = parsed.field("occurred_at") {
-            heading_parts.push(format!("**{}**", timestamp));
-        }
-        if let Some(actor) = parsed
-            .field("actor_label")
-            .or_else(|| parsed.field("actor_id"))
-            .or_else(|| parsed.field("actor_role"))
-        {
-            heading_parts.push(format!("`{}`", actor));
-        } else if let Some(unit_id) = parsed.field("unit_id") {
-            heading_parts.push(format!("`unit_id={}`", unit_id));
-        }
-        if heading_parts.is_empty() {
-            heading_parts.push(format!("`ordinal={}`", unit.chunk_index));
-        }
-        lines.push(format!("{}. {}", index + 1, heading_parts.join(" - ")));
-
-        let body = source_slice_unit_body_for_answer(latest_version_inventory, &parsed);
-        if !body.is_empty() {
-            lines.push(indent_source_unit_body(&body));
-        }
+        ));
     }
-
     Some(lines.join("\n"))
+}
+
+fn ordered_source_units_summary(
+    units: &[RuntimeMatchedChunk],
+    requested_count: usize,
+    single_source: bool,
+    document_labels: &BTreeSet<&str>,
+) -> String {
+    if !single_source {
+        return format!("{}/{}", units.len(), requested_count);
+    }
+    let label = document_labels.iter().next().copied().unwrap_or("source");
+    format!("`{label}` - {}/{}", units.len(), requested_count)
+}
+
+fn render_ordered_source_unit(
+    index: usize,
+    unit: &RuntimeMatchedChunk,
+    latest_version_inventory: bool,
+    include_document_label: bool,
+) -> Vec<String> {
+    let parsed = parse_source_unit_text(&unit.source_text);
+    let mut heading_parts = Vec::new();
+    if include_document_label {
+        heading_parts.push(format!("source=`{}`", unit.document_label.trim()));
+    }
+    if let Some(heading) =
+        latest_inventory_source_unit_heading(latest_version_inventory, include_document_label, unit)
+    {
+        heading_parts.push(format!("**{heading}**"));
+    }
+    if let Some(timestamp) = parsed.field("occurred_at") {
+        heading_parts.push(format!("**{timestamp}**"));
+    }
+    if let Some(actor) = parsed
+        .field("actor_label")
+        .or_else(|| parsed.field("actor_id"))
+        .or_else(|| parsed.field("actor_role"))
+    {
+        heading_parts.push(format!("`{actor}`"));
+    } else if let Some(unit_id) = parsed.field("unit_id") {
+        heading_parts.push(format!("`unit_id={unit_id}`"));
+    }
+    if heading_parts.is_empty() {
+        heading_parts.push(format!("`ordinal={}`", unit.chunk_index));
+    }
+    let mut lines = vec![format!("{}. {}", index + 1, heading_parts.join(" - "))];
+    let body = source_slice_unit_body_for_answer(latest_version_inventory, &parsed);
+    if !body.is_empty() {
+        lines.push(indent_source_unit_body(&body));
+    }
+    lines
 }
 
 fn latest_inventory_source_unit_heading(
@@ -5983,9 +5306,14 @@ fn latest_inventory_source_unit_heading(
     if !latest_version_inventory || include_document_label {
         return None;
     }
-    let label = compact_source_slice_inventory_line(&unit.document_label)?;
-    extract_semver_like_version(&label)?;
-    Some(excerpt_for(&label, 160))
+    if let Some(label) = compact_source_slice_inventory_line(&unit.document_label)
+        && extract_semver_like_version(&label).is_some()
+    {
+        return Some(excerpt_for(&label, 160));
+    }
+    explicit_latest_source_slice_answer_unit_version(unit).map(|version| {
+        format!("Version {}", version.iter().map(u32::to_string).collect::<Vec<_>>().join("."))
+    })
 }
 
 fn source_slice_unit_body_for_answer(
@@ -6358,9 +5686,20 @@ pub(crate) fn render_canonical_chunk_section(
         return section;
     }
     let question_keywords = technical_literal_focus_keywords(question, Some(query_ir));
-    let pagination_requested = false;
+    let mut selected =
+        select_canonical_answer_chunks(question, query_ir, &filtered_chunks, &question_keywords);
+    prepend_source_profile_chunks_for_coverage(query_ir, chunks, &mut selected);
+    render_canonical_chunk_sections(question, query_ir, &filtered_chunks, &selected)
+}
+
+fn select_canonical_answer_chunks(
+    question: &str,
+    query_ir: &QueryIR,
+    filtered_chunks: &[RuntimeMatchedChunk],
+    question_keywords: &[String],
+) -> Vec<RuntimeMatchedChunk> {
     let (max_total_chunks, max_chunks_per_document) = if query_ir.requests_source_coverage_context()
-        || query_ir_needs_expanded_setup_evidence(question, query_ir, &filtered_chunks)
+        || query_ir_needs_expanded_setup_evidence(question, query_ir, filtered_chunks)
     {
         (SOURCE_COVERAGE_MAX_TOTAL_CHUNKS, SOURCE_COVERAGE_MAX_CHUNKS_PER_DOCUMENT)
     } else {
@@ -6369,9 +5708,9 @@ pub(crate) fn render_canonical_chunk_section(
     let mut selected = select_document_balanced_chunks(
         question,
         Some(query_ir),
-        &filtered_chunks,
-        &question_keywords,
-        pagination_requested,
+        filtered_chunks,
+        question_keywords,
+        false,
         max_total_chunks,
         max_chunks_per_document,
     )
@@ -6381,39 +5720,44 @@ pub(crate) fn render_canonical_chunk_section(
     if selected.is_empty() {
         selected = filtered_chunks.iter().take(8).cloned().collect();
     }
-    if query_ir.requests_source_coverage_context() {
-        let mut seen_chunk_ids = selected.iter().map(|chunk| chunk.chunk_id).collect::<Vec<_>>();
-        let mut source_profile_chunks = chunks
-            .iter()
-            .filter(|chunk| is_source_profile_runtime_chunk(chunk))
-            .filter(|chunk| {
-                if seen_chunk_ids.contains(&chunk.chunk_id) {
-                    false
-                } else {
-                    seen_chunk_ids.push(chunk.chunk_id);
-                    true
-                }
-            })
-            .cloned()
-            .collect::<Vec<_>>();
-        if !source_profile_chunks.is_empty() {
-            source_profile_chunks.extend(selected);
-            selected = source_profile_chunks;
-        }
+    selected
+}
+
+fn prepend_source_profile_chunks_for_coverage(
+    query_ir: &QueryIR,
+    chunks: &[RuntimeMatchedChunk],
+    selected: &mut Vec<RuntimeMatchedChunk>,
+) {
+    if !query_ir.requests_source_coverage_context() {
+        return;
     }
+    let mut seen_chunk_ids = selected.iter().map(|chunk| chunk.chunk_id).collect::<HashSet<_>>();
+    let mut source_profile_chunks = chunks
+        .iter()
+        .filter(|chunk| is_source_profile_runtime_chunk(chunk))
+        .filter(|chunk| seen_chunk_ids.insert(chunk.chunk_id))
+        .cloned()
+        .collect::<Vec<_>>();
+    if !source_profile_chunks.is_empty() {
+        source_profile_chunks.append(selected);
+        *selected = source_profile_chunks;
+    }
+}
+
+fn render_canonical_chunk_sections(
+    question: &str,
+    query_ir: &QueryIR,
+    filtered_chunks: &[RuntimeMatchedChunk],
+    selected: &[RuntimeMatchedChunk],
+) -> String {
     let question_keywords = crate::services::query::planner::extract_keywords(question);
-    // For a confident single-document configure/how-to query, render the
-    // focused document's setup anchor (the chunk carrying both a command-object
-    // literal and a configuration path) in full, ahead of the sampled excerpts.
-    // The score-balanced selection above can otherwise drop or window-truncate
-    // the "what to install" line in favour of denser parameter-table chunks.
-    let setup_install_anchor = focused_setup_install_anchor(question, query_ir, &filtered_chunks);
+    let setup_install_anchor = focused_setup_install_anchor(question, query_ir, filtered_chunks);
     let anchor_chunk_id = setup_install_anchor.map(|chunk| chunk.chunk_id);
     let (source_profile_chunks, content_chunks): (Vec<_>, Vec<_>) = selected
         .iter()
         .filter(|chunk| Some(chunk.chunk_id) != anchor_chunk_id)
         .partition(|chunk| is_source_profile_runtime_chunk(chunk));
-    let mut sections = Vec::<String>::new();
+    let mut sections = Vec::new();
     if let Some(anchor) = setup_install_anchor {
         sections.push(format!(
             "Setup install anchor (scope=document; coverage=full; document=\"{}\")\n{}",
@@ -6457,7 +5801,7 @@ fn focused_setup_install_anchor<'a>(
         && query_ir.document_focus.is_some()
     {
         query_ir_document_focus_tokens(query_ir)?
-    } else if query_ir_allows_setup_anchor_fallback(query_ir) {
+    } else if query_ir_has_typed_setup_anchor_focus(query_ir) {
         let tokens = technical_literal_focus_keywords(question, Some(query_ir))
             .into_iter()
             .collect::<BTreeSet<_>>();
@@ -6478,14 +5822,12 @@ fn focused_setup_install_anchor<'a>(
         .max_by(|left, right| left.score.unwrap_or(0.0).total_cmp(&right.score.unwrap_or(0.0)))
 }
 
-fn query_ir_allows_setup_anchor_fallback(query_ir: &QueryIR) -> bool {
-    query_ir.confidence <= 0.3
-        && matches!(query_ir.act, QueryAct::Describe | QueryAct::ConfigureHow)
+fn query_ir_has_typed_setup_anchor_focus(query_ir: &QueryIR) -> bool {
+    matches!(query_ir.act, QueryAct::ConfigureHow | QueryAct::RetrieveValue)
         && query_ir.source_slice.is_none()
         && query_ir.document_focus.is_none()
-        && query_ir.target_types.is_empty()
-        && query_ir.target_entities.is_empty()
-        && query_ir.literal_constraints.is_empty()
+        && query_ir_has_setup_configuration_target(query_ir)
+        && (!query_ir.target_entities.is_empty() || !query_ir.literal_constraints.is_empty())
 }
 
 fn query_ir_needs_expanded_setup_evidence(
@@ -6509,12 +5851,12 @@ fn query_ir_needs_expanded_setup_evidence(
     if query_ir_needs_expanded_short_technical_evidence(question, query_ir, chunks) {
         return true;
     }
-    query_ir.target_types.iter().any(|target_type| {
-        matches!(
-            canonical_target_type_tag(target_type).as_str(),
-            "configuration_file" | "config_key" | "parameter" | "package"
-        )
-    })
+    query_ir.targets_any(&[
+        QueryTargetKind::ConfigurationFile,
+        QueryTargetKind::ConfigKey,
+        QueryTargetKind::Parameter,
+        QueryTargetKind::Package,
+    ])
 }
 
 fn query_ir_needs_expanded_short_technical_evidence(
@@ -6522,7 +5864,7 @@ fn query_ir_needs_expanded_short_technical_evidence(
     query_ir: &crate::domains::query_ir::QueryIR,
     chunks: &[RuntimeMatchedChunk],
 ) -> bool {
-    query_ir_allows_setup_anchor_fallback(query_ir)
+    query_ir_has_typed_setup_anchor_focus(query_ir)
         && technical_literal_focus_keywords(question, Some(query_ir))
             .iter()
             .any(|keyword| keyword.chars().count() < 4)
@@ -6633,94 +5975,122 @@ fn evidence_chunk_scope_and_excerpt(
     chunk: &RuntimeMatchedChunk,
     question_keywords: &[String],
 ) -> (&'static str, String) {
-    if chunk.score_kind == RuntimeChunkScoreKind::GraphEvidence {
-        let source_text = chunk.source_text.trim();
-        if !source_text.is_empty() {
-            let excerpt = if source_text.chars().count() <= STRUCTURED_SOURCE_UNIT_EVIDENCE_CHARS {
-                source_text.to_string()
-            } else {
-                focused_excerpt_for(
-                    source_text,
-                    question_keywords,
-                    STRUCTURED_SOURCE_UNIT_EVIDENCE_CHARS,
-                )
-            };
-            let excerpt = if excerpt.trim().is_empty() {
-                excerpt_for(source_text, STRUCTURED_SOURCE_UNIT_EVIDENCE_CHARS)
-            } else {
-                excerpt
-            };
-            return ("graph_evidence", excerpt);
-        }
+    if let Some(evidence) = graph_evidence_scope_and_excerpt(chunk, question_keywords) {
+        return evidence;
     }
-
-    if is_structured_source_unit_runtime_chunk(chunk) {
-        let source_text = chunk.source_text.trim();
-        if source_text.chars().count() <= STRUCTURED_SOURCE_UNIT_EVIDENCE_CHARS {
-            return ("source_unit", source_text.to_string());
-        }
-        let excerpt = focused_record_unit_excerpt(
-            source_text,
-            question_keywords,
-            STRUCTURED_SOURCE_UNIT_EVIDENCE_CHARS,
-        )
-        .unwrap_or_else(|| {
-            focused_excerpt_for(
-                source_text,
-                question_keywords,
-                STRUCTURED_SOURCE_UNIT_EVIDENCE_CHARS,
-            )
-        });
-        let excerpt = if excerpt.trim().is_empty() {
-            excerpt_for(source_text, STRUCTURED_SOURCE_UNIT_EVIDENCE_CHARS)
-        } else {
-            excerpt
-        };
-        return ("source_unit", excerpt);
+    if let Some(evidence) = source_unit_scope_and_excerpt(chunk, question_keywords) {
+        return evidence;
     }
+    if let Some(evidence) = code_block_scope_and_excerpt(chunk, question_keywords) {
+        return evidence;
+    }
+    if let Some(excerpt) = preferred_structured_excerpt(chunk, question_keywords) {
+        return excerpt;
+    }
+    ("excerpt", focused_chunk_excerpt(chunk, question_keywords))
+}
 
-    if chunk.chunk_kind.as_deref() == Some("code_block") {
-        let source_text = repair_technical_layout_noise(&chunk.source_text);
-        let excerpt = if source_text.chars().count() <= EVIDENCE_CODE_BLOCK_CHARS {
-            source_text
-        } else {
-            structured_literal_excerpt_for(
-                &source_text,
-                question_keywords,
-                EVIDENCE_CODE_BLOCK_CHARS,
-            )
+fn graph_evidence_scope_and_excerpt(
+    chunk: &RuntimeMatchedChunk,
+    question_keywords: &[String],
+) -> Option<(&'static str, String)> {
+    if chunk.score_kind != RuntimeChunkScoreKind::GraphEvidence {
+        return None;
+    }
+    let source_text = chunk.source_text.trim();
+    if source_text.is_empty() {
+        return None;
+    }
+    let excerpt = bounded_focused_excerpt(
+        source_text,
+        question_keywords,
+        STRUCTURED_SOURCE_UNIT_EVIDENCE_CHARS,
+    );
+    Some(("graph_evidence", excerpt))
+}
+
+fn source_unit_scope_and_excerpt(
+    chunk: &RuntimeMatchedChunk,
+    question_keywords: &[String],
+) -> Option<(&'static str, String)> {
+    if !is_structured_source_unit_runtime_chunk(chunk) {
+        return None;
+    }
+    let source_text = chunk.source_text.trim();
+    if source_text.chars().count() <= STRUCTURED_SOURCE_UNIT_EVIDENCE_CHARS {
+        return Some(("source_unit", source_text.to_string()));
+    }
+    let excerpt = focused_record_unit_excerpt(
+        source_text,
+        question_keywords,
+        STRUCTURED_SOURCE_UNIT_EVIDENCE_CHARS,
+    )
+    .unwrap_or_else(|| {
+        focused_excerpt_for(source_text, question_keywords, STRUCTURED_SOURCE_UNIT_EVIDENCE_CHARS)
+    });
+    Some((
+        "source_unit",
+        nonempty_excerpt_or_fallback(excerpt, source_text, STRUCTURED_SOURCE_UNIT_EVIDENCE_CHARS),
+    ))
+}
+
+fn code_block_scope_and_excerpt(
+    chunk: &RuntimeMatchedChunk,
+    question_keywords: &[String],
+) -> Option<(&'static str, String)> {
+    if chunk.chunk_kind.as_deref() != Some("code_block") {
+        return None;
+    }
+    let source_text = repair_technical_layout_noise(&chunk.source_text);
+    let excerpt = if source_text.chars().count() <= EVIDENCE_CODE_BLOCK_CHARS {
+        source_text
+    } else {
+        structured_literal_excerpt_for(&source_text, question_keywords, EVIDENCE_CODE_BLOCK_CHARS)
             .unwrap_or_else(|| excerpt_for(&source_text, EVIDENCE_CODE_BLOCK_CHARS))
-        };
-        return ("code_block", excerpt);
-    }
+    };
+    Some(("code_block", excerpt))
+}
 
+fn preferred_structured_excerpt(
+    chunk: &RuntimeMatchedChunk,
+    question_keywords: &[String],
+) -> Option<(&'static str, String)> {
     if let Some(excerpt) =
         salient_source_excerpt_for(&chunk.source_text, question_keywords, EVIDENCE_CODE_BLOCK_CHARS)
     {
-        return ("salient_excerpt", excerpt);
+        return Some(("salient_excerpt", excerpt));
     }
-
     if let Some(excerpt) = structured_literal_excerpt_for(
         &chunk.source_text,
         question_keywords,
         EVIDENCE_CODE_BLOCK_CHARS,
     ) {
-        return ("structured_excerpt", excerpt);
+        return Some(("structured_excerpt", excerpt));
     }
+    command_dense_excerpt_for(&chunk.source_text, EVIDENCE_CODE_BLOCK_CHARS)
+        .map(|excerpt| ("code_block", excerpt))
+}
 
-    if let Some(excerpt) = command_dense_excerpt_for(&chunk.source_text, EVIDENCE_CODE_BLOCK_CHARS)
-    {
-        return ("code_block", excerpt);
-    }
-
+fn focused_chunk_excerpt(chunk: &RuntimeMatchedChunk, question_keywords: &[String]) -> String {
     let excerpt =
         focused_excerpt_for(&chunk.source_text, question_keywords, EVIDENCE_CHUNK_EXCERPT_CHARS);
-    let excerpt = if excerpt.trim().is_empty() {
-        excerpt_for(&chunk.source_text, EVIDENCE_CHUNK_EXCERPT_CHARS)
-    } else {
-        excerpt
-    };
-    ("excerpt", excerpt)
+    nonempty_excerpt_or_fallback(excerpt, &chunk.source_text, EVIDENCE_CHUNK_EXCERPT_CHARS)
+}
+
+fn bounded_focused_excerpt(
+    source_text: &str,
+    question_keywords: &[String],
+    max_chars: usize,
+) -> String {
+    if source_text.chars().count() <= max_chars {
+        return source_text.to_string();
+    }
+    let excerpt = focused_excerpt_for(source_text, question_keywords, max_chars);
+    nonempty_excerpt_or_fallback(excerpt, source_text, max_chars)
+}
+
+fn nonempty_excerpt_or_fallback(excerpt: String, source_text: &str, max_chars: usize) -> String {
+    if excerpt.trim().is_empty() { excerpt_for(source_text, max_chars) } else { excerpt }
 }
 
 fn is_structured_source_unit_runtime_chunk(chunk: &RuntimeMatchedChunk) -> bool {
@@ -6815,7 +6185,7 @@ mod source_unit_answer_tests {
             act: crate::domains::query_ir::QueryAct::Enumerate,
             scope: crate::domains::query_ir::QueryScope::SingleDocument,
             language: crate::domains::query_ir::QueryLanguage::Auto,
-            target_types: vec!["record".to_string()],
+            target_types: vec![QueryTargetKind::Record],
             target_entities: Vec::new(),
             literal_constraints: Vec::new(),
             temporal_constraints: Vec::new(),
@@ -6837,7 +6207,7 @@ mod source_unit_answer_tests {
         let mut ir = source_slice_ir(count);
         ir.act = crate::domains::query_ir::QueryAct::Describe;
         ir.scope = crate::domains::query_ir::QueryScope::LibraryMeta;
-        ir.target_types = vec!["release".to_string()];
+        ir.target_types = vec![QueryTargetKind::Release];
         if let Some(slice) = ir.source_slice.as_mut() {
             slice.filter = crate::domains::query_ir::SourceSliceFilter::ReleaseMarker;
         }
@@ -6849,7 +6219,7 @@ mod source_unit_answer_tests {
             act: crate::domains::query_ir::QueryAct::Describe,
             scope: crate::domains::query_ir::QueryScope::LibraryMeta,
             language: crate::domains::query_ir::QueryLanguage::Auto,
-            target_types: vec!["concept".to_string()],
+            target_types: vec![QueryTargetKind::Concept],
             target_entities: Vec::new(),
             literal_constraints: Vec::new(),
             temporal_constraints: Vec::new(),
@@ -6868,7 +6238,7 @@ mod source_unit_answer_tests {
             act: crate::domains::query_ir::QueryAct::Describe,
             scope: crate::domains::query_ir::QueryScope::SingleDocument,
             language: crate::domains::query_ir::QueryLanguage::Auto,
-            target_types: vec!["version".to_string()],
+            target_types: vec![QueryTargetKind::Version],
             target_entities: Vec::new(),
             literal_constraints: vec![crate::domains::query_ir::LiteralSpan {
                 text: version.to_string(),
@@ -6890,7 +6260,7 @@ mod source_unit_answer_tests {
             act: crate::domains::query_ir::QueryAct::ConfigureHow,
             scope: crate::domains::query_ir::QueryScope::SingleDocument,
             language: crate::domains::query_ir::QueryLanguage::Auto,
-            target_types: vec!["procedure".to_string()],
+            target_types: vec![QueryTargetKind::Procedure],
             target_entities: Vec::new(),
             literal_constraints: Vec::new(),
             temporal_constraints: Vec::new(),
@@ -6908,12 +6278,108 @@ mod source_unit_answer_tests {
 
     fn configure_update_focus_ir(focus: &str) -> crate::domains::query_ir::QueryIR {
         let mut query_ir = configure_how_focus_ir(focus);
-        query_ir.target_types = vec!["artifact".to_string(), "procedure".to_string()];
+        query_ir.target_types = vec![QueryTargetKind::Procedure, QueryTargetKind::Version];
         query_ir.target_entities = vec![crate::domains::query_ir::EntityMention {
             label: focus.to_string(),
             role: crate::domains::query_ir::EntityRole::Subject,
         }];
         query_ir
+    }
+
+    #[test]
+    fn typed_versioned_procedure_renders_exact_identity_formal_steps() {
+        let mut chunk = evidence_chunk(
+            1,
+            Some("paragraph"),
+            concat!(
+                "Sample Target lifecycle sequence:\n",
+                "1. alpha-admin prepare --target=/srv/alpha\n",
+                "2. alpha-admin switch --version=2.0.0\n",
+                "3. alpha-admin verify --format=json",
+            ),
+        );
+        chunk.document_label = "Sample Target lifecycle guide".to_string();
+
+        let answer = build_update_procedure_sequence_answer(
+            "opaque request text",
+            &configure_update_focus_ir("Sample Target"),
+            &[chunk],
+        )
+        .expect("typed exact identity and formal steps should produce an answer");
+
+        assert!(answer.contains("alpha-admin prepare --target=/srv/alpha"));
+        assert!(answer.contains("alpha-admin switch --version=2.0.0"));
+        assert!(answer.contains("alpha-admin verify --format=json"));
+    }
+
+    #[test]
+    fn typed_versioned_procedure_fails_closed_without_version_or_with_concept() {
+        let mut chunk = evidence_chunk(
+            1,
+            Some("paragraph"),
+            "Sample Target:\n1. alpha-admin prepare\n2. alpha-admin verify",
+        );
+        chunk.document_label = "Sample Target guide".to_string();
+        let mut without_version = configure_update_focus_ir("Sample Target");
+        without_version.target_types = vec![QueryTargetKind::Procedure];
+        let mut concept = configure_update_focus_ir("Sample Target");
+        concept.target_types.push(QueryTargetKind::Concept);
+
+        assert!(
+            build_update_procedure_sequence_answer(
+                "opaque request text",
+                &without_version,
+                std::slice::from_ref(&chunk),
+            )
+            .is_none()
+        );
+        assert!(
+            build_update_procedure_sequence_answer("opaque request text", &concept, &[chunk])
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn typed_versioned_procedure_requires_exact_identity() {
+        let mut chunk = evidence_chunk(
+            1,
+            Some("paragraph"),
+            "Sample Targets:\n1. alpha-admin prepare\n2. alpha-admin verify",
+        );
+        chunk.document_label = "Sample Targets guide".to_string();
+
+        assert!(
+            build_update_procedure_sequence_answer(
+                "opaque request text",
+                &configure_update_focus_ir("Sample Target"),
+                &[chunk],
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn typed_versioned_procedure_rejects_unbound_materialization_script() {
+        let mut chunk = evidence_chunk(
+            1,
+            Some("paragraph"),
+            concat!(
+                "Sample Target:\n",
+                "1. curl https://example.invalid/runner.sh -o /tmp/runner.sh\n",
+                "2. chmod +x /tmp/runner.sh\n",
+                "3. /tmp/runner.sh",
+            ),
+        );
+        chunk.document_label = "Sample Target guide".to_string();
+
+        assert!(
+            build_update_procedure_sequence_answer(
+                "opaque request text",
+                &configure_update_focus_ir("Sample Target"),
+                &[chunk],
+            )
+            .is_none()
+        );
     }
 
     #[test]
@@ -6971,7 +6437,7 @@ mod source_unit_answer_tests {
     }
 
     #[test]
-    fn render_canonical_chunk_section_surfaces_setup_anchor_for_low_confidence_fallback_ir() {
+    fn render_canonical_chunk_section_surfaces_setup_anchor_for_typed_setup_ir() {
         let mut anchor = evidence_chunk(
             1,
             Some("paragraph"),
@@ -6980,15 +6446,20 @@ mod source_unit_answer_tests {
         anchor.document_label = "Sample Subject admin guide".to_string();
         anchor.score = Some(1.0);
         let mut query_ir = configure_how_focus_ir("Sample Subject");
-        query_ir.act = QueryAct::Describe;
+        query_ir.act = QueryAct::ConfigureHow;
         query_ir.confidence = 0.25;
-        query_ir.target_types.clear();
+        query_ir.target_types =
+            vec![QueryTargetKind::ConfigurationFile, QueryTargetKind::ConfigKey];
+        query_ir.target_entities = vec![crate::domains::query_ir::EntityMention {
+            label: "Sample Subject".to_string(),
+            role: crate::domains::query_ir::EntityRole::Subject,
+        }];
         query_ir.document_focus = None;
 
         let section =
             render_canonical_chunk_section("configure Sample Subject", &query_ir, &[anchor], false);
 
-        assert!(section.contains("Setup install anchor"), "fallback anchor must be rendered");
+        assert!(section.contains("Setup install anchor"), "typed setup anchor must be rendered");
         assert!(
             section.contains("sample-runner --install sample-link"),
             "install command must remain in the prompt context"
@@ -6996,14 +6467,39 @@ mod source_unit_answer_tests {
     }
 
     #[test]
-    fn render_canonical_chunk_section_expands_low_confidence_short_technical_rows() {
+    fn render_canonical_chunk_section_does_not_infer_setup_anchor_for_empty_ir() {
+        let mut anchor = evidence_chunk(
+            1,
+            Some("paragraph"),
+            "sample-runner --install sample-link\nfile /opt/alpha/connector/connector.conf",
+        );
+        anchor.document_label = "Sample Subject admin guide".to_string();
+        let mut query_ir = configure_how_focus_ir("Sample Subject");
+        query_ir.act = QueryAct::Describe;
+        query_ir.target_types.clear();
+        query_ir.target_entities.clear();
+        query_ir.document_focus = None;
+        query_ir.confidence = 0.2;
+
+        let section =
+            render_canonical_chunk_section("configure Sample Subject", &query_ir, &[anchor], false);
+
+        assert!(!section.contains("Setup install anchor"));
+    }
+
+    #[test]
+    fn render_canonical_chunk_section_expands_typed_short_technical_rows() {
         let document_id = Uuid::now_v7();
         let revision_id = Uuid::now_v7();
         let mut query_ir = configure_how_focus_ir("Subject Alpha setup");
-        query_ir.act = QueryAct::Describe;
+        query_ir.act = QueryAct::ConfigureHow;
         query_ir.confidence = 0.25;
-        query_ir.target_types.clear();
-        query_ir.target_entities.clear();
+        query_ir.target_types =
+            vec![QueryTargetKind::ConfigurationFile, QueryTargetKind::ConfigKey];
+        query_ir.target_entities = vec![crate::domains::query_ir::EntityMention {
+            label: "QX".to_string(),
+            role: crate::domains::query_ir::EntityRole::Subject,
+        }];
         query_ir.document_focus = None;
 
         let mut chunks = vec![
@@ -7029,7 +6525,7 @@ mod source_unit_answer_tests {
 
         assert!(
             section.contains("visibleMode"),
-            "low-confidence short-token structured rows below the old per-document cap must remain visible"
+            "typed short-token structured rows below the old per-document cap must remain visible"
         );
     }
 
@@ -7038,9 +6534,14 @@ mod source_unit_answer_tests {
         let document_id = Uuid::now_v7();
         let revision_id = Uuid::now_v7();
         let mut query_ir = configure_how_focus_ir("Subject Alpha setup");
-        query_ir.act = QueryAct::Describe;
+        query_ir.act = QueryAct::ConfigureHow;
         query_ir.confidence = 0.25;
-        query_ir.target_types.clear();
+        query_ir.target_types =
+            vec![QueryTargetKind::ConfigurationFile, QueryTargetKind::ConfigKey];
+        query_ir.target_entities = vec![crate::domains::query_ir::EntityMention {
+            label: "QX".to_string(),
+            role: crate::domains::query_ir::EntityRole::Subject,
+        }];
         query_ir.document_focus = None;
 
         let mut chunks = (1..=21)
@@ -7170,252 +6671,6 @@ mod source_unit_answer_tests {
     }
 
     #[test]
-    fn update_procedure_answer_augmentation_keeps_non_step_evidence_out_of_visible_answer() {
-        let procedure_chunk = evidence_chunk(
-            1,
-            Some("paragraph"),
-            "Sample Target update procedure:\n1. Update Sample Target record to revision 1.\n2. Update Sample Target record to revision 2.",
-        );
-        let evidence_chunk = evidence_chunk(
-            2,
-            Some("paragraph"),
-            "2026-02-03: Sample Target Theta marker changed from state K to state L.",
-        );
-        let mut query_ir = configure_update_focus_ir("Sample Target");
-        query_ir.target_types.push("version".to_string());
-        let raw_answer = build_update_procedure_sequence_answer(
-            "how to update Sample Target version?",
-            &query_ir,
-            std::slice::from_ref(&procedure_chunk),
-        )
-        .expect("update procedure answer");
-        assert!(!raw_answer.contains("Theta marker changed"), "{raw_answer}");
-
-        let answer = augment_deterministic_grounded_answer_with_evidence(
-            raw_answer,
-            "how to update Sample Target?",
-            &query_ir,
-            &[procedure_chunk, evidence_chunk],
-        );
-
-        assert!(!answer.contains("Theta marker changed from state K to state L"), "{answer}");
-    }
-
-    #[test]
-    fn update_procedure_answer_augmentation_does_not_append_selected_source_evidence() {
-        let mut procedure_chunk = evidence_chunk(
-            1,
-            Some("paragraph"),
-            "Sample Target update procedure:\n1. Update Sample Target record to revision 1.\n2. Update Sample Target record to revision 2.",
-        );
-        procedure_chunk.document_label = "Sample Target maintenance guide".to_string();
-        let mut selected_source_evidence =
-            evidence_chunk(2, Some("paragraph"), "2026-02-03: Sample Target audit.marker=state-l.");
-        selected_source_evidence.document_label = "Sample Target maintenance guide".to_string();
-        let mut same_document_sibling =
-            evidence_chunk(4, Some("paragraph"), "2026-02-03: Other Subject audit.marker=state-y.");
-        same_document_sibling.document_label = "Sample Target maintenance guide".to_string();
-        let mut sibling_evidence =
-            evidence_chunk(3, Some("paragraph"), "2026-02-03: Other Subject audit.marker=state-x.");
-        sibling_evidence.document_label = "Other Subject maintenance guide".to_string();
-        let mut query_ir = configure_update_focus_ir("Sample Target");
-        query_ir.target_types.push("version".to_string());
-        let raw_answer = build_update_procedure_sequence_answer(
-            "how to update Sample Target version?",
-            &query_ir,
-            &[procedure_chunk.clone()],
-        )
-        .expect("update procedure answer");
-        assert!(raw_answer.contains("Sample Target maintenance guide"), "{raw_answer}");
-
-        let answer = augment_deterministic_grounded_answer_with_evidence(
-            raw_answer,
-            "how to update Sample Target version?",
-            &query_ir,
-            &[procedure_chunk, sibling_evidence, same_document_sibling, selected_source_evidence],
-        );
-
-        assert!(!answer.contains("audit.marker=state-l"), "{answer}");
-        assert!(!answer.contains("audit.marker=state-x"), "{answer}");
-        assert!(!answer.contains("audit.marker=state-y"), "{answer}");
-    }
-
-    #[test]
-    fn update_procedure_answer_augmentation_rejects_unanswered_structural_line() {
-        let mut procedure_chunk = evidence_chunk(
-            1,
-            Some("paragraph"),
-            "Sample Target update procedure:\n\
-             1. Run sample-runner --refresh.\n\
-             2. Run sample-runner --apply.",
-        );
-        procedure_chunk.document_label = "Sample Target maintenance guide".to_string();
-        let mut stale_structural_line = evidence_chunk(
-            2,
-            Some("paragraph"),
-            "Move the environment baseline to version 20.04 before continuing.",
-        );
-        stale_structural_line.document_label = procedure_chunk.document_label.clone();
-        let mut query_ir = configure_update_focus_ir("Sample Target");
-        query_ir.target_types.push("version".to_string());
-        let raw_answer = build_update_procedure_sequence_answer(
-            "how to update Sample Target version?",
-            &query_ir,
-            &[procedure_chunk.clone()],
-        )
-        .expect("update procedure answer");
-
-        let answer = augment_deterministic_grounded_answer_with_evidence(
-            raw_answer,
-            "how to update Sample Target version?",
-            &query_ir,
-            &[procedure_chunk, stale_structural_line],
-        );
-
-        assert!(!answer.contains("20.04"), "{answer}");
-        assert!(!answer.contains("environment baseline"), "{answer}");
-    }
-
-    #[test]
-    fn update_procedure_answer_augmentation_rejects_mixed_unanswered_structural_anchors() {
-        let mut procedure_chunk = evidence_chunk(
-            1,
-            Some("paragraph"),
-            "Sample Target update procedure:\n\
-             1. Run sample-runner --refresh.\n\
-             2. Run sample-runner --apply.",
-        );
-        procedure_chunk.document_label = "Sample Target maintenance guide".to_string();
-        let mut stale_structural_line = evidence_chunk(
-            2,
-            Some("paragraph"),
-            "For Sample Target, run sample-runner --refresh; if the host baseline is older, run sample-release-upgrade to version 20.04.",
-        );
-        stale_structural_line.document_label = procedure_chunk.document_label.clone();
-        let mut query_ir = configure_update_focus_ir("Sample Target");
-        query_ir.target_types.push("version".to_string());
-        let raw_answer = build_update_procedure_sequence_answer(
-            "how to update Sample Target version?",
-            &query_ir,
-            &[procedure_chunk.clone()],
-        )
-        .expect("update procedure answer");
-
-        let answer = augment_deterministic_grounded_answer_with_evidence(
-            raw_answer,
-            "how to update Sample Target version?",
-            &query_ir,
-            &[procedure_chunk, stale_structural_line],
-        );
-
-        assert!(!answer.contains("sample-release-upgrade"), "{answer}");
-        assert!(!answer.contains("20.04"), "{answer}");
-    }
-
-    #[test]
-    fn update_procedure_sequence_answer_prefers_command_runbook_over_prose_context() {
-        let mut prose = evidence_chunk(
-            1,
-            Some("paragraph"),
-            "Sample Target version procedure:\n\
-             1. Move Sample Target controller to version 1.2.0.\n\
-             2. Edit /opt/sample/target.conf.\n\
-             3. Review the compatibility checklist.\n\
-             4. Restart dependent workflows after validation.",
-        );
-        prose.document_label = "Sample Target compatibility guide".to_string();
-        let mut commands = evidence_chunk(
-            2,
-            Some("code_block"),
-            "Sample Target update procedure:\n\
-             1. sudo su\n\
-             2. sample-transfer https://example.invalid/sample/update.sh -o /tmp/sample-runner.sh\n\
-             3. sample-prepare +x /tmp/sample-runner.sh\n\
-             4. /tmp/sample-runner.sh",
-        );
-        commands.document_label = "Lifecycle maintenance guide".to_string();
-        let mut query_ir = configure_update_focus_ir("Sample Target");
-        query_ir.retrieval_query = Some("how to update Sample Target?".to_string());
-
-        let answer = build_update_procedure_sequence_answer(
-            "how to update Sample Target?",
-            &query_ir,
-            &[prose, commands],
-        )
-        .expect("update procedure answer");
-
-        assert!(answer.contains("Lifecycle maintenance guide"), "{answer}");
-        assert!(answer.contains("`sample-transfer"), "{answer}");
-        assert!(answer.contains("`/tmp/sample-runner.sh`"), "{answer}");
-        assert!(!answer.contains("compatibility guide"), "{answer}");
-    }
-
-    #[test]
-    fn update_procedure_sequence_answer_rejects_location_only_body_target_identity() {
-        let mut distractor = evidence_chunk(
-            1,
-            Some("paragraph"),
-            "Companion Unit can run on the same node as Sample Target.\n\
-             Companion Unit update procedure:\n\
-             1. sample-get refresh\n\
-             2. sample-get upgrade\n\
-             3. sample-configure companion-unit\n\
-             4. sudo service companion-unit restart",
-        );
-        distractor.document_label = "Companion Unit update guide".to_string();
-        let mut runbook = evidence_chunk(
-            2,
-            Some("paragraph"),
-            "Sample Target update procedure:\n\
-             1. sudo su\n\
-             2. sample-transfer https://example.invalid/sample/update.sh -o /tmp/sample-runner.sh\n\
-             3. sample-prepare +x /tmp/sample-runner.sh\n\
-             4. /tmp/sample-runner.sh",
-        );
-        runbook.document_label = "Installation and maintenance".to_string();
-        let mut query_ir = configure_update_focus_ir("Sample Target");
-        query_ir.retrieval_query = Some("how to update Sample Target?".to_string());
-
-        let answer = build_update_procedure_sequence_answer(
-            "how to update Sample Target?",
-            &query_ir,
-            &[distractor, runbook],
-        )
-        .expect("update procedure answer");
-
-        assert!(answer.contains("Installation and maintenance"), "{answer}");
-        assert!(answer.contains("`/tmp/sample-runner.sh`"), "{answer}");
-        assert!(!answer.contains("Companion Unit update guide"), "{answer}");
-        assert!(!answer.contains("sample-configure companion-unit"), "{answer}");
-    }
-
-    #[test]
-    fn update_procedure_chunk_text_uses_focused_view_over_dense_source() {
-        let mut query_ir = configure_update_focus_ir("Sample Target");
-        query_ir.retrieval_query = Some("update Sample Target".to_string());
-        let focus_model = update_procedure_focus_model("how to update Sample Target?", &query_ir);
-        let mut chunk = evidence_chunk(
-            1,
-            Some("paragraph"),
-            "Sample Target update procedure:\n1. Update Sample Target record to revision 1.\n2. Update Sample Target record to revision 2.",
-        );
-        chunk.source_text = concat!(
-            "Sample Target update procedure:\n",
-            "1. Update Sample Target record to revision 1.\n",
-            "2. Update Sample Target record to revision 2.\n",
-            "Other procedure:\n",
-            "- Rotate Other Subject marker.\n",
-            "- Remove Other Subject marker."
-        )
-        .to_string();
-
-        let source_view = update_procedure_chunk_text(&chunk, &focus_model);
-
-        assert!(source_view.contains("Update Sample Target record"), "{source_view}");
-        assert!(!source_view.contains("Other Subject"), "{source_view}");
-    }
-
-    #[test]
     fn structured_source_unit_field_answer_preserves_late_matching_fields() {
         let mut query_ir = low_confidence_concept_ir();
         query_ir.act = QueryAct::RetrieveValue;
@@ -7468,7 +6723,7 @@ mod source_unit_answer_tests {
     fn structured_source_unit_inventory_answer_lists_service_ports() {
         let mut query_ir = low_confidence_concept_ir();
         query_ir.act = QueryAct::Enumerate;
-        query_ir.target_types = vec!["service".to_string(), "port".to_string()];
+        query_ir.target_types = vec![QueryTargetKind::Service, QueryTargetKind::Port];
         let mut chunk = source_unit(
             0,
             "[unit_ordinal=0] fields: services.alpha-edge.environment.ALPHA_ADMIN_LISTEN=0.0.0.0:8001; services.beta-worker.expose=3001; services.gamma-store.ports=${GAMMA_STORE_PORT:-5432}:5432",
@@ -7493,7 +6748,7 @@ mod source_unit_answer_tests {
     fn structured_source_unit_inventory_answer_selects_relevant_group_fields() {
         let mut query_ir = low_confidence_concept_ir();
         query_ir.act = QueryAct::Enumerate;
-        query_ir.target_types = vec!["group".to_string(), "flag".to_string()];
+        query_ir.target_types = vec![QueryTargetKind::Group, QueryTargetKind::Flag];
         let answer = build_structured_source_unit_inventory_answer(
             "Which groups are defined and which flags are active?",
             &query_ir,
@@ -7514,7 +6769,7 @@ mod source_unit_answer_tests {
     fn structured_source_unit_inventory_answer_abstains_for_typed_table_column_inventory() {
         let mut query_ir = low_confidence_concept_ir();
         query_ir.act = QueryAct::Enumerate;
-        query_ir.target_types = vec!["table_row".to_string(), "table_summary".to_string()];
+        query_ir.target_types = vec![QueryTargetKind::TableRow, QueryTargetKind::TableSummary];
 
         assert!(
             build_structured_source_unit_inventory_answer(
@@ -7550,7 +6805,7 @@ mod source_unit_answer_tests {
     fn structured_source_unit_inventory_answer_selects_relevant_status_fields() {
         let mut query_ir = low_confidence_concept_ir();
         query_ir.act = QueryAct::Describe;
-        query_ir.target_types = vec!["parameter".to_string(), "error_code".to_string()];
+        query_ir.target_types = vec![QueryTargetKind::Parameter, QueryTargetKind::ErrorCode];
         let answer = build_structured_source_unit_inventory_answer(
             "Which reason codes are valid for quantity adjustments and what status is returned for insufficient quantity?",
             &query_ir,
@@ -7571,7 +6826,7 @@ mod source_unit_answer_tests {
     fn structured_source_unit_inventory_answer_selects_relevant_event_and_secret_fields() {
         let mut query_ir = low_confidence_concept_ir();
         query_ir.act = QueryAct::Describe;
-        query_ir.target_types = vec!["event".to_string(), "credential".to_string()];
+        query_ir.target_types = vec![QueryTargetKind::Event, QueryTargetKind::Credential];
         let answer = build_structured_source_unit_inventory_answer(
             "Which events are supported and how are event payloads authenticated?",
             &query_ir,
@@ -7592,7 +6847,7 @@ mod source_unit_answer_tests {
     fn structured_source_unit_inventory_answer_expands_relevant_sibling_fields() {
         let mut query_ir = low_confidence_concept_ir();
         query_ir.act = QueryAct::Describe;
-        query_ir.target_types = vec!["event".to_string(), "credential".to_string()];
+        query_ir.target_types = vec![QueryTargetKind::Event, QueryTargetKind::Credential];
         let answer = build_structured_source_unit_inventory_answer(
             "Which events are supported and how are event payloads authenticated?",
             &query_ir,
@@ -7613,7 +6868,7 @@ mod source_unit_answer_tests {
      {
         let mut query_ir = low_confidence_concept_ir();
         query_ir.act = QueryAct::Describe;
-        query_ir.target_types = vec!["event".to_string(), "credential".to_string()];
+        query_ir.target_types = vec![QueryTargetKind::Event, QueryTargetKind::Credential];
         let answer = build_structured_source_unit_inventory_answer(
             "What callback events does the inventory API support, and how are callback payloads authenticated?",
             &query_ir,
@@ -7639,7 +6894,7 @@ mod source_unit_answer_tests {
     {
         let mut query_ir = low_confidence_concept_ir();
         query_ir.act = QueryAct::Describe;
-        query_ir.target_types = vec!["group".to_string(), "state".to_string()];
+        query_ir.target_types = vec![QueryTargetKind::Group, QueryTargetKind::State];
         let answer = build_structured_source_unit_inventory_answer(
             "Which groups are defined, which are active, and what arrangement is described?",
             &query_ir,
@@ -7662,7 +6917,7 @@ mod source_unit_answer_tests {
     fn structured_source_unit_inventory_answer_does_not_expand_large_root_as_direct_match() {
         let mut query_ir = low_confidence_concept_ir();
         query_ir.act = QueryAct::Enumerate;
-        query_ir.target_types = vec!["item".to_string(), "value".to_string()];
+        query_ir.target_types = vec![QueryTargetKind::Item, QueryTargetKind::Value];
         let distractors = (0..10)
             .map(|index| format!("items.extra{index}.description=Supplemental note {index}"))
             .collect::<Vec<_>>()
@@ -7689,7 +6944,7 @@ mod source_unit_answer_tests {
      {
         let mut query_ir = low_confidence_concept_ir();
         query_ir.act = QueryAct::Describe;
-        query_ir.target_types = vec!["group".to_string(), "state".to_string()];
+        query_ir.target_types = vec![QueryTargetKind::Group, QueryTargetKind::State];
         let target_document_id = Uuid::now_v7();
         let mut ordinary = evidence_chunk(
             0,
@@ -7720,7 +6975,7 @@ mod source_unit_answer_tests {
     fn structured_source_unit_inventory_answer_requires_distinctive_surface_anchor_when_present() {
         let mut query_ir = low_confidence_concept_ir();
         query_ir.act = QueryAct::Describe;
-        query_ir.target_types = vec!["service".to_string(), "connection".to_string()];
+        query_ir.target_types = vec![QueryTargetKind::Service, QueryTargetKind::Connection];
 
         assert!(
             build_structured_source_unit_inventory_answer(
@@ -7752,7 +7007,7 @@ mod source_unit_answer_tests {
     fn structured_source_unit_inventory_answer_uses_document_with_exact_field_anchor() {
         let mut query_ir = low_confidence_concept_ir();
         query_ir.act = QueryAct::Enumerate;
-        query_ir.target_types = vec!["entry".to_string(), "value".to_string()];
+        query_ir.target_types = vec![QueryTargetKind::Entry, QueryTargetKind::Value];
         query_ir.literal_constraints =
             vec![LiteralSpan { kind: LiteralKind::Identifier, text: "AlphaToken".to_string() }];
         let focused_document_id = Uuid::now_v7();
@@ -7790,7 +7045,7 @@ mod source_unit_answer_tests {
     {
         let mut query_ir = low_confidence_concept_ir();
         query_ir.act = QueryAct::Enumerate;
-        query_ir.target_types = vec!["value".to_string()];
+        query_ir.target_types = vec![QueryTargetKind::Value];
         let answer = build_structured_source_unit_inventory_answer(
             "Which values are exposed for each item?",
             &query_ir,
@@ -7811,7 +7066,7 @@ mod source_unit_answer_tests {
     fn structured_source_unit_inventory_answer_upgrades_weak_direct_sibling_matches() {
         let mut query_ir = low_confidence_concept_ir();
         query_ir.act = QueryAct::Describe;
-        query_ir.target_types = vec!["event".to_string()];
+        query_ir.target_types = vec![QueryTargetKind::Event];
         let distractors = (0..24)
             .map(|index| format!("channels.alpha.metadata.field{index}=metadata-{index}"))
             .collect::<Vec<_>>()
@@ -7837,7 +7092,7 @@ mod source_unit_answer_tests {
     fn structured_source_unit_inventory_answer_abstains_for_broad_concept_explanation() {
         let mut query_ir = low_confidence_concept_ir();
         query_ir.act = QueryAct::Describe;
-        query_ir.target_types = vec!["protocol".to_string(), "concept".to_string()];
+        query_ir.target_types = vec![QueryTargetKind::Protocol, QueryTargetKind::Concept];
         let document_id = Uuid::now_v7();
         let mut ordinary = evidence_chunk(
             0,
@@ -7866,127 +7121,46 @@ mod source_unit_answer_tests {
     }
 
     #[test]
-    fn update_procedure_sequence_answer_extracts_steps_from_evidence() {
-        let mut distractor_chunk = evidence_chunk(
+    fn deterministic_answer_yields_troubleshooting_lists_to_grounded_synthesis() {
+        let mut query_ir = configure_update_focus_ir("Sample Incident");
+        query_ir.target_types = vec![
+            QueryTargetKind::Procedure,
+            QueryTargetKind::Troubleshooting,
+            QueryTargetKind::Remediation,
+            QueryTargetKind::ErrorMessage,
+        ];
+        query_ir.literal_constraints = vec![crate::domains::query_ir::LiteralSpan {
+            text: "sample operation was already completed".to_string(),
+            kind: crate::domains::query_ir::LiteralKind::Other,
+        }];
+        let mut generic_runbook = evidence_chunk(
             1,
             Some("paragraph"),
-            "Environment host refresh note. sudo platform-refresh",
+            "Error: sample operation was already completed.\n\
+             Sample Incident workflow:\n\
+             1. Open the generic operations screen.\n\
+             2. Review the current queue.\n\
+             3. Continue the ordinary workflow.",
         );
-        distractor_chunk.document_label = "Environment host maintenance guide".to_string();
-        let mut product_chunk = evidence_chunk(
-            2,
-            Some("paragraph"),
-            "Sample Subject update procedure:\n1. Update Sample Control Object to version 1.2.3 or higher.\n2. Update the secondary record to version 2.\n3. Update Alpha subject artifact to version 1.8.0 or higher.\n4. Update Alpha subject artifact to version 2.0.0 or higher.\nSkipping steps is forbidden.",
+        generic_runbook.document_label = "Sample operations guide".to_string();
+        let evidence = CanonicalAnswerEvidence {
+            bundle: None,
+            chunk_rows: Vec::new(),
+            structured_blocks: Vec::new(),
+            technical_facts: Vec::new(),
+        };
+
+        let answer = build_deterministic_grounded_answer(
+            "What should I do when the error says \"sample operation was already completed\"?",
+            &query_ir,
+            &evidence,
+            &[generic_runbook],
         );
-        product_chunk.document_label = "Sample Subject upgrade guide".to_string();
 
-        let answer = build_update_procedure_sequence_answer(
-            "how to update Sample Target?",
-            &configure_update_focus_ir("Sample Target"),
-            &[distractor_chunk, product_chunk],
-        )
-        .expect("update procedure answer");
-
-        assert!(answer.contains("Sample Control Object"));
-        assert!(answer.contains("1.2.3"));
-        assert!(answer.contains("1.8.0"));
-        assert!(answer.contains("2.0.0"));
-        assert!(answer.contains("Skipping steps is forbidden"));
-        assert!(!answer.contains("platform-refresh"));
-    }
-
-    #[test]
-    fn update_procedure_sequence_answer_projects_focused_tail_from_mixed_block() {
-        let mut mixed_chunk = evidence_chunk(
-            2,
-            Some("paragraph"),
-            "Sample Console update procedure:\n\
-             1. sample-platform-refresh --all\n\
-             2. sample-platform-upgrade --major\n\
-             3. sample-platform-transition --commit\n\
-             4. repeat sample-platform-transition --commit if the platform reports pending work\n\
-             5. sample-runner --refresh\n\
-             6. sample-runner --upgrade sample-console-rest\n\
-             7. sample-configure sample-console-rest\n\
-             8. sudo service sample-console-rest restart",
+        assert!(
+            answer.is_none(),
+            "typed troubleshooting must reach grounded remediation synthesis instead of any deterministic list shortcut: {answer:?}"
         );
-        mixed_chunk.document_label = "Sample Console update guide".to_string();
-
-        let answer = build_update_procedure_sequence_answer(
-            "how to update Sample Console?",
-            &configure_update_focus_ir("Sample Console"),
-            &[mixed_chunk],
-        )
-        .expect("focused tail procedure answer");
-
-        assert!(answer.contains("sample-runner --refresh"), "{answer}");
-        assert!(answer.contains("sample-runner --upgrade sample-console-rest"), "{answer}");
-        assert!(answer.contains("sample-configure sample-console-rest"), "{answer}");
-        assert!(answer.contains("sudo service sample-console-rest restart"), "{answer}");
-        assert!(!answer.contains("sample-platform-transition"), "{answer}");
-    }
-
-    #[test]
-    fn update_procedure_tail_projection_keeps_adjacent_same_head_preparation_command() {
-        let query_ir = configure_update_focus_ir("Sample Console");
-        let focus_model = update_procedure_focus_model("how to update Sample Console?", &query_ir);
-        let text = "Sample Console update from 1.0.0 to 2.0.0:\n\
-             1. platform-transition --prepare\n\
-             2. sample-get refresh\n\
-             3. sample-get upgrade\n\
-             4. sample-configure connector-rest\n\
-             5. sudo service connector-rest restart\n\
-             6. sample-check connector-rest";
-        let blocks = update_procedure_line_blocks(text);
-        let block = blocks.first().expect("procedure block");
-        let source_extract =
-            update_procedure_extract_from_block(0, block, &focus_model).expect("source extract");
-        let tail_extract = update_procedure_command_tail_projection_from_block(
-            0,
-            block,
-            &focus_model,
-            &source_extract,
-        )
-        .expect("tail projection");
-
-        let steps = tail_extract.steps.join("\n");
-        assert!(steps.contains("sample-get refresh"), "{steps}");
-        assert!(steps.contains("sample-get upgrade"), "{steps}");
-        assert!(steps.contains("sample-configure connector-rest"), "{steps}");
-        assert!(!steps.contains("platform-transition"), "{steps}");
-    }
-
-    #[test]
-    fn update_procedure_selection_prepends_adjacent_same_head_preparation_command() {
-        let steps =
-            vec!["sample-get upgrade".to_string(), "sample-configure alpha-service".to_string()];
-        let block_text = "Sample Target update procedure:\n\
-             1. platform-transition --prepare\n\
-             2. sample-get refresh\n\
-             3. sample-get upgrade\n\
-             4. sample-configure alpha-service";
-
-        let augmented =
-            update_procedure_steps_with_adjacent_same_head_preparation(steps, block_text);
-
-        assert_eq!(augmented[0], "sample-get refresh");
-        assert_eq!(augmented[1], "sample-get upgrade");
-        assert!(!augmented.iter().any(|step| step.contains("platform-transition")));
-    }
-
-    #[test]
-    fn update_procedure_selection_prepends_same_head_preparation_from_dense_line() {
-        let steps =
-            vec!["sample-get upgrade".to_string(), "sample-configure alpha-service".to_string()];
-        let block_text = "Sample Target update procedure: sample-get refresh sample-get upgrade\n\
-             sample-configure alpha-service";
-
-        let augmented =
-            update_procedure_steps_with_adjacent_same_head_preparation(steps, block_text);
-
-        assert_eq!(augmented[0], "sample-get refresh");
-        assert_eq!(augmented[1], "sample-get upgrade");
-        assert!(augmented.iter().any(|step| step == "sample-configure alpha-service"));
     }
 
     #[test]
@@ -8040,7 +7214,7 @@ mod source_unit_answer_tests {
     fn structured_list_answer_abstains_for_typed_table_column_inventory() {
         let mut query_ir = low_confidence_concept_ir();
         query_ir.act = QueryAct::Enumerate;
-        query_ir.target_types = vec!["table_row".to_string(), "table_summary".to_string()];
+        query_ir.target_types = vec![QueryTargetKind::TableRow, QueryTargetKind::TableSummary];
         query_ir.target_entities = vec![crate::domains::query_ir::EntityMention {
             label: "accounts".to_string(),
             role: crate::domains::query_ir::EntityRole::Subject,
@@ -8088,86 +7262,54 @@ mod source_unit_answer_tests {
     }
 
     #[test]
-    fn update_procedure_sequence_answer_allows_single_document_procedure_ir_without_entity() {
-        let mut query_ir = configure_how_focus_ir("Sample Target");
-        query_ir.document_focus = None;
-        query_ir.target_entities.clear();
-        query_ir.target_types = vec!["procedure".to_string(), "release".to_string()];
-        query_ir.retrieval_query = Some("how to update Sample Target?".to_string());
-        let mut product_chunk = evidence_chunk(
-            2,
+    fn structured_list_answer_yields_non_actionable_how_to_inventory_to_synthesis() {
+        let mut query_ir = configure_how_focus_ir("Sample Connector");
+        query_ir.target_types = vec![QueryTargetKind::Procedure, QueryTargetKind::Concept];
+        let mut chunk = evidence_chunk(
+            1,
             Some("paragraph"),
-            "Alpha subject update procedure:\n\
-             1. Run sudo /opt/alpha/install_update.sh.\n\
-             2. Restart the Alpha subject service.\n\
-             3. Validate the package version.",
+            "Sample Connector configuration:\n\
+             1. [Main]\n\
+             2. endpointUrl\n\
+             3. Default value false",
         );
-        product_chunk.document_label = "Alpha subject update guide".to_string();
+        chunk.document_label = "Sample Connector setup guide".to_string();
 
-        let answer = build_update_procedure_sequence_answer(
-            "how to update Sample Target?",
+        let answer = build_structured_list_grounded_answer(
+            "How do I configure Sample Connector?",
             &query_ir,
-            &[product_chunk],
-        )
-        .expect("single-document procedure answer");
-
-        assert!(answer.contains("install_update.sh"));
-        assert!(answer.contains("Restart the Alpha subject service"));
-        assert!(answer.contains("Validate the package version"));
-    }
-
-    #[test]
-    fn update_procedure_sequence_answer_keeps_concept_only_ir_on_synthesis_path() {
-        let mut query_ir = configure_how_focus_ir("Sample Target");
-        query_ir.document_focus = None;
-        query_ir.target_entities.clear();
-        query_ir.target_types = vec!["procedure".to_string(), "concept".to_string()];
-        query_ir.retrieval_query = Some("Sample Target".to_string());
-        let mut product_chunk = evidence_chunk(
-            2,
-            Some("paragraph"),
-            "Alpha subject update procedure:\n\
-             1. Run sudo /opt/alpha/install_update.sh.\n\
-             2. Restart the Alpha subject service.",
+            &[chunk],
         );
-        product_chunk.document_label = "Alpha subject update guide".to_string();
 
         assert!(
-            build_update_procedure_sequence_answer("Sample Target", &query_ir, &[product_chunk])
-                .is_none()
+            answer.is_none(),
+            "a how-to inventory without two action-bearing steps must reach grounded synthesis: {answer:?}"
         );
     }
 
     #[test]
-    fn update_procedure_sequence_answer_accepts_focused_concept_procedure_ir() {
-        let mut query_ir = configure_how_focus_ir("Sample Target");
-        query_ir.document_focus = None;
-        query_ir.target_entities = vec![crate::domains::query_ir::EntityMention {
-            label: "Sample Target".to_string(),
-            role: crate::domains::query_ir::EntityRole::Subject,
-        }];
-        query_ir.target_types = vec!["procedure".to_string(), "concept".to_string()];
-        query_ir.retrieval_query = Some("how to update Sample Target?".to_string());
-        let mut product_chunk = evidence_chunk(
-            2,
+    fn structured_list_answer_keeps_actionable_how_to_steps() {
+        let mut query_ir = configure_how_focus_ir("Sample Connector");
+        query_ir.target_types = vec![QueryTargetKind::Procedure, QueryTargetKind::Concept];
+        let mut chunk = evidence_chunk(
+            1,
             Some("paragraph"),
-            "Sample Target update procedure:\n\
-             1. Run sudo sample-target-update --apply.\n\
-             2. Restart the Sample Target service.\n\
-             3. Validate the reported version.",
+            "Sample Connector setup:\n\
+             1. Install the connector package.\n\
+             2. Open the connector settings.\n\
+             3. Save the configured mode.",
         );
-        product_chunk.document_label = "Sample Target maintenance guide".to_string();
+        chunk.document_label = "Sample Connector setup guide".to_string();
 
-        let answer = build_update_procedure_sequence_answer(
-            "how to update Sample Target?",
+        let answer = build_structured_list_grounded_answer(
+            "How do I configure Sample Connector?",
             &query_ir,
-            &[product_chunk],
+            &[chunk],
         )
-        .expect("focused concept/procedure IR should use structural procedure evidence");
+        .expect("actionable structured procedure");
 
-        assert!(answer.contains("sample-target-update"), "{answer}");
-        assert!(answer.contains("Restart the Sample Target service"), "{answer}");
-        assert!(answer.contains("Validate the reported version"), "{answer}");
+        assert!(answer.contains("Install the connector package"), "{answer}");
+        assert!(answer.contains("Open the connector settings"), "{answer}");
     }
 
     #[test]
@@ -8193,693 +7335,6 @@ mod source_unit_answer_tests {
     }
 
     #[test]
-    fn update_procedure_sequence_answer_ignores_numeric_data_records() {
-        let mut data_chunk = evidence_chunk(
-            1,
-            Some("paragraph"),
-            "{\"metricA\": 14.31}\nmetricB = 82.10\n| metricC | 9.20 |\nmetricD: 3.40",
-        );
-        data_chunk.document_label = "Sample Subject metric extract".to_string();
-
-        assert!(
-            build_update_procedure_sequence_answer(
-                "how to update Sample Target?",
-                &configure_update_focus_ir("Sample Target"),
-                &[data_chunk],
-            )
-            .is_none()
-        );
-    }
-
-    #[test]
-    fn update_procedure_sequence_answer_prefers_focused_command_block_without_versions() {
-        let mut distractor_chunk = evidence_chunk(
-            1,
-            Some("paragraph"),
-            "Environment transition transition:\n\
-             1. Update the environment from baseline 1 to baseline 2.\n\
-             2. Update the environment from baseline 2 to baseline 3.\n\
-             3. Run sudo platform-release.",
-        );
-        distractor_chunk.document_label = "Environment transition transition".to_string();
-        let mut product_chunk = evidence_chunk(
-            2,
-            Some("paragraph"),
-            "Sample Target update:\n\
-             sudo su\n\
-             sample-transfer https://updates.example.invalid/alpha/update.sh -o /tmp/sample-runner.sh\n\
-             sample-prepare +x /tmp/sample-runner.sh\n\
-             /tmp/sample-runner.sh\n\
-             The update script refreshes Sample Target dependencies.",
-        );
-        product_chunk.document_label = "Sample Target update guide".to_string();
-
-        let answer = build_update_procedure_sequence_answer(
-            "how to update Sample Target?",
-            &configure_update_focus_ir("Sample Target"),
-            &[distractor_chunk, product_chunk],
-        )
-        .expect("focused command update answer");
-
-        assert!(answer.contains("Sample Target update guide"));
-        assert!(answer.contains("/tmp/sample-runner.sh"));
-        assert!(answer.contains("sample-prepare +x"));
-        assert!(!answer.contains("**Evidence fragments:**"));
-        assert!(answer.contains("`/tmp/sample-runner.sh`"));
-        assert!(!answer.contains("platform-release"));
-    }
-
-    #[test]
-    fn update_procedure_sequence_answer_rejects_subject_match_without_action_match() {
-        let mut upload_chunk = evidence_chunk(
-            1,
-            Some("paragraph"),
-            "Sample Target receipt upload:\n\
-             sudo su\n\
-             sample-transfer https://updates.example.invalid/alpha/upload-agent.sh -o /tmp/upload-agent.sh\n\
-             /tmp/upload-agent.sh\n\
-             The upload agent sends receipt payloads.",
-        );
-        upload_chunk.document_label = "Sample Target upload example".to_string();
-
-        assert!(
-            build_update_procedure_sequence_answer(
-                "how to update Sample Target?",
-                &configure_update_focus_ir("Sample Target"),
-                &[upload_chunk],
-            )
-            .is_none(),
-            "a subject-matching command block must not become an update answer unless the action also matches"
-        );
-    }
-
-    #[test]
-    fn update_procedure_sequence_answer_rejects_subject_variant_as_action_match() {
-        let mut maintenance_chunk = evidence_chunk(
-            1,
-            Some("paragraph"),
-            "Alpha Service maintenance:\n\
-             1. Check Alpha Service package version 1.0.0.\n\
-             2. Restart Alpha Service workers.",
-        );
-        maintenance_chunk.document_label = "Alpha Service maintenance guide".to_string();
-
-        assert!(
-            build_update_procedure_sequence_answer(
-                "how to refresh Alpha Services?",
-                &configure_update_focus_ir("Alpha Service"),
-                &[maintenance_chunk],
-            )
-            .is_none(),
-            "subject variants must not satisfy the action gate through fuzzy prefix matching"
-        );
-    }
-
-    #[test]
-    fn update_procedure_sequence_answer_rejects_action_leak_from_adjacent_block() {
-        let mut mixed_chunk = evidence_chunk(
-            1,
-            Some("paragraph"),
-            "Sample Target refresh notes mention the requested action.\n\
-             \n\
-             Sample Target upload helper:\n\
-             sudo su\n\
-             sample-transfer https://packages.example.invalid/alpha/upload-helper.sh -o /tmp/upload-helper.sh\n\
-             sample-prepare +x /tmp/upload-helper.sh\n\
-             /tmp/upload-helper.sh",
-        );
-        mixed_chunk.document_label = "Sample Target operations".to_string();
-
-        assert!(
-            build_update_procedure_sequence_answer(
-                "how to refresh Sample Target?",
-                &configure_update_focus_ir("Sample Target"),
-                &[mixed_chunk],
-            )
-            .is_none(),
-            "action evidence in an adjacent block must not validate the selected procedure block"
-        );
-    }
-
-    #[test]
-    fn update_procedure_sequence_answer_rejects_action_leak_from_quoted_step_reference() {
-        let mut install_chunk = evidence_chunk(
-            1,
-            Some("paragraph"),
-            "Sample Target installation:\n\
-             1. Install the Alpha subject artifact.\n\
-             2. Install the agent. Read the section \"Installing and updating the agent\".\n\
-             sudo su\n\
-             sample-transfer https://packages.example.invalid/alpha/install-agent.sh -o /tmp/install-agent.sh\n\
-             sample-prepare +x /tmp/install-agent.sh\n\
-             /tmp/install-agent.sh",
-        );
-        install_chunk.document_label = "Sample Target installation guide".to_string();
-
-        assert!(
-            build_update_procedure_sequence_answer(
-                "how to update Sample Target?",
-                &configure_update_focus_ir("Sample Target"),
-                &[install_chunk],
-            )
-            .is_none(),
-            "a quoted reference title inside an install step must not satisfy the requested update action"
-        );
-    }
-
-    #[test]
-    fn update_procedure_sequence_answer_rejects_setup_script_under_action_heading() {
-        let mut install_chunk = evidence_chunk(
-            1,
-            Some("paragraph"),
-            "Sample Target update:\n\
-             sudo su\n\
-             sample-transfer https://packages.example.invalid/alpha/install-agent.sh -o /tmp/install-agent.sh\n\
-             sample-prepare +x /tmp/install-agent.sh\n\
-             /tmp/install-agent.sh",
-        );
-        install_chunk.document_label = "Sample Target maintenance guide".to_string();
-
-        assert!(
-            build_update_procedure_sequence_answer(
-                "how to update Sample Target?",
-                &configure_update_focus_ir("Sample Target"),
-                &[install_chunk],
-            )
-            .is_none(),
-            "an install-script command sequence must not be accepted solely because the heading names the requested action"
-        );
-    }
-
-    #[test]
-    fn update_procedure_sequence_answer_rejects_install_script_from_update_host() {
-        let mut install_chunk = evidence_chunk(
-            1,
-            Some("paragraph"),
-            "Sample Target update:\n\
-             sudo su sample-transfer https://updates.example.invalid/alpha/install-agent.sh -o /tmp/install-agent.sh\n\
-             sample-prepare +x /tmp/install-agent.sh\n\
-             /tmp/install-agent.sh",
-        );
-        install_chunk.document_label = "Sample Target maintenance guide".to_string();
-
-        assert!(
-            build_update_procedure_sequence_answer(
-                "how to update Sample Target?",
-                &configure_update_focus_ir("Sample Target"),
-                &[install_chunk],
-            )
-            .is_none(),
-            "the update host name must not make an install script action-specific"
-        );
-    }
-
-    #[test]
-    fn update_procedure_sequence_answer_rejects_fetched_install_script_with_format_mark() {
-        let mut install_chunk = evidence_chunk(
-            1,
-            Some("paragraph"),
-            "Sample Target update:\n\
-             sudo su sample-transfer https://updates.example.invalid/alpha/install-agent.sh\u{200e} -o /tmp/install-agent.sh\u{200e}\n\
-             /tmp/install-agent.sh\u{200e}\n\
-             Activate the node after package installation.",
-        );
-        install_chunk.document_label = "Sample Target maintenance guide".to_string();
-
-        assert!(
-            build_update_procedure_sequence_answer(
-                "how to update Sample Target?",
-                &configure_update_focus_ir("Sample Target"),
-                &[install_chunk],
-            )
-            .is_none(),
-            "format marks and a missing sample-prepare line must not hide a materialized setup artifact"
-        );
-    }
-
-    #[test]
-    fn update_procedure_sequence_answer_rejects_setup_script_with_joined_privilege_token() {
-        let mut install_chunk = evidence_chunk(
-            1,
-            Some("paragraph"),
-            "Sample Target update:\n\
-             sudo susample-transfer https://packages.example.invalid/alpha/install-agent.sh -o /tmp/install-agent.sh\n\
-             sample-prepare +x /tmp/install-agent.sh\n\
-             /tmp/install-agent.sh",
-        );
-        install_chunk.document_label = "Sample Target maintenance guide".to_string();
-
-        assert!(
-            build_update_procedure_sequence_answer(
-                "how to update Sample Target?",
-                &configure_update_focus_ir("Sample Target"),
-                &[install_chunk],
-            )
-            .is_none(),
-            "a joined su+sample-transfer layout artifact must still be treated as an install-script sequence"
-        );
-    }
-
-    #[test]
-    fn update_procedure_sequence_answer_rejects_setup_script_with_joined_preparation_path() {
-        let mut install_chunk = evidence_chunk(
-            1,
-            Some("paragraph"),
-            "Sample Target update:\n\
-             sudo susample-transfer https://packages.example.invalid/alpha/install-agent.sh -o /tmp/install-agent.sh\n\
-             sample-prepare +x /tmp/install-agent.sh/tmp/install-agent.sh",
-        );
-        install_chunk.document_label = "Sample Target maintenance guide".to_string();
-
-        assert!(
-            build_update_procedure_sequence_answer(
-                "how to update Sample Target?",
-                &configure_update_focus_ir("Sample Target"),
-                &[install_chunk],
-            )
-            .is_none(),
-            "a sample-prepare line with a joined /tmp script path is still setup-script evidence, not the requested update procedure"
-        );
-    }
-
-    #[test]
-    fn update_procedure_sequence_answer_uses_later_valid_block_after_action_reject() {
-        let mut mixed_chunk = evidence_chunk(
-            1,
-            Some("paragraph"),
-            "Sample Target installation:\n\
-             1. Install the Alpha subject artifact.\n\
-             2. Install the agent. Read the section \"Sample Target update\".\n\
-             sudo su\n\
-             sample-transfer https://packages.example.invalid/alpha/install-agent.sh -o /tmp/install-agent.sh\n\
-             sample-prepare +x /tmp/install-agent.sh\n\
-             /tmp/install-agent.sh\n\
-             \n\
-             Sample Target update:\n\
-             1. Stop Alpha subject workers.\n\
-             2. Install Alpha subject artifact version 2.0.0.\n\
-             3. Restart Alpha subject workers.",
-        );
-        mixed_chunk.document_label = "Sample Target operations guide".to_string();
-
-        let answer = build_update_procedure_sequence_answer(
-            "how to update Sample Target?",
-            &configure_update_focus_ir("Sample Target"),
-            &[mixed_chunk],
-        )
-        .expect("later valid update block should be selected");
-
-        assert!(answer.contains("Stop Alpha subject workers"));
-        assert!(answer.contains("2.0.0"));
-        assert!(!answer.contains("install-agent.sh"));
-    }
-
-    #[test]
-    fn update_procedure_sequence_answer_does_not_use_label_action_for_wrong_command_block() {
-        let mut mixed_chunk = evidence_chunk(
-            1,
-            Some("paragraph"),
-            "Install Sample Target:\n\
-             sudo su\n\
-             sample-transfer https://packages.example.invalid/alpha/install-node.sh -o /tmp/install-node.sh\n\
-             sample-prepare +x /tmp/install-node.sh\n\
-             /tmp/install-node.sh\n\
-             \n\
-             Update Sample Target:\n\
-             sudo su\n\
-             sample-transfer https://example.invalid/sample/update-main -o sample-update-token\n\
-             sample-prepare +x sample-update-token\n\
-             sample-update-token",
-        );
-        mixed_chunk.document_label = "Sample Target install and update".to_string();
-
-        let answer = build_update_procedure_sequence_answer(
-            "how to update Sample Target?",
-            &configure_update_focus_ir("Sample Target"),
-            &[mixed_chunk],
-        )
-        .expect("block action must win over generic document label action");
-
-        assert!(answer.contains("/sample/update"), "{answer}");
-        assert!(answer.contains("sample-update-token"), "{answer}");
-        assert!(!answer.contains("install-node.sh"), "{answer}");
-    }
-
-    #[test]
-    fn update_procedure_sequence_answer_prefers_action_named_command_over_config_prep() {
-        let mut mixed_chunk = evidence_chunk(
-            1,
-            Some("paragraph"),
-            "Prepare Sample Target package versions:\n\
-             1. Download the configuration file.\n\
-             sudo su\n\
-             sample-transfer https://packages.example.invalid/alpha/packages_version.conf -o /tmp/packages_version.conf\n\
-             2. List installed packages with sample-list --all | grep alpha.\n\
-             3. Edit /tmp/packages_version.conf.\n\
-             \n\
-             Update Sample Target:\n\
-             sudo su\n\
-             sample-transfer https://example.invalid/sample/update-main -o sample-update-token\n\
-             sample-prepare +x sample-update-token\n\
-             sample-update-token",
-        );
-        mixed_chunk.document_label = "Sample Target install and update".to_string();
-
-        let answer = build_update_procedure_sequence_answer(
-            "how to update Sample Target?",
-            &configure_update_focus_ir("Sample Target"),
-            &[mixed_chunk],
-        )
-        .expect("action-named update command should outrank config preparation");
-
-        assert!(answer.contains("/sample/update"), "{answer}");
-        assert!(!answer.contains("packages_version.conf"), "{answer}");
-    }
-
-    #[test]
-    fn update_procedure_sequence_answer_prefers_later_dense_update_chunk_over_config_prep_chunk() {
-        let mut prep_chunk = evidence_chunk(
-            1,
-            Some("paragraph"),
-            "Prepare Sample Target package versions:\n\
-             The package-version workflow can be used for install/update operations.\n\
-             1. Download the configuration file.\n\
-             sudo su\n\
-             sample-transfer https://packages.example.invalid/alpha/packages_version.conf -o /tmp/packages_version.conf\n\
-             2. List installed packages with sample-list --all | grep alpha.\n\
-             3. Edit /tmp/packages_version.conf.",
-        );
-        prep_chunk.document_label = "Sample Target install and update".to_string();
-        prep_chunk.score = Some(20.0);
-
-        let mut update_chunk = evidence_chunk(
-            2,
-            Some("paragraph"),
-            "Update Sample Target\n\
-             - If all components are installed on one host, update Sample Target with: sudo su sample-transfer https://example.invalid/sample/update-main -o sample-update-token sample-prepare +x sample-update-token sample-update-token\n\
-             - If components are installed on multiple hosts, update Sample Target with: sudo su sample-transfer https://example.invalid/sample/update-secondary -o sample-update-token sample-prepare +x sample-update-token sample-update-token\n\
-             The scripts update required dependencies.",
-        );
-        update_chunk.document_label = "Sample Target install and update".to_string();
-        update_chunk.score = Some(19.0);
-
-        let answer = build_update_procedure_sequence_answer(
-            "how to update Sample Target?",
-            &configure_update_focus_ir("Sample Target"),
-            &[prep_chunk, update_chunk],
-        )
-        .expect("later dense update commands should outrank package-version prep");
-
-        assert!(answer.contains("/sample/update"), "{answer}");
-        assert!(answer.contains("sample-prepare +x sample-update-token"), "{answer}");
-        assert!(!answer.contains("packages_version.conf"), "{answer}");
-        assert!(!answer.contains("https://packages. example"), "{answer}");
-    }
-
-    #[test]
-    fn update_procedure_sequence_answer_prefers_command_runbook_over_transition_outline() {
-        let mut outline_chunk = evidence_chunk(
-            1,
-            Some("paragraph"),
-            "Centralized Alpha node update:\n\
-             1. Update the management server to version 4.0.63 or later.\n\
-             2. Update to version 9.8.7 or later.\n\
-             3. Update to version 10.4.2 or later.\n\
-             4. Do not skip steps or change their order.",
-        );
-        outline_chunk.document_label = "Alpha node transition guide".to_string();
-        outline_chunk.score = Some(25.0);
-
-        let mut command_chunk = evidence_chunk(
-            2,
-            Some("paragraph"),
-            "Alpha node update commands:\n\
-             1. Configure the package source.\n\
-             sudo su\n\
-             sample-transfer https://example.invalid/sample/update-main -o sample-update-token\n\
-             sample-prepare +x sample-update-token\n\
-             sample-update-token",
-        );
-        command_chunk.document_label = "Alpha node transition guide".to_string();
-        command_chunk.score = Some(19.0);
-
-        let answer = build_update_procedure_sequence_answer(
-            "how to update Alpha node?",
-            &configure_update_focus_ir("Alpha node"),
-            &[outline_chunk, command_chunk],
-        )
-        .expect("actionable command runbook should outrank a version-only transition outline");
-
-        assert!(answer.contains("/sample/update-main"), "{answer}");
-        assert!(answer.contains("sample-prepare +x sample-update-token"), "{answer}");
-        assert!(!answer.contains("Do not skip steps"), "{answer}");
-    }
-
-    #[test]
-    fn update_procedure_extract_caps_command_signal_scores() {
-        let query_ir = configure_update_focus_ir("Alpha node");
-        let focus_model = update_procedure_focus_model("how to update Alpha node?", &query_ir);
-        let block = (0..32)
-            .map(|index| UpdateProcedureLine {
-                text: format!("{index}. sudo alpha-tool update --target node"),
-                has_order_marker: true,
-                has_version: false,
-                has_command: true,
-            })
-            .collect::<Vec<_>>();
-
-        let extract = update_procedure_extract_from_block(0, &block, &focus_model)
-            .expect("command block should extract");
-
-        assert_eq!(extract.command_count, UPDATE_PROCEDURE_COMMAND_SIGNAL_SCORE_CAP);
-        assert_eq!(extract.action_command_score, UPDATE_PROCEDURE_COMMAND_SIGNAL_SCORE_CAP);
-    }
-
-    #[test]
-    fn update_procedure_sequence_answer_projects_focus_aligned_tail_from_mixed_block() {
-        let mut mixed_chunk = evidence_chunk(
-            1,
-            Some("paragraph"),
-            "Alpha control plane update from environment 1 to environment 2:\n\
-             2. Disable third-party sources.\n\
-             3. Refresh prerequisites: sample-runner --refresh sample-runner --apply\n\
-             4. Update platform dependencies: sample-runner --migrate\n\
-             5. Run platform update: sample-platform-update\n\
-             8. Re-enable subject bundle sources and refresh: sample-runner --refresh\n\
-             9. Upgrade subject bundles: sample-runner --apply\n\
-             10. Reconfigure the API package: sudo sample-configure alpha-rest\n\
-             11. Restart the API service: sudo service alpha-rest restart",
-        );
-        mixed_chunk.document_label = "Alpha control plane update runbook".to_string();
-
-        let answer = build_update_procedure_sequence_answer(
-            "how to update Alpha control plane version?",
-            &configure_update_focus_ir("Alpha control plane"),
-            &[mixed_chunk],
-        )
-        .expect("focus-aligned projection should be selected");
-
-        assert!(answer.contains("`sample-runner --apply`"), "{answer}");
-        assert!(answer.contains("`sudo sample-configure alpha-rest`"), "{answer}");
-        assert!(answer.contains("`sudo service alpha-rest restart`"), "{answer}");
-        assert!(!answer.contains("sample-platform-update"), "{answer}");
-    }
-
-    #[test]
-    fn update_procedure_sequence_answer_prefers_dense_update_chunk_over_preparation_text() {
-        let mut prep_chunk = evidence_chunk(
-            1,
-            Some("paragraph"),
-            "Preparation notes\n\
-             To install or update with explicit package versions:\n\
-             1. Download packages_version.conf. sudo su sample-transfer https://packages.example.invalid/alpha/packages_version.conf -o /tmp/packages_version.conf\n\
-             2. List installed packages with sample-list --all | grep alpha.\n\
-             3. Write versions to /tmp/packages_version.conf.",
-        );
-        prep_chunk.document_label = "Install and update Alpha node".to_string();
-        prep_chunk.score = Some(20.0);
-
-        let mut update_chunk = evidence_chunk(
-            2,
-            Some("paragraph"),
-            "Alpha node update\n\
-             - For a single-node layout, run: sudo su sample-transfer https://packages.example.invalid/alpha/update.sh -o /tmp/sample-runner.sh sample-prepare +x /tmp/sample-runner.sh /tmp/sample-runner.sh\n\
-             - For a split-node layout, run: sudo su sample-transfer https://packages.example.invalid/alpha/update_secondary.sh -o /tmp/sample-runner.sh sample-prepare +x /tmp/sample-runner.sh /tmp/sample-runner.sh\n\
-             The scripts download the update and refresh required dependencies.",
-        );
-        update_chunk.document_label = "Install and update Alpha node".to_string();
-        update_chunk.score = Some(19.0);
-
-        let mut query_ir = configure_update_focus_ir("Alpha node");
-        query_ir.retrieval_query =
-            Some("how to update Alpha node? Alpha node update procedure".to_string());
-
-        let answer = build_update_procedure_sequence_answer(
-            "how to update Alpha node?",
-            &query_ir,
-            &[prep_chunk, update_chunk],
-        )
-        .expect("dense update commands should outrank package prep");
-
-        assert!(answer.contains("update_secondary.sh"), "{answer}");
-        assert!(answer.contains("sample-prepare +x /tmp/sample-runner.sh"), "{answer}");
-        assert!(!answer.contains("packages_version.conf"), "{answer}");
-        assert!(!answer.contains("https://packages. example"), "{answer}");
-    }
-
-    #[test]
-    fn update_procedure_sequence_answer_matches_latin_script_artifact_from_retrieval_query() {
-        let mut update_chunk = evidence_chunk(
-            1,
-            Some("paragraph"),
-            "Support node update\n\
-             - For a single-node layout, run: sudo su sample-transfer https://packages.example.invalid/alpha/update.sh -o /tmp/sample-runner.sh sample-prepare +x /tmp/sample-runner.sh /tmp/sample-runner.sh\n\
-             - For a split-node layout, run: sudo su sample-transfer https://packages.example.invalid/alpha/update_secondary.sh -o /tmp/sample-runner.sh sample-prepare +x /tmp/sample-runner.sh /tmp/sample-runner.sh",
-        );
-        update_chunk.document_label = "Install and update".to_string();
-
-        let mut query_ir = configure_update_focus_ir("support node");
-        query_ir.retrieval_query = Some("how to update support node?".to_string());
-
-        let answer = build_update_procedure_sequence_answer(
-            "how to update support node?",
-            &query_ir,
-            &[update_chunk],
-        )
-        .expect("latin-script command artifact family should match the retrieval action");
-
-        assert!(answer.contains("update.sh"), "{answer}");
-        assert!(answer.contains("update_secondary.sh"), "{answer}");
-        assert!(answer.contains("sample-prepare +x /tmp/sample-runner.sh"), "{answer}");
-    }
-
-    #[test]
-    fn update_procedure_sequence_answer_keeps_heading_only_action_without_setup_signature() {
-        let mut update_chunk = evidence_chunk(
-            1,
-            Some("paragraph"),
-            "Sample Target update:\n\
-             1. Stop Alpha subject workers.\n\
-             2. Copy alpha-node-2.0.0 into /opt/alpha/bin.\n\
-             3. Start Alpha subject workers.",
-        );
-        update_chunk.document_label = "Sample Target runbook".to_string();
-
-        let answer = build_update_procedure_sequence_answer(
-            "how to update Sample Target?",
-            &configure_update_focus_ir("Sample Target"),
-            &[update_chunk],
-        )
-        .expect("heading-only update action should remain valid without setup-script signature");
-
-        assert!(answer.contains("Stop Alpha subject workers"));
-        assert!(answer.contains("alpha-node-2.0.0"));
-        assert!(answer.contains("Start Alpha subject workers"));
-    }
-
-    #[test]
-    fn update_procedure_sequence_answer_accepts_title_action_with_structural_body() {
-        let mut product_chunk = evidence_chunk(
-            1,
-            Some("paragraph"),
-            "Maintenance checklist:\n\
-             1. Stop Alpha service workers.\n\
-             2. Install Alpha service package version 2.0.0.\n\
-             3. Start Alpha service workers.",
-        );
-        product_chunk.document_label = "Alpha service refresh runbook".to_string();
-
-        let answer = build_update_procedure_sequence_answer(
-            "how to refresh Alpha service?",
-            &configure_update_focus_ir("Alpha service"),
-            &[product_chunk],
-        )
-        .expect("title-aligned action should validate the structural runbook body");
-
-        assert!(answer.contains("Alpha service refresh runbook"));
-        assert!(answer.contains("Stop Alpha service workers"));
-        assert!(answer.contains("2.0.0"));
-        assert!(answer.contains("Start Alpha service workers"));
-    }
-
-    #[test]
-    fn update_procedure_sequence_answer_accepts_command_only_action_match() {
-        let mut product_chunk = evidence_chunk(
-            1,
-            Some("paragraph"),
-            "Sample Target maintenance:\n\
-             sudo su\n\
-             sample-transfer https://example.invalid/sample/update-main -o sample-update-token\n\
-             sample-prepare +x sample-update-token\n\
-             sample-update-token",
-        );
-        product_chunk.document_label = "Sample Target maintenance runbook".to_string();
-
-        let answer = build_update_procedure_sequence_answer(
-            "how to update Sample Target?",
-            &configure_update_focus_ir("Sample Target"),
-            &[product_chunk],
-        )
-        .expect("command-only update action should still be accepted");
-
-        assert!(answer.contains("sample-update-token"));
-        assert!(answer.contains("sample-prepare +x"));
-    }
-
-    #[test]
-    fn update_procedure_sequence_answer_prefers_full_source_over_truncated_excerpt_commands() {
-        let mut product_chunk = evidence_chunk(
-            1,
-            Some("paragraph"),
-            "Sample Target update:\n\
-             sudo su\n\
-             sample-transfer https://updates. example",
-        );
-        product_chunk.document_label = "Sample Target update".to_string();
-        product_chunk.source_text = concat!(
-            "Sample Target update:\n",
-            "- For the single-node layout run: sudo su sample-transfer ",
-            "https://updates.example.invalid/alpha/update-node.sh -o sample-update-token ",
-            "sample-prepare +x sample-update-token sample-update-token"
-        )
-        .to_string();
-
-        let answer = build_update_procedure_sequence_answer(
-            "how to update Sample Target?",
-            &configure_update_focus_ir("Sample Target"),
-            &[product_chunk],
-        )
-        .expect("update procedure answer should use full command source");
-
-        assert!(answer.contains("updates.example.invalid/alpha/update-node.sh"), "{answer}");
-        assert!(answer.contains("/tmp/sample-runner.sh") || answer.contains("sample-update-token"));
-        assert!(!answer.contains("https://updates. example"), "{answer}");
-    }
-
-    #[test]
-    fn dense_procedure_line_splits_privilege_prefix_from_fetch_command() {
-        assert_eq!(
-            split_dense_procedure_line(
-                "Sample Target lifecycle: sudo su sample-transfer https://example.invalid/sample/update-main -o sample-update-token"
-            ),
-            vec![
-                "Sample Target lifecycle:",
-                "sudo su",
-                "sample-transfer https://example.invalid/sample/update-main -o sample-update-token"
-            ]
-        );
-        assert_eq!(
-            split_dense_procedure_line(
-                "sudo susample-transfer https://example.invalid/sample/update-main -o sample-update-token"
-            ),
-            vec![
-                "sudo su",
-                "sample-transfer https://example.invalid/sample/update-main -o sample-update-token"
-            ]
-        );
-    }
-
-    #[test]
     fn dense_procedure_line_does_not_split_url_or_parent_relative_path() {
         assert_eq!(
             split_dense_procedure_line(
@@ -8900,916 +7355,30 @@ mod source_unit_answer_tests {
     }
 
     #[test]
-    fn update_procedure_sequence_answer_accepts_action_named_script() {
-        let mut product_chunk = evidence_chunk(
-            1,
-            Some("paragraph"),
-            "Sample Target lifecycle:\n\
-             sudo su\n\
-             sample-transfer https://packages.example.invalid/alpha/refresh.sh -o /tmp/refresh.sh\n\
-             sample-prepare +x /tmp/refresh.sh\n\
-             /tmp/refresh.sh",
-        );
-        product_chunk.document_label = "Sample Target lifecycle guide".to_string();
-
-        let answer = build_update_procedure_sequence_answer(
-            "how to refresh Sample Target?",
-            &configure_update_focus_ir("Sample Target"),
-            &[product_chunk],
-        )
-        .expect("action-named script should be accepted across question languages");
-
-        assert!(answer.contains("refresh.sh"), "{answer}");
-        assert!(answer.contains("sample-prepare +x"), "{answer}");
-        assert!(answer.contains("`/tmp/refresh.sh`"), "{answer}");
+    fn dense_procedure_line_preserves_ordered_command_arguments() {
+        for line in
+            ["1. alpha-admin prepare --target=/srv/alpha", "2. alpha-admin switch --version=2.0.0"]
+        {
+            assert_eq!(split_dense_procedure_line(line), vec![line]);
+        }
     }
 
     #[test]
-    fn update_procedure_sequence_answer_accepts_update_script_with_joined_privilege_prefix() {
-        let mut product_chunk = evidence_chunk(
-            1,
-            Some("paragraph"),
-            "Sample Target lifecycle:\n\
-             sudo su sample-transfer https://example.invalid/sample/update-main -o sample-update-token\n\
-             sample-prepare +x sample-update-token\n\
-             sample-update-token",
-        );
-        product_chunk.document_label = "Sample Target lifecycle guide".to_string();
-
-        let answer = build_update_procedure_sequence_answer(
-            "how to update Sample Target?",
-            &configure_update_focus_ir("Sample Target"),
-            &[product_chunk],
-        )
-        .expect("update-named script with privilege prefix should be accepted");
-
-        assert!(answer.contains("`sudo su`"), "{answer}");
-        assert!(
-            answer.contains(
-                "`sample-transfer https://example.invalid/sample/update-main -o sample-update-token`"
-            ),
-            "{answer}"
-        );
-        assert!(answer.contains("/sample/update-main"), "{answer}");
-        assert!(!answer.contains("susample-transfer"), "{answer}");
-        assert!(answer.contains("`sample-prepare +x sample-update-token`"), "{answer}");
-        assert!(answer.contains("`sample-update-token`"), "{answer}");
+    fn command_shape_does_not_depend_on_executable_spelling() {
+        for executable in ["alpha-tool", "beta_tool", "./gamma-tool"] {
+            assert!(line_has_command_signal(&format!(
+                "{executable} --mode=strict /work/update-token"
+            )));
+        }
     }
 
     #[test]
-    fn update_procedure_sequence_answer_accepts_update_script_with_joined_privilege_command_token()
-    {
-        let mut product_chunk = evidence_chunk(
-            1,
-            Some("paragraph"),
-            "Sample Target lifecycle:\n\
-             sudo susample-transfer https://example.invalid/sample/update-main -o sample-update-token\n\
-             sample-prepare +x sample-update-token\n\
-             sample-update-token",
-        );
-        product_chunk.document_label = "Sample Target lifecycle guide".to_string();
-
-        let answer = build_update_procedure_sequence_answer(
-            "how to update Sample Target?",
-            &configure_update_focus_ir("Sample Target"),
-            &[product_chunk],
-        )
-        .expect("joined su+fetch token should be repaired for update-named scripts");
-
-        assert!(answer.contains("`sudo su`"), "{answer}");
-        assert!(
-            answer.contains(
-                "`sample-transfer https://example.invalid/sample/update-main -o sample-update-token`"
-            ),
-            "{answer}"
-        );
-        assert!(!answer.contains("susample-transfer"), "{answer}");
-        assert!(answer.contains("`sample-prepare +x sample-update-token`"), "{answer}");
-        assert!(answer.contains("`sample-update-token`"), "{answer}");
-    }
-
-    #[test]
-    fn update_procedure_sequence_answer_accepts_unicode_action_prefix_match() {
-        let mut product_chunk = evidence_chunk(
-            1,
-            Some("paragraph"),
-            "Δέλτα Node δοκιμηενεργειας:\n\
-             1. Stop Delta workers.\n\
-             2. Install Delta package version 2.0.0.\n\
-             3. Restart Delta workers.",
-        );
-        product_chunk.document_label = "Δέλτα Node runbook".to_string();
-
-        let answer = build_update_procedure_sequence_answer(
-            "δοκιμηενεργεια Delta Node?",
-            &configure_update_focus_ir("Delta Node"),
-            &[product_chunk],
-        )
-        .expect("unicode action prefix should match across inflected tokens");
-
-        assert!(answer.contains("2.0.0"));
-    }
-
-    #[test]
-    fn update_procedure_sequence_answer_matches_subject_acronym_evidence() {
-        let mut distractor_chunk = evidence_chunk(
-            1,
-            Some("paragraph"),
-            "Host migration:\n\
-             1. Update the environment from baseline 1 to baseline 2.\n\
-             2. Run sample-platform-release.",
-        );
-        distractor_chunk.document_label = "Environment host migration".to_string();
-        let mut product_chunk = evidence_chunk(
-            2,
-            Some("paragraph"),
-            "AS update:\n\
-             1. Stop AS workers.\n\
-             2. Install AS package version 2.0.0.\n\
-             3. Restart AS workers.",
-        );
-        product_chunk.document_label = "AS update guide".to_string();
-
-        let answer = build_update_procedure_sequence_answer(
-            "how to update Alpha Service?",
-            &configure_update_focus_ir("Alpha Service"),
-            &[distractor_chunk, product_chunk],
-        )
-        .expect("acronym-focused update procedure answer");
-
-        assert!(answer.contains("AS update guide"));
-        assert!(answer.contains("Stop AS workers"));
-        assert!(answer.contains("2.0.0"));
-        assert!(!answer.contains("sample-platform-release"));
-    }
-
-    #[test]
-    fn update_procedure_sequence_answer_splits_command_from_following_prose() {
-        let mut product_chunk = evidence_chunk(
-            1,
-            Some("paragraph"),
-            "Alpha control plane update:\n\
-             1. Upgrade Alpha control plane to version 2.0: sudo alpha-update-runner If AlphaDB version differs: touch /etc/alpha.pref Add file content: Package: alpha* Pin: version <Version> Pin-Priority: 1001 Restart database: service alpha restart",
-        );
-        product_chunk.document_label = "Alpha control plane update guide".to_string();
-
-        let answer = build_update_procedure_sequence_answer(
-            "how to update Alpha control plane?",
-            &configure_update_focus_ir("Alpha control plane"),
-            &[product_chunk],
-        )
-        .expect("dense command/prose procedure answer");
-
-        assert!(answer.contains("`sudo alpha-update-runner`"));
-        assert!(answer.contains("`touch /etc/alpha.pref`"));
-        assert!(answer.contains("`service alpha restart`"));
-        assert!(!answer.contains("`sudo alpha-update-runner If"));
-    }
-
-    #[test]
-    fn update_procedure_sequence_answer_splits_service_after_structural_delimiter() {
-        let mut product_chunk = evidence_chunk(
-            1,
-            Some("paragraph"),
-            "Alpha node update:\n\
-             1. Apply Alpha node package version 2.0.0.\n\
-             2. Restart daemon: service alpha-node restart.",
-        );
-        product_chunk.document_label = "Alpha node update guide".to_string();
-
-        let answer = build_update_procedure_sequence_answer(
-            "how to update Alpha node?",
-            &configure_update_focus_ir("Alpha node"),
-            &[product_chunk],
-        )
-        .expect("service command after structural delimiter should be extracted");
-
-        assert!(answer.contains("`service alpha-node restart`"), "{answer}");
-    }
-
-    #[test]
-    fn update_procedure_sequence_answer_keeps_directory_change_commands() {
-        let mut product_chunk = evidence_chunk(
-            1,
-            Some("paragraph"),
-            "Sample Target versioned update:\n\
-             1. Remove /etc/pkg/sources.list.\n\
-             2. Install package alpha-upgrade command: pkgctl install alpha-upgrade\n\
-             3. Run update script from /opt/alpha/bin: cd /opt/alpha/bin ./upgrade_alpha.sh\n\
-             4. Wait until the script finishes.",
-        );
-        product_chunk.document_label = "Alpha subject versioned update guide".to_string();
-
-        let answer = build_update_procedure_sequence_answer(
-            "how to update Sample Target?",
-            &configure_update_focus_ir("Sample Target"),
-            &[product_chunk],
-        )
-        .expect("versioned update procedure answer with cd command");
-
-        assert!(answer.contains("alpha-upgrade"));
-        assert!(answer.contains("`cd /opt/alpha/bin`"));
-        assert!(answer.contains("`./upgrade_alpha.sh`"), "{answer}");
-    }
-
-    #[test]
-    fn update_procedure_sequence_answer_prefers_richer_runbook_over_short_package_fragment() {
-        let mut short_fragment = evidence_chunk(
-            1,
-            Some("paragraph"),
-            "Sample Target package refresh:\n\
-             1. Update package cache with sudo pkgctl refresh.\n\
-             2. Upgrade installed packages with sudo pkgctl upgrade.",
-        );
-        short_fragment.document_label = "Sample Target quick maintenance note".to_string();
-        let mut full_runbook = evidence_chunk(
-            2,
-            Some("paragraph"),
-            "Sample Target versioned update procedure:\n\
-             1. Create a backup of the Alpha database.\n\
-             2. Disable third-party package repositories in /etc/pkg/sources.list.d.\n\
-             3. Run sudo pkgctl refresh.\n\
-             4. Run sudo pkgctl upgrade.\n\
-             5. Run sudo pkgctl full-upgrade.\n\
-             6. Install the release manager with sudo pkgctl install alpha-release-manager.\n\
-             7. Run sudo alpha-release-runner.\n\
-             8. Re-enable the package repositories.\n\
-             9. Run sudo sample-configure alpha-rest.\n\
-             10. Restart the Alpha service with sudo service alpha-server restart.",
-        );
-        full_runbook.document_label = "Sample Target versioned update guide".to_string();
-
-        let answer = build_update_procedure_sequence_answer(
-            "how to update Sample Target?",
-            &configure_update_focus_ir("Sample Target"),
-            &[short_fragment, full_runbook],
-        )
-        .expect("full update procedure answer");
-
-        assert!(answer.contains("Create a backup"), "{answer}");
-        assert!(answer.contains("`sudo alpha-release-runner`"), "{answer}");
-        assert!(answer.contains("`sudo sample-configure alpha-rest`"), "{answer}");
-        assert!(answer.contains("`sudo service alpha-server restart`"), "{answer}");
-    }
-
-    #[test]
-    fn update_procedure_sequence_answer_prefers_command_runbook_over_version_note() {
-        let mut version_note = evidence_chunk(
-            1,
-            Some("paragraph"),
-            "Alpha orchestrator integration change:\n\
-             1. Disable the legacy plugin in /opt/alpha/max.ini.\n\
-             2. Update Alpha orchestrator to version 9.8.7.\n\
-             3. Update Alpha subject artifact to version 8.7.6.",
-        );
-        version_note.document_label = "Alpha orchestrator integration version note".to_string();
-        let mut command_runbook = evidence_chunk(
-            2,
-            Some("paragraph"),
-            "Alpha orchestrator update runbook:\n\
-             1. Install the update manager with sudo pkgctl install alpha-update-manager.\n\
-             2. Run sudo alpha-update-runner.\n\
-             3. Reconfigure Alpha REST with sudo sample-configure alpha-rest.\n\
-             4. Restart Alpha service with sudo service alpha-server restart.",
-        );
-        command_runbook.document_label = "Alpha orchestrator update guide".to_string();
-
-        let answer = build_update_procedure_sequence_answer(
-            "how to update Alpha orchestrator version?",
-            &configure_update_focus_ir("Alpha orchestrator"),
-            &[version_note, command_runbook],
-        )
-        .expect("command-bearing runbook should win over a prose-only version note");
-
-        assert!(answer.contains("Alpha orchestrator update guide"), "{answer}");
-        assert!(answer.contains("`sudo alpha-update-runner`"), "{answer}");
-        assert!(answer.contains("`sudo sample-configure alpha-rest`"), "{answer}");
-        assert!(!answer.contains("legacy plugin"), "{answer}");
-        assert!(!answer.contains("8.7.6"), "{answer}");
-    }
-
-    #[test]
-    fn update_procedure_sequence_answer_prefers_rich_runbook_over_short_exact_note() {
-        let mut short_exact_note = evidence_chunk(
-            1,
-            Some("paragraph"),
-            "Sample Target quick package refresh:\n\
-             1. Refresh bundle metadata:\n\
-             sample-runner --refresh.",
-        );
-        short_exact_note.document_label = "Sample Target quick update note".to_string();
-        let mut rich_runbook = evidence_chunk(
-            2,
-            Some("paragraph"),
-            "Sample Target update runbook:\n\
-             1. Create a database backup.\n\
-             2. Disable third-party package repositories.\n\
-             3. Refresh subject references:\n\
-             sample-runner --refresh\n\
-             4. Update installed subject bundles:\n\
-             sample-runner --apply\n\
-             5. Reconfigure the REST package:\n\
-             sudo sample-configure alpha-rest\n\
-             6. Restart the REST service:\n\
-             sudo service alpha-rest restart.",
-        );
-        rich_runbook.document_label = "Alpha platform update guide".to_string();
-        let mut query_ir = configure_update_focus_ir("Sample Target");
-        query_ir.target_types =
-            vec!["artifact".to_string(), "procedure".to_string(), "version".to_string()];
-
-        let answer = build_update_procedure_sequence_answer(
-            "how to update Sample Target version?",
-            &query_ir,
-            &[short_exact_note, rich_runbook],
-        )
-        .expect("rich package-maintenance runbook should win");
-
-        assert!(answer.contains("Alpha platform update guide"), "{answer}");
-        assert!(answer.contains("Create a database backup"), "{answer}");
-        assert!(answer.contains("`sample-runner --apply`"), "{answer}");
-        assert!(answer.contains("`sudo sample-configure alpha-rest`"), "{answer}");
-        assert!(answer.contains("`sudo service alpha-rest restart`"), "{answer}");
-        assert!(!answer.contains("quick update note"), "{answer}");
-    }
-
-    #[test]
-    fn update_procedure_sequence_answer_prefers_acronym_runbook_script_over_neighbor_product_note()
-    {
-        let mut adjacent_product_note = evidence_chunk(
-            1,
-            Some("paragraph"),
-            "Alpha subject endpoint manual update:\n\
-             1. Install the endpoint artifact with pkgctl install alpha-pos.\n\
-             2. Run sample-control transition for the endpoint environment.",
-        );
-        adjacent_product_note.document_label = "Manual update".to_string();
-
-        let mut server_runbook = evidence_chunk(
-            2,
-            Some("paragraph"),
-            "Update AS\n\
-             If all components are installed on one AS node, update the Alpha server with commands:\n\
-             sudo su sample-transfer https://updates.example/static/as_env/update.sh -o /tmp/sample-runner.sh\n\
-             sample-prepare +x /tmp/sample-runner.sh\n\
-             /tmp/sample-runner.sh\n\
-             The scripts update required dependencies.",
-        );
-        server_runbook.document_label = "Install and update".to_string();
-
-        let answer = build_update_procedure_sequence_answer(
-            "how to update Alpha server?",
-            &configure_update_focus_ir("Alpha server"),
-            &[adjacent_product_note, server_runbook],
-        )
-        .expect("server runbook script answer");
-
-        assert!(answer.contains("Install and update"), "{answer}");
-        assert!(
-            answer.contains(
-                "`sample-transfer https://updates.example/static/as_env/update.sh -o /tmp/sample-runner.sh`"
-            ),
-            "{answer}"
-        );
-        assert!(answer.contains("`sample-prepare +x /tmp/sample-runner.sh`"), "{answer}");
-        assert!(answer.contains("`/tmp/sample-runner.sh`"), "{answer}");
-        assert!(!answer.contains("sample-control transition"), "{answer}");
-    }
-
-    #[test]
-    fn update_procedure_sequence_answer_prefers_target_transition_over_adjacent_transition() {
-        let mut platform_chunk = evidence_chunk(
-            1,
-            Some("paragraph"),
-            "Environment Variant platform migration for hosted Sample Target nodes:\n\
-             1. Install the release manager with sudo pkgctl install platform-release-helper.\n\
-             2. Run sudo platform-release-upgrade.\n\
-             3. Upgrade generic packages with sudo pkgctl upgrade.\n\
-             4. Restart the backing service with sudo service environment-beta restart.",
-        );
-        platform_chunk.document_label = "Environment Variant platform migration guide".to_string();
-        let mut product_chunk = evidence_chunk(
-            2,
-            Some("paragraph"),
-            "Alpha product transition runbook:\n\
-             1. Update AlphaControlCenter to version 9.8.7.6 or higher.\n\
-             2. Update subject licenses to version 5.\n\
-             3. Update subject artifact to version 9.8.7-3 or higher.\n\
-             4. Update subject artifact to version 10.4.2 or higher.\n\
-             Manual package update:\n\
-             1. Run pkgctl refresh.\n\
-             2. Install the new product package with pkgctl install alpha-pos.",
-        );
-        product_chunk.document_label = "Alpha product transition guide".to_string();
-
-        let answer = build_update_procedure_sequence_answer(
-            "how to update Sample Target version?",
-            &configure_update_focus_ir("Sample Target"),
-            &[platform_chunk, product_chunk],
-        )
-        .expect("target transition procedure answer");
-
-        assert!(answer.contains("Alpha product transition guide"), "{answer}");
-        assert!(answer.contains("AlphaControlCenter"), "{answer}");
-        assert!(answer.contains("10.4.2"), "{answer}");
-        assert!(answer.contains("pkgctl install alpha-pos"), "{answer}");
-        assert!(!answer.contains("platform-release-upgrade"), "{answer}");
-        assert!(!answer.contains("Environment Variant platform"), "{answer}");
-    }
-
-    #[test]
-    fn update_procedure_sequence_answer_prefers_focus_aligned_tail_inside_mixed_transition_doc() {
-        let mut mixed_chunk = evidence_chunk(
-            1,
-            Some("paragraph"),
-            "Alpha orchestrator update from platform 18.04 to 22.04:\n\
-             \n\
-             1. Update the host baseline to 20.04:\n\
-             sudo sample-platform-update\n\
-             \n\
-             2. Update base prerequisites:\n\
-             sample-runner --migrate\n\
-             \n\
-             3. Install the transition helper:\n\
-             sample-runner --install helper-unit\n\
-             \n\
-             4. Refresh subject references:\n\
-             sample-runner --refresh\n\
-             \n\
-             5. Update installed subject bundles:\n\
-             sample-runner --apply\n\
-             \n\
-             6. Reconfigure the product REST package:\n\
-             sudo sample-configure alpha-rest\n\
-             \n\
-             7. Restart the product service:\n\
-             sudo service alpha-rest restart",
-        );
-        mixed_chunk.document_label = "Alpha orchestrator update guide".to_string();
-
-        let answer = build_update_procedure_sequence_answer(
-            "how to update Alpha orchestrator version?",
-            &configure_update_focus_ir("Alpha orchestrator"),
-            &[mixed_chunk],
-        )
-        .expect("product maintenance commands should be extracted from a mixed transition guide");
-
-        assert!(answer.contains("Alpha orchestrator update guide"), "{answer}");
-        assert!(answer.contains("`sample-runner --apply`"), "{answer}");
-        assert!(answer.contains("`sudo sample-configure alpha-rest`"), "{answer}");
-        assert!(answer.contains("`sudo service alpha-rest restart`"), "{answer}");
-        assert!(!answer.contains("sample-platform-update"), "{answer}");
-        assert!(!answer.contains("host baseline"), "{answer}");
-        assert!(!answer.contains("base prerequisites"), "{answer}");
-    }
-
-    #[test]
-    fn update_procedure_sequence_answer_prefers_exact_target_label_over_neighbor_migration() {
-        let mut migration_chunk = evidence_chunk(
-            1,
-            Some("paragraph"),
-            "Environment transition transition for hosted Sample Subject nodes:\n\
-             1. Update the base environment with sample-platform-update.\n\
-             2. Upgrade base prerequisites with sample-runner --migrate.\n\
-             3. Install the transition helper with sample-runner --install helper-unit.\n\
-             4. Restart the environment service with sudo service environment-beta restart.",
-        );
-        migration_chunk.document_label = "Environment transition migration guide".to_string();
-        migration_chunk.score = Some(200.0);
-        let mut product_chunk = evidence_chunk(
-            2,
-            Some("paragraph"),
-            "Update Sample Subject 9.0 package:\n\
-             1. Refresh subject references with sample-runner --refresh.\n\
-             2. Upgrade installed subject bundles with sample-runner --apply.\n\
-             3. Reconfigure the product REST package with sudo sample-configure alpha-rest.\n\
-             4. Restart the product service with sudo service alpha-rest restart.",
-        );
-        product_chunk.document_label = "Sample Subject 9.0 update guide".to_string();
-        product_chunk.score = Some(20.0);
-        let mut query_ir = configure_update_focus_ir("Sample Subject 9.0");
-        query_ir.target_types =
-            vec!["artifact".to_string(), "procedure".to_string(), "version".to_string()];
-
-        let answer = build_update_procedure_sequence_answer(
-            "how to update Sample Subject 9.0 version?",
-            &query_ir,
-            &[migration_chunk, product_chunk],
-        )
-        .expect("exact target label should select product maintenance procedure");
-
-        assert!(answer.contains("Sample Subject 9.0 update guide"), "{answer}");
-        assert!(answer.contains("`sample-runner --refresh`"), "{answer}");
-        assert!(answer.contains("`sample-runner --apply`"), "{answer}");
-        assert!(answer.contains("`sudo sample-configure alpha-rest`"), "{answer}");
-        assert!(answer.contains("`sudo service alpha-rest restart`"), "{answer}");
-        assert!(!answer.contains("sample-platform-update"), "{answer}");
-    }
-
-    #[test]
-    fn update_procedure_sequence_answer_prefers_exact_target_source_over_generic_manual() {
-        let mut generic_manual = evidence_chunk(
-            1,
-            Some("paragraph"),
-            "Manual update runbook:\n\
-             1. Run sudo generic-update --prepare.\n\
-             2. Run sudo generic-update --apply.\n\
-             3. Run sudo generic-update --restart.\n\
-             4. Run sudo generic-update --validate.",
-        );
-        generic_manual.document_label = "Neighboring manual update runbook".to_string();
-        generic_manual.score = Some(200.0);
-        let mut target_runbook = evidence_chunk(
-            2,
-            Some("paragraph"),
-            "Sample Target update procedure:\n\
-             1. Open the release workspace.\n\
-             2. Replace the control component package.\n\
-             3. Validate the reported version.",
-        );
-        target_runbook.document_label = "Generic update guide".to_string();
-        target_runbook.score = Some(20.0);
-
-        let answer = build_update_procedure_sequence_answer(
-            "how to update Sample Target version?",
-            &configure_update_focus_ir("Sample Target"),
-            &[generic_manual, target_runbook],
-        )
-        .expect("exact target source should select target runbook");
-
-        assert!(answer.contains("Generic update guide"), "{answer}");
-        assert!(answer.contains("Replace the control component package"), "{answer}");
-        assert!(answer.contains("Validate the reported version"), "{answer}");
-        assert!(!answer.contains("generic-update"), "{answer}");
-    }
-
-    #[test]
-    fn update_procedure_sequence_answer_prefers_exact_target_label_over_generic_upgrade_script() {
-        let mut generic_upgrade = evidence_chunk(
-            1,
-            Some("paragraph"),
-            "Target Server hosted node major upgrade:\n\
-             1. Run sudo generic-major-upgrade --prepare.\n\
-             2. Run sudo generic-major-upgrade --migrate.\n\
-             3. Run sudo generic-major-upgrade --restart.\n\
-             4. Run sudo generic-major-upgrade --verify.",
-        );
-        generic_upgrade.document_label = "Target Server major upgrade runbook".to_string();
-        generic_upgrade.score = Some(200.0);
-        let mut target_runbook = evidence_chunk(
-            2,
-            Some("paragraph"),
-            "Target Server update procedure:\n\
-             1. Stop dependent jobs.\n\
-             2. Replace the Target Server package.\n\
-             3. Validate the reported service version.",
-        );
-        target_runbook.document_label = "Target Server update guide".to_string();
-        target_runbook.score = Some(20.0);
-
-        let answer = build_update_procedure_sequence_answer(
-            "how to update Target Server?",
-            &configure_update_focus_ir("Target Server"),
-            &[generic_upgrade, target_runbook],
-        )
-        .expect("exact target label should select target runbook");
-
-        assert!(answer.contains("Target Server update guide"), "{answer}");
-        assert!(answer.contains("Replace the Target Server package"), "{answer}");
-        assert!(!answer.contains("generic-major-upgrade"), "{answer}");
-    }
-
-    #[test]
-    fn update_procedure_sequence_answer_prefers_focused_target_title_over_command_heavy_neighbor() {
-        let mut generic_script = evidence_chunk(
-            1,
-            Some("paragraph"),
-            "Target Server update script:\n\
-             1. Run sudo generic-script --prepare.\n\
-             2. Run sudo generic-script --migrate.\n\
-             3. Run sudo generic-script --restart.\n\
-             4. Run sudo generic-script --verify.",
-        );
-        generic_script.document_label = "Neighboring lifecycle runbook".to_string();
-        generic_script.score = Some(200.0);
-        let mut target_runbook = evidence_chunk(
-            2,
-            Some("paragraph"),
-            "Target Server update procedure:\n\
-             1. Stop dependent jobs.\n\
-             2. Replace the Target Server package.\n\
-             3. Validate the reported service version.",
-        );
-        target_runbook.document_label = "Target Server update guide".to_string();
-        target_runbook.score = Some(20.0);
-
-        let answer = build_update_procedure_sequence_answer(
-            "how to update Target Server?",
-            &configure_update_focus_ir("Target Server"),
-            &[generic_script, target_runbook],
-        )
-        .expect("focused target title should select target runbook");
-
-        assert!(answer.contains("Target Server update guide"), "{answer}");
-        assert!(answer.contains("Replace the Target Server package"), "{answer}");
-        assert!(!answer.contains("generic-script"), "{answer}");
-    }
-
-    #[test]
-    fn update_procedure_sequence_answer_matches_inflected_target_identity_over_generic_runbook() {
-        let mut generic_upgrade = evidence_chunk(
-            1,
-            Some("paragraph"),
-            "Major lifecycle upgrade:\n\
-             1. Run generic-runbook --prepare.\n\
-             2. Run generic-runbook --migrate.\n\
-             3. Run generic-runbook --restart.\n\
-             4. Run generic-runbook --verify.",
-        );
-        generic_upgrade.document_label = "Major lifecycle upgrade runbook".to_string();
-        generic_upgrade.score = Some(200.0);
-        let mut target_runbook = evidence_chunk(
-            2,
-            Some("paragraph"),
-            "Sample Processes update procedure:\n\
-             1. Open the release workspace.\n\
-             2. Replace the Sample Processes bundle.\n\
-             3. Validate the reported Sample Processes version.",
-        );
-        target_runbook.document_label = "Sample Processes update guide".to_string();
-        target_runbook.score = Some(20.0);
-
-        let answer = build_update_procedure_sequence_answer(
-            "how to update Sample Process version?",
-            &configure_update_focus_ir("Sample Process"),
-            &[generic_upgrade, target_runbook],
-        )
-        .expect("inflected target identity should select target runbook");
-
-        assert!(answer.contains("Sample Processes update guide"), "{answer}");
-        assert!(answer.contains("Replace the Sample Processes bundle"), "{answer}");
-        assert!(!answer.contains("generic-runbook"), "{answer}");
-    }
-
-    #[test]
-    fn update_procedure_sequence_answer_uses_raw_question_identity_without_ir_subject() {
-        let mut generic_upgrade = evidence_chunk(
-            1,
-            Some("paragraph"),
-            "Manual update runbook:\n\
-             1. Run generic-runbook --prepare.\n\
-             2. Run generic-runbook --migrate.\n\
-             3. Run generic-runbook --restart.\n\
-             4. Run generic-runbook --verify.",
-        );
-        generic_upgrade.document_label = "Manual update checklist".to_string();
-        generic_upgrade.score = Some(200.0);
-        let mut target_runbook = evidence_chunk(
-            2,
-            Some("paragraph"),
-            "Sample Process update procedure:\n\
-             1. Open the release workspace.\n\
-             2. Replace the Sample Process bundle.\n\
-             3. Validate the reported Sample Process version.",
-        );
-        target_runbook.document_label = "Sample Process update guide".to_string();
-        target_runbook.score = Some(20.0);
-        let mut query_ir = configure_update_focus_ir("unfocused");
-        query_ir.target_entities.clear();
-        query_ir.document_focus = None;
-        query_ir.retrieval_query = Some("how to update Sample Process version?".to_string());
-
-        let answer = build_update_procedure_sequence_answer(
-            "how to update Sample Process version?",
-            &query_ir,
-            &[generic_upgrade, target_runbook],
-        )
-        .expect("raw question identity should select the target runbook");
-
-        assert!(answer.contains("Sample Process update guide"), "{answer}");
-        assert!(answer.contains("Replace the Sample Process bundle"), "{answer}");
-        assert!(!answer.contains("generic-runbook"), "{answer}");
-    }
-
-    #[test]
-    fn update_procedure_sequence_answer_accepts_empty_ir_with_raw_command_runbook() {
-        let mut generic_upgrade = evidence_chunk(
-            1,
-            Some("paragraph"),
-            "Manual update runbook:\n\
-             1. Run generic-runbook --prepare.\n\
-             2. Run generic-runbook --migrate.\n\
-             3. Run generic-runbook --restart.",
-        );
-        generic_upgrade.document_label = "Manual update checklist".to_string();
-        generic_upgrade.score = Some(200.0);
-        let mut target_runbook = evidence_chunk(
-            2,
-            Some("paragraph"),
-            "support node update procedure:\n\
-             1. Fetch the support node update bundle.\n\
-             2. Run /tmp/support-node-update.sh.\n\
-             3. Restart the support node service.",
-        );
-        target_runbook.document_label = "Maintenance instructions".to_string();
-        target_runbook.score = Some(20.0);
-        let mut query_ir = configure_how_focus_ir("ignored");
-        query_ir.target_types.clear();
-        query_ir.target_entities.clear();
-        query_ir.document_focus = None;
-        query_ir.retrieval_query = None;
-        query_ir.confidence = 0.2;
-
-        let answer = build_update_procedure_sequence_answer(
-            "how to update support node?",
-            &query_ir,
-            &[generic_upgrade, target_runbook],
-        )
-        .expect("empty IR should still allow a structurally grounded raw runbook answer");
-
-        assert!(answer.contains("Maintenance instructions"), "{answer}");
-        assert!(answer.contains("support-node-update.sh"), "{answer}");
-        assert!(answer.contains("Restart the support node service"), "{answer}");
-        assert!(!answer.contains("generic-runbook"), "{answer}");
-    }
-
-    #[test]
-    fn update_procedure_sequence_answer_keeps_action_bound_setup_signature_script() {
-        let mut generic_upgrade = evidence_chunk(
-            1,
-            Some("paragraph"),
-            "Manual update runbook:\n\
-             1. Run generic-runbook --prepare.\n\
-             2. Run generic-runbook --migrate.\n\
-             3. Run generic-runbook --restart.\n\
-             4. Run generic-runbook --verify.",
-        );
-        generic_upgrade.document_label = "Manual update checklist".to_string();
-        generic_upgrade.score = Some(200.0);
-        let mut target_runbook = evidence_chunk(
-            2,
-            Some("paragraph"),
-            "Install and update Sample Process agent\n\
-             1. Download the maintenance artifact.\n\
-             sample-transfer https://example.invalid/sample/install_agent.bin -o /tmp/install_agent.bin\n\
-             2. sample-prepare +x /tmp/install_agent.bin\n\
-             3. /tmp/install_agent.bin\n\
-             4. Restart Sample Process workers.",
-        );
-        target_runbook.document_label = "Sample Process install and update".to_string();
-        target_runbook.score = Some(20.0);
-
-        let answer = build_update_procedure_sequence_answer(
-            "how to update Sample Process?",
-            &configure_update_focus_ir("Sample Process"),
-            &[generic_upgrade, target_runbook],
-        )
-        .expect("action-bound setup signature should remain eligible");
-
-        assert!(answer.contains("Sample Process install and update"), "{answer}");
-        assert!(answer.contains("install_agent.bin"), "{answer}");
-        assert!(!answer.contains("generic-runbook"), "{answer}");
-    }
-
-    #[test]
-    fn update_procedure_sequence_answer_uses_literal_component_identity() {
-        let mut generic_manual = evidence_chunk(
-            1,
-            Some("paragraph"),
-            "Target Server manual package update:\n\
-             1. Run sudo generic-package --install.\n\
-             2. Run sudo generic-package --configure.\n\
-             3. Run sudo generic-package --restart.\n\
-             4. Run sudo generic-package --verify.",
-        );
-        generic_manual.document_label = "Manual package install guide".to_string();
-        generic_manual.score = Some(200.0);
-        let mut component_runbook = evidence_chunk(
-            2,
-            Some("paragraph"),
-            "Control Component version update:\n\
-             1. Open the component release panel.\n\
-             2. Replace Control Component with the requested version.\n\
-             3. Validate the Control Component version report.",
-        );
-        component_runbook.document_label = "Control Component version guide".to_string();
-        component_runbook.score = Some(20.0);
-        let mut query_ir = configure_update_focus_ir("Target Server");
-        query_ir.literal_constraints = vec![crate::domains::query_ir::LiteralSpan {
-            text: "Control Component".to_string(),
-            kind: crate::domains::query_ir::LiteralKind::Other,
-        }];
-
-        let answer = build_update_procedure_sequence_answer(
-            "how to update Control Component version?",
-            &query_ir,
-            &[generic_manual, component_runbook],
-        )
-        .expect("literal component identity should select component runbook");
-
-        assert!(answer.contains("Control Component version guide"), "{answer}");
-        assert!(answer.contains("Replace Control Component"), "{answer}");
-        assert!(!answer.contains("generic-package"), "{answer}");
-    }
-
-    #[test]
-    fn update_procedure_focus_model_ignores_scoped_previous_question_terms() {
-        let query_ir = configure_update_focus_ir("Alternate Target");
-
-        let bare =
-            update_procedure_focus_model("how to update Alternate Target version?", &query_ir);
-        let scoped = update_procedure_focus_model(
-            "scope: how to update Sample Subject\nquestion: how to update Alternate Target version?",
-            &query_ir,
-        );
-
-        assert_eq!(scoped.query_terms, bare.query_terms);
-        assert_eq!(scoped.procedure_terms, bare.procedure_terms);
-        assert_eq!(scoped.subject_terms, bare.subject_terms);
-        assert!(!scoped.query_terms.contains("alpha"));
-        assert!(!scoped.query_terms.contains("suite"));
-    }
-
-    #[test]
-    fn update_procedure_sequence_answer_accepts_procedure_document_ir() {
-        let mut query_ir = configure_how_focus_ir("Sample Target");
-        query_ir.target_types = vec!["procedure".to_string(), "document".to_string()];
-
-        let mut runbook_chunk = evidence_chunk(
-            1,
-            Some("paragraph"),
-            "Sample Target versioned update procedure:\n\
-             1. Back up the Alpha database.\n\
-             2. Run sample-runner --refresh.\n\
-             3. Install the upgrade package with sample-install alpha-upgrade.\n\
-             4. Run sudo service alpha-server restart.",
-        );
-        runbook_chunk.document_label = "Sample Target update runbook".to_string();
-
-        let answer = build_update_procedure_sequence_answer(
-            "how to update Sample Target?",
-            &query_ir,
-            &[runbook_chunk],
-        )
-        .expect("procedure/document IR should still allow grounded runbook extraction");
-
-        assert!(answer.contains("Sample Target update runbook"), "{answer}");
-        assert!(answer.contains("`sample-runner --refresh`"), "{answer}");
-        assert!(answer.contains("`sample-install alpha-upgrade`"), "{answer}");
-        assert!(answer.contains("`sudo service alpha-server restart`"), "{answer}");
-    }
-
-    #[test]
-    fn update_procedure_sequence_answer_rejects_generic_concept_runbook_ir() {
-        let mut query_ir = configure_how_focus_ir("Sample Target");
-        query_ir.target_types =
-            vec!["procedure".to_string(), "document".to_string(), "concept".to_string()];
-
-        let mut runbook_chunk = evidence_chunk(
-            1,
-            Some("paragraph"),
-            "Sample Target versioned update procedure:\n\
-             1. Back up the Alpha database.\n\
-             2. Run sample-runner --refresh.\n\
-             3. Install the upgrade package with sample-install alpha-upgrade.\n\
-             4. Run sudo service alpha-server restart.",
-        );
-        runbook_chunk.document_label = "Sample Target update runbook".to_string();
-
-        assert!(
-            build_update_procedure_sequence_answer(
-                "how to configure Sample Target?",
-                &query_ir,
-                &[runbook_chunk],
-            )
-            .is_none()
-        );
-    }
-
-    #[test]
-    fn update_procedure_sequence_answer_skips_setup_configuration_ir() {
-        let mut query_ir = configure_how_focus_ir("Environment Variant setup");
-        query_ir.target_types =
-            vec!["procedure".to_string(), "configuration_file".to_string(), "package".to_string()];
-
-        let mut setup_chunk = evidence_chunk(
-            1,
-            Some("paragraph"),
-            "Environment Variant configuration:\n\
-             sample-install beta-connector\n\
-             sample-configure beta-connector\n\
-             Settings are defined in /opt/beta/connector.conf.",
-        );
-        setup_chunk.document_label = "Environment Variant setup guide".to_string();
-
-        assert!(
-            build_update_procedure_sequence_answer(
-                "how to configure Environment Variant?",
-                &query_ir,
-                &[setup_chunk],
-            )
-            .is_none()
-        );
+    fn command_signal_rejects_configuration_sections_and_hyphenated_sentences() {
+        assert!(!line_has_command_signal("[Sample2]"));
+        assert!(!line_has_command_signal("QR-code is not performed automatically."));
+        assert!(line_has_command_signal("sample-runner --configure connector"));
+        assert!(line_has_command_signal("SampleRunner --configure connector"));
+        assert!(line_has_command_signal("工具 --configure connector"));
     }
 
     #[test]
@@ -9861,13 +7430,13 @@ mod source_unit_answer_tests {
     #[test]
     fn setup_configuration_anchor_answer_accepts_procedure_artifact_ir_with_config_evidence() {
         let mut query_ir = configure_how_focus_ir("Sample Connector");
-        query_ir.target_types = vec!["artifact".to_string(), "procedure".to_string()];
+        query_ir.target_types = vec![QueryTargetKind::Artifact, QueryTargetKind::Procedure];
 
         let mut chunk = evidence_chunk(
             1,
             Some("paragraph"),
             "Sample Connector configuration\n\
-             sample-configure sample-connector\n\
+             sample-configure --target=sample-connector\n\
              Settings are stored in /etc/sample/connector.conf in section [Main].\n\
              sampleMerchantId = identifier issued by the provider.",
         );
@@ -9891,7 +7460,7 @@ mod source_unit_answer_tests {
     fn setup_configuration_anchor_answer_accepts_subject_entity_config_evidence() {
         let mut query_ir = configure_how_focus_ir("Sample Connector");
         query_ir.document_focus = None;
-        query_ir.target_types = vec!["artifact".to_string(), "procedure".to_string()];
+        query_ir.target_types = vec![QueryTargetKind::Artifact, QueryTargetKind::Procedure];
         query_ir.target_entities = vec![crate::domains::query_ir::EntityMention {
             label: "Sample Connector".to_string(),
             role: crate::domains::query_ir::EntityRole::Subject,
@@ -9934,7 +7503,8 @@ mod source_unit_answer_tests {
     fn setup_configuration_anchor_answer_extracts_embedded_command_anchor() {
         let mut query_ir = configure_how_focus_ir("Sample Connector");
         query_ir.document_focus = None;
-        query_ir.target_types = vec!["configuration_file".to_string(), "parameter".to_string()];
+        query_ir.target_types =
+            vec![QueryTargetKind::ConfigurationFile, QueryTargetKind::Parameter];
         query_ir.target_entities = vec![crate::domains::query_ir::EntityMention {
             label: "Sample Connector".to_string(),
             role: crate::domains::query_ir::EntityRole::Subject,
@@ -9943,8 +7513,8 @@ mod source_unit_answer_tests {
             1,
             Some("paragraph"),
             "Sample Connector configuration\n\
-             Install the package with sample-install sample-connector.\n\
-             Configuration command sample-reconfigure sample-connector.\n\
+             Install the package with sample-install --package=sample-connector.\n\
+             Configuration command sample-reconfigure --package=sample-connector.\n\
              Settings are defined in /etc/sample/connector.conf in section [Main].\n\
              sampleMerchantId = \"\"\n\
              sampleTerminalKey = \"\"",
@@ -9958,7 +7528,7 @@ mod source_unit_answer_tests {
         )
         .expect("setup configuration answer");
 
-        assert!(answer.contains("sample-reconfigure sample-connector"), "{answer}");
+        assert!(answer.contains("sample-reconfigure --package=sample-connector"), "{answer}");
         assert!(answer.contains("/etc/sample/connector.conf"), "{answer}");
         assert!(answer.contains("[Main]"), "{answer}");
         assert!(answer.contains("sampleMerchantId"), "{answer}");
@@ -9968,34 +7538,63 @@ mod source_unit_answer_tests {
     fn setup_configuration_command_literals_reject_mixed_script_prose_fragments() {
         let commands = extract_setup_configuration_command_literals(
             "QR-code text appears in the user interface.\n\
-             QR-код для оплаты отображается на экране.\n\
-             Configuration command sample-reconfigure sample-connector.\n\
+              QR-код для оплаты отображается на экране.\n\
+              Configuration command sample-reconfigure --package=sample-connector.\n\
              Section [Main] contains sampleMerchantId.",
             8,
         );
 
-        assert!(commands.iter().any(|command| command == "sample-reconfigure sample-connector"));
+        assert!(
+            commands
+                .iter()
+                .any(|command| command == "sample-reconfigure --package=sample-connector")
+        );
         assert!(!commands.iter().any(|command| command.contains("QR-код")), "{commands:?}");
         assert!(!commands.iter().any(|command| command.starts_with("Section ")), "{commands:?}");
     }
 
     #[test]
-    fn setup_configuration_command_literals_reject_bare_word_prose_with_artifact() {
-        let commands = extract_setup_configuration_command_literals(
+    fn setup_configuration_command_literals_require_formal_command_signals() {
+        let ambiguous = extract_setup_configuration_command_literals(
             "address should be configured as https://localhost/api\n\
              package-name . sample-install package-name\n\
              sample-configure package-name",
             8,
         );
+        assert!(ambiguous.is_empty(), "{ambiguous:?}");
 
-        assert_eq!(commands, vec!["sample-install package-name", "sample-configure package-name"]);
+        let commands = extract_setup_configuration_command_literals(
+            "sample-install --package=package-name\n\
+             sample-configure package=package-name",
+            8,
+        );
+
+        assert_eq!(
+            commands,
+            vec!["sample-install --package=package-name", "sample-configure package=package-name",]
+        );
+    }
+
+    #[test]
+    fn setup_configuration_command_literals_reject_artifact_headed_text() {
+        let commands = extract_setup_configuration_command_literals(
+            "/work/sample/config.ini contains mode=strict\n\
+             https://example.invalid/schema describes mode=strict\n\
+             runner-tool --mode=strict",
+            8,
+        );
+
+        assert_eq!(commands, vec!["runner-tool --mode=strict"]);
     }
 
     #[test]
     fn setup_configuration_anchor_answer_renders_beyond_four_variants() {
         let mut query_ir = configure_how_focus_ir("DeltaVariant");
-        query_ir.target_types =
-            vec!["configuration_file".to_string(), "package".to_string(), "procedure".to_string()];
+        query_ir.target_types = vec![
+            QueryTargetKind::ConfigurationFile,
+            QueryTargetKind::Package,
+            QueryTargetKind::Procedure,
+        ];
         query_ir.target_entities = vec![crate::domains::query_ir::EntityMention {
             label: "DeltaVariant".to_string(),
             role: crate::domains::query_ir::EntityRole::Subject,
@@ -10007,7 +7606,7 @@ mod source_unit_answer_tests {
                     Some("paragraph"),
                     &format!(
                         "DeltaVariant module {index} configuration\n\
-                         sample-configure delta-module-{index}\n\
+                         sample-configure --target=delta-module-{index}\n\
                          Settings are defined in /opt/delta/module-{index}.conf in section [Delta{index}]."
                     ),
                 );
@@ -10021,7 +7620,7 @@ mod source_unit_answer_tests {
                 .expect("setup configuration answer");
 
         assert!(answer.contains("DeltaVariant setup variant 5"), "{answer}");
-        assert!(answer.contains("sample-configure delta-module-5"), "{answer}");
+        assert!(answer.contains("sample-configure --target=delta-module-5"), "{answer}");
         assert!(answer.contains("/opt/delta/module-5.conf"), "{answer}");
     }
 
@@ -10093,7 +7692,7 @@ mod source_unit_answer_tests {
         query_ir.act = QueryAct::RetrieveValue;
         query_ir.scope = QueryScope::SingleDocument;
         query_ir.target_types =
-            vec!["document".to_string(), "config_key".to_string(), "error_code".to_string()];
+            vec![QueryTargetKind::Document, QueryTargetKind::ConfigKey, QueryTargetKind::ErrorCode];
         query_ir.document_focus =
             Some(crate::domains::query_ir::DocumentHint { hint: "reference.json".to_string() });
         query_ir.target_entities.push(crate::domains::query_ir::EntityMention {
@@ -10258,8 +7857,11 @@ mod source_unit_answer_tests {
         );
         focused.document_label = "DeltaVariant setup reference".to_string();
         let mut query_ir = configure_how_focus_ir("DeltaVariant");
-        query_ir.target_types =
-            vec!["configuration_file".to_string(), "package".to_string(), "procedure".to_string()];
+        query_ir.target_types = vec![
+            QueryTargetKind::ConfigurationFile,
+            QueryTargetKind::Package,
+            QueryTargetKind::Procedure,
+        ];
         query_ir.target_entities = vec![crate::domains::query_ir::EntityMention {
             label: "DeltaVariant".to_string(),
             role: crate::domains::query_ir::EntityRole::Subject,
@@ -10275,6 +7877,84 @@ mod source_unit_answer_tests {
         assert!(
             candidate.should_use_as_direct_answer(&query_ir, &[focused]),
             "single focused setup variants with package/path anchors should not fall through to LLM"
+        );
+    }
+
+    #[test]
+    fn setup_configuration_anchor_candidate_does_not_short_circuit_generic_procedure() {
+        let document_id = Uuid::now_v7();
+        let revision_id = Uuid::now_v7();
+        let mut focused = evidence_chunk(
+            1,
+            Some("paragraph"),
+            "Sample Connector configuration\n\
+             Settings are defined in /opt/subject/connector.conf in section [Main].",
+        );
+        focused.document_id = document_id;
+        focused.revision_id = revision_id;
+        focused.document_label = "Sample Connector setup guide".to_string();
+        let mut parameter_row = evidence_chunk(
+            2,
+            Some("table_row"),
+            "Sheet: Module settings | Row 12 | Name: endpoint | Type: URL | \
+             Description: Service endpoint | Notes: Defaults to http://localhost",
+        );
+        parameter_row.document_id = document_id;
+        parameter_row.revision_id = revision_id;
+        parameter_row.document_label = focused.document_label.clone();
+        let mut query_ir = configure_how_focus_ir("Sample Connector");
+        query_ir.target_types = vec![QueryTargetKind::Procedure, QueryTargetKind::Concept];
+        query_ir.target_entities = vec![crate::domains::query_ir::EntityMention {
+            label: "Sample Connector".to_string(),
+            role: crate::domains::query_ir::EntityRole::Subject,
+        }];
+
+        let candidate = build_setup_configuration_anchor_candidate(
+            "How do I configure Sample Connector?",
+            &query_ir,
+            &[focused.clone(), parameter_row.clone()],
+        )
+        .expect("focused setup configuration candidate");
+
+        assert!(
+            !candidate
+                .should_use_as_direct_answer(&query_ir, &[focused.clone(), parameter_row.clone()],),
+            "a generic how-to needs ordered synthesis; parameter presence alone must not select the inventory renderer"
+        );
+        assert!(
+            !candidate.should_use_as_preflight_answer(&query_ir, &[focused, parameter_row]),
+            "canonical preflight must not reintroduce the same generic parameter dump"
+        );
+    }
+
+    #[test]
+    fn setup_configuration_anchor_candidate_yields_mixed_remediation_ir_to_synthesis() {
+        let mut focused = evidence_chunk(
+            1,
+            Some("paragraph"),
+            "Sample Incident configuration\n\
+             sample-configure incident-handler\n\
+             Settings are defined in /opt/sample/incident.conf in section [Main].",
+        );
+        focused.document_label = "Sample Incident setup guide".to_string();
+        let mut query_ir = configure_how_focus_ir("Sample Incident");
+        query_ir.target_types = vec![
+            QueryTargetKind::Procedure,
+            QueryTargetKind::Remediation,
+            QueryTargetKind::ErrorMessage,
+            QueryTargetKind::ConfigurationFile,
+        ];
+
+        let candidate = build_setup_configuration_anchor_candidate(
+            "How do I resolve the Sample Incident error?",
+            &query_ir,
+            std::slice::from_ref(&focused),
+        )
+        .expect("mixed remediation/configuration candidate");
+
+        assert!(!candidate.should_use_as_direct_answer(&query_ir, std::slice::from_ref(&focused)));
+        assert!(
+            !candidate.should_use_as_preflight_answer(&query_ir, std::slice::from_ref(&focused))
         );
     }
 
@@ -10352,7 +8032,8 @@ mod source_unit_answer_tests {
     fn setup_configuration_anchor_answer_preserves_split_command_only_anchor() {
         let document_id = Uuid::now_v7();
         let revision_id = Uuid::now_v7();
-        let mut command = evidence_chunk(1, Some("paragraph"), "sample-reconfigure delta-subject");
+        let mut command =
+            evidence_chunk(1, Some("paragraph"), "sample-reconfigure --target=delta-subject");
         command.document_id = document_id;
         command.revision_id = revision_id;
         command.document_label = "DeltaVariant setup reference".to_string();
@@ -10367,9 +8048,9 @@ mod source_unit_answer_tests {
         parameters.document_label = command.document_label.clone();
         let mut query_ir = configure_how_focus_ir("DeltaVariant");
         query_ir.target_types = vec![
-            "configuration_file".to_string(),
-            "parameter".to_string(),
-            "procedure".to_string(),
+            QueryTargetKind::ConfigurationFile,
+            QueryTargetKind::Parameter,
+            QueryTargetKind::Procedure,
         ];
 
         let answer = build_setup_configuration_anchor_answer(
@@ -10379,7 +8060,7 @@ mod source_unit_answer_tests {
         )
         .expect("focused setup configuration answer");
 
-        assert!(answer.contains("`sample-reconfigure delta-subject`"), "{answer}");
+        assert!(answer.contains("`sample-reconfigure --target=delta-subject`"), "{answer}");
         assert!(answer.contains("`primaryKey`"), "{answer}");
     }
 
@@ -10493,7 +8174,8 @@ mod source_unit_answer_tests {
         chunks.push(exact);
         let mut query_ir = configure_how_focus_ir("Subject");
         query_ir.document_focus = None;
-        query_ir.target_types = vec!["configuration_file".to_string(), "parameter".to_string()];
+        query_ir.target_types =
+            vec![QueryTargetKind::ConfigurationFile, QueryTargetKind::Parameter];
         query_ir.target_entities = vec![
             crate::domains::query_ir::EntityMention {
                 label: "Subject".to_string(),
@@ -10543,7 +8225,7 @@ mod source_unit_answer_tests {
         parameter_row.document_label = anchor.document_label.clone();
         let mut query_ir = configure_how_focus_ir("S1");
         query_ir.act = QueryAct::Describe;
-        query_ir.target_types = vec!["parameter".to_string()];
+        query_ir.target_types = vec![QueryTargetKind::Parameter];
 
         assert!(
             build_setup_configuration_anchor_answer(
@@ -10631,7 +8313,7 @@ mod source_unit_answer_tests {
         let mut query_ir = configure_how_focus_ir("services");
         query_ir.act = QueryAct::Describe;
         query_ir.document_focus = None;
-        query_ir.target_types = vec!["service".to_string(), "port".to_string()];
+        query_ir.target_types = vec![QueryTargetKind::Service, QueryTargetKind::Port];
 
         assert!(
             build_setup_configuration_anchor_answer(
@@ -10679,7 +8361,8 @@ mod source_unit_answer_tests {
     fn setup_configuration_anchor_answer_skips_unambiguous_versioned_procedure() {
         let mut ir = configure_how_focus_ir("Sample Target");
         ir.document_focus = None;
-        ir.target_types = vec!["artifact".to_string(), "procedure".to_string()];
+        ir.target_types =
+            vec![QueryTargetKind::Artifact, QueryTargetKind::Procedure, QueryTargetKind::Version];
         ir.target_entities = vec![crate::domains::query_ir::EntityMention {
             label: "Sample Target".to_string(),
             role: crate::domains::query_ir::EntityRole::Subject,
@@ -10704,10 +8387,11 @@ mod source_unit_answer_tests {
     }
 
     #[test]
-    fn setup_configuration_anchor_answer_skips_focused_concept_procedure_without_config_signal() {
+    fn setup_configuration_anchor_answer_skips_typed_release_procedure_without_config_target() {
         let mut ir = configure_how_focus_ir("Sample Target");
         ir.document_focus = None;
-        ir.target_types = vec!["procedure".to_string(), "concept".to_string()];
+        ir.target_types =
+            vec![QueryTargetKind::Procedure, QueryTargetKind::Concept, QueryTargetKind::Release];
         ir.target_entities = vec![crate::domains::query_ir::EntityMention {
             label: "Sample Target".to_string(),
             role: crate::domains::query_ir::EntityRole::Subject,
@@ -10729,6 +8413,14 @@ mod source_unit_answer_tests {
             )
             .is_none()
         );
+    }
+
+    #[test]
+    fn generic_procedure_target_is_not_a_lifecycle_signal() {
+        let mut ir = configure_how_focus_ir("Sample Target");
+        ir.target_types = vec![QueryTargetKind::Procedure];
+
+        assert!(!question_requests_lifecycle_update_procedure("", &ir));
     }
 
     fn source_unit(index: i32, text: &str) -> RuntimeMatchedChunk {
@@ -10822,7 +8514,7 @@ mod source_unit_answer_tests {
             act: crate::domains::query_ir::QueryAct::ConfigureHow,
             scope: crate::domains::query_ir::QueryScope::SingleDocument,
             language: crate::domains::query_ir::QueryLanguage::Auto,
-            target_types: vec!["parameter".to_string()],
+            target_types: vec![QueryTargetKind::Parameter],
             target_entities: Vec::new(),
             literal_constraints: Vec::new(),
             temporal_constraints: Vec::new(),
@@ -10885,20 +8577,22 @@ mod source_unit_answer_tests {
 
     #[test]
     fn ordered_source_units_answer_lists_every_unit_once() {
-        let answer = build_ordered_source_units_answer(
-            &source_slice_ir(2),
-            &[
-                source_unit(
-                    2,
-                    "[unit_id=b occurred_at=2026-01-02T00:00:00+00:00 actor_label=Assistant] second",
-                ),
-                source_unit(
-                    1,
-                    "[unit_id=a occurred_at=2026-01-01T00:00:00+00:00 actor_label=User] first",
-                ),
-            ],
-        )
-        .expect("source slice answer");
+        let document_id = Uuid::now_v7();
+        let revision_id = Uuid::now_v7();
+        let mut second = source_unit(
+            2,
+            "[unit_id=b occurred_at=2026-01-02T00:00:00+00:00 actor_label=Assistant] second",
+        );
+        second.document_id = document_id;
+        second.revision_id = revision_id;
+        let mut first = source_unit(
+            1,
+            "[unit_id=a occurred_at=2026-01-01T00:00:00+00:00 actor_label=User] first",
+        );
+        first.document_id = document_id;
+        first.revision_id = revision_id;
+        let answer = build_ordered_source_units_answer(&source_slice_ir(2), &[second, first])
+            .expect("source slice answer");
 
         assert!(answer.starts_with("`records.jsonl` - 2/2"));
         assert!(answer.find("first").unwrap() < answer.find("second").unwrap());
@@ -10994,7 +8688,7 @@ mod source_unit_answer_tests {
     }
 
     #[test]
-    fn latest_source_slice_answer_does_not_require_explicit_source_slice() {
+    fn latest_source_slice_answer_requires_typed_release_source_slice() {
         let mut ir = latest_source_slice_ir(2);
         ir.source_slice = None;
         ir.literal_constraints = vec![crate::domains::query_ir::LiteralSpan {
@@ -11022,65 +8716,11 @@ mod source_unit_answer_tests {
             ),
         ];
 
-        let answer = build_ordered_source_slice_answer(&ir, &[], &chunks)
-            .expect("latest source-slice answer");
-
-        assert_eq!(answer.unit_count, 2);
-        assert!(answer.used_context_fallback);
-        assert!(answer.answer.starts_with("2/2"));
-        assert!(answer.answer.contains("source=`Sample Subject Release 1.0.2`"));
-        assert!(
-            answer.answer.find("Sample Subject Release 1.0.2").unwrap()
-                < answer.answer.find("Sample Subject Release 1.0.1").unwrap()
-        );
+        assert!(build_ordered_source_slice_answer(&ir, &[], &chunks).is_none());
     }
 
     #[test]
-    fn latest_source_slice_fallback_yields_to_update_procedure_intent() {
-        let mut ir = configure_update_focus_ir("Sample Target");
-        ir.retrieval_query = Some("how to update Sample Target version?".to_string());
-        let release_noise = release_identity_chunk(
-            Uuid::now_v7(),
-            Uuid::now_v7(),
-            0,
-            100.0,
-            "Sample Subject Release 1.0.2",
-            "Version 1.0.2\nCompatibility note for Sample Target.",
-        );
-        let mut procedure = evidence_chunk(
-            1,
-            Some("paragraph"),
-            "Sample Target update procedure:\n\
-             sample-runner --refresh\n\
-             sample-runner --apply\n\
-             sudo sample-configure alpha-subject\n\
-             sudo service alpha-subject restart",
-        );
-        procedure.document_label = "Instruction for updating Sample Target".to_string();
-
-        assert!(
-            build_ordered_source_slice_answer(
-                &ir,
-                &[],
-                &[release_noise.clone(), procedure.clone()]
-            )
-            .is_none(),
-            "inferred latest-version inventory must not preempt versioned update procedure answers"
-        );
-        let answer = build_update_procedure_sequence_answer(
-            "how to update Sample Target version?",
-            &ir,
-            &[release_noise, procedure],
-        )
-        .expect("update procedure answer");
-        assert!(answer.contains("sample-runner --refresh"), "{answer}");
-        assert!(answer.contains("sample-runner --apply"), "{answer}");
-        assert!(answer.contains("sample-configure"), "{answer}");
-        assert!(answer.contains("service alpha-subject restart"), "{answer}");
-    }
-
-    #[test]
-    fn latest_source_slice_answer_uses_query_ir_focus_body_versions() {
+    fn latest_source_slice_answer_rejects_query_ir_focus_body_versions() {
         let document_id = Uuid::now_v7();
         let revision_id = Uuid::now_v7();
         let mut older = release_relevance_chunk(
@@ -11114,18 +8754,173 @@ mod source_unit_answer_tests {
             &latest_source_slice_ir(2),
             &[],
             &[older, noise, newer],
+        );
+
+        assert!(answer.is_none());
+    }
+
+    #[test]
+    fn latest_source_slice_answer_rejects_generic_source_context_body_versions() {
+        let mut focused = release_relevance_chunk(
+            Uuid::now_v7(),
+            Uuid::now_v7(),
+            0,
+            80.0,
+            "Sample Subject release history",
+            "Version 1.0.3\ngeneric source-context detail",
+        );
+        focused.score_kind =
+            crate::services::query::execution::RuntimeChunkScoreKind::SourceContext;
+        focused.excerpt = "Version 1.0.2\nfocused excerpt detail".to_string();
+
+        let answer = build_ordered_source_slice_answer(&latest_source_slice_ir(1), &[], &[focused]);
+
+        assert!(answer.is_none());
+    }
+
+    #[test]
+    fn latest_source_slice_answer_keeps_attested_lane_ahead_of_higher_noise_version() {
+        let mut attested = release_relevance_chunk(
+            Uuid::now_v7(),
+            Uuid::now_v7(),
+            0,
+            80.0,
+            "Sample Subject release history",
+            "Version 3.0.0\nattested release detail",
+        );
+        attested.score_kind =
+            crate::services::query::execution::RuntimeChunkScoreKind::LatestVersion;
+        let mut compatibility_noise = release_relevance_chunk(
+            Uuid::now_v7(),
+            Uuid::now_v7(),
+            0,
+            100.0,
+            "Sample Subject compatibility 99.0.0",
+            "compatibility-only detail",
+        );
+        compatibility_noise.score_kind =
+            crate::services::query::execution::RuntimeChunkScoreKind::QueryIrFocus;
+
+        let answer = build_ordered_source_slice_answer(
+            &latest_source_slice_ir(1),
+            &[],
+            &[compatibility_noise, attested],
         )
-        .expect("latest source-slice answer");
+        .expect("attested latest source-slice answer");
+
+        assert_eq!(answer.unit_count, 1);
+        assert!(answer.answer.contains("Version 3.0.0"), "{}", answer.answer);
+        assert!(!answer.answer.contains("99.0.0"), "{}", answer.answer);
+    }
+
+    #[test]
+    fn latest_source_slice_answer_does_not_drop_attested_lane_for_a_larger_noise_family() {
+        let mut attested = release_relevance_chunk(
+            Uuid::now_v7(),
+            Uuid::now_v7(),
+            0,
+            80.0,
+            "Canonical release history",
+            "Version 3.0.0\nattested release detail",
+        );
+        attested.score_kind =
+            crate::services::query::execution::RuntimeChunkScoreKind::LatestVersion;
+        let mut noise_99 = release_relevance_chunk(
+            Uuid::now_v7(),
+            Uuid::now_v7(),
+            0,
+            100.0,
+            "Compatibility record 99.0.0",
+            "compatibility-only detail",
+        );
+        noise_99.score_kind =
+            crate::services::query::execution::RuntimeChunkScoreKind::QueryIrFocus;
+        let mut noise_98 = release_relevance_chunk(
+            Uuid::now_v7(),
+            Uuid::now_v7(),
+            0,
+            90.0,
+            "Compatibility record 98.0.0",
+            "compatibility-only detail",
+        );
+        noise_98.score_kind =
+            crate::services::query::execution::RuntimeChunkScoreKind::QueryIrFocus;
+
+        let answer = build_ordered_source_slice_answer(
+            &latest_source_slice_ir(2),
+            &[],
+            &[noise_99, noise_98, attested],
+        )
+        .expect("attested latest source-slice answer");
 
         assert_eq!(answer.unit_count, 2);
-        assert!(answer.used_context_fallback);
-        assert!(answer.answer.contains("Version 1.0.2"));
-        assert!(answer.answer.contains("Version 1.0.1"));
-        assert!(
-            answer.answer.find("Version 1.0.2").unwrap()
-                < answer.answer.find("Version 1.0.1").unwrap()
+        assert!(answer.answer.contains("Version 3.0.0"), "{}", answer.answer);
+    }
+
+    #[test]
+    fn latest_source_slice_answer_keeps_typed_source_unit_ahead_of_a_larger_noise_family() {
+        let mut typed_unit =
+            source_unit(1, "Version 3.0.0\ncanonical structured source-unit detail");
+        typed_unit.score_kind =
+            crate::services::query::execution::RuntimeChunkScoreKind::SourceContext;
+        let mut noise_99 = release_relevance_chunk(
+            Uuid::now_v7(),
+            Uuid::now_v7(),
+            0,
+            100.0,
+            "Compatibility record 99.0.0",
+            "compatibility-only detail",
         );
-        assert!(!answer.answer.contains("not a focused release unit"));
+        noise_99.score_kind =
+            crate::services::query::execution::RuntimeChunkScoreKind::QueryIrFocus;
+        let mut noise_98 = release_relevance_chunk(
+            Uuid::now_v7(),
+            Uuid::now_v7(),
+            0,
+            90.0,
+            "Compatibility record 98.0.0",
+            "compatibility-only detail",
+        );
+        noise_98.score_kind =
+            crate::services::query::execution::RuntimeChunkScoreKind::QueryIrFocus;
+
+        let answer = build_ordered_source_slice_answer(
+            &latest_source_slice_ir(2),
+            &[typed_unit],
+            &[noise_99, noise_98],
+        )
+        .expect("typed source-unit latest answer");
+
+        assert_eq!(answer.unit_count, 2);
+        assert!(answer.answer.contains("Version 3.0.0"), "{}", answer.answer);
+    }
+
+    #[test]
+    fn latest_source_slice_answer_does_not_fill_from_unattested_source_units() {
+        let mut unattested = source_unit(1, "Version 99.0.0\ncompatibility-only detail");
+        unattested.score_kind =
+            crate::services::query::execution::RuntimeChunkScoreKind::QueryIrFocus;
+        let mut attested = release_relevance_chunk(
+            Uuid::now_v7(),
+            Uuid::now_v7(),
+            0,
+            80.0,
+            "Sample Subject release history",
+            "Version 3.0.0\nattested release detail",
+        );
+        attested.score_kind =
+            crate::services::query::execution::RuntimeChunkScoreKind::LatestVersion;
+
+        let answer = build_ordered_source_slice_answer(
+            &latest_source_slice_ir(2),
+            &[unattested],
+            &[attested],
+        )
+        .expect("attested latest source-slice answer");
+
+        assert_eq!(answer.unit_count, 1);
+        assert!(answer.answer.contains("Version 3.0.0"), "{}", answer.answer);
+        assert!(!answer.answer.contains("99.0.0"), "{}", answer.answer);
     }
 
     #[test]
@@ -11162,8 +8957,7 @@ mod source_unit_answer_tests {
 
     #[test]
     fn latest_source_slice_answer_removes_markdown_decoration() {
-        let mut ir = latest_source_slice_ir(1);
-        ir.source_slice = None;
+        let ir = latest_source_slice_ir(1);
         let document_id = Uuid::now_v7();
         let chunks = vec![release_identity_chunk(
             document_id,
@@ -11187,7 +8981,7 @@ mod source_unit_answer_tests {
     }
 
     #[test]
-    fn latest_source_slice_answer_uses_extended_source_unit_payload() {
+    fn latest_source_slice_answer_uses_typed_source_context_unit_payload() {
         let mut unit = source_unit(
             1,
             "[unit_id=u-1 occurred_at=2026-01-02T00:00:00+00:00 actor_label=Recorder] ![preview](asset.png)\n\
@@ -11196,6 +8990,7 @@ mod source_unit_answer_tests {
              - Added second neutral evidence line",
         );
         unit.document_label = "Neutral record stream".to_string();
+        unit.score_kind = crate::services::query::execution::RuntimeChunkScoreKind::SourceContext;
 
         let answer = build_ordered_source_slice_answer(&latest_source_slice_ir(1), &[unit], &[])
             .expect("latest source-slice answer");
@@ -11209,7 +9004,7 @@ mod source_unit_answer_tests {
     }
 
     #[test]
-    fn latest_source_slice_answer_respects_runtime_latest_rank_before_body_version() {
+    fn latest_source_slice_answer_orders_grounded_version_before_runtime_rank() {
         let mut ranked_unit = source_unit(4, "[unit_id=u-4 version=1.0.1 change=ranked-evidence]");
         ranked_unit.document_label = "Neutral inventory".to_string();
         ranked_unit.score_kind =
@@ -11230,8 +9025,195 @@ mod source_unit_answer_tests {
         .expect("latest source-slice answer");
 
         assert_eq!(answer.unit_count, 1);
-        assert!(answer.answer.contains("ranked-evidence"), "{}", answer.answer);
-        assert!(!answer.answer.contains("unrelated-newer"), "{}", answer.answer);
+        assert!(answer.answer.contains("unrelated-newer"), "{}", answer.answer);
+        assert!(!answer.answer.contains("ranked-evidence"), "{}", answer.answer);
+    }
+
+    #[test]
+    fn latest_source_slice_answer_merges_newer_context_with_stale_source_units() {
+        let mut stale = source_unit(9, "[unit_id=stale] Version 1.0.0\n- Stale neutral change");
+        stale.document_label = "Neutral release history".to_string();
+        let newer = release_relevance_chunk(
+            Uuid::now_v7(),
+            Uuid::now_v7(),
+            0,
+            100.0,
+            "Version 3.0.0",
+            "Version 3.0.0\n- Newest neutral change",
+        );
+        let middle = release_relevance_chunk(
+            Uuid::now_v7(),
+            Uuid::now_v7(),
+            0,
+            90.0,
+            "Version 2.0.0",
+            "Version 2.0.0\n- Middle neutral change",
+        );
+
+        let answer = build_ordered_source_slice_answer(
+            &latest_source_slice_ir(2),
+            &[stale],
+            &[middle, newer],
+        )
+        .expect("merged latest-version answer");
+
+        assert_eq!(answer.unit_count, 2);
+        assert!(answer.used_context_fallback);
+        let newest = answer.answer.find("3.0.0").expect("newest version");
+        let middle = answer.answer.find("2.0.0").expect("middle version");
+        assert!(newest < middle, "{}", answer.answer);
+        assert!(!answer.answer.contains("1.0.0"), "{}", answer.answer);
+    }
+
+    #[test]
+    fn latest_source_slice_answer_dedupes_title_variants_for_same_typed_source() {
+        let repeated_document_id = Uuid::now_v7();
+        let repeated_revision_id = Uuid::now_v7();
+        let chunks = vec![
+            release_identity_chunk(
+                repeated_document_id,
+                repeated_revision_id,
+                0,
+                100.0,
+                "Delta 9.0.5",
+                "newest neutral change",
+            ),
+            release_identity_chunk(
+                repeated_document_id,
+                repeated_revision_id,
+                0,
+                99.0,
+                "Delta 9.0.5 - Administration",
+                "duplicate rendering of the newest neutral change",
+            ),
+            release_identity_chunk(
+                Uuid::now_v7(),
+                Uuid::now_v7(),
+                0,
+                98.0,
+                "Delta Suite 9.0.4",
+                "second neutral change",
+            ),
+            release_identity_chunk(
+                Uuid::now_v7(),
+                Uuid::now_v7(),
+                0,
+                97.0,
+                "Delta Suite 9.0.3 - Delta Suite Administration",
+                "third neutral change",
+            ),
+            release_identity_chunk(
+                Uuid::now_v7(),
+                Uuid::now_v7(),
+                0,
+                96.0,
+                "Delta Suite 9.0.2 - Delta Suite Administration",
+                "fourth neutral change",
+            ),
+            release_identity_chunk(
+                Uuid::now_v7(),
+                Uuid::now_v7(),
+                0,
+                95.0,
+                "Delta Suite 9.0.1 - Delta Suite Administration",
+                "fifth neutral change",
+            ),
+        ];
+
+        let query_ir = latest_source_slice_ir(5);
+        let answer = build_ordered_source_slice_answer(&query_ir, &[], &chunks)
+            .expect("complete latest-version answer");
+        let completion =
+            AnswerCompletionContract::from_query_ir(&query_ir).evaluate(&answer.answer);
+
+        assert_eq!(answer.unit_count, 5);
+        assert!(completion.complete, "{completion:?}");
+        assert!(answer.answer.contains("Delta Suite 9.0.1"), "{}", answer.answer);
+        assert_eq!(answer.answer.matches("9.0.5").count(), 1, "{}", answer.answer);
+    }
+
+    #[test]
+    fn latest_source_slice_answer_keeps_generic_title_variants_from_distinct_sources() {
+        let chunks = vec![
+            release_identity_chunk(
+                Uuid::now_v7(),
+                Uuid::now_v7(),
+                0,
+                100.0,
+                "Delta Suite 9.0.5",
+                "first independent record",
+            ),
+            release_identity_chunk(
+                Uuid::now_v7(),
+                Uuid::now_v7(),
+                0,
+                99.0,
+                "Delta Suite 9.0.5 - Administration",
+                "second independent record",
+            ),
+        ];
+
+        let answer = build_ordered_source_slice_answer(&latest_source_slice_ir(2), &[], &chunks)
+            .expect("distinct-source latest-version answer");
+
+        assert_eq!(answer.unit_count, 2);
+        assert!(answer.answer.contains("first independent record"), "{}", answer.answer);
+        assert!(answer.answer.contains("second independent record"), "{}", answer.answer);
+    }
+
+    #[test]
+    fn latest_source_slice_answer_keeps_exact_titles_from_distinct_sources() {
+        let chunks = vec![
+            release_identity_chunk(
+                Uuid::now_v7(),
+                Uuid::now_v7(),
+                0,
+                100.0,
+                "Delta Suite 9.0.5",
+                "first exact-title record",
+            ),
+            release_identity_chunk(
+                Uuid::now_v7(),
+                Uuid::now_v7(),
+                0,
+                99.0,
+                "Delta Suite 9.0.5",
+                "second exact-title record",
+            ),
+        ];
+
+        let query_ir = latest_source_slice_ir(2);
+        let answer = build_ordered_source_slice_answer(&query_ir, &[], &chunks)
+            .expect("exact-title distinct-source latest-version answer");
+        let completion =
+            AnswerCompletionContract::from_query_ir(&query_ir).evaluate(&answer.answer);
+
+        assert_eq!(answer.unit_count, 2);
+        assert!(completion.complete, "{completion:?}");
+        assert!(answer.answer.contains("first exact-title record"), "{}", answer.answer);
+        assert!(answer.answer.contains("second exact-title record"), "{}", answer.answer);
+    }
+
+    #[test]
+    fn latest_source_slice_answer_renders_body_version_instead_of_internal_ordinal() {
+        let document_id = Uuid::now_v7();
+        let revision_id = Uuid::now_v7();
+        let mut release = release_relevance_chunk(
+            document_id,
+            revision_id,
+            37,
+            100.0,
+            "Neutral release history",
+            "Version 7.8.901\n- Added a neutral capability",
+        );
+        release.score_kind =
+            crate::services::query::execution::RuntimeChunkScoreKind::LatestVersion;
+
+        let answer = build_ordered_source_slice_answer(&latest_source_slice_ir(1), &[], &[release])
+            .expect("latest source-slice answer");
+
+        assert!(answer.answer.contains("7.8.901"), "{}", answer.answer);
+        assert!(!answer.answer.contains("ordinal=37"), "{}", answer.answer);
     }
 
     #[test]
@@ -11249,7 +9231,7 @@ mod source_unit_answer_tests {
             Uuid::now_v7(),
             0,
             50.0,
-            "Build 2.4.259 - Neutral stream",
+            "Build 7.8.901 - Neutral stream",
             "Changed neutral behavior.",
         );
 
@@ -11261,7 +9243,7 @@ mod source_unit_answer_tests {
         .expect("latest source-slice answer");
 
         assert_eq!(answer.unit_count, 1);
-        assert!(answer.answer.contains("Build 2.4.259"), "{}", answer.answer);
+        assert!(answer.answer.contains("Build 7.8.901"), "{}", answer.answer);
         assert!(answer.answer.contains("Changed neutral behavior"), "{}", answer.answer);
         assert!(!answer.answer.contains("Sample Product 5.0"), "{}", answer.answer);
     }
@@ -11270,6 +9252,7 @@ mod source_unit_answer_tests {
     fn latest_source_slice_answer_preserves_version_header_payload() {
         let mut unit = source_unit(1, "[unit_id=u-1 version=1.0.2 change=neutral-header-evidence]");
         unit.document_label = "Neutral record stream".to_string();
+        unit.score_kind = crate::services::query::execution::RuntimeChunkScoreKind::LatestVersion;
 
         let answer = build_ordered_source_slice_answer(&latest_source_slice_ir(1), &[unit], &[])
             .expect("latest source-slice answer");
@@ -11282,18 +9265,18 @@ mod source_unit_answer_tests {
     #[test]
     fn latest_source_slice_answer_preserves_single_document_version_label_heading() {
         let mut unit = source_unit(1, "[unit_id=u-1] Changed neutral behavior.");
-        unit.document_label = "Build 2.4.259 - Neutral stream".to_string();
+        unit.document_label = "Build 7.8.901 - Neutral stream".to_string();
 
         let answer = build_ordered_source_slice_answer(&latest_source_slice_ir(1), &[unit], &[])
             .expect("latest source-slice answer");
 
         assert_eq!(answer.unit_count, 1);
-        assert!(answer.answer.contains("**Build 2.4.259 - Neutral stream**"));
+        assert!(answer.answer.contains("**Build 7.8.901 - Neutral stream**"));
         assert!(answer.answer.contains("Changed neutral behavior."));
     }
 
     #[test]
-    fn latest_source_slice_answer_keeps_dominant_release_family() {
+    fn latest_source_slice_answer_does_not_infer_dominance_from_exact_title_families() {
         let chunks = vec![
             release_identity_chunk(
                 Uuid::now_v7(),
@@ -11325,13 +9308,162 @@ mod source_unit_answer_tests {
             .expect("latest source-slice answer");
 
         assert_eq!(answer.unit_count, 2);
+        assert!(answer.answer.contains("Beta Tool Release 9.0.0"));
         assert!(answer.answer.contains("Sample Subject Release 1.0.2"));
-        assert!(answer.answer.contains("Sample Subject Release 1.0.1"));
-        assert!(!answer.answer.contains("Beta Tool Release 9.0.0"));
+        assert!(!answer.answer.contains("Sample Subject Release 1.0.1"));
     }
 
     #[test]
-    fn low_confidence_context_release_series_uses_latest_inventory_fallback() {
+    fn latest_source_slice_answer_does_not_infer_dominance_from_title_extensions() {
+        let chunks = vec![
+            release_identity_chunk(
+                Uuid::now_v7(),
+                Uuid::now_v7(),
+                0,
+                10.0,
+                "Delta Suite 3.0.3",
+                "desired newest",
+            ),
+            release_identity_chunk(
+                Uuid::now_v7(),
+                Uuid::now_v7(),
+                0,
+                10.0,
+                "Delta Suite 3.0.2 - Delta Suite Administration",
+                "desired middle",
+            ),
+            release_identity_chunk(
+                Uuid::now_v7(),
+                Uuid::now_v7(),
+                0,
+                10.0,
+                "Delta Suite 3.0.1 - Delta Suite Administration",
+                "desired oldest",
+            ),
+            release_identity_chunk(
+                Uuid::now_v7(),
+                Uuid::now_v7(),
+                0,
+                10.0,
+                "Omega Stack 99.0.2",
+                "noise newest",
+            ),
+            release_identity_chunk(
+                Uuid::now_v7(),
+                Uuid::now_v7(),
+                0,
+                10.0,
+                "Omega Stack 99.0.1",
+                "noise older",
+            ),
+        ];
+
+        let answer = build_ordered_source_slice_answer(&latest_source_slice_ir(3), &[], &chunks)
+            .expect("mixed latest-version answer");
+
+        assert_eq!(answer.unit_count, 3);
+        assert!(answer.answer.contains("Delta Suite 3.0.3"), "{}", answer.answer);
+        assert!(answer.answer.contains("Omega Stack 99.0.2"), "{}", answer.answer);
+        assert!(answer.answer.contains("Omega Stack 99.0.1"), "{}", answer.answer);
+        assert!(!answer.answer.contains("Delta Suite 3.0.1"), "{}", answer.answer);
+    }
+
+    #[test]
+    fn latest_source_slice_answer_orders_mixed_sources_by_release_version() {
+        let chunks = vec![
+            release_identity_chunk(
+                Uuid::now_v7(),
+                Uuid::now_v7(),
+                0,
+                10.0,
+                "Legacy Stream Release 1.0.3",
+                "legacy newest",
+            ),
+            release_identity_chunk(
+                Uuid::now_v7(),
+                Uuid::now_v7(),
+                0,
+                10.0,
+                "Legacy Stream Release 1.0.2",
+                "legacy middle",
+            ),
+            release_identity_chunk(
+                Uuid::now_v7(),
+                Uuid::now_v7(),
+                0,
+                10.0,
+                "Legacy Stream Release 1.0.1",
+                "legacy oldest",
+            ),
+            release_identity_chunk(
+                Uuid::now_v7(),
+                Uuid::now_v7(),
+                0,
+                10.0,
+                "Current Stream Release 9.0.2",
+                "current newest",
+            ),
+            release_identity_chunk(
+                Uuid::now_v7(),
+                Uuid::now_v7(),
+                0,
+                10.0,
+                "Current Stream Release 9.0.1",
+                "current older",
+            ),
+        ];
+
+        let answer = build_ordered_source_slice_answer(&latest_source_slice_ir(2), &[], &chunks)
+            .expect("latest source-slice answer");
+
+        assert_eq!(answer.unit_count, 2);
+        assert!(answer.answer.contains("Current Stream Release 9.0.2"));
+        assert!(answer.answer.contains("Current Stream Release 9.0.1"));
+        assert!(!answer.answer.contains("Legacy Stream Release"));
+    }
+
+    #[test]
+    fn latest_source_slice_answer_does_not_apply_title_family_filtering() {
+        let mut chunks = (1..=6)
+            .map(|version| {
+                release_identity_chunk(
+                    Uuid::now_v7(),
+                    Uuid::now_v7(),
+                    0,
+                    10.0,
+                    &format!("Legacy Stream Release 1.0.{version}"),
+                    "legacy change",
+                )
+            })
+            .collect::<Vec<_>>();
+        chunks.extend((1..=4).map(|version| {
+            release_identity_chunk(
+                Uuid::now_v7(),
+                Uuid::now_v7(),
+                0,
+                10.0,
+                &format!("Current Stream Release 9.0.{version}"),
+                "current change",
+            )
+        }));
+
+        let answer = build_ordered_source_slice_answer(&latest_source_slice_ir(5), &[], &chunks)
+            .expect("latest source-slice answer");
+
+        assert_eq!(answer.unit_count, 5);
+        for version in 1..=4 {
+            assert!(
+                answer.answer.contains(&format!("Current Stream Release 9.0.{version}")),
+                "{}",
+                answer.answer
+            );
+        }
+        assert!(answer.answer.contains("Legacy Stream Release 1.0.6"), "{}", answer.answer);
+        assert!(!answer.answer.contains("Legacy Stream Release 1.0.5"), "{}", answer.answer);
+    }
+
+    #[test]
+    fn low_confidence_context_release_series_does_not_infer_latest_inventory() {
         let alpha_new_id = Uuid::now_v7();
         let alpha_old_id = Uuid::now_v7();
         let beta_id = Uuid::now_v7();
@@ -11367,17 +9499,7 @@ mod source_unit_answer_tests {
             ),
         ];
 
-        let answer = build_ordered_source_slice_answer(&ir, &[], &chunks)
-            .expect("semver document series should infer latest inventory answer");
-
-        assert_eq!(answer.unit_count, 2);
-        assert!(answer.used_context_fallback);
-        assert!(answer.answer.starts_with("2/2"));
-        assert!(
-            answer.answer.find("Sample Subject Release 1.0.2").unwrap()
-                < answer.answer.find("Sample Subject Release 1.0.1").unwrap()
-        );
-        assert!(!answer.answer.contains("Beta Tool Release 9.0.0"));
+        assert!(build_ordered_source_slice_answer(&ir, &[], &chunks).is_none());
     }
 
     #[test]
@@ -11601,3 +9723,7 @@ mod source_unit_answer_tests {
 #[cfg(test)]
 #[path = "answer_document_label_tests.rs"]
 mod document_label_tests;
+
+#[cfg(test)]
+#[path = "answer_procedure_syntax_tests.rs"]
+mod procedure_syntax_tests;

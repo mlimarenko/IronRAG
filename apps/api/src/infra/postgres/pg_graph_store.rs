@@ -1,5 +1,3 @@
-#![allow(clippy::unimplemented, dead_code, unused_variables)]
-
 use anyhow::Context;
 use async_trait::async_trait;
 use serde::de::DeserializeOwned;
@@ -1738,7 +1736,7 @@ impl GraphStore for PgGraphStore {
                     null::text as normalized_text,
                     revision.checksum as text_checksum,
                     null::text as image_checksum,
-                    'ready'::text as text_state,
+                    'text_readable'::text as text_state,
                     'ready'::text as vector_state,
                     'ready'::text as graph_state,
                     null::timestamptz as text_readable_at,

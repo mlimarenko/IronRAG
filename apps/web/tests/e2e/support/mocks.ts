@@ -1,15 +1,15 @@
-import type { Page } from "@playwright/test";
+import type { Page } from '@playwright/test'
 
-import { iamSession, opsLibraryDashboard } from "../../../src/shared/api/mocks/fixtures";
-import type { BrowserMockConfig } from "../../../src/shared/api/mocks/e2e";
+import { iamSession, opsLibraryDashboard } from '../../../src/shared/api/mocks/fixtures'
+import type { BrowserMockConfig } from '../../../src/shared/api/mocks/e2e'
 
 export const mockPath = (path: string) => {
-  const separator = path.includes("?") ? "&" : "?";
-  return `${path}${separator}mocks=1`;
-};
+  const separator = path.includes('?') ? '&' : '?'
+  return `${path}${separator}mocks=1`
+}
 
 export function emptyDashboard() {
-  const base = opsLibraryDashboard();
+  const base = opsLibraryDashboard()
 
   return {
     ...base,
@@ -41,7 +41,7 @@ export function emptyDashboard() {
         typedFactDocumentCount: 0,
       },
       relationCount: 0,
-      status: "empty",
+      status: 'empty',
       typedFactDocumentCount: 0,
     },
     metrics: [],
@@ -55,17 +55,14 @@ export function emptyDashboard() {
     recentDocuments: [],
     recentWebRuns: [],
     warnings: [],
-  };
+  }
 }
 
-type MockOptions = Omit<BrowserMockConfig, "session"> & {
-  session?: ReturnType<typeof iamSession>;
-};
+type MockOptions = Omit<BrowserMockConfig, 'session'> & {
+  session?: ReturnType<typeof iamSession>
+}
 
-export async function installBrowserMocks(
-  page: Page,
-  options: MockOptions = {},
-) {
+export async function installBrowserMocks(page: Page, options: MockOptions = {}) {
   const config: BrowserMockConfig = {
     authenticated: options.authenticated ?? true,
     bootstrapRequired: options.bootstrapRequired ?? false,
@@ -73,9 +70,9 @@ export async function installBrowserMocks(
     queryConversations: options.queryConversations ?? {},
     querySessions: options.querySessions ?? [],
     session: options.session ?? iamSession(),
-  };
+  }
 
   await page.addInitScript((mockConfig) => {
-    window.__IRONRAG_E2E_MOCKS__ = mockConfig;
-  }, config);
+    window.__IRONRAG_E2E_MOCKS__ = mockConfig
+  }, config)
 }

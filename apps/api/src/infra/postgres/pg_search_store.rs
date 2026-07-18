@@ -1,24 +1,31 @@
-#![allow(clippy::too_many_lines)]
-
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::LazyLock;
 
 use anyhow::Context;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use sqlx::{FromRow, PgPool};
+use sqlx::{Executor, FromRow, PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
 use crate::domains::query_ir::literal_text_is_identifier_shaped;
 use crate::domains::retrieval::DEFAULT_TEXT_SEARCH_CONFIG;
+use crate::infra::postgres::pg_vector_config::{
+    PgVectorStorage, pg_hnsw_index_params, read_env_u64,
+};
 use crate::infra::{
-    knowledge_plane::SearchStore,
+    knowledge_plane::{
+        CanonicalIngestVectorWriteFence, CanonicalVectorWriteFence, ChunkVectorProfileInventory,
+        SearchStore, VECTOR_PLANE_DATA_ADVISORY_LOCK_PREFIX,
+        VECTOR_REBUILD_STAGING_PROFILE_DIGEST_LEN, VECTOR_REBUILD_STAGING_PROFILE_PREFIX,
+        VectorPlaneDeleteOutcome,
+    },
     knowledge_rows::{
         KNOWLEDGE_CHUNK_VECTOR_KIND, KNOWLEDGE_ENTITY_VECTOR_KIND, KnowledgeChunkSearchRow,
         KnowledgeChunkVectorRow, KnowledgeChunkVectorSearchRow, KnowledgeEntitySearchRow,
         KnowledgeEntityVectorRow, KnowledgeEntityVectorSearchRow, KnowledgeRelationSearchRow,
         KnowledgeStructuredBlockSearchRow, KnowledgeTechnicalFactSearchRow,
     },
+    repositories::ingest_repository,
 };
 
 const TITLE_NGRAM_MIN_TERM_CHARS: usize = 8;
@@ -39,22 +46,44 @@ const LEXICAL_PREFIX_MIN_TOKEN_CHARS: usize = 4;
 const LEXICAL_RELAX_FLOOR: usize = 8;
 const CHUNK_VECTOR_RELATION_PREFIX: &str = "knowledge_chunk_vector_d";
 const ENTITY_VECTOR_RELATION_PREFIX: &str = "knowledge_entity_vector_d";
-const PGVECTOR_HNSW_VECTOR_MAX_DIM: u64 = 2000;
-const PG_HNSW_DEFAULT_BUILD_BUDGET_BYTES: u64 = 3_000_000_000;
+const EMBEDDING_PROFILE_PREFIX: &str = "embedding-profile:v1:";
+const EMBEDDING_PROFILE_DIGEST_LEN: usize = 64;
+const VECTOR_RELATION_DDL_ADVISORY_LOCK_KEY: &str = "knowledge.vector_relation.ddl";
+/// Maximum manifest rows locked and removed per abandoned-rebuild recovery
+/// transaction. Recovery commits each batch and continues until exhausted, so
+/// this is a lock/transaction bound rather than a ceiling on recoverable work.
+const MAX_ABANDONED_VECTOR_REBUILD_MANIFEST_ROWS: usize = 512;
+const PGVECTOR_MAX_INDEXED_DIM: u64 = 4_000;
 const PG_HNSW_DEFAULT_EF_SEARCH: u64 = 400;
-const PG_HNSW_MIN_M: u64 = 8;
-const PG_HNSW_MID_M: u64 = 16;
-const PG_HNSW_LARGE_M: u64 = 24;
+// pgvector defines hnsw.ef_search as an integer GUC in the inclusive range
+// 1..=1000. Clamp locally so a configuration typo cannot abort every ANN query.
+const PG_HNSW_MAX_EF_SEARCH: u64 = 1_000;
+const PG_HNSW_DEFAULT_MAX_SCAN_TUPLES: u64 = 50_000;
+const PG_HNSW_MAX_SCAN_TUPLES: u64 = 1_000_000;
+const PG_HNSW_DEFAULT_SCAN_MEM_MULTIPLIER: u64 = 2;
+const PG_HNSW_MAX_SCAN_MEM_MULTIPLIER: u64 = 64;
+const PG_HNSW_DEFAULT_EXACT_FALLBACK_MAX_ROWS: u64 = 10_000;
+const PG_HNSW_MAX_EXACT_FALLBACK_ROWS: u64 = 100_000;
 
 /// Chunk lexical-lane CTE with the FTS constructor abstracted as `{FTS}`. The
 /// two rungs of the relaxation ladder share this template verbatim and differ
 /// only in which tsquery constructor is substituted — the user query text always
 /// binds via `$2`, never interpolated, so no user data enters the SQL string.
-const CHUNK_LEXICAL_SQL_TEMPLATE: &str = "with title_identity_docs as (
+const CHUNK_LEXICAL_SQL_TEMPLATE: &str = "with readable_docs as (
+                 select d.document_id, d.readable_revision_id
+                 from knowledge_document d
+                 where d.library_id = $1
+                   and d.document_state = 'active'
+                   and d.readable_revision_id is not null
+                   and d.deleted_at is null
+             ),
+             title_identity_docs as (
                  select d.document_id
                  from knowledge_document d
                  where d.library_id = $1
                    and d.document_state = 'active'
+                   and d.readable_revision_id is not null
+                   and d.deleted_at is null
                    and cardinality($7::text[]) > 0
                    and not exists (
                        select 1
@@ -79,6 +108,8 @@ const CHUNK_LEXICAL_SQL_TEMPLATE: &str = "with title_identity_docs as (
                  from knowledge_document d
                  where d.library_id = $1
                    and d.document_state = 'active'
+                   and d.readable_revision_id is not null
+                   and d.deleted_at is null
                    and (
                        exists (
                            select 1 from unnest($6::text[]) term(value)
@@ -125,8 +156,12 @@ const CHUNK_LEXICAL_SQL_TEMPLATE: &str = "with title_identity_docs as (
                         * coalesce(c.quality_score::double precision, 1.0) as score,
                     c.quality_score
                  from knowledge_chunk c
+                 join readable_docs rd
+                   on rd.document_id = c.document_id
+                  and rd.readable_revision_id = c.revision_id
                  where c.library_id = $1
                    and c.chunk_state = 'ready'
+                   and c.raptor_level is null
                    and c.search_tsv @@ {FTS}
                    and (($4::timestamptz is null and $5::timestamptz is null)
                         or (c.occurred_at is not null
@@ -152,9 +187,13 @@ const CHUNK_LEXICAL_SQL_TEMPLATE: &str = "with title_identity_docs as (
                             ((1000000.0 - c.chunk_index::double precision)
                                 * coalesce(c.quality_score::double precision, 1.0)) as score
                         from knowledge_chunk c
+                        join readable_docs rd
+                          on rd.document_id = c.document_id
+                         and rd.readable_revision_id = c.revision_id
                         join title_identity_docs d on d.document_id = c.document_id
                         where c.library_id = $1
                           and c.chunk_state = 'ready'
+                          and c.raptor_level is null
                           and (($4::timestamptz is null and $5::timestamptz is null)
                                or (c.occurred_at is not null
                                    and ($4::timestamptz is null or coalesce(c.occurred_until, c.occurred_at) >= $4)
@@ -180,10 +219,14 @@ const CHUNK_LEXICAL_SQL_TEMPLATE: &str = "with title_identity_docs as (
                             ((50.0 - (c.chunk_index::double precision * 0.001))
                                 * coalesce(c.quality_score::double precision, 1.0)) as score
                         from knowledge_chunk c
+                        join readable_docs rd
+                          on rd.document_id = c.document_id
+                         and rd.readable_revision_id = c.revision_id
                         join soft_title_docs d on d.document_id = c.document_id
                         where $9::boolean
                           and c.library_id = $1
                           and c.chunk_state = 'ready'
+                          and c.raptor_level is null
                           and (($4::timestamptz is null and $5::timestamptz is null)
                                or (c.occurred_at is not null
                                    and ($4::timestamptz is null or coalesce(c.occurred_until, c.occurred_at) >= $4)
@@ -209,9 +252,54 @@ const CHUNK_LEXICAL_SQL_TEMPLATE: &str = "with title_identity_docs as (
              order by score desc, chunk_id asc
              limit $10";
 
-/// Pass A (precise): exact AND `websearch_to_tsquery`. Byte-for-byte the
-/// original chunk query — the executed SQL is unchanged. Rendered with the
-/// historical default text-search config so the default path stays identical.
+/// Structured source blocks are revision-scoped evidence. Joining the
+/// canonical document head in the lexical statement is essential: filtering
+/// stale rows after this query would let them consume the bounded top-k and
+/// starve the current readable revision.
+const STRUCTURED_BLOCK_LEXICAL_SQL_TEMPLATE: &str =
+    "select b.block_id, b.document_id, b.workspace_id, b.library_id, b.revision_id, b.ordinal,
+        b.block_kind, b.text, b.normalized_text, b.section_path, b.heading_trail,
+        ts_rank_cd(b.search_tsv, {FTS})::double precision as score
+     from knowledge_structured_block b
+     join knowledge_document d
+       on d.document_id = b.document_id
+      and d.library_id = b.library_id
+      and d.readable_revision_id = b.revision_id
+      and d.document_state = 'active'
+      and d.deleted_at is null
+     where b.library_id = $1
+       and b.search_tsv @@ {FTS}
+     order by score desc, b.revision_id desc, b.ordinal asc, b.block_id asc
+     limit $3";
+
+/// Typed facts have the same canonical-head requirement as chunks and
+/// structured blocks. The exact-value boost is preserved, but it may only rank
+/// facts from the current readable revision of an active document.
+const TECHNICAL_FACT_LEXICAL_SQL_TEMPLATE: &str =
+    "select f.fact_id, f.document_id, f.workspace_id, f.library_id, f.revision_id, f.fact_kind,
+        f.canonical_value_text, f.display_value,
+        (f.canonical_value_exact = $3) as exact_match,
+        (
+            case when f.canonical_value_exact = $3 then 1000000.0 else 0.0 end
+            + ts_rank_cd(f.search_tsv, {FTS})::double precision
+        ) as score
+     from knowledge_technical_fact f
+     join knowledge_document d
+       on d.document_id = f.document_id
+      and d.library_id = f.library_id
+      and d.readable_revision_id = f.revision_id
+      and d.document_state = 'active'
+      and d.deleted_at is null
+     where f.library_id = $1
+       and (
+            f.canonical_value_exact = $3
+            or f.search_tsv @@ {FTS}
+       )
+     order by score desc, f.fact_id asc
+     limit $4";
+
+/// Pass A (precise): exact AND `websearch_to_tsquery`, rendered with the
+/// historical default text-search config and the shared safety filters.
 static CHUNK_LEXICAL_SQL_EXACT: LazyLock<String> =
     LazyLock::new(|| chunk_lexical_sql(DEFAULT_TEXT_SEARCH_CONFIG).0);
 
@@ -220,15 +308,29 @@ static CHUNK_LEXICAL_SQL_PREFIX: LazyLock<String> =
     LazyLock::new(|| chunk_lexical_sql(DEFAULT_TEXT_SEARCH_CONFIG).1);
 
 /// Renders the chunk lexical-lane `(exact_sql, prefix_sql)` pair for a given
-/// Postgres text-search config name. `text_search_config == "simple"` reproduces
-/// the historical hardcoded SQL byte-for-byte.
+/// Postgres text-search config name. `text_search_config == "simple"` preserves
+/// the historical analyzer semantics.
 fn chunk_lexical_sql(text_search_config: &str) -> (String, String) {
     lexical_lane_sql_for_config(CHUNK_LEXICAL_SQL_TEMPLATE, text_search_config)
+}
+
+fn structured_block_lexical_sql() -> (String, String) {
+    lexical_lane_sql(STRUCTURED_BLOCK_LEXICAL_SQL_TEMPLATE)
+}
+
+fn technical_fact_lexical_sql() -> (String, String) {
+    lexical_lane_sql(TECHNICAL_FACT_LEXICAL_SQL_TEMPLATE)
 }
 
 #[derive(Clone)]
 pub struct PgSearchStore {
     pub pool: PgPool,
+}
+
+#[derive(Debug, Clone)]
+struct PgVectorSearchLane {
+    relation_name: String,
+    manifest_row_count: u64,
 }
 
 #[derive(Debug, Clone, FromRow)]
@@ -353,13 +455,255 @@ struct PgEntityVectorSearchRow {
     score: f64,
 }
 
+fn chunk_vector_similarity_sql_with_order(
+    relation: &str,
+    cast_type: &str,
+    exact_retry: bool,
+) -> String {
+    let order_expression = if exact_retry {
+        format!("(v.embedding <=> $3::{cast_type}) + 0.0")
+    } else {
+        format!("v.embedding <=> $3::{cast_type}")
+    };
+    format!(
+        "select v.vector_id, v.workspace_id, v.library_id, v.chunk_id, v.revision_id,
+            v.embedding_model_key, v.vector_kind, v.freshness_generation,
+            (1.0 - (v.embedding <=> $3::{cast_type}))::double precision as score
+         from {relation} v
+         join knowledge_chunk c
+           on c.chunk_id = v.chunk_id
+          and c.revision_id = v.revision_id
+          and c.library_id = v.library_id
+         join knowledge_document d
+           on d.document_id = c.document_id
+          and d.library_id = v.library_id
+          and d.readable_revision_id = v.revision_id
+          and d.document_state = 'active'
+          and d.deleted_at is null
+         where v.library_id = $1
+           and v.embedding_model_key = $2
+           and v.vector_kind = $6
+           and c.chunk_state = 'ready'
+           and c.raptor_level is null
+           and (($4::timestamptz is null and $5::timestamptz is null)
+                or (v.occurred_at is not null
+                    and ($4::timestamptz is null or coalesce(v.occurred_until, v.occurred_at) >= $4)
+                    and ($5::timestamptz is null or v.occurred_at <= $5)))
+         order by {order_expression}, v.chunk_id asc
+         limit $7"
+    )
+}
+
+fn chunk_vector_similarity_sql(relation: &str, cast_type: &str) -> String {
+    chunk_vector_similarity_sql_with_order(relation, cast_type, false)
+}
+
+fn chunk_vector_exact_similarity_sql(relation: &str, cast_type: &str) -> String {
+    chunk_vector_similarity_sql_with_order(relation, cast_type, true)
+}
+
+fn entity_vector_similarity_sql_with_order(
+    relation: &str,
+    cast_type: &str,
+    exact_retry: bool,
+) -> String {
+    let order_expression = if exact_retry {
+        format!("(v.embedding <=> $3::{cast_type}) + 0.0")
+    } else {
+        format!("v.embedding <=> $3::{cast_type}")
+    };
+    format!(
+        "select v.vector_id, v.workspace_id, v.library_id, v.entity_id,
+            v.embedding_model_key, v.vector_kind, v.freshness_generation,
+            (1.0 - (v.embedding <=> $3::{cast_type}))::double precision as score
+         from {relation} v
+         join knowledge_entity e
+           on e.entity_id = v.entity_id
+          and e.library_id = v.library_id
+          and e.entity_state = 'active'
+          and e.freshness_generation = v.freshness_generation
+         where v.library_id = $1
+           and v.embedding_model_key = $2
+           and v.vector_kind = $4
+         order by {order_expression}, v.entity_id asc
+         limit $5"
+    )
+}
+
+fn entity_vector_similarity_sql(relation: &str, cast_type: &str) -> String {
+    entity_vector_similarity_sql_with_order(relation, cast_type, false)
+}
+
+fn entity_vector_exact_similarity_sql(relation: &str, cast_type: &str) -> String {
+    entity_vector_similarity_sql_with_order(relation, cast_type, true)
+}
+
+/// Runtime coverage checks must measure only vectors backed by canonical
+/// source chunks. Legacy RAPTOR summary rows can remain in the physical vector
+/// shards for maintenance/cleanup, but they must not make a revision appear
+/// over- or under-embedded.
+fn canonical_chunk_vector_count_sql(relation: &str) -> String {
+    format!(
+        "select count(*)::bigint
+         from {relation} v
+         join knowledge_chunk c
+           on c.chunk_id = v.chunk_id
+          and c.revision_id = v.revision_id
+          and c.library_id = v.library_id
+         where v.revision_id = $1
+           and v.embedding_model_key = $2
+           and v.vector_kind = $3
+           and v.freshness_generation = $4
+           and c.chunk_state = 'ready'
+           and c.raptor_level is null"
+    )
+}
+
+/// Count live canonical vectors across all candidate dimension shards in one
+/// set-based database call. This avoids trusting manifest `row_count`, which
+/// deliberately includes legacy rows used by broad maintenance APIs, without
+/// adding one client round trip per historical dimension.
+fn canonical_chunk_vector_dimension_counts_sql(
+    manifest_rows: &[(i32, String)],
+) -> anyhow::Result<Option<String>> {
+    let mut branches = Vec::with_capacity(manifest_rows.len());
+    for (dim, relation_name) in manifest_rows {
+        anyhow::ensure!(*dim > 0, "chunk vector manifest dimension must be positive");
+        validate_relation_name(relation_name, CHUNK_VECTOR_RELATION_PREFIX)?;
+        let expected_relation = vector_relation_name(
+            CHUNK_VECTOR_RELATION_PREFIX,
+            u64::try_from(*dim).context("chunk vector manifest dimension overflowed u64")?,
+        )?;
+        anyhow::ensure!(
+            relation_name == &expected_relation,
+            "chunk vector manifest dimension {dim} points to unexpected relation {relation_name}"
+        );
+        let relation = quote_identifier(relation_name)?;
+        branches.push(format!(
+            "select {dim}::integer as dim, count(distinct v.chunk_id)::bigint as canonical_count
+             from {relation} v
+             join knowledge_chunk c
+               on c.chunk_id = v.chunk_id
+              and c.revision_id = v.revision_id
+              and c.library_id = v.library_id
+             join knowledge_document d
+               on d.document_id = c.document_id
+              and d.library_id = v.library_id
+              and d.readable_revision_id = v.revision_id
+              and d.document_state = 'active'
+              and d.deleted_at is null
+             where v.library_id = $1
+               and v.embedding_model_key = $2
+               and v.vector_kind = $3
+               and c.chunk_state = 'ready'
+               and c.raptor_level is null"
+        ));
+    }
+    Ok((!branches.is_empty()).then(|| branches.join(" union all ")))
+}
+
+fn rank_canonical_chunk_vector_dimensions(mut counts: Vec<(i32, i64)>) -> anyhow::Result<Vec<u64>> {
+    for (dim, count) in &counts {
+        anyhow::ensure!(*dim > 0, "chunk vector manifest dimension must be positive");
+        anyhow::ensure!(*count >= 0, "canonical chunk vector count must be non-negative");
+    }
+    counts.retain(|(_, count)| *count > 0);
+    counts.sort_by(|(left_dim, left_count), (right_dim, right_count)| {
+        right_count.cmp(left_count).then_with(|| right_dim.cmp(left_dim))
+    });
+    counts
+        .into_iter()
+        .map(|(dim, _)| {
+            u64::try_from(dim).context("chunk vector manifest dimension overflowed u64")
+        })
+        .collect()
+}
+
+fn chunk_vector_profile_inventory(
+    canonical_counts: Vec<(i32, i64)>,
+) -> anyhow::Result<ChunkVectorProfileInventory> {
+    let active_vector_count =
+        canonical_counts.iter().try_fold(0_u64, |total, (_, count)| -> anyhow::Result<u64> {
+            let count = u64::try_from(*count)
+                .context("active canonical chunk vector count was negative")?;
+            total.checked_add(count).context("active canonical chunk vector count overflowed")
+        })?;
+    Ok(ChunkVectorProfileInventory {
+        dimensions: rank_canonical_chunk_vector_dimensions(canonical_counts)?,
+        active_vector_count,
+    })
+}
+
 impl PgSearchStore {
+    async fn vector_relation_objects_exist(
+        &self,
+        relation_name: &str,
+        id_column: &str,
+        extra_column: Option<&str>,
+    ) -> anyhow::Result<bool> {
+        let required_objects =
+            vector_relation_required_objects(relation_name, id_column, extra_column);
+        sqlx::query_scalar::<_, bool>(
+            "select coalesce(bool_and(
+                        to_regclass(format('%I.%I', current_schema(), object_name)) is not null
+                    ), false)
+             from unnest($1::text[]) required(object_name)",
+        )
+        .bind(required_objects)
+        .fetch_one(&self.pool)
+        .await
+        .with_context(|| format!("failed to inspect vector relation objects for {relation_name}"))
+    }
+
+    async fn vector_relation_objects_exist_in_transaction(
+        transaction: &mut Transaction<'_, Postgres>,
+        relation_name: &str,
+        id_column: &str,
+        extra_column: Option<&str>,
+    ) -> anyhow::Result<bool> {
+        let required_objects =
+            vector_relation_required_objects(relation_name, id_column, extra_column);
+        sqlx::query_scalar::<_, bool>(
+            "select coalesce(bool_and(
+                        to_regclass(format('%I.%I', current_schema(), object_name)) is not null
+                    ), false)
+             from unnest($1::text[]) required(object_name)",
+        )
+        .bind(required_objects)
+        .fetch_one(&mut **transaction)
+        .await
+        .with_context(|| format!("failed to recheck vector relation objects for {relation_name}"))
+    }
+
     async fn ensure_chunk_vector_relation(&self, dim: u64) -> anyhow::Result<String> {
         let relation_name = vector_relation_name(CHUNK_VECTOR_RELATION_PREFIX, dim)?;
+        if self
+            .vector_relation_objects_exist(&relation_name, "chunk_id", Some("revision_id"))
+            .await?
+        {
+            return Ok(relation_name);
+        }
         let relation = quote_identifier(&relation_name)?;
         let storage = PgVectorStorage::for_dim(dim);
         let dim = checked_dim_i32(dim)?;
         let embedding_type = storage.column_type(dim);
+        let mut transaction = self.pool.begin().await.context("begin chunk vector relation DDL")?;
+        sqlx::query("select pg_advisory_xact_lock(hashtextextended($1::text, 0))")
+            .bind(VECTOR_RELATION_DDL_ADVISORY_LOCK_KEY)
+            .execute(&mut *transaction)
+            .await
+            .context("serialize shared vector relation DDL")?;
+        if Self::vector_relation_objects_exist_in_transaction(
+            &mut transaction,
+            &relation_name,
+            "chunk_id",
+            Some("revision_id"),
+        )
+        .await?
+        {
+            transaction.commit().await.context("commit chunk vector DDL recheck")?;
+            return Ok(relation_name);
+        }
         sqlx::query(sqlx::AssertSqlSafe(format!(
             "create table if not exists {relation} (
                 key text primary key,
@@ -378,10 +722,11 @@ impl PgSearchStore {
                 occurred_until timestamptz
             )"
         )))
-        .execute(&self.pool)
+        .execute(&mut *transaction)
         .await
         .with_context(|| format!("failed to create chunk vector relation {relation_name}"))?;
-        self.ensure_vector_relation_indexes(
+        Self::ensure_vector_relation_indexes(
+            &mut transaction,
             &relation_name,
             "chunk_id",
             Some("revision_id"),
@@ -389,15 +734,37 @@ impl PgSearchStore {
             dim,
         )
         .await?;
+        transaction.commit().await.context("commit chunk vector relation DDL")?;
         Ok(relation_name)
     }
 
     async fn ensure_entity_vector_relation(&self, dim: u64) -> anyhow::Result<String> {
         let relation_name = vector_relation_name(ENTITY_VECTOR_RELATION_PREFIX, dim)?;
+        if self.vector_relation_objects_exist(&relation_name, "entity_id", None).await? {
+            return Ok(relation_name);
+        }
         let relation = quote_identifier(&relation_name)?;
         let storage = PgVectorStorage::for_dim(dim);
         let dim = checked_dim_i32(dim)?;
         let embedding_type = storage.column_type(dim);
+        let mut transaction =
+            self.pool.begin().await.context("begin entity vector relation DDL")?;
+        sqlx::query("select pg_advisory_xact_lock(hashtextextended($1::text, 0))")
+            .bind(VECTOR_RELATION_DDL_ADVISORY_LOCK_KEY)
+            .execute(&mut *transaction)
+            .await
+            .context("serialize shared vector relation DDL")?;
+        if Self::vector_relation_objects_exist_in_transaction(
+            &mut transaction,
+            &relation_name,
+            "entity_id",
+            None,
+        )
+        .await?
+        {
+            transaction.commit().await.context("commit entity vector DDL recheck")?;
+            return Ok(relation_name);
+        }
         sqlx::query(sqlx::AssertSqlSafe(format!(
             "create table if not exists {relation} (
                 key text primary key,
@@ -413,16 +780,24 @@ impl PgSearchStore {
                 created_at timestamptz not null
             )"
         )))
-        .execute(&self.pool)
+        .execute(&mut *transaction)
         .await
         .with_context(|| format!("failed to create entity vector relation {relation_name}"))?;
-        self.ensure_vector_relation_indexes(&relation_name, "entity_id", None, storage, dim)
-            .await?;
+        Self::ensure_vector_relation_indexes(
+            &mut transaction,
+            &relation_name,
+            "entity_id",
+            None,
+            storage,
+            dim,
+        )
+        .await?;
+        transaction.commit().await.context("commit entity vector relation DDL")?;
         Ok(relation_name)
     }
 
     async fn ensure_vector_relation_indexes(
-        &self,
+        transaction: &mut Transaction<'_, Postgres>,
         relation_name: &str,
         id_column: &str,
         extra_column: Option<&str>,
@@ -430,48 +805,105 @@ impl PgSearchStore {
         dim: i32,
     ) -> anyhow::Result<()> {
         let relation = quote_identifier(relation_name)?;
+        let quoted_id_column = quote_identifier(id_column)?;
+        let logical_identity_columns = match extra_column {
+            Some(extra_column) => format!(
+                "library_id, {quoted_id_column}, {}, embedding_model_key, vector_kind, freshness_generation",
+                quote_identifier(extra_column)?,
+            ),
+            None => format!(
+                "library_id, {quoted_id_column}, embedding_model_key, vector_kind, freshness_generation"
+            ),
+        };
+        let logical_key_index_name = format!("{relation_name}_logical_key");
+        let logical_key_index_exists = sqlx::query_scalar::<_, bool>(
+            "select to_regclass(format('%I.%I', current_schema(), $1)) is not null",
+        )
+        .bind(&logical_key_index_name)
+        .fetch_one(&mut **transaction)
+        .await
+        .with_context(|| format!("inspect logical key index on {relation_name}"))?;
+        if !logical_key_index_exists {
+            let has_logical_duplicates =
+                sqlx::query_scalar::<_, bool>(sqlx::AssertSqlSafe(format!(
+                    "select exists (
+                         select 1
+                         from {relation}
+                         group by {logical_identity_columns}
+                         having count(*) > 1
+                         limit 1
+                     )"
+                )))
+                .fetch_one(&mut **transaction)
+                .await
+                .with_context(|| format!("inspect logical vector duplicates in {relation_name}"))?;
+            anyhow::ensure!(
+                !has_logical_duplicates,
+                "cannot install logical vector uniqueness on {relation_name}: duplicate object/profile/generation rows require explicit repair"
+            );
+            let logical_key_idx = quote_identifier(&logical_key_index_name)?;
+            sqlx::query(sqlx::AssertSqlSafe(format!(
+                "create unique index if not exists {logical_key_idx}
+                 on {relation} ({logical_identity_columns})"
+            )))
+            .execute(&mut **transaction)
+            .await
+            .with_context(|| format!("failed to create logical key index on {relation_name}"))?;
+        }
+
         let lane_idx = quote_identifier(&format!("{relation_name}_lane_idx"))?;
         sqlx::query(sqlx::AssertSqlSafe(format!(
             "create index if not exists {lane_idx}
              on {relation} (library_id, embedding_model_key, vector_kind)"
         )))
-        .execute(&self.pool)
+        .execute(&mut **transaction)
         .await
         .with_context(|| format!("failed to create lane index on {relation_name}"))?;
 
         let id_idx = quote_identifier(&format!("{relation_name}_{id_column}_idx"))?;
         sqlx::query(sqlx::AssertSqlSafe(format!(
-            "create index if not exists {id_idx} on {relation} ({id_column})"
+            "create index if not exists {id_idx} on {relation} ({quoted_id_column})"
         )))
-        .execute(&self.pool)
+        .execute(&mut **transaction)
         .await
         .with_context(|| format!("failed to create id index on {relation_name}"))?;
 
         if let Some(extra_column) = extra_column {
             let extra_idx = quote_identifier(&format!("{relation_name}_{extra_column}_idx"))?;
+            let quoted_extra_column = quote_identifier(extra_column)?;
             sqlx::query(sqlx::AssertSqlSafe(format!(
-                "create index if not exists {extra_idx} on {relation} ({extra_column})"
+                "create index if not exists {extra_idx} on {relation} ({quoted_extra_column})"
             )))
-            .execute(&self.pool)
+            .execute(&mut **transaction)
             .await
             .with_context(|| format!("failed to create extra index on {relation_name}"))?;
         }
-        self.ensure_vector_relation_hnsw_index(relation_name, storage, dim).await?;
+        Self::ensure_vector_relation_hnsw_index(transaction, relation_name, storage, dim).await?;
         Ok(())
     }
 
     async fn ensure_vector_relation_hnsw_index(
-        &self,
+        transaction: &mut Transaction<'_, Postgres>,
         relation_name: &str,
         storage: PgVectorStorage,
         dim: i32,
     ) -> anyhow::Result<()> {
         let relation = quote_identifier(relation_name)?;
-        let hnsw_idx = quote_identifier(&format!("{relation_name}_hnsw"))?;
+        let hnsw_index_name = format!("{relation_name}_hnsw");
+        let index_exists = sqlx::query_scalar::<_, bool>("select to_regclass($1) is not null")
+            .bind(&hnsw_index_name)
+            .fetch_one(&mut **transaction)
+            .await
+            .with_context(|| format!("failed to inspect HNSW index {hnsw_index_name}"))?;
+        if index_exists {
+            return Ok(());
+        }
+
+        let hnsw_idx = quote_identifier(&hnsw_index_name)?;
         let row_count = sqlx::query_scalar::<_, i64>(sqlx::AssertSqlSafe(format!(
             "select count(*)::bigint from {relation}"
         )))
-        .fetch_one(&self.pool)
+        .fetch_one(&mut **transaction)
         .await
         .with_context(|| format!("failed to count rows in {relation_name} for HNSW sizing"))?;
         let row_count = u64::try_from(row_count).context("negative vector shard row count")?;
@@ -484,14 +916,14 @@ impl PgSearchStore {
             m = params.m,
             ef_construction = params.ef_construction
         )))
-        .execute(&self.pool)
+        .execute(&mut **transaction)
         .await
         .with_context(|| format!("failed to create HNSW index on {relation_name}"))?;
         Ok(())
     }
 
-    async fn upsert_manifest(
-        &self,
+    async fn upsert_manifest_in_transaction(
+        transaction: &mut Transaction<'_, Postgres>,
         library_id: Uuid,
         dim: u64,
         vector_kind: &str,
@@ -513,22 +945,22 @@ impl PgSearchStore {
         .bind(vector_kind)
         .bind(embedding_model_key)
         .bind(relation_name)
-        .execute(&self.pool)
+        .execute(&mut **transaction)
         .await
-        .context("failed to upsert vector relation manifest")?;
+        .context("failed to upsert vector relation manifest in vector write transaction")?;
         Ok(())
     }
 
-    async fn resolve_manifest_relation(
+    async fn resolve_manifest_search_lane(
         &self,
         library_id: Uuid,
         dim: u64,
         vector_kind: &str,
         embedding_model_key: &str,
         expected_prefix: &str,
-    ) -> anyhow::Result<Option<String>> {
-        let relation_name = sqlx::query_scalar::<_, String>(
-            "select relation_name
+    ) -> anyhow::Result<Option<PgVectorSearchLane>> {
+        let row = sqlx::query_as::<_, (String, i64)>(
+            "select relation_name, row_count
              from knowledge_vector_relation_manifest
              where library_id = $1
                and dim = $2
@@ -541,11 +973,14 @@ impl PgSearchStore {
         .bind(embedding_model_key)
         .fetch_optional(&self.pool)
         .await
-        .context("failed to resolve vector relation manifest")?;
-        if let Some(relation_name) = &relation_name {
-            validate_relation_name(relation_name, expected_prefix)?;
-        }
-        Ok(relation_name)
+        .context("failed to resolve vector search lane manifest")?;
+        let Some((relation_name, row_count)) = row else {
+            return Ok(None);
+        };
+        validate_relation_name(&relation_name, expected_prefix)?;
+        let manifest_row_count = u64::try_from(row_count)
+            .context("vector search lane manifest row count was negative")?;
+        Ok(Some(PgVectorSearchLane { relation_name, manifest_row_count }))
     }
 
     async fn list_vector_relations(&self, expected_prefix: &str) -> anyhow::Result<Vec<String>> {
@@ -567,8 +1002,8 @@ impl PgSearchStore {
             .collect()
     }
 
-    async fn refresh_manifest_count(
-        &self,
+    async fn refresh_manifest_count_in_transaction(
+        transaction: &mut Transaction<'_, Postgres>,
         relation_name: &str,
         library_id: Uuid,
         dim: i32,
@@ -586,121 +1021,451 @@ impl PgSearchStore {
         .bind(library_id)
         .bind(vector_kind)
         .bind(embedding_model_key)
-        .fetch_one(&self.pool)
+        .fetch_one(&mut **transaction)
         .await
         .with_context(|| format!("failed to count rows in {relation_name}"))?;
-        sqlx::query(
+        let updated = sqlx::query(
             "update knowledge_vector_relation_manifest
              set row_count = $5
              where library_id = $1
                and dim = $2
                and vector_kind = $3
-               and embedding_model_key = $4",
+               and embedding_model_key = $4
+               and promoted = false",
         )
         .bind(library_id)
         .bind(dim)
         .bind(vector_kind)
         .bind(embedding_model_key)
         .bind(row_count)
-        .execute(&self.pool)
+        .execute(&mut **transaction)
         .await
-        .context("failed to refresh manifest row_count")?;
+        .context("failed to refresh prepared manifest row_count")?;
+        ensure_single_manifest_row_updated(updated.rows_affected())?;
         Ok(())
     }
 
-    async fn upsert_chunk_vector_in_relation(
-        &self,
+    async fn upsert_chunk_vectors_in_relation_bulk_with_executor<'e, E>(
         relation_name: &str,
-        row: &KnowledgeChunkVectorRow,
-    ) -> anyhow::Result<KnowledgeChunkVectorRow> {
+        rows: &[&KnowledgeChunkVectorRow],
+        executor: E,
+    ) -> anyhow::Result<()>
+    where
+        E: Executor<'e, Database = Postgres>,
+    {
+        let Some(first) = rows.first() else {
+            return Ok(());
+        };
         let relation = quote_identifier(relation_name)?;
-        let vector_literal = pgvector_literal(&row.vector)?;
-        let storage = PgVectorStorage::for_dim(u64::try_from(row.dimensions)?);
+        let storage = PgVectorStorage::for_dim(u64::try_from(first.dimensions)?);
         let cast_type = storage.cast_type();
-        let row = sqlx::query_as::<_, PgChunkVectorRow>(sqlx::AssertSqlSafe(format!(
+        let vector_literals = rows
+            .iter()
+            .map(|row| pgvector_literal(&row.vector))
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        sqlx::query(sqlx::AssertSqlSafe(format!(
             "insert into {relation} (
                 key, vector_id, workspace_id, library_id, chunk_id, revision_id,
                 embedding_model_key, vector_kind, dimensions, embedding,
                 freshness_generation, created_at, occurred_at, occurred_until
-             ) values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::{cast_type}, $11, $12, $13, $14)
-             on conflict (key) do update set
+             )
+             select input.key, input.vector_id, input.workspace_id, input.library_id,
+                    input.chunk_id, input.revision_id, input.embedding_model_key,
+                    input.vector_kind, input.dimensions, input.embedding_text::{cast_type},
+                    input.freshness_generation, input.created_at,
+                    input.occurred_at, input.occurred_until
+             from unnest(
+                $1::text[], $2::uuid[], $3::uuid[], $4::uuid[], $5::uuid[], $6::uuid[],
+                $7::text[], $8::text[], $9::integer[], $10::text[], $11::bigint[],
+                $12::timestamptz[], $13::timestamptz[], $14::timestamptz[]
+             ) as input(
+                key, vector_id, workspace_id, library_id, chunk_id, revision_id,
+                embedding_model_key, vector_kind, dimensions, embedding_text,
+                freshness_generation, created_at, occurred_at, occurred_until
+             )
+             on conflict (
+                library_id, chunk_id, revision_id, embedding_model_key,
+                vector_kind, freshness_generation
+             ) do update set
+                key = excluded.key,
+                vector_id = excluded.vector_id,
                 workspace_id = excluded.workspace_id,
-                library_id = excluded.library_id,
-                chunk_id = excluded.chunk_id,
-                revision_id = excluded.revision_id,
-                embedding_model_key = excluded.embedding_model_key,
-                vector_kind = excluded.vector_kind,
                 dimensions = excluded.dimensions,
                 embedding = excluded.embedding,
-                freshness_generation = excluded.freshness_generation,
+                created_at = excluded.created_at,
                 occurred_at = excluded.occurred_at,
-                occurred_until = excluded.occurred_until
-             returning key, vector_id, workspace_id, library_id, chunk_id, revision_id,
-                embedding_model_key, vector_kind, dimensions, embedding::text as vector_text,
-                freshness_generation, created_at, occurred_at, occurred_until"
+                occurred_until = excluded.occurred_until"
         )))
-        .bind(row.vector_id.to_string())
-        .bind(row.vector_id)
-        .bind(row.workspace_id)
-        .bind(row.library_id)
-        .bind(row.chunk_id)
-        .bind(row.revision_id)
-        .bind(&row.embedding_model_key)
-        .bind(&row.vector_kind)
-        .bind(row.dimensions)
-        .bind(vector_literal)
-        .bind(row.freshness_generation)
-        .bind(row.created_at)
-        .bind(row.occurred_at)
-        .bind(row.occurred_until)
-        .fetch_one(&self.pool)
+        .bind(rows.iter().map(|row| row.vector_id.to_string()).collect::<Vec<_>>())
+        .bind(rows.iter().map(|row| row.vector_id).collect::<Vec<_>>())
+        .bind(rows.iter().map(|row| row.workspace_id).collect::<Vec<_>>())
+        .bind(rows.iter().map(|row| row.library_id).collect::<Vec<_>>())
+        .bind(rows.iter().map(|row| row.chunk_id).collect::<Vec<_>>())
+        .bind(rows.iter().map(|row| row.revision_id).collect::<Vec<_>>())
+        .bind(rows.iter().map(|row| row.embedding_model_key.clone()).collect::<Vec<_>>())
+        .bind(rows.iter().map(|row| row.vector_kind.clone()).collect::<Vec<_>>())
+        .bind(rows.iter().map(|row| row.dimensions).collect::<Vec<_>>())
+        .bind(vector_literals)
+        .bind(rows.iter().map(|row| row.freshness_generation).collect::<Vec<_>>())
+        .bind(rows.iter().map(|row| row.created_at).collect::<Vec<_>>())
+        .bind(rows.iter().map(|row| row.occurred_at).collect::<Vec<_>>())
+        .bind(rows.iter().map(|row| row.occurred_until).collect::<Vec<_>>())
+        .execute(executor)
         .await
-        .with_context(|| format!("failed to upsert chunk vector into {relation_name}"))?;
-        chunk_vector_from_pg(row)
+        .with_context(|| {
+            format!("failed to bulk-upsert {} chunk vectors into {relation_name}", rows.len())
+        })?;
+        Ok(())
     }
 
-    async fn upsert_entity_vector_in_relation(
-        &self,
+    async fn upsert_entity_vectors_in_relation_bulk_with_executor<'e, E>(
         relation_name: &str,
-        row: &KnowledgeEntityVectorRow,
-    ) -> anyhow::Result<KnowledgeEntityVectorRow> {
+        rows: &[&KnowledgeEntityVectorRow],
+        executor: E,
+    ) -> anyhow::Result<()>
+    where
+        E: Executor<'e, Database = Postgres>,
+    {
+        let Some(first) = rows.first() else {
+            return Ok(());
+        };
         let relation = quote_identifier(relation_name)?;
-        let vector_literal = pgvector_literal(&row.vector)?;
-        let storage = PgVectorStorage::for_dim(u64::try_from(row.dimensions)?);
+        let storage = PgVectorStorage::for_dim(u64::try_from(first.dimensions)?);
         let cast_type = storage.cast_type();
-        let row = sqlx::query_as::<_, PgEntityVectorRow>(sqlx::AssertSqlSafe(format!(
+        let vector_literals = rows
+            .iter()
+            .map(|row| pgvector_literal(&row.vector))
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        sqlx::query(sqlx::AssertSqlSafe(format!(
             "insert into {relation} (
                 key, vector_id, workspace_id, library_id, entity_id, embedding_model_key,
                 vector_kind, dimensions, embedding, freshness_generation, created_at
-             ) values ($1, $2, $3, $4, $5, $6, $7, $8, $9::{cast_type}, $10, $11)
-             on conflict (key) do update set
+             )
+             select input.key, input.vector_id, input.workspace_id, input.library_id,
+                    input.entity_id, input.embedding_model_key, input.vector_kind,
+                    input.dimensions, input.embedding_text::{cast_type},
+                    input.freshness_generation, input.created_at
+             from unnest(
+                $1::text[], $2::uuid[], $3::uuid[], $4::uuid[], $5::uuid[], $6::text[],
+                $7::text[], $8::integer[], $9::text[], $10::bigint[], $11::timestamptz[]
+             ) as input(
+                key, vector_id, workspace_id, library_id, entity_id, embedding_model_key,
+                vector_kind, dimensions, embedding_text, freshness_generation, created_at
+             )
+             on conflict (
+                library_id, entity_id, embedding_model_key,
+                vector_kind, freshness_generation
+             ) do update set
+                key = excluded.key,
+                vector_id = excluded.vector_id,
                 workspace_id = excluded.workspace_id,
-                library_id = excluded.library_id,
-                entity_id = excluded.entity_id,
-                embedding_model_key = excluded.embedding_model_key,
-                vector_kind = excluded.vector_kind,
                 dimensions = excluded.dimensions,
                 embedding = excluded.embedding,
-                freshness_generation = excluded.freshness_generation
-             returning key, vector_id, workspace_id, library_id, entity_id,
-                embedding_model_key, vector_kind, dimensions, embedding::text as vector_text,
-                freshness_generation, created_at"
+                created_at = excluded.created_at"
         )))
-        .bind(row.vector_id.to_string())
-        .bind(row.vector_id)
-        .bind(row.workspace_id)
-        .bind(row.library_id)
-        .bind(row.entity_id)
-        .bind(&row.embedding_model_key)
-        .bind(&row.vector_kind)
-        .bind(row.dimensions)
-        .bind(vector_literal)
-        .bind(row.freshness_generation)
-        .bind(row.created_at)
-        .fetch_one(&self.pool)
+        .bind(rows.iter().map(|row| row.vector_id.to_string()).collect::<Vec<_>>())
+        .bind(rows.iter().map(|row| row.vector_id).collect::<Vec<_>>())
+        .bind(rows.iter().map(|row| row.workspace_id).collect::<Vec<_>>())
+        .bind(rows.iter().map(|row| row.library_id).collect::<Vec<_>>())
+        .bind(rows.iter().map(|row| row.entity_id).collect::<Vec<_>>())
+        .bind(rows.iter().map(|row| row.embedding_model_key.clone()).collect::<Vec<_>>())
+        .bind(rows.iter().map(|row| row.vector_kind.clone()).collect::<Vec<_>>())
+        .bind(rows.iter().map(|row| row.dimensions).collect::<Vec<_>>())
+        .bind(vector_literals)
+        .bind(rows.iter().map(|row| row.freshness_generation).collect::<Vec<_>>())
+        .bind(rows.iter().map(|row| row.created_at).collect::<Vec<_>>())
+        .execute(executor)
         .await
-        .with_context(|| format!("failed to upsert entity vector into {relation_name}"))?;
-        entity_vector_from_pg(row)
+        .with_context(|| {
+            format!("failed to bulk-upsert {} entity vectors into {relation_name}", rows.len())
+        })?;
+        Ok(())
+    }
+
+    async fn upsert_chunk_vectors_bulk_immediate(
+        &self,
+        rows: &[KnowledgeChunkVectorRow],
+    ) -> anyhow::Result<()> {
+        let mut groups: BTreeMap<(u64, Uuid, String, String), Vec<&KnowledgeChunkVectorRow>> =
+            BTreeMap::new();
+        for row in rows {
+            let dim = validate_row_vector_dimensions(row.dimensions, &row.vector, "chunk")?;
+            groups
+                .entry((
+                    dim,
+                    row.library_id,
+                    row.vector_kind.clone(),
+                    row.embedding_model_key.clone(),
+                ))
+                .or_default()
+                .push(row);
+        }
+        for ((dim, library_id, vector_kind, embedding_model_key), rows) in groups {
+            let relation_name = self.ensure_chunk_vector_relation(dim).await?;
+            let mut transaction =
+                self.pool.begin().await.context("begin immediate chunk vector write")?;
+            lock_library_vector_plane_data(&mut transaction, library_id, false).await?;
+            Self::upsert_manifest_in_transaction(
+                &mut transaction,
+                library_id,
+                dim,
+                &vector_kind,
+                &embedding_model_key,
+                &relation_name,
+            )
+            .await?;
+            Self::upsert_chunk_vectors_in_relation_bulk_with_executor(
+                &relation_name,
+                rows.as_slice(),
+                &mut *transaction,
+            )
+            .await?;
+            Self::refresh_manifest_count_in_transaction(
+                &mut transaction,
+                &relation_name,
+                library_id,
+                checked_dim_i32(dim)?,
+                &vector_kind,
+                &embedding_model_key,
+            )
+            .await?;
+            transaction.commit().await.context("commit immediate chunk vector write")?;
+        }
+        Ok(())
+    }
+
+    async fn upsert_chunk_vectors_bulk_fenced_immediate(
+        &self,
+        rows: &[KnowledgeChunkVectorRow],
+        fence: &CanonicalVectorWriteFence,
+    ) -> anyhow::Result<i64> {
+        let first = rows.first().context("fenced chunk vector batch must not be empty")?;
+        validate_canonical_embedding_profile_key(&fence.embedding_profile_key)?;
+        anyhow::ensure!(
+            rows.iter().all(|row| row.library_id == first.library_id),
+            "fenced chunk vector batch spans multiple libraries"
+        );
+        anyhow::ensure!(
+            rows.iter().all(|row| {
+                row.embedding_model_key == fence.embedding_profile_key
+                    && row.embedding_model_key == first.embedding_model_key
+                    && row.vector_kind == first.vector_kind
+                    && row.dimensions == first.dimensions
+            }),
+            "fenced chunk vector batch spans multiple profiles, kinds, or dimensions"
+        );
+        let dim = validate_row_vector_dimensions(first.dimensions, &first.vector, "chunk")?;
+        for row in &rows[1..] {
+            anyhow::ensure!(
+                validate_row_vector_dimensions(row.dimensions, &row.vector, "chunk")? == dim,
+                "fenced chunk vector batch has mixed dimensions"
+            );
+        }
+        let relation_name = self.ensure_chunk_vector_relation(dim).await?;
+        let mut transaction = self.pool.begin().await.context("begin fenced chunk vector write")?;
+        lock_library_vector_plane_data(
+            &mut transaction,
+            first.library_id,
+            fence.advance_source_truth_version,
+        )
+        .await?;
+        let observed_source_truth_version =
+            validate_canonical_vector_write_fence(&mut transaction, first.library_id, fence)
+                .await?;
+        Self::upsert_manifest_in_transaction(
+            &mut transaction,
+            first.library_id,
+            dim,
+            &first.vector_kind,
+            &first.embedding_model_key,
+            &relation_name,
+        )
+        .await?;
+        let borrowed = rows.iter().collect::<Vec<_>>();
+        Self::upsert_chunk_vectors_in_relation_bulk_with_executor(
+            &relation_name,
+            borrowed.as_slice(),
+            &mut *transaction,
+        )
+        .await?;
+        Self::refresh_manifest_count_in_transaction(
+            &mut transaction,
+            &relation_name,
+            first.library_id,
+            checked_dim_i32(dim)?,
+            &first.vector_kind,
+            &first.embedding_model_key,
+        )
+        .await?;
+        let source_truth_version = finish_canonical_vector_write_fence(
+            &mut transaction,
+            first.library_id,
+            fence,
+            observed_source_truth_version,
+        )
+        .await?;
+        transaction.commit().await.context("commit fenced chunk vector write")?;
+        Ok(source_truth_version)
+    }
+
+    async fn upsert_entity_vectors_bulk_fenced_immediate(
+        &self,
+        rows: &[KnowledgeEntityVectorRow],
+        fence: &CanonicalVectorWriteFence,
+    ) -> anyhow::Result<i64> {
+        let first = rows.first().context("fenced entity vector batch must not be empty")?;
+        validate_canonical_embedding_profile_key(&fence.embedding_profile_key)?;
+        anyhow::ensure!(
+            rows.iter().all(|row| row.library_id == first.library_id),
+            "fenced entity vector batch spans multiple libraries"
+        );
+        anyhow::ensure!(
+            rows.iter().all(|row| {
+                row.embedding_model_key == fence.embedding_profile_key
+                    && row.embedding_model_key == first.embedding_model_key
+                    && row.vector_kind == first.vector_kind
+                    && row.dimensions == first.dimensions
+            }),
+            "fenced entity vector batch spans multiple profiles, kinds, or dimensions"
+        );
+        let dim = validate_row_vector_dimensions(first.dimensions, &first.vector, "entity")?;
+        for row in &rows[1..] {
+            anyhow::ensure!(
+                validate_row_vector_dimensions(row.dimensions, &row.vector, "entity")? == dim,
+                "fenced entity vector batch has mixed dimensions"
+            );
+        }
+        let relation_name = self.ensure_entity_vector_relation(dim).await?;
+        let mut transaction =
+            self.pool.begin().await.context("begin fenced entity vector write")?;
+        lock_library_vector_plane_data(
+            &mut transaction,
+            first.library_id,
+            fence.advance_source_truth_version,
+        )
+        .await?;
+        let observed_source_truth_version =
+            validate_canonical_vector_write_fence(&mut transaction, first.library_id, fence)
+                .await?;
+        Self::upsert_manifest_in_transaction(
+            &mut transaction,
+            first.library_id,
+            dim,
+            &first.vector_kind,
+            &first.embedding_model_key,
+            &relation_name,
+        )
+        .await?;
+        let borrowed = rows.iter().collect::<Vec<_>>();
+        Self::upsert_entity_vectors_in_relation_bulk_with_executor(
+            &relation_name,
+            borrowed.as_slice(),
+            &mut *transaction,
+        )
+        .await?;
+        Self::refresh_manifest_count_in_transaction(
+            &mut transaction,
+            &relation_name,
+            first.library_id,
+            checked_dim_i32(dim)?,
+            &first.vector_kind,
+            &first.embedding_model_key,
+        )
+        .await?;
+        let source_truth_version = finish_canonical_vector_write_fence(
+            &mut transaction,
+            first.library_id,
+            fence,
+            observed_source_truth_version,
+        )
+        .await?;
+        transaction.commit().await.context("commit fenced entity vector write")?;
+        Ok(source_truth_version)
+    }
+
+    async fn upsert_entity_vectors_bulk_immediate(
+        &self,
+        rows: &[KnowledgeEntityVectorRow],
+    ) -> anyhow::Result<()> {
+        let mut groups: BTreeMap<(u64, Uuid, String, String), Vec<&KnowledgeEntityVectorRow>> =
+            BTreeMap::new();
+        for row in rows {
+            let dim = validate_row_vector_dimensions(row.dimensions, &row.vector, "entity")?;
+            groups
+                .entry((
+                    dim,
+                    row.library_id,
+                    row.vector_kind.clone(),
+                    row.embedding_model_key.clone(),
+                ))
+                .or_default()
+                .push(row);
+        }
+        for ((dim, library_id, vector_kind, embedding_model_key), rows) in groups {
+            let relation_name = self.ensure_entity_vector_relation(dim).await?;
+            let mut transaction =
+                self.pool.begin().await.context("begin immediate entity vector write")?;
+            lock_library_vector_plane_data(&mut transaction, library_id, false).await?;
+            Self::upsert_manifest_in_transaction(
+                &mut transaction,
+                library_id,
+                dim,
+                &vector_kind,
+                &embedding_model_key,
+                &relation_name,
+            )
+            .await?;
+            Self::upsert_entity_vectors_in_relation_bulk_with_executor(
+                &relation_name,
+                rows.as_slice(),
+                &mut *transaction,
+            )
+            .await?;
+            Self::refresh_manifest_count_in_transaction(
+                &mut transaction,
+                &relation_name,
+                library_id,
+                checked_dim_i32(dim)?,
+                &vector_kind,
+                &embedding_model_key,
+            )
+            .await?;
+            transaction.commit().await.context("commit immediate entity vector write")?;
+        }
+        Ok(())
+    }
+
+    async fn reconcile_manifest_count_for_lane(
+        &self,
+        library_id: Uuid,
+        dimensions: u64,
+        vector_kind: &str,
+        embedding_model_key: &str,
+        relation_prefix: &str,
+    ) -> anyhow::Result<()> {
+        let mut transaction =
+            self.pool.begin().await.context("begin vector manifest reconciliation")?;
+        lock_library_vector_plane_data(&mut transaction, library_id, false).await?;
+        let relation_name = lock_prepared_manifest_lane_for_share(
+            &mut transaction,
+            library_id,
+            dimensions,
+            vector_kind,
+            embedding_model_key,
+            relation_prefix,
+        )
+        .await?;
+        Self::refresh_manifest_count_in_transaction(
+            &mut transaction,
+            &relation_name,
+            library_id,
+            checked_dim_i32(dimensions)?,
+            vector_kind,
+            embedding_model_key,
+        )
+        .await?;
+        transaction.commit().await.context("commit vector manifest reconciliation")?;
+        Ok(())
     }
 
     /// Runs a single rung of the chunk lexical ladder.
@@ -711,7 +1476,6 @@ impl PgSearchStore {
     /// prefix tsquery string for a relaxed pass. Every other bound parameter is
     /// identical across passes, so the title-aware scoring is preserved while
     /// only the FTS lane widens.
-    #[allow(clippy::too_many_arguments)]
     async fn run_chunk_lexical_pass(
         &self,
         sql: &str,
@@ -757,6 +1521,945 @@ impl PgSearchStore {
     }
 }
 
+fn ensure_single_manifest_row_updated(rows_affected: u64) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        rows_affected == 1,
+        "vector manifest reconciliation updated {rows_affected} rows; expected exactly one prepared lane"
+    );
+    Ok(())
+}
+
+fn vector_plane_data_advisory_lock_name(library_id: Uuid) -> String {
+    format!("{VECTOR_PLANE_DATA_ADVISORY_LOCK_PREFIX}:{library_id}")
+}
+
+async fn lock_library_vector_plane_data(
+    transaction: &mut Transaction<'_, Postgres>,
+    library_id: Uuid,
+    exclusive: bool,
+) -> anyhow::Result<()> {
+    let lock_name = vector_plane_data_advisory_lock_name(library_id);
+    if exclusive {
+        sqlx::query("select pg_advisory_xact_lock(hashtextextended($1::text, 0))")
+            .bind(lock_name)
+            .execute(&mut **transaction)
+            .await
+            .context("acquire exclusive library vector-plane data lock")?;
+    } else {
+        sqlx::query("select pg_advisory_xact_lock_shared(hashtextextended($1::text, 0))")
+            .bind(lock_name)
+            .execute(&mut **transaction)
+            .await
+            .context("acquire shared library vector-plane data lock")?;
+    }
+    Ok(())
+}
+
+async fn validate_canonical_vector_write_fence(
+    transaction: &mut Transaction<'_, Postgres>,
+    library_id: Uuid,
+    fence: &CanonicalVectorWriteFence,
+) -> anyhow::Result<i64> {
+    anyhow::ensure!(
+        fence.expected_source_truth_version > 0,
+        "canonical vector write requires a positive source-truth fence"
+    );
+    let source_truth_version = if fence.advance_source_truth_version {
+        sqlx::query_scalar::<_, i64>(
+            "select source_truth_version
+             from catalog_library
+             where id = $1
+             for update",
+        )
+        .bind(library_id)
+        .fetch_optional(&mut **transaction)
+        .await
+    } else {
+        sqlx::query_scalar::<_, i64>(
+            "select source_truth_version
+             from catalog_library
+             where id = $1
+             for share",
+        )
+        .bind(library_id)
+        .fetch_optional(&mut **transaction)
+        .await
+    }
+    .context("lock canonical vector write source/profile fence")?
+    .ok_or_else(|| anyhow::anyhow!("library disappeared during canonical vector write"))?;
+    anyhow::ensure!(
+        source_truth_version == fence.expected_source_truth_version,
+        "library source or embedding profile changed before canonical vector write"
+    );
+    if let Some(ingest_attempt) = fence.ingest_attempt {
+        anyhow::ensure!(
+            lock_latest_leased_ingest_attempt_authority(transaction, library_id, ingest_attempt,)
+                .await?,
+            "ingest attempt authority changed before canonical vector write"
+        );
+    }
+    Ok(source_truth_version)
+}
+
+/// Lock and validate the queue authority used by a short vector transaction.
+///
+/// Canonical lock order is library -> job -> attempt. The caller has already
+/// locked the library source row; holding the job row in SHARE mode makes
+/// lease recovery/finalization wait until the vector transaction commits. No
+/// provider I/O runs while these locks are held.
+async fn lock_latest_leased_ingest_attempt_authority(
+    transaction: &mut Transaction<'_, Postgres>,
+    library_id: Uuid,
+    ingest_attempt: CanonicalIngestVectorWriteFence,
+) -> anyhow::Result<bool> {
+    ingest_repository::lock_latest_leased_revision_attempt(
+        transaction,
+        library_id,
+        ingest_attempt.attempt_id,
+        ingest_attempt.revision_id,
+    )
+    .await
+    .context("lock latest canonical vector ingest authority")
+}
+
+async fn finish_canonical_vector_write_fence(
+    transaction: &mut Transaction<'_, Postgres>,
+    library_id: Uuid,
+    fence: &CanonicalVectorWriteFence,
+    observed_source_truth_version: i64,
+) -> anyhow::Result<i64> {
+    if !fence.advance_source_truth_version {
+        return Ok(observed_source_truth_version);
+    }
+    advance_vector_source_truth_version(transaction, library_id, observed_source_truth_version)
+        .await
+}
+
+async fn validate_exclusive_vector_delete_fence(
+    transaction: &mut Transaction<'_, Postgres>,
+    library_id: Uuid,
+    expected_source_truth_version: i64,
+) -> anyhow::Result<i64> {
+    anyhow::ensure!(
+        expected_source_truth_version > 0,
+        "vector delete requires a positive source-truth fence"
+    );
+    let observed_source_truth_version =
+        lock_exclusive_vector_mutation_source(transaction, library_id).await?;
+    anyhow::ensure!(
+        observed_source_truth_version == expected_source_truth_version,
+        "library source or embedding profile changed before destructive vector mutation"
+    );
+    Ok(observed_source_truth_version)
+}
+
+pub(crate) async fn lock_exclusive_vector_mutation_source(
+    transaction: &mut Transaction<'_, Postgres>,
+    library_id: Uuid,
+) -> anyhow::Result<i64> {
+    lock_library_vector_plane_data(transaction, library_id, true).await?;
+    sqlx::query_scalar::<_, i64>(
+        "select source_truth_version
+         from catalog_library
+         where id = $1
+         for update",
+    )
+    .bind(library_id)
+    .fetch_optional(&mut **transaction)
+    .await
+    .context("lock destructive vector mutation source fence")?
+    .ok_or_else(|| anyhow::anyhow!("library disappeared during destructive vector mutation"))
+}
+
+pub(crate) async fn advance_vector_source_truth_version(
+    transaction: &mut Transaction<'_, Postgres>,
+    library_id: Uuid,
+    observed_source_truth_version: i64,
+) -> anyhow::Result<i64> {
+    sqlx::query_scalar::<_, i64>(
+        "update catalog_library
+         set source_truth_version = greatest(
+                coalesce(source_truth_version, 0) + 1,
+                (extract(epoch from clock_timestamp()) * 1000000)::bigint
+             ),
+             updated_at = now()
+         where id = $1 and source_truth_version = $2
+         returning source_truth_version",
+    )
+    .bind(library_id)
+    .bind(observed_source_truth_version)
+    .fetch_optional(&mut **transaction)
+    .await
+    .context("advance source fence with vector mutation")?
+    .ok_or_else(|| anyhow::anyhow!("library source fence changed during vector mutation"))
+}
+
+fn validate_vector_rebuild_staging_profile_key(profile_key: &str) -> anyhow::Result<()> {
+    let digest = profile_key
+        .strip_prefix(VECTOR_REBUILD_STAGING_PROFILE_PREFIX)
+        .context("vector rebuild staging profile has an invalid protocol prefix")?;
+    anyhow::ensure!(
+        digest.len() == VECTOR_REBUILD_STAGING_PROFILE_DIGEST_LEN
+            && digest.bytes().all(|byte| byte.is_ascii_hexdigit()),
+        "vector rebuild staging profile has an invalid digest"
+    );
+    Ok(())
+}
+
+fn validate_canonical_embedding_profile_key(profile_key: &str) -> anyhow::Result<()> {
+    let digest = profile_key
+        .strip_prefix(EMBEDDING_PROFILE_PREFIX)
+        .context("embedding profile dimension claim has an invalid protocol prefix")?;
+    anyhow::ensure!(
+        digest.len() == EMBEDDING_PROFILE_DIGEST_LEN
+            && digest.bytes().all(|byte| byte.is_ascii_hexdigit()),
+        "embedding profile dimension claim has an invalid digest"
+    );
+    Ok(())
+}
+
+fn validate_exact_profile_dimension_claim(
+    relation_prefix: &str,
+    claims: &[(i32, String)],
+) -> anyhow::Result<Option<u64>> {
+    match claims {
+        [] => Ok(None),
+        [(dimensions, relation_name)] => {
+            let dimensions = u64::try_from(*dimensions)
+                .context("exact-profile vector dimension claim was negative")?;
+            checked_dim_i32(dimensions)?;
+            validate_relation_name(relation_name, relation_prefix)?;
+            anyhow::ensure!(
+                relation_name == &vector_relation_name(relation_prefix, dimensions)?,
+                "exact-profile vector dimension claim points to a different dimension relation"
+            );
+            Ok(Some(dimensions))
+        }
+        _ => {
+            anyhow::bail!("exact embedding execution profile has multiple vector dimension claims")
+        }
+    }
+}
+
+async fn lock_prepared_manifest_lane_for_share(
+    transaction: &mut Transaction<'_, Postgres>,
+    library_id: Uuid,
+    dimensions: u64,
+    vector_kind: &str,
+    embedding_model_key: &str,
+    relation_prefix: &str,
+) -> anyhow::Result<String> {
+    validate_vector_rebuild_staging_profile_key(embedding_model_key)?;
+    let relation_name = sqlx::query_scalar::<_, String>(
+        "select relation_name
+         from knowledge_vector_relation_manifest
+         where library_id = $1
+           and dim = $2
+           and vector_kind = $3
+           and embedding_model_key = $4
+           and promoted = false
+         for share",
+    )
+    .bind(library_id)
+    .bind(checked_dim_i32(dimensions)?)
+    .bind(vector_kind)
+    .bind(embedding_model_key)
+    .fetch_optional(&mut **transaction)
+    .await
+    .context("lock prepared vector manifest lane")?
+    .ok_or_else(|| anyhow::anyhow!("prepared vector manifest lane is missing or promoted"))?;
+    validate_relation_name(&relation_name, relation_prefix)?;
+    let expected_relation_name = vector_relation_name(relation_prefix, dimensions)?;
+    anyhow::ensure!(
+        relation_name == expected_relation_name,
+        "prepared vector manifest points to an unexpected dimension relation"
+    );
+    Ok(relation_name)
+}
+
+async fn discard_staged_vector_rebuild_in_transaction(
+    transaction: &mut Transaction<'_, Postgres>,
+    library_id: Uuid,
+    dimensions: u64,
+    staging_embedding_model_key: &str,
+) -> anyhow::Result<BTreeSet<(u64, String, String)>> {
+    validate_vector_rebuild_staging_profile_key(staging_embedding_model_key)?;
+    let lanes = sqlx::query_as::<_, (String, String)>(
+        "select vector_kind, relation_name
+         from knowledge_vector_relation_manifest
+         where library_id = $1
+           and dim = $2
+           and embedding_model_key = $3
+           and promoted = false
+         order by vector_kind
+         for update",
+    )
+    .bind(library_id)
+    .bind(checked_dim_i32(dimensions)?)
+    .bind(staging_embedding_model_key)
+    .fetch_all(&mut **transaction)
+    .await
+    .context("list staged vector lanes for cleanup")?;
+    let mut touched_relations = BTreeSet::new();
+    for (vector_kind, relation_name) in lanes {
+        let relation_prefix = match vector_kind.as_str() {
+            KNOWLEDGE_CHUNK_VECTOR_KIND => CHUNK_VECTOR_RELATION_PREFIX,
+            KNOWLEDGE_ENTITY_VECTOR_KIND => ENTITY_VECTOR_RELATION_PREFIX,
+            _ => anyhow::bail!("staged vector manifest has an unsupported vector kind"),
+        };
+        validate_relation_name(&relation_name, relation_prefix)?;
+        let relation = quote_identifier(&relation_name)?;
+        sqlx::query(sqlx::AssertSqlSafe(format!(
+            "delete from {relation}
+             where library_id = $1
+               and vector_kind = $2
+               and embedding_model_key = $3"
+        )))
+        .bind(library_id)
+        .bind(&vector_kind)
+        .bind(staging_embedding_model_key)
+        .execute(&mut **transaction)
+        .await
+        .with_context(|| format!("delete staged rows from {relation_name}"))?;
+        touched_relations.insert((dimensions, vector_kind, relation_name));
+    }
+    sqlx::query(
+        "delete from knowledge_vector_relation_manifest
+         where library_id = $1
+           and dim = $2
+           and embedding_model_key = $3
+           and promoted = false",
+    )
+    .bind(library_id)
+    .bind(checked_dim_i32(dimensions)?)
+    .bind(staging_embedding_model_key)
+    .execute(&mut **transaction)
+    .await
+    .context("delete staged vector manifest lanes")?;
+    Ok(touched_relations)
+}
+
+async fn delete_source_less_vectors_in_touched_relations(
+    transaction: &mut Transaction<'_, Postgres>,
+    library_id: Uuid,
+    touched_relations: &BTreeSet<(u64, String, String)>,
+) -> anyhow::Result<()> {
+    for (dimensions, vector_kind, relation_name) in touched_relations {
+        let relation_prefix = match vector_kind.as_str() {
+            KNOWLEDGE_CHUNK_VECTOR_KIND => CHUNK_VECTOR_RELATION_PREFIX,
+            KNOWLEDGE_ENTITY_VECTOR_KIND => ENTITY_VECTOR_RELATION_PREFIX,
+            _ => anyhow::bail!("staged vector manifest has an unsupported vector kind"),
+        };
+        validate_relation_name(relation_name, relation_prefix)?;
+        anyhow::ensure!(
+            relation_name == &vector_relation_name(relation_prefix, *dimensions)?,
+            "staged cleanup relation does not match its manifest dimension"
+        );
+        let relation = quote_identifier(relation_name)?;
+        let source_identity_exists = match vector_kind.as_str() {
+            KNOWLEDGE_CHUNK_VECTOR_KIND => {
+                "exists (
+                    select 1
+                    from knowledge_chunk source_chunk
+                    where source_chunk.library_id = stored_vector.library_id
+                      and source_chunk.chunk_id = stored_vector.chunk_id
+                      and source_chunk.revision_id = stored_vector.revision_id
+                 )"
+            }
+            KNOWLEDGE_ENTITY_VECTOR_KIND => {
+                "exists (
+                    select 1
+                    from knowledge_entity source_entity
+                    where source_entity.library_id = stored_vector.library_id
+                      and source_entity.entity_id = stored_vector.entity_id
+                 )"
+            }
+            _ => unreachable!("vector kind was validated before relation cleanup"),
+        };
+        sqlx::query(sqlx::AssertSqlSafe(format!(
+            "delete from {relation} stored_vector
+             where stored_vector.library_id = $1
+               and stored_vector.vector_kind = $2
+               and not ({source_identity_exists})"
+        )))
+        .bind(library_id)
+        .bind(vector_kind)
+        .execute(&mut **transaction)
+        .await
+        .with_context(|| format!("delete source-less vector rows from {relation_name}"))?;
+        sqlx::query(sqlx::AssertSqlSafe(format!(
+            "update knowledge_vector_relation_manifest manifest
+             set row_count = (
+                select count(*)::bigint
+                from {relation} stored_vector
+                where stored_vector.library_id = manifest.library_id
+                  and stored_vector.vector_kind = manifest.vector_kind
+                  and stored_vector.embedding_model_key = manifest.embedding_model_key
+             )
+             where manifest.library_id = $1
+               and manifest.dim = $2
+               and manifest.vector_kind = $3
+               and manifest.relation_name = $4"
+        )))
+        .bind(library_id)
+        .bind(checked_dim_i32(*dimensions)?)
+        .bind(vector_kind)
+        .bind(relation_name)
+        .execute(&mut **transaction)
+        .await
+        .with_context(|| format!("refresh vector manifests after cleanup in {relation_name}"))?;
+    }
+    Ok(())
+}
+
+async fn list_physical_vector_relations_in_transaction(
+    transaction: &mut Transaction<'_, Postgres>,
+    relation_prefix: &str,
+) -> anyhow::Result<BTreeSet<String>> {
+    let relation_names = sqlx::query_scalar::<_, String>(
+        "select c.relname
+         from pg_catalog.pg_class c
+         join pg_catalog.pg_namespace n on n.oid = c.relnamespace
+         where n.nspname = current_schema()
+           and c.relkind = 'r'
+           and left(c.relname, char_length($1)) = $1
+         order by c.relname",
+    )
+    .bind(relation_prefix)
+    .fetch_all(&mut **transaction)
+    .await
+    .context("failed to discover physical vector relations")?;
+    relation_names
+        .into_iter()
+        .map(|relation_name| {
+            validate_relation_name(&relation_name, relation_prefix)?;
+            Ok(relation_name)
+        })
+        .collect()
+}
+
+async fn refresh_library_vector_manifest_counts_in_transaction(
+    transaction: &mut Transaction<'_, Postgres>,
+    library_id: Uuid,
+    relation_prefix: &str,
+) -> anyhow::Result<()> {
+    sqlx::query(
+        "update knowledge_vector_relation_manifest
+         set row_count = 0
+         where library_id = $1
+           and relation_name like $2",
+    )
+    .bind(library_id)
+    .bind(format!("{relation_prefix}%"))
+    .execute(&mut **transaction)
+    .await
+    .context("reset vector manifest counts before exact reconciliation")?;
+    for relation_name in
+        list_physical_vector_relations_in_transaction(transaction, relation_prefix).await?
+    {
+        let relation = quote_identifier(&relation_name)?;
+        sqlx::query(sqlx::AssertSqlSafe(format!(
+            "update knowledge_vector_relation_manifest manifest
+             set row_count = (
+                select count(*)::bigint
+                from {relation} stored_vector
+                where stored_vector.library_id = manifest.library_id
+                  and stored_vector.vector_kind = manifest.vector_kind
+                  and stored_vector.embedding_model_key = manifest.embedding_model_key
+             )
+             where manifest.library_id = $1
+               and manifest.relation_name = $2"
+        )))
+        .bind(library_id)
+        .bind(&relation_name)
+        .execute(&mut **transaction)
+        .await
+        .with_context(|| format!("reconcile vector manifests after delete in {relation_name}"))?;
+    }
+    Ok(())
+}
+
+#[derive(Clone, Copy)]
+enum FencedChunkVectorDelete<'a> {
+    ExactVectorIds(&'a [Uuid]),
+    Revision(Uuid),
+}
+
+async fn delete_chunk_vectors_in_transaction(
+    transaction: &mut Transaction<'_, Postgres>,
+    library_id: Uuid,
+    selector: FencedChunkVectorDelete<'_>,
+) -> anyhow::Result<u64> {
+    let mut deleted = 0_u64;
+    for relation_name in
+        list_physical_vector_relations_in_transaction(transaction, CHUNK_VECTOR_RELATION_PREFIX)
+            .await?
+    {
+        let relation = quote_identifier(&relation_name)?;
+        let result = match selector {
+            FencedChunkVectorDelete::ExactVectorIds(vector_ids) => {
+                sqlx::query(sqlx::AssertSqlSafe(format!(
+                    "delete from {relation}
+                     where library_id = $1
+                       and vector_id = any($2::uuid[])"
+                )))
+                .bind(library_id)
+                .bind(vector_ids.to_vec())
+                .execute(&mut **transaction)
+                .await
+            }
+            FencedChunkVectorDelete::Revision(revision_id) => {
+                sqlx::query(sqlx::AssertSqlSafe(format!(
+                    "delete from {relation}
+                     where library_id = $1
+                       and revision_id = $2"
+                )))
+                .bind(library_id)
+                .bind(revision_id)
+                .execute(&mut **transaction)
+                .await
+            }
+        }
+        .with_context(|| format!("delete fenced chunk vectors from {relation_name}"))?;
+        deleted = deleted
+            .checked_add(result.rows_affected())
+            .context("fenced chunk vector delete count overflowed u64")?;
+    }
+    Ok(deleted)
+}
+
+/// Removes every chunk vector owned by one revision and reconciles its
+/// manifests inside a caller-owned lifecycle transaction. The caller must
+/// already hold the exclusive library vector/source lock.
+pub(crate) async fn delete_ingest_revision_chunk_vectors(
+    transaction: &mut Transaction<'_, Postgres>,
+    library_id: Uuid,
+    revision_id: Uuid,
+) -> anyhow::Result<u64> {
+    let deleted = delete_chunk_vectors_in_transaction(
+        transaction,
+        library_id,
+        FencedChunkVectorDelete::Revision(revision_id),
+    )
+    .await?;
+    refresh_library_vector_manifest_counts_in_transaction(
+        transaction,
+        library_id,
+        CHUNK_VECTOR_RELATION_PREFIX,
+    )
+    .await?;
+    Ok(deleted)
+}
+
+async fn delete_chunk_vectors_fenced(
+    pool: &PgPool,
+    library_id: Uuid,
+    selector: FencedChunkVectorDelete<'_>,
+    expected_source_truth_version: i64,
+    ingest_attempt: Option<CanonicalIngestVectorWriteFence>,
+) -> anyhow::Result<Option<VectorPlaneDeleteOutcome>> {
+    if matches!(selector, FencedChunkVectorDelete::ExactVectorIds(ids) if ids.is_empty()) {
+        return Ok(Some(VectorPlaneDeleteOutcome {
+            deleted: 0,
+            source_truth_version: expected_source_truth_version,
+        }));
+    }
+    let advance_on_noop = matches!(selector, FencedChunkVectorDelete::Revision(_));
+    let mut transaction = pool.begin().await.context("begin fenced chunk vector delete")?;
+    let observed_source_truth_version = if let Some(ingest_attempt) = ingest_attempt {
+        anyhow::ensure!(
+            expected_source_truth_version > 0,
+            "attempt-owned vector cleanup requires a positive source-truth fence"
+        );
+        let observed = lock_exclusive_vector_mutation_source(&mut transaction, library_id).await?;
+        if !lock_latest_leased_ingest_attempt_authority(
+            &mut transaction,
+            library_id,
+            ingest_attempt,
+        )
+        .await?
+        {
+            transaction.commit().await.context("commit preserved attempt-owned vector cleanup")?;
+            return Ok(None);
+        }
+        anyhow::ensure!(
+            observed == expected_source_truth_version,
+            "library source or embedding profile changed before attempt-owned vector cleanup"
+        );
+        observed
+    } else {
+        validate_exclusive_vector_delete_fence(
+            &mut transaction,
+            library_id,
+            expected_source_truth_version,
+        )
+        .await?
+    };
+    let deleted =
+        delete_chunk_vectors_in_transaction(&mut transaction, library_id, selector).await?;
+    refresh_library_vector_manifest_counts_in_transaction(
+        &mut transaction,
+        library_id,
+        CHUNK_VECTOR_RELATION_PREFIX,
+    )
+    .await?;
+    let source_truth_version = if deleted > 0 || advance_on_noop {
+        advance_vector_source_truth_version(
+            &mut transaction,
+            library_id,
+            observed_source_truth_version,
+        )
+        .await?
+    } else {
+        observed_source_truth_version
+    };
+    transaction.commit().await.context("commit fenced chunk vector delete")?;
+    Ok(Some(VectorPlaneDeleteOutcome { deleted, source_truth_version }))
+}
+
+/// Locks the revision and proves exact canonical chunk-vector coverage inside
+/// a caller-owned publication transaction.
+pub(crate) async fn validate_ingest_revision_vector_coverage(
+    transaction: &mut Transaction<'_, Postgres>,
+    library_id: Uuid,
+    revision_id: Uuid,
+    embedding_profile_key: Option<&str>,
+) -> anyhow::Result<()> {
+    let revision_number = sqlx::query_scalar::<_, i64>(
+        "select revision_number
+         from knowledge_revision
+         where revision_id = $1 and library_id = $2
+         for update",
+    )
+    .bind(revision_id)
+    .bind(library_id)
+    .fetch_optional(&mut **transaction)
+    .await
+    .context("lock revision for attempt-fenced readiness")?
+    .ok_or_else(|| anyhow::anyhow!("revision disappeared before ingest readiness"))?;
+    let chunk_count = sqlx::query_scalar::<_, i64>(
+        "select count(*)::bigint
+         from knowledge_chunk
+         where library_id = $1
+           and revision_id = $2
+           and chunk_state = 'ready'
+           and raptor_level is null",
+    )
+    .bind(library_id)
+    .bind(revision_id)
+    .fetch_one(&mut **transaction)
+    .await
+    .context("count canonical chunks before ingest readiness")?;
+    anyhow::ensure!(chunk_count >= 0, "canonical chunk count was negative");
+
+    let vector_count = if chunk_count == 0 {
+        0
+    } else {
+        let profile = embedding_profile_key
+            .context("non-empty revision readiness requires an exact embedding profile")?;
+        validate_canonical_embedding_profile_key(profile)?;
+        let lanes = sqlx::query_as::<_, (i32, String)>(
+            "select dim, relation_name
+             from knowledge_vector_relation_manifest
+             where library_id = $1
+               and vector_kind = $2
+               and embedding_model_key = $3
+             order by dim",
+        )
+        .bind(library_id)
+        .bind(KNOWLEDGE_CHUNK_VECTOR_KIND)
+        .bind(profile)
+        .fetch_all(&mut **transaction)
+        .await
+        .context("resolve exact vector lane before ingest readiness")?;
+        anyhow::ensure!(
+            lanes.len() == 1,
+            "ingest readiness requires exactly one exact-profile vector lane; found {}",
+            lanes.len()
+        );
+        let (dim, relation_name) = &lanes[0];
+        anyhow::ensure!(*dim > 0, "ingest readiness vector dimension must be positive");
+        validate_relation_name(relation_name, CHUNK_VECTOR_RELATION_PREFIX)?;
+        anyhow::ensure!(
+            relation_name
+                == &vector_relation_name(
+                    CHUNK_VECTOR_RELATION_PREFIX,
+                    u64::try_from(*dim).context("ingest readiness dimension overflowed u64")?,
+                )?,
+            "ingest readiness manifest dimension does not match its physical relation"
+        );
+        let relation = quote_identifier(relation_name)?;
+        sqlx::query_scalar::<_, i64>(sqlx::AssertSqlSafe(canonical_chunk_vector_count_sql(
+            &relation,
+        )))
+        .bind(revision_id)
+        .bind(profile)
+        .bind(KNOWLEDGE_CHUNK_VECTOR_KIND)
+        .bind(revision_number)
+        .fetch_one(&mut **transaction)
+        .await
+        .context("count exact-profile vectors before ingest readiness")?
+    };
+    anyhow::ensure!(
+        vector_count == chunk_count,
+        "ingest readiness coverage mismatch for revision {revision_id}: {chunk_count} canonical chunks, {vector_count} exact-profile vectors"
+    );
+    Ok(())
+}
+
+async fn delete_entity_vectors_by_library_fenced_transaction(
+    pool: &PgPool,
+    library_id: Uuid,
+    expected_source_truth_version: i64,
+) -> anyhow::Result<VectorPlaneDeleteOutcome> {
+    let mut transaction = pool.begin().await.context("begin fenced entity vector delete")?;
+    let observed_source_truth_version = validate_exclusive_vector_delete_fence(
+        &mut transaction,
+        library_id,
+        expected_source_truth_version,
+    )
+    .await?;
+    let mut deleted = 0_u64;
+    for relation_name in list_physical_vector_relations_in_transaction(
+        &mut transaction,
+        ENTITY_VECTOR_RELATION_PREFIX,
+    )
+    .await?
+    {
+        let relation = quote_identifier(&relation_name)?;
+        let result = sqlx::query(sqlx::AssertSqlSafe(format!(
+            "delete from {relation} where library_id = $1"
+        )))
+        .bind(library_id)
+        .execute(&mut *transaction)
+        .await
+        .with_context(|| format!("delete fenced entity vectors from {relation_name}"))?;
+        deleted = deleted
+            .checked_add(result.rows_affected())
+            .context("fenced entity vector delete count overflowed u64")?;
+    }
+    refresh_library_vector_manifest_counts_in_transaction(
+        &mut transaction,
+        library_id,
+        ENTITY_VECTOR_RELATION_PREFIX,
+    )
+    .await?;
+    let source_truth_version = advance_vector_source_truth_version(
+        &mut transaction,
+        library_id,
+        observed_source_truth_version,
+    )
+    .await?;
+    transaction.commit().await.context("commit fenced entity vector delete")?;
+    Ok(VectorPlaneDeleteOutcome { deleted, source_truth_version })
+}
+
+async fn promote_staged_vector_kind(
+    transaction: &mut Transaction<'_, Postgres>,
+    library_id: Uuid,
+    dimensions: u64,
+    vector_kind: &str,
+    relation_prefix: &str,
+    canonical_embedding_model_key: &str,
+    staging_embedding_model_key: &str,
+    expected_count: u64,
+) -> anyhow::Result<()> {
+    let target_relation_name = vector_relation_name(relation_prefix, dimensions)?;
+    let staged_relation_name = sqlx::query_scalar::<_, String>(
+        "select relation_name
+         from knowledge_vector_relation_manifest
+         where library_id = $1
+           and dim = $2
+           and vector_kind = $3
+           and embedding_model_key = $4
+         for update",
+    )
+    .bind(library_id)
+    .bind(checked_dim_i32(dimensions)?)
+    .bind(vector_kind)
+    .bind(staging_embedding_model_key)
+    .fetch_optional(&mut **transaction)
+    .await
+    .context("failed to lock staged vector manifest lane")?
+    .ok_or_else(|| anyhow::anyhow!("staged vector manifest lane is missing"))?;
+    anyhow::ensure!(
+        staged_relation_name == target_relation_name,
+        "staged vector manifest points to an unexpected dimension relation"
+    );
+
+    let target_relation = quote_identifier(&target_relation_name)?;
+    let staged_count = sqlx::query_scalar::<_, i64>(sqlx::AssertSqlSafe(format!(
+        "select count(*)::bigint
+         from {target_relation}
+         where library_id = $1
+           and vector_kind = $2
+           and embedding_model_key = $3"
+    )))
+    .bind(library_id)
+    .bind(vector_kind)
+    .bind(staging_embedding_model_key)
+    .fetch_one(&mut **transaction)
+    .await
+    .context("failed to count staged vector rows")?;
+    let expected_count =
+        i64::try_from(expected_count).context("staged vector count overflowed i64")?;
+    anyhow::ensure!(
+        staged_count == expected_count,
+        "staged vector row count mismatch: expected {expected_count}, found {staged_count}"
+    );
+
+    let mut old_relations = sqlx::query_scalar::<_, String>(
+        "select distinct relation_name
+         from knowledge_vector_relation_manifest
+         where library_id = $1
+           and vector_kind = $2
+         order by relation_name",
+    )
+    .bind(library_id)
+    .bind(vector_kind)
+    .fetch_all(&mut **transaction)
+    .await
+    .context("failed to list vector relations replaced by staged promotion")?
+    .into_iter()
+    .collect::<BTreeSet<_>>();
+    old_relations
+        .extend(list_physical_vector_relations_in_transaction(transaction, relation_prefix).await?);
+    for relation_name in old_relations {
+        validate_relation_name(&relation_name, relation_prefix)?;
+        let relation = quote_identifier(&relation_name)?;
+        if relation_name == target_relation_name {
+            let (staged_identity_match, source_identity_exists) = match vector_kind {
+                KNOWLEDGE_CHUNK_VECTOR_KIND => (
+                    "staged.chunk_id = prior_vector.chunk_id
+                     and staged.revision_id = prior_vector.revision_id",
+                    "exists (
+                        select 1
+                        from knowledge_chunk source_chunk
+                        where source_chunk.library_id = prior_vector.library_id
+                          and source_chunk.chunk_id = prior_vector.chunk_id
+                          and source_chunk.revision_id = prior_vector.revision_id
+                     )",
+                ),
+                KNOWLEDGE_ENTITY_VECTOR_KIND => (
+                    "staged.entity_id = prior_vector.entity_id",
+                    "exists (
+                        select 1
+                        from knowledge_entity source_entity
+                        where source_entity.library_id = prior_vector.library_id
+                          and source_entity.entity_id = prior_vector.entity_id
+                     )",
+                ),
+                _ => anyhow::bail!("staged vector promotion has an unsupported vector kind"),
+            };
+            // Preserve same-profile target-dimension rows that are not part of
+            // this snapshot only while their canonical source identity still
+            // exists (for example a not-yet-readable ingest revision). Every
+            // staged identity is replaced; obsolete profiles and source-less
+            // physical orphans are purged in the same promotion transaction.
+            sqlx::query(sqlx::AssertSqlSafe(format!(
+                "delete from {relation} prior_vector
+                 where prior_vector.library_id = $1
+                   and prior_vector.vector_kind = $2
+                   and prior_vector.embedding_model_key <> $3
+                   and (
+                        prior_vector.embedding_model_key <> $4
+                        or not ({source_identity_exists})
+                        or exists (
+                            select 1
+                            from {target_relation} staged
+                            where staged.library_id = prior_vector.library_id
+                              and staged.vector_kind = prior_vector.vector_kind
+                              and staged.embedding_model_key = $3
+                              and {staged_identity_match}
+                        )
+                   )"
+            )))
+            .bind(library_id)
+            .bind(vector_kind)
+            .bind(staging_embedding_model_key)
+            .bind(canonical_embedding_model_key)
+            .execute(&mut **transaction)
+            .await
+            .with_context(|| {
+                format!("failed to replace canonical vector rows in {relation_name}")
+            })?;
+        } else {
+            sqlx::query(sqlx::AssertSqlSafe(format!(
+                "delete from {relation}
+                 where library_id = $1
+                   and vector_kind = $2
+                   and embedding_model_key <> $3"
+            )))
+            .bind(library_id)
+            .bind(vector_kind)
+            .bind(staging_embedding_model_key)
+            .execute(&mut **transaction)
+            .await
+            .with_context(|| {
+                format!("failed to remove replaced vector rows from {relation_name}")
+            })?;
+        }
+    }
+
+    let promoted = sqlx::query(sqlx::AssertSqlSafe(format!(
+        "update {target_relation}
+         set embedding_model_key = $4
+         where library_id = $1
+           and vector_kind = $2
+           and embedding_model_key = $3"
+    )))
+    .bind(library_id)
+    .bind(vector_kind)
+    .bind(staging_embedding_model_key)
+    .bind(canonical_embedding_model_key)
+    .execute(&mut **transaction)
+    .await
+    .context("failed to promote staged vector rows")?;
+    anyhow::ensure!(
+        i64::try_from(promoted.rows_affected()).ok() == Some(expected_count),
+        "staged vector promotion changed an unexpected row count"
+    );
+    let canonical_row_count = sqlx::query_scalar::<_, i64>(sqlx::AssertSqlSafe(format!(
+        "select count(*)::bigint
+         from {target_relation}
+         where library_id = $1
+           and vector_kind = $2
+           and embedding_model_key = $3"
+    )))
+    .bind(library_id)
+    .bind(vector_kind)
+    .bind(canonical_embedding_model_key)
+    .fetch_one(&mut **transaction)
+    .await
+    .context("failed to count promoted canonical vector rows")?;
+
+    sqlx::query(
+        "delete from knowledge_vector_relation_manifest
+         where library_id = $1 and vector_kind = $2",
+    )
+    .bind(library_id)
+    .bind(vector_kind)
+    .execute(&mut **transaction)
+    .await
+    .context("failed to retire replaced vector manifest lanes")?;
+    sqlx::query(
+        "insert into knowledge_vector_relation_manifest (
+            library_id, dim, vector_kind, embedding_model_key, relation_name,
+            is_default, row_count, promoted
+         ) values ($1, $2, $3, $4, $5, true, $6, true)",
+    )
+    .bind(library_id)
+    .bind(checked_dim_i32(dimensions)?)
+    .bind(vector_kind)
+    .bind(canonical_embedding_model_key)
+    .bind(target_relation_name)
+    .bind(canonical_row_count)
+    .execute(&mut **transaction)
+    .await
+    .context("failed to install promoted vector manifest lane")?;
+    Ok(())
+}
+
 #[async_trait]
 impl SearchStore for PgSearchStore {
     async fn ensure_chunk_vector_shard(&self, dim: u64) -> anyhow::Result<()> {
@@ -764,7 +2467,7 @@ impl SearchStore for PgSearchStore {
         Ok(())
     }
 
-    async fn ensure_chunk_vector_shard_for_library(
+    async fn ensure_chunk_vector_lane_for_library(
         &self,
         dim: u64,
         _library_id: Uuid,
@@ -782,69 +2485,100 @@ impl SearchStore for PgSearchStore {
         &self,
         row: &KnowledgeChunkVectorRow,
     ) -> anyhow::Result<KnowledgeChunkVectorRow> {
-        let dim = validate_row_vector_dimensions(row.dimensions, &row.vector, "chunk")?;
-        let relation_name = self.ensure_chunk_vector_relation(dim).await?;
-        self.upsert_manifest(
-            row.library_id,
-            dim,
-            &row.vector_kind,
-            &row.embedding_model_key,
-            &relation_name,
-        )
-        .await?;
-        let stored = self.upsert_chunk_vector_in_relation(&relation_name, row).await?;
-        self.refresh_manifest_count(
-            &relation_name,
-            row.library_id,
-            row.dimensions,
-            &row.vector_kind,
-            &row.embedding_model_key,
-        )
-        .await?;
-        Ok(stored)
+        self.upsert_chunk_vectors_bulk_immediate(std::slice::from_ref(row)).await?;
+        Ok(row.clone())
     }
 
     async fn upsert_chunk_vectors_bulk(
         &self,
         rows: &[KnowledgeChunkVectorRow],
     ) -> anyhow::Result<()> {
-        let mut groups: BTreeMap<(u64, Uuid, String, String), Vec<&KnowledgeChunkVectorRow>> =
-            BTreeMap::new();
-        for row in rows {
-            let dim = validate_row_vector_dimensions(row.dimensions, &row.vector, "chunk")?;
-            groups
-                .entry((
-                    dim,
-                    row.library_id,
-                    row.vector_kind.clone(),
-                    row.embedding_model_key.clone(),
-                ))
-                .or_default()
-                .push(row);
-        }
-        for ((dim, library_id, vector_kind, embedding_model_key), rows) in groups {
-            let relation_name = self.ensure_chunk_vector_relation(dim).await?;
-            self.upsert_manifest(
-                library_id,
-                dim,
-                &vector_kind,
-                &embedding_model_key,
-                &relation_name,
-            )
-            .await?;
-            for row in rows {
-                self.upsert_chunk_vector_in_relation(&relation_name, row).await?;
-            }
-            self.refresh_manifest_count(
-                &relation_name,
-                library_id,
-                checked_dim_i32(dim)?,
-                &vector_kind,
-                &embedding_model_key,
-            )
-            .await?;
-        }
+        self.upsert_chunk_vectors_bulk_immediate(rows).await
+    }
+
+    async fn upsert_chunk_vectors_bulk_fenced(
+        &self,
+        rows: &[KnowledgeChunkVectorRow],
+        fence: &CanonicalVectorWriteFence,
+    ) -> anyhow::Result<i64> {
+        self.upsert_chunk_vectors_bulk_fenced_immediate(rows, fence).await
+    }
+
+    async fn prepare_chunk_vector_rebuild_lane(
+        &self,
+        library_id: Uuid,
+        dimensions: u64,
+        embedding_model_key: &str,
+    ) -> anyhow::Result<()> {
+        validate_vector_rebuild_staging_profile_key(embedding_model_key)?;
+        let relation_name = self.ensure_chunk_vector_relation(dimensions).await?;
+        let mut transaction =
+            self.pool.begin().await.context("begin chunk rebuild lane preparation")?;
+        lock_library_vector_plane_data(&mut transaction, library_id, false).await?;
+        Self::upsert_manifest_in_transaction(
+            &mut transaction,
+            library_id,
+            dimensions,
+            KNOWLEDGE_CHUNK_VECTOR_KIND,
+            embedding_model_key,
+            &relation_name,
+        )
+        .await?;
+        transaction.commit().await.context("commit chunk rebuild lane preparation")?;
         Ok(())
+    }
+
+    async fn upsert_chunk_vectors_bulk_deferred_manifest(
+        &self,
+        rows: &[KnowledgeChunkVectorRow],
+    ) -> anyhow::Result<()> {
+        let Some(expected_relation_name) = deferred_chunk_vector_relation(rows)? else {
+            return Ok(());
+        };
+        let first = rows.first().context("deferred chunk vector batch unexpectedly empty")?;
+        let dimensions =
+            u64::try_from(first.dimensions).context("chunk vector dimension overflowed u64")?;
+        let mut transaction =
+            self.pool.begin().await.context("begin deferred chunk vector batch")?;
+        lock_library_vector_plane_data(&mut transaction, first.library_id, false).await?;
+        let relation_name = lock_prepared_manifest_lane_for_share(
+            &mut transaction,
+            first.library_id,
+            dimensions,
+            &first.vector_kind,
+            &first.embedding_model_key,
+            CHUNK_VECTOR_RELATION_PREFIX,
+        )
+        .await?;
+        anyhow::ensure!(
+            relation_name == expected_relation_name,
+            "prepared chunk vector manifest relation changed before batch write"
+        );
+        let borrowed = rows.iter().collect::<Vec<_>>();
+        Self::upsert_chunk_vectors_in_relation_bulk_with_executor(
+            &relation_name,
+            borrowed.as_slice(),
+            &mut *transaction,
+        )
+        .await?;
+        transaction.commit().await.context("commit deferred chunk vector batch")?;
+        Ok(())
+    }
+
+    async fn reconcile_chunk_vector_manifest_count(
+        &self,
+        library_id: Uuid,
+        dimensions: u64,
+        embedding_model_key: &str,
+    ) -> anyhow::Result<()> {
+        self.reconcile_manifest_count_for_lane(
+            library_id,
+            dimensions,
+            KNOWLEDGE_CHUNK_VECTOR_KIND,
+            embedding_model_key,
+            CHUNK_VECTOR_RELATION_PREFIX,
+        )
+        .await
     }
 
     async fn delete_chunk_vector(
@@ -890,6 +2624,57 @@ impl SearchStore for PgSearchStore {
             revision_id,
         )
         .await
+    }
+
+    async fn delete_chunk_vectors_by_ids_fenced(
+        &self,
+        library_id: Uuid,
+        vector_ids: &[Uuid],
+        expected_source_truth_version: i64,
+    ) -> anyhow::Result<VectorPlaneDeleteOutcome> {
+        delete_chunk_vectors_fenced(
+            &self.pool,
+            library_id,
+            FencedChunkVectorDelete::ExactVectorIds(vector_ids),
+            expected_source_truth_version,
+            None,
+        )
+        .await?
+        .context("unconditional exact-ID vector delete unexpectedly lost attempt authority")
+    }
+
+    async fn delete_attempt_owned_chunk_vectors_by_ids_fenced(
+        &self,
+        library_id: Uuid,
+        vector_ids: &[Uuid],
+        expected_source_truth_version: i64,
+        ingest_attempt: CanonicalIngestVectorWriteFence,
+    ) -> anyhow::Result<Option<VectorPlaneDeleteOutcome>> {
+        delete_chunk_vectors_fenced(
+            &self.pool,
+            library_id,
+            FencedChunkVectorDelete::ExactVectorIds(vector_ids),
+            expected_source_truth_version,
+            Some(ingest_attempt),
+        )
+        .await
+    }
+
+    async fn delete_chunk_vectors_by_revision_fenced(
+        &self,
+        library_id: Uuid,
+        revision_id: Uuid,
+        expected_source_truth_version: i64,
+    ) -> anyhow::Result<VectorPlaneDeleteOutcome> {
+        delete_chunk_vectors_fenced(
+            &self.pool,
+            library_id,
+            FencedChunkVectorDelete::Revision(revision_id),
+            expected_source_truth_version,
+            None,
+        )
+        .await?
+        .context("revision-wide vector delete unexpectedly lost attempt authority")
     }
 
     async fn delete_chunk_vectors_by_library(&self, library_id: Uuid) -> anyhow::Result<u64> {
@@ -1026,14 +2811,9 @@ impl SearchStore for PgSearchStore {
         let mut total = 0_i64;
         for relation_name in self.list_vector_relations(CHUNK_VECTOR_RELATION_PREFIX).await? {
             let relation = quote_identifier(&relation_name)?;
-            let count = sqlx::query_scalar::<_, i64>(sqlx::AssertSqlSafe(format!(
-                "select count(*)::bigint
-                 from {relation}
-                 where revision_id = $1
-                   and embedding_model_key = $2
-                   and vector_kind = $3
-                   and freshness_generation = $4"
-            )))
+            let count = sqlx::query_scalar::<_, i64>(sqlx::AssertSqlSafe(
+                canonical_chunk_vector_count_sql(&relation),
+            ))
             .bind(revision_id)
             .bind(embedding_model_key)
             .bind(vector_kind)
@@ -1046,61 +2826,466 @@ impl SearchStore for PgSearchStore {
         usize::try_from(total).context("chunk vector count overflowed usize")
     }
 
-    async fn list_chunk_vector_dimensions(
+    async fn read_vector_profile_dimension_claim(
         &self,
         library_id: Uuid,
         embedding_model_key: &str,
         vector_kind: &str,
-    ) -> anyhow::Result<Vec<u64>> {
-        let rows = sqlx::query_scalar::<_, i32>(
-            "select dim
+    ) -> anyhow::Result<Option<u64>> {
+        validate_canonical_embedding_profile_key(embedding_model_key)?;
+        let relation_prefix = match vector_kind {
+            KNOWLEDGE_CHUNK_VECTOR_KIND => CHUNK_VECTOR_RELATION_PREFIX,
+            KNOWLEDGE_ENTITY_VECTOR_KIND => ENTITY_VECTOR_RELATION_PREFIX,
+            _ => anyhow::bail!("unsupported vector kind for an exact-profile dimension claim"),
+        };
+        let claims = sqlx::query_as::<_, (i32, String)>(
+            "select dim, relation_name
              from knowledge_vector_relation_manifest
              where library_id = $1
                and embedding_model_key = $2
                and vector_kind = $3
-               and row_count > 0
-             group by dim
-             order by sum(row_count) desc, dim desc",
+               and embedding_model_key like 'embedding-profile:v1:%'
+             order by dim
+             limit 2",
         )
         .bind(library_id)
         .bind(embedding_model_key)
         .bind(vector_kind)
         .fetch_all(&self.pool)
         .await
+        .context("failed to read exact-profile vector dimension claim")?;
+
+        validate_exact_profile_dimension_claim(relation_prefix, &claims)
+    }
+
+    async fn inspect_chunk_vector_profile(
+        &self,
+        library_id: Uuid,
+        embedding_model_key: &str,
+        vector_kind: &str,
+    ) -> anyhow::Result<ChunkVectorProfileInventory> {
+        let manifest_rows = sqlx::query_as::<_, (i32, String)>(
+            "select dim, relation_name
+             from knowledge_vector_relation_manifest
+             where library_id = $1
+               and embedding_model_key = $2
+               and vector_kind = $3
+               and relation_name like $4
+             order by dim desc",
+        )
+        .bind(library_id)
+        .bind(embedding_model_key)
+        .bind(vector_kind)
+        .bind(format!("{CHUNK_VECTOR_RELATION_PREFIX}%"))
+        .fetch_all(&self.pool)
+        .await
         .context("failed to list chunk vector dimensions from manifest")?;
 
-        rows.into_iter()
-            .map(|dim| {
-                anyhow::ensure!(dim > 0, "chunk vector manifest dimension must be positive");
-                u64::try_from(dim).context("chunk vector manifest dimension overflowed u64")
-            })
-            .collect()
+        let Some(counts_sql) = canonical_chunk_vector_dimension_counts_sql(&manifest_rows)? else {
+            return Ok(ChunkVectorProfileInventory {
+                dimensions: Vec::new(),
+                active_vector_count: 0,
+            });
+        };
+        let canonical_counts = sqlx::query_as::<_, (i32, i64)>(sqlx::AssertSqlSafe(counts_sql))
+            .bind(library_id)
+            .bind(embedding_model_key)
+            .bind(vector_kind)
+            .fetch_all(&self.pool)
+            .await
+            .context("failed to count canonical chunk vectors by dimension")?;
+        chunk_vector_profile_inventory(canonical_counts)
     }
 
     async fn upsert_entity_vector(
         &self,
         row: &KnowledgeEntityVectorRow,
     ) -> anyhow::Result<KnowledgeEntityVectorRow> {
-        let dim = validate_row_vector_dimensions(row.dimensions, &row.vector, "entity")?;
-        let relation_name = self.ensure_entity_vector_relation(dim).await?;
-        self.upsert_manifest(
-            row.library_id,
-            dim,
-            &row.vector_kind,
-            &row.embedding_model_key,
+        self.upsert_entity_vectors_bulk_immediate(std::slice::from_ref(row)).await?;
+        Ok(row.clone())
+    }
+
+    async fn upsert_entity_vectors_bulk_fenced(
+        &self,
+        rows: &[KnowledgeEntityVectorRow],
+        fence: &CanonicalVectorWriteFence,
+    ) -> anyhow::Result<i64> {
+        self.upsert_entity_vectors_bulk_fenced_immediate(rows, fence).await
+    }
+
+    async fn prepare_entity_vector_rebuild_lane(
+        &self,
+        library_id: Uuid,
+        dimensions: u64,
+        embedding_model_key: &str,
+    ) -> anyhow::Result<()> {
+        validate_vector_rebuild_staging_profile_key(embedding_model_key)?;
+        let relation_name = self.ensure_entity_vector_relation(dimensions).await?;
+        let mut transaction =
+            self.pool.begin().await.context("begin entity rebuild lane preparation")?;
+        lock_library_vector_plane_data(&mut transaction, library_id, false).await?;
+        Self::upsert_manifest_in_transaction(
+            &mut transaction,
+            library_id,
+            dimensions,
+            KNOWLEDGE_ENTITY_VECTOR_KIND,
+            embedding_model_key,
             &relation_name,
         )
         .await?;
-        let stored = self.upsert_entity_vector_in_relation(&relation_name, row).await?;
-        self.refresh_manifest_count(
-            &relation_name,
-            row.library_id,
-            row.dimensions,
-            &row.vector_kind,
-            &row.embedding_model_key,
+        transaction.commit().await.context("commit entity rebuild lane preparation")?;
+        Ok(())
+    }
+
+    async fn upsert_entity_vectors_bulk_deferred_manifest(
+        &self,
+        rows: &[KnowledgeEntityVectorRow],
+    ) -> anyhow::Result<()> {
+        let Some(expected_relation_name) = deferred_entity_vector_relation(rows)? else {
+            return Ok(());
+        };
+        let first = rows.first().context("deferred entity vector batch unexpectedly empty")?;
+        let dimensions =
+            u64::try_from(first.dimensions).context("entity vector dimension overflowed u64")?;
+        let mut transaction =
+            self.pool.begin().await.context("begin deferred entity vector batch")?;
+        lock_library_vector_plane_data(&mut transaction, first.library_id, false).await?;
+        let relation_name = lock_prepared_manifest_lane_for_share(
+            &mut transaction,
+            first.library_id,
+            dimensions,
+            &first.vector_kind,
+            &first.embedding_model_key,
+            ENTITY_VECTOR_RELATION_PREFIX,
         )
         .await?;
-        Ok(stored)
+        anyhow::ensure!(
+            relation_name == expected_relation_name,
+            "prepared entity vector manifest relation changed before batch write"
+        );
+        let borrowed = rows.iter().collect::<Vec<_>>();
+        Self::upsert_entity_vectors_in_relation_bulk_with_executor(
+            &relation_name,
+            borrowed.as_slice(),
+            &mut *transaction,
+        )
+        .await?;
+        transaction.commit().await.context("commit deferred entity vector batch")?;
+        Ok(())
+    }
+
+    async fn reconcile_entity_vector_manifest_count(
+        &self,
+        library_id: Uuid,
+        dimensions: u64,
+        embedding_model_key: &str,
+    ) -> anyhow::Result<()> {
+        self.reconcile_manifest_count_for_lane(
+            library_id,
+            dimensions,
+            KNOWLEDGE_ENTITY_VECTOR_KIND,
+            embedding_model_key,
+            ENTITY_VECTOR_RELATION_PREFIX,
+        )
+        .await
+    }
+
+    async fn purge_empty_library_vector_plane(
+        &self,
+        library_id: Uuid,
+        expected_source_truth_version: i64,
+    ) -> anyhow::Result<u64> {
+        let mut transaction = self.pool.begin().await.context("begin empty vector-plane purge")?;
+        // Lock order for cross-process vector-plane mutations is always:
+        // per-library data serializer -> AI-config serializer -> library row.
+        // Ordinary canonical writes use the shared form of this first lock.
+        lock_library_vector_plane_data(&mut transaction, library_id, true).await?;
+        sqlx::query(
+            "select pg_advisory_xact_lock(
+                hashtextextended('ironrag:ai-config-generation', 0)
+             )",
+        )
+        .execute(&mut *transaction)
+        .await
+        .context("serialize empty vector purge with AI configuration changes")?;
+        let observed_source_truth_version = sqlx::query_scalar::<_, i64>(
+            "select source_truth_version
+             from catalog_library
+             where id = $1
+             for update",
+        )
+        .bind(library_id)
+        .fetch_optional(&mut *transaction)
+        .await
+        .context("lock library source fence before empty vector purge")?
+        .ok_or_else(|| anyhow::anyhow!("library disappeared during empty vector purge"))?;
+        anyhow::ensure!(
+            observed_source_truth_version == expected_source_truth_version,
+            "library source truth changed before empty vector purge"
+        );
+        let active_chunk_count = sqlx::query_scalar::<_, i64>(
+            "select count(*)::bigint
+             from knowledge_chunk c
+             join knowledge_document d
+               on d.document_id = c.document_id
+              and d.library_id = c.library_id
+              and d.readable_revision_id = c.revision_id
+              and d.document_state = 'active'
+              and d.deleted_at is null
+             where c.library_id = $1
+               and c.chunk_state = 'ready'
+               and c.raptor_level is null",
+        )
+        .bind(library_id)
+        .fetch_one(&mut *transaction)
+        .await
+        .context("recheck canonical chunks before empty vector purge")?;
+        anyhow::ensure!(active_chunk_count == 0, "library gained chunks before empty vector purge");
+
+        let mut deleted = 0_u64;
+        for relation_prefix in [CHUNK_VECTOR_RELATION_PREFIX, ENTITY_VECTOR_RELATION_PREFIX] {
+            for relation_name in
+                list_physical_vector_relations_in_transaction(&mut transaction, relation_prefix)
+                    .await?
+            {
+                let relation = quote_identifier(&relation_name)?;
+                let result = sqlx::query(sqlx::AssertSqlSafe(format!(
+                    "delete from {relation} where library_id = $1"
+                )))
+                .bind(library_id)
+                .execute(&mut *transaction)
+                .await
+                .with_context(|| {
+                    format!("delete empty-library vector rows from {relation_name}")
+                })?;
+                deleted = deleted
+                    .checked_add(result.rows_affected())
+                    .context("empty-library vector purge count overflowed u64")?;
+            }
+        }
+        let deleted_manifests =
+            sqlx::query("delete from knowledge_vector_relation_manifest where library_id = $1")
+                .bind(library_id)
+                .execute(&mut *transaction)
+                .await
+                .context("delete empty-library vector manifests")?;
+        if deleted > 0 || deleted_manifests.rows_affected() > 0 {
+            let advanced = sqlx::query_scalar::<_, i64>(
+                "update catalog_library
+                 set source_truth_version = greatest(
+                        coalesce(source_truth_version, 0) + 1,
+                        (extract(epoch from clock_timestamp()) * 1000000)::bigint
+                     ),
+                     updated_at = now()
+                 where id = $1 and source_truth_version = $2
+                 returning source_truth_version",
+            )
+            .bind(library_id)
+            .bind(expected_source_truth_version)
+            .fetch_optional(&mut *transaction)
+            .await
+            .context("advance source fence with empty vector purge")?;
+            anyhow::ensure!(
+                advanced.is_some(),
+                "library source fence changed before empty vector purge"
+            );
+        }
+        transaction.commit().await.context("commit empty vector-plane purge")?;
+        Ok(deleted)
+    }
+
+    async fn promote_staged_vector_rebuild(
+        &self,
+        library_id: Uuid,
+        dimensions: u64,
+        canonical_embedding_model_key: &str,
+        staging_embedding_model_key: &str,
+        expected_source_truth_version: i64,
+        expected_chunk_count: Option<u64>,
+        expected_entity_count: Option<u64>,
+    ) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            canonical_embedding_model_key != staging_embedding_model_key,
+            "canonical and staging embedding profiles must be distinct"
+        );
+        validate_vector_rebuild_staging_profile_key(staging_embedding_model_key)?;
+        anyhow::ensure!(
+            expected_chunk_count.is_some() || expected_entity_count.is_some(),
+            "staged vector promotion requires at least one lane"
+        );
+        let mut transaction = self.pool.begin().await.context("begin staged vector promotion")?;
+        lock_library_vector_plane_data(&mut transaction, library_id, true).await?;
+        // AI-binding trigger transactions acquire this serializer before
+        // taking child and catalog-library locks. Promotion must enter the
+        // same global order before comparing the source fence; otherwise a
+        // binding change can wait behind the library row and commit an
+        // obsolete vector profile immediately after promotion.
+        sqlx::query(
+            "select pg_advisory_xact_lock(
+                hashtextextended('ironrag:ai-config-generation', 0)
+             )",
+        )
+        .execute(&mut *transaction)
+        .await
+        .context("serialize staged promotion with AI configuration changes")?;
+        let observed_source_truth_version = sqlx::query_scalar::<_, i64>(
+            "select source_truth_version
+             from catalog_library
+             where id = $1
+             for update",
+        )
+        .bind(library_id)
+        .fetch_optional(&mut *transaction)
+        .await
+        .context("lock library source fence before staged vector promotion")?
+        .ok_or_else(|| anyhow::anyhow!("library disappeared during staged vector promotion"))?;
+        anyhow::ensure!(
+            observed_source_truth_version == expected_source_truth_version,
+            "library source truth changed during staged vector rebuild"
+        );
+
+        if let Some(expected_count) = expected_chunk_count {
+            promote_staged_vector_kind(
+                &mut transaction,
+                library_id,
+                dimensions,
+                KNOWLEDGE_CHUNK_VECTOR_KIND,
+                CHUNK_VECTOR_RELATION_PREFIX,
+                canonical_embedding_model_key,
+                staging_embedding_model_key,
+                expected_count,
+            )
+            .await?;
+        }
+        if let Some(expected_count) = expected_entity_count {
+            promote_staged_vector_kind(
+                &mut transaction,
+                library_id,
+                dimensions,
+                KNOWLEDGE_ENTITY_VECTOR_KIND,
+                ENTITY_VECTOR_RELATION_PREFIX,
+                canonical_embedding_model_key,
+                staging_embedding_model_key,
+                expected_count,
+            )
+            .await?;
+        }
+        let advanced = sqlx::query_scalar::<_, i64>(
+            "update catalog_library
+             set source_truth_version = greatest(
+                    coalesce(source_truth_version, 0) + 1,
+                    (extract(epoch from clock_timestamp()) * 1000000)::bigint
+                 ),
+                 updated_at = now()
+             where id = $1 and source_truth_version = $2
+             returning source_truth_version",
+        )
+        .bind(library_id)
+        .bind(expected_source_truth_version)
+        .fetch_optional(&mut *transaction)
+        .await
+        .context("advance library source fence with staged vector promotion")?;
+        anyhow::ensure!(advanced.is_some(), "library source fence changed before vector promotion");
+        transaction.commit().await.context("commit staged vector promotion")?;
+        Ok(())
+    }
+
+    async fn discard_staged_vector_rebuild(
+        &self,
+        library_id: Uuid,
+        dimensions: u64,
+        staging_embedding_model_key: &str,
+    ) -> anyhow::Result<()> {
+        let mut transaction = self.pool.begin().await.context("begin staged vector cleanup")?;
+        // Cleanup refreshes canonical manifest counts for touched physical
+        // relations, so it participates in the same short exclusive data
+        // boundary as purge/promotion in addition to the rebuild session lock.
+        lock_library_vector_plane_data(&mut transaction, library_id, true).await?;
+        let touched_relations = discard_staged_vector_rebuild_in_transaction(
+            &mut transaction,
+            library_id,
+            dimensions,
+            staging_embedding_model_key,
+        )
+        .await?;
+        delete_source_less_vectors_in_touched_relations(
+            &mut transaction,
+            library_id,
+            &touched_relations,
+        )
+        .await?;
+        transaction.commit().await.context("commit staged vector cleanup")?;
+        Ok(())
+    }
+
+    async fn discard_abandoned_staged_vector_rebuilds(
+        &self,
+        library_id: Uuid,
+    ) -> anyhow::Result<u64> {
+        let limit = i64::try_from(MAX_ABANDONED_VECTOR_REBUILD_MANIFEST_ROWS)
+            .context("abandoned staging scan limit overflowed i64")?;
+        let mut discarded_profiles = 0_u64;
+        loop {
+            let mut transaction =
+                self.pool.begin().await.context("begin abandoned staging cleanup batch")?;
+            lock_library_vector_plane_data(&mut transaction, library_id, true).await?;
+            let rows = sqlx::query_as::<_, (i32, String)>(
+                "select dim, embedding_model_key
+                 from knowledge_vector_relation_manifest
+                 where library_id = $1
+                   and promoted = false
+                   and embedding_model_key like $2
+                 order by dim, embedding_model_key, vector_kind
+                 limit $3
+                 for update",
+            )
+            .bind(library_id)
+            .bind(format!("{VECTOR_REBUILD_STAGING_PROFILE_PREFIX}%"))
+            .bind(limit)
+            .fetch_all(&mut *transaction)
+            .await
+            .context("scan abandoned vector rebuild manifest batch")?;
+            if rows.is_empty() {
+                transaction.commit().await.context("commit empty abandoned staging scan")?;
+                break;
+            }
+            let staging_profiles = rows
+                .into_iter()
+                .map(|(dimensions, profile_key)| {
+                    validate_vector_rebuild_staging_profile_key(&profile_key)?;
+                    Ok((
+                        u64::try_from(dimensions)
+                            .context("abandoned staging dimension was negative")?,
+                        profile_key,
+                    ))
+                })
+                .collect::<anyhow::Result<BTreeSet<_>>>()?;
+            let mut touched_relations = BTreeSet::new();
+            for (dimensions, profile_key) in &staging_profiles {
+                touched_relations.extend(
+                    discard_staged_vector_rebuild_in_transaction(
+                        &mut transaction,
+                        library_id,
+                        *dimensions,
+                        profile_key,
+                    )
+                    .await?,
+                );
+            }
+            delete_source_less_vectors_in_touched_relations(
+                &mut transaction,
+                library_id,
+                &touched_relations,
+            )
+            .await?;
+            transaction.commit().await.context("commit abandoned staging cleanup batch")?;
+            let batch_profiles = u64::try_from(staging_profiles.len())
+                .context("abandoned staging batch count overflowed u64")?;
+            discarded_profiles = discarded_profiles
+                .checked_add(batch_profiles)
+                .context("abandoned staging cleanup count overflowed u64")?;
+        }
+        Ok(discarded_profiles)
     }
 
     async fn delete_entity_vector(
@@ -1148,6 +3333,19 @@ impl SearchStore for PgSearchStore {
         .await?;
         reset_manifest_counts(&self.pool, Some(library_id), ENTITY_VECTOR_RELATION_PREFIX).await?;
         Ok(())
+    }
+
+    async fn delete_entity_vectors_by_library_fenced(
+        &self,
+        library_id: Uuid,
+        expected_source_truth_version: i64,
+    ) -> anyhow::Result<VectorPlaneDeleteOutcome> {
+        delete_entity_vectors_by_library_fenced_transaction(
+            &self.pool,
+            library_id,
+            expected_source_truth_version,
+        )
+        .await
     }
 
     async fn delete_all_entity_vectors(&self) -> anyhow::Result<u64> {
@@ -1303,16 +3501,7 @@ impl SearchStore for PgSearchStore {
         }
         // PARITY-TODO(0.5.0): .omc/research/adapter-review/search.md:12 -
         // replace the single simple FTS lane with analyzer-equivalent EN/RU parity columns or queries.
-        let (exact_sql, prefix_sql) = lexical_lane_sql(
-            "select block_id, document_id, workspace_id, library_id, revision_id, ordinal,
-                block_kind, text, normalized_text, section_path, heading_trail,
-                ts_rank_cd(search_tsv, {FTS})::double precision as score
-             from knowledge_structured_block
-             where library_id = $1
-               and search_tsv @@ {FTS}
-             order by score desc, revision_id desc, ordinal asc, block_id asc
-             limit $3",
-        );
+        let (exact_sql, prefix_sql) = structured_block_lexical_sql();
         run_lexical_ladder(
             query,
             &exact_sql,
@@ -1363,23 +3552,7 @@ impl SearchStore for PgSearchStore {
         let query_exact = query.split_whitespace().collect::<String>();
         // `$3` (exact canonical value) and `$4` (limit) are FTS-independent, so
         // they bind identically across passes; only the FTS lane (`$2`) widens.
-        let (exact_sql, prefix_sql) = lexical_lane_sql(
-            "select fact_id, document_id, workspace_id, library_id, revision_id, fact_kind,
-                canonical_value_text, display_value,
-                (canonical_value_exact = $3) as exact_match,
-                (
-                    case when canonical_value_exact = $3 then 1000000.0 else 0.0 end
-                    + ts_rank_cd(search_tsv, {FTS})::double precision
-                ) as score
-             from knowledge_technical_fact
-             where library_id = $1
-               and (
-                    canonical_value_exact = $3
-                    or search_tsv @@ {FTS}
-               )
-             order by score desc, fact_id asc
-             limit $4",
-        );
+        let (exact_sql, prefix_sql) = technical_fact_lexical_sql();
         run_lexical_ladder(
             query,
             &exact_sql,
@@ -1532,8 +3705,8 @@ impl SearchStore for PgSearchStore {
         temporal_end: Option<DateTime<Utc>>,
     ) -> anyhow::Result<Vec<KnowledgeChunkVectorSearchRow>> {
         validate_query_vector_dimensions(dim, query_vector, "chunk")?;
-        let Some(relation_name) = self
-            .resolve_manifest_relation(
+        let Some(search_lane) = self
+            .resolve_manifest_search_lane(
                 library_id,
                 dim,
                 KNOWLEDGE_CHUNK_VECTOR_KIND,
@@ -1544,40 +3717,82 @@ impl SearchStore for PgSearchStore {
         else {
             return Ok(Vec::new());
         };
+        let relation_name = search_lane.relation_name;
+        let manifest_row_count = search_lane.manifest_row_count;
         let relation = quote_identifier(&relation_name)?;
         let query_literal = pgvector_literal(query_vector)?;
         let storage = PgVectorStorage::for_dim(dim);
         let cast_type = storage.cast_type();
-        let ef_search = pg_hnsw_ef_search(n_probe);
+        let search_params = pg_hnsw_search_params(n_probe);
+        let query_limit = limit.max(1);
+        let query_limit_i64 =
+            i64::try_from(query_limit).context("chunk ANN limit overflowed i64")?;
         let mut tx = self.pool.begin().await?;
-        sqlx::query(sqlx::AssertSqlSafe(format!("set local hnsw.ef_search = {ef_search}")))
-            .execute(&mut *tx)
-            .await?;
-        let rows = sqlx::query_as::<_, PgChunkVectorSearchRow>(sqlx::AssertSqlSafe(format!(
-            "select vector_id, workspace_id, library_id, chunk_id, revision_id,
-                embedding_model_key, vector_kind, freshness_generation,
-                (1.0 - (embedding <=> $3::{cast_type}))::double precision as score
-             from {relation}
-             where library_id = $1
-               and embedding_model_key = $2
-               and vector_kind = $6
-               and (($4::timestamptz is null and $5::timestamptz is null)
-                    or (occurred_at is not null
-                        and ($4::timestamptz is null or coalesce(occurred_until, occurred_at) >= $4)
-                        and ($5::timestamptz is null or occurred_at <= $5)))
-             order by embedding <=> $3::{cast_type}, chunk_id asc
-             limit $7"
-        )))
+        configure_hnsw_search(&mut tx, search_params).await?;
+        let mut rows = sqlx::query_as::<_, PgChunkVectorSearchRow>(sqlx::AssertSqlSafe(
+            chunk_vector_similarity_sql(&relation, cast_type),
+        ))
         .bind(library_id)
         .bind(embedding_model_key)
-        .bind(query_literal)
-        .bind(temporal_start)
-        .bind(temporal_end)
+        .bind(&query_literal)
+        .bind(temporal_start.as_ref())
+        .bind(temporal_end.as_ref())
         .bind(KNOWLEDGE_CHUNK_VECTOR_KIND)
-        .bind(limit.max(1) as i64)
+        .bind(query_limit_i64)
         .fetch_all(&mut *tx)
         .await
         .with_context(|| format!("failed to search chunk vectors in {relation_name}"))?;
+        if rows.len() < query_limit
+            && u64::try_from(query_limit).is_ok_and(|value| manifest_row_count >= value)
+        {
+            let approximate_result_count = rows.len();
+            let exact_fallback_max_rows = pg_hnsw_exact_fallback_max_rows();
+            if should_retry_exact_ann(
+                approximate_result_count,
+                query_limit,
+                manifest_row_count,
+                exact_fallback_max_rows,
+            ) {
+                rows = sqlx::query_as::<_, PgChunkVectorSearchRow>(sqlx::AssertSqlSafe(
+                    chunk_vector_exact_similarity_sql(&relation, cast_type),
+                ))
+                .bind(library_id)
+                .bind(embedding_model_key)
+                .bind(&query_literal)
+                .bind(temporal_start.as_ref())
+                .bind(temporal_end.as_ref())
+                .bind(KNOWLEDGE_CHUNK_VECTOR_KIND)
+                .bind(query_limit_i64)
+                .fetch_all(&mut *tx)
+                .await
+                .with_context(|| {
+                    format!("failed bounded exact chunk-vector retry in {relation_name}")
+                })?;
+                tracing::warn!(
+                    library_id = %library_id,
+                    approximate_result_count,
+                    exact_result_count = rows.len(),
+                    requested_limit = query_limit,
+                    manifest_row_count,
+                    ef_search = search_params.ef_search,
+                    max_scan_tuples = search_params.max_scan_tuples,
+                    scan_mem_multiplier = search_params.scan_mem_multiplier,
+                    "filtered HNSW chunk search underfilled and used a bounded exact retry"
+                );
+            } else {
+                tracing::warn!(
+                    library_id = %library_id,
+                    approximate_result_count,
+                    requested_limit = query_limit,
+                    manifest_row_count,
+                    exact_fallback_max_rows,
+                    ef_search = search_params.ef_search,
+                    max_scan_tuples = search_params.max_scan_tuples,
+                    scan_mem_multiplier = search_params.scan_mem_multiplier,
+                    "filtered HNSW chunk search underfilled at the configured scan bound; exact retry skipped"
+                );
+            }
+        }
         tx.commit().await?;
         Ok(rows
             .into_iter()
@@ -1605,8 +3820,8 @@ impl SearchStore for PgSearchStore {
         n_probe: Option<u64>,
     ) -> anyhow::Result<Vec<KnowledgeEntityVectorSearchRow>> {
         validate_query_vector_dimensions(dim, query_vector, "entity")?;
-        let Some(relation_name) = self
-            .resolve_manifest_relation(
+        let Some(search_lane) = self
+            .resolve_manifest_search_lane(
                 library_id,
                 dim,
                 KNOWLEDGE_ENTITY_VECTOR_KIND,
@@ -1617,34 +3832,78 @@ impl SearchStore for PgSearchStore {
         else {
             return Ok(Vec::new());
         };
+        let relation_name = search_lane.relation_name;
+        let manifest_row_count = search_lane.manifest_row_count;
         let relation = quote_identifier(&relation_name)?;
         let query_literal = pgvector_literal(query_vector)?;
         let storage = PgVectorStorage::for_dim(dim);
         let cast_type = storage.cast_type();
-        let ef_search = pg_hnsw_ef_search(n_probe);
+        let search_params = pg_hnsw_search_params(n_probe);
+        let query_limit = limit.max(1);
+        let query_limit_i64 =
+            i64::try_from(query_limit).context("entity ANN limit overflowed i64")?;
         let mut tx = self.pool.begin().await?;
-        sqlx::query(sqlx::AssertSqlSafe(format!("set local hnsw.ef_search = {ef_search}")))
-            .execute(&mut *tx)
-            .await?;
-        let rows = sqlx::query_as::<_, PgEntityVectorSearchRow>(sqlx::AssertSqlSafe(format!(
-            "select vector_id, workspace_id, library_id, entity_id,
-                embedding_model_key, vector_kind, freshness_generation,
-                (1.0 - (embedding <=> $3::{cast_type}))::double precision as score
-             from {relation}
-             where library_id = $1
-               and embedding_model_key = $2
-               and vector_kind = $4
-             order by embedding <=> $3::{cast_type}, entity_id asc
-             limit $5"
-        )))
+        configure_hnsw_search(&mut tx, search_params).await?;
+        let mut rows = sqlx::query_as::<_, PgEntityVectorSearchRow>(sqlx::AssertSqlSafe(
+            entity_vector_similarity_sql(&relation, cast_type),
+        ))
         .bind(library_id)
         .bind(embedding_model_key)
-        .bind(query_literal)
+        .bind(&query_literal)
         .bind(KNOWLEDGE_ENTITY_VECTOR_KIND)
-        .bind(limit.max(1) as i64)
+        .bind(query_limit_i64)
         .fetch_all(&mut *tx)
         .await
         .with_context(|| format!("failed to search entity vectors in {relation_name}"))?;
+        if rows.len() < query_limit
+            && u64::try_from(query_limit).is_ok_and(|value| manifest_row_count >= value)
+        {
+            let approximate_result_count = rows.len();
+            let exact_fallback_max_rows = pg_hnsw_exact_fallback_max_rows();
+            if should_retry_exact_ann(
+                approximate_result_count,
+                query_limit,
+                manifest_row_count,
+                exact_fallback_max_rows,
+            ) {
+                rows = sqlx::query_as::<_, PgEntityVectorSearchRow>(sqlx::AssertSqlSafe(
+                    entity_vector_exact_similarity_sql(&relation, cast_type),
+                ))
+                .bind(library_id)
+                .bind(embedding_model_key)
+                .bind(&query_literal)
+                .bind(KNOWLEDGE_ENTITY_VECTOR_KIND)
+                .bind(query_limit_i64)
+                .fetch_all(&mut *tx)
+                .await
+                .with_context(|| {
+                    format!("failed bounded exact entity-vector retry in {relation_name}")
+                })?;
+                tracing::warn!(
+                    library_id = %library_id,
+                    approximate_result_count,
+                    exact_result_count = rows.len(),
+                    requested_limit = query_limit,
+                    manifest_row_count,
+                    ef_search = search_params.ef_search,
+                    max_scan_tuples = search_params.max_scan_tuples,
+                    scan_mem_multiplier = search_params.scan_mem_multiplier,
+                    "filtered HNSW entity search underfilled and used a bounded exact retry"
+                );
+            } else {
+                tracing::warn!(
+                    library_id = %library_id,
+                    approximate_result_count,
+                    requested_limit = query_limit,
+                    manifest_row_count,
+                    exact_fallback_max_rows,
+                    ef_search = search_params.ef_search,
+                    max_scan_tuples = search_params.max_scan_tuples,
+                    scan_mem_multiplier = search_params.scan_mem_multiplier,
+                    "filtered HNSW entity search underfilled at the configured scan bound; exact retry skipped"
+                );
+            }
+        }
         tx.commit().await?;
         Ok(rows
             .into_iter()
@@ -1746,117 +4005,103 @@ async fn reset_manifest_counts(
     Ok(())
 }
 
-#[derive(Debug, Clone, Copy)]
-enum PgVectorStorage {
-    Vector,
-    Halfvec,
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PgHnswSearchParams {
+    ef_search: u64,
+    max_scan_tuples: u64,
+    scan_mem_multiplier: u64,
 }
 
-impl PgVectorStorage {
-    fn for_dim(dim: u64) -> Self {
-        if dim > PGVECTOR_HNSW_VECTOR_MAX_DIM { Self::Halfvec } else { Self::Vector }
-    }
+const HNSW_SEARCH_CONFIG_SQL: &str = "select
+    set_config('hnsw.ef_search', $1, true),
+    set_config('hnsw.iterative_scan', 'strict_order', true),
+    set_config('hnsw.max_scan_tuples', $2, true),
+    set_config('hnsw.scan_mem_multiplier', $3, true)";
 
-    fn column_type(self, dim: i32) -> String {
-        match self {
-            Self::Vector => format!("vector({dim})"),
-            Self::Halfvec => format!("halfvec({dim})"),
-        }
-    }
-
-    fn cast_type(self) -> &'static str {
-        match self {
-            Self::Vector => "vector",
-            Self::Halfvec => "halfvec",
-        }
-    }
-
-    fn cosine_ops(self) -> &'static str {
-        match self {
-            Self::Vector => "vector_cosine_ops",
-            Self::Halfvec => "halfvec_cosine_ops",
-        }
-    }
-
-    fn bytes_per_component(self) -> u64 {
-        match self {
-            Self::Vector => 4,
-            Self::Halfvec => 2,
-        }
+fn pg_hnsw_search_params_from_overrides(
+    n_probe: Option<u64>,
+    configured_ef_search: Option<u64>,
+    configured_max_scan_tuples: Option<u64>,
+    configured_scan_mem_multiplier: Option<u64>,
+) -> PgHnswSearchParams {
+    PgHnswSearchParams {
+        ef_search: n_probe
+            .or(configured_ef_search)
+            .unwrap_or(PG_HNSW_DEFAULT_EF_SEARCH)
+            .clamp(1, PG_HNSW_MAX_EF_SEARCH),
+        max_scan_tuples: configured_max_scan_tuples
+            .unwrap_or(PG_HNSW_DEFAULT_MAX_SCAN_TUPLES)
+            .clamp(1, PG_HNSW_MAX_SCAN_TUPLES),
+        scan_mem_multiplier: configured_scan_mem_multiplier
+            .unwrap_or(PG_HNSW_DEFAULT_SCAN_MEM_MULTIPLIER)
+            .clamp(1, PG_HNSW_MAX_SCAN_MEM_MULTIPLIER),
     }
 }
 
-#[derive(Debug, Clone, Copy)]
-struct PgHnswIndexParams {
-    m: u64,
-    ef_construction: u64,
-}
-
-fn pg_hnsw_index_params(
-    row_count: u64,
-    dim: i32,
-    storage: PgVectorStorage,
-) -> anyhow::Result<PgHnswIndexParams> {
-    let dim = u64::try_from(dim).context("vector dimension must be positive")?;
-    let configured_m = read_env_u64("IRONRAG_PG_HNSW_M");
-    let configured_ef_construction = read_env_u64("IRONRAG_PG_HNSW_EF_CONSTRUCTION");
-    let m = configured_m
-        .map(|m| m.clamp(PG_HNSW_MIN_M, PG_HNSW_LARGE_M))
-        .unwrap_or_else(|| memory_safe_hnsw_m(row_count, dim, storage));
-    let ef_construction = configured_ef_construction.unwrap_or(m.saturating_mul(4)).max(m);
-    Ok(PgHnswIndexParams { m, ef_construction })
-}
-
-fn memory_safe_hnsw_m(row_count: u64, dim: u64, storage: PgVectorStorage) -> u64 {
-    let target = if row_count >= 100_000 {
-        PG_HNSW_LARGE_M
-    } else if row_count >= 1_000 {
-        PG_HNSW_MID_M
-    } else {
-        PG_HNSW_MIN_M
-    };
-    let budget = pg_hnsw_build_budget_bytes();
-    [target, PG_HNSW_MID_M, PG_HNSW_MIN_M]
-        .into_iter()
-        .find(|&m| estimated_hnsw_build_bytes(row_count, dim, storage, m) <= budget)
-        .unwrap_or(PG_HNSW_MIN_M)
-}
-
-fn estimated_hnsw_build_bytes(row_count: u64, dim: u64, storage: PgVectorStorage, m: u64) -> u128 {
-    let rows = u128::from(row_count.max(1));
-    let vector_bytes = u128::from(dim) * u128::from(storage.bytes_per_component());
-    let graph_bytes = u128::from(m) * 16;
-    rows * (vector_bytes.saturating_mul(2) + graph_bytes)
-}
-
-fn pg_hnsw_build_budget_bytes() -> u128 {
-    u128::from(
-        read_env_u64("IRONRAG_PG_HNSW_BUILD_BUDGET_BYTES")
-            .or_else(|| read_env_u64("IRONRAG_VECTOR_INDEX_TRAINING_BUDGET_BYTES"))
-            .unwrap_or(PG_HNSW_DEFAULT_BUILD_BUDGET_BYTES),
+fn pg_hnsw_search_params(n_probe: Option<u64>) -> PgHnswSearchParams {
+    pg_hnsw_search_params_from_overrides(
+        n_probe,
+        read_env_u64("IRONRAG_PG_HNSW_EF_SEARCH"),
+        read_env_u64("IRONRAG_PG_HNSW_MAX_SCAN_TUPLES"),
+        read_env_u64("IRONRAG_PG_HNSW_SCAN_MEM_MULTIPLIER"),
     )
 }
 
-fn pg_hnsw_ef_search(n_probe: Option<u64>) -> u64 {
-    n_probe
-        .or_else(|| read_env_u64("IRONRAG_PG_HNSW_EF_SEARCH"))
-        .unwrap_or(PG_HNSW_DEFAULT_EF_SEARCH)
-        .clamp(1, 10_000)
+fn pg_hnsw_exact_fallback_max_rows() -> u64 {
+    pg_hnsw_exact_fallback_max_rows_from_override(read_env_u64_allow_zero(
+        "IRONRAG_PG_HNSW_EXACT_FALLBACK_MAX_ROWS",
+    ))
 }
 
-fn read_env_u64(name: &str) -> Option<u64> {
-    std::env::var(name).ok().and_then(|value| {
-        let trimmed = value.trim();
-        if trimmed.is_empty() {
-            None
-        } else {
-            trimmed.parse::<u64>().ok().filter(|value| *value > 0)
-        }
-    })
+fn pg_hnsw_exact_fallback_max_rows_from_override(configured: Option<u64>) -> u64 {
+    configured
+        .unwrap_or(PG_HNSW_DEFAULT_EXACT_FALLBACK_MAX_ROWS)
+        .min(PG_HNSW_MAX_EXACT_FALLBACK_ROWS)
+}
+
+fn should_retry_exact_ann(
+    result_count: usize,
+    requested_limit: usize,
+    manifest_row_count: u64,
+    exact_fallback_max_rows: u64,
+) -> bool {
+    let requested_limit = requested_limit.max(1);
+    result_count < requested_limit
+        && u64::try_from(requested_limit).is_ok_and(|limit| manifest_row_count >= limit)
+        && exact_fallback_max_rows > 0
+        && manifest_row_count <= exact_fallback_max_rows
+}
+
+async fn configure_hnsw_search(
+    transaction: &mut Transaction<'_, Postgres>,
+    params: PgHnswSearchParams,
+) -> anyhow::Result<()> {
+    // pgvector applies ordinary filters after an approximate HNSW scan. During
+    // a rebuild, opaque staging rows share the dimension shard with canonical
+    // rows, so a fixed candidate list can otherwise be consumed by staging.
+    // PostgreSQL 18 is the project baseline and its pgvector image is >= 0.8.1;
+    // strict iterative scans (introduced in 0.8.0) continue until the filtered
+    // LIMIT is satisfied or pgvector's configured scan bound is reached.
+    sqlx::query(HNSW_SEARCH_CONFIG_SQL)
+        .bind(params.ef_search.to_string())
+        .bind(params.max_scan_tuples.to_string())
+        .bind(params.scan_mem_multiplier.to_string())
+        .execute(&mut **transaction)
+        .await
+        .context("failed to configure filtered HNSW search")?;
+    Ok(())
+}
+
+fn read_env_u64_allow_zero(name: &str) -> Option<u64> {
+    std::env::var(name).ok().and_then(|value| value.trim().parse::<u64>().ok())
 }
 
 fn checked_dim_i32(dim: u64) -> anyhow::Result<i32> {
     anyhow::ensure!(dim > 0, "vector dimension must be positive");
+    anyhow::ensure!(
+        dim <= PGVECTOR_MAX_INDEXED_DIM,
+        "vector dimension exceeds the indexed storage limit"
+    );
     i32::try_from(dim).context("vector dimension overflowed i32")
 }
 
@@ -1875,6 +4120,78 @@ fn validate_row_vector_dimensions(
     Ok(vector_dim)
 }
 
+fn validate_deferred_chunk_manifest_lane(rows: &[KnowledgeChunkVectorRow]) -> anyhow::Result<()> {
+    let Some(first) = rows.first() else {
+        return Ok(());
+    };
+    anyhow::ensure!(
+        first.vector_kind == KNOWLEDGE_CHUNK_VECTOR_KIND,
+        "deferred chunk rebuild requires the canonical chunk vector kind"
+    );
+    anyhow::ensure!(
+        rows.iter().all(|row| {
+            row.library_id == first.library_id
+                && row.dimensions == first.dimensions
+                && row.vector_kind == first.vector_kind
+                && row.embedding_model_key == first.embedding_model_key
+        }),
+        "deferred chunk vector batch spans multiple manifest lanes"
+    );
+    Ok(())
+}
+
+fn validate_deferred_entity_manifest_lane(rows: &[KnowledgeEntityVectorRow]) -> anyhow::Result<()> {
+    let Some(first) = rows.first() else {
+        return Ok(());
+    };
+    anyhow::ensure!(
+        first.vector_kind == KNOWLEDGE_ENTITY_VECTOR_KIND,
+        "deferred entity rebuild requires the canonical entity vector kind"
+    );
+    anyhow::ensure!(
+        rows.iter().all(|row| {
+            row.library_id == first.library_id
+                && row.dimensions == first.dimensions
+                && row.vector_kind == first.vector_kind
+                && row.embedding_model_key == first.embedding_model_key
+        }),
+        "deferred entity vector batch spans multiple manifest lanes"
+    );
+    Ok(())
+}
+
+fn deferred_chunk_vector_relation(
+    rows: &[KnowledgeChunkVectorRow],
+) -> anyhow::Result<Option<String>> {
+    validate_deferred_chunk_manifest_lane(rows)?;
+    let Some(first) = rows.first() else {
+        return Ok(None);
+    };
+    for row in rows {
+        validate_row_vector_dimensions(row.dimensions, &row.vector, "chunk")?;
+    }
+    Ok(Some(vector_relation_name(
+        CHUNK_VECTOR_RELATION_PREFIX,
+        u64::try_from(first.dimensions).context("chunk vector dimension overflowed u64")?,
+    )?))
+}
+
+fn deferred_entity_vector_relation(
+    rows: &[KnowledgeEntityVectorRow],
+) -> anyhow::Result<Option<String>> {
+    validate_deferred_entity_manifest_lane(rows)?;
+    let Some(first) = rows.first() else {
+        return Ok(None);
+    };
+    for row in rows {
+        validate_row_vector_dimensions(row.dimensions, &row.vector, "entity")?;
+    }
+    Ok(Some(vector_relation_name(
+        ENTITY_VECTOR_RELATION_PREFIX,
+        u64::try_from(first.dimensions).context("entity vector dimension overflowed u64")?,
+    )?))
+}
+
 fn validate_query_vector_dimensions(dim: u64, vector: &[f32], label: &str) -> anyhow::Result<()> {
     anyhow::ensure!(!vector.is_empty(), "{label} query vector must not be empty");
     let vector_dim = u64::try_from(vector.len()).context("query vector length overflowed u64")?;
@@ -1891,9 +4208,33 @@ fn vector_relation_name(prefix: &str, dim: u64) -> anyhow::Result<String> {
     Ok(format!("{prefix}{dim}"))
 }
 
+fn vector_relation_required_objects(
+    relation_name: &str,
+    id_column: &str,
+    extra_column: Option<&str>,
+) -> Vec<String> {
+    let mut objects = vec![
+        relation_name.to_string(),
+        format!("{relation_name}_logical_key"),
+        format!("{relation_name}_lane_idx"),
+        format!("{relation_name}_{id_column}_idx"),
+        format!("{relation_name}_hnsw"),
+    ];
+    if let Some(extra_column) = extra_column {
+        objects.push(format!("{relation_name}_{extra_column}_idx"));
+    }
+    objects
+}
+
 fn validate_relation_name(relation_name: &str, expected_prefix: &str) -> anyhow::Result<()> {
+    let dimension = relation_name
+        .strip_prefix(expected_prefix)
+        .filter(|suffix| !suffix.is_empty() && suffix.bytes().all(|byte| byte.is_ascii_digit()))
+        .context("vector relation does not follow the dimension-shard protocol")?
+        .parse::<u64>()
+        .context("vector relation dimension overflowed u64")?;
     anyhow::ensure!(
-        relation_name.starts_with(expected_prefix),
+        vector_relation_name(expected_prefix, dimension)? == relation_name,
         "manifest relation {relation_name} does not match expected prefix {expected_prefix}"
     );
     quote_identifier(relation_name)?;
@@ -2046,7 +4387,7 @@ fn numeric_title_literals(query: &str) -> Vec<String> {
     terms
 }
 
-fn title_soft_raw_enabled(query_terms: &[String]) -> bool {
+const fn title_soft_raw_enabled(query_terms: &[String]) -> bool {
     query_terms.len() <= TITLE_IDENTITY_MAX_TERMS
 }
 
@@ -2156,7 +4497,7 @@ fn prefix_relaxed_tsquery_or(query: &str) -> Option<String> {
 
 /// Whether the precise pass returned too few hits and the ladder should descend
 /// to the next, more relaxed pass.
-fn should_relax_lexical(hit_count: usize) -> bool {
+const fn should_relax_lexical(hit_count: usize) -> bool {
     hit_count < LEXICAL_RELAX_FLOOR
 }
 
@@ -2261,9 +4602,9 @@ mod tests {
     }
 
     #[test]
-    fn chunk_exact_template_is_byte_identical_to_original() {
-        // Pass A must execute the unchanged precise query: the only difference
-        // from the relaxed template is the FTS constructor literal.
+    fn chunk_exact_template_keeps_precise_fts_constructor() {
+        // Pass A remains the precise query; the relaxed template differs only in
+        // the FTS constructor while shared safety filters stay identical.
         assert!(CHUNK_LEXICAL_SQL_EXACT.contains(
             "ts_rank_cd(c.search_tsv, websearch_to_tsquery('simple', ironrag_unaccent($2)))"
         ));
@@ -2282,6 +4623,420 @@ mod tests {
         );
         assert!(!CHUNK_LEXICAL_SQL_PREFIX.contains("websearch_to_tsquery"));
         assert!(!CHUNK_LEXICAL_SQL_PREFIX.contains("{FTS}"));
+    }
+
+    #[test]
+    fn chunk_lexical_sql_excludes_legacy_raptor_rows_from_every_lane() {
+        for sql in [CHUNK_LEXICAL_SQL_EXACT.as_str(), CHUNK_LEXICAL_SQL_PREFIX.as_str()] {
+            assert_eq!(
+                sql.matches("and c.raptor_level is null").count(),
+                3,
+                "text, title-identity, and soft-title lanes must all quarantine legacy summaries"
+            );
+        }
+    }
+
+    #[test]
+    fn chunk_lexical_sql_filters_stale_revisions_before_every_lane_limit() {
+        for sql in [CHUNK_LEXICAL_SQL_EXACT.as_str(), CHUNK_LEXICAL_SQL_PREFIX.as_str()] {
+            assert!(sql.contains("d.readable_revision_id is not null"));
+            assert!(sql.contains("d.deleted_at is null"));
+            assert_eq!(sql.matches("join readable_docs rd").count(), 3);
+            assert_eq!(sql.matches("rd.readable_revision_id = c.revision_id").count(), 3);
+            assert_eq!(
+                sql.matches("and d.readable_revision_id is not null").count(),
+                3,
+                "readable-doc, exact-title, and soft-title candidates must filter unreadable documents before their local limits",
+            );
+            assert_eq!(
+                sql.matches("and d.deleted_at is null").count(),
+                3,
+                "deleted title matches must not consume a bounded title lane before canonical chunk hydration",
+            );
+        }
+    }
+
+    #[test]
+    fn structured_block_lexical_sql_filters_noncanonical_revisions_before_limit() {
+        let (exact_sql, prefix_sql) = structured_block_lexical_sql();
+        for sql in [&exact_sql, &prefix_sql] {
+            assert!(sql.contains("from knowledge_structured_block b"));
+            assert!(sql.contains("join knowledge_document d"));
+            assert!(sql.contains("d.document_id = b.document_id"));
+            assert!(sql.contains("d.library_id = b.library_id"));
+            assert!(sql.contains("d.readable_revision_id = b.revision_id"));
+            assert!(sql.contains("d.document_state = 'active'"));
+            assert!(sql.contains("d.deleted_at is null"));
+            assert!(
+                sql.find("d.deleted_at is null").unwrap() < sql.rfind("limit $3").unwrap(),
+                "canonical document filters must run before the bounded result set",
+            );
+        }
+    }
+
+    #[test]
+    fn technical_fact_lexical_sql_filters_noncanonical_revisions_before_limit() {
+        let (exact_sql, prefix_sql) = technical_fact_lexical_sql();
+        for sql in [&exact_sql, &prefix_sql] {
+            assert!(sql.contains("from knowledge_technical_fact f"));
+            assert!(sql.contains("join knowledge_document d"));
+            assert!(sql.contains("d.document_id = f.document_id"));
+            assert!(sql.contains("d.library_id = f.library_id"));
+            assert!(sql.contains("d.readable_revision_id = f.revision_id"));
+            assert!(sql.contains("d.document_state = 'active'"));
+            assert!(sql.contains("d.deleted_at is null"));
+            assert!(
+                sql.find("d.deleted_at is null").unwrap() < sql.rfind("limit $4").unwrap(),
+                "canonical document filters must run before the bounded result set",
+            );
+        }
+    }
+
+    #[test]
+    fn chunk_vector_sql_excludes_legacy_raptor_rows_before_top_k() {
+        let sql = chunk_vector_similarity_sql("\"knowledge_chunk_vector_3\"", "vector(3)");
+
+        assert!(sql.contains("join knowledge_chunk c"));
+        assert!(sql.contains("join knowledge_document d"));
+        assert!(sql.contains("d.readable_revision_id = v.revision_id"));
+        assert!(sql.contains("d.document_state = 'active'"));
+        assert!(sql.contains("d.deleted_at is null"));
+        assert!(sql.contains("and c.chunk_state = 'ready'"));
+        assert!(sql.contains("and c.raptor_level is null"));
+        assert!(sql.contains("order by v.embedding <=> $3::vector(3)"));
+    }
+
+    #[test]
+    fn entity_vector_sql_filters_inactive_entities_before_top_k() {
+        let sql = entity_vector_similarity_sql("\"knowledge_entity_vector_d3\"", "vector(3)");
+
+        assert!(sql.contains("from \"knowledge_entity_vector_d3\" v"));
+        assert!(sql.contains("join knowledge_entity e"));
+        assert!(sql.contains("e.entity_id = v.entity_id"));
+        assert!(sql.contains("e.library_id = v.library_id"));
+        assert!(sql.contains("e.entity_state = 'active'"));
+        assert!(
+            sql.find("e.entity_state = 'active'").unwrap() < sql.rfind("limit $5").unwrap(),
+            "inactive entity vectors must not consume the bounded ANN result set",
+        );
+    }
+
+    #[test]
+    fn filtered_hnsw_search_parameters_are_explicit_and_bounded() {
+        let defaults = pg_hnsw_search_params_from_overrides(None, None, None, None);
+        assert_eq!(defaults.ef_search, PG_HNSW_DEFAULT_EF_SEARCH);
+        assert_eq!(defaults.max_scan_tuples, PG_HNSW_DEFAULT_MAX_SCAN_TUPLES);
+        assert_eq!(defaults.scan_mem_multiplier, PG_HNSW_DEFAULT_SCAN_MEM_MULTIPLIER);
+
+        let bounded = pg_hnsw_search_params_from_overrides(
+            Some(u64::MAX),
+            Some(7),
+            Some(u64::MAX),
+            Some(u64::MAX),
+        );
+        assert_eq!(bounded.ef_search, PG_HNSW_MAX_EF_SEARCH);
+        assert_eq!(bounded.max_scan_tuples, PG_HNSW_MAX_SCAN_TUPLES);
+        assert_eq!(bounded.scan_mem_multiplier, PG_HNSW_MAX_SCAN_MEM_MULTIPLIER);
+
+        let minimums = pg_hnsw_search_params_from_overrides(None, Some(0), Some(0), Some(0));
+        assert_eq!(minimums.ef_search, 1);
+        assert_eq!(minimums.max_scan_tuples, 1);
+        assert_eq!(minimums.scan_mem_multiplier, 1);
+
+        let configured =
+            pg_hnsw_search_params_from_overrides(None, Some(123), Some(45_000), Some(3));
+        assert_eq!(configured.ef_search, 123);
+        assert_eq!(configured.max_scan_tuples, 45_000);
+        assert_eq!(configured.scan_mem_multiplier, 3);
+
+        let request_override =
+            pg_hnsw_search_params_from_overrides(Some(321), Some(123), Some(45_000), Some(3));
+        assert_eq!(request_override.ef_search, 321);
+    }
+
+    #[test]
+    fn exact_fallback_threshold_is_explicit_disableable_and_bounded() {
+        assert_eq!(
+            pg_hnsw_exact_fallback_max_rows_from_override(None),
+            PG_HNSW_DEFAULT_EXACT_FALLBACK_MAX_ROWS
+        );
+        assert_eq!(pg_hnsw_exact_fallback_max_rows_from_override(Some(0)), 0);
+        assert_eq!(
+            pg_hnsw_exact_fallback_max_rows_from_override(Some(u64::MAX)),
+            PG_HNSW_MAX_EXACT_FALLBACK_ROWS
+        );
+    }
+
+    #[test]
+    fn filtered_hnsw_configuration_sets_every_bounded_pgvector_knob() {
+        for setting in [
+            "hnsw.ef_search",
+            "hnsw.iterative_scan",
+            "hnsw.max_scan_tuples",
+            "hnsw.scan_mem_multiplier",
+        ] {
+            assert!(HNSW_SEARCH_CONFIG_SQL.contains(setting));
+        }
+    }
+
+    #[test]
+    fn exact_retry_is_limited_to_underfilled_small_manifest_lanes() {
+        assert!(should_retry_exact_ann(3, 8, 1_000, 10_000));
+        assert!(!should_retry_exact_ann(8, 8, 1_000, 10_000));
+        assert!(!should_retry_exact_ann(3, 8, 7, 10_000));
+        assert!(!should_retry_exact_ann(3, 8, 10_001, 10_000));
+        assert!(!should_retry_exact_ann(3, 8, 1_000, 0));
+    }
+
+    #[test]
+    fn exact_retry_sql_disables_hnsw_ordering_without_removing_lane_filters() {
+        let chunk_sql =
+            chunk_vector_exact_similarity_sql("\"knowledge_chunk_vector_d3\"", "vector(3)");
+        assert!(chunk_sql.contains("v.embedding_model_key = $2"));
+        assert!(chunk_sql.contains("v.vector_kind = $6"));
+        assert!(chunk_sql.contains("order by (v.embedding <=> $3::vector(3)) + 0.0"));
+
+        let entity_sql =
+            entity_vector_exact_similarity_sql("\"knowledge_entity_vector_d3\"", "vector(3)");
+        assert!(entity_sql.contains("v.embedding_model_key = $2"));
+        assert!(entity_sql.contains("v.vector_kind = $4"));
+        assert!(entity_sql.contains("order by (v.embedding <=> $3::vector(3)) + 0.0"));
+    }
+
+    #[test]
+    fn chunk_vector_coverage_sql_counts_only_canonical_chunks() {
+        let sql = canonical_chunk_vector_count_sql("\"knowledge_chunk_vector_d3\"");
+
+        assert!(sql.contains("from \"knowledge_chunk_vector_d3\" v"));
+        assert!(sql.contains("join knowledge_chunk c"));
+        assert!(sql.contains("c.chunk_id = v.chunk_id"));
+        assert!(sql.contains("c.revision_id = v.revision_id"));
+        assert!(sql.contains("c.library_id = v.library_id"));
+        assert!(sql.contains("and c.chunk_state = 'ready'"));
+        assert!(sql.contains("and c.raptor_level is null"));
+    }
+
+    #[test]
+    fn chunk_vector_dimension_sql_uses_one_set_query_and_ignores_legacy_only_shards() {
+        let sql = canonical_chunk_vector_dimension_counts_sql(&[
+            (3, "knowledge_chunk_vector_d3".to_string()),
+            (7, "knowledge_chunk_vector_d7".to_string()),
+        ])
+        .unwrap()
+        .unwrap();
+
+        assert!(sql.contains("from \"knowledge_chunk_vector_d3\" v"));
+        assert!(sql.contains("from \"knowledge_chunk_vector_d7\" v"));
+        assert_eq!(sql.matches("union all").count(), 1);
+        assert_eq!(sql.matches("count(distinct v.chunk_id)").count(), 2);
+        assert!(sql.contains("join knowledge_chunk c"));
+        assert!(sql.contains("c.chunk_id = v.chunk_id"));
+        assert!(sql.contains("c.revision_id = v.revision_id"));
+        assert!(sql.contains("c.library_id = v.library_id"));
+        assert_eq!(sql.matches("and c.chunk_state = 'ready'").count(), 2);
+        assert_eq!(sql.matches("and c.raptor_level is null").count(), 2);
+        assert_eq!(sql.matches("join knowledge_document d").count(), 2);
+        assert_eq!(sql.matches("d.readable_revision_id = v.revision_id").count(), 2);
+        assert_eq!(sql.matches("d.document_state = 'active'").count(), 2);
+        assert_eq!(sql.matches("d.deleted_at is null").count(), 2);
+        assert!(canonical_chunk_vector_dimension_counts_sql(&[]).unwrap().is_none());
+    }
+
+    #[test]
+    fn chunk_vector_dimension_sql_rejects_manifest_dimension_relation_mismatch() {
+        let result = canonical_chunk_vector_dimension_counts_sql(&[(
+            1536,
+            "knowledge_chunk_vector_d768".to_string(),
+        )]);
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn canonical_chunk_vector_dimensions_drop_empty_and_rank_by_live_rows() {
+        let dimensions =
+            rank_canonical_chunk_vector_dimensions(vec![(384, 0), (768, 2), (1536, 5), (1024, 5)])
+                .unwrap();
+
+        assert_eq!(dimensions, vec![1536, 1024, 768]);
+    }
+
+    #[test]
+    fn chunk_vector_profile_inventory_returns_ranked_dimensions_and_exact_count() {
+        let inventory =
+            chunk_vector_profile_inventory(vec![(384, 0), (768, 2), (1536, 5)]).unwrap();
+
+        assert_eq!(inventory.dimensions, vec![1536, 768]);
+        assert_eq!(inventory.active_vector_count, 7);
+        assert!(chunk_vector_profile_inventory(vec![(768, -1)]).is_err());
+    }
+
+    #[test]
+    fn empty_profile_inventory_has_no_dimension_or_active_vectors() {
+        let inventory = chunk_vector_profile_inventory(vec![(384, 0), (768, 0)]).unwrap();
+
+        assert!(inventory.dimensions.is_empty());
+        assert_eq!(inventory.active_vector_count, 0);
+    }
+
+    #[test]
+    fn manifest_reconciliation_requires_exactly_one_prepared_lane() {
+        assert!(ensure_single_manifest_row_updated(0).is_err());
+        assert!(ensure_single_manifest_row_updated(1).is_ok());
+        assert!(ensure_single_manifest_row_updated(2).is_err());
+    }
+
+    #[test]
+    fn staging_cleanup_accepts_only_the_opaque_rebuild_key_protocol() {
+        let valid =
+            format!("{VECTOR_REBUILD_STAGING_PROFILE_PREFIX}{}", "0123456789abcdef".repeat(4));
+        assert!(validate_vector_rebuild_staging_profile_key(&valid).is_ok());
+        assert!(
+            validate_vector_rebuild_staging_profile_key(
+                "embedding-profile:v1:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+            )
+            .is_err()
+        );
+        assert!(
+            validate_vector_rebuild_staging_profile_key("embedding-rebuild:v1:0123456789abcdef")
+                .is_err()
+        );
+        assert!(
+            validate_vector_rebuild_staging_profile_key(
+                "embedding-rebuild:v1:zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn dimension_claim_reader_accepts_only_canonical_exact_profile_keys() {
+        let valid = format!("{EMBEDDING_PROFILE_PREFIX}{}", "0123456789abcdef".repeat(4));
+        assert!(validate_canonical_embedding_profile_key(&valid).is_ok());
+        assert!(validate_canonical_embedding_profile_key(&Uuid::now_v7().to_string()).is_err());
+        assert!(
+            validate_canonical_embedding_profile_key(
+                "embedding-rebuild:v1:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+            )
+            .is_err()
+        );
+        assert!(
+            validate_canonical_embedding_profile_key(
+                "embedding-profile:v1:zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn dimension_claim_requires_one_positive_storage_safe_matching_relation() {
+        assert_eq!(
+            validate_exact_profile_dimension_claim(CHUNK_VECTOR_RELATION_PREFIX, &[]).unwrap(),
+            None
+        );
+        assert_eq!(
+            validate_exact_profile_dimension_claim(
+                CHUNK_VECTOR_RELATION_PREFIX,
+                &[(3, "knowledge_chunk_vector_d3".to_string())],
+            )
+            .unwrap(),
+            Some(3)
+        );
+        assert!(
+            validate_exact_profile_dimension_claim(
+                CHUNK_VECTOR_RELATION_PREFIX,
+                &[(0, "knowledge_chunk_vector_d0".to_string())],
+            )
+            .is_err()
+        );
+        assert!(
+            validate_exact_profile_dimension_claim(
+                CHUNK_VECTOR_RELATION_PREFIX,
+                &[(4_001, "knowledge_chunk_vector_d4001".to_string())],
+            )
+            .is_err()
+        );
+        assert!(
+            validate_exact_profile_dimension_claim(
+                CHUNK_VECTOR_RELATION_PREFIX,
+                &[(3, "knowledge_chunk_vector_d4".to_string())],
+            )
+            .is_err()
+        );
+        assert!(
+            validate_exact_profile_dimension_claim(
+                CHUNK_VECTOR_RELATION_PREFIX,
+                &[
+                    (3, "knowledge_chunk_vector_d3".to_string()),
+                    (4, "knowledge_chunk_vector_d4".to_string()),
+                ],
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn deferred_chunk_relation_requires_one_valid_prepared_lane() {
+        let library_id = Uuid::now_v7();
+        let mut first = deferred_chunk_row(library_id, 3, "profile-a");
+        let second = deferred_chunk_row(library_id, 3, "profile-a");
+
+        assert_eq!(
+            deferred_chunk_vector_relation(&[first.clone(), second]).unwrap(),
+            Some("knowledge_chunk_vector_d3".to_string())
+        );
+        first.vector.pop();
+        assert!(deferred_chunk_vector_relation(&[first]).is_err());
+        assert_eq!(deferred_chunk_vector_relation(&[]).unwrap(), None);
+    }
+
+    #[test]
+    fn deferred_entity_relation_rejects_cross_library_batches() {
+        let first = deferred_entity_row(Uuid::now_v7(), 3, "profile-a");
+        let second = deferred_entity_row(Uuid::now_v7(), 3, "profile-a");
+
+        assert!(deferred_entity_vector_relation(&[first, second]).is_err());
+    }
+
+    fn deferred_chunk_row(
+        library_id: Uuid,
+        dimensions: i32,
+        embedding_model_key: &str,
+    ) -> KnowledgeChunkVectorRow {
+        KnowledgeChunkVectorRow {
+            vector_id: Uuid::now_v7(),
+            workspace_id: Uuid::now_v7(),
+            library_id,
+            chunk_id: Uuid::now_v7(),
+            revision_id: Uuid::now_v7(),
+            embedding_model_key: embedding_model_key.to_string(),
+            vector_kind: KNOWLEDGE_CHUNK_VECTOR_KIND.to_string(),
+            dimensions,
+            vector: vec![0.0; usize::try_from(dimensions).unwrap()],
+            freshness_generation: 1,
+            created_at: Utc::now(),
+            occurred_at: None,
+            occurred_until: None,
+        }
+    }
+
+    fn deferred_entity_row(
+        library_id: Uuid,
+        dimensions: i32,
+        embedding_model_key: &str,
+    ) -> KnowledgeEntityVectorRow {
+        KnowledgeEntityVectorRow {
+            vector_id: Uuid::now_v7(),
+            workspace_id: Uuid::now_v7(),
+            library_id,
+            entity_id: Uuid::now_v7(),
+            embedding_model_key: embedding_model_key.to_string(),
+            vector_kind: KNOWLEDGE_ENTITY_VECTOR_KIND.to_string(),
+            dimensions,
+            vector: vec![0.0; usize::try_from(dimensions).unwrap()],
+            freshness_generation: 1,
+            created_at: Utc::now(),
+        }
     }
 
     #[test]

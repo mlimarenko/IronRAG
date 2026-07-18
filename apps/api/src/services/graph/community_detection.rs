@@ -162,65 +162,77 @@ fn run_label_propagation(
     nodes: &[RuntimeGraphNodeIdRow],
     edges: &[RuntimeGraphEdgeAdjacencyRow],
 ) -> HashMap<Uuid, usize> {
-    // Build adjacency list: node_id -> [(neighbour_id, weight)]
-    let mut adj: HashMap<Uuid, Vec<(Uuid, i32)>> = HashMap::new();
-    for edge in edges {
-        adj.entry(edge.from_node_id).or_default().push((edge.to_node_id, edge.support_count));
-        adj.entry(edge.to_node_id).or_default().push((edge.from_node_id, edge.support_count));
-    }
+    let adj = graph_adjacency(edges);
+    let mut community =
+        nodes.iter().enumerate().map(|(index, node)| (node.id, index)).collect::<HashMap<_, _>>();
+    let mut node_ids = nodes.iter().map(|node| node.id).collect::<Vec<_>>();
 
-    // Initialize: each node in its own community
-    let mut community: HashMap<Uuid, usize> = HashMap::new();
-    for (i, node) in nodes.iter().enumerate() {
-        community.insert(node.id, i);
-    }
-
-    // Iterate
-    let max_iterations: u64 = 20;
-    let mut node_ids: Vec<Uuid> = nodes.iter().map(|n| n.id).collect();
-
-    for iteration in 0..max_iterations {
-        let mut changed = false;
-
-        // Deterministic shuffle based on node id bytes + iteration
-        node_ids.sort_by_key(|id| {
-            let bytes = id.as_bytes();
-            u64::from_le_bytes([
-                bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
-            ])
-            .wrapping_add(iteration)
-        });
-
-        for &node_id in &node_ids {
-            let neighbours = match adj.get(&node_id) {
-                Some(n) if !n.is_empty() => n,
-                _ => continue,
-            };
-
-            // Count weighted votes for each community among neighbours
-            let mut votes: HashMap<usize, i32> = HashMap::new();
-            for &(neighbour_id, weight) in neighbours {
-                if let Some(&comm) = community.get(&neighbour_id) {
-                    *votes.entry(comm).or_default() += weight;
-                }
-            }
-
-            // Pick community with most weighted votes
-            if let Some((&best_comm, _)) = votes.iter().max_by_key(|&(_, &v)| v) {
-                let current = community[&node_id];
-                if best_comm != current {
-                    community.insert(node_id, best_comm);
-                    changed = true;
-                }
-            }
-        }
-
-        if !changed {
+    for iteration in 0_u64..20 {
+        sort_node_ids_for_iteration(&mut node_ids, iteration);
+        if !propagate_community_labels(&node_ids, &adj, &mut community) {
             break;
         }
     }
-
     community
+}
+
+fn graph_adjacency(edges: &[RuntimeGraphEdgeAdjacencyRow]) -> HashMap<Uuid, Vec<(Uuid, i32)>> {
+    let mut adjacency = HashMap::new();
+    for edge in edges {
+        adjacency
+            .entry(edge.from_node_id)
+            .or_insert_with(Vec::new)
+            .push((edge.to_node_id, edge.support_count));
+        adjacency
+            .entry(edge.to_node_id)
+            .or_insert_with(Vec::new)
+            .push((edge.from_node_id, edge.support_count));
+    }
+    adjacency
+}
+
+fn sort_node_ids_for_iteration(node_ids: &mut [Uuid], iteration: u64) {
+    node_ids.sort_by_key(|id| {
+        let bytes = id.as_bytes();
+        u64::from_le_bytes([
+            bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
+        ])
+        .wrapping_add(iteration)
+    });
+}
+
+fn propagate_community_labels(
+    node_ids: &[Uuid],
+    adjacency: &HashMap<Uuid, Vec<(Uuid, i32)>>,
+    community: &mut HashMap<Uuid, usize>,
+) -> bool {
+    let mut changed = false;
+    for &node_id in node_ids {
+        let Some(neighbours) = adjacency.get(&node_id).filter(|values| !values.is_empty()) else {
+            continue;
+        };
+        let Some(best_community) = strongest_neighbour_community(neighbours, community) else {
+            continue;
+        };
+        if community.get(&node_id).copied() != Some(best_community) {
+            community.insert(node_id, best_community);
+            changed = true;
+        }
+    }
+    changed
+}
+
+fn strongest_neighbour_community(
+    neighbours: &[(Uuid, i32)],
+    community: &HashMap<Uuid, usize>,
+) -> Option<usize> {
+    let mut votes = HashMap::<usize, i32>::new();
+    for &(neighbour_id, weight) in neighbours {
+        if let Some(neighbour_community) = community.get(&neighbour_id) {
+            *votes.entry(*neighbour_community).or_default() += weight;
+        }
+    }
+    votes.into_iter().max_by_key(|&(_, weight)| weight).map(|(id, _)| id)
 }
 
 // ---------------------------------------------------------------------------
@@ -333,20 +345,15 @@ pub async fn generate_community_summaries(
         let entity_list = top_display.join(", ");
 
         let mut summary =
-            format!("Community of {node_count} entities centered around {entity_list}.",);
+            format!("Community of {node_count} entities centered around {entity_list}.");
 
         if !intra_edges.is_empty() {
             let rel_descriptions: Vec<String> = intra_edges
                 .iter()
                 .map(|e| {
-                    let from = node_by_id
-                        .get(&e.from_node_id)
-                        .map(|node| node.label.as_str())
-                        .unwrap_or("?");
-                    let to = node_by_id
-                        .get(&e.to_node_id)
-                        .map(|node| node.label.as_str())
-                        .unwrap_or("?");
+                    let from =
+                        node_by_id.get(&e.from_node_id).map_or("?", |node| node.label.as_str());
+                    let to = node_by_id.get(&e.to_node_id).map_or("?", |node| node.label.as_str());
                     format!("{from} {} {to}", e.relation_type)
                 })
                 .collect();

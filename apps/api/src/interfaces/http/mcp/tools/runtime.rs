@@ -1,17 +1,13 @@
+use serde::Serialize;
 use serde_json::{Value, json};
 
-use crate::{
-    mcp_types::{
-        McpAuditActionKind, McpAuditScope, McpGetRuntimeExecutionRequest,
-        McpGetRuntimeExecutionTraceRequest,
-    },
-    services::mcp::support::{describe_runtime_execution_summary, describe_runtime_trace_summary},
+use crate::mcp_types::{
+    McpGetRuntimeExecutionRequest, McpGetRuntimeExecutionTraceRequest, McpRuntimeExecutionSummary,
+    McpRuntimeExecutionTrace,
 };
 
 use super::super::{
-    McpToolDescriptor, McpToolResult,
-    audit::{record_error_audit, record_success_audit},
-    ok_tool_result, parse_tool_args, tool_error_result,
+    McpToolDescriptor, McpToolResult, ok_tool_result, parse_tool_args, tool_error_result,
 };
 use super::ToolCallContext;
 
@@ -74,67 +70,11 @@ async fn get_runtime_execution(context: ToolCallContext<'_>, arguments: &Value) 
         .await
         {
             Ok(payload) => {
-                record_success_audit(
-                    context.auth,
-                    context.state,
-                    context.request_id,
-                    McpAuditActionKind::GetRuntimeExecution,
-                    McpAuditScope {
-                        workspace_id: context.auth.workspace_id,
-                        library_id: None,
-                        document_id: None,
-                    },
-                    json!({
-                        "tool": "get_runtime_execution",
-                        "runtimeExecutionId": payload.runtime_execution_id,
-                        "lifecycleState": payload.lifecycle_state,
-                        "activeStage": payload.active_stage,
-                        "failureCode": payload.failure_code,
-                        "policyRejectCount": payload.policy_summary.reject_count,
-                        "policyTerminateCount": payload.policy_summary.terminate_count,
-                    }),
-                )
-                .await;
                 ok_tool_result(&describe_runtime_execution_summary(&payload), json!(payload))
             }
-            Err(error) => {
-                record_error_audit(
-                    context.auth,
-                    context.state,
-                    context.request_id,
-                    McpAuditActionKind::GetRuntimeExecution,
-                    McpAuditScope {
-                        workspace_id: context.auth.workspace_id,
-                        library_id: None,
-                        document_id: None,
-                    },
-                    &error,
-                    json!({
-                        "tool": "get_runtime_execution",
-                        "runtimeExecutionId": args.runtime_execution_id,
-                    }),
-                )
-                .await;
-                tool_error_result(error)
-            }
+            Err(error) => tool_error_result(error),
         },
-        Err(error) => {
-            record_error_audit(
-                context.auth,
-                context.state,
-                context.request_id,
-                McpAuditActionKind::GetRuntimeExecution,
-                McpAuditScope {
-                    workspace_id: context.auth.workspace_id,
-                    library_id: None,
-                    document_id: None,
-                },
-                &error,
-                json!({ "tool": "get_runtime_execution" }),
-            )
-            .await;
-            tool_error_result(error)
-        }
+        Err(error) => tool_error_result(error),
     }
 }
 
@@ -151,69 +91,77 @@ async fn get_runtime_execution_trace(
         .await
         {
             Ok(payload) => {
-                record_success_audit(
-                    context.auth,
-                    context.state,
-                    context.request_id,
-                    McpAuditActionKind::GetRuntimeExecutionTrace,
-                    McpAuditScope {
-                        workspace_id: context.auth.workspace_id,
-                        library_id: None,
-                        document_id: None,
-                    },
-                    json!({
-                        "tool": "get_runtime_execution_trace",
-                        "runtimeExecutionId": payload.execution.runtime_execution_id,
-                        "lifecycleState": payload.execution.lifecycle_state,
-                        "activeStage": payload.execution.active_stage,
-                        "failureCode": payload.execution.failure_code,
-                        "stageCount": payload.stages.len(),
-                        "actionCount": payload.actions.len(),
-                        "policyDecisionCount": payload.policy_decisions.len(),
-                        "policyRejectCount": payload.execution.policy_summary.reject_count,
-                        "policyTerminateCount": payload.execution.policy_summary.terminate_count,
-                    }),
-                )
-                .await;
                 ok_tool_result(&describe_runtime_trace_summary(&payload), json!(payload))
             }
-            Err(error) => {
-                record_error_audit(
-                    context.auth,
-                    context.state,
-                    context.request_id,
-                    McpAuditActionKind::GetRuntimeExecutionTrace,
-                    McpAuditScope {
-                        workspace_id: context.auth.workspace_id,
-                        library_id: None,
-                        document_id: None,
-                    },
-                    &error,
-                    json!({
-                        "tool": "get_runtime_execution_trace",
-                        "runtimeExecutionId": args.runtime_execution_id,
-                    }),
-                )
-                .await;
-                tool_error_result(error)
-            }
+            Err(error) => tool_error_result(error),
         },
-        Err(error) => {
-            record_error_audit(
-                context.auth,
-                context.state,
-                context.request_id,
-                McpAuditActionKind::GetRuntimeExecutionTrace,
-                McpAuditScope {
-                    workspace_id: context.auth.workspace_id,
-                    library_id: None,
-                    document_id: None,
-                },
-                &error,
-                json!({ "tool": "get_runtime_execution_trace" }),
-            )
-            .await;
-            tool_error_result(error)
-        }
+        Err(error) => tool_error_result(error),
     }
+}
+
+// --- Runtime-text formatting -------------------------------------------
+//
+// Split out of the former `services/mcp/support.rs` god-file (plan
+// §6.4): these two functions had exactly one caller each, both in this
+// module, so moving them here (module-private) closes the last of the
+// five unrelated concerns that file used to bundle.
+
+fn describe_runtime_execution_summary(execution: &McpRuntimeExecutionSummary) -> String {
+    let policy_suffix = if execution.policy_summary.reject_count > 0
+        || execution.policy_summary.terminate_count > 0
+    {
+        format!(
+            " Policy interventions: {} rejected, {} terminated.",
+            execution.policy_summary.reject_count, execution.policy_summary.terminate_count
+        )
+    } else {
+        String::new()
+    };
+    match (execution.lifecycle_state, execution.active_stage) {
+        (crate::domains::agent_runtime::RuntimeLifecycleState::Running, Some(active_stage)) => {
+            format!(
+                "Runtime execution {} is running in stage {}.{}",
+                execution.runtime_execution_id,
+                canonical_runtime_value(&active_stage),
+                policy_suffix
+            )
+        }
+        (
+            crate::domains::agent_runtime::RuntimeLifecycleState::Completed
+            | crate::domains::agent_runtime::RuntimeLifecycleState::Recovered,
+            Some(active_stage),
+        ) => format!(
+            "Runtime execution {} finished in state {} after stage {}.{}",
+            execution.runtime_execution_id,
+            canonical_runtime_value(&execution.lifecycle_state),
+            canonical_runtime_value(&active_stage),
+            policy_suffix
+        ),
+        _ => format!(
+            "Runtime execution {} is {}.{}",
+            execution.runtime_execution_id,
+            canonical_runtime_value(&execution.lifecycle_state),
+            policy_suffix
+        ),
+    }
+}
+
+fn describe_runtime_trace_summary(trace: &McpRuntimeExecutionTrace) -> String {
+    format!(
+        "Runtime trace loaded for execution {} with {} stage(s), {} action(s), and {} policy decision(s).",
+        trace.execution.runtime_execution_id,
+        trace.stages.len(),
+        trace.actions.len(),
+        trace.policy_decisions.len()
+    )
+}
+
+fn canonical_runtime_value<T>(value: &T) -> String
+where
+    T: Serialize,
+{
+    serde_json::to_value(value)
+        .ok()
+        .and_then(|value| value.as_str().map(ToString::to_string))
+        .unwrap_or_else(|| "unknown".to_string())
 }

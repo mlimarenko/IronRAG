@@ -15,24 +15,26 @@ use crate::services::content::error::ContentServiceError;
 const CONTENT_STASH_DIRECTORY_NAME: &str = ".trash";
 
 #[derive(Clone, Debug)]
-pub struct FilesystemContentStorageProvider {
+pub(super) struct FilesystemContentStorageProvider {
     root: PathBuf,
 }
 
 impl FilesystemContentStorageProvider {
     #[must_use]
-    pub fn new(root: impl Into<PathBuf>) -> Self {
+    pub(super) fn new(root: impl Into<PathBuf>) -> Self {
         Self { root: root.into() }
     }
 
-    pub async fn prepare_and_validate(&self) -> Result<ContentStorageProbe, ContentServiceError> {
+    pub(super) async fn prepare_and_validate(
+        &self,
+    ) -> Result<ContentStorageProbe, ContentServiceError> {
         fs::create_dir_all(&self.root).await.with_context(|| {
             format!("failed to create content storage root {}", self.root.display())
         })?;
         Ok(ContentStorageProbe { status: ContentStorageProbeStatus::Ok, message: None })
     }
 
-    pub async fn probe(&self) -> ContentStorageProbe {
+    pub(super) async fn probe(&self) -> ContentStorageProbe {
         match fs::try_exists(&self.root).await {
             Ok(true) => {
                 ContentStorageProbe { status: ContentStorageProbeStatus::Ok, message: None }
@@ -54,7 +56,7 @@ impl FilesystemContentStorageProvider {
         }
     }
 
-    pub async fn persist(
+    pub(super) async fn persist(
         &self,
         storage_key: &str,
         file_bytes: &[u8],
@@ -75,7 +77,7 @@ impl FilesystemContentStorageProvider {
         self.write(storage_key, file_bytes).await
     }
 
-    pub async fn write(
+    pub(super) async fn write(
         &self,
         storage_key: &str,
         file_bytes: &[u8],
@@ -101,21 +103,21 @@ impl FilesystemContentStorageProvider {
         Ok(())
     }
 
-    pub async fn has(&self, storage_key: &str) -> Result<bool, ContentServiceError> {
+    pub(super) async fn has(&self, storage_key: &str) -> Result<bool, ContentServiceError> {
         let path = self.resolve_storage_path(storage_key)?;
         Ok(fs::try_exists(&path).await.with_context(|| {
             format!("failed to inspect stored content source {}", path.display())
         })?)
     }
 
-    pub async fn read(&self, storage_key: &str) -> Result<Vec<u8>, ContentServiceError> {
+    pub(super) async fn read(&self, storage_key: &str) -> Result<Vec<u8>, ContentServiceError> {
         let path = self.resolve_storage_path(storage_key)?;
         Ok(fs::read(&path)
             .await
             .with_context(|| format!("failed to read stored content source {}", path.display()))?)
     }
 
-    pub async fn stash_prefix(
+    pub(super) async fn stash_prefix(
         &self,
         relative_directory: &str,
     ) -> Result<Option<StashedContentDirectory>, ContentServiceError> {
@@ -143,21 +145,7 @@ impl FilesystemContentStorageProvider {
         Ok(Some(StashedContentDirectory { original_path, stashed_path }))
     }
 
-    pub async fn restore_stashed_directory(
-        &self,
-        stashed_directory: &StashedContentDirectory,
-    ) -> Result<(), ContentServiceError> {
-        self.restore_stashed_directory_inner(stashed_directory, false).await
-    }
-
-    pub async fn restore_stashed_directory_replacing_current(
-        &self,
-        stashed_directory: &StashedContentDirectory,
-    ) -> Result<(), ContentServiceError> {
-        self.restore_stashed_directory_inner(stashed_directory, true).await
-    }
-
-    async fn restore_stashed_directory_inner(
+    pub(super) async fn restore_stashed_directory(
         &self,
         stashed_directory: &StashedContentDirectory,
         replace_current: bool,
@@ -191,7 +179,7 @@ impl FilesystemContentStorageProvider {
         Ok(())
     }
 
-    pub async fn purge_stashed_directory(
+    pub(super) async fn purge_stashed_directory(
         &self,
         stashed_directory: &StashedContentDirectory,
     ) -> Result<(), ContentServiceError> {

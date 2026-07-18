@@ -96,9 +96,8 @@ fn scan_yaml_block_end(chunk: &str, full_spec: &str, chunk_start: usize) -> usiz
     let mut pos = 0usize;
     while pos < chunk.len() {
         let line = &chunk[pos..];
-        let line_end = match line.find('\n') {
-            Some(n) => n,
-            None => return full_spec.len(),
+        let Some(line_end) = line.find('\n') else {
+            return full_spec.len();
         };
         let content = &line[..line_end];
         if content.is_empty()

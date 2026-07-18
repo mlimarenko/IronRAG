@@ -1,30 +1,50 @@
-import { act } from 'react';
-import type { TFunction } from 'i18next';
-import { createRoot, type Root } from 'react-dom/client';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { act } from 'react'
+import type { TFunction } from 'i18next'
+import { createRoot, type Root } from 'react-dom/client'
+import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 
-import { ChatMessage } from './ChatMessage';
+import { ChatMessage } from './ChatMessage'
 
-const t = ((key: string) => key) as TFunction;
+const t = ((key: string) => key) as TFunction
 
 describe('ChatMessage', () => {
-  let container: HTMLDivElement;
-  let root: Root | null;
+  let container: HTMLDivElement
+  let root: Root | null
 
   beforeEach(() => {
-    container = document.createElement('div');
-    document.body.appendChild(container);
-    root = createRoot(container);
-  });
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    root = createRoot(container)
+  })
 
   afterEach(async () => {
     if (root) {
       await act(async () => {
-        root?.unmount();
-      });
+        root?.unmount()
+      })
     }
-    container.remove();
-  });
+    container.remove()
+  })
+
+  it('preserves repeated user message lines without index keys', async () => {
+    await act(async () => {
+      root?.render(
+        <ChatMessage
+          t={t}
+          message={{
+            id: 'user-repeated-lines',
+            role: 'user',
+            content: 'Repeat\nRepeat\nFinal',
+            timestamp: '2026-04-10T10:00:00Z',
+          }}
+        />,
+      )
+    })
+
+    const lines = Array.from(container.querySelectorAll('p'))
+    expect(lines.map((line) => line.textContent)).toEqual(['Repeat', 'Repeat', 'Final'])
+    expect(lines.map((line) => line.className)).toEqual(['', 'mt-2', 'mt-2'])
+  })
 
   it('renders markdown source links as visible clickable links', async () => {
     await act(async () => {
@@ -38,26 +58,26 @@ describe('ChatMessage', () => {
             timestamp: '2026-04-10T10:00:00Z',
           }}
         />,
-      );
-    });
+      )
+    })
 
-    const link = container.querySelector<HTMLAnchorElement>('a[href="https://example.test/source"]');
-    expect(link).toBeTruthy();
-    expect(link?.textContent).toBe('Alpha Guide');
-    expect(link?.target).toBe('_blank');
-    expect(link?.rel).toContain('noopener');
-    expect(link?.className).toContain('text-primary');
-    expect(link?.className).toContain('underline');
-  });
+    const link = container.querySelector<HTMLAnchorElement>('a[href="https://example.test/source"]')
+    expect(link).toBeTruthy()
+    expect(link?.textContent).toBe('Alpha Guide')
+    expect(link?.target).toBe('_blank')
+    expect(link?.rel).toContain('noopener')
+    expect(link?.className).toContain('text-primary')
+    expect(link?.className).toContain('underline')
+  })
 
   it('keeps structured evidence sources out of the answer bubble', async () => {
-    let openedEvidence = false;
+    let openedEvidence = false
     await act(async () => {
       root?.render(
         <ChatMessage
           t={t}
           onOpenEvidence={() => {
-            openedEvidence = true;
+            openedEvidence = true
           }}
           totalSourceCount={1}
           message={{
@@ -86,36 +106,38 @@ describe('ChatMessage', () => {
               relationRefs: [],
               verificationState: 'passed',
               verificationWarnings: [],
+              answerDisposition: 'factual_ready',
+              clarification: { required: false, question: null, answerCandidates: [] },
             },
           }}
         />,
-      );
-    });
+      )
+    })
 
-    expect(container.querySelector('a[href="/v1/content/documents/doc-1/source"]')).toBeNull();
-    expect(container.textContent).not.toContain('Alpha Guide');
-    expect(container.textContent).toContain('assistant.seeAllSources');
-    expect(container.textContent).not.toContain('assistant.attachedSources');
-    expect(container.textContent).not.toContain('assistant.attachedSourcesNote');
-    expect(container.querySelector('hr')).toBeNull();
-    const evidenceButton = Array.from(container.querySelectorAll('button')).find(button =>
+    expect(container.querySelector('a[href="/v1/content/documents/doc-1/source"]')).toBeNull()
+    expect(container.textContent).not.toContain('Alpha Guide')
+    expect(container.textContent).toContain('assistant.seeAllSources')
+    expect(container.textContent).not.toContain('assistant.attachedSources')
+    expect(container.textContent).not.toContain('assistant.attachedSourcesNote')
+    expect(container.querySelector('hr')).toBeNull()
+    const evidenceButton = Array.from(container.querySelectorAll('button')).find((button) =>
       button.textContent?.includes('assistant.seeAllSources'),
-    );
-    expect(evidenceButton).toBeTruthy();
+    )
+    expect(evidenceButton).toBeTruthy()
     await act(async () => {
-      evidenceButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
-    });
-    expect(openedEvidence).toBe(true);
-  });
+      evidenceButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    })
+    expect(openedEvidence).toBe(true)
+  })
 
   it('keeps model-authored source links without adding structured evidence links inline', async () => {
-    let openedEvidence = false;
+    let openedEvidence = false
     await act(async () => {
       root?.render(
         <ChatMessage
           t={t}
           onOpenEvidence={() => {
-            openedEvidence = true;
+            openedEvidence = true
           }}
           totalSourceCount={1}
           message={{
@@ -145,29 +167,31 @@ describe('ChatMessage', () => {
               relationRefs: [],
               verificationState: 'passed',
               verificationWarnings: [],
+              answerDisposition: 'factual_ready',
+              clarification: { required: false, question: null, answerCandidates: [] },
             },
           }}
         />,
-      );
-    });
+      )
+    })
 
-    expect(container.textContent).toContain('The answer body stays visible.');
-    expect(container.textContent).toContain('Generated Source');
-    expect(container.querySelector('a[href="https://generated.example/source"]')).toBeTruthy();
-    expect(container.textContent).toContain('assistant.seeAllSources');
-    expect(container.textContent).not.toContain('assistant.attachedSources');
-    expect(container.textContent).not.toContain('assistant.attachedSourcesNote');
+    expect(container.textContent).toContain('The answer body stays visible.')
+    expect(container.textContent).toContain('Generated Source')
+    expect(container.querySelector('a[href="https://generated.example/source"]')).toBeTruthy()
+    expect(container.textContent).toContain('assistant.seeAllSources')
+    expect(container.textContent).not.toContain('assistant.attachedSources')
+    expect(container.textContent).not.toContain('assistant.attachedSourcesNote')
 
-    expect(container.querySelector('a[href="/v1/content/documents/doc-1/source"]')).toBeNull();
-    const evidenceButton = Array.from(container.querySelectorAll('button')).find(button =>
+    expect(container.querySelector('a[href="/v1/content/documents/doc-1/source"]')).toBeNull()
+    const evidenceButton = Array.from(container.querySelectorAll('button')).find((button) =>
       button.textContent?.includes('assistant.seeAllSources'),
-    );
-    expect(evidenceButton).toBeTruthy();
+    )
+    expect(evidenceButton).toBeTruthy()
     await act(async () => {
-      evidenceButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
-    });
-    expect(openedEvidence).toBe(true);
-  });
+      evidenceButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    })
+    expect(openedEvidence).toBe(true)
+  })
 
   it('does not duplicate inline model links with attached structured evidence links', async () => {
     await act(async () => {
@@ -200,21 +224,23 @@ describe('ChatMessage', () => {
               relationRefs: [],
               verificationState: 'passed',
               verificationWarnings: [],
+              answerDisposition: 'factual_ready',
+              clarification: { required: false, question: null, answerCandidates: [] },
             },
           }}
         />,
-      );
-    });
+      )
+    })
 
     const matchingLinks = container.querySelectorAll<HTMLAnchorElement>(
       'a[href="/v1/content/documents/doc-1/source"]',
-    );
-    expect(matchingLinks).toHaveLength(1);
-    expect(matchingLinks[0]?.textContent).toBe('Alpha Guide');
-    expect(container.textContent).not.toContain('assistant.sources');
-    expect(container.textContent).not.toContain('assistant.attachedSources');
-    expect(container.textContent).not.toContain('assistant.attachedSourcesNote');
-  });
+    )
+    expect(matchingLinks).toHaveLength(1)
+    expect(matchingLinks[0]?.textContent).toBe('Alpha Guide')
+    expect(container.textContent).not.toContain('assistant.sources')
+    expect(container.textContent).not.toContain('assistant.attachedSources')
+    expect(container.textContent).not.toContain('assistant.attachedSourcesNote')
+  })
 
   it('renders markdown images as safe links instead of embedded media', async () => {
     await act(async () => {
@@ -228,17 +254,17 @@ describe('ChatMessage', () => {
             timestamp: '2026-04-10T10:00:00Z',
           }}
         />,
-      );
-    });
+      )
+    })
 
-    expect(container.querySelector('img')).toBeNull();
+    expect(container.querySelector('img')).toBeNull()
     const link = container.querySelector<HTMLAnchorElement>(
       'a[href="https://example.test/diagram.png"]',
-    );
-    expect(link).toBeTruthy();
-    expect(link?.textContent).toBe('diagram');
-    expect(link?.target).toBe('_blank');
-  });
+    )
+    expect(link).toBeTruthy()
+    expect(link?.textContent).toBe('diagram')
+    expect(link?.target).toBe('_blank')
+  })
 
   it('keeps prose after a separator when it is not a bare source list', async () => {
     await act(async () => {
@@ -272,14 +298,16 @@ describe('ChatMessage', () => {
               relationRefs: [],
               verificationState: 'passed',
               verificationWarnings: [],
+              answerDisposition: 'factual_ready',
+              clarification: { required: false, question: null, answerCandidates: [] },
             },
           }}
         />,
-      );
-    });
+      )
+    })
 
-    expect(container.textContent).toContain('Conclusion');
-    expect(container.textContent).toContain('Alpha Guide covers setup details.');
-    expect(container.querySelector('hr')).toBeTruthy();
-  });
-});
+    expect(container.textContent).toContain('Conclusion')
+    expect(container.textContent).toContain('Alpha Guide covers setup details.')
+    expect(container.querySelector('hr')).toBeTruthy()
+  })
+})

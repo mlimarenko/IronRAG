@@ -18,7 +18,7 @@
 #      includes inherited effective bindings. Bearer-only runs can only check
 #      direct library-scope bindings through /v1/ai/bindings.
 #   3. (--with-bench) scripts/bench/agent_turn_p95.py quality gates pass and
-#      p95 <= 25 000 ms.
+#      p95 <= 25 000 ms (the rollout canary target; the hard full-turn SLO is 90 s).
 #
 # Output:
 #   stderr  — coloured human-readable status table
@@ -432,7 +432,7 @@ LIBRARIES_JSON="${LIBRARIES_JSON%,}]"
 # ---------------------------------------------------------------------------
 # Precondition 3 — Latency benchmark (optional)
 # ---------------------------------------------------------------------------
-printf "\n${BOLD}[3/3] Latency benchmark (p95 gate ≤ 25 000 ms)${RESET}\n" >&2
+printf "\n${BOLD}[3/3] Latency benchmark (rollout canary p95 ≤ 25 000 ms)${RESET}\n" >&2
 
 BENCH_P95_MS="null"
 BENCH_P95_GATE_MS="null"

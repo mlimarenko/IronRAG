@@ -1,9 +1,220 @@
 use super::*;
-use crate::services::query::execution::preflight::{
-    extend_setup_preflight_chunks_from_structured_context, merge_setup_preflight_structured_blocks,
-    query_ir_requests_low_confidence_setup_preflight, query_ir_requests_setup_literal_context,
-    question_prefers_single_exact_literal_scope,
+use crate::services::query::execution::preflight::setup_structured_stage::{
+    merge_setup_preflight_structured_blocks, setup_preflight_document_ids,
 };
+use crate::services::query::execution::preflight::{
+    extend_setup_preflight_chunks_from_setup_lanes,
+    extend_setup_preflight_chunks_from_structured_context, preflight_exact_literal_document_scope,
+    query_ir_requests_low_confidence_setup_preflight, query_ir_requests_setup_literal_context,
+    question_prefers_single_exact_literal_scope, select_technical_literal_chunks,
+};
+
+fn broad_setup_chunk(
+    document_id: Uuid,
+    document_label: &str,
+    source_text: &str,
+    score: f32,
+) -> RuntimeMatchedChunk {
+    RuntimeMatchedChunk {
+        chunk_id: Uuid::now_v7(),
+        revision_id: Uuid::now_v7(),
+        chunk_index: 0,
+        chunk_kind: Some("paragraph".to_string()),
+        document_id,
+        document_label: document_label.to_string(),
+        excerpt: source_text.to_string(),
+        score_kind: RuntimeChunkScoreKind::Relevance,
+        score: Some(score),
+        source_text: source_text.to_string(),
+    }
+}
+
+fn broad_setup_chunks(
+    primary_document_id: Uuid,
+    secondary_document_id: Uuid,
+) -> Vec<RuntimeMatchedChunk> {
+    vec![
+        broad_setup_chunk(
+            primary_document_id,
+            "Sample Connector Atlas setup",
+            "Install atlas-adapter.pkg and set atlasMode=true.",
+            10.0,
+        ),
+        broad_setup_chunk(
+            secondary_document_id,
+            "Sample Connector Boreal setup",
+            "Install boreal-adapter.pkg and set borealMode=true.",
+            1.0,
+        ),
+    ]
+}
+
+fn broad_setup_query_ir() -> QueryIR {
+    let mut query_ir = query_ir_with_act_scope_and_target_types(
+        QueryAct::ConfigureHow,
+        QueryScope::SingleDocument,
+        ["configuration_file", "config_key", "procedure"],
+    );
+    query_ir.target_entities =
+        vec![EntityMention { label: "Sample Connector".to_string(), role: EntityRole::Subject }];
+    query_ir
+}
+
+#[test]
+fn broad_setup_preflight_keeps_multiple_document_variants_unscoped() {
+    let primary_document_id = Uuid::now_v7();
+    let secondary_document_id = Uuid::now_v7();
+    let chunks = broad_setup_chunks(primary_document_id, secondary_document_id);
+    let query_ir = broad_setup_query_ir();
+    let profile = QueryIntentProfile { act: Some(QueryAct::ConfigureHow), ..Default::default() };
+
+    assert!(
+        preflight_exact_literal_document_scope(
+            "How do I configure Sample Connector?",
+            &query_ir,
+            &profile,
+            &chunks,
+        )
+        .is_none(),
+        "a broad setup question must not scope preflight to one variant"
+    );
+    assert_eq!(
+        setup_preflight_document_ids(
+            "How do I configure Sample Connector?",
+            &query_ir,
+            &chunks,
+            None,
+        ),
+        vec![primary_document_id, secondary_document_id],
+    );
+}
+
+#[test]
+fn broad_setup_literal_selection_preserves_document_variants() {
+    let primary_document_id = Uuid::now_v7();
+    let secondary_document_id = Uuid::now_v7();
+    let chunks = broad_setup_chunks(primary_document_id, secondary_document_id);
+    let query_ir = broad_setup_query_ir();
+
+    let selected = select_technical_literal_chunks(
+        "How do I configure Sample Connector?",
+        &query_ir,
+        &chunks,
+        TechnicalLiteralIntent { wants_paths: true, wants_parameters: true, ..Default::default() },
+        8,
+        &[],
+        &[],
+        false,
+    );
+    let selected_document_ids =
+        selected.iter().map(|chunk| chunk.document_id).collect::<HashSet<_>>();
+
+    assert_eq!(selected_document_ids, HashSet::from([primary_document_id, secondary_document_id]),);
+}
+
+#[test]
+fn broad_setup_preflight_caps_actionable_variants_and_rejects_noise() {
+    let actionable_document_ids = (0..7).map(|_| Uuid::now_v7()).collect::<Vec<_>>();
+    let noise_document_ids = (0..16).map(|_| Uuid::now_v7()).collect::<Vec<_>>();
+    let mut chunks = actionable_document_ids
+        .iter()
+        .enumerate()
+        .map(|(index, document_id)| RuntimeMatchedChunk {
+            chunk_id: Uuid::now_v7(),
+            revision_id: Uuid::now_v7(),
+            chunk_index: index as i32,
+            chunk_kind: Some("paragraph".to_string()),
+            document_id: *document_id,
+            document_label: format!("Sample Connector variant {index}"),
+            excerpt: format!("Install adapter-{index}.pkg and set mode{index}=true."),
+            score_kind: RuntimeChunkScoreKind::Relevance,
+            score: Some(10.0 - index as f32),
+            source_text: format!("Install adapter-{index}.pkg and set mode{index}=true."),
+        })
+        .collect::<Vec<_>>();
+    chunks.extend(noise_document_ids.iter().enumerate().map(|(index, document_id)| {
+        RuntimeMatchedChunk {
+            chunk_id: Uuid::now_v7(),
+            revision_id: Uuid::now_v7(),
+            chunk_index: index as i32,
+            chunk_kind: Some("paragraph".to_string()),
+            document_id: *document_id,
+            document_label: format!("Sample Connector overview {index}"),
+            excerpt: "General architecture and background.".to_string(),
+            score_kind: RuntimeChunkScoreKind::Relevance,
+            score: Some(100.0 - index as f32),
+            source_text: "General architecture and background.".to_string(),
+        }
+    }));
+    let mut query_ir = query_ir_with_act_scope_and_target_types(
+        QueryAct::ConfigureHow,
+        QueryScope::SingleDocument,
+        ["configuration_file", "config_key", "procedure"],
+    );
+    query_ir.target_entities =
+        vec![EntityMention { label: "Sample Connector".to_string(), role: EntityRole::Subject }];
+
+    let selected = setup_preflight_document_ids(
+        "How do I configure Sample Connector?",
+        &query_ir,
+        &chunks,
+        None,
+    );
+
+    assert_eq!(selected, actionable_document_ids[..5]);
+    assert_eq!(selected.len(), 5);
+    assert!(selected.iter().all(|document_id| !noise_document_ids.contains(document_id)));
+}
+
+#[test]
+fn setup_preflight_keeps_explicit_single_document_scope() {
+    let focused_document_id = Uuid::now_v7();
+    let other_document_id = Uuid::now_v7();
+    let chunks = vec![
+        RuntimeMatchedChunk {
+            chunk_id: Uuid::now_v7(),
+            revision_id: Uuid::now_v7(),
+            chunk_index: 0,
+            chunk_kind: Some("paragraph".to_string()),
+            document_id: focused_document_id,
+            document_label: "Sample Connector focused setup".to_string(),
+            excerpt: "Install focused-adapter.pkg and set focusedMode=true.".to_string(),
+            score_kind: RuntimeChunkScoreKind::Relevance,
+            score: Some(1.0),
+            source_text: "Install focused-adapter.pkg and set focusedMode=true.".to_string(),
+        },
+        RuntimeMatchedChunk {
+            chunk_id: Uuid::now_v7(),
+            revision_id: Uuid::now_v7(),
+            chunk_index: 0,
+            chunk_kind: Some("paragraph".to_string()),
+            document_id: other_document_id,
+            document_label: "Sample Connector other setup".to_string(),
+            excerpt: "Install other-adapter.pkg and set otherMode=true.".to_string(),
+            score_kind: RuntimeChunkScoreKind::Relevance,
+            score: Some(10.0),
+            source_text: "Install other-adapter.pkg and set otherMode=true.".to_string(),
+        },
+    ];
+    let mut query_ir = query_ir_with_act_scope_and_target_types(
+        QueryAct::ConfigureHow,
+        QueryScope::SingleDocument,
+        ["configuration_file", "config_key", "procedure"],
+    );
+    query_ir.document_focus =
+        Some(DocumentHint { hint: "Sample Connector focused setup".to_string() });
+    let scoped_document_ids = HashSet::from([focused_document_id]);
+
+    assert_eq!(
+        setup_preflight_document_ids(
+            "How do I configure the focused setup?",
+            &query_ir,
+            &chunks,
+            Some(&scoped_document_ids),
+        ),
+        vec![focused_document_id],
+    );
+}
 
 #[test]
 fn canonical_preflight_answer_prefers_missing_explicit_document_before_other_paths() {
@@ -272,6 +483,44 @@ fn setup_preflight_extends_override_context_with_late_parameter_chunks() {
         !preflight_chunks.iter().any(|chunk| chunk.source_text.contains("foreignParameter")),
         "{preflight_chunks:#?}"
     );
+}
+
+#[test]
+fn empty_setup_preflight_recovers_only_fixed_setup_lane_context() {
+    let retrieved_document_id = Uuid::now_v7();
+    let context_chunk = RuntimeMatchedChunk {
+        chunk_id: Uuid::now_v7(),
+        revision_id: Uuid::now_v7(),
+        chunk_index: 0,
+        chunk_kind: None,
+        document_id: retrieved_document_id,
+        document_label: "sample-provider-setup.md".to_string(),
+        excerpt: "Install the module and configure its documented parameters.".to_string(),
+        score_kind: RuntimeChunkScoreKind::DocumentIdentity,
+        score: Some(0.9),
+        source_text: "Install the module and configure its documented parameters.".to_string(),
+    };
+    let distractor = RuntimeMatchedChunk {
+        chunk_id: Uuid::now_v7(),
+        revision_id: Uuid::now_v7(),
+        chunk_index: 1,
+        chunk_kind: None,
+        document_id: Uuid::now_v7(),
+        document_label: "unrelated-overview.md".to_string(),
+        excerpt: "Unrelated primary retrieval tail.".to_string(),
+        score_kind: RuntimeChunkScoreKind::Relevance,
+        score: Some(0.8),
+        source_text: "Unrelated primary retrieval tail.".to_string(),
+    };
+    let mut preflight_chunks = Vec::new();
+
+    extend_setup_preflight_chunks_from_setup_lanes(
+        &mut preflight_chunks,
+        &[context_chunk.clone(), distractor],
+    );
+
+    assert_eq!(preflight_chunks.len(), 1);
+    assert_eq!(preflight_chunks[0].chunk_id, context_chunk.chunk_id);
 }
 
 #[test]
@@ -877,7 +1126,7 @@ fn retrieve_value_config_key_with_focus_uses_setup_literal_context() {
 }
 
 #[test]
-fn low_confidence_short_technical_context_requests_preflight_bridge() {
+fn low_confidence_parameter_surface_requests_preflight_bridge_without_raw_question_signal() {
     let mut ir = query_ir_with_act_scope_and_target_types(
         QueryAct::Describe,
         QueryScope::SingleDocument,
@@ -897,11 +1146,7 @@ fn low_confidence_short_technical_context_requests_preflight_bridge() {
         source_text: "QX visibleMode = true".to_string(),
     };
 
-    assert!(query_ir_requests_low_confidence_setup_preflight(
-        "QX settings",
-        &ir,
-        &[source_context],
-    ));
+    assert!(query_ir_requests_low_confidence_setup_preflight(&ir, &[source_context]));
 }
 
 #[test]
@@ -925,11 +1170,7 @@ fn low_confidence_setup_context_requests_preflight_bridge_without_short_focus_to
         source_text: "Configure /opt/alpha/alpha.conf section [Main]. alphaMode = true".to_string(),
     };
 
-    assert!(query_ir_requests_low_confidence_setup_preflight(
-        "Provide a complete configuration example",
-        &ir,
-        &[source_context],
-    ));
+    assert!(query_ir_requests_low_confidence_setup_preflight(&ir, &[source_context]));
 }
 
 #[test]
@@ -952,11 +1193,7 @@ fn low_confidence_structural_setup_context_requests_preflight_bridge() {
         source_text: "Configure /opt/alpha/alpha.conf section [Main]. alphaMode = true".to_string(),
     };
 
-    assert!(query_ir_requests_low_confidence_setup_preflight(
-        "Provider Alpha settings",
-        &ir,
-        &[source_context],
-    ));
+    assert!(query_ir_requests_low_confidence_setup_preflight(&ir, &[source_context]));
 }
 
 #[test]

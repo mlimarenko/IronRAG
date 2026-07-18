@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1.7
 
 # ── Stage 1: Rust builder ──────────────────────────────────────────────
-FROM rust:1.96.0-trixie AS builder
+FROM rust:1.97.0-trixie AS builder
 WORKDIR /workspace
 ARG APP_VERSION=0.0.0-dev
 
@@ -36,7 +36,7 @@ RUN apt-get update \
 # so the build must not depend on it — the base image is the source of truth
 # for the toolchain version (kept in lockstep with the FROM tag above).
 ENV CARGO_HOME=/usr/local/cargo \
-    RUSTUP_TOOLCHAIN=1.96.0 \
+    RUSTUP_TOOLCHAIN=1.97.0 \
     RUSTFLAGS="-C linker=clang -C link-arg=--ld-path=/usr/local/bin/wild" \
     CARGO_INCREMENTAL=0 \
     APP_VERSION=${APP_VERSION}
@@ -99,9 +99,8 @@ RUN apt-get update \
     libgl1 \
     libglib2.0-0 \
     libgomp1 \
-  && rm -rf /var/lib/apt/lists/*
-
-RUN python -m venv "${VIRTUAL_ENV}" \
+  && rm -rf /var/lib/apt/lists/* \
+  && python -m venv "${VIRTUAL_ENV}" \
   && "${VIRTUAL_ENV}/bin/pip" install --no-cache-dir --upgrade pip \
   && "${VIRTUAL_ENV}/bin/pip" install --no-cache-dir \
     --index-url https://download.pytorch.org/whl/cpu \
@@ -114,12 +113,19 @@ RUN python -m venv "${VIRTUAL_ENV}" \
 
 COPY apps/api/docker/docling-extract.py /usr/local/bin/ironrag-docling-extract
 
-RUN chmod +x /usr/local/bin/ironrag-docling-extract
-
-RUN adduser --disabled-password --gecos "" appuser \
+RUN chmod +x /usr/local/bin/ironrag-docling-extract \
+  && adduser --disabled-password --gecos "" appuser \
   && mkdir -p /var/lib/ironrag/content-storage \
   && HOME=/home/appuser "${VIRTUAL_ENV}/bin/docling-tools" models download \
-  && "${VIRTUAL_ENV}/bin/python" -c 'from pathlib import Path; from PIL import Image, ImageDraw; target = Path("/tmp/docling-ocr-warmup.png"); image = Image.new("RGB", (420, 120), "white"); draw = ImageDraw.Draw(image); draw.text((24, 42), "IronRAG Docling OCR warmup", fill="black"); image.save(target)' \
+  && printf '%s\n' \
+    'from pathlib import Path' \
+    'from PIL import Image, ImageDraw' \
+    'target = Path("/tmp/docling-ocr-warmup.png")' \
+    'image = Image.new("RGB", (420, 120), "white")' \
+    'draw = ImageDraw.Draw(image)' \
+    'draw.text((24, 42), "IronRAG Docling OCR warmup", fill="black")' \
+    'image.save(target)' \
+    | "${VIRTUAL_ENV}/bin/python" \
   && HOME=/home/appuser /usr/local/bin/ironrag-docling-extract /tmp/docling-ocr-warmup.png >/tmp/docling-ocr-warmup.json \
   && rm -f /tmp/docling-ocr-warmup.png /tmp/docling-ocr-warmup.json \
   && chown -R appuser:appuser /app /var/lib/ironrag \
@@ -140,6 +146,7 @@ COPY apps/api/docker/docling-extract.py /usr/local/bin/ironrag-docling-extract
 RUN chmod +x /usr/local/bin/runtime-entrypoint.sh /usr/local/bin/ironrag-docling-extract
 
 ENV HOME=/home/appuser
+USER appuser
 
 # Baked runtime tuning (image default; override per-deployment via env if needed):
 #  - _RJEM_MALLOC_CONF: jemalloc background-decay thread returns freed pages to

@@ -3,11 +3,10 @@ use std::collections::{HashMap, HashSet};
 use uuid::Uuid;
 
 use crate::domains::query_ir::{
-    LiteralKind, QueryAct, QueryIR, QueryScope, literal_text_is_identifier_shaped,
+    LiteralKind, QueryAct, QueryIR, QueryScope, QueryTargetKind, literal_text_is_identifier_shaped,
 };
 use crate::services::query::effective_query::current_question_segment;
 use crate::services::query::planner::strip_leading_question_marker;
-use crate::services::query::text_match::related_prefix_token_match;
 
 use super::retrieve::score_value;
 use super::technical_literal_extractors::{
@@ -82,32 +81,13 @@ fn is_short_technical_focus_token(token: &str) -> bool {
         && token.chars().any(|ch| ch.is_ascii_uppercase() || ch.is_ascii_digit())
 }
 
-fn technical_keyword_stem(keyword: &str) -> Option<String> {
-    if keyword.chars().count() < 6 {
-        return None;
-    }
-    let stem = keyword.chars().take(5).collect::<String>();
-    (stem.chars().count() >= 4).then_some(stem)
-}
-
 pub(super) fn technical_keyword_present(lowered_text: &str, keyword: &str) -> bool {
     technical_keyword_exact_token_present(lowered_text, keyword)
-        || technical_keyword_stem(keyword)
-            .is_some_and(|stem| technical_keyword_stem_present(lowered_text, stem.as_str()))
-        || technical_keyword_related_prefix_present(lowered_text, keyword)
 }
 
 pub(super) fn technical_keyword_weight(lowered_text: &str, keyword: &str) -> usize {
     if technical_keyword_exact_token_present(lowered_text, keyword) {
         return keyword.chars().count().min(24);
-    }
-    if technical_keyword_stem(keyword)
-        .is_some_and(|stem| technical_keyword_stem_present(lowered_text, stem.as_str()))
-    {
-        return 4;
-    }
-    if technical_keyword_related_prefix_present(lowered_text, keyword) {
-        return 3;
     }
     0
 }
@@ -121,17 +101,6 @@ fn technical_focus_text_tokens(value: &str) -> impl Iterator<Item = &str> + '_ {
 
 fn technical_keyword_exact_token_present(lowered_text: &str, keyword: &str) -> bool {
     technical_focus_text_tokens(lowered_text).any(|token| token == keyword)
-}
-
-fn technical_keyword_stem_present(lowered_text: &str, stem: &str) -> bool {
-    technical_focus_text_tokens(lowered_text)
-        .any(|token| token == stem || related_prefix_token_match(stem, token))
-}
-
-fn technical_keyword_related_prefix_present(lowered_text: &str, keyword: &str) -> bool {
-    keyword.chars().count() >= 5
-        && technical_focus_text_tokens(lowered_text)
-            .any(|token| related_prefix_token_match(keyword, token))
 }
 
 pub(super) fn technical_literal_focus_keyword_segments(
@@ -155,7 +124,7 @@ pub(super) fn technical_literal_focus_keyword_segments(
     let current_question = current_question_segment(question);
     let segments = current_question
         .split([';', ',', '\n'])
-        .map(|segment| technical_literal_focus_keywords(&segment, ir))
+        .map(|segment| technical_literal_focus_keywords(segment, ir))
         .filter(|keywords| !keywords.is_empty())
         .collect::<Vec<_>>();
     if segments.is_empty() {
@@ -230,7 +199,7 @@ pub(super) fn technical_chunk_selection_score(
         .sum::<isize>()
 }
 
-fn query_ir_literal_inventory_boost_multiplier(question: &str, ir: Option<&QueryIR>) -> isize {
+fn query_ir_literal_inventory_boost_multiplier(ir: Option<&QueryIR>) -> isize {
     let Some(ir) = ir else {
         return 0;
     };
@@ -242,26 +211,23 @@ fn query_ir_literal_inventory_boost_multiplier(question: &str, ir: Option<&Query
     {
         return 1;
     }
-    if ir.target_types.iter().any(|tag| {
-        matches!(
-            tag.trim().to_ascii_lowercase().as_str(),
-            "endpoint"
-                | "path"
-                | "url"
-                | "wsdl"
-                | "base_url"
-                | "parameter"
-                | "config_key"
-                | "software_module"
-                | "package"
-                | "configuration_file"
-                | "filesystem_path"
-                | "http_method"
-                | "port"
-                | "protocol"
-                | "connection"
-        )
-    }) {
+    if ir.targets_any(&[
+        QueryTargetKind::Endpoint,
+        QueryTargetKind::Path,
+        QueryTargetKind::Url,
+        QueryTargetKind::Wsdl,
+        QueryTargetKind::BaseUrl,
+        QueryTargetKind::Parameter,
+        QueryTargetKind::ConfigKey,
+        QueryTargetKind::SoftwareModule,
+        QueryTargetKind::Package,
+        QueryTargetKind::ConfigurationFile,
+        QueryTargetKind::FilesystemPath,
+        QueryTargetKind::HttpMethod,
+        QueryTargetKind::Port,
+        QueryTargetKind::Protocol,
+        QueryTargetKind::Connection,
+    ]) {
         return 1;
     }
     if ir.literal_constraints.iter().any(|literal| match literal.kind {
@@ -269,18 +235,6 @@ fn query_ir_literal_inventory_boost_multiplier(question: &str, ir: Option<&Query
         LiteralKind::Identifier => literal_text_is_identifier_shaped(&literal.text),
         LiteralKind::Version | LiteralKind::NumericCode | LiteralKind::Other => false,
     }) {
-        return 1;
-    }
-    if ir.confidence <= 0.3
-        && matches!(ir.act, QueryAct::Describe | QueryAct::ConfigureHow)
-        && matches!(ir.scope, QueryScope::SingleDocument)
-        && ir.source_slice.is_none()
-        && ir.target_types.is_empty()
-        && ir.literal_constraints.is_empty()
-        && technical_literal_focus_keywords(question, Some(ir))
-            .iter()
-            .any(|keyword| keyword.chars().count() < 4)
-    {
         return 1;
     }
     0
@@ -318,8 +272,7 @@ pub(super) fn select_document_balanced_chunks<'a>(
 
     for document_chunks in per_document_chunks.values_mut() {
         let local_keywords = document_local_focus_keywords(question, ir, document_chunks, keywords);
-        let literal_inventory_boost_multiplier =
-            query_ir_literal_inventory_boost_multiplier(question, ir);
+        let literal_inventory_boost_multiplier = query_ir_literal_inventory_boost_multiplier(ir);
         let score_by_chunk_id = document_chunks
             .iter()
             .map(|chunk| {
@@ -419,8 +372,8 @@ mod tests {
     }
 
     #[test]
-    fn technical_keyword_weight_accepts_longer_related_prefix_token() {
-        assert_eq!(technical_keyword_weight("acmealpha payment configuration", "acmew"), 3);
+    fn technical_keyword_weight_rejects_related_prefix_without_exact_token() {
+        assert_eq!(technical_keyword_weight("acmealpha payment configuration", "acmew"), 0);
     }
 
     #[test]
@@ -442,9 +395,10 @@ mod tests {
     }
 
     #[test]
-    fn technical_keyword_weight_keeps_long_token_prefix_matching() {
-        assert_eq!(technical_keyword_weight("config value", "configuration"), 4);
-        assert_eq!(technical_keyword_weight("configuration value", "config"), 4);
+    fn technical_keyword_weight_does_not_implement_language_stemming() {
+        assert_eq!(technical_keyword_weight("config value", "configuration"), 0);
+        assert_eq!(technical_keyword_weight("configuration value", "config"), 0);
+        assert_eq!(technical_keyword_weight("configuration value", "configuration"), 13);
     }
 
     #[test]
@@ -463,7 +417,7 @@ mod tests {
             "[Main]\nalphaMerchantId = 10\nsecretKey = value\npollInterval = 30",
         );
         let mut ir = test_query_ir();
-        ir.target_types = vec!["config_key".to_string()];
+        ir.target_types = vec![crate::domains::query_ir::QueryTargetKind::ConfigKey];
 
         let chunks = [overview, config.clone()];
         let selected = select_document_balanced_chunks(
@@ -538,31 +492,14 @@ mod tests {
     }
 
     #[test]
-    fn chunk_selection_uses_short_technical_fallback_inventory_for_config_chunks() {
-        let document_id = Uuid::now_v7();
-        let overview = test_chunk(document_id, "Alpha guide", 0, "QR settings overview.");
-        let config = test_chunk(
-            document_id,
-            "Alpha guide",
-            1,
-            "[UI.Alpha.QR]\nalphaVisible = true\nprintSlip = false",
-        );
+    fn literal_inventory_boost_requires_typed_query_ir_signal() {
         let mut ir = test_query_ir();
         ir.act = QueryAct::Describe;
         ir.confidence = 0.25;
 
-        let chunks = [overview, config.clone()];
-        let selected = select_document_balanced_chunks(
-            "Which QR setting is used?",
-            Some(&ir),
-            &chunks,
-            &technical_literal_focus_keywords("Which QR setting is used?", Some(&ir)),
-            false,
-            1,
-            1,
-        );
+        assert_eq!(query_ir_literal_inventory_boost_multiplier(Some(&ir)), 0);
 
-        assert_eq!(selected.len(), 1);
-        assert_eq!(selected[0].chunk_id, config.chunk_id);
+        ir.target_types = vec![QueryTargetKind::ConfigKey];
+        assert_eq!(query_ir_literal_inventory_boost_multiplier(Some(&ir)), 1);
     }
 }

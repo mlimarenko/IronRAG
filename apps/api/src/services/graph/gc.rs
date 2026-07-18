@@ -1,5 +1,3 @@
-#![allow(clippy::missing_errors_doc, clippy::too_many_lines)]
-
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -44,7 +42,7 @@ pub struct GcReport {
 
 impl GcReport {
     #[must_use]
-    pub fn merge(self, other: Self) -> Self {
+    pub const fn merge(self, other: Self) -> Self {
         Self {
             entities_deleted: self.entities_deleted.saturating_add(other.entities_deleted),
             relations_deleted: self.relations_deleted.saturating_add(other.relations_deleted),

@@ -48,14 +48,14 @@ fn describe_query_ir() -> QueryIR {
 fn table_row_inventory_ir() -> QueryIR {
     QueryIR {
         act: QueryAct::Enumerate,
-        target_types: vec!["table_row".to_string()],
+        target_types: vec![crate::domains::query_ir::QueryTargetKind::TableRow],
         ..describe_query_ir()
     }
 }
 
 fn initial_table_rows_ir(row_count: u16) -> QueryIR {
     QueryIR {
-        target_types: vec!["table_row".to_string()],
+        target_types: vec![crate::domains::query_ir::QueryTargetKind::TableRow],
         source_slice: Some(SourceSliceSpec {
             direction: SourceSliceDirection::Head,
             count: Some(row_count),
@@ -68,7 +68,7 @@ fn initial_table_rows_ir(row_count: u16) -> QueryIR {
 fn table_average_ir() -> QueryIR {
     QueryIR {
         act: QueryAct::RetrieveValue,
-        target_types: vec!["table_average".to_string()],
+        target_types: vec![crate::domains::query_ir::QueryTargetKind::TableAverage],
         ..describe_query_ir()
     }
 }
@@ -76,7 +76,7 @@ fn table_average_ir() -> QueryIR {
 fn table_frequency_ir() -> QueryIR {
     QueryIR {
         act: QueryAct::RetrieveValue,
-        target_types: vec!["table_frequency".to_string()],
+        target_types: vec![crate::domains::query_ir::QueryTargetKind::TableFrequency],
         ..describe_query_ir()
     }
 }
@@ -84,7 +84,10 @@ fn table_frequency_ir() -> QueryIR {
 fn table_column_inventory_ir(label: &str) -> QueryIR {
     QueryIR {
         act: QueryAct::Describe,
-        target_types: vec!["table_row".to_string(), "table_summary".to_string()],
+        target_types: vec![
+            crate::domains::query_ir::QueryTargetKind::TableRow,
+            crate::domains::query_ir::QueryTargetKind::TableSummary,
+        ],
         target_entities: vec![EntityMention {
             label: label.to_string(),
             role: EntityRole::Subject,
@@ -102,7 +105,7 @@ fn table_summary_with_table_row_target_is_not_aggregation_lookup() {
     let row_lookup_ir = retrieve_table_column_inventory_ir("accounts table");
     let summary_ir = QueryIR {
         act: QueryAct::RetrieveValue,
-        target_types: vec!["table_summary".to_string()],
+        target_types: vec![crate::domains::query_ir::QueryTargetKind::TableSummary],
         ..describe_query_ir()
     };
 
@@ -113,10 +116,29 @@ fn table_summary_with_table_row_target_is_not_aggregation_lookup() {
 #[test]
 fn concise_document_subject_label_strips_spreadsheet_extensions() {
     assert_eq!(
-        concise_document_subject_label("spreadsheet_ods_api_reference.xlsb"),
+        concise_document_subject_label("spreadsheet_ODS_API_reference.xlsb"),
         "Spreadsheet ODS API reference"
     );
+    assert_eq!(
+        concise_document_subject_label("spreadsheet_ods_api_reference.xlsb"),
+        "Spreadsheet ods api reference"
+    );
     assert_eq!(concise_document_subject_label("inventory_snapshot.ods"), "Inventory snapshot");
+}
+
+#[test]
+fn concise_document_subject_label_preserves_explicit_unicode_casing() {
+    assert_eq!(concise_document_subject_label("phase_ΔΣ_overview.md"), "Phase ΔΣ overview");
+}
+
+#[test]
+fn concise_document_subject_label_does_not_infer_acronyms_from_lowercase() {
+    assert_eq!(concise_document_subject_label("rag_overview.md"), "Rag overview");
+}
+
+#[test]
+fn concise_document_subject_label_does_not_strip_named_suffixes() {
+    assert_eq!(concise_document_subject_label("sample_wikipedia.md"), "Sample wikipedia");
 }
 
 #[test]
@@ -376,7 +398,7 @@ fn build_table_row_grounded_answer_handles_focused_row_lookup_without_inventory_
     }];
     let ir = QueryIR {
         act: QueryAct::RetrieveValue,
-        target_types: vec!["table_row".to_string()],
+        target_types: vec![crate::domains::query_ir::QueryTargetKind::TableRow],
         ..describe_query_ir()
     };
 
@@ -1047,7 +1069,7 @@ fn build_missing_explicit_document_answer_reports_absent_file_reference() {
         document_id: Uuid::now_v7(),
         workspace_id: Uuid::now_v7(),
         library_id: Uuid::now_v7(),
-        external_key: "organizations-100.csv".to_string(),
+        external_key: format!("fixture-{}", Uuid::now_v7()),
         file_name: Some("organizations-100.csv".to_string()),
         title: Some("organizations-100.csv".to_string()),
         source_uri: None,

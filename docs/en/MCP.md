@@ -11,14 +11,15 @@
 ## Endpoint
 
 - Endpoint URL: `http://127.0.0.1:19000/v1/mcp`
-- Transport: **MCP Streamable HTTP, spec `2025-06-18`**. One endpoint handles `POST`, `GET`, and `DELETE` — no separate SSE channel, no stdio proxy.
+- Transport: **MCP Streamable HTTP, spec `2025-11-25`**. One endpoint handles `POST`, `GET`, and `DELETE` — no separate SSE channel, no stdio proxy.
   - `POST` — every JSON-RPC message. Content negotiated from the `Accept` header:
     - `Accept: application/json` → a plain JSON body (default, curl-friendly).
     - `Accept: application/json, text/event-stream` → a single SSE frame `event: message\ndata: …\n\n`; SDK clients that advertise both formats get the transport they expect.
     - Notification-only requests (no `id`) are acknowledged with a bare `202 Accepted`.
-  - `GET` — reserved for server-push streams. IronRAG emits no background notifications today, so it returns `200 OK` + `Content-Type: text/event-stream` with a single `: ready` SSE comment and no further events. Spec 2025-06-18 permits either 405 or an empty SSE stream; we pick the latter because some bundled MCP clients treat any non-200 handshake as fatal and drop the whole MCP server for that agent context.
-  - `DELETE` — session termination signal. The server is stateless between requests, so it always returns `200 OK` so client cleanup flows finish cleanly.
-- The `initialize` response carries an `Mcp-Session-Id` header (UUIDv7). Clients that echo it on subsequent requests are accepted without additional validation.
+  - `GET` — reserved for server-push streams. IronRAG emits no background notifications today, so it returns `200 OK` + `Content-Type: text/event-stream` with a single `: ready` SSE comment and no further events. Spec 2025-11-25 permits either 405 or an empty SSE stream; we pick the latter because some bundled MCP clients treat any non-200 handshake as fatal and drop the whole MCP server for that agent context.
+  - `DELETE` — owned session termination signal. It writes a bounded distributed tombstone, rejects later calls for that session, and cancels in-flight work owned by any API replica. Repeating cleanup for the same owner remains idempotent while the tombstone is active.
+- The `initialize` response carries an `Mcp-Session-Id` header (UUIDv7). Every later `POST`, `GET`, and `DELETE` must echo that exact value and send `Mcp-Protocol-Version: 2025-11-25`. Missing, malformed, expired, terminated, or foreign sessions fail closed; unsupported or duplicate protocol headers are rejected. A valid initialize request for another protocol version receives the one canonical server version in the result; clients that do not support it should disconnect.
+- Native clients may omit `Origin`. If `Origin` is present, exactly one canonical HTTP origin must match `IRONRAG_FRONTEND_ORIGIN` or the optional `IRONRAG_OPENAPI_PUBLIC_ORIGIN`; duplicate, malformed, noncanonical, and untrusted values receive HTTP `403` before authentication, session lookup, or JSON parsing.
 - Capabilities (for monitoring and UI): `GET http://127.0.0.1:19000/v1/mcp/capabilities` — this is not part of the MCP protocol, just a sidecar probe.
 - Auth: `Authorization: Bearer <token>` on every request (including `GET` / `DELETE`).
 - Protocol server name: `ironrag-mcp-memory`.
@@ -33,7 +34,7 @@ curl -sS -X POST http://127.0.0.1:19000/v1/mcp \
   -H "Authorization: Bearer $IRONRAG_MCP_TOKEN" \
   -H "Content-Type: application/json" \
   -H "Accept: application/json" \
-  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}'
+  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"manual-probe","version":"1"}}}'
 ```
 
 Quick probe (SSE frame, matching the SDK client default):
@@ -43,7 +44,7 @@ curl -sS -X POST http://127.0.0.1:19000/v1/mcp \
   -H "Authorization: Bearer $IRONRAG_MCP_TOKEN" \
   -H "Content-Type: application/json" \
   -H "Accept: application/json, text/event-stream" \
-  -d '{"jsonrpc":"2.0","id":2,"method":"initialize","params":{}}'
+  -d '{"jsonrpc":"2.0","id":2,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"manual-probe","version":"1"}}}'
 ```
 
 If your IronRAG instance is behind another domain or TLS terminator, replace the origin with the address your client can reach.
@@ -68,7 +69,7 @@ Catalog targets use stable refs instead of opaque UUIDs: `workspace` is `<worksp
 |------|-------------|---------------------|
 | `grounded_answer` | Ask a natural-language question and get a grounded answer with evidence references from IronRAG's grounded-answer pipeline (QueryCompiler → hybrid retrieval → graph-aware context → answer generation → verifier). Prefer this over `search_documents` + `read_document` whenever the user expects an answer, not a hit list. | `library`, `query` |
 
-Response shape: tool text contains the answer; structured output contains `executionDetail` with chunk, prepared-segment, technical-fact, graph-entity, graph-relation, verifier, runtime, request, and response fields. Top-level `runtimeExecutionId`, `executionId`, and `conversationId` are shortcuts for trace lookup. The built-in UI assistant is itself a tool-using agent over this MCP answer surface: it may call `grounded_answer`, inspect raw search/read tools, or answer directly when no library lookup is needed. External MCP clients get the same tool vocabulary, schemas, and grounded-answer result contract.
+Response shape: tool text contains the answer. The default `compact` structured output carries bounded references, warnings, typed verifier/readiness/completion state, repair policy, and trace identifiers without duplicating the diagnostic execution object. Request `responseProfile: "full"` only when an operational client needs `executionDetail` with chunk, prepared-segment, technical-fact, graph-entity, graph-relation, runtime, request, and response fields. Top-level `runtimeExecutionId`, `executionId`, and `conversationId` remain shortcuts for trace lookup in both profiles. The built-in UI assistant is itself a tool-using agent over this MCP answer surface: it may call `grounded_answer`, inspect raw search/read tools, or answer directly when no library lookup is needed. External MCP clients get the same tool vocabulary, schemas, and grounded-answer result contract.
 
 **Clarification and answer candidates** — when the pipeline determines that the query is ambiguous across multiple distinct subjects, the response includes two top-level fields in `structuredContent`:
 

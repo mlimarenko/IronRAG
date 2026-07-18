@@ -1,17 +1,27 @@
 use anyhow::Context;
 use futures::stream::{self, StreamExt};
+use std::collections::HashMap;
 use uuid::Uuid;
 
 use crate::{
     app::state::AppState,
     domains::ai::AiBindingPurpose,
-    integrations::llm::EmbeddingBatchRequest,
-    services::ingest::error::IngestServiceError,
+    integrations::llm::{EmbeddingBatchRequest, EmbeddingBatchResponse},
+    services::{ai_catalog_service::ResolvedRuntimeBinding, ingest::error::IngestServiceError},
     shared::extraction::chunking::{BlockSentenceEmbeddings, split_into_sentences},
     shared::extraction::structured_document::StructuredBlockData,
 };
 
 const SENTENCE_EMBEDDING_BATCH_SIZE: usize = 16;
+
+type SentenceEmbeddingBatch = Vec<(Uuid, usize, String)>;
+type SentenceEmbeddingBatchResult =
+    anyhow::Result<(SentenceEmbeddingBatch, EmbeddingBatchResponse)>;
+
+struct BlockSentenceEntry {
+    block_id: Uuid,
+    sentences: Vec<String>,
+}
 
 /// Embeds all sentences from the provided blocks in batches of
 /// [`SENTENCE_EMBEDDING_BATCH_SIZE`] using the library's `EmbedChunk` binding.
@@ -30,7 +40,24 @@ pub async fn embed_sentences_for_blocks(
     blocks: &[StructuredBlockData],
     max_tokens_per_chunk: usize,
 ) -> Result<(BlockSentenceEmbeddings, usize), IngestServiceError> {
-    let embedding_binding = state
+    let embedding_binding = resolve_sentence_embedding_binding(state, library_id).await?;
+    let block_entries = collect_block_sentence_entries(blocks, max_tokens_per_chunk);
+    if block_entries.is_empty() {
+        return Ok((BlockSentenceEmbeddings::new(), 0));
+    }
+
+    let batches = build_sentence_embedding_batches(&block_entries);
+    let total_sentences = batches.iter().map(Vec::len).sum();
+    let batch_results = embed_sentence_batches(state, &embedding_binding, batches).await;
+    let result = assemble_sentence_embeddings(&block_entries, batch_results)?;
+    Ok((result, total_sentences))
+}
+
+async fn resolve_sentence_embedding_binding(
+    state: &AppState,
+    library_id: Uuid,
+) -> Result<ResolvedRuntimeBinding, IngestServiceError> {
+    state
         .canonical_services
         .ai_catalog
         .resolve_active_runtime_binding(state, library_id, AiBindingPurpose::EmbedChunk)
@@ -38,148 +65,138 @@ pub async fn embed_sentences_for_blocks(
         .context("failed to resolve EmbedChunk binding for sentence embeddings")?
         .ok_or_else(|| {
             anyhow::anyhow!("active EmbedChunk binding is not configured for library {library_id}")
-        })?;
-
-    // Collect only blocks that are large enough to need semantic splitting.
-    // A block with ≤ max_tokens_per_chunk tokens can be emitted as one chunk
-    // without any sentence-level embeddings.
-    struct BlockEntry {
-        block_id: Uuid,
-        sentences: Vec<String>,
-    }
-
-    let block_entries: Vec<BlockEntry> = blocks
-        .iter()
-        .filter(|b| !b.is_boilerplate)
-        .filter_map(|b| {
-            let token_count = b.normalized_text.split_whitespace().count();
-            if token_count <= max_tokens_per_chunk {
-                return None;
-            }
-            let sentences: Vec<String> = split_into_sentences(b.normalized_text.trim())
-                .into_iter()
-                .map(str::to_string)
-                .collect();
-            if sentences.len() < 2 {
-                return None;
-            }
-            Some(BlockEntry { block_id: b.block_id, sentences })
+                .into()
         })
-        .collect();
+}
 
-    if block_entries.is_empty() {
-        return Ok((BlockSentenceEmbeddings::new(), 0));
+fn collect_block_sentence_entries(
+    blocks: &[StructuredBlockData],
+    max_tokens_per_chunk: usize,
+) -> Vec<BlockSentenceEntry> {
+    blocks
+        .iter()
+        .filter(|block| !block.is_boilerplate)
+        .filter_map(|block| block_sentence_entry(block, max_tokens_per_chunk))
+        .collect()
+}
+
+fn block_sentence_entry(
+    block: &StructuredBlockData,
+    max_tokens_per_chunk: usize,
+) -> Option<BlockSentenceEntry> {
+    let token_count = block.normalized_text.split_whitespace().count();
+    if token_count <= max_tokens_per_chunk {
+        return None;
     }
-
-    // Flatten all sentences into a single indexed list so we can batch
-    // across block boundaries.
-    struct FlatEntry {
-        block_id: Uuid,
-        sentence_idx: usize,
-        text: String,
+    let sentences = split_into_sentences(block.normalized_text.trim())
+        .into_iter()
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    if sentences.len() < 2 {
+        return None;
     }
+    Some(BlockSentenceEntry { block_id: block.block_id, sentences })
+}
 
-    let flat: Vec<FlatEntry> = block_entries
+fn build_sentence_embedding_batches(
+    block_entries: &[BlockSentenceEntry],
+) -> Vec<SentenceEmbeddingBatch> {
+    let flattened = block_entries
         .iter()
         .flat_map(|entry| {
-            entry.sentences.iter().enumerate().map(|(idx, s)| FlatEntry {
-                block_id: entry.block_id,
-                sentence_idx: idx,
-                text: s.clone(),
-            })
+            entry
+                .sentences
+                .iter()
+                .enumerate()
+                .map(|(index, sentence)| (entry.block_id, index, sentence.clone()))
         })
-        .collect();
+        .collect::<Vec<_>>();
+    flattened.chunks(SENTENCE_EMBEDDING_BATCH_SIZE).map(<[_]>::to_vec).collect()
+}
 
-    let total_sentences = flat.len();
-
-    // Split into batches.
-    type Batch = Vec<(Uuid, usize, String)>; // (block_id, sentence_idx, text)
-    let mut batches: Vec<Batch> = Vec::new();
-    let mut current: Batch = Vec::with_capacity(SENTENCE_EMBEDDING_BATCH_SIZE);
-    for entry in flat {
-        current.push((entry.block_id, entry.sentence_idx, entry.text));
-        if current.len() == SENTENCE_EMBEDDING_BATCH_SIZE {
-            batches.push(std::mem::replace(
-                &mut current,
-                Vec::with_capacity(SENTENCE_EMBEDDING_BATCH_SIZE),
-            ));
-        }
-    }
-    if !current.is_empty() {
-        batches.push(current);
-    }
-
+async fn embed_sentence_batches(
+    state: &AppState,
+    binding: &ResolvedRuntimeBinding,
+    batches: Vec<SentenceEmbeddingBatch>,
+) -> Vec<SentenceEmbeddingBatchResult> {
     let parallelism = state.settings.ingestion_embedding_parallelism.max(1);
-
-    let provider_kind = embedding_binding.provider_kind.clone();
-    let model_name = embedding_binding.model_name.clone();
-    let api_key = embedding_binding.api_key.clone();
-    let base_url = embedding_binding.provider_base_url.clone();
-    let extra_parameters_json = embedding_binding.extra_parameters_json.clone();
-
-    let batch_results = stream::iter(batches.into_iter().map(|batch| {
-        let provider_kind = provider_kind.clone();
-        let model_name = model_name.clone();
-        let api_key = api_key.clone();
-        let base_url = base_url.clone();
-        let extra_parameters_json = extra_parameters_json.clone();
+    stream::iter(batches.into_iter().map(|batch| {
+        let request = sentence_embedding_batch_request(binding, &batch);
         async move {
-            let inputs: Vec<String> = batch.iter().map(|(_, _, text)| text.clone()).collect();
             let response = state
                 .llm_gateway
-                .embed_many(EmbeddingBatchRequest {
-                    provider_kind,
-                    model_name,
-                    inputs,
-                    api_key_override: api_key,
-                    base_url_override: base_url,
-                    extra_parameters_json,
-                })
+                .embed_many(request)
                 .await
                 .context("failed to embed sentence batch")?;
-            anyhow::Ok((batch, response))
+            Ok((batch, response))
         }
     }))
     .buffer_unordered(parallelism)
-    .collect::<Vec<_>>()
-    .await;
+    .collect()
+    .await
+}
 
-    // Assemble per-block sentence embedding maps.
-    // First pass: determine sentence count per block so we can pre-allocate.
-    let mut block_sentence_counts: std::collections::HashMap<Uuid, usize> =
-        std::collections::HashMap::new();
-    for entry in &block_entries {
-        block_sentence_counts.insert(entry.block_id, entry.sentences.len());
+fn sentence_embedding_batch_request(
+    binding: &ResolvedRuntimeBinding,
+    batch: &SentenceEmbeddingBatch,
+) -> EmbeddingBatchRequest {
+    EmbeddingBatchRequest {
+        provider_kind: binding.provider_kind.clone(),
+        model_name: binding.model_name.clone(),
+        inputs: batch.iter().map(|(_, _, text)| text.clone()).collect(),
+        api_key_override: binding.api_key.clone(),
+        base_url_override: binding.provider_base_url.clone(),
+        extra_parameters_json: binding.extra_parameters_json.clone(),
     }
+}
 
-    let mut result: BlockSentenceEmbeddings =
-        block_entries.iter().map(|e| (e.block_id, vec![Vec::new(); e.sentences.len()])).collect();
-
+fn assemble_sentence_embeddings(
+    block_entries: &[BlockSentenceEntry],
+    batch_results: Vec<SentenceEmbeddingBatchResult>,
+) -> Result<BlockSentenceEmbeddings, IngestServiceError> {
+    let mut result = block_entries
+        .iter()
+        .map(|entry| (entry.block_id, vec![Vec::new(); entry.sentences.len()]))
+        .collect::<HashMap<_, _>>();
     for batch_result in batch_results {
         let (batch, response) = batch_result?;
-        if response.embeddings.len() != batch.len() {
-            return Err(IngestServiceError::ProviderUnavailable {
-                message: format!(
-                    "sentence embedding batch returned {} vectors for {} inputs",
-                    response.embeddings.len(),
-                    batch.len()
-                ),
-            });
-        }
-        for ((block_id, sentence_idx, _), embedding) in
-            batch.into_iter().zip(response.embeddings.into_iter())
-        {
-            if let Some(block_embeddings) = result.get_mut(&block_id) {
-                if sentence_idx < block_embeddings.len() {
-                    block_embeddings[sentence_idx] = embedding;
-                }
-            }
-        }
+        merge_sentence_embedding_batch(&mut result, batch, response)?;
     }
+    result.retain(|_, embeddings| embeddings.iter().all(|embedding| !embedding.is_empty()));
+    Ok(result)
+}
 
-    // Remove blocks where any sentence ended up with an empty embedding
-    // (shouldn't happen in practice, but guard against partial failures).
-    result.retain(|_, embeddings| embeddings.iter().all(|e| !e.is_empty()));
+fn merge_sentence_embedding_batch(
+    result: &mut BlockSentenceEmbeddings,
+    batch: SentenceEmbeddingBatch,
+    response: EmbeddingBatchResponse,
+) -> Result<(), IngestServiceError> {
+    if response.embeddings.len() != batch.len() {
+        return Err(IngestServiceError::ProviderUnavailable {
+            message: format!(
+                "sentence embedding batch returned {} vectors for {} inputs",
+                response.embeddings.len(),
+                batch.len()
+            ),
+        });
+    }
+    for ((block_id, sentence_index, _), embedding) in batch.into_iter().zip(response.embeddings) {
+        assign_sentence_embedding(result, block_id, sentence_index, embedding);
+    }
+    Ok(())
+}
 
-    Ok((result, total_sentences))
+fn assign_sentence_embedding(
+    result: &mut BlockSentenceEmbeddings,
+    block_id: Uuid,
+    sentence_index: usize,
+    embedding: Vec<f32>,
+) {
+    let Some(block_embeddings) = result.get_mut(&block_id) else {
+        return;
+    };
+    let Some(sentence_embedding) = block_embeddings.get_mut(sentence_index) else {
+        return;
+    };
+    *sentence_embedding = embedding;
 }

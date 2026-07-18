@@ -23,7 +23,6 @@ where
 
 /// # Errors
 /// Returns the error produced by the provided runtime pipeline operation.
-#[allow(clippy::needless_pass_by_value)]
 pub fn run_try_op<TInput, TOp>(input: TInput, op: TOp) -> Result<TOp::Output, TOp::Error>
 where
     TOp: RuntimeTryOp<TInput>,

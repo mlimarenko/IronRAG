@@ -37,23 +37,17 @@ pub struct GraphMergeOutcome {
     pub filtered_artifact_count: usize,
 }
 
-pub async fn reconcile_merge_support_counts(
+pub(crate) async fn reconcile_merge_support_counts(
     pool: &sqlx::PgPool,
     scope: &GraphMergeScope,
     changed_node_ids: &[uuid::Uuid],
     changed_edge_ids: &[uuid::Uuid],
 ) -> std::result::Result<(), GraphServiceError> {
-    repositories::recalculate_runtime_graph_node_support_counts_by_ids(
+    repositories::recalculate_runtime_graph_support_counts_by_ids_atomically(
         pool,
         scope.library_id,
         scope.projection_version,
         changed_node_ids,
-    )
-    .await?;
-    repositories::recalculate_runtime_graph_edge_support_counts_by_ids(
-        pool,
-        scope.library_id,
-        scope.projection_version,
         changed_edge_ids,
     )
     .await?;
@@ -62,7 +56,7 @@ pub async fn reconcile_merge_support_counts(
 
 impl GraphMergeOutcome {
     #[must_use]
-    pub fn has_projection_follow_up(&self) -> bool {
+    pub const fn has_projection_follow_up(&self) -> bool {
         !self.nodes.is_empty() || !self.edges.is_empty() || self.evidence_count > 0
     }
 
@@ -97,7 +91,7 @@ impl GraphMergeOutcome {
 }
 
 enum EdgePersistenceOutcome {
-    Admitted(RuntimeGraphEdgeRow),
+    Admitted(Box<RuntimeGraphEdgeRow>),
     Filtered,
 }
 
@@ -120,7 +114,7 @@ impl GraphMergeScope {
 }
 
 #[must_use]
-pub fn normalize_graph_aliases(label: &str, aliases: &[String]) -> Vec<String> {
+pub(crate) fn normalize_graph_aliases(label: &str, aliases: &[String]) -> Vec<String> {
     let mut values = BTreeSet::new();
     values.insert(label.trim().to_string());
     for alias in aliases {
@@ -132,7 +126,140 @@ pub fn normalize_graph_aliases(label: &str, aliases: &[String]) -> Vec<String> {
     values.into_iter().collect()
 }
 
-pub async fn merge_chunk_graph_candidates(
+struct MergeAccumulator {
+    nodes: Vec<RuntimeGraphNodeRow>,
+    edges: Vec<RuntimeGraphEdgeRow>,
+    evidence_targets: Vec<repositories::GraphEvidenceTarget>,
+    evidence_count: usize,
+    filtered_artifact_count: usize,
+}
+
+impl MergeAccumulator {
+    fn new(document_node: RuntimeGraphNodeRow) -> Self {
+        Self {
+            evidence_targets: vec![repositories::GraphEvidenceTarget {
+                target_kind: "node",
+                target_id: document_node.id,
+                evidence_context_key: "document_node",
+            }],
+            nodes: vec![document_node],
+            edges: Vec::new(),
+            evidence_count: 1,
+            filtered_artifact_count: 0,
+        }
+    }
+
+    fn record_entity_result(
+        &mut self,
+        node: RuntimeGraphNodeRow,
+        document_edge: EdgePersistenceOutcome,
+    ) {
+        self.evidence_targets.push(repositories::GraphEvidenceTarget {
+            target_kind: "node",
+            target_id: node.id,
+            evidence_context_key: "entity_node",
+        });
+        self.nodes.push(node);
+        match document_edge {
+            EdgePersistenceOutcome::Admitted(document_edge) => {
+                self.evidence_targets.push(repositories::GraphEvidenceTarget {
+                    target_kind: "edge",
+                    target_id: document_edge.id,
+                    evidence_context_key: "document_mentions_edge",
+                });
+                self.edges.push(*document_edge);
+                self.evidence_count += 2;
+            }
+            EdgePersistenceOutcome::Filtered => {
+                self.evidence_count += 1;
+                self.filtered_artifact_count += 1;
+            }
+        }
+    }
+
+    fn record_relation_result(&mut self, result: RelationMergeResult) {
+        let (source_node, target_node, edge) = match result {
+            RelationMergeResult::Admitted { source_node, target_node, edge } => {
+                (source_node, target_node, Some(edge))
+            }
+            RelationMergeResult::Filtered { source_node, target_node } => {
+                self.filtered_artifact_count += 1;
+                (source_node, target_node, None)
+            }
+        };
+        self.evidence_targets.extend([
+            repositories::GraphEvidenceTarget {
+                target_kind: "node",
+                target_id: source_node.id,
+                evidence_context_key: "relation_source_node",
+            },
+            repositories::GraphEvidenceTarget {
+                target_kind: "node",
+                target_id: target_node.id,
+                evidence_context_key: "relation_target_node",
+            },
+        ]);
+        self.nodes.extend([*source_node, *target_node]);
+        self.evidence_count += 2;
+        if let Some(edge) = edge {
+            self.evidence_targets.push(repositories::GraphEvidenceTarget {
+                target_kind: "edge",
+                target_id: edge.id,
+                evidence_context_key: "relation_edge",
+            });
+            self.edges.push(*edge);
+            self.evidence_count += 1;
+        }
+    }
+
+    fn into_outcome(self) -> GraphMergeOutcome {
+        GraphMergeOutcome {
+            nodes: self.nodes,
+            edges: self.edges,
+            evidence_count: self.evidence_count,
+            filtered_artifact_count: self.filtered_artifact_count,
+        }
+    }
+}
+
+struct EntityMergeResult {
+    nodes_by_key: HashMap<String, RuntimeGraphNodeRow>,
+    canonical_keys: Vec<String>,
+}
+
+type RelationCandidate = crate::services::graph::extract::GraphRelationCandidate;
+
+struct FilteredRelation<'a> {
+    relation: &'a RelationCandidate,
+    source_key: String,
+    target_key: String,
+    reason_label: &'static str,
+}
+
+struct AdmittedRelation<'a> {
+    relation: &'a RelationCandidate,
+    source_key: String,
+    target_key: String,
+}
+
+struct RelationPartition<'a> {
+    filtered: Vec<FilteredRelation<'a>>,
+    admitted: Vec<AdmittedRelation<'a>>,
+}
+
+enum RelationMergeResult {
+    Admitted {
+        source_node: Box<RuntimeGraphNodeRow>,
+        target_node: Box<RuntimeGraphNodeRow>,
+        edge: Box<RuntimeGraphEdgeRow>,
+    },
+    Filtered {
+        source_node: Box<RuntimeGraphNodeRow>,
+        target_node: Box<RuntimeGraphNodeRow>,
+    },
+}
+
+pub(crate) async fn merge_chunk_graph_candidates(
     pool: &sqlx::PgPool,
     graph_quality_guard: &GraphQualityGuardService,
     scope: &GraphMergeScope,
@@ -142,351 +269,63 @@ pub async fn merge_chunk_graph_candidates(
     extraction_recovery: Option<&ExtractionRecoverySummary>,
 ) -> std::result::Result<GraphMergeOutcome, GraphServiceError> {
     let entity_key_index = build_entity_key_index(candidates);
-    // Collect every evidence row generated during this chunk merge into one
-    // batch and flush via `bulk_create_runtime_graph_evidence_for_chunk` at
-    // the end. Replaces 50+ sequential single-row INSERTs with a single
-    // bulk `INSERT ... SELECT FROM unnest(...)` round-trip.
-    let mut evidence_targets: Vec<repositories::GraphEvidenceTarget> = Vec::new();
-
-    // Bulk-preload every runtime_graph_node row this chunk merge will
-    // touch (document + each entity + each relation endpoint) in a single
-    // round-trip. The per-upsert branch then reads `existing` from this
-    // map instead of issuing its own SELECT. On a typical chunk with 15
-    // entities and 10 relations, that's ~35 serial SELECTs collapsed
-    // into 1 indexed range scan — cuts pool-hold time and lock-wait
-    // pressure during the parallel entity upsert fan-out.
     let preloaded_existing =
         preload_existing_nodes_for_merge(pool, scope, document, candidates, &entity_key_index)
             .await?;
-
     let document_node = upsert_document_node(pool, scope, document, &preloaded_existing).await?;
-    evidence_targets.push(repositories::GraphEvidenceTarget {
-        target_kind: "node",
-        target_id: document_node.id,
-        evidence_context_key: "document_node",
-    });
-    let mut nodes = vec![document_node.clone()];
-    let mut edges = Vec::new();
-    let mut evidence_count = 1usize;
-    let mut filtered_artifact_count = 0usize;
+    let mut accumulator = MergeAccumulator::new(document_node.clone());
 
-    // Bulk-upsert every entity node in one round-trip. The old shape
-    // fanned out per-entity `upsert_graph_node` calls across
-    // `ENTITY_UPSERT_CONCURRENCY` concurrent tasks, each holding a
-    // pool connection for the node INSERT plus the edge INSERT — on a
-    // chunk with 15 entities that's 30 parallel connection grabs on
-    // the main Postgres pool and 30 small WAL flushes. Under prod load
-    // we measured that pattern dominating the `slow statement` log
-    // with row-lock contention even though individual INSERTs were
-    // sub-second on an unloaded pool.
-    //
-    // The bulk UPSERT uses `ON CONFLICT ... DO UPDATE` per row, so
-    // same-key duplicates inside one input follow last-writer-wins
-    // semantics identical to the old parallel fan-out (which also had
-    // no deterministic order under race). Dedup by canonical key
-    // preserves the previous behaviour of collapsing repeat labels.
-    let extraction_recovery_for_edges = extraction_recovery.cloned();
-    let mut entity_bulk_inputs: Vec<repositories::RuntimeGraphNodeUpsertInput> =
-        Vec::with_capacity(candidates.entities.len());
-    let mut entity_canonical_keys: Vec<String> = Vec::with_capacity(candidates.entities.len());
-    let mut seen_entity_keys: std::collections::BTreeSet<String> =
-        std::collections::BTreeSet::new();
-    for entity in &candidates.entities {
-        // Capture corpus-gloss acronym aliases the chunk text spells for this
-        // entity via a parenthetical gloss (`<label> ( <short> )`), so a
-        // later short-form query resolves to this concept node. Evidence-local
-        // by construction: only this chunk's text drives detection and the
-        // alias lands on the node whose evidence is this chunk.
-        let mut entity_aliases = entity.aliases.clone();
-        entity_aliases.extend(
-            crate::services::graph::extract::acronym_gloss::detect_acronym_aliases_for_label(
-                &chunk.content,
-                &entity.label,
-            ),
-        );
-        let aliases = normalize_graph_aliases(&entity.label, &entity_aliases);
-        let canonical_node_key = entity_key_index.canonical_node_key_for_label(&entity.label);
-        let canonical_node_type =
-            crate::services::graph::identity::runtime_node_type_from_key(&canonical_node_key);
-        entity_canonical_keys.push(canonical_node_key.clone());
-        if !seen_entity_keys.insert(canonical_node_key.clone()) {
-            continue;
-        }
-        let existing = preloaded_existing.get(&canonical_node_key);
-        let support_count = existing.map_or(1, |row| row.support_count.max(1));
-        let mut metadata = merge_graph_quality_metadata(
-            existing.map(|row| &row.metadata_json),
-            extraction_recovery,
-            entity.summary.as_deref(),
-        );
-        if let Some(st) = entity.sub_type.as_deref() {
-            if let Some(obj) = metadata.as_object_mut() {
-                obj.insert("sub_type".to_string(), serde_json::Value::String(st.to_string()));
-            }
-        }
-        entity_bulk_inputs.push(repositories::RuntimeGraphNodeUpsertInput {
-            canonical_key: canonical_node_key,
-            label: entity.label.trim().to_string(),
-            node_type: crate::services::graph::identity::runtime_node_type_slug(
-                &canonical_node_type,
-            )
-            .to_string(),
-            aliases_json: serde_json::to_value(aliases).unwrap_or_else(|_| serde_json::json!([])),
-            summary: entity.summary.clone(),
-            metadata_json: metadata,
-            support_count,
-        });
-    }
-    let entity_nodes_by_key: std::collections::HashMap<String, RuntimeGraphNodeRow> =
-        if entity_bulk_inputs.is_empty() {
-            std::collections::HashMap::new()
-        } else {
-            let upserted = repositories::bulk_upsert_runtime_graph_nodes(
-                pool,
-                scope.library_id,
-                scope.projection_version,
-                &entity_bulk_inputs,
-            )
-            .await?;
-            upserted.into_iter().map(|row| (row.canonical_key.clone(), row)).collect()
-        };
-
-    // Fan out only the doc-mentions edge work — nodes are already
-    // persisted via the bulk call above, so each task now runs exactly
-    // ONE Postgres round-trip (edge upsert), not two.
-    let document_node_for_edges = document_node.clone();
-    let edge_inputs: Vec<(RuntimeGraphNodeRow, String)> = entity_canonical_keys
-        .iter()
-        .filter_map(|key| entity_nodes_by_key.get(key).map(|row| (row.clone(), key.clone())))
-        .collect();
-    let entity_results: Vec<(RuntimeGraphNodeRow, EdgePersistenceOutcome)> =
-        stream::iter(edge_inputs)
-            .map(|(entity_node, _canonical_key)| {
-                let pool = pool.clone();
-                let scope = scope.clone();
-                let document_node_for_edge = document_node_for_edges.clone();
-                let extraction_recovery = extraction_recovery_for_edges.clone();
-                async move {
-                    let document_edge = upsert_graph_edge(
-                        &pool,
-                        &scope,
-                        &document_node_for_edge,
-                        &entity_node,
-                        "mentions",
-                        Some("Document mentions extracted entity"),
-                        extraction_recovery.as_ref(),
-                    )
-                    .await?;
-                    anyhow::Ok((entity_node, document_edge))
-                }
-            })
-            .buffered(ENTITY_UPSERT_CONCURRENCY)
-            .try_collect()
-            .await?;
-    for (node, document_edge) in entity_results {
-        evidence_targets.push(repositories::GraphEvidenceTarget {
-            target_kind: "node",
-            target_id: node.id,
-            evidence_context_key: "entity_node",
-        });
-        nodes.push(node);
-        match document_edge {
-            EdgePersistenceOutcome::Admitted(document_edge) => {
-                evidence_targets.push(repositories::GraphEvidenceTarget {
-                    target_kind: "edge",
-                    target_id: document_edge.id,
-                    evidence_context_key: "document_mentions_edge",
-                });
-                edges.push(document_edge);
-                evidence_count += 2;
-            }
-            EdgePersistenceOutcome::Filtered => {
-                evidence_count += 1;
-                filtered_artifact_count += 1;
-            }
-        }
+    let entity_merge = upsert_entity_nodes(
+        pool,
+        scope,
+        chunk,
+        candidates,
+        &entity_key_index,
+        &preloaded_existing,
+        extraction_recovery,
+    )
+    .await?;
+    let entity_results = upsert_entity_mention_edges(
+        pool,
+        scope,
+        &document_node,
+        &entity_merge,
+        extraction_recovery,
+    )
+    .await?;
+    for (node, edge) in entity_results {
+        accumulator.record_entity_result(node, edge);
     }
 
-    // Split relations by quality-guard decision using a sync filter
-    // check (`graph_quality_guard.filter_reason` is a pure function).
-    // Filtered relations go straight to an artifact row; admitted
-    // relations flow into a second bulk node upsert for any source /
-    // target endpoint that wasn't already covered by `entity_bulk_inputs`.
-    let mut filtered_relations: Vec<(
-        &crate::services::graph::extract::GraphRelationCandidate,
-        String,
-        String,
-        &'static str,
-    )> = Vec::new();
-    let mut admitted_relations: Vec<(
-        &crate::services::graph::extract::GraphRelationCandidate,
-        String,
-        String,
-    )> = Vec::new();
-    for relation in &candidates.relations {
-        let source_key = entity_key_index.canonical_node_key_for_label(&relation.source_label);
-        let target_key = entity_key_index.canonical_node_key_for_label(&relation.target_label);
-        if let Some(filter_reason) =
-            graph_quality_guard.filter_reason(&source_key, &target_key, &relation.relation_type)
-        {
-            let reason_label = match filter_reason {
-                crate::domains::runtime_graph::RuntimeGraphArtifactFilterReason::EmptyRelation => {
-                    "empty_relation"
-                }
-                crate::domains::runtime_graph::RuntimeGraphArtifactFilterReason::DegenerateSelfLoop => {
-                    "degenerate_self_loop"
-                }
-                crate::domains::runtime_graph::RuntimeGraphArtifactFilterReason::LowValueArtifact => {
-                    "low_value_artifact"
-                }
-            };
-            filtered_relations.push((relation, source_key, target_key, reason_label));
-        } else {
-            admitted_relations.push((relation, source_key, target_key));
-        }
-    }
-
-    // Filter artifacts — per-row INSERTs. Count is typically small
-    // (low-single digits per chunk) so leaving these serial keeps the
-    // code simple; if that changes a bulk insert can be added later.
-    for (relation, source_key, target_key, reason_label) in &filtered_relations {
-        repositories::create_runtime_graph_filtered_artifact(
-            pool,
-            scope.library_id,
-            scope.activated_by_attempt_id,
-            scope.revision_id,
-            "edge",
-            &crate::services::graph::identity::canonical_edge_key(
-                source_key,
-                &relation.relation_type,
-                target_key,
-            ),
-            Some(source_key.as_str()),
-            Some(target_key.as_str()),
-            Some(&graph_quality_guard.normalized_relation_type(&relation.relation_type)),
-            reason_label,
-            relation.summary.as_deref(),
-            serde_json::json!({
-                "document_id": document.id,
-                "chunk_id": chunk.id,
-                "source_label": &relation.source_label,
-                "target_label": &relation.target_label,
-                "raw_relation_type": &relation.relation_type,
-                "source_file_name": &document.external_key,
-            }),
-        )
-        .await?;
-        filtered_artifact_count += 1;
-    }
-
-    // Second bulk UPSERT: admitted-relation endpoints that weren't
-    // already persisted by the entity bulk. Endpoints that DO appear
-    // in `entity_nodes_by_key` are re-used verbatim — no duplicate
-    // upsert. Endpoints introduced only by relations (nodes the
-    // extractor referenced but didn't list as entities) are collected
-    // here and persisted in one round-trip.
-    let mut endpoint_bulk_inputs: Vec<repositories::RuntimeGraphNodeUpsertInput> = Vec::new();
-    let mut endpoint_seen_keys: std::collections::BTreeSet<String> =
-        std::collections::BTreeSet::new();
-    for (relation, source_key, target_key) in &admitted_relations {
-        for (key, label) in [
-            (source_key.as_str(), relation.source_label.as_str()),
-            (target_key.as_str(), relation.target_label.as_str()),
-        ] {
-            if entity_nodes_by_key.contains_key(key) {
-                continue;
-            }
-            if !endpoint_seen_keys.insert(key.to_string()) {
-                continue;
-            }
-            let node_type = crate::services::graph::identity::runtime_node_type_from_key(key);
-            let aliases = normalize_graph_aliases(label, std::slice::from_ref(&label.to_string()));
-            let existing = preloaded_existing.get(key);
-            let support_count = existing.map_or(1, |row| row.support_count.max(1));
-            let metadata = merge_graph_quality_metadata(
-                existing.map(|row| &row.metadata_json),
-                extraction_recovery,
-                None,
-            );
-            endpoint_bulk_inputs.push(repositories::RuntimeGraphNodeUpsertInput {
-                canonical_key: key.to_string(),
-                label: label.trim().to_string(),
-                node_type: crate::services::graph::identity::runtime_node_type_slug(&node_type)
-                    .to_string(),
-                aliases_json: serde_json::to_value(aliases)
-                    .unwrap_or_else(|_| serde_json::json!([])),
-                summary: None,
-                metadata_json: metadata,
-                support_count,
-            });
-        }
-    }
-    let mut all_nodes_by_key = entity_nodes_by_key;
-    if !endpoint_bulk_inputs.is_empty() {
-        let endpoint_upserted = repositories::bulk_upsert_runtime_graph_nodes(
-            pool,
-            scope.library_id,
-            scope.projection_version,
-            &endpoint_bulk_inputs,
-        )
-        .await?;
-        for row in endpoint_upserted {
-            all_nodes_by_key.insert(row.canonical_key.clone(), row);
-        }
-    }
-
-    // Finally, upsert each admitted relation's edge. Nodes are all in
-    // `all_nodes_by_key` by this point. Edge upserts are kept serial
-    // here — typical chunk has ≤ 15 admitted relations; a fan-out
-    // would help only marginally and would complicate the
-    // evidence_targets/nodes/edges accumulation.
-    for (relation, source_key, target_key) in &admitted_relations {
-        let source_node = all_nodes_by_key.get(source_key).cloned().ok_or_else(|| {
-            anyhow::anyhow!(
-                "bulk upsert did not return source node for relation endpoint {source_key}"
-            )
-        })?;
-        let target_node = all_nodes_by_key.get(target_key).cloned().ok_or_else(|| {
-            anyhow::anyhow!(
-                "bulk upsert did not return target node for relation endpoint {target_key}"
-            )
-        })?;
-        evidence_targets.push(repositories::GraphEvidenceTarget {
-            target_kind: "node",
-            target_id: source_node.id,
-            evidence_context_key: "relation_source_node",
-        });
-        evidence_targets.push(repositories::GraphEvidenceTarget {
-            target_kind: "node",
-            target_id: target_node.id,
-            evidence_context_key: "relation_target_node",
-        });
-        let edge_outcome = upsert_graph_edge(
-            pool,
-            scope,
-            &source_node,
-            &target_node,
-            &relation.relation_type,
-            relation.summary.as_deref(),
-            extraction_recovery,
-        )
-        .await?;
-        match edge_outcome {
-            EdgePersistenceOutcome::Admitted(edge) => {
-                evidence_targets.push(repositories::GraphEvidenceTarget {
-                    target_kind: "edge",
-                    target_id: edge.id,
-                    evidence_context_key: "relation_edge",
-                });
-                nodes.push(source_node);
-                nodes.push(target_node);
-                edges.push(edge);
-                evidence_count += 3;
-            }
-            EdgePersistenceOutcome::Filtered => {
-                filtered_artifact_count += 1;
-            }
-        }
+    let relations = partition_relations(graph_quality_guard, &entity_key_index, candidates);
+    accumulator.filtered_artifact_count += persist_filtered_relations(
+        pool,
+        graph_quality_guard,
+        scope,
+        document,
+        chunk,
+        &relations.filtered,
+    )
+    .await?;
+    let all_nodes_by_key = upsert_relation_endpoint_nodes(
+        pool,
+        scope,
+        &relations.admitted,
+        entity_merge.nodes_by_key,
+        &preloaded_existing,
+        extraction_recovery,
+    )
+    .await?;
+    for result in upsert_admitted_relation_edges(
+        pool,
+        scope,
+        &relations.admitted,
+        &all_nodes_by_key,
+        extraction_recovery,
+    )
+    .await?
+    {
+        accumulator.record_relation_result(result);
     }
 
     repositories::bulk_create_runtime_graph_evidence_for_chunk(
@@ -499,11 +338,323 @@ pub async fn merge_chunk_graph_candidates(
         Some(&document.external_key),
         &chunk.content,
         None,
-        &evidence_targets,
+        &accumulator.evidence_targets,
     )
     .await?;
+    Ok(accumulator.into_outcome())
+}
 
-    Ok(GraphMergeOutcome { nodes, edges, evidence_count, filtered_artifact_count })
+async fn upsert_entity_nodes(
+    pool: &sqlx::PgPool,
+    scope: &GraphMergeScope,
+    chunk: &ChunkRow,
+    candidates: &GraphExtractionCandidateSet,
+    entity_key_index: &crate::services::graph::identity::GraphLabelNodeTypeIndex,
+    preloaded_existing: &HashMap<String, RuntimeGraphNodeRow>,
+    extraction_recovery: Option<&ExtractionRecoverySummary>,
+) -> std::result::Result<EntityMergeResult, GraphServiceError> {
+    let mut inputs = Vec::with_capacity(candidates.entities.len());
+    let mut canonical_keys = Vec::with_capacity(candidates.entities.len());
+    let mut seen_keys = BTreeSet::new();
+    for entity in &candidates.entities {
+        let canonical_key = entity_key_index.canonical_node_key_for_label(&entity.label);
+        canonical_keys.push(canonical_key.clone());
+        if !seen_keys.insert(canonical_key.clone()) {
+            continue;
+        }
+        inputs.push(entity_node_input(
+            entity,
+            chunk,
+            &canonical_key,
+            preloaded_existing.get(&canonical_key),
+            extraction_recovery,
+        ));
+    }
+    let rows = if inputs.is_empty() {
+        Vec::new()
+    } else {
+        repositories::bulk_upsert_runtime_graph_nodes(
+            pool,
+            scope.library_id,
+            scope.projection_version,
+            &inputs,
+        )
+        .await?
+    };
+    Ok(EntityMergeResult {
+        nodes_by_key: rows.into_iter().map(|row| (row.canonical_key.clone(), row)).collect(),
+        canonical_keys,
+    })
+}
+
+fn entity_node_input(
+    entity: &crate::services::graph::extract::GraphEntityCandidate,
+    chunk: &ChunkRow,
+    canonical_key: &str,
+    existing: Option<&RuntimeGraphNodeRow>,
+    extraction_recovery: Option<&ExtractionRecoverySummary>,
+) -> repositories::RuntimeGraphNodeUpsertInput {
+    let mut entity_aliases = entity.aliases.clone();
+    entity_aliases.extend(
+        crate::services::graph::extract::acronym_gloss::detect_acronym_aliases_for_label(
+            &chunk.content,
+            &entity.label,
+        ),
+    );
+    let aliases = normalize_graph_aliases(&entity.label, &entity_aliases);
+    let canonical_node_type =
+        crate::services::graph::identity::runtime_node_type_from_key(canonical_key);
+    let mut metadata = merge_graph_quality_metadata(
+        existing.map(|row| &row.metadata_json),
+        extraction_recovery,
+        entity.summary.as_deref(),
+    );
+    if let Some(sub_type) = entity.sub_type.as_deref()
+        && let Some(object) = metadata.as_object_mut()
+    {
+        object.insert("sub_type".to_string(), serde_json::Value::String(sub_type.to_string()));
+    }
+    repositories::RuntimeGraphNodeUpsertInput {
+        canonical_key: canonical_key.to_string(),
+        label: entity.label.trim().to_string(),
+        node_type: crate::services::graph::identity::runtime_node_type_slug(&canonical_node_type)
+            .to_string(),
+        aliases_json: serde_json::to_value(aliases).unwrap_or_else(|_| serde_json::json!([])),
+        summary: entity.summary.clone(),
+        metadata_json: metadata,
+        support_count: existing.map_or(1, |row| row.support_count.max(1)),
+    }
+}
+
+async fn upsert_entity_mention_edges(
+    pool: &sqlx::PgPool,
+    scope: &GraphMergeScope,
+    document_node: &RuntimeGraphNodeRow,
+    entity_merge: &EntityMergeResult,
+    extraction_recovery: Option<&ExtractionRecoverySummary>,
+) -> std::result::Result<Vec<(RuntimeGraphNodeRow, EdgePersistenceOutcome)>, GraphServiceError> {
+    let edge_inputs = entity_merge
+        .canonical_keys
+        .iter()
+        .filter_map(|key| entity_merge.nodes_by_key.get(key).cloned())
+        .collect::<Vec<_>>();
+    let extraction_recovery = extraction_recovery.cloned();
+    stream::iter(edge_inputs)
+        .map(|entity_node| {
+            let pool = pool.clone();
+            let scope = scope.clone();
+            let document_node = document_node.clone();
+            let extraction_recovery = extraction_recovery.clone();
+            async move {
+                let edge = upsert_graph_edge(
+                    &pool,
+                    &scope,
+                    &document_node,
+                    &entity_node,
+                    "mentions",
+                    Some("Document mentions extracted entity"),
+                    extraction_recovery.as_ref(),
+                )
+                .await?;
+                anyhow::Ok((entity_node, edge))
+            }
+        })
+        .buffered(ENTITY_UPSERT_CONCURRENCY)
+        .try_collect()
+        .await
+        .map_err(GraphServiceError::from)
+}
+
+fn partition_relations<'a>(
+    graph_quality_guard: &GraphQualityGuardService,
+    entity_key_index: &crate::services::graph::identity::GraphLabelNodeTypeIndex,
+    candidates: &'a GraphExtractionCandidateSet,
+) -> RelationPartition<'a> {
+    let mut filtered = Vec::new();
+    let mut admitted = Vec::new();
+    for relation in &candidates.relations {
+        let source_key = entity_key_index.canonical_node_key_for_label(&relation.source_label);
+        let target_key = entity_key_index.canonical_node_key_for_label(&relation.target_label);
+        if let Some(reason) =
+            graph_quality_guard.filter_reason(&source_key, &target_key, &relation.relation_type)
+        {
+            filtered.push(FilteredRelation {
+                relation,
+                source_key,
+                target_key,
+                reason_label: artifact_filter_reason_label(reason),
+            });
+        } else {
+            admitted.push(AdmittedRelation { relation, source_key, target_key });
+        }
+    }
+    RelationPartition { filtered, admitted }
+}
+
+const fn artifact_filter_reason_label(
+    reason: crate::domains::runtime_graph::RuntimeGraphArtifactFilterReason,
+) -> &'static str {
+    match reason {
+        crate::domains::runtime_graph::RuntimeGraphArtifactFilterReason::EmptyRelation => {
+            "empty_relation"
+        }
+        crate::domains::runtime_graph::RuntimeGraphArtifactFilterReason::DegenerateSelfLoop => {
+            "degenerate_self_loop"
+        }
+        crate::domains::runtime_graph::RuntimeGraphArtifactFilterReason::LowValueArtifact => {
+            "low_value_artifact"
+        }
+    }
+}
+
+async fn persist_filtered_relations(
+    pool: &sqlx::PgPool,
+    graph_quality_guard: &GraphQualityGuardService,
+    scope: &GraphMergeScope,
+    document: &DocumentRow,
+    chunk: &ChunkRow,
+    relations: &[FilteredRelation<'_>],
+) -> std::result::Result<usize, GraphServiceError> {
+    for filtered in relations {
+        let relation = filtered.relation;
+        repositories::create_runtime_graph_filtered_artifact(
+            pool,
+            scope.library_id,
+            scope.activated_by_attempt_id,
+            scope.revision_id,
+            "edge",
+            &crate::services::graph::identity::canonical_edge_key(
+                &filtered.source_key,
+                &relation.relation_type,
+                &filtered.target_key,
+            ),
+            Some(filtered.source_key.as_str()),
+            Some(filtered.target_key.as_str()),
+            Some(&graph_quality_guard.normalized_relation_type(&relation.relation_type)),
+            filtered.reason_label,
+            relation.summary.as_deref(),
+            serde_json::json!({
+                "document_id": document.id,
+                "chunk_id": chunk.id,
+                "source_label": &relation.source_label,
+                "target_label": &relation.target_label,
+                "raw_relation_type": &relation.relation_type,
+                "source_file_name": &document.external_key,
+            }),
+        )
+        .await?;
+    }
+    Ok(relations.len())
+}
+
+async fn upsert_relation_endpoint_nodes(
+    pool: &sqlx::PgPool,
+    scope: &GraphMergeScope,
+    relations: &[AdmittedRelation<'_>],
+    mut nodes_by_key: HashMap<String, RuntimeGraphNodeRow>,
+    preloaded_existing: &HashMap<String, RuntimeGraphNodeRow>,
+    extraction_recovery: Option<&ExtractionRecoverySummary>,
+) -> std::result::Result<HashMap<String, RuntimeGraphNodeRow>, GraphServiceError> {
+    let mut inputs = Vec::new();
+    let mut seen_keys = BTreeSet::new();
+    for admitted in relations {
+        for (key, label) in [
+            (admitted.source_key.as_str(), admitted.relation.source_label.as_str()),
+            (admitted.target_key.as_str(), admitted.relation.target_label.as_str()),
+        ] {
+            if nodes_by_key.contains_key(key) || !seen_keys.insert(key.to_string()) {
+                continue;
+            }
+            inputs.push(relation_endpoint_input(
+                key,
+                label,
+                preloaded_existing.get(key),
+                extraction_recovery,
+            ));
+        }
+    }
+    if !inputs.is_empty() {
+        let rows = repositories::bulk_upsert_runtime_graph_nodes(
+            pool,
+            scope.library_id,
+            scope.projection_version,
+            &inputs,
+        )
+        .await?;
+        nodes_by_key.extend(rows.into_iter().map(|row| (row.canonical_key.clone(), row)));
+    }
+    Ok(nodes_by_key)
+}
+
+fn relation_endpoint_input(
+    canonical_key: &str,
+    label: &str,
+    existing: Option<&RuntimeGraphNodeRow>,
+    extraction_recovery: Option<&ExtractionRecoverySummary>,
+) -> repositories::RuntimeGraphNodeUpsertInput {
+    let node_type = crate::services::graph::identity::runtime_node_type_from_key(canonical_key);
+    let aliases = normalize_graph_aliases(label, &[label.to_string()]);
+    repositories::RuntimeGraphNodeUpsertInput {
+        canonical_key: canonical_key.to_string(),
+        label: label.trim().to_string(),
+        node_type: crate::services::graph::identity::runtime_node_type_slug(&node_type).to_string(),
+        aliases_json: serde_json::to_value(aliases).unwrap_or_else(|_| serde_json::json!([])),
+        summary: None,
+        metadata_json: merge_graph_quality_metadata(
+            existing.map(|row| &row.metadata_json),
+            extraction_recovery,
+            None,
+        ),
+        support_count: existing.map_or(1, |row| row.support_count.max(1)),
+    }
+}
+
+async fn upsert_admitted_relation_edges(
+    pool: &sqlx::PgPool,
+    scope: &GraphMergeScope,
+    relations: &[AdmittedRelation<'_>],
+    nodes_by_key: &HashMap<String, RuntimeGraphNodeRow>,
+    extraction_recovery: Option<&ExtractionRecoverySummary>,
+) -> std::result::Result<Vec<RelationMergeResult>, GraphServiceError> {
+    let mut results = Vec::with_capacity(relations.len());
+    for admitted in relations {
+        let source_node = relation_endpoint(nodes_by_key, &admitted.source_key, "source")?;
+        let target_node = relation_endpoint(nodes_by_key, &admitted.target_key, "target")?;
+        let edge = upsert_graph_edge(
+            pool,
+            scope,
+            &source_node,
+            &target_node,
+            &admitted.relation.relation_type,
+            admitted.relation.summary.as_deref(),
+            extraction_recovery,
+        )
+        .await?;
+        results.push(match edge {
+            EdgePersistenceOutcome::Admitted(edge) => RelationMergeResult::Admitted {
+                source_node: Box::new(source_node),
+                target_node: Box::new(target_node),
+                edge,
+            },
+            EdgePersistenceOutcome::Filtered => RelationMergeResult::Filtered {
+                source_node: Box::new(source_node),
+                target_node: Box::new(target_node),
+            },
+        });
+    }
+    Ok(results)
+}
+
+fn relation_endpoint(
+    nodes_by_key: &HashMap<String, RuntimeGraphNodeRow>,
+    canonical_key: &str,
+    role: &str,
+) -> std::result::Result<RuntimeGraphNodeRow, GraphServiceError> {
+    nodes_by_key.get(canonical_key).cloned().ok_or_else(|| {
+        GraphServiceError::Internal(anyhow::anyhow!(
+            "bulk upsert did not return {role} node for relation endpoint {canonical_key}"
+        ))
+    })
 }
 
 #[must_use]
@@ -512,7 +663,7 @@ fn build_entity_key_index(
 ) -> crate::services::graph::identity::GraphLabelNodeTypeIndex {
     let mut index = crate::services::graph::identity::GraphLabelNodeTypeIndex::new();
     for entity in &candidates.entities {
-        index.insert_aliases(&entity.label, &entity.aliases, entity.node_type.clone());
+        index.insert_aliases(&entity.label, &entity.aliases, entity.node_type);
     }
     index
 }
@@ -672,7 +823,7 @@ async fn upsert_graph_edge(
         scope.projection_version,
     )
     .await
-    .map(EdgePersistenceOutcome::Admitted)
+    .map(|edge| EdgePersistenceOutcome::Admitted(Box::new(edge)))
     .map_err(Into::into)
 }
 
@@ -915,6 +1066,57 @@ mod tests {
             metadata["summary_fragments"],
             serde_json::json!(["Budget approval moved to Q2."])
         );
+    }
+
+    #[test]
+    fn filtered_relation_preserves_endpoint_evidence() {
+        let library_id = uuid::Uuid::now_v7();
+        let source_node = test_graph_node(library_id, "entity:source", "Source");
+        let target_node = test_graph_node(library_id, "entity:target", "Target");
+        let document_node = test_graph_node(library_id, "document:source", "Document");
+        let mut accumulator = MergeAccumulator::new(document_node);
+
+        accumulator.record_relation_result(RelationMergeResult::Filtered {
+            source_node: Box::new(source_node.clone()),
+            target_node: Box::new(target_node.clone()),
+        });
+
+        assert_eq!(
+            accumulator.nodes.iter().skip(1).map(|node| node.id).collect::<Vec<_>>(),
+            vec![source_node.id, target_node.id]
+        );
+        assert_eq!(accumulator.evidence_count, 3);
+        assert_eq!(accumulator.filtered_artifact_count, 1);
+        assert_eq!(
+            accumulator
+                .evidence_targets
+                .iter()
+                .filter(|target| target.evidence_context_key.starts_with("relation_"))
+                .map(|target| target.target_id)
+                .collect::<Vec<_>>(),
+            vec![source_node.id, target_node.id]
+        );
+    }
+
+    fn test_graph_node(
+        library_id: uuid::Uuid,
+        canonical_key: &str,
+        label: &str,
+    ) -> RuntimeGraphNodeRow {
+        RuntimeGraphNodeRow {
+            id: uuid::Uuid::now_v7(),
+            library_id,
+            canonical_key: canonical_key.to_string(),
+            label: label.to_string(),
+            node_type: "entity".to_string(),
+            aliases_json: serde_json::json!([]),
+            summary: None,
+            metadata_json: serde_json::json!({}),
+            support_count: 1,
+            projection_version: 1,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        }
     }
 
     #[test]

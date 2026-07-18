@@ -19,10 +19,13 @@ pub enum KnowledgeServiceError {
 
 impl From<anyhow::Error> for KnowledgeServiceError {
     fn from(error: anyhow::Error) -> Self {
-        let message = error.to_string();
-        match Self::from_message(message) {
-            Self::Internal(_) => Self::Internal(error),
-            classified => classified,
+        let error = match error.downcast::<Self>() {
+            Ok(error) => return error,
+            Err(error) => error,
+        };
+        match error.downcast::<sqlx::Error>() {
+            Ok(error) => Self::Repository(error),
+            Err(error) => Self::Internal(error),
         }
     }
 }
@@ -39,23 +42,41 @@ impl KnowledgeServiceError {
             Self::Internal(_) => "KnowledgeServiceError::Internal",
         }
     }
+}
 
-    #[must_use]
-    pub fn from_message(message: impl Into<String>) -> Self {
-        let message = message.into();
-        let normalized = message.to_ascii_lowercase();
-        if normalized.contains("library") && normalized.contains("not found") {
-            return Self::NotFound { message };
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unknown_anyhow_messages_are_always_internal() {
+        for message in ["library not found", "graph is ready", "redis cache unavailable"] {
+            let error = KnowledgeServiceError::from(anyhow::anyhow!(message));
+
+            assert!(matches!(error, KnowledgeServiceError::Internal(_)), "{message}");
         }
-        if normalized.contains("not found") {
-            return Self::NotFound { message };
-        }
-        if normalized.contains("graph") && normalized.contains("ready") {
-            return Self::GraphNotReady { message };
-        }
-        if normalized.contains("redis") || normalized.contains("cache") {
-            return Self::CacheUnavailable { message };
-        }
-        Self::Internal(anyhow::anyhow!(message))
+    }
+
+    #[test]
+    fn anyhow_context_preserves_typed_service_error() {
+        let error = anyhow::Error::new(KnowledgeServiceError::GraphNotReady {
+            message: "opaque".to_string(),
+        })
+        .context("knowledge boundary");
+
+        assert!(matches!(
+            KnowledgeServiceError::from(error),
+            KnowledgeServiceError::GraphNotReady { message } if message == "opaque"
+        ));
+    }
+
+    #[test]
+    fn anyhow_context_preserves_typed_repository_error() {
+        let error = anyhow::Error::new(sqlx::Error::RowNotFound).context("knowledge query failed");
+
+        assert!(matches!(
+            KnowledgeServiceError::from(error),
+            KnowledgeServiceError::Repository(sqlx::Error::RowNotFound)
+        ));
     }
 }

@@ -56,10 +56,9 @@ unused-license-exception = "deny"
 include-dev = true
 include-build = true
 exceptions = [
-    { crate = "webpki-root-certs@1.0.7", allow = ["CDLA-Permissive-2.0"] },
-    { crate = "webpki-roots@0.26.11", allow = ["CDLA-Permissive-2.0"] },
-    { crate = "webpki-roots@1.0.7", allow = ["CDLA-Permissive-2.0"] },
-    { crate = "xxhash-rust@0.8.15", allow = ["BSL-1.0"] },
+    { crate = "webpki-root-certs@1.0.8", allow = ["CDLA-Permissive-2.0"] },
+    { crate = "webpki-roots@1.0.8", allow = ["CDLA-Permissive-2.0"] },
+    { crate = "xxhash-rust@0.8.16", allow = ["BSL-1.0"] },
 ]
 
 [licenses.private]

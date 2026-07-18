@@ -1,6 +1,7 @@
-import { useState } from 'react';
-import type { TFunction } from 'i18next';
+import { useRef, useState } from 'react'
+import type { TFunction } from 'i18next'
 import {
+  Atom,
   Blend,
   Boxes,
   ChevronDown,
@@ -14,14 +15,15 @@ import {
   Waypoints,
   Workflow,
   type LucideIcon,
-} from 'lucide-react';
+} from 'lucide-react'
 
-import { GRAPH_LAYOUT_OPTIONS, type GraphLayoutType } from '@/features/graph/model/config';
+import { GRAPH_LAYOUT_OPTIONS, type GraphLayoutType } from '@/features/graph/model/config'
 
 // One icon per layout, chosen to hint at the arrangement the layout produces
 // (hub-and-spoke, provenance branches, layered flow, concentric rings, …) so
 // the picker reads visually instead of as a bare text list.
 const LAYOUT_ICONS: Record<GraphLayoutType, LucideIcon> = {
+  force: Atom,
   hubs: Waypoints,
   sources: GitBranch,
   flow: Workflow,
@@ -32,14 +34,14 @@ const LAYOUT_ICONS: Record<GraphLayoutType, LucideIcon> = {
   components: Boxes,
   rings: Target,
   clusters: Group,
-};
+}
 
-type GraphLayoutPickerProps = {
-  value: GraphLayoutType;
-  recommended: GraphLayoutType | null;
-  onChange: (value: GraphLayoutType) => void;
-  t: TFunction;
-};
+type GraphLayoutPickerProps = Readonly<{
+  value: GraphLayoutType
+  recommended: GraphLayoutType | null
+  onChange: (value: GraphLayoutType) => void
+  t: TFunction
+}>
 
 /**
  * Icon-tile layout picker. A combobox trigger showing the current layout's icon
@@ -47,27 +49,28 @@ type GraphLayoutPickerProps = {
  * a hover description; the recommended layout is marked with a subtle sparkle.
  */
 export function GraphLayoutPicker({ value, recommended, onChange, t }: GraphLayoutPickerProps) {
-  const [open, setOpen] = useState(false);
-  const CurrentIcon = LAYOUT_ICONS[value];
+  const [open, setOpen] = useState(false)
+  const triggerRef = useRef<HTMLButtonElement>(null)
+  const CurrentIcon = LAYOUT_ICONS[value]
 
   const choose = (next: GraphLayoutType) => {
-    onChange(next);
-    setOpen(false);
-  };
+    onChange(next)
+    setOpen(false)
+    triggerRef.current?.focus()
+  }
 
   return (
     <div className="relative w-full sm:w-auto">
       <button
+        ref={triggerRef}
         type="button"
-        role="combobox"
         aria-expanded={open}
-        aria-haspopup="listbox"
         aria-label={t('graph.layoutControls')}
         onClick={() => setOpen((prev) => !prev)}
         onKeyDown={(event) => {
-          if (event.key === 'ArrowDown' || event.key === 'Enter' || event.key === ' ') {
-            event.preventDefault();
-            setOpen(true);
+          if (event.key === 'ArrowDown') {
+            event.preventDefault()
+            setOpen(true)
           }
         }}
         className="flex h-8 w-full items-center gap-2 rounded-lg border bg-background px-2.5 text-xs font-medium shadow-soft transition-colors hover:bg-muted/60 sm:w-[11rem]"
@@ -89,21 +92,19 @@ export function GraphLayoutPicker({ value, recommended, onChange, t }: GraphLayo
             onClick={() => setOpen(false)}
           />
           <div
-            role="listbox"
             aria-label={t('graph.layoutControls')}
             className="absolute left-0 top-full z-50 mt-1.5 w-[min(22rem,calc(100vw-2rem))] rounded-xl border bg-popover p-2 shadow-elevated animate-scale-in"
           >
             <div className="grid grid-cols-2 gap-1.5">
               {GRAPH_LAYOUT_OPTIONS.map((option) => {
-                const Icon = LAYOUT_ICONS[option.id];
-                const active = option.id === value;
-                const isRecommended = recommended === option.id;
+                const Icon = LAYOUT_ICONS[option.id]
+                const active = option.id === value
+                const isRecommended = recommended === option.id
                 return (
                   <button
                     key={option.id}
                     type="button"
-                    role="option"
-                    aria-selected={active}
+                    aria-pressed={active}
                     title={t(option.descriptionKey)}
                     onClick={() => choose(option.id)}
                     className={`group flex items-start gap-2.5 rounded-lg border p-2.5 text-left transition-colors ${
@@ -131,12 +132,12 @@ export function GraphLayoutPicker({ value, recommended, onChange, t }: GraphLayo
                       )}
                     </span>
                   </button>
-                );
+                )
               })}
             </div>
           </div>
         </>
       )}
     </div>
-  );
+  )
 }

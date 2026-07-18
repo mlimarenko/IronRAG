@@ -1,11 +1,11 @@
-import { useEffect, useMemo, useState } from 'react';
-import { useTranslation } from 'react-i18next';
-import { ArrowLeft, ArrowRight, KeyRound, Loader2, Sparkles } from 'lucide-react';
-import { toast } from 'sonner';
-import { z } from 'zod';
+import { useEffect, useMemo, useState } from 'react'
+import { useTranslation } from 'react-i18next'
+import { ArrowLeft, ArrowRight, KeyRound, Loader2, Sparkles } from 'lucide-react'
+import { toast } from 'sonner'
+import { z } from 'zod'
 
-import { adminApi } from '@/shared/api';
-import { Button } from '@/shared/components/ui/button';
+import { adminApi } from '@/shared/api'
+import { Button } from '@/shared/components/ui/button'
 import {
   Dialog,
   DialogContent,
@@ -13,59 +13,146 @@ import {
   DialogFooter,
   DialogHeader,
   DialogTitle,
-} from '@/shared/components/ui/dialog';
-import { Input } from '@/shared/components/ui/input';
-import { Label } from '@/shared/components/ui/label';
+} from '@/shared/components/ui/dialog'
+import { Input } from '@/shared/components/ui/input'
+import { Label } from '@/shared/components/ui/label'
 import {
   Select,
   SelectContent,
   SelectItem,
   SelectTrigger,
   SelectValue,
-} from '@/shared/components/ui/select';
-import { ProviderCredentialFields } from '@/shared/components/ai-provider/ProviderCredentialFields';
-import { canEditProviderBaseUrl, normalizeProviderBaseUrl } from '@/shared/lib/ai-provider';
-import { errorMessage } from '@/shared/lib/errorMessage';
-import {
-  FormInputField,
-  FormSelectField,
-  FormTextareaField,
-  useTypedForm,
-} from '@/shared/forms';
-import type { AIAccount, AIBindingAssignment, AIModelOption, AIProvider, AIPurpose, AIScopeKind, PricingRule } from '@/shared/types';
+} from '@/shared/components/ui/select'
+import { ProviderCredentialFields } from '@/shared/components/ai-provider/ProviderCredentialFields'
+import { canEditProviderBaseUrl, normalizeProviderBaseUrl } from '@/shared/lib/ai-provider'
+import { errorMessage } from '@/shared/lib/errorMessage'
+import { FormInputField, FormSelectField, FormTextareaField, useTypedForm } from '@/shared/forms'
+import type {
+  AIAccount,
+  AIBinding,
+  AIModelOption,
+  AIProvider,
+  AIScopeKind,
+  PricingRule,
+} from '@/shared/types'
 import {
   bindingParamsRequestBody,
   bindingParamsSchema,
   compactScopeQuery,
   formatModelPriceSuffix,
   localScopeQuery,
+  modelSupportsBindingPurpose,
+  providerSupportsBindingPurpose,
   purposeLabel,
-  REQUIRED_RUNTIME_PURPOSE_ORDER,
+  REQUIRED_BINDING_PURPOSES,
   resolveBindingForPurpose,
   resolveModelPriceSummary,
   type AiScopeContext,
-} from '@/features/admin/model/aiConfig';
+} from '@/features/admin/model/aiConfig'
 
-type AccountMode = 'existing' | 'new';
-type WizardStep = 'account' | 'model';
+type AccountMode = 'existing' | 'new'
+type WizardStep = 'account' | 'model'
+
+const aiBindingWizardTopSchema = z.object({
+  purpose: z.enum(REQUIRED_BINDING_PURPOSES),
+  scope: z.enum(['instance', 'workspace', 'library'] satisfies readonly AIScopeKind[]),
+})
 
 type AiBindingWizardProps = {
-  open: boolean;
-  onOpenChange: (open: boolean) => void;
-  selectedScope: AIScopeKind;
-  scopeContext: AiScopeContext;
-  activeWorkspaceName?: string | undefined;
-  activeLibraryName?: string | undefined;
-  onScopeChange: (scope: AIScopeKind) => void;
-  availableAccounts: AIAccount[];
-  providers: AIProvider[];
-  models: AIModelOption[];
-  prices: PricingRule[];
-  bindingsForScope: AIBindingAssignment[];
-  instanceBindings: AIBindingAssignment[];
-  workspaceBindings: AIBindingAssignment[];
-  invalidateAll: () => void;
-};
+  open: boolean
+  onOpenChange: (open: boolean) => void
+  selectedScope: AIScopeKind
+  scopeContext: AiScopeContext
+  activeWorkspaceName?: string | undefined
+  activeLibraryName?: string | undefined
+  onScopeChange: (scope: AIScopeKind) => void
+  availableAccounts: AIAccount[]
+  providers: AIProvider[]
+  models: AIModelOption[]
+  prices: PricingRule[]
+  bindingsForScope: AIBinding[]
+  instanceBindings: AIBinding[]
+  workspaceBindings: AIBinding[]
+  invalidateAll: () => Promise<void>
+}
+
+type WizardResetActions = Readonly<{
+  activeAccounts: AIAccount[]
+  providers: AIProvider[]
+  resetBindingForm: () => void
+  setAccountError: (value: string) => void
+  setAccountMode: (value: AccountMode) => void
+  setNewAccountApiKey: (value: string) => void
+  setNewAccountBaseUrl: (value: string) => void
+  setNewAccountLabel: (value: string) => void
+  setNewAccountProviderId: (value: string) => void
+  setSelectedAccountId: (value: string) => void
+  setStep: (value: WizardStep) => void
+}>
+
+function resetWizard(actions: WizardResetActions): void {
+  actions.setStep('account')
+  actions.setAccountMode(actions.activeAccounts.length > 0 ? 'existing' : 'new')
+  actions.setSelectedAccountId(actions.activeAccounts[0]?.id ?? '')
+  actions.setNewAccountProviderId(
+    actions.providers.find((entry) => entry.lifecycleState === 'active')?.id ??
+      actions.providers[0]?.id ??
+      '',
+  )
+  actions.setNewAccountLabel('')
+  actions.setNewAccountApiKey('')
+  actions.setNewAccountBaseUrl('')
+  actions.setAccountError('')
+  actions.resetBindingForm()
+}
+
+function synchronizeWizardOpenState(
+  open: boolean,
+  wasOpen: boolean,
+  setWasOpen: (value: boolean) => void,
+  resetActions: WizardResetActions,
+): void {
+  if (open === wasOpen) return
+  setWasOpen(open)
+  if (open) resetWizard(resetActions)
+}
+
+function accountProviderIdForMode(
+  accountMode: AccountMode,
+  activeAccounts: AIAccount[],
+  selectedAccountId: string,
+  newAccountProviderId: string,
+): string | undefined {
+  if (accountMode === 'existing') {
+    return activeAccounts.find((entry) => entry.id === selectedAccountId)?.providerId
+  }
+  return newAccountProviderId
+}
+
+function modelsForBinding(
+  models: AIModelOption[],
+  purpose: (typeof REQUIRED_BINDING_PURPOSES)[number],
+  provider: AIProvider | undefined,
+  accountProviderId: string | undefined,
+): AIModelOption[] {
+  return models.filter(
+    (entry) =>
+      modelSupportsBindingPurpose(entry, purpose) &&
+      providerSupportsBindingPurpose(provider, purpose) &&
+      (!accountProviderId || entry.providerCatalogId === accountProviderId),
+  )
+}
+
+function canAdvanceAccountStep(
+  accountMode: AccountMode,
+  selectedAccountId: string,
+  newAccountProviderId: string,
+  newAccountLabel: string,
+): boolean {
+  return accountMode === 'existing'
+    ? Boolean(selectedAccountId)
+    : Boolean(newAccountProviderId && newAccountLabel.trim())
+}
 
 /**
  * Guided binding wizard (ADM-01, variant A). Two steps for a chosen purpose +
@@ -91,24 +178,27 @@ export function AiBindingWizard({
   instanceBindings,
   workspaceBindings,
   invalidateAll,
-}: AiBindingWizardProps) {
-  const { t } = useTranslation();
-  const topSchema = useMemo(() => z.object({ purpose: z.string(), scope: z.string() }), []);
+}: Readonly<AiBindingWizardProps>) {
+  const { t } = useTranslation()
   const topForm = useTypedForm({
-    schema: topSchema,
-    defaultValues: { purpose: REQUIRED_RUNTIME_PURPOSE_ORDER[0] ?? '', scope: selectedScope },
-  });
-  const { setValue: setTopValue } = topForm;
-  const purpose = topForm.watch('purpose') as AIPurpose;
+    schema: aiBindingWizardTopSchema,
+    defaultValues: { purpose: REQUIRED_BINDING_PURPOSES[0] ?? '', scope: selectedScope },
+  })
+  const { setValue: setTopValue } = topForm
+  const purpose = topForm.watch('purpose')
 
   useEffect(() => {
-    setTopValue('scope', selectedScope);
-  }, [selectedScope, setTopValue]);
+    setTopValue('scope', selectedScope)
+  }, [selectedScope, setTopValue])
 
   const scopeOptions = useMemo(
     () =>
       [
-        { kind: 'instance' as const, label: t('admin.aiPanel.scopeCards.instanceTitle'), enabled: true },
+        {
+          kind: 'instance' as const,
+          label: t('admin.aiPanel.scopeCards.instanceTitle'),
+          enabled: true,
+        },
         {
           kind: 'workspace' as const,
           label: activeWorkspaceName ?? t('admin.aiPanel.scopeCards.workspaceTitle'),
@@ -121,26 +211,26 @@ export function AiBindingWizard({
         },
       ].filter((option) => option.enabled),
     [activeWorkspaceName, activeLibraryName, t],
-  );
+  )
 
-  const [step, setStep] = useState<WizardStep>('account');
-  const [accountMode, setAccountMode] = useState<AccountMode>('existing');
-  const [selectedAccountId, setSelectedAccountId] = useState('');
-  const [newAccountProviderId, setNewAccountProviderId] = useState('');
-  const [newAccountLabel, setNewAccountLabel] = useState('');
-  const [newAccountApiKey, setNewAccountApiKey] = useState('');
-  const [newAccountBaseUrl, setNewAccountBaseUrl] = useState('');
-  const [accountBusy, setAccountBusy] = useState(false);
-  const [accountError, setAccountError] = useState('');
-  const [bindingBusy, setBindingBusy] = useState(false);
+  const [step, setStep] = useState<WizardStep>('account')
+  const [accountMode, setAccountMode] = useState<AccountMode>('existing')
+  const [selectedAccountId, setSelectedAccountId] = useState('')
+  const [newAccountProviderId, setNewAccountProviderId] = useState('')
+  const [newAccountLabel, setNewAccountLabel] = useState('')
+  const [newAccountApiKey, setNewAccountApiKey] = useState('')
+  const [newAccountBaseUrl, setNewAccountBaseUrl] = useState('')
+  const [accountBusy, setAccountBusy] = useState(false)
+  const [accountError, setAccountError] = useState('')
+  const [bindingBusy, setBindingBusy] = useState(false)
 
   const activeAccounts = useMemo(
-    () => availableAccounts.filter(entry => entry.state === 'active'),
+    () => availableAccounts.filter((entry) => entry.state === 'active'),
     [availableAccounts],
-  );
-  const newAccountProvider = providers.find(entry => entry.id === newAccountProviderId) ?? null;
+  )
+  const newAccountProvider = providers.find((entry) => entry.id === newAccountProviderId) ?? null
 
-  const bindingSchema = useMemo(() => bindingParamsSchema(t), [t]);
+  const bindingSchema = useMemo(() => bindingParamsSchema(t), [t])
   const bindingForm = useTypedForm({
     schema: bindingSchema,
     defaultValues: {
@@ -153,24 +243,17 @@ export function AiBindingWizard({
       extraParametersJson: '',
     },
     mode: 'onChange',
-  });
+  })
 
   // Reset the wizard's local state when the dialog transitions from closed to
   // open. Adjusted during render (React's documented pattern for syncing
   // state to a changing prop) instead of an effect, so it can't cascade an
   // extra render pass the way `setState` inside `useEffect` would.
-  const [wasOpen, setWasOpen] = useState(open);
-  if (open !== wasOpen) {
-    setWasOpen(open);
-    if (open) {
-      setStep('account');
-      setAccountMode(activeAccounts.length > 0 ? 'existing' : 'new');
-      setSelectedAccountId(activeAccounts[0]?.id ?? '');
-      setNewAccountProviderId(providers.find(entry => entry.lifecycleState === 'active')?.id ?? providers[0]?.id ?? '');
-      setNewAccountLabel('');
-      setNewAccountApiKey('');
-      setNewAccountBaseUrl('');
-      setAccountError('');
+  const [wasOpen, setWasOpen] = useState(open)
+  synchronizeWizardOpenState(open, wasOpen, setWasOpen, {
+    activeAccounts,
+    providers,
+    resetBindingForm: () =>
       bindingForm.reset({
         accountId: '',
         modelCatalogId: '',
@@ -179,53 +262,67 @@ export function AiBindingWizard({
         topP: '',
         maxOutputTokens: '',
         extraParametersJson: '',
-      });
-    }
-  }
+      }),
+    setAccountError,
+    setAccountMode,
+    setNewAccountApiKey,
+    setNewAccountBaseUrl,
+    setNewAccountLabel,
+    setNewAccountProviderId,
+    setSelectedAccountId,
+    setStep,
+  })
 
-  const accountProviderId = accountMode === 'existing'
-    ? activeAccounts.find(entry => entry.id === selectedAccountId)?.providerId
-    : newAccountProviderId;
-  const modelOptions = models.filter(
-    entry => entry.allowedBindingPurposes.includes(purpose) && (!accountProviderId || entry.providerCatalogId === accountProviderId),
-  );
+  const accountProviderId = accountProviderIdForMode(
+    accountMode,
+    activeAccounts,
+    selectedAccountId,
+    newAccountProviderId,
+  )
+  const bindingProvider = providers.find((entry) => entry.id === accountProviderId)
+  const modelOptions = modelsForBinding(models, purpose, bindingProvider, accountProviderId)
 
-  const canAdvanceFromAccount = accountMode === 'existing'
-    ? Boolean(selectedAccountId)
-    : Boolean(newAccountProviderId && newAccountLabel.trim());
+  const canAdvanceFromAccount = canAdvanceAccountStep(
+    accountMode,
+    selectedAccountId,
+    newAccountProviderId,
+    newAccountLabel,
+  )
 
   const goToModelStep = async () => {
     if (accountMode === 'existing') {
-      bindingForm.setValue('accountId', selectedAccountId, { shouldValidate: true });
-      setStep('model');
-      return;
+      bindingForm.setValue('accountId', selectedAccountId, { shouldValidate: true })
+      setStep('model')
+      return
     }
     if (!newAccountProvider) {
-      return;
+      return
     }
-    setAccountBusy(true);
-    setAccountError('');
+    setAccountBusy(true)
+    setAccountError('')
     try {
-      const localParams = localScopeQuery(selectedScope, scopeContext);
+      const localParams = localScopeQuery(selectedScope, scopeContext)
       const account = await adminApi.createAccount({
-        ...(localParams.query ?? {}),
+        ...localParams.query,
         providerCatalogId: newAccountProvider.id,
         label: newAccountLabel.trim(),
         apiKey: newAccountApiKey.trim() || undefined,
-        baseUrl: canEditProviderBaseUrl(newAccountProvider) ? newAccountBaseUrl.trim() || undefined : undefined,
-      });
-      bindingForm.setValue('accountId', account.id, { shouldValidate: true });
-      invalidateAll();
-      setStep('model');
+        baseUrl: canEditProviderBaseUrl(newAccountProvider)
+          ? newAccountBaseUrl.trim() || undefined
+          : undefined,
+      })
+      bindingForm.setValue('accountId', account.id, { shouldValidate: true })
+      await invalidateAll()
+      setStep('model')
     } catch (err) {
-      setAccountError(errorMessage(err, t('admin.aiPanel.messages.accountSaveFailed')));
+      setAccountError(errorMessage(err, t('admin.aiPanel.messages.accountSaveFailed')))
     } finally {
-      setAccountBusy(false);
+      setAccountBusy(false)
     }
-  };
+  }
 
   const submitBinding = bindingForm.handleSubmit(async (values) => {
-    setBindingBusy(true);
+    setBindingBusy(true)
     try {
       const resolved = resolveBindingForPurpose({
         purpose,
@@ -233,30 +330,30 @@ export function AiBindingWizard({
         bindingsForScope,
         instanceBindings,
         workspaceBindings,
-      });
-      const localScopeParams = compactScopeQuery(localScopeQuery(selectedScope, scopeContext).query);
+      })
+      const localScopeParams = compactScopeQuery(localScopeQuery(selectedScope, scopeContext).query)
       if (resolved.localBinding) {
         await adminApi.updateBinding(resolved.localBinding.id, {
           ...bindingParamsRequestBody(values),
           bindingState: 'active',
-        });
+        })
       } else {
         await adminApi.createBinding({
           ...localScopeParams,
           scopeKind: selectedScope,
           bindingPurpose: purpose,
           ...bindingParamsRequestBody(values),
-        });
+        })
       }
-      toast.success(t('admin.aiPanel.messages.bindingSaved'));
-      invalidateAll();
-      onOpenChange(false);
+      toast.success(t('admin.aiPanel.messages.bindingSaved'))
+      await invalidateAll()
+      onOpenChange(false)
     } catch (err) {
-      toast.error(errorMessage(err, t('admin.aiPanel.messages.bindingSaveFailed')));
+      toast.error(errorMessage(err, t('admin.aiPanel.messages.bindingSaveFailed')))
     } finally {
-      setBindingBusy(false);
+      setBindingBusy(false)
     }
-  });
+  })
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -279,9 +376,9 @@ export function AiBindingWizard({
               name="purpose"
               triggerClassName="h-9 text-sm"
             >
-              {REQUIRED_RUNTIME_PURPOSE_ORDER.map((p) => (
-                <SelectItem key={p} value={p}>
-                  {purposeLabel(p, t)}
+              {REQUIRED_BINDING_PURPOSES.map((bindingPurpose) => (
+                <SelectItem key={bindingPurpose} value={bindingPurpose}>
+                  {purposeLabel(bindingPurpose, t)}
                 </SelectItem>
               ))}
             </FormSelectField>
@@ -291,7 +388,9 @@ export function AiBindingWizard({
               id="ai-wizard-scope"
               label={t('admin.aiWizard.scopeLabel')}
               name="scope"
-              onValueChange={(value) => onScopeChange(value as AIScopeKind)}
+              onValueChange={(value) =>
+                onScopeChange(aiBindingWizardTopSchema.shape.scope.parse(value))
+              }
               triggerClassName="h-9 text-sm"
             >
               {scopeOptions.map((option) => (
@@ -307,7 +406,9 @@ export function AiBindingWizard({
               {t('admin.aiWizard.stepNumber', { number: step === 'account' ? 1 : 2 })}
             </span>
             <span className="text-sm font-bold">
-              {step === 'account' ? t('admin.aiWizard.steps.account.title') : t('admin.aiWizard.steps.model.title')}
+              {step === 'account'
+                ? t('admin.aiWizard.steps.account.title')
+                : t('admin.aiWizard.steps.model.title')}
             </span>
           </div>
 
@@ -336,16 +437,16 @@ export function AiBindingWizard({
 
               {accountMode === 'existing' ? (
                 <div className="space-y-2">
-                  <Label htmlFor="ai-wizard-account">
-                    {t('admin.aiPanel.fields.account')}
-                  </Label>
+                  <Label htmlFor="ai-wizard-account">{t('admin.aiPanel.fields.account')}</Label>
                   <Select value={selectedAccountId} onValueChange={setSelectedAccountId}>
                     <SelectTrigger id="ai-wizard-account" className="h-9 text-sm">
                       <SelectValue placeholder={t('admin.aiPanel.placeholders.selectAccount')} />
                     </SelectTrigger>
                     <SelectContent>
-                      {activeAccounts.map(entry => (
-                        <SelectItem key={entry.id} value={entry.id}>{entry.label} · {entry.providerName}</SelectItem>
+                      {activeAccounts.map((entry) => (
+                        <SelectItem key={entry.id} value={entry.id}>
+                          {entry.label} · {entry.providerName}
+                        </SelectItem>
                       ))}
                     </SelectContent>
                   </Select>
@@ -353,36 +454,38 @@ export function AiBindingWizard({
               ) : (
                 <div className="space-y-3">
                   <div className="space-y-2">
-                    <Label htmlFor="ai-wizard-new-account-provider">
-                      {t('admin.provider')}
-                    </Label>
+                    <Label htmlFor="ai-wizard-new-account-provider">{t('admin.provider')}</Label>
                     <Select
                       value={newAccountProviderId}
-                      onValueChange={value => {
-                        const provider = providers.find(entry => entry.id === value) ?? null;
-                        setNewAccountProviderId(value);
-                        setNewAccountApiKey('');
-                        setNewAccountBaseUrl(provider ? normalizeProviderBaseUrl(provider, provider.defaultBaseUrl) : '');
+                      onValueChange={(value) => {
+                        const provider = providers.find((entry) => entry.id === value) ?? null
+                        setNewAccountProviderId(value)
+                        setNewAccountApiKey('')
+                        setNewAccountBaseUrl(
+                          provider
+                            ? normalizeProviderBaseUrl(provider, provider.defaultBaseUrl)
+                            : '',
+                        )
                       }}
                     >
                       <SelectTrigger id="ai-wizard-new-account-provider" className="h-9 text-sm">
                         <SelectValue placeholder={t('admin.aiPanel.placeholders.selectProvider')} />
                       </SelectTrigger>
                       <SelectContent>
-                        {providers.map(entry => (
-                          <SelectItem key={entry.id} value={entry.id}>{entry.displayName}</SelectItem>
+                        {providers.map((entry) => (
+                          <SelectItem key={entry.id} value={entry.id}>
+                            {entry.displayName}
+                          </SelectItem>
                         ))}
                       </SelectContent>
                     </Select>
                   </div>
                   <div className="space-y-2">
-                    <Label htmlFor="ai-wizard-new-account-label">
-                      {t('admin.label')}
-                    </Label>
+                    <Label htmlFor="ai-wizard-new-account-label">{t('admin.label')}</Label>
                     <Input
                       id="ai-wizard-new-account-label"
                       value={newAccountLabel}
-                      onChange={event => setNewAccountLabel(event.target.value)}
+                      onChange={(event) => setNewAccountLabel(event.target.value)}
                       placeholder={t('admin.aiPanel.placeholders.accountLabel')}
                     />
                   </div>
@@ -409,9 +512,7 @@ export function AiBindingWizard({
                   )}
                 </div>
               )}
-              {accountError && (
-                <p className="text-xs text-destructive">{accountError}</p>
-              )}
+              {accountError && <p className="text-xs text-destructive">{accountError}</p>}
             </div>
           ) : (
             <div className="space-y-3">
@@ -424,15 +525,20 @@ export function AiBindingWizard({
                 placeholder={t('admin.aiPanel.placeholders.selectModel')}
                 triggerClassName="h-9 text-sm"
               >
-                {modelOptions.map(entry => {
-                  const priceSuffix = formatModelPriceSuffix(resolveModelPriceSummary(entry.id, prices));
+                {modelOptions.map((entry) => {
+                  const priceSuffix = formatModelPriceSuffix(
+                    resolveModelPriceSummary(entry.id, prices),
+                  )
                   return (
                     <SelectItem key={entry.id} value={entry.id}>
                       {priceSuffix
-                        ? t('admin.aiPanel.modelPricePerMillion', { model: entry.modelName, price: priceSuffix })
+                        ? t('admin.aiPanel.modelPricePerMillion', {
+                            model: entry.modelName,
+                            price: priceSuffix,
+                          })
                         : entry.modelName}
                     </SelectItem>
-                  );
+                  )
                 })}
               </FormSelectField>
 
@@ -496,8 +602,22 @@ export function AiBindingWizard({
             {t('admin.cancel')}
           </Button>
           {step === 'account' ? (
-            <Button disabled={!canAdvanceFromAccount || accountBusy} onClick={() => void goToModelStep()}>
-              {accountBusy ? <><Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" /> {t('admin.saving')}</> : <>{t('admin.aiWizard.continue')}<ArrowRight className="ml-1.5 h-3.5 w-3.5" /></>}
+            <Button
+              disabled={!canAdvanceFromAccount || accountBusy}
+              onClick={async () => {
+                await goToModelStep()
+              }}
+            >
+              {accountBusy ? (
+                <>
+                  <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" /> {t('admin.saving')}
+                </>
+              ) : (
+                <>
+                  {t('admin.aiWizard.continue')}
+                  <ArrowRight className="ml-1.5 h-3.5 w-3.5" />
+                </>
+              )}
             </Button>
           ) : (
             <>
@@ -507,14 +627,22 @@ export function AiBindingWizard({
               </Button>
               <Button
                 disabled={!bindingForm.formState.isValid || bindingBusy}
-                onClick={() => void submitBinding()}
+                onClick={async () => {
+                  await submitBinding()
+                }}
               >
-                {bindingBusy ? <><Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" /> {t('admin.saving')}</> : t('admin.aiWizard.createBinding')}
+                {bindingBusy ? (
+                  <>
+                    <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" /> {t('admin.saving')}
+                  </>
+                ) : (
+                  t('admin.aiWizard.createBinding')
+                )}
               </Button>
             </>
           )}
         </DialogFooter>
       </DialogContent>
     </Dialog>
-  );
+  )
 }

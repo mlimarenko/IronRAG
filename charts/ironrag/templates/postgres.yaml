@@ -39,21 +39,37 @@ spec:
         {{- include "ironrag.selectorLabels" . | nindent 8 }}
         app.kubernetes.io/component: postgres
     spec:
+      automountServiceAccountToken: false
       securityContext:
+        runAsNonRoot: true
+        runAsUser: 999
+        runAsGroup: 999
         fsGroup: 999
+        seccompProfile:
+          type: RuntimeDefault
       containers:
         - name: postgres
           image: "{{ .Values.dependencies.postgres.image.repository }}:{{ .Values.dependencies.postgres.image.tag }}"
           imagePullPolicy: {{ .Values.dependencies.postgres.image.pullPolicy }}
           securityContext:
+            runAsNonRoot: true
+            runAsUser: 999
+            runAsGroup: 999
+            readOnlyRootFilesystem: true
             allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
           env:
             - name: POSTGRES_DB
               value: {{ .Values.dependencies.postgres.database | quote }}
             - name: POSTGRES_USER
               value: {{ .Values.dependencies.postgres.username | quote }}
             - name: POSTGRES_PASSWORD
-              value: {{ .Values.dependencies.postgres.password | quote }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "ironrag.bundledDependencySecretName" . }}
+                  key: IRONRAG_POSTGRES_PASSWORD
           ports:
             - containerPort: 5432
               name: tcp
@@ -76,6 +92,8 @@ spec:
           volumeMounts:
             - name: data
               mountPath: /var/lib/postgresql
+            - name: socket
+              mountPath: /var/run/postgresql
             # Postgres parallel-query gathers allocate dynamic-shared-memory
             # segments in /dev/shm. Kubernetes mounts /dev/shm as a 64Mi
             # emptyDir by default, which large graph-topology scans or a
@@ -93,6 +111,8 @@ spec:
         - name: data
           persistentVolumeClaim:
             claimName: {{ include "ironrag.fullname" . }}-postgres
+        - name: socket
+          emptyDir: {}
         - name: dshm
           emptyDir:
             medium: Memory

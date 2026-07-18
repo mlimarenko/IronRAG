@@ -2,13 +2,11 @@ use crate::{
     domains::ops::{
         OpsAsyncOperation, OpsAsyncOperationStatus, OpsLibraryState, OpsLibraryWarning,
     },
-    interfaces::http::ops::{
-        build_attention_items_bounded, build_documents_overview_from_metrics, map_attention_item,
-    },
+    interfaces::http::ops::{build_attention_items_bounded, map_attention_item},
 };
 use chrono::Utc;
 use ironrag_contracts::{
-    documents::{DocumentReadiness, DocumentStatus, DocumentSummary, LibraryDocumentMetrics},
+    documents::{DocumentReadiness, DocumentStatus, DocumentSummary},
     graph::{GraphStatus, GraphSurface},
 };
 use serde_json::json;
@@ -133,24 +131,6 @@ fn dashboard_attention_routes_document_lifecycle_signals_to_filtered_documents()
             .map(|item| item.route_path.as_str()),
         Some("/documents?status=failed"),
     );
-}
-
-#[test]
-fn dashboard_overview_does_not_fold_canceled_documents_into_failed_count() {
-    let overview = build_documents_overview_from_metrics(&LibraryDocumentMetrics {
-        total: 7,
-        ready: 3,
-        processing: 1,
-        queued: 1,
-        failed: 1,
-        canceled: 1,
-        graph_ready: 2,
-        graph_sparse: 1,
-        recomputed_at: Utc::now(),
-    });
-
-    assert_eq!(overview.failed_documents, 1);
-    assert_eq!(overview.processing_documents, 2);
 }
 
 #[test]

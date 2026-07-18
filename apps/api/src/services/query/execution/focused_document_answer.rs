@@ -26,9 +26,7 @@ pub(crate) fn build_focused_document_answer(
     .into_iter()
     .find(|intent| intents.contains(intent))?;
     match intent {
-        QuestionIntent::FocusedFormatsUnderTest => {
-            extract_formats_under_test_answer(&document_chunks)
-        }
+        QuestionIntent::FocusedFormatsUnderTest => None,
         QuestionIntent::FocusedSecondaryHeading => {
             extract_secondary_document_heading(&document_chunks)
         }
@@ -57,29 +55,6 @@ fn focused_or_single_document_chunks<'a>(
     (unique_document_ids.len() == 1).then(|| chunks.iter().collect::<Vec<_>>())
 }
 
-fn extract_formats_under_test_answer(document_chunks: &[&RuntimeMatchedChunk]) -> Option<String> {
-    for chunk in document_chunks {
-        for line in chunk.source_text.lines().map(str::trim) {
-            let lowered = line.to_lowercase();
-            if !lowered.contains("formats under test") {
-                continue;
-            }
-            let Some((_, remainder)) = line.split_once(':') else {
-                continue;
-            };
-            let formats = remainder
-                .split(',')
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .collect::<Vec<_>>();
-            if !formats.is_empty() {
-                return Some(formats.join(", "));
-            }
-        }
-    }
-    None
-}
-
 fn extract_primary_document_heading(document_chunks: &[&RuntimeMatchedChunk]) -> Option<String> {
     document_heading_lines(document_chunks).into_iter().next()
 }
@@ -95,6 +70,9 @@ fn extract_secondary_document_heading(document_chunks: &[&RuntimeMatchedChunk]) 
 
 fn extract_inline_secondary_heading(document_chunks: &[&RuntimeMatchedChunk]) -> Option<String> {
     for chunk in document_chunks {
+        if !chunk_may_contain_heading(chunk) {
+            continue;
+        }
         let subjects = inline_secondary_heading_subjects(&chunk.excerpt, &chunk.document_label);
         for line in chunk.source_text.lines().map(str::trim) {
             for subject in &subjects {
@@ -146,6 +124,9 @@ fn document_heading_lines(document_chunks: &[&RuntimeMatchedChunk]) -> Vec<Strin
     let mut headings = Vec::<String>::new();
     let mut seen = HashSet::<String>::new();
     for chunk in document_chunks {
+        if !chunk_may_contain_heading(chunk) {
+            continue;
+        }
         for line in chunk.source_text.lines() {
             let Some(candidate) = normalize_heading_line(line) else {
                 continue;
@@ -161,12 +142,14 @@ fn document_heading_lines(document_chunks: &[&RuntimeMatchedChunk]) -> Vec<Strin
     headings
 }
 
+fn chunk_may_contain_heading(chunk: &RuntimeMatchedChunk) -> bool {
+    chunk.chunk_kind.as_deref().is_none_or(|kind| kind == "heading")
+}
+
 fn normalize_heading_line(line: &str) -> Option<String> {
     let candidate = line.trim().trim_start_matches('#').trim();
     if candidate.is_empty()
         || candidate.len() > 120
-        || candidate.starts_with("Source:")
-        || candidate.starts_with("Source type:")
         || candidate.starts_with("http://")
         || candidate.starts_with("https://")
         || candidate.starts_with('/')

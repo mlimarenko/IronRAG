@@ -4,9 +4,9 @@ SwaggerUIBundle({
   docExpansion: 'list',
   defaultModelsExpandDepth: -1,
   requestInterceptor: function (req) {
-    req.credentials = 'include';
-    return req;
+    req.credentials = 'include'
+    return req
   },
   presets: [SwaggerUIBundle.presets.apis],
   layout: 'BaseLayout',
-});
+})

@@ -1,11 +1,14 @@
 use axum::{
     Json, Router,
     extract::{Path, Query, State},
-    routing::{get, post, put},
+    http::{HeaderValue, StatusCode, header},
+    response::IntoResponse,
+    routing::{get, post},
 };
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
+use zeroize::Zeroize as _;
 
 use crate::{
     app::state::AppState,
@@ -26,8 +29,8 @@ use crate::{
         router_support::{ApiError, RequestId},
     },
     services::ai_catalog_service::{
-        AiScopeRef, CreateAiAccountCommand, CreateAiBindingCommand, CreateBindingValidationCommand,
-        CreateModelCatalogCommand, CreateProviderCatalogCommand,
+        AiAccountSummary, AiScopeRef, CreateAiAccountCommand, CreateAiBindingCommand,
+        CreateBindingValidationCommand, CreateModelCatalogCommand, CreateProviderCatalogCommand,
         CreateWorkspacePriceOverrideCommand, UpdateAiAccountCommand, UpdateAiBindingCommand,
         UpdateModelCatalogCommand, UpdateProviderCatalogCommand,
         UpdateWorkspacePriceOverrideCommand,
@@ -115,7 +118,7 @@ pub struct UpdateModelCatalogRequest {
     pub metadata_json: Option<serde_json::Value>,
 }
 
-#[derive(Debug, Deserialize, utoipa::ToSchema)]
+#[derive(Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct CreateAiAccountRequest {
     pub scope_kind: AiScopeKind,
@@ -127,13 +130,56 @@ pub struct CreateAiAccountRequest {
     pub base_url: Option<String>,
 }
 
-#[derive(Debug, Deserialize, utoipa::ToSchema)]
+impl Drop for CreateAiAccountRequest {
+    fn drop(&mut self) {
+        if let Some(api_key) = self.api_key.as_mut() {
+            api_key.zeroize();
+        }
+    }
+}
+
+impl std::fmt::Debug for CreateAiAccountRequest {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("CreateAiAccountRequest")
+            .field("scope_kind", &self.scope_kind)
+            .field("workspace_id", &self.workspace_id)
+            .field("library_id", &self.library_id)
+            .field("provider_catalog_id", &self.provider_catalog_id)
+            .field("label", &self.label)
+            .field("api_key", &self.api_key.as_ref().map(|_| "<redacted>"))
+            .field("base_url", &self.base_url.as_ref().map(|_| "<redacted>"))
+            .finish()
+    }
+}
+
+#[derive(Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct UpdateAiAccountRequest {
     pub label: String,
     pub api_key: Option<String>,
     pub base_url: Option<String>,
     pub credential_state: String,
+}
+
+impl Drop for UpdateAiAccountRequest {
+    fn drop(&mut self) {
+        if let Some(api_key) = self.api_key.as_mut() {
+            api_key.zeroize();
+        }
+    }
+}
+
+impl std::fmt::Debug for UpdateAiAccountRequest {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("UpdateAiAccountRequest")
+            .field("label", &self.label)
+            .field("api_key", &self.api_key.as_ref().map(|_| "<redacted>"))
+            .field("base_url", &self.base_url.as_ref().map(|_| "<redacted>"))
+            .field("credential_state", &self.credential_state)
+            .finish()
+    }
 }
 
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
@@ -290,16 +336,45 @@ pub struct BindingValidationResponse {
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/ai/providers", get(list_providers).post(create_provider))
-        .route("/ai/providers/{provider_id}", put(update_provider).delete(delete_provider))
+        .route(
+            "/ai/providers/{provider_id}",
+            get(get_provider).patch(update_provider).delete(delete_provider),
+        )
         .route("/ai/models", get(list_models).post(create_model))
-        .route("/ai/models/{model_id}", put(update_model).delete(delete_model))
-        .route("/ai/prices", get(list_prices).post(create_price_override))
-        .route("/ai/prices/{price_id}", put(update_price_override).delete(delete_price_override))
+        .route("/ai/models/{model_id}", get(get_model).patch(update_model).delete(delete_model))
+        .route("/ai/prices", get(list_prices))
+        .route("/ai/price-overrides", post(create_price_override))
+        .route(
+            "/ai/price-overrides/{price_id}",
+            get(get_price_override).patch(update_price_override).delete(delete_price_override),
+        )
         .route("/ai/accounts", get(list_accounts).post(create_account))
-        .route("/ai/accounts/{account_id}", put(update_account).delete(delete_account))
+        .route(
+            "/ai/accounts/{account_id}",
+            get(get_account).patch(update_account).delete(delete_account),
+        )
         .route("/ai/bindings", get(list_bindings).post(create_binding))
-        .route("/ai/bindings/{binding_id}", put(update_binding).delete(delete_binding))
-        .route("/ai/bindings/{binding_id}/validate", post(validate_binding))
+        .route(
+            "/ai/bindings/{binding_id}",
+            get(get_binding).patch(update_binding).delete(delete_binding),
+        )
+        .route(
+            "/ai/bindings/{binding_id}/validations",
+            get(list_binding_validations).post(create_binding_validation),
+        )
+        .route("/ai/bindings/{binding_id}/validations/{validation_id}", get(get_binding_validation))
+}
+
+/// Builds a sync-create `201 Created` response with a `Location` header
+/// pointing at the newly created resource's own item-read endpoint (see
+/// router_support conventions established by the Content domain reference
+/// implementation).
+fn created_response<T: Serialize>(location: &str, body: T) -> axum::response::Response {
+    let mut response = (StatusCode::CREATED, Json(body)).into_response();
+    if let Ok(value) = HeaderValue::from_str(location) {
+        response.headers_mut().insert(header::LOCATION, value);
+    }
+    response
 }
 
 #[utoipa::path(
@@ -375,7 +450,7 @@ pub async fn list_models(
     operation_id = "createAiProvider",
     request_body = CreateProviderCatalogRequest,
     responses(
-        (status = 200, description = "Newly created AI provider catalog entry", body = ProviderCatalogEntryResponse),
+        (status = 201, description = "Newly created AI provider catalog entry", body = ProviderCatalogEntryResponse),
         (status = 401, description = "Caller is not authenticated"),
         (status = 403, description = "Caller is not a system administrator"),
     ),
@@ -386,7 +461,7 @@ pub async fn create_provider(
     State(state): State<AppState>,
     request_id: Option<axum::Extension<RequestId>>,
     Json(payload): Json<CreateProviderCatalogRequest>,
-) -> Result<Json<ProviderCatalogEntryResponse>, ApiError> {
+) -> Result<axum::response::Response, ApiError> {
     authorize_ai_catalog_admin(&auth)?;
     let entry = state
         .canonical_services
@@ -417,11 +492,35 @@ pub async fn create_provider(
         vec![instance_subject("provider_catalog", entry.id)],
     )
     .await;
+    Ok(created_response(&format!("/v1/ai/providers/{}", entry.id), map_provider(entry)))
+}
+
+#[utoipa::path(
+    get,
+    path = "/v1/ai/providers/{providerId}",
+    tag = "ai",
+    operation_id = "getAiProvider",
+    params(("providerId" = uuid::Uuid, Path, description = "AI provider catalog identifier")),
+    responses(
+        (status = 200, description = "AI provider catalog entry", body = ProviderCatalogEntryResponse),
+        (status = 401, description = "Caller is not authenticated"),
+        (status = 404, description = "Provider not found"),
+    ),
+)]
+#[tracing::instrument(level = "info", name = "http.get_provider", skip_all, fields(provider_id = %provider_id))]
+pub async fn get_provider(
+    auth: AuthContext,
+    State(state): State<AppState>,
+    Path(provider_id): Path<Uuid>,
+) -> Result<Json<ProviderCatalogEntryResponse>, ApiError> {
+    auth.require_any_scope(POLICY_MCP_DISCOVERY)?;
+    let entry =
+        state.canonical_services.ai_catalog.get_provider_catalog(&state, provider_id).await?;
     Ok(Json(map_provider(entry)))
 }
 
 #[utoipa::path(
-    put,
+    patch,
     path = "/v1/ai/providers/{providerId}",
     tag = "ai",
     operation_id = "updateAiProvider",
@@ -476,6 +575,10 @@ pub async fn update_provider(
     Ok(Json(map_provider(entry)))
 }
 
+/// Real hard delete; 409 when a model still references this provider. The
+/// reversible pause is `PATCH {lifecycleState:"disabled"}` above — the two
+/// are distinct operations (obtained by not deleting FK references but
+/// blocking on them), not two paths to the same result.
 #[utoipa::path(
     delete,
     path = "/v1/ai/providers/{providerId}",
@@ -483,10 +586,11 @@ pub async fn update_provider(
     operation_id = "deleteAiProvider",
     params(("providerId" = uuid::Uuid, Path, description = "AI provider catalog identifier")),
     responses(
-        (status = 200, description = "Provider catalog entry was disabled", body = serde_json::Value),
+        (status = 204, description = "Provider catalog entry deleted"),
         (status = 401, description = "Caller is not authenticated"),
         (status = 403, description = "Caller is not a system administrator"),
         (status = 404, description = "Provider not found"),
+        (status = 409, description = "Provider is still referenced by a model"),
     ),
 )]
 #[tracing::instrument(level = "info", name = "http.delete_provider", skip_all, fields(provider_id = %provider_id))]
@@ -495,25 +599,26 @@ pub async fn delete_provider(
     State(state): State<AppState>,
     request_id: Option<axum::Extension<RequestId>>,
     Path(provider_id): Path<Uuid>,
-) -> Result<Json<serde_json::Value>, ApiError> {
+) -> Result<StatusCode, ApiError> {
     authorize_ai_catalog_admin(&auth)?;
     let entry =
-        state.canonical_services.ai_catalog.disable_provider_catalog(&state, provider_id).await?;
+        state.canonical_services.ai_catalog.get_provider_catalog(&state, provider_id).await?;
+    state.canonical_services.ai_catalog.delete_provider_catalog(&state, provider_id).await?;
     record_ai_audit_event(
         &state,
         &auth,
         request_id.map(|value| value.0.0),
-        "ai.provider_catalog.disable",
+        "ai.provider_catalog.delete",
         "succeeded",
-        Some(format!("AI provider {} disabled", entry.display_name)),
+        Some(format!("AI provider {} deleted", entry.display_name)),
         Some(format!(
-            "principal {} disabled AI provider catalog entry {}",
+            "principal {} deleted AI provider catalog entry {}",
             auth.principal_id, entry.id
         )),
         vec![instance_subject("provider_catalog", entry.id)],
     )
     .await;
-    Ok(Json(serde_json::json!({ "disabled": true })))
+    Ok(StatusCode::NO_CONTENT)
 }
 
 #[utoipa::path(
@@ -523,7 +628,7 @@ pub async fn delete_provider(
     operation_id = "createAiModel",
     request_body = CreateModelCatalogRequest,
     responses(
-        (status = 200, description = "Newly created AI model catalog entry", body = ModelCatalogEntryResponse),
+        (status = 201, description = "Newly created AI model catalog entry", body = ModelCatalogEntryResponse),
         (status = 401, description = "Caller is not authenticated"),
         (status = 403, description = "Caller is not a system administrator"),
     ),
@@ -534,7 +639,7 @@ pub async fn create_model(
     State(state): State<AppState>,
     request_id: Option<axum::Extension<RequestId>>,
     Json(payload): Json<CreateModelCatalogRequest>,
-) -> Result<Json<ModelCatalogEntryResponse>, ApiError> {
+) -> Result<axum::response::Response, ApiError> {
     authorize_ai_catalog_admin(&auth)?;
     let entry = state
         .canonical_services
@@ -568,15 +673,38 @@ pub async fn create_model(
         vec![instance_subject("model_catalog", entry.id)],
     )
     .await;
-    Ok(Json(map_model(ResolvedModelCatalogEntry {
-        model: entry,
-        availability_state: ModelAvailabilityState::Unknown,
-        available_account_ids: Vec::new(),
-    })))
+    let model_id = entry.id;
+    let resolved =
+        state.canonical_services.ai_catalog.get_resolved_model_catalog(&state, model_id).await?;
+    Ok(created_response(&format!("/v1/ai/models/{model_id}"), map_model(resolved)))
 }
 
 #[utoipa::path(
-    put,
+    get,
+    path = "/v1/ai/models/{modelId}",
+    tag = "ai",
+    operation_id = "getAiModel",
+    params(("modelId" = uuid::Uuid, Path, description = "AI model catalog identifier")),
+    responses(
+        (status = 200, description = "AI model catalog entry with its resolved availability", body = ModelCatalogEntryResponse),
+        (status = 401, description = "Caller is not authenticated"),
+        (status = 404, description = "Model not found"),
+    ),
+)]
+#[tracing::instrument(level = "info", name = "http.get_model", skip_all, fields(model_id = %model_id))]
+pub async fn get_model(
+    auth: AuthContext,
+    State(state): State<AppState>,
+    Path(model_id): Path<Uuid>,
+) -> Result<Json<ModelCatalogEntryResponse>, ApiError> {
+    auth.require_any_scope(POLICY_MCP_DISCOVERY)?;
+    let resolved =
+        state.canonical_services.ai_catalog.get_resolved_model_catalog(&state, model_id).await?;
+    Ok(Json(map_model(resolved)))
+}
+
+#[utoipa::path(
+    patch,
     path = "/v1/ai/models/{modelId}",
     tag = "ai",
     operation_id = "updateAiModel",
@@ -631,13 +759,15 @@ pub async fn update_model(
         vec![instance_subject("model_catalog", entry.id)],
     )
     .await;
-    Ok(Json(map_model(ResolvedModelCatalogEntry {
-        model: entry,
-        availability_state: ModelAvailabilityState::Unknown,
-        available_account_ids: Vec::new(),
-    })))
+    let resolved =
+        state.canonical_services.ai_catalog.get_resolved_model_catalog(&state, model_id).await?;
+    Ok(Json(map_model(resolved)))
 }
 
+/// Real hard delete; 409 when a price override or binding still references
+/// this model. The reversible pause is `PATCH {lifecycleState:"disabled"}`
+/// above — the two are distinct operations, not two paths to the same
+/// result.
 #[utoipa::path(
     delete,
     path = "/v1/ai/models/{modelId}",
@@ -645,10 +775,11 @@ pub async fn update_model(
     operation_id = "deleteAiModel",
     params(("modelId" = uuid::Uuid, Path, description = "AI model catalog identifier")),
     responses(
-        (status = 200, description = "Model catalog entry was disabled", body = serde_json::Value),
+        (status = 204, description = "Model catalog entry deleted"),
         (status = 401, description = "Caller is not authenticated"),
         (status = 403, description = "Caller is not a system administrator"),
         (status = 404, description = "Model not found"),
+        (status = 409, description = "Model is still referenced by a price override or binding"),
     ),
 )]
 #[tracing::instrument(level = "info", name = "http.delete_model", skip_all, fields(model_id = %model_id))]
@@ -657,24 +788,25 @@ pub async fn delete_model(
     State(state): State<AppState>,
     request_id: Option<axum::Extension<RequestId>>,
     Path(model_id): Path<Uuid>,
-) -> Result<Json<serde_json::Value>, ApiError> {
+) -> Result<StatusCode, ApiError> {
     authorize_ai_catalog_admin(&auth)?;
-    let entry = state.canonical_services.ai_catalog.disable_model_catalog(&state, model_id).await?;
+    let entry = state.canonical_services.ai_catalog.get_model_catalog(&state, model_id).await?;
+    state.canonical_services.ai_catalog.delete_model_catalog(&state, model_id).await?;
     record_ai_audit_event(
         &state,
         &auth,
         request_id.map(|value| value.0.0),
-        "ai.model_catalog.disable",
+        "ai.model_catalog.delete",
         "succeeded",
-        Some(format!("AI model {} disabled", entry.model_name)),
+        Some(format!("AI model {} deleted", entry.model_name)),
         Some(format!(
-            "principal {} disabled AI model catalog entry {}",
+            "principal {} deleted AI model catalog entry {}",
             auth.principal_id, entry.id
         )),
         vec![instance_subject("model_catalog", entry.id)],
     )
     .await;
-    Ok(Json(serde_json::json!({ "disabled": true })))
+    Ok(StatusCode::NO_CONTENT)
 }
 
 #[utoipa::path(
@@ -717,6 +849,30 @@ pub async fn list_prices(
 
 #[utoipa::path(
     get,
+    path = "/v1/ai/price-overrides/{overrideId}",
+    tag = "ai",
+    operation_id = "getAiPriceOverride",
+    params(("overrideId" = uuid::Uuid, Path, description = "Price catalog entry identifier")),
+    responses(
+        (status = 200, description = "Price catalog entry", body = PriceCatalogEntryResponse),
+        (status = 401, description = "Caller is not authenticated"),
+        (status = 404, description = "Price override not found"),
+    ),
+)]
+#[tracing::instrument(level = "info", name = "http.get_price_override", skip_all, fields(price_id = %price_id))]
+pub async fn get_price_override(
+    auth: AuthContext,
+    State(state): State<AppState>,
+    Path(price_id): Path<Uuid>,
+) -> Result<Json<PriceCatalogEntryResponse>, ApiError> {
+    auth.require_any_scope(POLICY_MCP_DISCOVERY)?;
+    let entry =
+        state.canonical_services.ai_catalog.get_price_catalog_entry(&state, price_id).await?;
+    Ok(Json(map_price(entry)))
+}
+
+#[utoipa::path(
+    get,
     path = "/v1/ai/accounts",
     tag = "ai",
     operation_id = "listAiAccounts",
@@ -747,7 +903,7 @@ pub async fn list_accounts(
             query.library_id,
         )
         .await?;
-        state.canonical_services.ai_catalog.list_accounts_exact(&state, scope).await?
+        state.canonical_services.ai_catalog.list_account_summaries_exact(&state, scope).await?
     } else {
         let (workspace_id, library_id) =
             authorize_visible_ai_context(&auth, &state, query.workspace_id, query.library_id)
@@ -755,10 +911,41 @@ pub async fn list_accounts(
         state
             .canonical_services
             .ai_catalog
-            .list_visible_accounts(&state, workspace_id, library_id)
+            .list_visible_account_summaries(&state, workspace_id, library_id)
             .await?
     };
-    Ok(Json(entries.into_iter().map(map_account).collect()))
+    Ok(Json(entries.into_iter().map(map_account_summary).collect()))
+}
+
+#[utoipa::path(
+    get,
+    path = "/v1/ai/accounts/{accountId}",
+    tag = "ai",
+    operation_id = "getAiAccount",
+    params(("accountId" = uuid::Uuid, Path, description = "AI account identifier")),
+    responses(
+        (status = 200, description = "AI account (secret redacted, same as the list view)", body = AiAccountResponse),
+        (status = 401, description = "Caller is not authenticated"),
+        (status = 403, description = "Caller cannot view accounts in the account's scope"),
+        (status = 404, description = "Account not found"),
+    ),
+)]
+#[tracing::instrument(level = "info", name = "http.get_account", skip_all, fields(account_id = %account_id))]
+pub async fn get_account(
+    auth: AuthContext,
+    State(state): State<AppState>,
+    Path(account_id): Path<Uuid>,
+) -> Result<Json<AiAccountResponse>, ApiError> {
+    let account = state.canonical_services.ai_catalog.get_account(&state, account_id).await?;
+    authorize_exact_ai_scope(
+        &auth,
+        &state,
+        account.scope_kind,
+        account.workspace_id,
+        account.library_id,
+    )
+    .await?;
+    Ok(Json(map_account(account)))
 }
 
 #[utoipa::path(
@@ -796,13 +983,44 @@ pub async fn list_bindings(
 }
 
 #[utoipa::path(
+    get,
+    path = "/v1/ai/bindings/{bindingId}",
+    tag = "ai",
+    operation_id = "getAiLibraryBinding",
+    params(("bindingId" = uuid::Uuid, Path, description = "Binding identifier")),
+    responses(
+        (status = 200, description = "Binding", body = AiBindingResponse),
+        (status = 401, description = "Caller is not authenticated"),
+        (status = 403, description = "Caller cannot view bindings in the binding's scope"),
+        (status = 404, description = "Binding not found"),
+    ),
+)]
+#[tracing::instrument(level = "info", name = "http.get_binding", skip_all, fields(binding_id = %binding_id))]
+pub async fn get_binding(
+    auth: AuthContext,
+    State(state): State<AppState>,
+    Path(binding_id): Path<Uuid>,
+) -> Result<Json<AiBindingResponse>, ApiError> {
+    let binding = state.canonical_services.ai_catalog.get_binding(&state, binding_id).await?;
+    authorize_exact_ai_scope(
+        &auth,
+        &state,
+        binding.scope_kind,
+        binding.workspace_id,
+        binding.library_id,
+    )
+    .await?;
+    Ok(Json(map_binding(binding)))
+}
+
+#[utoipa::path(
     post,
     path = "/v1/ai/accounts",
     tag = "ai",
     operation_id = "createAiAccount",
     request_body = CreateAiAccountRequest,
     responses(
-        (status = 200, description = "Newly created AI account", body = AiAccountResponse),
+        (status = 201, description = "Newly created AI account", body = AiAccountResponse),
         (status = 401, description = "Caller is not authenticated"),
         (status = 403, description = "Caller cannot administer accounts in the requested scope"),
     ),
@@ -817,8 +1035,8 @@ pub async fn create_account(
     auth: AuthContext,
     State(state): State<AppState>,
     request_id: Option<axum::Extension<RequestId>>,
-    Json(payload): Json<CreateAiAccountRequest>,
-) -> Result<Json<AiAccountResponse>, ApiError> {
+    Json(mut payload): Json<CreateAiAccountRequest>,
+) -> Result<axum::response::Response, ApiError> {
     let request_id = request_id.map(|value| value.0.0);
     let scope = authorize_exact_ai_scope(
         &auth,
@@ -838,9 +1056,9 @@ pub async fn create_account(
                 workspace_id: scope.workspace_id,
                 library_id: scope.library_id,
                 provider_catalog_id: payload.provider_catalog_id,
-                label: payload.label,
-                api_key: payload.api_key,
-                base_url: payload.base_url,
+                label: std::mem::take(&mut payload.label),
+                api_key: payload.api_key.take(),
+                base_url: payload.base_url.take(),
                 created_by_principal_id: Some(auth.principal_id),
             },
         )
@@ -866,7 +1084,8 @@ pub async fn create_account(
         )],
     )
     .await;
-    Ok(Json(map_account(entry)))
+    let account_id = entry.id;
+    Ok(created_response(&format!("/v1/ai/accounts/{account_id}"), map_account(entry)))
 }
 
 #[tracing::instrument(
@@ -876,7 +1095,7 @@ pub async fn create_account(
     fields(account_id = %account_id)
 )]
 #[utoipa::path(
-    put,
+    patch,
     path = "/v1/ai/accounts/{accountId}",
     tag = "ai",
     operation_id = "updateAiAccount",
@@ -894,7 +1113,7 @@ pub async fn update_account(
     State(state): State<AppState>,
     request_id: Option<axum::Extension<RequestId>>,
     Path(account_id): Path<Uuid>,
-    Json(payload): Json<UpdateAiAccountRequest>,
+    Json(mut payload): Json<UpdateAiAccountRequest>,
 ) -> Result<Json<AiAccountResponse>, ApiError> {
     let account = state.canonical_services.ai_catalog.get_account(&state, account_id).await?;
     authorize_exact_ai_scope(
@@ -912,10 +1131,10 @@ pub async fn update_account(
             &state,
             UpdateAiAccountCommand {
                 account_id,
-                label: payload.label,
-                api_key: payload.api_key,
-                base_url: payload.base_url,
-                credential_state: payload.credential_state,
+                label: std::mem::take(&mut payload.label),
+                api_key: payload.api_key.take(),
+                base_url: payload.base_url.take(),
+                credential_state: std::mem::take(&mut payload.credential_state),
             },
         )
         .await?;
@@ -956,7 +1175,7 @@ pub async fn update_account(
     operation_id = "deleteAiAccount",
     params(("accountId" = uuid::Uuid, Path, description = "AI account identifier")),
     responses(
-        (status = 200, description = "Empty acknowledgement payload", body = serde_json::Value),
+        (status = 204, description = "Account deleted"),
         (status = 401, description = "Caller is not authenticated"),
         (status = 403, description = "Caller cannot administer accounts in the account's scope"),
         (status = 404, description = "Account not found"),
@@ -968,7 +1187,7 @@ pub async fn delete_account(
     State(state): State<AppState>,
     request_id: Option<axum::Extension<RequestId>>,
     Path(account_id): Path<Uuid>,
-) -> Result<Json<serde_json::Value>, ApiError> {
+) -> Result<StatusCode, ApiError> {
     let account = state.canonical_services.ai_catalog.get_account(&state, account_id).await?;
     authorize_exact_ai_scope(
         &auth,
@@ -1000,7 +1219,7 @@ pub async fn delete_account(
         )],
     )
     .await;
-    Ok(Json(serde_json::json!({ "deleted": true })))
+    Ok(StatusCode::NO_CONTENT)
 }
 
 #[tracing::instrument(
@@ -1011,12 +1230,12 @@ pub async fn delete_account(
 )]
 #[utoipa::path(
     post,
-    path = "/v1/ai/prices",
+    path = "/v1/ai/price-overrides",
     tag = "ai",
     operation_id = "createAiPriceOverride",
     request_body = CreateWorkspacePriceOverrideRequest,
     responses(
-        (status = 200, description = "Newly created workspace price override", body = PriceCatalogEntryResponse),
+        (status = 201, description = "Newly created workspace price override", body = PriceCatalogEntryResponse),
         (status = 401, description = "Caller is not authenticated"),
         (status = 403, description = "Caller cannot administer pricing for the workspace"),
     ),
@@ -1026,7 +1245,7 @@ pub async fn create_price_override(
     State(state): State<AppState>,
     request_id: Option<axum::Extension<RequestId>>,
     Json(payload): Json<CreateWorkspacePriceOverrideRequest>,
-) -> Result<Json<PriceCatalogEntryResponse>, ApiError> {
+) -> Result<axum::response::Response, ApiError> {
     authorize_workspace_permission(&auth, payload.workspace_id, POLICY_PROVIDERS_ADMIN)?;
     let entry = state
         .canonical_services
@@ -1064,7 +1283,8 @@ pub async fn create_price_override(
         }],
     )
     .await;
-    Ok(Json(map_price(entry)))
+    let price_id = entry.id;
+    Ok(created_response(&format!("/v1/ai/price-overrides/{price_id}"), map_price(entry)))
 }
 
 #[tracing::instrument(
@@ -1074,11 +1294,11 @@ pub async fn create_price_override(
     fields(price_id = %price_id)
 )]
 #[utoipa::path(
-    put,
-    path = "/v1/ai/prices/{priceId}",
+    patch,
+    path = "/v1/ai/price-overrides/{overrideId}",
     tag = "ai",
     operation_id = "updateAiPriceOverride",
-    params(("priceId" = uuid::Uuid, Path, description = "Price catalog entry identifier")),
+    params(("overrideId" = uuid::Uuid, Path, description = "Price catalog entry identifier")),
     request_body = UpdateWorkspacePriceOverrideRequest,
     responses(
         (status = 200, description = "Updated workspace price override", body = PriceCatalogEntryResponse),
@@ -1150,12 +1370,12 @@ pub async fn update_price_override(
 )]
 #[utoipa::path(
     delete,
-    path = "/v1/ai/prices/{priceId}",
+    path = "/v1/ai/price-overrides/{overrideId}",
     tag = "ai",
     operation_id = "deleteAiPriceOverride",
-    params(("priceId" = uuid::Uuid, Path, description = "Price catalog entry identifier")),
+    params(("overrideId" = uuid::Uuid, Path, description = "Price catalog entry identifier")),
     responses(
-        (status = 200, description = "Empty acknowledgement payload", body = serde_json::Value),
+        (status = 204, description = "Price override deleted"),
         (status = 400, description = "System catalog prices are read-only"),
         (status = 401, description = "Caller is not authenticated"),
         (status = 403, description = "Caller cannot administer pricing for the workspace"),
@@ -1168,7 +1388,7 @@ pub async fn delete_price_override(
     State(state): State<AppState>,
     request_id: Option<axum::Extension<RequestId>>,
     Path(price_id): Path<Uuid>,
-) -> Result<Json<serde_json::Value>, ApiError> {
+) -> Result<StatusCode, ApiError> {
     let price =
         state.canonical_services.ai_catalog.get_price_catalog_entry(&state, price_id).await?;
     let workspace_id = price
@@ -1185,7 +1405,7 @@ pub async fn delete_price_override(
         request_id.map(|value| value.0.0),
         "ai.price_override.delete",
         "succeeded",
-        Some(format!("workspace price override {} deleted", price_id)),
+        Some(format!("workspace price override {price_id} deleted")),
         Some(format!(
             "principal {} deleted workspace price override {} in workspace {}",
             auth.principal_id, price_id, workspace_id
@@ -1199,7 +1419,7 @@ pub async fn delete_price_override(
         }],
     )
     .await;
-    Ok(Json(serde_json::json!({ "deleted": true })))
+    Ok(StatusCode::NO_CONTENT)
 }
 
 #[tracing::instrument(
@@ -1215,7 +1435,7 @@ pub async fn delete_price_override(
     operation_id = "createAiLibraryBinding",
     request_body = CreateAiBindingRequest,
     responses(
-        (status = 200, description = "Newly created binding", body = AiBindingResponse),
+        (status = 201, description = "Newly created binding", body = AiBindingResponse),
         (status = 401, description = "Caller is not authenticated"),
         (status = 403, description = "Caller cannot administer bindings in the requested scope"),
     ),
@@ -1225,7 +1445,7 @@ pub async fn create_binding(
     State(state): State<AppState>,
     request_id: Option<axum::Extension<RequestId>>,
     Json(payload): Json<CreateAiBindingRequest>,
-) -> Result<Json<AiBindingResponse>, ApiError> {
+) -> Result<axum::response::Response, ApiError> {
     let scope = authorize_exact_ai_scope(
         &auth,
         &state,
@@ -1276,7 +1496,8 @@ pub async fn create_binding(
         )],
     )
     .await;
-    Ok(Json(map_binding(entry)))
+    let binding_id = entry.id;
+    Ok(created_response(&format!("/v1/ai/bindings/{binding_id}"), map_binding(entry)))
 }
 
 #[tracing::instrument(
@@ -1286,7 +1507,7 @@ pub async fn create_binding(
     fields(binding_id = %binding_id)
 )]
 #[utoipa::path(
-    put,
+    patch,
     path = "/v1/ai/bindings/{bindingId}",
     tag = "ai",
     operation_id = "updateAiLibraryBinding",
@@ -1371,7 +1592,7 @@ pub async fn update_binding(
     operation_id = "deleteAiLibraryBinding",
     params(("bindingId" = uuid::Uuid, Path, description = "Binding identifier")),
     responses(
-        (status = 200, description = "Empty acknowledgement payload", body = serde_json::Value),
+        (status = 204, description = "Binding deleted"),
         (status = 401, description = "Caller is not authenticated"),
         (status = 403, description = "Caller cannot administer bindings in the binding's scope"),
         (status = 404, description = "Binding not found"),
@@ -1382,7 +1603,7 @@ pub async fn delete_binding(
     State(state): State<AppState>,
     request_id: Option<axum::Extension<RequestId>>,
     Path(binding_id): Path<Uuid>,
-) -> Result<Json<serde_json::Value>, ApiError> {
+) -> Result<StatusCode, ApiError> {
     let binding = state.canonical_services.ai_catalog.get_binding(&state, binding_id).await?;
     authorize_exact_ai_scope(
         &auth,
@@ -1414,34 +1635,40 @@ pub async fn delete_binding(
         )],
     )
     .await;
-    Ok(Json(serde_json::json!({ "deleted": true })))
+    Ok(StatusCode::NO_CONTENT)
 }
 
+/// Creates a binding-validation attempt. Resource-shaped replacement for the
+/// former RPC-verb `POST .../validate`: the handler already created a real
+/// record with a `pending` → `succeeded`/`failed` lifecycle (`ai_binding_validation`,
+/// unchanged by this redesign); the defect was the unpollable verb-shaped
+/// form, not the underlying action. `Location` points at the created
+/// validation's own item-read endpoint below.
 #[tracing::instrument(
     level = "info",
-    name = "http.validate_binding",
+    name = "http.create_binding_validation",
     skip_all,
     fields(binding_id = %binding_id)
 )]
 #[utoipa::path(
     post,
-    path = "/v1/ai/bindings/{bindingId}/validate",
+    path = "/v1/ai/bindings/{bindingId}/validations",
     tag = "ai",
-    operation_id = "validateAiLibraryBinding",
+    operation_id = "createAiBindingValidation",
     params(("bindingId" = uuid::Uuid, Path, description = "Binding identifier")),
     responses(
-        (status = 200, description = "Binding validation result", body = BindingValidationResponse),
+        (status = 201, description = "Binding validation attempt created", body = BindingValidationResponse),
         (status = 401, description = "Caller is not authenticated"),
         (status = 403, description = "Caller cannot validate bindings in the binding's scope"),
         (status = 404, description = "Binding not found"),
     ),
 )]
-pub async fn validate_binding(
+pub async fn create_binding_validation(
     auth: AuthContext,
     State(state): State<AppState>,
     request_id: Option<axum::Extension<RequestId>>,
     Path(binding_id): Path<Uuid>,
-) -> Result<Json<BindingValidationResponse>, ApiError> {
+) -> Result<axum::response::Response, ApiError> {
     let binding = state.canonical_services.ai_catalog.get_binding(&state, binding_id).await?;
     authorize_exact_ai_scope(
         &auth,
@@ -1485,7 +1712,95 @@ pub async fn validate_binding(
         )],
     )
     .await;
+    let validation_id = validation.id;
+    Ok(created_response(
+        &format!("/v1/ai/bindings/{binding_id}/validations/{validation_id}"),
+        map_binding_validation(validation),
+    ))
+}
+
+#[tracing::instrument(
+    level = "info",
+    name = "http.get_binding_validation",
+    skip_all,
+    fields(binding_id = %binding_id, validation_id = %validation_id)
+)]
+#[utoipa::path(
+    get,
+    path = "/v1/ai/bindings/{bindingId}/validations/{validationId}",
+    tag = "ai",
+    operation_id = "getAiBindingValidation",
+    params(
+        ("bindingId" = uuid::Uuid, Path, description = "Binding identifier"),
+        ("validationId" = uuid::Uuid, Path, description = "Binding validation attempt identifier"),
+    ),
+    responses(
+        (status = 200, description = "Binding validation outcome", body = BindingValidationResponse),
+        (status = 401, description = "Caller is not authenticated"),
+        (status = 403, description = "Caller cannot view validations in the binding's scope"),
+        (status = 404, description = "Binding or validation not found"),
+    ),
+)]
+pub async fn get_binding_validation(
+    auth: AuthContext,
+    State(state): State<AppState>,
+    Path((binding_id, validation_id)): Path<(Uuid, Uuid)>,
+) -> Result<Json<BindingValidationResponse>, ApiError> {
+    let binding = state.canonical_services.ai_catalog.get_binding(&state, binding_id).await?;
+    authorize_exact_ai_scope(
+        &auth,
+        &state,
+        binding.scope_kind,
+        binding.workspace_id,
+        binding.library_id,
+    )
+    .await?;
+    let validation =
+        state.canonical_services.ai_catalog.get_binding_validation(&state, validation_id).await?;
+    if validation.binding_id != binding_id {
+        return Err(ApiError::resource_not_found("binding_validation", validation_id));
+    }
     Ok(Json(map_binding_validation(validation)))
+}
+
+#[tracing::instrument(
+    level = "info",
+    name = "http.list_binding_validations",
+    skip_all,
+    fields(binding_id = %binding_id, item_count)
+)]
+#[utoipa::path(
+    get,
+    path = "/v1/ai/bindings/{bindingId}/validations",
+    tag = "ai",
+    operation_id = "listAiBindingValidations",
+    params(("bindingId" = uuid::Uuid, Path, description = "Binding identifier")),
+    responses(
+        (status = 200, description = "Validation attempt history for the binding, newest first", body = [BindingValidationResponse]),
+        (status = 401, description = "Caller is not authenticated"),
+        (status = 403, description = "Caller cannot view validations in the binding's scope"),
+        (status = 404, description = "Binding not found"),
+    ),
+)]
+pub async fn list_binding_validations(
+    auth: AuthContext,
+    State(state): State<AppState>,
+    Path(binding_id): Path<Uuid>,
+) -> Result<Json<Vec<BindingValidationResponse>>, ApiError> {
+    let span = tracing::Span::current();
+    let binding = state.canonical_services.ai_catalog.get_binding(&state, binding_id).await?;
+    authorize_exact_ai_scope(
+        &auth,
+        &state,
+        binding.scope_kind,
+        binding.workspace_id,
+        binding.library_id,
+    )
+    .await?;
+    let validations =
+        state.canonical_services.ai_catalog.list_binding_validations(&state, binding_id).await?;
+    span.record("item_count", validations.len());
+    Ok(Json(validations.into_iter().map(map_binding_validation).collect()))
 }
 
 async fn record_ai_audit_event(
@@ -1573,34 +1888,43 @@ fn map_price(entry: PriceCatalogEntry) -> PriceCatalogEntryResponse {
     }
 }
 
-fn map_account(entry: AiAccount) -> AiAccountResponse {
+fn map_account(mut entry: AiAccount) -> AiAccountResponse {
+    let api_key_summary = configured_api_key_summary(
+        entry.api_key.as_deref().is_some_and(|value| !value.trim().is_empty()),
+    );
     AiAccountResponse {
         id: entry.id,
         scope_kind: entry.scope_kind,
         workspace_id: entry.workspace_id,
         library_id: entry.library_id,
         provider_catalog_id: entry.provider_catalog_id,
-        label: entry.label,
-        base_url: entry.base_url,
-        api_key_summary: summarize_api_key(entry.api_key.as_deref()),
-        credential_state: entry.credential_state,
+        label: std::mem::take(&mut entry.label),
+        base_url: entry.base_url.take(),
+        api_key_summary,
+        credential_state: std::mem::take(&mut entry.credential_state),
         created_at: entry.created_at,
         updated_at: entry.updated_at,
     }
 }
 
-fn summarize_api_key(value: Option<&str>) -> String {
-    let Some(trimmed) = value.map(str::trim).filter(|value| !value.is_empty()) else {
-        return "not_configured".to_string();
-    };
-    let prefix: String = trimmed.chars().take(4).collect();
-    let suffix =
-        trimmed.chars().rev().take(4).collect::<Vec<_>>().into_iter().rev().collect::<String>();
-    if trimmed.chars().count() <= 8 {
-        format!("{prefix}••••")
-    } else {
-        format!("{prefix}••••{suffix}")
+fn map_account_summary(mut entry: AiAccountSummary) -> AiAccountResponse {
+    AiAccountResponse {
+        id: entry.id,
+        scope_kind: entry.scope_kind,
+        workspace_id: entry.workspace_id,
+        library_id: entry.library_id,
+        provider_catalog_id: entry.provider_catalog_id,
+        label: std::mem::take(&mut entry.label),
+        base_url: entry.base_url.take(),
+        api_key_summary: configured_api_key_summary(entry.has_api_key),
+        credential_state: std::mem::take(&mut entry.credential_state),
+        created_at: entry.created_at,
+        updated_at: entry.updated_at,
     }
+}
+
+fn configured_api_key_summary(configured: bool) -> String {
+    if configured { "configured" } else { "not_configured" }.to_string()
 }
 
 fn map_binding(entry: AiBinding) -> AiBindingResponse {
@@ -1659,12 +1983,12 @@ async fn authorize_visible_ai_context(
     if let Some(library_id) = library_id {
         let library =
             load_library_and_authorize(auth, state, library_id, POLICY_PROVIDERS_ADMIN).await?;
-        if let Some(workspace_id) = workspace_id {
-            if workspace_id != library.workspace_id {
-                return Err(ApiError::BadRequest(
-                    "libraryId does not belong to workspaceId".to_string(),
-                ));
-            }
+        if let Some(workspace_id) = workspace_id
+            && workspace_id != library.workspace_id
+        {
+            return Err(ApiError::BadRequest(
+                "libraryId does not belong to workspaceId".to_string(),
+            ));
         }
         return Ok((Some(library.workspace_id), Some(library.id)));
     }
@@ -1721,12 +2045,12 @@ async fn authorize_exact_ai_scope(
             })?;
             let library =
                 load_library_and_authorize(auth, state, library_id, POLICY_PROVIDERS_ADMIN).await?;
-            if let Some(workspace_id) = workspace_id {
-                if workspace_id != library.workspace_id {
-                    return Err(ApiError::BadRequest(
-                        "libraryId does not belong to workspaceId".to_string(),
-                    ));
-                }
+            if let Some(workspace_id) = workspace_id
+                && workspace_id != library.workspace_id
+            {
+                return Err(ApiError::BadRequest(
+                    "libraryId does not belong to workspaceId".to_string(),
+                ));
             }
             Ok(AiScopeRef {
                 scope_kind,
@@ -1746,11 +2070,11 @@ fn describe_scope(
         AiScopeKind::Instance => "instance scope".to_string(),
         AiScopeKind::Workspace => format!(
             "workspace {}",
-            workspace_id.map(|value| value.to_string()).unwrap_or_else(|| "unknown".to_string())
+            workspace_id.map_or_else(|| "unknown".to_string(), |value| value.to_string())
         ),
         AiScopeKind::Library => format!(
             "library {}",
-            library_id.map(|value| value.to_string()).unwrap_or_else(|| "unknown".to_string())
+            library_id.map_or_else(|| "unknown".to_string(), |value| value.to_string())
         ),
     }
 }
@@ -1767,5 +2091,50 @@ fn subject_from_scope(
         workspace_id,
         library_id,
         document_id: None,
+    }
+}
+
+#[cfg(test)]
+mod secret_surface_tests {
+    use uuid::Uuid;
+
+    use super::{
+        AiScopeKind, CreateAiAccountRequest, UpdateAiAccountRequest, configured_api_key_summary,
+    };
+
+    #[test]
+    fn account_request_debug_redacts_key_and_untrusted_base_url() {
+        let create = CreateAiAccountRequest {
+            scope_kind: AiScopeKind::Instance,
+            workspace_id: None,
+            library_id: None,
+            provider_catalog_id: Uuid::now_v7(),
+            label: "synthetic".into(),
+            api_key: Some("provider-key-regression".into()),
+            base_url: Some("https://user:url-secret@host.example/?token=query-secret".into()),
+        };
+        let update = UpdateAiAccountRequest {
+            label: "synthetic".into(),
+            api_key: Some("updated-key-regression".into()),
+            base_url: Some("https://host.example/?token=updated-query-secret".into()),
+            credential_state: "active".into(),
+        };
+
+        let debug = format!("{create:?} {update:?}");
+        for secret in [
+            "provider-key-regression",
+            "updated-key-regression",
+            "url-secret",
+            "query-secret",
+            "updated-query-secret",
+        ] {
+            assert!(!debug.contains(secret), "Debug exposed {secret}");
+        }
+    }
+
+    #[test]
+    fn account_key_summary_never_discloses_key_fragments() {
+        assert_eq!(configured_api_key_summary(true), "configured");
+        assert_eq!(configured_api_key_summary(false), "not_configured");
     }
 }

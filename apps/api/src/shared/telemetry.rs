@@ -12,7 +12,7 @@ use crate::domains::ingest::WebRunCounts;
 /// `hyper`, `h2`, `reqwest`, `rustls`, `mio`, `tower`, `tonic`, `selectors`
 /// are similarly chatty. We force them to `warn` regardless of the
 /// top-level filter so that raising the application filter to `debug` for
-/// troubleshooting doesn't accidentally DoS the worker via its own logs.
+/// troubleshooting doesn't accidentally `DoS` the worker via its own logs.
 const NOISY_CRATE_CEILINGS: &[&str] = &[
     "scraper=warn",
     "html5ever=warn",
@@ -33,7 +33,7 @@ const NOISY_CRATE_CEILINGS: &[&str] = &[
 ];
 
 /// Reads `/proc/self/status` and returns the current process resident set
-/// size (VmRSS) in bytes. Returns None on non-Linux or parse error.
+/// size (`VmRSS`) in bytes. Returns None on non-Linux or parse error.
 #[must_use]
 pub fn current_process_rss_bytes() -> Option<u64> {
     let status = std::fs::read_to_string("/proc/self/status").ok()?;
@@ -66,33 +66,32 @@ pub fn detect_container_memory_limit_bytes() -> Option<u64> {
     // cgroup v2
     if let Ok(raw) = std::fs::read_to_string("/sys/fs/cgroup/memory.max") {
         let trimmed = raw.trim();
-        if trimmed != "max" {
-            if let Ok(bytes) = trimmed.parse::<u64>() {
-                if bytes > 0 && bytes < UNLIMITED_THRESHOLD {
-                    return Some(bytes);
-                }
-            }
+        if trimmed != "max"
+            && let Ok(bytes) = trimmed.parse::<u64>()
+            && bytes > 0
+            && bytes < UNLIMITED_THRESHOLD
+        {
+            return Some(bytes);
         }
     }
 
     // cgroup v1
-    if let Ok(raw) = std::fs::read_to_string("/sys/fs/cgroup/memory/memory.limit_in_bytes") {
-        if let Ok(bytes) = raw.trim().parse::<u64>() {
-            if bytes > 0 && bytes < UNLIMITED_THRESHOLD {
-                return Some(bytes);
-            }
-        }
+    if let Ok(raw) = std::fs::read_to_string("/sys/fs/cgroup/memory/memory.limit_in_bytes")
+        && let Ok(bytes) = raw.trim().parse::<u64>()
+        && bytes > 0
+        && bytes < UNLIMITED_THRESHOLD
+    {
+        return Some(bytes);
     }
 
     // Host RAM fallback (bare metal, cgroup unlimited, or non-standard layout).
     if let Ok(meminfo) = std::fs::read_to_string("/proc/meminfo") {
         for line in meminfo.lines() {
-            if let Some(rest) = line.strip_prefix("MemTotal:") {
-                if let Some(kb_str) = rest.split_whitespace().next() {
-                    if let Ok(kb) = kb_str.parse::<u64>() {
-                        return Some(kb * 1024);
-                    }
-                }
+            if let Some(rest) = line.strip_prefix("MemTotal:")
+                && let Some(kb_str) = rest.split_whitespace().next()
+                && let Ok(kb) = kb_str.parse::<u64>()
+            {
+                return Some(kb * 1024);
             }
         }
     }
@@ -108,18 +107,18 @@ pub fn detect_container_memory_limit_bytes() -> Option<u64> {
 /// 3. Rust's `available_parallelism`, which is cgroup-aware on modern Linux.
 #[must_use]
 pub fn detect_container_cpu_parallelism() -> Option<usize> {
-    if let Ok(raw) = std::fs::read_to_string("/sys/fs/cgroup/cpu.max") {
-        if let Some(value) = parse_cgroup_cpu_max(&raw) {
-            return Some(value);
-        }
+    if let Ok(raw) = std::fs::read_to_string("/sys/fs/cgroup/cpu.max")
+        && let Some(value) = parse_cgroup_cpu_max(&raw)
+    {
+        return Some(value);
     }
 
     let quota = std::fs::read_to_string("/sys/fs/cgroup/cpu/cpu.cfs_quota_us").ok();
     let period = std::fs::read_to_string("/sys/fs/cgroup/cpu/cpu.cfs_period_us").ok();
-    if let (Some(quota), Some(period)) = (quota, period) {
-        if let Some(value) = parse_cgroup_cpu_quota_period(&quota, &period) {
-            return Some(value);
-        }
+    if let (Some(quota), Some(period)) = (quota, period)
+        && let Some(value) = parse_cgroup_cpu_quota_period(&quota, &period)
+    {
+        return Some(value);
     }
 
     std::thread::available_parallelism().ok().map(usize::from).filter(|value| *value > 0)

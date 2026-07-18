@@ -8,21 +8,43 @@ data:
   IRONRAG_ENVIRONMENT: {{ .Values.app.environment | quote }}
   IRONRAG_DEPLOYMENT_ID: {{ .Values.observability.deploymentId | quote }}
   IRONRAG_DATABASE_MAX_CONNECTIONS: {{ .Values.app.databaseMaxConnections | quote }}
-  IRONRAG_API_REPLICAS: {{ add (int .Values.api.replicaCount) 1 | quote }}
-  IRONRAG_WORKER_REPLICAS: {{ .Values.worker.replicaCount | quote }}
+  IRONRAG_API_REPLICAS: {{ include "ironrag.apiCapacityReplicas" . | quote }}
+  IRONRAG_WORKER_REPLICAS: {{ include "ironrag.workerCapacityReplicas" . | quote }}
   IRONRAG_KNOWLEDGE_PLANE_BACKEND: {{ .Values.app.knowledgePlaneBackend | quote }}
   IRONRAG_QUERY_ANSWER_SOURCE_LINKS_ENABLED: {{ .Values.app.queryAnswerSourceLinksEnabled | quote }}
+  IRONRAG_PROVIDER_CONCURRENCY_MAX_OUTBOUND: {{ .Values.app.providerConcurrency.maxOutbound | quote }}
+  IRONRAG_PROVIDER_CONCURRENCY_QUERY_RESERVED: {{ .Values.app.providerConcurrency.queryReserved | quote }}
+  IRONRAG_PROVIDER_CONCURRENCY_ACQUIRE_TIMEOUT_MS: {{ .Values.app.providerConcurrency.acquireTimeoutMs | quote }}
+  IRONRAG_PROVIDER_CONCURRENCY_REGISTRY_MAX_ENTRIES: {{ .Values.app.providerConcurrency.registryMaxEntries | quote }}
+  IRONRAG_PROVIDER_CONCURRENCY_REGISTRY_IDLE_TTL_SECONDS: {{ .Values.app.providerConcurrency.registryIdleTtlSeconds | quote }}
+  IRONRAG_PG_HNSW_EF_SEARCH: {{ .Values.app.pgHnsw.efSearch | quote }}
+  IRONRAG_PG_HNSW_MAX_SCAN_TUPLES: {{ .Values.app.pgHnsw.maxScanTuples | quote }}
+  IRONRAG_PG_HNSW_SCAN_MEM_MULTIPLIER: {{ .Values.app.pgHnsw.scanMemMultiplier | quote }}
+  IRONRAG_PG_HNSW_EXACT_FALLBACK_MAX_ROWS: {{ .Values.app.pgHnsw.exactFallbackMaxRows | quote }}
+  IRONRAG_QUERY_RERANK_ENABLED: {{ .Values.app.queryRerank.enabled | quote }}
+  IRONRAG_QUERY_RERANK_CANDIDATE_LIMIT: {{ .Values.app.queryRerank.candidateLimit | quote }}
+  IRONRAG_QUERY_SEMANTIC_RERANK_MODE: {{ .Values.app.queryRerank.semantic.mode | quote }}
+  IRONRAG_QUERY_SEMANTIC_RERANK_TIMEOUT_MS: {{ .Values.app.queryRerank.semantic.timeoutMs | quote }}
+  IRONRAG_QUERY_SEMANTIC_RERANK_CANDIDATE_LIMIT: {{ .Values.app.queryRerank.semantic.candidateLimit | quote }}
+  IRONRAG_QUERY_SEMANTIC_RERANK_CANDIDATE_TEXT_CHARS: {{ .Values.app.queryRerank.semantic.candidateTextChars | quote }}
+  IRONRAG_QUERY_SEMANTIC_RERANK_TOTAL_TEXT_CHARS: {{ .Values.app.queryRerank.semantic.totalTextChars | quote }}
   IRONRAG_LOG_FILTER: {{ .Values.app.logFilter | quote }}
   IRONRAG_FRONTEND_ORIGIN: {{ .Values.app.frontendOrigin | quote }}
+  IRONRAG_OPENAPI_PUBLIC_ORIGIN: {{ .Values.app.openapiPublicOrigin | quote }}
+  IRONRAG_CREDENTIAL_ENCRYPTION_WRITE_ENABLED: {{ .Values.app.credentialEncryptionWriteEnabled | quote }}
   IRONRAG_UI_BOOTSTRAP_ADMIN_LOGIN: {{ .Values.app.bootstrapAdmin.login | quote }}
   IRONRAG_UI_BOOTSTRAP_EXTRACT_GRAPH_PROVIDER_KIND: {{ .Values.app.modelDefaults.extractGraphProviderKind | quote }}
   IRONRAG_UI_BOOTSTRAP_EXTRACT_GRAPH_MODEL_NAME: {{ .Values.app.modelDefaults.extractGraphModelName | quote }}
   IRONRAG_UI_BOOTSTRAP_EMBED_CHUNK_PROVIDER_KIND: {{ .Values.app.modelDefaults.embedChunkProviderKind | quote }}
   IRONRAG_UI_BOOTSTRAP_EMBED_CHUNK_MODEL_NAME: {{ .Values.app.modelDefaults.embedChunkModelName | quote }}
+  IRONRAG_UI_BOOTSTRAP_QUERY_COMPILE_PROVIDER_KIND: {{ .Values.app.modelDefaults.queryCompileProviderKind | quote }}
+  IRONRAG_UI_BOOTSTRAP_QUERY_COMPILE_MODEL_NAME: {{ .Values.app.modelDefaults.queryCompileModelName | quote }}
   IRONRAG_UI_BOOTSTRAP_QUERY_ANSWER_PROVIDER_KIND: {{ .Values.app.modelDefaults.queryAnswerProviderKind | quote }}
   IRONRAG_UI_BOOTSTRAP_QUERY_ANSWER_MODEL_NAME: {{ .Values.app.modelDefaults.queryAnswerModelName | quote }}
-  IRONRAG_UI_BOOTSTRAP_VISION_PROVIDER_KIND: {{ .Values.app.modelDefaults.visionProviderKind | quote }}
-  IRONRAG_UI_BOOTSTRAP_VISION_MODEL_NAME: {{ .Values.app.modelDefaults.visionModelName | quote }}
+  IRONRAG_UI_BOOTSTRAP_AGENT_PROVIDER_KIND: {{ .Values.app.modelDefaults.agentProviderKind | quote }}
+  IRONRAG_UI_BOOTSTRAP_AGENT_MODEL_NAME: {{ .Values.app.modelDefaults.agentModelName | quote }}
+  IRONRAG_UI_BOOTSTRAP_EXTRACT_TEXT_PROVIDER_KIND: {{ .Values.app.modelDefaults.extractTextProviderKind | quote }}
+  IRONRAG_UI_BOOTSTRAP_EXTRACT_TEXT_MODEL_NAME: {{ .Values.app.modelDefaults.extractTextModelName | quote }}
   IRONRAG_RUNTIME_POLICY_REJECT_TASK_KINDS: {{ .Values.app.runtimePolicy.rejectTaskKinds | quote }}
   IRONRAG_RUNTIME_POLICY_REJECT_TARGET_KINDS: {{ .Values.app.runtimePolicy.rejectTargetKinds | quote }}
   IRONRAG_UI_DEFAULT_LOCALE: {{ .Values.app.uiDefaultLocale | quote }}
@@ -46,29 +68,3 @@ data:
   OTEL_EXPORTER_OTLP_PROTOCOL: {{ .Values.observability.otlpProtocol | quote }}
   OTEL_EXPORTER_OTLP_ENDPOINT: {{ .Values.observability.otlpEndpoint | quote }}
   OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE: {{ .Values.observability.metricsTemporality | quote }}
-{{- if not .Values.runtimeSecret.existingSecret }}
----
-apiVersion: v1
-kind: Secret
-metadata:
-  name: {{ include "ironrag.runtimeSecretName" . }}
-  labels:
-    {{- include "ironrag.labels" . | nindent 4 }}
-type: Opaque
-stringData:
-  IRONRAG_DATABASE_URL: {{ include "ironrag.databaseUrl" . | quote }}
-  IRONRAG_REDIS_URL: {{ include "ironrag.redisUrl" . | quote }}
-  IRONRAG_BOOTSTRAP_TOKEN: {{ .Values.app.bootstrapToken | quote }}
-  IRONRAG_UI_BOOTSTRAP_ADMIN_PASSWORD: {{ .Values.app.bootstrapAdmin.password | quote }}
-  IRONRAG_UI_BOOTSTRAP_ADMIN_API_TOKEN: {{ .Values.app.bootstrapAdmin.apiToken | quote }}
-  IRONRAG_OPENAI_API_KEY: {{ .Values.app.providerSecrets.openaiApiKey | quote }}
-  IRONRAG_DEEPSEEK_API_KEY: {{ .Values.app.providerSecrets.deepseekApiKey | quote }}
-  IRONRAG_QWEN_API_KEY: {{ .Values.app.providerSecrets.qwenApiKey | quote }}
-  IRONRAG_GPTUNNEL_API_KEY: {{ .Values.app.providerSecrets.gptunnelApiKey | quote }}
-  IRONRAG_OPENROUTER_API_KEY: {{ .Values.app.providerSecrets.openrouterApiKey | quote }}
-  IRONRAG_ROUTERAI_API_KEY: {{ .Values.app.providerSecrets.routeraiApiKey | quote }}
-  IRONRAG_MINIMAX_API_KEY: {{ .Values.app.providerSecrets.minimaxApiKey | quote }}
-  IRONRAG_CONTENT_STORAGE_S3_ACCESS_KEY_ID: {{ .Values.storage.s3.accessKeyId | quote }}
-  IRONRAG_CONTENT_STORAGE_S3_SECRET_ACCESS_KEY: {{ .Values.storage.s3.secretAccessKey | quote }}
-  IRONRAG_CONTENT_STORAGE_S3_SESSION_TOKEN: {{ .Values.storage.s3.sessionToken | quote }}
-{{- end }}

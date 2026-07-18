@@ -1,23 +1,16 @@
-import type { Meta, StoryObj } from "@storybook/react";
-import { Badge } from "./badge";
-import { Button } from "./button";
-import {
-  Card,
-  CardContent,
-  CardDescription,
-  CardFooter,
-  CardHeader,
-  CardTitle,
-} from "./card";
-import { Separator } from "./separator";
+import type { Meta, StoryObj } from '@storybook/react'
+import { Badge } from './badge'
+import { Button } from './button'
+import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from './card'
+import { Separator } from './separator'
 
 const meta = {
-  title: "UI/Card",
+  title: 'UI/Card',
   component: Card,
-} satisfies Meta<typeof Card>;
+} satisfies Meta<typeof Card>
 
-export default meta;
-type Story = StoryObj<typeof meta>;
+export default meta
+type Story = StoryObj<typeof meta>
 
 export const Default: Story = {
   render: () => (
@@ -31,7 +24,7 @@ export const Default: Story = {
       </CardContent>
     </Card>
   ),
-};
+}
 
 export const WithFooterActions: Story = {
   render: () => (
@@ -56,7 +49,7 @@ export const WithFooterActions: Story = {
       </CardFooter>
     </Card>
   ),
-};
+}
 
 export const MetricCard: Story = {
   render: () => (
@@ -70,4 +63,4 @@ export const MetricCard: Story = {
       </CardContent>
     </Card>
   ),
-};
+}

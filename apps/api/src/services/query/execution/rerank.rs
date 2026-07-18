@@ -2,6 +2,10 @@ use std::collections::HashMap;
 
 use crate::{
     app::state::AppState,
+    domains::query::{
+        RerankMetadata, RerankStatus, SemanticRerankMetadata, SemanticRerankMode,
+        SemanticRerankOutcome, SemanticRerankStrategy,
+    },
     services::query::{
         planner::RuntimeQueryPlan,
         support::{
@@ -11,9 +15,262 @@ use crate::{
     },
 };
 
-use super::types::*;
+use super::semantic_rerank::{
+    SemanticCandidateOrder, SemanticRerankAttempt, SemanticRerankFailure, SemanticRerankPolicy,
+    execute_semantic_rerank, prepare_semantic_rerank_request, try_acquire_distributed_shadow_lease,
+    try_acquire_shadow_task_permit,
+};
+use super::types::{
+    RetrievalBundle, RuntimeChunkScoreKind, RuntimeMatchedChunk, RuntimeMatchedEntity,
+    RuntimeMatchedRelationship, SemanticRerankExecutionContext,
+};
 
 const RERANK_RUNTIME_EVIDENCE_TEXT_CHARS: usize = 2_400;
+
+pub(crate) async fn apply_configured_rerank(
+    state: &AppState,
+    library_id: uuid::Uuid,
+    semantic_rerank_context: SemanticRerankExecutionContext,
+    question: &str,
+    plan: &RuntimeQueryPlan,
+    bundle: &mut RetrievalBundle,
+    semantic_chunk_ranks: &mut HashMap<uuid::Uuid, usize>,
+) -> RerankMetadata {
+    let mode = state.retrieval_intelligence.semantic_rerank.mode;
+    if mode == SemanticRerankMode::Off || !state.retrieval_intelligence.rerank_enabled {
+        return apply_deterministic_rerank(state, question, plan, bundle);
+    }
+
+    let entity_candidates = build_entity_candidates(&bundle.entities);
+    let relationship_candidates = build_relationship_candidates(&bundle.relationships);
+    let chunk_candidates = build_chunk_candidates(&bundle.chunks);
+    let policy =
+        SemanticRerankPolicy::from_runtime_settings(state.retrieval_intelligence.semantic_rerank);
+    let prepared = prepare_semantic_rerank_request(
+        question,
+        &entity_candidates,
+        &relationship_candidates,
+        &chunk_candidates,
+        policy,
+    );
+    let prepared_candidate_count =
+        prepared.as_ref().map_or(0, |request| request.prepared_candidate_count());
+    let Some(prepared) = prepared.filter(|request| request.can_change_order()) else {
+        let mut metadata = apply_deterministic_rerank(state, question, plan, bundle);
+        metadata.semantic_rerank = Some(SemanticRerankMetadata {
+            mode,
+            strategy: SemanticRerankStrategy::LexicalHeuristicFallback,
+            outcome: SemanticRerankOutcome::NotApplicable,
+            prepared_candidate_count,
+        });
+        return metadata;
+    };
+    match mode {
+        SemanticRerankMode::Off => apply_deterministic_rerank(state, question, plan, bundle),
+        SemanticRerankMode::Shadow => {
+            let mut metadata = apply_deterministic_rerank(state, question, plan, bundle);
+            let heuristic_baseline = semantic_candidate_order(bundle);
+            let scheduled = spawn_semantic_rerank_shadow(
+                state,
+                library_id,
+                semantic_rerank_context,
+                prepared,
+                heuristic_baseline,
+                policy,
+            );
+            metadata.semantic_rerank = Some(SemanticRerankMetadata {
+                mode,
+                strategy: SemanticRerankStrategy::LexicalHeuristicWithProviderShadow,
+                outcome: if scheduled {
+                    SemanticRerankOutcome::ShadowScheduled
+                } else {
+                    SemanticRerankOutcome::ShadowCapacitySkipped
+                },
+                prepared_candidate_count,
+            });
+            metadata
+        }
+        SemanticRerankMode::Active => {
+            match execute_semantic_rerank(
+                state,
+                library_id,
+                semantic_rerank_context,
+                prepared,
+                policy,
+            )
+            .await
+            {
+                SemanticRerankAttempt::Applied {
+                    order,
+                    prepared_candidate_count,
+                    reordered_count,
+                } => {
+                    semantic_chunk_ranks.extend(
+                        order.provider_ranked_chunk_ids().iter().enumerate().filter_map(
+                            |(rank, chunk_id)| {
+                                chunk_id.parse::<uuid::Uuid>().ok().map(|chunk_id| (chunk_id, rank))
+                            },
+                        ),
+                    );
+                    apply_semantic_candidate_order(bundle, &order);
+                    RerankMetadata {
+                        status: RerankStatus::Applied,
+                        candidate_count: entity_candidates.len()
+                            + relationship_candidates.len()
+                            + chunk_candidates.len(),
+                        reordered_count: Some(reordered_count),
+                        semantic_rerank: Some(SemanticRerankMetadata {
+                            mode,
+                            strategy: SemanticRerankStrategy::ProviderSemantic,
+                            outcome: SemanticRerankOutcome::Applied,
+                            prepared_candidate_count,
+                        }),
+                    }
+                }
+                SemanticRerankAttempt::Failed { failure, prepared_candidate_count } => {
+                    let mut metadata = apply_deterministic_rerank(state, question, plan, bundle);
+                    metadata.semantic_rerank = Some(SemanticRerankMetadata {
+                        mode,
+                        strategy: SemanticRerankStrategy::LexicalHeuristicFallback,
+                        outcome: failure_metadata_outcome(failure),
+                        prepared_candidate_count,
+                    });
+                    metadata
+                }
+            }
+        }
+    }
+}
+
+fn apply_deterministic_rerank(
+    state: &AppState,
+    question: &str,
+    plan: &RuntimeQueryPlan,
+    bundle: &mut RetrievalBundle,
+) -> RerankMetadata {
+    match plan.planned_mode {
+        crate::domains::query::RuntimeQueryMode::Hybrid => {
+            apply_hybrid_rerank(state, question, plan, bundle)
+        }
+        crate::domains::query::RuntimeQueryMode::Mix => {
+            apply_mix_rerank(state, question, plan, bundle)
+        }
+        _ => crate::services::query::support::derive_rerank_metadata(&RerankRequest {
+            question: question.to_string(),
+            requested_mode: plan.planned_mode,
+            candidate_count: bundle.entities.len()
+                + bundle.relationships.len()
+                + bundle.chunks.len(),
+            enabled: state.retrieval_intelligence.rerank_enabled,
+            result_limit: plan.top_k,
+        }),
+    }
+}
+
+fn spawn_semantic_rerank_shadow(
+    state: &AppState,
+    library_id: uuid::Uuid,
+    execution_context: SemanticRerankExecutionContext,
+    prepared: super::semantic_rerank::PreparedSemanticRerankRequest,
+    heuristic_baseline: SemanticCandidateOrder,
+    policy: SemanticRerankPolicy,
+) -> bool {
+    let Some(shadow_permit) = try_acquire_shadow_task_permit() else {
+        tracing::debug!(
+            stage = "retrieval.semantic_rerank_shadow",
+            library_id = %library_id,
+            query_execution_id = %execution_context.query_execution_id,
+            "semantic rerank shadow skipped because the background task budget is full"
+        );
+        return false;
+    };
+    let state = state.clone();
+    tokio::spawn(async move {
+        let _shadow_permit = shadow_permit;
+        let _distributed_lease = match try_acquire_distributed_shadow_lease(
+            &state.persistence.redis,
+        )
+        .await
+        {
+            Ok(Some(lease)) => lease,
+            Ok(None) => {
+                tracing::debug!(
+                    stage = "retrieval.semantic_rerank_shadow",
+                    library_id = %library_id,
+                    query_execution_id = %execution_context.query_execution_id,
+                    "semantic rerank shadow skipped because another replica holds the deployment lease"
+                );
+                return;
+            }
+            Err(error) => {
+                tracing::warn!(
+                    stage = "retrieval.semantic_rerank_shadow",
+                    library_id = %library_id,
+                    query_execution_id = %execution_context.query_execution_id,
+                    %error,
+                    "semantic rerank shadow coordination failed; provider call suppressed"
+                );
+                return;
+            }
+        };
+        let started = std::time::Instant::now();
+        let attempt = Box::pin(crate::integrations::provider_budget::with_lane(
+            crate::integrations::provider_budget::ProviderLane::Ingest,
+            execute_semantic_rerank(&state, library_id, execution_context, prepared, policy),
+        ))
+        .await;
+        match attempt {
+            SemanticRerankAttempt::Applied { order, prepared_candidate_count, .. } => {
+                let disagreement_count = order.reordered_count_against(
+                    &heuristic_baseline.entities,
+                    &heuristic_baseline.relationships,
+                    &heuristic_baseline.chunks,
+                );
+                tracing::info!(
+                    stage = "retrieval.semantic_rerank_shadow",
+                    library_id = %library_id,
+                    query_execution_id = %execution_context.query_execution_id,
+                    prepared_candidate_count,
+                    disagreement_count,
+                    elapsed_ms = started.elapsed().as_millis(),
+                    "semantic rerank shadow compared against the production heuristic order"
+                );
+            }
+            SemanticRerankAttempt::Failed { failure, prepared_candidate_count } => tracing::warn!(
+                stage = "retrieval.semantic_rerank_shadow",
+                library_id = %library_id,
+                query_execution_id = %execution_context.query_execution_id,
+                ?failure,
+                prepared_candidate_count,
+                elapsed_ms = started.elapsed().as_millis(),
+                "semantic rerank shadow failed without affecting answer order"
+            ),
+        }
+    });
+    true
+}
+
+fn semantic_candidate_order(bundle: &RetrievalBundle) -> SemanticCandidateOrder {
+    SemanticCandidateOrder {
+        entities: bundle.entities.iter().map(|entity| entity.node_id.to_string()).collect(),
+        relationships: bundle
+            .relationships
+            .iter()
+            .map(|relationship| relationship.edge_id.to_string())
+            .collect(),
+        chunks: bundle.chunks.iter().map(|chunk| chunk.chunk_id.to_string()).collect(),
+        provider_ranked_chunks: Vec::new(),
+    }
+}
+
+const fn failure_metadata_outcome(failure: SemanticRerankFailure) -> SemanticRerankOutcome {
+    match failure {
+        SemanticRerankFailure::MissingBinding => SemanticRerankOutcome::MissingBinding,
+        SemanticRerankFailure::TimedOut => SemanticRerankOutcome::TimedOut,
+        SemanticRerankFailure::ProviderFailure => SemanticRerankOutcome::ProviderFailure,
+        SemanticRerankFailure::InvalidResponse => SemanticRerankOutcome::InvalidResponse,
+    }
+}
 
 pub(crate) fn apply_hybrid_rerank(
     state: &AppState,
@@ -132,6 +389,18 @@ pub(crate) fn apply_rerank_outcome(bundle: &mut RetrievalBundle, outcome: &Reran
     bundle.relationships =
         reorder_relationships(std::mem::take(&mut bundle.relationships), &outcome.relationships);
     bundle.chunks = reorder_chunks(std::mem::take(&mut bundle.chunks), &outcome.chunks);
+}
+
+fn apply_semantic_candidate_order(bundle: &mut RetrievalBundle, order: &SemanticCandidateOrder) {
+    bundle.entities = reorder_entities(std::mem::take(&mut bundle.entities), &order.entities);
+    bundle.relationships =
+        reorder_relationships(std::mem::take(&mut bundle.relationships), &order.relationships);
+    // Provider scores decide ordering only. Source/lane scores remain intact
+    // so provenance and downstream absolute-evidence guards do not conflate a
+    // model judgment with the score produced by the retrieval lane.
+    bundle.chunks = reorder_by_ids(std::mem::take(&mut bundle.chunks), &order.chunks, |chunk| {
+        chunk.chunk_id.to_string()
+    });
 }
 
 fn reorder_entities(
@@ -263,6 +532,7 @@ mod tests {
                 status: crate::domains::query::RerankStatus::Applied,
                 candidate_count: 2,
                 reordered_count: Some(2),
+                semantic_rerank: None,
             },
         };
         let mut bundle = RetrievalBundle {
@@ -279,5 +549,31 @@ mod tests {
             .find(|chunk| chunk.chunk_id.to_string() == outcome.chunks[1])
             .expect("protected chunk must remain present");
         assert_eq!(retained.score, Some(5_000.0));
+    }
+
+    #[test]
+    fn semantic_order_preserves_original_retrieval_scores() {
+        let mut first = chunk_with_runtime_text(RuntimeChunkScoreKind::Relevance);
+        first.score = Some(0.9);
+        let first_id = first.chunk_id.to_string();
+        let mut second = chunk_with_runtime_text(RuntimeChunkScoreKind::Relevance);
+        second.score = Some(0.2);
+        let second_id = second.chunk_id.to_string();
+        let mut bundle = RetrievalBundle {
+            entities: Vec::new(),
+            relationships: Vec::new(),
+            chunks: vec![first, second],
+        };
+        let order = SemanticCandidateOrder {
+            entities: Vec::new(),
+            relationships: Vec::new(),
+            chunks: vec![second_id, first_id],
+            provider_ranked_chunks: Vec::new(),
+        };
+
+        apply_semantic_candidate_order(&mut bundle, &order);
+
+        assert_eq!(bundle.chunks[0].score, Some(0.2));
+        assert_eq!(bundle.chunks[1].score, Some(0.9));
     }
 }

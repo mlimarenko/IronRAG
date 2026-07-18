@@ -25,11 +25,23 @@ pub enum IngestServiceError {
 
 impl From<anyhow::Error> for IngestServiceError {
     fn from(error: anyhow::Error) -> Self {
-        let message = error.to_string();
-        match Self::from_message(message) {
-            Self::Internal(_) => Self::Internal(error),
-            classified => classified,
-        }
+        let error = match error.downcast::<Self>() {
+            Ok(error) => return error,
+            Err(error) => error,
+        };
+        let error = match error.downcast::<ApiError>() {
+            Ok(error) => return error.into(),
+            Err(error) => error,
+        };
+        let error = match error.downcast::<StageError>() {
+            Ok(error) => return error.into(),
+            Err(error) => error,
+        };
+        let error = match error.downcast::<sqlx::Error>() {
+            Ok(error) => return Self::Repository(error),
+            Err(error) => error,
+        };
+        Self::Internal(error)
     }
 }
 
@@ -45,33 +57,6 @@ impl IngestServiceError {
             Self::Repository(_) => "IngestServiceError::Repository",
             Self::Internal(_) => "IngestServiceError::Internal",
         }
-    }
-
-    #[must_use]
-    pub fn from_message(message: impl Into<String>) -> Self {
-        let message = message.into();
-        let normalized = message.to_ascii_lowercase();
-        if normalized.contains("not found") && normalized.contains("library") {
-            return Self::StateConflict { message };
-        }
-        if normalized.contains("not configured") || normalized.contains("no active") {
-            return Self::BindingNotConfigured { message };
-        }
-        if normalized.contains("provider")
-            || normalized.contains("llm")
-            || normalized.contains("embedding")
-            || normalized.contains("upstream")
-            || normalized.contains("invalid model output")
-        {
-            return Self::ProviderUnavailable { message };
-        }
-        if normalized.contains("cancelled") || normalized.contains("canceled") {
-            return Self::Cancelled;
-        }
-        if normalized.contains("conflict") || normalized.contains("invalid state") {
-            return Self::StateConflict { message };
-        }
-        Self::Internal(anyhow::anyhow!(message))
     }
 }
 
@@ -99,5 +84,46 @@ impl From<ApiError> for IngestServiceError {
 impl From<StageError> for IngestServiceError {
     fn from(_: StageError) -> Self {
         Self::Cancelled
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unknown_anyhow_messages_are_always_internal() {
+        for message in [
+            "library not found",
+            "binding not configured",
+            "provider unavailable",
+            "operation cancelled",
+            "invalid state conflict",
+        ] {
+            let error = IngestServiceError::from(anyhow::anyhow!(message));
+
+            assert!(matches!(error, IngestServiceError::Internal(_)), "{message}");
+        }
+    }
+
+    #[test]
+    fn anyhow_context_preserves_typed_api_error() {
+        let error = anyhow::Error::new(ApiError::ProviderFailure("opaque".to_string()))
+            .context("ingest boundary failed");
+
+        assert!(matches!(
+            IngestServiceError::from(error),
+            IngestServiceError::ProviderUnavailable { message } if message == "opaque"
+        ));
+    }
+
+    #[test]
+    fn anyhow_context_preserves_typed_repository_error() {
+        let error = anyhow::Error::new(sqlx::Error::RowNotFound).context("ingest query failed");
+
+        assert!(matches!(
+            IngestServiceError::from(error),
+            IngestServiceError::Repository(sqlx::Error::RowNotFound)
+        ));
     }
 }

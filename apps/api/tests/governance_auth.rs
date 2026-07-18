@@ -1,5 +1,3 @@
-#![allow(clippy::unwrap_used, clippy::expect_used)]
-
 use anyhow::{Context, Result};
 use axum::{
     Router,
@@ -8,6 +6,7 @@ use axum::{
     http::{Request, StatusCode, header},
     routing::{get, post},
 };
+use base64::{Engine as _, engine::general_purpose::STANDARD};
 use http_body_util::BodyExt;
 use serde_json::{Value, json};
 use sqlx::{PgPool, postgres::PgPoolOptions};
@@ -27,13 +26,19 @@ use ironrag_backend::{
             POLICY_LIBRARY_WRITE, POLICY_WORKSPACE_ADMIN, load_content_document_and_authorize,
             load_library_and_authorize, load_workspace_and_authorize,
         },
+        mcp::{MCP_PROTOCOL_HEADER, MCP_PROTOCOL_VERSION, MCP_SESSION_HEADER},
         router,
     },
+    shared::secret_encryption::SecretPurpose,
 };
 
 const TEST_TOKEN_PREFIX: &str = "governance";
 const TEST_PROVIDER_CREDENTIAL_LABEL: &str = "governance-provider-credential";
 const TEST_BINDING_PURPOSE: &str = "query_answer";
+
+fn test_credential_master_key() -> String {
+    STANDARD.encode([37_u8; 32])
+}
 
 #[derive(Clone)]
 struct GrantSpec {
@@ -114,6 +119,8 @@ impl GovernanceAuthFixture {
         let temp_database = TempDatabase::create(&settings.database_url).await?;
         settings.database_url = temp_database.database_url.clone();
         settings.destructive_fresh_bootstrap_required = true;
+        settings.credential_master_key = Some(test_credential_master_key());
+        settings.credential_encryption_write_enabled = true;
 
         let postgres = PgPoolOptions::new()
             .max_connections(4)
@@ -353,7 +360,11 @@ impl GovernanceAuthFixture {
         }
         let response = self
             .app()
-            .oneshot(request.body(Body::empty()).expect("build governance auth GET request"))
+            .oneshot(
+                request
+                    .body(Body::empty())
+                    .context("failed to build governance auth GET request")?,
+            )
             .await
             .with_context(|| format!("GET {path} failed"))?;
         let status = response.status();
@@ -371,7 +382,11 @@ impl GovernanceAuthFixture {
         }
         let response = self
             .app()
-            .oneshot(request.body(Body::empty()).expect("build governance auth GET status request"))
+            .oneshot(
+                request
+                    .body(Body::empty())
+                    .context("failed to build governance auth GET status request")?,
+            )
             .await
             .with_context(|| format!("GET {path} failed"))?;
         Ok(response.status())
@@ -408,7 +423,7 @@ impl GovernanceAuthFixture {
             .oneshot(
                 request
                     .body(Body::from(payload.to_string()))
-                    .expect("build governance auth POST request"),
+                    .context("failed to build governance auth POST request")?,
             )
             .await
             .with_context(|| format!("POST {path} failed"))?;
@@ -417,18 +432,51 @@ impl GovernanceAuthFixture {
     }
 
     async fn mcp_call(&self, token: &str, method: &str, params: Option<Value>) -> Result<Value> {
-        let (status, json) = self
-            .rest_post(
+        let initialize = self
+            .mcp_transport_request(
                 token,
-                "/v1/mcp",
-                json!({
+                "POST",
+                None,
+                Some(json!({
+                    "jsonrpc": "2.0",
+                    "id": format!("governance-initialize-{}", method.replace('/', "-")),
+                    "method": "initialize",
+                    "params": {
+                        "protocolVersion": MCP_PROTOCOL_VERSION,
+                        "capabilities": {},
+                        "clientInfo": { "name": "ironrag-governance-test", "version": "1" },
+                    },
+                })),
+            )
+            .await?;
+        if initialize.status() != StatusCode::OK {
+            anyhow::bail!("unexpected MCP initialize status {}", initialize.status());
+        }
+        let session_id = initialize
+            .headers()
+            .get(MCP_SESSION_HEADER)
+            .and_then(|value| value.to_str().ok())
+            .context("MCP initialize omitted its session id")?
+            .to_string();
+        let response = self
+            .mcp_transport_request(
+                token,
+                "POST",
+                Some(&session_id),
+                Some(json!({
                     "jsonrpc": "2.0",
                     "id": format!("governance-{}", method.replace('/', "-")),
                     "method": method,
                     "params": params,
-                }),
+                })),
             )
             .await?;
+        let status = response.status();
+        let json = response_json(response).await?;
+        let cleanup = self.mcp_transport_request(token, "DELETE", Some(&session_id), None).await?;
+        if cleanup.status() != StatusCode::OK {
+            anyhow::bail!("unexpected MCP session cleanup status {}", cleanup.status());
+        }
         if status != StatusCode::OK && status != StatusCode::ACCEPTED {
             anyhow::bail!("unexpected status {status} for MCP {method}");
         }
@@ -437,6 +485,35 @@ impl GovernanceAuthFixture {
 
     async fn mcp_tools_list(&self, token: &str) -> Result<Value> {
         self.mcp_call(token, "tools/list", None).await
+    }
+
+    async fn mcp_transport_request(
+        &self,
+        token: &str,
+        method: &str,
+        session_id: Option<&str>,
+        payload: Option<Value>,
+    ) -> Result<axum::response::Response> {
+        let mut request = Request::builder()
+            .method(method)
+            .uri("/v1/mcp")
+            .header(header::AUTHORIZATION, format!("Bearer {token}"));
+        if let Some(session_id) = session_id {
+            request = request
+                .header(MCP_PROTOCOL_HEADER, MCP_PROTOCOL_VERSION)
+                .header(MCP_SESSION_HEADER, session_id);
+        }
+        let body = match payload {
+            Some(payload) => {
+                request = request.header(header::CONTENT_TYPE, "application/json");
+                Body::from(payload.to_string())
+            }
+            None => Body::empty(),
+        };
+        self.app()
+            .oneshot(request.body(body).context("failed to build MCP transport request")?)
+            .await
+            .context("MCP transport request failed")
     }
 }
 
@@ -1010,14 +1087,21 @@ async fn library_scoped_binding_admin_can_create_library_binding() -> Result<()>
             .mint_workspace_token(fixture.workspace_id, "library-binding-admin", &["binding_admin"])
             .await?;
 
+        let account_id = Uuid::now_v7();
+        let encrypted_api_key = fixture.state.credential_cipher.encrypt(
+            SecretPurpose::AiAccountApiKey,
+            account_id,
+            "secret://governance/provider-credential",
+        )?;
         let account = ai_repository::create_account(
             fixture.pool(),
+            account_id,
             "workspace",
             Some(fixture.workspace_id),
             None,
             fixture.provider_catalog_id,
             TEST_PROVIDER_CREDENTIAL_LABEL,
-            Some("secret://governance/provider-credential"),
+            Some(&encrypted_api_key),
             None,
             None,
         )
@@ -1037,7 +1121,7 @@ async fn library_scoped_binding_admin_can_create_library_binding() -> Result<()>
                 }),
             )
             .await?;
-        assert_eq!(status, StatusCode::OK);
+        assert_eq!(status, StatusCode::CREATED);
         assert_eq!(body["workspaceId"], json!(fixture.workspace_id));
         assert_eq!(body["libraryId"], json!(fixture.library_id));
         assert_eq!(body["bindingPurpose"], json!(TEST_BINDING_PURPOSE));
@@ -1127,13 +1211,13 @@ async fn mcp_tools_list_hides_unauthorized_mutation_and_admin_tools() -> Result<
         assert!(names.contains(&"list_libraries".to_string()));
         assert!(!names.contains(&"create_workspace".to_string()));
         assert!(!names.contains(&"create_library".to_string()));
-        assert!(!names.contains(&"upload_documents".to_string()));
-        assert!(!names.contains(&"update_document".to_string()));
-        assert!(!names.contains(&"get_mutation_status".to_string()));
-        assert!(!names.contains(&"submit_web_ingest_run".to_string()));
-        assert!(!names.contains(&"get_web_ingest_run".to_string()));
-        assert!(!names.contains(&"list_web_ingest_run_pages".to_string()));
-        assert!(!names.contains(&"cancel_web_ingest_run".to_string()));
+        assert!(!names.contains(&"create_documents".to_string()));
+        assert!(!names.contains(&"create_document_revision".to_string()));
+        assert!(!names.contains(&"get_operation".to_string()));
+        assert!(!names.contains(&"submit_web_run".to_string()));
+        assert!(!names.contains(&"get_web_run".to_string()));
+        assert!(!names.contains(&"list_web_run_pages".to_string()));
+        assert!(!names.contains(&"cancel_web_run".to_string()));
         assert!(!names.contains(&"list_audit_events".to_string()));
 
         Ok(())
@@ -1200,60 +1284,60 @@ async fn mcp_tools_list_respects_system_workspace_library_and_document_grants() 
         assert!(system_tools.contains(&"create_library".to_string()));
         assert!(system_tools.contains(&"search_documents".to_string()));
         assert!(system_tools.contains(&"read_document".to_string()));
-        assert!(system_tools.contains(&"upload_documents".to_string()));
-        assert!(system_tools.contains(&"update_document".to_string()));
-        assert!(system_tools.contains(&"get_mutation_status".to_string()));
+        assert!(system_tools.contains(&"create_documents".to_string()));
+        assert!(system_tools.contains(&"create_document_revision".to_string()));
+        assert!(system_tools.contains(&"get_operation".to_string()));
         assert!(system_tools.contains(&"get_runtime_execution".to_string()));
         assert!(system_tools.contains(&"get_runtime_execution_trace".to_string()));
-        assert!(system_tools.contains(&"submit_web_ingest_run".to_string()));
-        assert!(system_tools.contains(&"get_web_ingest_run".to_string()));
-        assert!(system_tools.contains(&"list_web_ingest_run_pages".to_string()));
-        assert!(system_tools.contains(&"cancel_web_ingest_run".to_string()));
+        assert!(system_tools.contains(&"submit_web_run".to_string()));
+        assert!(system_tools.contains(&"get_web_run".to_string()));
+        assert!(system_tools.contains(&"list_web_run_pages".to_string()));
+        assert!(system_tools.contains(&"cancel_web_run".to_string()));
 
         let workspace_tools = tool_names(&fixture.mcp_tools_list(&workspace_admin).await?)?;
         assert!(!workspace_tools.contains(&"create_workspace".to_string()));
         assert!(workspace_tools.contains(&"create_library".to_string()));
         assert!(workspace_tools.contains(&"search_documents".to_string()));
         assert!(workspace_tools.contains(&"read_document".to_string()));
-        assert!(workspace_tools.contains(&"upload_documents".to_string()));
-        assert!(workspace_tools.contains(&"update_document".to_string()));
-        assert!(workspace_tools.contains(&"get_mutation_status".to_string()));
+        assert!(workspace_tools.contains(&"create_documents".to_string()));
+        assert!(workspace_tools.contains(&"create_document_revision".to_string()));
+        assert!(workspace_tools.contains(&"get_operation".to_string()));
         assert!(workspace_tools.contains(&"get_runtime_execution".to_string()));
         assert!(workspace_tools.contains(&"get_runtime_execution_trace".to_string()));
-        assert!(workspace_tools.contains(&"submit_web_ingest_run".to_string()));
-        assert!(workspace_tools.contains(&"get_web_ingest_run".to_string()));
-        assert!(workspace_tools.contains(&"list_web_ingest_run_pages".to_string()));
-        assert!(workspace_tools.contains(&"cancel_web_ingest_run".to_string()));
+        assert!(workspace_tools.contains(&"submit_web_run".to_string()));
+        assert!(workspace_tools.contains(&"get_web_run".to_string()));
+        assert!(workspace_tools.contains(&"list_web_run_pages".to_string()));
+        assert!(workspace_tools.contains(&"cancel_web_run".to_string()));
 
         let library_tools = tool_names(&fixture.mcp_tools_list(&library_writer).await?)?;
         assert!(!library_tools.contains(&"create_workspace".to_string()));
         assert!(!library_tools.contains(&"create_library".to_string()));
         assert!(library_tools.contains(&"search_documents".to_string()));
         assert!(library_tools.contains(&"read_document".to_string()));
-        assert!(library_tools.contains(&"upload_documents".to_string()));
-        assert!(library_tools.contains(&"update_document".to_string()));
-        assert!(library_tools.contains(&"get_mutation_status".to_string()));
+        assert!(library_tools.contains(&"create_documents".to_string()));
+        assert!(library_tools.contains(&"create_document_revision".to_string()));
+        assert!(library_tools.contains(&"get_operation".to_string()));
         assert!(library_tools.contains(&"get_runtime_execution".to_string()));
         assert!(library_tools.contains(&"get_runtime_execution_trace".to_string()));
-        assert!(library_tools.contains(&"submit_web_ingest_run".to_string()));
-        assert!(library_tools.contains(&"get_web_ingest_run".to_string()));
-        assert!(library_tools.contains(&"list_web_ingest_run_pages".to_string()));
-        assert!(library_tools.contains(&"cancel_web_ingest_run".to_string()));
+        assert!(library_tools.contains(&"submit_web_run".to_string()));
+        assert!(library_tools.contains(&"get_web_run".to_string()));
+        assert!(library_tools.contains(&"list_web_run_pages".to_string()));
+        assert!(library_tools.contains(&"cancel_web_run".to_string()));
 
         let document_tools = tool_names(&fixture.mcp_tools_list(&document_writer).await?)?;
         assert!(!document_tools.contains(&"create_workspace".to_string()));
         assert!(!document_tools.contains(&"create_library".to_string()));
         assert!(!document_tools.contains(&"search_documents".to_string()));
         assert!(document_tools.contains(&"read_document".to_string()));
-        assert!(!document_tools.contains(&"upload_documents".to_string()));
-        assert!(document_tools.contains(&"update_document".to_string()));
-        assert!(document_tools.contains(&"get_mutation_status".to_string()));
+        assert!(!document_tools.contains(&"create_documents".to_string()));
+        assert!(document_tools.contains(&"create_document_revision".to_string()));
+        assert!(document_tools.contains(&"get_operation".to_string()));
         assert!(document_tools.contains(&"get_runtime_execution".to_string()));
         assert!(document_tools.contains(&"get_runtime_execution_trace".to_string()));
-        assert!(!document_tools.contains(&"submit_web_ingest_run".to_string()));
-        assert!(!document_tools.contains(&"get_web_ingest_run".to_string()));
-        assert!(!document_tools.contains(&"list_web_ingest_run_pages".to_string()));
-        assert!(!document_tools.contains(&"cancel_web_ingest_run".to_string()));
+        assert!(!document_tools.contains(&"submit_web_run".to_string()));
+        assert!(!document_tools.contains(&"get_web_run".to_string()));
+        assert!(!document_tools.contains(&"list_web_run_pages".to_string()));
+        assert!(!document_tools.contains(&"cancel_web_run".to_string()));
         assert!(!document_tools.contains(&"list_audit_events".to_string()));
 
         Ok(())
@@ -1289,6 +1373,207 @@ async fn anonymous_governance_and_operational_reads_are_rejected() -> Result<()>
         assert_eq!(
             fixture.rest_get_status_optional(None, "/v1/mcp/capabilities").await?,
             StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            fixture.rest_get_status_optional(None, "/v1/mcp").await?,
+            StatusCode::UNAUTHORIZED
+        );
+        let anonymous_delete = fixture
+            .app()
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri("/v1/mcp")
+                    .body(Body::empty())
+                    .context("failed to build anonymous MCP DELETE request")?,
+            )
+            .await
+            .context("anonymous DELETE /v1/mcp failed")?;
+        assert_eq!(anonymous_delete.status(), StatusCode::UNAUTHORIZED);
+
+        Ok(())
+    }
+    .await;
+
+    fixture.cleanup().await?;
+    result
+}
+
+#[tokio::test]
+#[ignore = "requires local postgres and redis services"]
+async fn mcp_streamable_http_session_is_owned_bounded_and_idempotently_terminated() -> Result<()> {
+    let fixture = GovernanceAuthFixture::create().await?;
+
+    let result = async {
+        let token = fixture
+            .mint_workspace_token(fixture.workspace_id, "mcp-session-owner", &["workspace_read"])
+            .await?;
+        let initialize = fixture
+            .mcp_transport_request(
+                &token,
+                "POST",
+                None,
+                Some(json!({
+                    "jsonrpc": "2.0",
+                    "id": "session-initialize",
+                    "method": "initialize",
+                    "params": {
+                        "protocolVersion": "2025-06-18",
+                        "capabilities": {},
+                        "clientInfo": { "name": "ironrag-session-test", "version": "1" }
+                    }
+                })),
+            )
+            .await?;
+        assert_eq!(initialize.status(), StatusCode::OK);
+        let session_id = initialize
+            .headers()
+            .get(MCP_SESSION_HEADER)
+            .and_then(|value| value.to_str().ok())
+            .context("initialize must issue an MCP session id")?
+            .to_string();
+        let initialize_payload = response_json(initialize).await?;
+        assert_eq!(
+            initialize_payload["result"]["protocolVersion"],
+            json!("2025-11-25"),
+            "initialize must negotiate every valid request to the one canonical server version"
+        );
+
+        for protocol_version in [None, Some("2025-06-18")] {
+            let mut request = Request::builder()
+                .method("POST")
+                .uri("/v1/mcp")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .header(MCP_SESSION_HEADER, &session_id);
+            if let Some(protocol_version) = protocol_version {
+                request = request.header(MCP_PROTOCOL_HEADER, protocol_version);
+            }
+            let response = fixture
+                .app()
+                .oneshot(
+                    request
+                        .body(Body::from(
+                            json!({
+                                "jsonrpc": "2.0",
+                                "id": "strict-protocol-tools-list",
+                                "method": "tools/list",
+                                "params": {},
+                            })
+                            .to_string(),
+                        ))
+                        .context("failed to build strict MCP protocol request")?,
+                )
+                .await
+                .context("strict MCP protocol request failed")?;
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        }
+
+        assert_eq!(
+            fixture.mcp_transport_request(&token, "GET", None, None).await?.status(),
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            fixture.mcp_transport_request(&token, "DELETE", None, None).await?.status(),
+            StatusCode::NOT_FOUND
+        );
+        let foreign_session = Uuid::now_v7().as_hyphenated().to_string();
+        assert_eq!(
+            fixture
+                .mcp_transport_request(&token, "GET", Some(&foreign_session), None)
+                .await?
+                .status(),
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            fixture
+                .mcp_transport_request(&token, "DELETE", Some(&foreign_session), None)
+                .await?
+                .status(),
+            StatusCode::NOT_FOUND
+        );
+        let foreign_token = fixture
+            .mint_workspace_token(
+                fixture.workspace_id,
+                "mcp-session-foreign-owner",
+                &["workspace_read"],
+            )
+            .await?;
+        assert_eq!(
+            fixture
+                .mcp_transport_request(&foreign_token, "GET", Some(&session_id), None)
+                .await?
+                .status(),
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            fixture
+                .mcp_transport_request(&foreign_token, "DELETE", Some(&session_id), None)
+                .await?
+                .status(),
+            StatusCode::NOT_FOUND
+        );
+
+        let stream = fixture.mcp_transport_request(&token, "GET", Some(&session_id), None).await?;
+        assert_eq!(stream.status(), StatusCode::OK);
+        let mut stream_body = stream.into_body();
+        let ready = tokio::time::timeout(std::time::Duration::from_secs(1), stream_body.frame())
+            .await
+            .context("MCP GET stream did not emit ready promptly")?
+            .context("MCP GET stream closed before ready")?
+            .context("MCP GET stream ready frame failed")?
+            .into_data()
+            .map_err(|_| anyhow::anyhow!("MCP GET stream ready frame was not data"))?;
+        assert_eq!(ready.as_ref(), b": ready\n\n");
+        let tools = fixture
+            .mcp_transport_request(
+                &token,
+                "POST",
+                Some(&session_id),
+                Some(json!({
+                    "jsonrpc": "2.0",
+                    "id": "session-tools-list",
+                    "method": "tools/list"
+                })),
+            )
+            .await?;
+        assert_eq!(tools.status(), StatusCode::OK);
+
+        assert_eq!(
+            fixture
+                .mcp_transport_request(&token, "DELETE", Some(&session_id), None)
+                .await?
+                .status(),
+            StatusCode::OK
+        );
+        let stream_end =
+            tokio::time::timeout(std::time::Duration::from_secs(1), stream_body.frame())
+                .await
+                .context("owned MCP DELETE did not cancel the local GET stream")?;
+        assert!(stream_end.is_none(), "terminated MCP GET stream must close without a data frame");
+        assert_eq!(
+            fixture
+                .mcp_transport_request(&token, "DELETE", Some(&session_id), None)
+                .await?
+                .status(),
+            StatusCode::OK,
+            "owned session teardown must be idempotent while the tombstone is alive"
+        );
+        assert_eq!(
+            fixture
+                .mcp_transport_request(
+                    &token,
+                    "POST",
+                    Some(&session_id),
+                    Some(json!({
+                        "jsonrpc": "2.0",
+                        "id": "session-after-delete",
+                        "method": "tools/list"
+                    })),
+                )
+                .await?
+                .status(),
+            StatusCode::NOT_FOUND
         );
 
         Ok(())
@@ -1372,7 +1657,7 @@ async fn workspace_audit_reader_gets_redacted_visible_events_only() -> Result<()
             format!("/v1/audit/events?workspaceId={}&internal=true", fixture.workspace_id);
         let (status, body) = fixture.rest_get(&token, &internal_path).await?;
         assert_eq!(status, StatusCode::FORBIDDEN);
-        assert_eq!(body["errorKind"], json!("forbidden"));
+        assert_eq!(body["code"], json!("forbidden"));
 
         Ok(())
     }

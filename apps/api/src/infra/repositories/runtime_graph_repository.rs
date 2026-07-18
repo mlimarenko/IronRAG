@@ -1,5 +1,3 @@
-#![allow(clippy::missing_errors_doc, clippy::too_many_arguments, clippy::too_many_lines)]
-
 mod coordination;
 mod snapshot;
 
@@ -83,7 +81,7 @@ pub struct RuntimeGraphEdgeAdjacencyRow {
 ///
 /// On a large corpus this drops one `serde_json::Value` heap allocation per
 /// node on every cache-miss load. Per-row savings depend on the average
-/// `metadata_json` payload size; typical sub_type objects are 50–300 bytes,
+/// `metadata_json` payload size; typical `sub_type` objects are 50–300 bytes,
 /// so at six-figure node counts this saves on the order of tens of MB for
 /// nodes alone.
 ///
@@ -176,12 +174,38 @@ const RUNTIME_GRAPH_EVIDENCE_TEXT_SEARCH_TOKEN_MIN_CHARS: usize = 4;
 const RUNTIME_GRAPH_EVIDENCE_TEXT_SEARCH_MIN_TOTAL_CHARS: usize = 11;
 const RUNTIME_GRAPH_EVIDENCE_TEXT_SEARCH_WINDOW_MIN_TOKENS: usize = 2;
 const RUNTIME_GRAPH_EVIDENCE_TEXT_SEARCH_WINDOW_MAX_TOKENS: usize = 4;
-const RUNTIME_GRAPH_EVIDENCE_LITERAL_SEARCH_SHORT_MAX_TOKENS: usize = 6;
-const RUNTIME_GRAPH_EVIDENCE_LITERAL_SEARCH_STRUCTURAL_MAX_TOKENS: usize = 20;
-const RUNTIME_GRAPH_EVIDENCE_LITERAL_SEARCH_SHORT_MAX_CHARS: usize = 128;
-const RUNTIME_GRAPH_EVIDENCE_LITERAL_SEARCH_STRUCTURAL_MAX_CHARS: usize = 220;
+const RUNTIME_GRAPH_EVIDENCE_LITERAL_SEARCH_MAX_TOKENS: usize = 20;
+const RUNTIME_GRAPH_EVIDENCE_LITERAL_SEARCH_MAX_CHARS: usize = 220;
 const RUNTIME_GRAPH_ENTITY_SEARCH_TOKEN_CAP: usize = 8;
 const RUNTIME_GRAPH_ENTITY_SEARCH_TOKEN_MIN_CHARS: usize = 3;
+
+/// A graph-evidence query with explicit lane provenance.
+///
+/// Natural-language questions stay in the full-text lexical lane. Only values
+/// emitted by the typed query compiler (or by a formal-syntax parser) may use
+/// the literal `LIKE` lane. The repository deliberately does not infer this
+/// distinction from casing, vocabulary, or other raw-text shape heuristics.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RuntimeGraphEvidenceSearchQuery {
+    Lexical(String),
+    LiteralOrFormal(String),
+}
+
+impl RuntimeGraphEvidenceSearchQuery {
+    #[must_use]
+    pub fn text(&self) -> &str {
+        match self {
+            Self::Lexical(text) | Self::LiteralOrFormal(text) => text,
+        }
+    }
+
+    fn literal_or_formal_text(&self) -> Option<&str> {
+        match self {
+            Self::Lexical(_) => None,
+            Self::LiteralOrFormal(text) => Some(text),
+        }
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow, utoipa::ToSchema)]
 pub struct RuntimeGraphProjectionCountsRow {
@@ -220,12 +244,10 @@ fn runtime_graph_evidence_identity_key(
         "{}:{}:{}:{}:{}:{}:{}:{}:{}",
         target_kind,
         target_id,
-        document_id.map(|value| value.to_string()).unwrap_or_else(|| "none".to_string()),
-        revision_id.map(|value| value.to_string()).unwrap_or_else(|| "none".to_string()),
-        activated_by_attempt_id
-            .map(|value| value.to_string())
-            .unwrap_or_else(|| "none".to_string()),
-        chunk_id.map(|value| value.to_string()).unwrap_or_else(|| "none".to_string()),
+        document_id.map_or_else(|| "none".to_string(), |value| value.to_string()),
+        revision_id.map_or_else(|| "none".to_string(), |value| value.to_string()),
+        activated_by_attempt_id.map_or_else(|| "none".to_string(), |value| value.to_string()),
+        chunk_id.map_or_else(|| "none".to_string(), |value| value.to_string()),
         page_ref.unwrap_or("none"),
         source_file_name.unwrap_or("none"),
         evidence_context_key
@@ -347,7 +369,7 @@ pub async fn count_runtime_graph_document_nodes_by_library(
 /// at all — neither `ready` nor `processing` nor `failed` — yet other
 /// revisions of the same document do. These are "orphaned on revision
 /// transition": when a document got a new revision, the old revision's
-/// extraction records stayed put but no job ever ran extract_graph against
+/// extraction records stayed put but no job ever ran `extract_graph` against
 /// the new one. Surfaced by the graph re-extract pass so a new ingest job
 /// can fill the gap.
 pub async fn list_library_documents_needing_graph_reextract(
@@ -837,7 +859,7 @@ pub async fn list_admitted_runtime_graph_edges_by_node_ids(
 /// Maximum byte length of a persisted `runtime_graph_node.label`.
 ///
 /// `runtime_graph_node` carries btree indexes that include `label` (and
-/// `lower(label)`). PostgreSQL caps a single btree index tuple at ~2704 bytes,
+/// `lower(label)`). `PostgreSQL` caps a single btree index tuple at ~2704 bytes,
 /// so an oversized label aborts the INSERT — and inside a whole-library restore
 /// transaction that rolls back the entire import (Workstream R / R4). The cap
 /// is a pure byte bound, NOT a natural-language rule: real entity names are
@@ -1373,35 +1395,43 @@ pub async fn list_runtime_graph_edges_adjacency_by_library(
     .await
 }
 
+/// Values required to create or refresh one runtime graph evidence link.
+///
+/// The named payload makes the evidence provenance explicit at call sites and
+/// prevents unrelated optional identifiers from being swapped positionally.
+pub struct CreateRuntimeGraphEvidenceInput<'a> {
+    pub library_id: Uuid,
+    pub target_kind: &'a str,
+    pub target_id: Uuid,
+    pub document_id: Option<Uuid>,
+    pub revision_id: Option<Uuid>,
+    pub activated_by_attempt_id: Option<Uuid>,
+    pub chunk_id: Option<Uuid>,
+    pub source_file_name: Option<&'a str>,
+    pub page_ref: Option<&'a str>,
+    pub evidence_text: &'a str,
+    pub confidence_score: Option<f64>,
+    pub evidence_context_key: &'a str,
+}
+
 /// Creates a runtime graph evidence link.
 ///
 /// # Errors
 /// Returns any `SQLx` error raised while inserting the evidence record.
 pub async fn create_runtime_graph_evidence(
     pool: &PgPool,
-    library_id: Uuid,
-    target_kind: &str,
-    target_id: Uuid,
-    document_id: Option<Uuid>,
-    revision_id: Option<Uuid>,
-    activated_by_attempt_id: Option<Uuid>,
-    chunk_id: Option<Uuid>,
-    source_file_name: Option<&str>,
-    page_ref: Option<&str>,
-    evidence_text: &str,
-    confidence_score: Option<f64>,
-    evidence_context_key: &str,
+    input: CreateRuntimeGraphEvidenceInput<'_>,
 ) -> Result<RuntimeGraphEvidenceRow, sqlx::Error> {
     let evidence_identity_key = runtime_graph_evidence_identity_key(
-        target_kind,
-        target_id,
-        document_id,
-        revision_id,
-        activated_by_attempt_id,
-        chunk_id,
-        page_ref,
-        source_file_name,
-        evidence_context_key,
+        input.target_kind,
+        input.target_id,
+        input.document_id,
+        input.revision_id,
+        input.activated_by_attempt_id,
+        input.chunk_id,
+        input.page_ref,
+        input.source_file_name,
+        input.evidence_context_key,
     );
     sqlx::query_as::<_, RuntimeGraphEvidenceRow>(
         "insert into runtime_graph_evidence (
@@ -1421,26 +1451,27 @@ pub async fn create_runtime_graph_evidence(
             page_ref, evidence_text, confidence_score, created_at",
     )
     .bind(Uuid::now_v7())
-    .bind(library_id)
+    .bind(input.library_id)
     .bind(&evidence_identity_key)
-    .bind(target_kind)
-    .bind(target_id)
-    .bind(document_id)
-    .bind(revision_id)
-    .bind(activated_by_attempt_id)
-    .bind(chunk_id)
-    .bind(source_file_name)
-    .bind(page_ref)
-    .bind(evidence_text)
-    .bind(confidence_score)
+    .bind(input.target_kind)
+    .bind(input.target_id)
+    .bind(input.document_id)
+    .bind(input.revision_id)
+    .bind(input.activated_by_attempt_id)
+    .bind(input.chunk_id)
+    .bind(input.source_file_name)
+    .bind(input.page_ref)
+    .bind(input.evidence_text)
+    .bind(input.confidence_score)
     .fetch_one(pool)
     .await
 }
 
 /// Single per-row payload for `bulk_create_runtime_graph_evidence_for_chunk`.
+///
 /// All other evidence columns are constant per merge call (the chunk's
-/// document_id / revision_id / attempt_id / chunk_id / source_file_name /
-/// evidence_text), so the bulk insert sends N rows in one round-trip
+/// `document_id` / `revision_id` / `attempt_id` / `chunk_id` / `source_file_name` /
+/// `evidence_text`), so the bulk insert sends N rows in one round-trip
 /// instead of N separate INSERTs.
 #[derive(Debug, Clone)]
 pub struct GraphEvidenceTarget {
@@ -1451,14 +1482,13 @@ pub struct GraphEvidenceTarget {
 
 /// Bulk-inserts a batch of `runtime_graph_evidence` rows that share the same
 /// chunk-level context (library / document / revision / attempt / chunk /
-/// source_file_name / evidence_text). Replaces N sequential
+/// `source_file_name` / `evidence_text`). Replaces N sequential
 /// `create_runtime_graph_evidence` calls with a single `INSERT ... SELECT
 /// FROM unnest(...)` round-trip — for a typical chunk with 10 entities and
 /// 10 relations, that's ~50 round-trips collapsed into 1.
 ///
 /// # Errors
 /// Returns any `SQLx` error raised while running the bulk insert.
-#[allow(clippy::too_many_arguments)]
 pub async fn bulk_create_runtime_graph_evidence_for_chunk(
     pool: &PgPool,
     library_id: Uuid,
@@ -1684,6 +1714,42 @@ pub async fn recalculate_runtime_graph_edge_support_counts_by_ids(
     .await
 }
 
+/// Recalculates targeted node and edge support counts in one transaction.
+///
+/// # Errors
+/// Returns any `SQLx` error and rolls both target classes back together.
+pub async fn recalculate_runtime_graph_support_counts_by_ids_atomically(
+    pool: &PgPool,
+    library_id: Uuid,
+    projection_version: i64,
+    node_ids: &[Uuid],
+    edge_ids: &[Uuid],
+) -> Result<(u64, u64), sqlx::Error> {
+    let mut transaction = pool.begin().await?;
+    let mut node_rows_affected = 0_u64;
+    for batch in node_ids.chunks(SUPPORT_COUNT_RECALCULATION_BATCH_SIZE) {
+        let result = sqlx::query(RECALCULATE_RUNTIME_GRAPH_NODE_SUPPORT_COUNTS_BY_IDS_SQL)
+            .bind(library_id)
+            .bind(projection_version)
+            .bind(batch)
+            .execute(&mut *transaction)
+            .await?;
+        node_rows_affected = node_rows_affected.saturating_add(result.rows_affected());
+    }
+    let mut edge_rows_affected = 0_u64;
+    for batch in edge_ids.chunks(SUPPORT_COUNT_RECALCULATION_BATCH_SIZE) {
+        let result = sqlx::query(RECALCULATE_RUNTIME_GRAPH_EDGE_SUPPORT_COUNTS_BY_IDS_SQL)
+            .bind(library_id)
+            .bind(projection_version)
+            .bind(batch)
+            .execute(&mut *transaction)
+            .await?;
+        edge_rows_affected = edge_rows_affected.saturating_add(result.rows_affected());
+    }
+    transaction.commit().await?;
+    Ok((node_rows_affected, edge_rows_affected))
+}
+
 /// Lists runtime graph evidence for one target.
 ///
 /// # Errors
@@ -1779,7 +1845,7 @@ pub async fn list_runtime_graph_evidence_by_targets(
 pub async fn search_runtime_graph_evidence_by_text(
     pool: &PgPool,
     library_id: Uuid,
-    query_texts: &[String],
+    query_texts: &[RuntimeGraphEvidenceSearchQuery],
     document_ids: &[Uuid],
     limit: i64,
 ) -> Result<Vec<RuntimeGraphEvidenceRow>, sqlx::Error> {
@@ -2019,10 +2085,13 @@ fn runtime_graph_evidence_per_query_candidate_limit(limit: i64, query_count: usi
     limit.min(24)
 }
 
-fn runtime_graph_evidence_text_search_queries(query_texts: &[String]) -> Vec<String> {
+fn runtime_graph_evidence_text_search_queries(
+    query_texts: &[RuntimeGraphEvidenceSearchQuery],
+) -> Vec<String> {
     let mut seen_queries = BTreeSet::new();
     let mut token_windows_by_query = Vec::new();
-    for query_text in query_texts {
+    for query in query_texts {
+        let query_text = query.text();
         let tokens = runtime_graph_evidence_text_search_tokens(query_text);
         if !runtime_graph_evidence_text_search_tokens_are_selective(&tokens) {
             continue;
@@ -2055,12 +2124,16 @@ fn runtime_graph_evidence_text_search_queries(query_texts: &[String]) -> Vec<Str
     search_queries
 }
 
-fn runtime_graph_evidence_literal_search_queries(query_texts: &[String]) -> Vec<String> {
+fn runtime_graph_evidence_literal_search_queries(
+    query_texts: &[RuntimeGraphEvidenceSearchQuery],
+) -> Vec<String> {
     let mut seen_queries = BTreeSet::new();
     let mut queries = Vec::new();
-    for query_text in query_texts {
+    for query_text in
+        query_texts.iter().filter_map(RuntimeGraphEvidenceSearchQuery::literal_or_formal_text)
+    {
         let normalized = query_text.split_whitespace().collect::<Vec<_>>().join(" ");
-        if !runtime_graph_evidence_literal_search_query_is_selective(&normalized) {
+        if !runtime_graph_evidence_literal_search_query_is_bounded(&normalized) {
             continue;
         }
         let query = normalized.to_lowercase();
@@ -2074,7 +2147,7 @@ fn runtime_graph_evidence_literal_search_queries(query_texts: &[String]) -> Vec<
     queries
 }
 
-fn runtime_graph_evidence_literal_search_query_is_selective(query_text: &str) -> bool {
+fn runtime_graph_evidence_literal_search_query_is_bounded(query_text: &str) -> bool {
     let alphanumeric_count = query_text.chars().filter(|ch| ch.is_alphanumeric()).count();
     if alphanumeric_count < 4 {
         return false;
@@ -2083,55 +2156,11 @@ fn runtime_graph_evidence_literal_search_query_is_selective(query_text: &str) ->
     let tokens = normalized_alnum_token_sequence_by(
         query_text,
         |token| !token.trim().is_empty(),
-        Some(RUNTIME_GRAPH_EVIDENCE_TEXT_SEARCH_TOKEN_CAP),
+        Some(RUNTIME_GRAPH_EVIDENCE_LITERAL_SEARCH_MAX_TOKENS + 1),
     );
-    let has_numeric =
-        tokens.iter().any(|token| runtime_graph_evidence_text_search_token_has_numeric(token));
-    let structural_separator_count =
-        query_text.chars().filter(|ch| !ch.is_alphanumeric() && !ch.is_whitespace()).count();
-    let has_structural_separator = structural_separator_count > 0;
-    let token_count = tokens.len();
-
-    let strict_short_name_phrase = !has_structural_separator
-        && !has_numeric
-        && token_count == 2
-        && (6..=48).contains(&alphanumeric_count)
-        && char_count <= 64
-        && query_text
-            .split_whitespace()
-            .all(runtime_graph_evidence_literal_plain_token_has_name_shape);
-    let short_numeric_phrase = has_numeric
-        && token_count <= RUNTIME_GRAPH_EVIDENCE_LITERAL_SEARCH_SHORT_MAX_TOKENS
-        && char_count <= 96;
-    let short_structural_phrase = has_structural_separator
-        && token_count <= RUNTIME_GRAPH_EVIDENCE_LITERAL_SEARCH_SHORT_MAX_TOKENS
-        && char_count <= RUNTIME_GRAPH_EVIDENCE_LITERAL_SEARCH_SHORT_MAX_CHARS;
-    let dense_structural_phrase = structural_separator_count >= 2
-        && structural_separator_count.saturating_mul(8) >= alphanumeric_count
-        && token_count <= RUNTIME_GRAPH_EVIDENCE_LITERAL_SEARCH_STRUCTURAL_MAX_TOKENS
-        && char_count <= RUNTIME_GRAPH_EVIDENCE_LITERAL_SEARCH_STRUCTURAL_MAX_CHARS;
-
-    strict_short_name_phrase
-        || short_numeric_phrase
-        || short_structural_phrase
-        || dense_structural_phrase
-}
-
-fn runtime_graph_evidence_literal_plain_token_has_name_shape(token: &str) -> bool {
-    let mut saw_first_cased = false;
-    let mut first_cased_is_upper = false;
-    let mut saw_later_lower = false;
-
-    for ch in token.chars().filter(|ch| ch.is_alphabetic()) {
-        if !saw_first_cased {
-            saw_first_cased = ch.is_uppercase() || ch.is_lowercase();
-            first_cased_is_upper = ch.is_uppercase();
-            continue;
-        }
-        saw_later_lower |= ch.is_lowercase();
-    }
-
-    saw_first_cased && first_cased_is_upper && saw_later_lower
+    !tokens.is_empty()
+        && tokens.len() <= RUNTIME_GRAPH_EVIDENCE_LITERAL_SEARCH_MAX_TOKENS
+        && char_count <= RUNTIME_GRAPH_EVIDENCE_LITERAL_SEARCH_MAX_CHARS
 }
 
 fn runtime_graph_evidence_text_search_query(tokens: &[String]) -> String {
@@ -2251,7 +2280,7 @@ fn runtime_graph_evidence_text_search_window_score(tokens: &[String]) -> usize {
 }
 
 fn runtime_graph_evidence_text_search_token_score(token: &str) -> usize {
-    let numeric_bonus = runtime_graph_evidence_text_search_token_has_numeric(token) as usize
+    let numeric_bonus = usize::from(runtime_graph_evidence_text_search_token_has_numeric(token))
         * RUNTIME_GRAPH_EVIDENCE_TEXT_SEARCH_MIN_TOTAL_CHARS;
     token.chars().count().saturating_add(numeric_bonus)
 }
@@ -2615,6 +2644,45 @@ pub async fn delete_runtime_graph_canonical_summaries_for_orphan_targets(
     Ok(result.rows_affected())
 }
 
+async fn delete_runtime_graph_canonical_summaries_for_orphan_targets_with_executor(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    library_id: Uuid,
+    node_ids: &[Uuid],
+    edge_ids: &[Uuid],
+) -> Result<u64, sqlx::Error> {
+    if node_ids.is_empty() && edge_ids.is_empty() {
+        return Ok(0);
+    }
+    let result = sqlx::query(
+        "delete from runtime_graph_canonical_summary as summary
+         where summary.library_id = $1
+           and (
+             (
+                summary.target_kind = 'node'
+                and summary.target_id = any($2)
+                and not exists (
+                    select 1 from runtime_graph_node as node
+                    where node.id = summary.target_id
+                )
+             )
+             or (
+                summary.target_kind = 'edge'
+                and summary.target_id = any($3)
+                and not exists (
+                    select 1 from runtime_graph_edge as edge
+                    where edge.id = summary.target_id
+                )
+             )
+           )",
+    )
+    .bind(library_id)
+    .bind(node_ids)
+    .bind(edge_ids)
+    .execute(&mut **transaction)
+    .await?;
+    Ok(result.rows_affected())
+}
+
 /// Lists active graph evidence rows for one logical content revision.
 ///
 /// # Errors
@@ -2777,6 +2845,132 @@ pub const RECALCULATE_RUNTIME_GRAPH_EDGE_SUPPORT_COUNTS_SQL: &str = "with target
          from desired_counts
          where edge.id = desired_counts.id
            and edge.support_count is distinct from desired_counts.support_count";
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RuntimeGraphProjectionPruneOutcome {
+    pub deleted_node_count: u64,
+    pub deleted_edge_count: u64,
+    pub deleted_summary_count: u64,
+}
+
+/// Recalculates library-wide support counts and prunes unsupported projection
+/// rows plus their summary projections in one advisory-locked transaction.
+///
+/// # Errors
+/// Returns any `SQLx` error and rolls the entire support/prune unit back.
+pub async fn synchronize_runtime_graph_support_and_prune(
+    pool: &PgPool,
+    library_id: Uuid,
+    projection_version: i64,
+) -> Result<RuntimeGraphProjectionPruneOutcome, sqlx::Error> {
+    let mut transaction = acquire_runtime_library_graph_lock(pool, library_id).await?;
+    sqlx::query(RECALCULATE_RUNTIME_GRAPH_NODE_SUPPORT_COUNTS_SQL)
+        .bind(library_id)
+        .bind(projection_version)
+        .execute(&mut *transaction)
+        .await?;
+    sqlx::query(RECALCULATE_RUNTIME_GRAPH_EDGE_SUPPORT_COUNTS_SQL)
+        .bind(library_id)
+        .bind(projection_version)
+        .execute(&mut *transaction)
+        .await?;
+
+    let deleted_edges = sqlx::query_as::<_, (Uuid, String)>(
+        "delete from runtime_graph_edge
+         where library_id = $1
+           and projection_version = $2
+           and support_count <= 0
+         returning id, canonical_key",
+    )
+    .bind(library_id)
+    .bind(projection_version)
+    .fetch_all(&mut *transaction)
+    .await?;
+    let deleted_nodes = sqlx::query_as::<_, (Uuid, String)>(
+        "delete from runtime_graph_node
+         where library_id = $1
+           and projection_version = $2
+           and support_count <= 0
+         returning id, canonical_key",
+    )
+    .bind(library_id)
+    .bind(projection_version)
+    .fetch_all(&mut *transaction)
+    .await?;
+    let deleted_edge_ids = deleted_edges.iter().map(|(id, _)| *id).collect::<Vec<_>>();
+    let deleted_node_ids = deleted_nodes.iter().map(|(id, _)| *id).collect::<Vec<_>>();
+    let deleted_summary_count =
+        delete_runtime_graph_canonical_summaries_for_orphan_targets_with_executor(
+            &mut transaction,
+            library_id,
+            &deleted_node_ids,
+            &deleted_edge_ids,
+        )
+        .await?;
+    release_runtime_library_graph_lock(transaction, library_id).await?;
+
+    Ok(RuntimeGraphProjectionPruneOutcome {
+        deleted_node_count: u64::try_from(deleted_nodes.len()).unwrap_or(u64::MAX),
+        deleted_edge_count: u64::try_from(deleted_edges.len()).unwrap_or(u64::MAX),
+        deleted_summary_count,
+    })
+}
+
+/// Atomically prunes explicit projection targets and any now-orphaned summary
+/// rows under the same library advisory lock used by publication.
+///
+/// # Errors
+/// Returns any `SQLx` error and rolls the entire prune unit back.
+pub async fn prune_runtime_graph_projection_rows(
+    pool: &PgPool,
+    library_id: Uuid,
+    projection_version: i64,
+    node_ids: &[Uuid],
+    edge_ids: &[Uuid],
+) -> Result<RuntimeGraphProjectionPruneOutcome, sqlx::Error> {
+    if node_ids.is_empty() && edge_ids.is_empty() {
+        return Ok(RuntimeGraphProjectionPruneOutcome::default());
+    }
+    let mut transaction = acquire_runtime_library_graph_lock(pool, library_id).await?;
+    let deleted_edge_count = sqlx::query(
+        "delete from runtime_graph_edge
+         where library_id = $1
+           and projection_version = $2
+           and id = any($3)",
+    )
+    .bind(library_id)
+    .bind(projection_version)
+    .bind(edge_ids)
+    .execute(&mut *transaction)
+    .await?
+    .rows_affected();
+    let deleted_node_count = sqlx::query(
+        "delete from runtime_graph_node
+         where library_id = $1
+           and projection_version = $2
+           and id = any($3)",
+    )
+    .bind(library_id)
+    .bind(projection_version)
+    .bind(node_ids)
+    .execute(&mut *transaction)
+    .await?
+    .rows_affected();
+    let deleted_summary_count =
+        delete_runtime_graph_canonical_summaries_for_orphan_targets_with_executor(
+            &mut transaction,
+            library_id,
+            node_ids,
+            edge_ids,
+        )
+        .await?;
+    release_runtime_library_graph_lock(transaction, library_id).await?;
+    Ok(RuntimeGraphProjectionPruneOutcome {
+        deleted_node_count,
+        deleted_edge_count,
+        deleted_summary_count,
+    })
+}
 
 pub async fn recalculate_runtime_graph_support_counts(
     pool: &PgPool,
@@ -3801,12 +3995,21 @@ pub async fn recompute_runtime_graph_node_fullform_aliases(
 mod tests {
     use super::{
         RUNTIME_GRAPH_EVIDENCE_TEXT_SEARCH_QUERY_CAP, RUNTIME_GRAPH_LABEL_MAX_BYTES,
-        clamp_runtime_graph_label, runtime_graph_entity_search_terms,
-        runtime_graph_entity_wildcard_prefixes, runtime_graph_evidence_literal_search_queries,
+        RuntimeGraphEvidenceSearchQuery, clamp_runtime_graph_label,
+        runtime_graph_entity_search_terms, runtime_graph_entity_wildcard_prefixes,
+        runtime_graph_evidence_literal_search_queries,
         runtime_graph_evidence_per_query_candidate_limit,
         runtime_graph_evidence_text_search_queries,
         runtime_graph_evidence_text_search_token_prefix, runtime_graph_evidence_text_search_tokens,
     };
+
+    fn lexical_evidence_query(value: &str) -> RuntimeGraphEvidenceSearchQuery {
+        RuntimeGraphEvidenceSearchQuery::Lexical(value.to_string())
+    }
+
+    fn literal_evidence_query(value: &str) -> RuntimeGraphEvidenceSearchQuery {
+        RuntimeGraphEvidenceSearchQuery::LiteralOrFormal(value.to_string())
+    }
 
     #[test]
     fn clamp_runtime_graph_label_leaves_short_labels_untouched() {
@@ -3886,11 +4089,11 @@ mod tests {
     #[test]
     fn evidence_text_search_query_uses_selective_suffix_tolerant_windows() {
         let queries = runtime_graph_evidence_text_search_queries(&[
-            "Which parameter links Alpha Module to control service?".to_string(),
-            "Alpha Module".to_string(),
-            "Alpha".to_string(),
-            "port 9407".to_string(),
-            "Which parameter links Alpha Module to control service?".to_string(),
+            lexical_evidence_query("Which parameter links Alpha Module to control service?"),
+            lexical_evidence_query("Alpha Module"),
+            lexical_evidence_query("Alpha"),
+            lexical_evidence_query("port 9407"),
+            lexical_evidence_query("Which parameter links Alpha Module to control service?"),
         ]);
 
         assert_eq!(
@@ -3909,11 +4112,13 @@ mod tests {
     #[test]
     fn evidence_literal_search_queries_keep_exact_structural_spans() {
         let queries = runtime_graph_evidence_literal_search_queries(&[
-            "Alpha".to_string(),
-            "Mono Sans".to_string(),
-            "alpha/report://needle?fontSize=12".to_string(),
-            "report://detail?out=display&title=Alpha%20Report%20%(shift.num[d])&font=Mono%20Sans&fontSize=12".to_string(),
-            "port 80".to_string(),
+            lexical_evidence_query("Alpha"),
+            literal_evidence_query("Mono Sans"),
+            literal_evidence_query("alpha/report://needle?fontSize=12"),
+            literal_evidence_query(
+                "report://detail?out=display&title=Alpha%20Report%20%(shift.num[d])&font=Mono%20Sans&fontSize=12",
+            ),
+            literal_evidence_query("port 80"),
         ]);
 
         assert!(!queries.contains(&"alpha".to_string()));
@@ -3926,13 +4131,28 @@ mod tests {
     }
 
     #[test]
-    fn evidence_literal_search_queries_reject_long_prose_without_dense_structure() {
+    fn evidence_literal_search_queries_require_typed_lane_not_name_casing() {
         let queries = runtime_graph_evidence_literal_search_queries(&[
-            "Find the configuration paragraph that explains how the terminal connects to the control service, include the source document, and keep this cache marker 2026-05-01.".to_string(),
-            "Which rare entity describes the escalation recipient, what fields are required in the message, and where is the source mentioned?".to_string(),
-            "recent project".to_string(),
-            "meeting notes".to_string(),
-            "Alpha Module".to_string(),
+            RuntimeGraphEvidenceSearchQuery::Lexical("Alpha Module".to_string()),
+            RuntimeGraphEvidenceSearchQuery::Lexical("mIxEd CaSiNg".to_string()),
+            RuntimeGraphEvidenceSearchQuery::LiteralOrFormal("caseless target".to_string()),
+        ]);
+
+        assert_eq!(queries, vec!["caseless target".to_string()]);
+    }
+
+    #[test]
+    fn evidence_literal_search_queries_ignore_lexical_prose_regardless_of_shape() {
+        let queries = runtime_graph_evidence_literal_search_queries(&[
+            lexical_evidence_query(
+                "Find the configuration paragraph that explains how the terminal connects to the control service, include the source document, and keep this cache marker 2026-05-01.",
+            ),
+            lexical_evidence_query(
+                "Which rare entity describes the escalation recipient, what fields are required in the message, and where is the source mentioned?",
+            ),
+            lexical_evidence_query("recent project"),
+            lexical_evidence_query("meeting notes"),
+            literal_evidence_query("Alpha Module"),
         ]);
 
         assert_eq!(queries, vec!["alpha module".to_string()]);
@@ -3958,7 +4178,8 @@ mod tests {
     #[test]
     fn evidence_text_search_tokens_keep_short_numeric_literals_exact() {
         let tokens = runtime_graph_evidence_text_search_tokens("port 80 status 404 build42");
-        let queries = runtime_graph_evidence_text_search_queries(&["port 80".to_string()]);
+        let queries =
+            runtime_graph_evidence_text_search_queries(&[lexical_evidence_query("port 80")]);
 
         assert_eq!(
             tokens,
@@ -3975,9 +4196,9 @@ mod tests {
 
     #[test]
     fn evidence_text_search_query_includes_short_needle_windows() {
-        let queries = runtime_graph_evidence_text_search_queries(&[
-            "alphacases betagamma deltazeta epsilonkey zetaport thetakey".to_string(),
-        ]);
+        let queries = runtime_graph_evidence_text_search_queries(&[lexical_evidence_query(
+            "alphacases betagamma deltazeta epsilonkey zetaport thetakey",
+        )]);
 
         assert!(queries.iter().any(|query| query.contains("'deltaze':* & 'epsilonk':*")));
         assert!(!queries.contains(&"'alphacas':* & 'betagam':*".to_string()));
@@ -3985,9 +4206,9 @@ mod tests {
 
     #[test]
     fn evidence_text_search_query_expands_short_phrases_with_subwindows() {
-        let queries = runtime_graph_evidence_text_search_queries(&[
-            "alphacases betagamma deltazeta epsilonkey".to_string(),
-        ]);
+        let queries = runtime_graph_evidence_text_search_queries(&[lexical_evidence_query(
+            "alphacases betagamma deltazeta epsilonkey",
+        )]);
 
         assert_eq!(
             queries.first().map(String::as_str),

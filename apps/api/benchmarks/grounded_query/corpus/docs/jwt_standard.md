@@ -51,7 +51,7 @@ HMAC_SHA256(
 The complete JWT combines all three encoded parts:
 
 ```
-eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJsb2dnZWRJbkFzIjoiYWRtaW4iLCJpYXQiOjE0MjI3Nzk2Mzh9.gzSraSYS8EXBxLN_oWnFSRgCzcmJmMjLiuyu5CSpyHI
+<encoded-header>.<encoded-payload>.<signature>
 ```
 
 This token can be easily passed through HTML and HTTP.

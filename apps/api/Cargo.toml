@@ -10,11 +10,16 @@ publish = false
 [features]
 default = []
 heap-profile = ["dep:dhat"]
+# Explicitly opt-in seams for integration tests that need an in-process
+# loopback transport. Production entry points remain fail-closed even when the
+# feature is enabled.
+test-support = []
 
 [lints.rust]
 unsafe_code = "forbid"
 unused_lifetimes = "deny"
 unused_attributes = "deny"
+unreachable_pub = "deny"
 rust_2018_idioms = { level = "deny", priority = -1 }
 
 [lints.clippy]
@@ -29,22 +34,7 @@ unimplemented = "deny"
 dbg_macro = "deny"
 print_stdout = "deny"
 print_stderr = "deny"
-result_large_err = "allow"
-clone_on_copy = "allow"
-collapsible_if = "allow"
-default_constructed_unit_structs = "allow"
-double_ended_iterator_last = "allow"
-large_enum_variant = "allow"
-let_unit_value = "allow"
-manual_inspect = "allow"
-manual_pattern_char_comparison = "allow"
-manual_contains = "allow"
-needless_borrow = "allow"
-needless_lifetimes = "allow"
-needless_question_mark = "allow"
-obfuscated_if_else = "allow"
-should_implement_trait = "allow"
-unnecessary_lazy_evaluations = "allow"
+large_futures = "deny"
 
 [dependencies]
 axum = { version = "0.8", features = ["macros", "json", "multipart"] }
@@ -86,7 +76,7 @@ aws-sdk-s3 = { version = "1.137", default-features = false, features = ["behavio
 rust_decimal = { version = "1", features = ["serde"] }
 cookie = "0.18"
 argon2 = { version = "0.5", features = ["std"] }
-calamine = "0.35.0"
+calamine = "0.36.0"
 csv = "1.4.0"
 tree-sitter = "0.26.10"
 # Tier 1: mainstream languages
@@ -113,6 +103,7 @@ toml_edit = { version = "0.25.12", features = ["serde"] }
 async-tar = { version = "0.6.1", default-features = false, features = ["runtime-tokio"] }
 async-compression = { version = "0.4", features = ["zstd", "tokio"] }
 base64 = "0.22.1"
+chacha20poly1305 = "0.10.1"
 tempfile = "3.27.0"
 image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "webp", "gif", "bmp", "tiff"] }
 png = "0.18.1"
@@ -123,6 +114,7 @@ url = "2"
 ironrag-contracts = { path = "../../crates/contracts" }
 clap = { version = "4", features = ["derive"] }
 rand = "0.10.2"
+zeroize = "1.9.0"
 dhat = { version = "0.3", optional = true }
 percent-encoding = "2"
 

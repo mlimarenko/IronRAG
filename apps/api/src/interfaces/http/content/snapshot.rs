@@ -34,16 +34,12 @@ use crate::{
     domains::ops::{ASYNC_OP_STATUS_FAILED, ASYNC_OP_STATUS_PROCESSING, ASYNC_OP_STATUS_READY},
     interfaces::http::{
         auth::AuthContext,
-        authorization::{
-            POLICY_LIBRARY_READ, POLICY_LIBRARY_WRITE, POLICY_WORKSPACE_ADMIN,
-            POLICY_WORKSPACE_READ, load_library_and_authorize, load_workspace_and_authorize,
-        },
+        authorization::{POLICY_LIBRARY_READ, POLICY_LIBRARY_WRITE, load_library_and_authorize},
         router_support::ApiError,
     },
     services::content::service::snapshot::{
-        IncludeKind, OverwriteMode, SnapshotImportReport, WorkspaceSnapshotImportReport,
-        export_library_archive, export_workspace_archive, restore_library_archive,
-        restore_workspace_archive,
+        IncludeKind, OverwriteMode, SnapshotImportReport, export_library_archive,
+        restore_library_archive,
     },
     services::ops::service::{CreateAsyncOperationCommand, UpdateAsyncOperationCommand},
 };
@@ -53,9 +49,10 @@ pub struct ExportQuery {
     /// Comma-separated include kinds. Valid values: `library_data`
     /// (content + runtime graph + knowledge tables), `blobs` (original
     /// source files, requires `library_data`), `workspace` (the owning
-    /// `catalog_workspace` row) and `ai_config` (portable AI configuration:
-    /// provider/model catalogs, prices, credentials without `api_key`,
-    /// presets and bindings). Defaults to `library_data,blobs`.
+    /// `catalog_workspace` row) and `ai_config` (portable canonical AI tables:
+    /// `ai_provider_catalog`, `ai_model_catalog`, `ai_price_catalog`,
+    /// `ai_account` without `api_key`, and `ai_binding`). Defaults to
+    /// `library_data,blobs`; legacy AI table names are rejected on restore.
     include: Option<String>,
 }
 
@@ -97,61 +94,25 @@ impl From<SnapshotImportReport> for SnapshotImportReportResponse {
     }
 }
 
-/// One library's restore counts inside a [`WorkspaceSnapshotImportReportResponse`].
-#[derive(Debug, Serialize, utoipa::ToSchema)]
-#[serde(rename_all = "camelCase")]
-pub struct WorkspaceLibraryImportReportResponse {
-    pub library_id: Uuid,
-    pub slug: String,
-    pub postgres_rows_by_table: BTreeMap<String, u64>,
-    pub blobs_restored: u64,
-}
-
-/// Report returned by `POST /v1/catalog/workspaces/{workspaceId}/snapshot`.
-#[derive(Debug, Serialize, utoipa::ToSchema)]
-#[serde(rename_all = "camelCase")]
-pub struct WorkspaceSnapshotImportReportResponse {
-    pub workspace_id: Uuid,
-    pub overwrite_mode: OverwriteMode,
-    pub libraries_restored: u64,
-    pub libraries: Vec<WorkspaceLibraryImportReportResponse>,
-}
-
-impl From<WorkspaceSnapshotImportReport> for WorkspaceSnapshotImportReportResponse {
-    fn from(report: WorkspaceSnapshotImportReport) -> Self {
-        Self {
-            workspace_id: report.workspace_id,
-            overwrite_mode: report.overwrite_mode,
-            libraries_restored: report.libraries_restored,
-            libraries: report
-                .libraries
-                .into_iter()
-                .map(|library| WorkspaceLibraryImportReportResponse {
-                    library_id: library.library_id,
-                    slug: library.slug,
-                    postgres_rows_by_table: library.postgres_rows_by_table.into_iter().collect(),
-                    blobs_restored: library.blobs_restored,
-                })
-                .collect(),
-        }
-    }
-}
-
-struct SnapshotBodySpool {
+/// Spools an in-flight snapshot import request body to a temp file so the
+/// restore path can seek/reread it. Shared across every snapshot import
+/// door (library here, workspace under `catalog::snapshot`) — snapshot
+/// archives can be multi-GB, so the body is never buffered in memory.
+pub(crate) struct SnapshotBodySpool {
     _temp_file: tempfile::NamedTempFile,
     path: PathBuf,
-    bytes_written: u64,
+    pub(crate) bytes_written: u64,
 }
 
 impl SnapshotBodySpool {
-    async fn open(&self) -> Result<tokio::fs::File, ApiError> {
+    pub(crate) async fn open(&self) -> Result<tokio::fs::File, ApiError> {
         tokio::fs::File::open(&self.path)
             .await
             .map_err(|error| ApiError::internal_with_log(error, "open spooled snapshot body"))
     }
 }
 
-async fn spool_snapshot_body(
+pub(crate) async fn spool_snapshot_body(
     body: Body,
     snapshot_kind: &'static str,
 ) -> Result<SnapshotBodySpool, ApiError> {
@@ -187,6 +148,59 @@ async fn spool_snapshot_body(
     Ok(SnapshotBodySpool { _temp_file: temp_file, path, bytes_written })
 }
 
+/// Marks the async operation behind a snapshot-import worker `ready`,
+/// logging (with `operation_id` — the enclosing tracing span already carries
+/// the workspace/library id) if the status update itself fails. Shared by
+/// the library- and workspace-scoped snapshot import workers.
+pub(crate) async fn mark_snapshot_import_operation_ready(state: &AppState, operation_id: Uuid) {
+    if let Err(error) = state
+        .canonical_services
+        .ops
+        .update_async_operation(
+            state,
+            UpdateAsyncOperationCommand {
+                operation_id,
+                status: ASYNC_OP_STATUS_READY.to_string(),
+                completed_at: Some(chrono::Utc::now()),
+                failure_code: None,
+            },
+        )
+        .await
+    {
+        tracing::error!(
+            %operation_id,
+            error = ?error,
+            "failed to mark snapshot import operation ready",
+        );
+    }
+}
+
+/// Marks the async operation behind a snapshot-import worker `failed`,
+/// logging if the status update itself fails. Shared by the library- and
+/// workspace-scoped snapshot import workers.
+pub(crate) async fn mark_snapshot_import_operation_failed(state: &AppState, operation_id: Uuid) {
+    if let Err(update_error) = state
+        .canonical_services
+        .ops
+        .update_async_operation(
+            state,
+            UpdateAsyncOperationCommand {
+                operation_id,
+                status: ASYNC_OP_STATUS_FAILED.to_string(),
+                completed_at: Some(chrono::Utc::now()),
+                failure_code: Some("snapshot_import_failed".to_string()),
+            },
+        )
+        .await
+    {
+        tracing::error!(
+            %operation_id,
+            error = ?update_error,
+            "failed to mark snapshot import operation failed",
+        );
+    }
+}
+
 fn spawn_library_snapshot_import_worker(
     state: AppState,
     operation_id: Uuid,
@@ -197,12 +211,12 @@ fn spawn_library_snapshot_import_worker(
     tokio::spawn(
         async move {
             let archive_bytes = spooled.bytes_written;
-            let result = async {
+            let result = Box::pin(async {
                 let reader = spooled.open().await?;
-                restore_library_archive(&state, library_id, reader, overwrite)
+                Box::pin(restore_library_archive(&state, library_id, reader, overwrite))
                     .await
                     .map_err(ApiError::from)
-            }
+            })
             .await;
 
             match result {
@@ -213,27 +227,7 @@ fn spawn_library_snapshot_import_worker(
                         archive_bytes,
                         "snapshot import restored from spooled request body",
                     );
-                    if let Err(error) = state
-                        .canonical_services
-                        .ops
-                        .update_async_operation(
-                            &state,
-                            UpdateAsyncOperationCommand {
-                                operation_id,
-                                status: ASYNC_OP_STATUS_READY.to_string(),
-                                completed_at: Some(chrono::Utc::now()),
-                                failure_code: None,
-                            },
-                        )
-                        .await
-                    {
-                        tracing::error!(
-                            %operation_id,
-                            %library_id,
-                            error = ?error,
-                            "failed to mark snapshot import operation ready",
-                        );
-                    }
+                    mark_snapshot_import_operation_ready(&state, operation_id).await;
                 }
                 Err(error) => {
                     tracing::error!(
@@ -242,27 +236,7 @@ fn spawn_library_snapshot_import_worker(
                         error = ?error,
                         "snapshot import worker failed",
                     );
-                    if let Err(update_error) = state
-                        .canonical_services
-                        .ops
-                        .update_async_operation(
-                            &state,
-                            UpdateAsyncOperationCommand {
-                                operation_id,
-                                status: ASYNC_OP_STATUS_FAILED.to_string(),
-                                completed_at: Some(chrono::Utc::now()),
-                                failure_code: Some("snapshot_import_failed".to_string()),
-                            },
-                        )
-                        .await
-                    {
-                        tracing::error!(
-                            %operation_id,
-                            %library_id,
-                            error = ?update_error,
-                            "failed to mark snapshot import operation failed",
-                        );
-                    }
+                    mark_snapshot_import_operation_failed(&state, operation_id).await;
                 }
             }
         }
@@ -315,7 +289,7 @@ pub async fn export_library_snapshot(
     let (writer, reader) = tokio::io::duplex(64 * 1024);
     let exporter_state = state.clone();
     let lib_id = library.id;
-    let include_clone = include.clone();
+    let include_clone = include;
     // Wrap the export in a JoinHandle observer so a panic inside the
     // exporter does not silently terminate the writer half with the
     // client still receiving HTTP 200 on a half-written archive. On
@@ -323,7 +297,7 @@ pub async fn export_library_snapshot(
     // EXPORT_FAILED.json sentinel tar entry before finalizing — this
     // observer is the second line of defense for genuine panics.
     let join = tokio::spawn(async move {
-        export_library_archive(exporter_state, lib_id, include_clone, writer).await
+        Box::pin(export_library_archive(exporter_state, lib_id, include_clone, writer)).await
     });
     let observer_lib_id = lib_id;
     tokio::spawn(async move {
@@ -350,7 +324,7 @@ pub async fn export_library_snapshot(
     let body = Body::from_stream(stream);
 
     let filename =
-        format!("library-{}-{}.tar.zst", library.slug, chrono::Utc::now().format("%Y%m%dT%H%M%S"),);
+        format!("library-{}-{}.tar.zst", library.slug, chrono::Utc::now().format("%Y%m%dT%H%M%S"));
     let disposition = format!("attachment; filename=\"{filename}\"");
     // Content-Encoding: identity opts out of the global CompressionLayer —
     // the body is already compressed (zstd) and double-compressing would
@@ -443,166 +417,20 @@ pub async fn import_library_snapshot(
     ))
 }
 
-/// Streams a workspace snapshot as a plain `application/x-tar` archive that
-/// bundles every library in the workspace (each embedded library archive is
-/// already zstd-compressed).
-#[utoipa::path(
-    get,
-    path = "/v1/catalog/workspaces/{workspaceId}/snapshot",
-    tag = "content",
-    operation_id = "exportWorkspaceSnapshot",
-    params(
-        ("workspaceId" = uuid::Uuid, Path, description = "Workspace identifier"),
-        ("include" = Option<String>, Query, description = "Comma-separated include kinds applied to every library archive (default `library_data,blobs`)"),
-    ),
-    responses(
-        (status = 200, description = "Streaming plain tar bundling every library archive", content_type = "application/x-tar", body = String),
-        (status = 401, description = "Caller is not authenticated"),
-        (status = 403, description = "Caller is not authorized for the workspace"),
-        (status = 404, description = "Workspace not found"),
-    ),
-)]
-#[tracing::instrument(
-    level = "info",
-    name = "http.export_workspace_snapshot",
-    skip_all,
-    fields(workspace_id = %workspace_id)
-)]
-pub async fn export_workspace_snapshot(
-    auth: AuthContext,
-    State(state): State<AppState>,
-    Path(workspace_id): Path<Uuid>,
-    Query(query): Query<ExportQuery>,
-) -> Result<Response, ApiError> {
-    let workspace =
-        load_workspace_and_authorize(&auth, &state, workspace_id, POLICY_WORKSPACE_READ).await?;
-
-    let include = match query.include.as_deref() {
-        None | Some("") => vec![IncludeKind::LibraryData, IncludeKind::Blobs],
-        Some(raw) => IncludeKind::parse_csv(raw)
-            .map_err(|error| ApiError::BadRequest(format!("invalid include: {error}")))?,
-    };
-
-    let (writer, reader) = tokio::io::duplex(64 * 1024);
-    let exporter_state = state.clone();
-    let ws_id = workspace.id;
-    let include_clone = include.clone();
-    let join = tokio::spawn(async move {
-        export_workspace_archive(exporter_state, ws_id, include_clone, writer).await
-    });
-    let observer_ws_id = ws_id;
-    tokio::spawn(async move {
-        match join.await {
-            Ok(Ok(())) => {}
-            Ok(Err(error)) => {
-                tracing::error!(
-                    workspace_id = %observer_ws_id,
-                    error = format!("{error:#}"),
-                    "workspace snapshot export failed",
-                );
-            }
-            Err(join_error) => {
-                tracing::error!(
-                    workspace_id = %observer_ws_id,
-                    error = format!("{join_error}"),
-                    "workspace snapshot export task panicked or was cancelled",
-                );
-            }
-        }
-    });
-
-    let stream = tokio_util::io::ReaderStream::new(reader);
-    let body = Body::from_stream(stream);
-
-    let filename =
-        format!("workspace-{}-{}.tar", workspace.slug, chrono::Utc::now().format("%Y%m%dT%H%M%S"),);
-    let disposition = format!("attachment; filename=\"{filename}\"");
-    // Plain (uncompressed) tar — the embedded library archives are already
-    // zstd. Content-Encoding: identity opts out of the global CompressionLayer.
-    let response = Response::builder()
-        .status(200)
-        .header(header::CONTENT_TYPE, "application/x-tar")
-        .header(header::CONTENT_DISPOSITION, disposition)
-        .header(header::CONTENT_ENCODING, "identity")
-        .body(body)
-        .map_err(|error| ApiError::internal_with_log(error, "internal"))?;
-    Ok(response)
-}
-
-/// Restores a workspace from a plain-tar snapshot body, provisioning one fresh
-/// library per embedded archive.
-#[tracing::instrument(
-    level = "info",
-    name = "http.import_workspace_snapshot",
-    skip_all,
-    fields(workspace_id = %workspace_id)
-)]
-#[utoipa::path(
-    post,
-    path = "/v1/catalog/workspaces/{workspaceId}/snapshot",
-    tag = "content",
-    operation_id = "importWorkspaceSnapshot",
-    params(
-        ("workspaceId" = uuid::Uuid, Path, description = "Workspace identifier"),
-        ("overwrite" = Option<String>, Query, description = "Overwrite mode recorded in the report: 'reject' (default) or 'replace'. Each newly minted library is always restored in replace mode."),
-    ),
-    request_body(
-        content_type = "application/x-tar",
-        description = "Plain tar archive previously emitted by GET /v1/catalog/workspaces/{workspaceId}/snapshot",
-    ),
-    responses(
-        (status = 200, description = "Workspace snapshot import report (per-library row counts)", body = WorkspaceSnapshotImportReportResponse),
-        (status = 401, description = "Caller is not authenticated"),
-        (status = 403, description = "Caller is not authorized for the workspace"),
-        (status = 404, description = "Workspace not found"),
-    ),
-)]
-pub async fn import_workspace_snapshot(
-    auth: AuthContext,
-    State(state): State<AppState>,
-    Path(workspace_id): Path<Uuid>,
-    Query(query): Query<ImportQuery>,
-    body: Body,
-) -> Result<Json<WorkspaceSnapshotImportReportResponse>, ApiError> {
-    load_workspace_and_authorize(&auth, &state, workspace_id, POLICY_WORKSPACE_ADMIN).await?;
-
-    let overwrite = OverwriteMode::parse(query.overwrite.as_deref().unwrap_or(""))
-        .map_err(|error| ApiError::BadRequest(format!("invalid overwrite: {error}")))?;
-
-    let spooled = spool_snapshot_body(body, "workspace").await?;
-    let reader = spooled.open().await?;
-
-    let report = restore_workspace_archive(&state, workspace_id, reader, overwrite)
-        .await
-        .map_err(ApiError::from)?;
-
-    tracing::info!(
-        workspace_id = %report.workspace_id,
-        archive_bytes = spooled.bytes_written,
-        libraries_restored = report.libraries_restored,
-        "workspace snapshot import restored from spooled request body",
-    );
-
-    Ok(Json(report.into()))
-}
-
-/// Snapshot routes. Wired as a `Router` because the import routes
-/// disable the global body-size limit — the caller can stream a
-/// multi-GB archive as the request body, and tar(-zst) is self-validating.
+/// Snapshot routes. Wired as a `Router` because the import route disables
+/// the global body-size limit — the caller can stream a multi-GB archive as
+/// the request body, and tar(-zst) is self-validating.
+///
+/// The whole-workspace snapshot pair (`GET`/`PUT
+/// /v1/catalog/workspaces/{workspaceId}/snapshot`) used to live here too;
+/// it has moved to `catalog::snapshot` (correct domain per the workspace
+/// scope of that resource) and is no longer part of this router.
 pub(super) fn routes() -> Router<AppState> {
-    Router::new()
-        .route(
-            "/content/libraries/{library_id}/snapshot",
-            MethodRouter::new()
-                .get(export_library_snapshot)
-                .post(import_library_snapshot)
-                .layer(DefaultBodyLimit::disable()),
-        )
-        .route(
-            "/catalog/workspaces/{workspace_id}/snapshot",
-            MethodRouter::new()
-                .get(export_workspace_snapshot)
-                .post(import_workspace_snapshot)
-                .layer(DefaultBodyLimit::disable()),
-        )
+    Router::new().route(
+        "/content/libraries/{library_id}/snapshot",
+        MethodRouter::new()
+            .get(export_library_snapshot)
+            .post(import_library_snapshot)
+            .layer(DefaultBodyLimit::disable()),
+    )
 }

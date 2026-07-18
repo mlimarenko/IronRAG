@@ -4,6 +4,11 @@ expression: shapes
 ---
 [
   {
+    "answerDisposition": {
+      "executionDetail": "factual_ready",
+      "matches": true,
+      "readiness": "factual_ready"
+    },
     "case": "verified_endpoint_answer",
     "citationCounts": {
       "chunkReferences": 2,
@@ -32,6 +37,7 @@ expression: shapes
       "count": 1
     },
     "executionDetailKeys": [
+      "answerDisposition",
       "chunkReferences",
       "clarification",
       "contextBundleId",
@@ -105,6 +111,7 @@ expression: shapes
       "answerBody",
       "answerCandidates",
       "clarification",
+      "completion",
       "conversationId",
       "executionDetail",
       "executionId",
@@ -113,6 +120,9 @@ expression: shapes
       "libraryId",
       "lifecycleState",
       "mustPreserveSpans",
+      "readiness",
+      "repairPolicy",
+      "responseProfile",
       "runtimeExecutionId",
       "workspaceId"
     ],
@@ -151,6 +161,11 @@ expression: shapes
     }
   },
   {
+    "answerDisposition": {
+      "executionDetail": "factual_ready",
+      "matches": true,
+      "readiness": "factual_ready"
+    },
     "case": "followup_with_external_turns",
     "citationCounts": {
       "chunkReferences": 1,
@@ -179,6 +194,7 @@ expression: shapes
       "count": 1
     },
     "executionDetailKeys": [
+      "answerDisposition",
       "chunkReferences",
       "clarification",
       "contextBundleId",
@@ -270,6 +286,7 @@ expression: shapes
       "answerBody",
       "answerCandidates",
       "clarification",
+      "completion",
       "conversationId",
       "executionDetail",
       "executionId",
@@ -278,6 +295,9 @@ expression: shapes
       "libraryId",
       "lifecycleState",
       "mustPreserveSpans",
+      "readiness",
+      "repairPolicy",
+      "responseProfile",
       "runtimeExecutionId",
       "workspaceId"
     ],
@@ -316,6 +336,11 @@ expression: shapes
     }
   },
   {
+    "answerDisposition": {
+      "executionDetail": "non_terminal",
+      "matches": true,
+      "readiness": "non_terminal"
+    },
     "case": "insufficient_evidence_answer",
     "citationCounts": {
       "chunkReferences": 0,
@@ -344,6 +369,7 @@ expression: shapes
       "count": 1
     },
     "executionDetailKeys": [
+      "answerDisposition",
       "chunkReferences",
       "clarification",
       "contextBundleId",
@@ -384,6 +410,7 @@ expression: shapes
       "answerBody",
       "answerCandidates",
       "clarification",
+      "completion",
       "conversationId",
       "executionDetail",
       "executionId",
@@ -392,6 +419,9 @@ expression: shapes
       "libraryId",
       "lifecycleState",
       "mustPreserveSpans",
+      "readiness",
+      "repairPolicy",
+      "responseProfile",
       "runtimeExecutionId",
       "workspaceId"
     ],
@@ -443,6 +473,11 @@ expression: shapes
     }
   },
   {
+    "answerDisposition": {
+      "executionDetail": "non_terminal",
+      "matches": true,
+      "readiness": "non_terminal"
+    },
     "case": "conflicting_prepared_segments",
     "citationCounts": {
       "chunkReferences": 2,
@@ -471,6 +506,7 @@ expression: shapes
       "count": 1
     },
     "executionDetailKeys": [
+      "answerDisposition",
       "chunkReferences",
       "clarification",
       "contextBundleId",
@@ -552,6 +588,7 @@ expression: shapes
       "answerBody",
       "answerCandidates",
       "clarification",
+      "completion",
       "conversationId",
       "executionDetail",
       "executionId",
@@ -560,6 +597,9 @@ expression: shapes
       "libraryId",
       "lifecycleState",
       "mustPreserveSpans",
+      "readiness",
+      "repairPolicy",
+      "responseProfile",
       "runtimeExecutionId",
       "workspaceId"
     ],
@@ -611,6 +651,11 @@ expression: shapes
     }
   },
   {
+    "answerDisposition": {
+      "executionDetail": "factual_ready",
+      "matches": true,
+      "readiness": "factual_ready"
+    },
     "case": "graph_grounded_answer",
     "citationCounts": {
       "chunkReferences": 1,
@@ -639,6 +684,7 @@ expression: shapes
       "count": 1
     },
     "executionDetailKeys": [
+      "answerDisposition",
       "chunkReferences",
       "clarification",
       "contextBundleId",
@@ -712,6 +758,7 @@ expression: shapes
       "answerBody",
       "answerCandidates",
       "clarification",
+      "completion",
       "conversationId",
       "executionDetail",
       "executionId",
@@ -720,6 +767,9 @@ expression: shapes
       "libraryId",
       "lifecycleState",
       "mustPreserveSpans",
+      "readiness",
+      "repairPolicy",
+      "responseProfile",
       "runtimeExecutionId",
       "workspaceId"
     ],
@@ -758,6 +808,11 @@ expression: shapes
     }
   },
   {
+    "answerDisposition": {
+      "executionDetail": "non_terminal",
+      "matches": true,
+      "readiness": "non_terminal"
+    },
     "case": "partially_supported_fact_answer",
     "citationCounts": {
       "chunkReferences": 1,
@@ -786,6 +841,7 @@ expression: shapes
       "count": 1
     },
     "executionDetailKeys": [
+      "answerDisposition",
       "chunkReferences",
       "clarification",
       "contextBundleId",
@@ -867,6 +923,7 @@ expression: shapes
       "answerBody",
       "answerCandidates",
       "clarification",
+      "completion",
       "conversationId",
       "executionDetail",
       "executionId",
@@ -875,6 +932,9 @@ expression: shapes
       "libraryId",
       "lifecycleState",
       "mustPreserveSpans",
+      "readiness",
+      "repairPolicy",
+      "responseProfile",
       "runtimeExecutionId",
       "workspaceId"
     ],

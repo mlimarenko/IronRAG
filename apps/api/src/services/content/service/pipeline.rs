@@ -19,20 +19,22 @@ use crate::{
     app::state::AppState,
     domains::knowledge::TypedTechnicalFact,
     infra::knowledge_rows::{KnowledgeChunkRow, KnowledgeDocumentRow, KnowledgeRevisionRow},
-    infra::repositories::{self, ingest_repository},
-    interfaces::http::router_support::ApiError,
+    infra::repositories::{self, admission_repository, ingest_repository},
+    interfaces::http::router_support::{ApiError, map_runtime_lifecycle_error},
     services::{
         graph::extract::{
             GraphExtractionRequest, GraphExtractionStructuredChunkContext,
             GraphExtractionSubTypeHints, GraphExtractionTechnicalFact,
         },
         ingest::service::{
-            FinalizeAttemptCommand, INGEST_STAGE_CHUNK_CONTENT, INGEST_STAGE_EMBED_CHUNK,
-            INGEST_STAGE_EXTRACT_CONTENT, INGEST_STAGE_EXTRACT_GRAPH,
-            INGEST_STAGE_EXTRACT_TECHNICAL_FACTS, INGEST_STAGE_FINALIZING,
+            INGEST_STAGE_CHUNK_CONTENT, INGEST_STAGE_EMBED_CHUNK, INGEST_STAGE_EXTRACT_CONTENT,
+            INGEST_STAGE_EXTRACT_GRAPH, INGEST_STAGE_EXTRACT_TECHNICAL_FACTS,
             INGEST_STAGE_PREPARE_STRUCTURE, RecordStageEventCommand,
         },
         ops::billing::CaptureIngestAttemptBillingCommand,
+        query::vector_dimensions::{
+            ensure_active_embedding_profile_key, invalidate_library_embedding_profile_inventory,
+        },
     },
     shared::extraction::{
         file_extract::{
@@ -49,12 +51,11 @@ use super::{
     AcceptMutationCommand, AdmitDocumentCommand, AdmitMutationCommand, AppendInlineMutationCommand,
     ContentMutationAdmission, ContentService, CreateDocumentAdmission, CreateMutationItemCommand,
     CreateRevisionCommand, EditInlineMutationCommand, MaterializeRevisionGraphCandidatesCommand,
-    MaterializeWebCaptureCommand, MaterializedWebCapture, PromoteHeadCommand,
-    ReconcileFailedIngestMutationCommand, ReplaceInlineMutationCommand, RevisionAdmissionMetadata,
-    UpdateMutationCommand, UpdateMutationItemCommand, UploadInlineDocumentCommand,
+    MaterializeWebCaptureCommand, MaterializedWebCapture, ReplaceInlineMutationCommand,
+    RevisionAdmissionMetadata, UpdateMutationCommand, UploadInlineDocumentCommand,
     edited_markdown_file_name, graph_extract_success_message, graph_state_after_successful_extract,
-    infer_inline_mime_type, merge_appended_bytes, sha256_hex_bytes, sha256_hex_text,
-    source_uri_for_inline_payload,
+    infer_inline_mime_type, map_mutation_item_row, merge_appended_bytes, sha256_hex_bytes,
+    sha256_hex_text, source_uri_for_inline_payload,
 };
 
 const GRAPH_EXTRACTION_MIN_CHUNK_QUALITY_SCORE: f32 = 0.35;
@@ -63,6 +64,30 @@ const CHUNK_KIND_SOURCE_UNIT: &str = "source_unit";
 
 struct InlineAttemptHeartbeatGuard {
     running: Arc<AtomicBool>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum InlineContentPipelineOutcome {
+    Applied,
+    AuthorityLost,
+}
+
+#[derive(Debug)]
+struct InlinePipelineFailure {
+    error: ApiError,
+    delete_vectors: bool,
+}
+
+impl InlinePipelineFailure {
+    const fn new(error: ApiError, delete_vectors: bool) -> Self {
+        Self { error, delete_vectors }
+    }
+}
+
+impl From<ApiError> for InlinePipelineFailure {
+    fn from(error: ApiError) -> Self {
+        Self::new(error, false)
+    }
 }
 
 impl Drop for InlineAttemptHeartbeatGuard {
@@ -123,7 +148,7 @@ impl GraphExtractionChunkPolicy {
     }
 
     #[must_use]
-    pub(super) fn record_stream(selected_source_units: BTreeSet<Uuid>) -> Self {
+    pub(super) const fn record_stream(selected_source_units: BTreeSet<Uuid>) -> Self {
         Self { record_stream: true, selected_record_stream_source_units: selected_source_units }
     }
 
@@ -312,8 +337,7 @@ impl ContentService {
             .as_deref()
             .map(str::trim)
             .filter(|value| !value.is_empty())
-            .map(ToString::to_string)
-            .unwrap_or_else(|| file_name.clone());
+            .map_or_else(|| file_name.clone(), ToString::to_string);
         let storage_lock = repositories::content_repository::acquire_content_library_storage_lock(
             &state.persistence.postgres,
             command.library_id,
@@ -434,8 +458,6 @@ impl ContentService {
             }
         };
 
-        let current_head = self.get_document_head(state, document.id).await?;
-        let base_revision_id = current_head.as_ref().and_then(|head| head.latest_revision_id());
         let revision = self
             .create_revision(
                 state,
@@ -454,61 +476,32 @@ impl ContentService {
                 },
             )
             .await?;
-        let mutation_item = self
-            .create_mutation_item(
-                state,
-                CreateMutationItemCommand {
-                    mutation_id: command.mutation_id,
-                    document_id: Some(document.id),
-                    base_revision_id,
-                    result_revision_id: Some(revision.id),
-                    item_state: "pending".to_string(),
-                    message: Some("web page accepted and queued for ingest".to_string()),
-                },
-            )
-            .await?;
-        let job = match state
-            .canonical_services
-            .ingest
-            .admit_job(
-                state,
-                crate::services::ingest::service::AdmitIngestJobCommand {
-                    workspace_id: command.workspace_id,
-                    library_id: command.library_id,
-                    mutation_id: Some(command.mutation_id),
-                    connector_id: None,
-                    async_operation_id: None,
-                    knowledge_document_id: Some(document.id),
-                    knowledge_revision_id: Some(revision.id),
-                    job_kind: "content_mutation".to_string(),
-                    priority: 100,
-                    dedupe_key: None,
-                    available_at: None,
-                },
-            )
-            .await
-        {
-            Ok(job) => job,
-            Err(error) => {
-                let _ = self
-                    .reconcile_failed_ingest_mutation(
-                        state,
-                        ReconcileFailedIngestMutationCommand {
-                            mutation_id: command.mutation_id,
-                            failure_code: "ingest_job_admission_failed".to_string(),
-                            failure_message: "failed to admit ingest job for materialized web page"
-                                .to_string(),
-                        },
-                    )
-                    .await;
-                return Err(error);
-            }
-        };
-        let _ = self
-            .promote_pending_document_mutation_head(state, document.id, command.mutation_id)
-            .await?;
+        let admission = admission_repository::admit_web_capture_materialization_with_failpoint(
+            &state.persistence.postgres,
+            &admission_repository::WebCaptureMaterializationAdmissionRequest {
+                workspace_id: command.workspace_id,
+                library_id: command.library_id,
+                mutation_id: command.mutation_id,
+                document_id: document.id,
+                revision_id: revision.id,
+                requested_by_principal_id: command.requested_by_principal_id,
+                priority: 100,
+            },
+            None,
+        )
+        .await
+        .map_err(|error| {
+            ApiError::internal_with_log(error, "web capture materialization admission failed")
+        })?
+        .into_bundle();
+        let mutation_item = map_mutation_item_row(admission.item);
 
-        Ok(MaterializedWebCapture::Ingested { document, revision, mutation_item, job_id: job.id })
+        Ok(MaterializedWebCapture::Ingested {
+            document,
+            revision: Box::new(revision),
+            mutation_item,
+            job_id: admission.job.id,
+        })
     }
 
     pub async fn append_inline_mutation(
@@ -726,7 +719,10 @@ impl ContentService {
         }
         self.ensure_document_accepts_new_mutation(state, command.document_id, "replace").await?;
         let head = self.get_document_head(state, command.document_id).await?;
-        let base_revision = match head.as_ref().and_then(|row| row.latest_revision_id()) {
+        let base_revision = match head
+            .as_ref()
+            .and_then(crate::domains::content::ContentDocumentHead::latest_revision_id)
+        {
             Some(revision_id) => state
                 .document_store
                 .get_revision(revision_id)
@@ -805,342 +801,305 @@ impl ContentService {
     ) -> Result<ContentMutationAdmission, ApiError> {
         let context = self.inline_mutation_context_from_admission(admission)?;
         let attempt = self.lease_inline_attempt(state, &context).await?;
-        let _heartbeat_guard = spawn_inline_attempt_heartbeat(state, attempt.id);
-        self.update_mutation(
-            state,
-            UpdateMutationCommand {
-                mutation_id: context.mutation_id,
-                mutation_state: "running".to_string(),
-                completed_at: None,
-                failure_code: None,
-                conflict_code: None,
-            },
-        )
-        .await?;
-        state
-            .canonical_services
-            .ingest
-            .record_stage_event(
-                state,
-                RecordStageEventCommand {
-                    attempt_id: attempt.id,
-                    stage_name: INGEST_STAGE_EXTRACT_CONTENT.to_string(),
-                    stage_state: "started".to_string(),
-                    message: Some("materializing appended text".to_string()),
-                    details_json: serde_json::json!({
-                        "documentId": context.document_id,
-                        "revisionId": context.revision_id,
-                    }),
-                    provider_kind: None,
-                    model_name: None,
-                    prompt_tokens: None,
-                    completion_tokens: None,
-                    total_tokens: None,
-                    cached_tokens: None,
-                    estimated_cost: None,
-                    currency_code: None,
-                    elapsed_ms: None,
-                },
-            )
-            .await?;
-        let stage_start = Instant::now();
-        state
-            .canonical_services
-            .knowledge
-            .set_revision_extract_state(
-                state,
-                context.revision_id,
-                "ready",
-                Some(&text),
-                Some(&sha256_hex_text(&text)),
-            )
-            .await?;
-        state
-            .canonical_services
-            .ingest
-            .record_stage_event(
-                state,
-                RecordStageEventCommand {
-                    attempt_id: attempt.id,
-                    stage_name: INGEST_STAGE_EXTRACT_CONTENT.to_string(),
-                    stage_state: "completed".to_string(),
-                    message: Some("appended text materialized".to_string()),
-                    details_json: serde_json::json!({ "contentLength": text.chars().count() }),
-                    provider_kind: None,
-                    model_name: None,
-                    prompt_tokens: None,
-                    completion_tokens: None,
-                    total_tokens: None,
-                    cached_tokens: None,
-                    estimated_cost: None,
-                    currency_code: None,
-                    elapsed_ms: Some(stage_start.elapsed().as_millis() as i64),
-                },
-            )
-            .await?;
-        state
-            .canonical_services
-            .ingest
-            .record_stage_event(
-                state,
-                RecordStageEventCommand {
-                    attempt_id: attempt.id,
-                    stage_name: INGEST_STAGE_PREPARE_STRUCTURE.to_string(),
-                    stage_state: "started".to_string(),
-                    message: Some("building structured revision from normalized text".to_string()),
-                    details_json: serde_json::json!({ "revisionId": context.revision_id }),
-                    provider_kind: None,
-                    model_name: None,
-                    prompt_tokens: None,
-                    completion_tokens: None,
-                    total_tokens: None,
-                    cached_tokens: None,
-                    estimated_cost: None,
-                    currency_code: None,
-                    elapsed_ms: None,
-                },
-            )
-            .await?;
-        let extraction_plan = if file_name.is_some() || mime_type.is_some() {
-            build_inline_text_extraction_plan_for_source(
-                &text,
-                file_name.as_deref(),
-                mime_type.as_deref(),
-            )
-            .map_err(|error| ApiError::BadRequest(format!("inline extraction failed: {error}")))?
-        } else {
-            build_inline_text_extraction_plan(&text)
-        };
-        let preparation_cancellation_token = CancellationToken::new();
-        let preparation = self
-            .prepare_and_persist_revision_structure(
-                state,
-                context.revision_id,
-                &extraction_plan,
-                &preparation_cancellation_token,
-            )
-            .await
-            .map_err(ApiError::from)?;
-        state
-            .canonical_services
-            .ingest
-            .record_stage_event(
-                state,
-                RecordStageEventCommand {
-                    attempt_id: attempt.id,
-                    stage_name: INGEST_STAGE_PREPARE_STRUCTURE.to_string(),
-                    stage_state: "completed".to_string(),
-                    message: Some("structured revision prepared".to_string()),
-                    details_json: serde_json::json!({
-                        "revisionId": context.revision_id,
-                        "normalizationProfile": preparation.normalization_profile,
-                        "blockCount": preparation.prepared_revision.block_count,
-                        "chunkCount": preparation.chunk_count,
-                    }),
-                    provider_kind: None,
-                    model_name: None,
-                    prompt_tokens: None,
-                    completion_tokens: None,
-                    total_tokens: None,
-                    cached_tokens: None,
-                    estimated_cost: None,
-                    currency_code: None,
-                    elapsed_ms: Some(preparation.prepare_structure_elapsed_ms),
-                },
-            )
-            .await?;
-        state
-            .canonical_services
-            .ingest
-            .record_stage_event(
-                state,
-                RecordStageEventCommand {
-                    attempt_id: attempt.id,
-                    stage_name: INGEST_STAGE_CHUNK_CONTENT.to_string(),
-                    stage_state: "started".to_string(),
-                    message: Some("persisting content chunks".to_string()),
-                    details_json: serde_json::json!({
-                        "revisionId": context.revision_id,
-                    }),
-                    provider_kind: None,
-                    model_name: None,
-                    prompt_tokens: None,
-                    completion_tokens: None,
-                    total_tokens: None,
-                    cached_tokens: None,
-                    estimated_cost: None,
-                    currency_code: None,
-                    elapsed_ms: None,
-                },
-            )
-            .await?;
-        state
-            .canonical_services
-            .ingest
-            .record_stage_event(
-                state,
-                RecordStageEventCommand {
-                    attempt_id: attempt.id,
-                    stage_name: INGEST_STAGE_CHUNK_CONTENT.to_string(),
-                    stage_state: "completed".to_string(),
-                    message: Some("content chunks persisted".to_string()),
-                    details_json: serde_json::json!({
-                        "revisionId": context.revision_id,
-                        "chunkCount": preparation.chunk_count,
-                    }),
-                    provider_kind: None,
-                    model_name: None,
-                    prompt_tokens: None,
-                    completion_tokens: None,
-                    total_tokens: None,
-                    cached_tokens: None,
-                    estimated_cost: None,
-                    currency_code: None,
-                    elapsed_ms: Some(preparation.chunk_content_elapsed_ms),
-                },
-            )
-            .await?;
-        state
-            .canonical_services
-            .ingest
-            .record_stage_event(
-                state,
-                RecordStageEventCommand {
-                    attempt_id: attempt.id,
-                    stage_name: INGEST_STAGE_EXTRACT_TECHNICAL_FACTS.to_string(),
-                    stage_state: "started".to_string(),
-                    message: Some(
-                        "extracting technical facts from structured revision".to_string(),
-                    ),
-                    details_json: serde_json::json!({
-                        "revisionId": context.revision_id,
-                    }),
-                    provider_kind: None,
-                    model_name: None,
-                    prompt_tokens: None,
-                    completion_tokens: None,
-                    total_tokens: None,
-                    cached_tokens: None,
-                    estimated_cost: None,
-                    currency_code: None,
-                    elapsed_ms: None,
-                },
-            )
-            .await?;
-        state
-            .canonical_services
-            .ingest
-            .record_stage_event(
-                state,
-                RecordStageEventCommand {
-                    attempt_id: attempt.id,
-                    stage_name: INGEST_STAGE_EXTRACT_TECHNICAL_FACTS.to_string(),
-                    stage_state: "completed".to_string(),
-                    message: Some("technical facts extracted from structured revision".to_string()),
-                    details_json: serde_json::json!({
-                        "revisionId": context.revision_id,
-                        "technicalFactCount": preparation.technical_fact_count,
-                        "technicalConflictCount": preparation.technical_conflict_count,
-                    }),
-                    provider_kind: None,
-                    model_name: None,
-                    prompt_tokens: None,
-                    completion_tokens: None,
-                    total_tokens: None,
-                    cached_tokens: None,
-                    estimated_cost: None,
-                    currency_code: None,
-                    elapsed_ms: Some(preparation.extract_technical_facts_elapsed_ms),
-                },
-            )
-            .await?;
-        match self.complete_successful_inline_mutation(state, &context, attempt.id).await {
-            Ok(admission) => Ok(admission),
-            Err(error) => {
-                self.finalize_failed_inline_mutation(state, &context, attempt.id, &error).await;
-                Err(error)
-            }
-        }
-    }
-
-    async fn complete_successful_inline_mutation(
-        &self,
-        state: &AppState,
-        context: &InlineMutationContext,
-        attempt_id: Uuid,
-    ) -> Result<ContentMutationAdmission, ApiError> {
-        self.run_inline_post_chunk_pipeline(state, context, attempt_id).await?;
-        let _ = self
-            .promote_document_head(
-                state,
-                PromoteHeadCommand {
-                    document_id: context.document_id,
-                    active_revision_id: Some(context.revision_id),
-                    readable_revision_id: Some(context.revision_id),
-                    latest_mutation_id: Some(context.mutation_id),
-                    latest_successful_attempt_id: Some(attempt_id),
-                },
-            )
-            .await?;
-        if let Err(error) = self
-            .converge_document_technical_facts(
-                state,
-                context.document_id,
-                Some(context.revision_id),
-            )
-            .await
-        {
-            warn!(
-                document_id = %context.document_id,
-                revision_id = %context.revision_id,
-                mutation_id = %context.mutation_id,
-                ?error,
-                "post-head-promotion technical fact convergence failed after inline mutation commit"
-            );
-        }
-        let _ = self
-            .update_mutation_item(
-                state,
-                UpdateMutationItemCommand {
-                    item_id: context.item_id,
-                    document_id: Some(context.document_id),
-                    base_revision_id: None,
-                    result_revision_id: Some(context.revision_id),
-                    item_state: "applied".to_string(),
-                    message: Some("mutation applied".to_string()),
-                },
-            )
-            .await?;
-        let _ = self
-            .update_mutation(
+        let heartbeat_guard = spawn_inline_attempt_heartbeat(state, attempt.id);
+        // Keep every post-lease fallible operation inside one lifecycle
+        // boundary. Any error before publication is settled by the exact-item
+        // failure UoW; work after a committed publication is deliberately kept
+        // outside this boundary and can never rewrite the terminal state.
+        let lifecycle_result: Result<InlineContentPipelineOutcome, InlinePipelineFailure> = async {
+            self.update_mutation(
                 state,
                 UpdateMutationCommand {
                     mutation_id: context.mutation_id,
-                    mutation_state: "applied".to_string(),
-                    completed_at: Some(Utc::now()),
+                    mutation_state: "running".to_string(),
+                    completed_at: None,
                     failure_code: None,
                     conflict_code: None,
                 },
             )
             .await?;
-        let _ = state
-            .canonical_services
-            .ingest
-            .finalize_attempt(
-                state,
-                FinalizeAttemptCommand {
-                    attempt_id,
-                    knowledge_generation_id: None,
-                    attempt_state: "succeeded".to_string(),
-                    current_stage: Some(INGEST_STAGE_FINALIZING.to_string()),
-                    failure_class: None,
-                    failure_code: None,
-                    failure_message: None,
-                    retryable: false,
-                },
-            )
-            .await?;
-        self.get_mutation_admission(state, context.mutation_id).await
+            state
+                .canonical_services
+                .ingest
+                .record_stage_event(
+                    state,
+                    RecordStageEventCommand {
+                        attempt_id: attempt.id,
+                        stage_name: INGEST_STAGE_EXTRACT_CONTENT.to_string(),
+                        stage_state: "started".to_string(),
+                        message: Some("materializing appended text".to_string()),
+                        details_json: serde_json::json!({
+                            "documentId": context.document_id,
+                            "revisionId": context.revision_id,
+                        }),
+                        provider_kind: None,
+                        model_name: None,
+                        prompt_tokens: None,
+                        completion_tokens: None,
+                        total_tokens: None,
+                        cached_tokens: None,
+                        estimated_cost: None,
+                        currency_code: None,
+                        elapsed_ms: None,
+                    },
+                )
+                .await?;
+            let stage_start = Instant::now();
+            state
+                .canonical_services
+                .knowledge
+                .set_revision_extract_state(
+                    state,
+                    context.revision_id,
+                    "ready",
+                    Some(&text),
+                    Some(&sha256_hex_text(&text)),
+                )
+                .await?;
+            state
+                .canonical_services
+                .ingest
+                .record_stage_event(
+                    state,
+                    RecordStageEventCommand {
+                        attempt_id: attempt.id,
+                        stage_name: INGEST_STAGE_EXTRACT_CONTENT.to_string(),
+                        stage_state: "completed".to_string(),
+                        message: Some("appended text materialized".to_string()),
+                        details_json: serde_json::json!({ "contentLength": text.chars().count() }),
+                        provider_kind: None,
+                        model_name: None,
+                        prompt_tokens: None,
+                        completion_tokens: None,
+                        total_tokens: None,
+                        cached_tokens: None,
+                        estimated_cost: None,
+                        currency_code: None,
+                        elapsed_ms: Some(stage_start.elapsed().as_millis() as i64),
+                    },
+                )
+                .await?;
+            state
+                .canonical_services
+                .ingest
+                .record_stage_event(
+                    state,
+                    RecordStageEventCommand {
+                        attempt_id: attempt.id,
+                        stage_name: INGEST_STAGE_PREPARE_STRUCTURE.to_string(),
+                        stage_state: "started".to_string(),
+                        message: Some(
+                            "building structured revision from normalized text".to_string(),
+                        ),
+                        details_json: serde_json::json!({ "revisionId": context.revision_id }),
+                        provider_kind: None,
+                        model_name: None,
+                        prompt_tokens: None,
+                        completion_tokens: None,
+                        total_tokens: None,
+                        cached_tokens: None,
+                        estimated_cost: None,
+                        currency_code: None,
+                        elapsed_ms: None,
+                    },
+                )
+                .await?;
+            let extraction_plan = if file_name.is_some() || mime_type.is_some() {
+                build_inline_text_extraction_plan_for_source(
+                    &text,
+                    file_name.as_deref(),
+                    mime_type.as_deref(),
+                )
+                .map_err(|error| {
+                    ApiError::BadRequest(format!("inline extraction failed: {error}"))
+                })?
+            } else {
+                build_inline_text_extraction_plan(&text)
+            };
+            let preparation_cancellation_token = CancellationToken::new();
+            let preparation = self
+                .prepare_and_persist_revision_structure(
+                    state,
+                    context.revision_id,
+                    &extraction_plan,
+                    &preparation_cancellation_token,
+                )
+                .await
+                .map_err(ApiError::from)?;
+            state
+                .canonical_services
+                .ingest
+                .record_stage_event(
+                    state,
+                    RecordStageEventCommand {
+                        attempt_id: attempt.id,
+                        stage_name: INGEST_STAGE_PREPARE_STRUCTURE.to_string(),
+                        stage_state: "completed".to_string(),
+                        message: Some("structured revision prepared".to_string()),
+                        details_json: serde_json::json!({
+                            "revisionId": context.revision_id,
+                            "normalizationProfile": preparation.normalization_profile,
+                            "blockCount": preparation.prepared_revision.block_count,
+                            "chunkCount": preparation.chunk_count,
+                        }),
+                        provider_kind: None,
+                        model_name: None,
+                        prompt_tokens: None,
+                        completion_tokens: None,
+                        total_tokens: None,
+                        cached_tokens: None,
+                        estimated_cost: None,
+                        currency_code: None,
+                        elapsed_ms: Some(preparation.prepare_structure_elapsed_ms),
+                    },
+                )
+                .await?;
+            state
+                .canonical_services
+                .ingest
+                .record_stage_event(
+                    state,
+                    RecordStageEventCommand {
+                        attempt_id: attempt.id,
+                        stage_name: INGEST_STAGE_CHUNK_CONTENT.to_string(),
+                        stage_state: "started".to_string(),
+                        message: Some("persisting content chunks".to_string()),
+                        details_json: serde_json::json!({
+                            "revisionId": context.revision_id,
+                        }),
+                        provider_kind: None,
+                        model_name: None,
+                        prompt_tokens: None,
+                        completion_tokens: None,
+                        total_tokens: None,
+                        cached_tokens: None,
+                        estimated_cost: None,
+                        currency_code: None,
+                        elapsed_ms: None,
+                    },
+                )
+                .await?;
+            state
+                .canonical_services
+                .ingest
+                .record_stage_event(
+                    state,
+                    RecordStageEventCommand {
+                        attempt_id: attempt.id,
+                        stage_name: INGEST_STAGE_CHUNK_CONTENT.to_string(),
+                        stage_state: "completed".to_string(),
+                        message: Some("content chunks persisted".to_string()),
+                        details_json: serde_json::json!({
+                            "revisionId": context.revision_id,
+                            "chunkCount": preparation.chunk_count,
+                        }),
+                        provider_kind: None,
+                        model_name: None,
+                        prompt_tokens: None,
+                        completion_tokens: None,
+                        total_tokens: None,
+                        cached_tokens: None,
+                        estimated_cost: None,
+                        currency_code: None,
+                        elapsed_ms: Some(preparation.chunk_content_elapsed_ms),
+                    },
+                )
+                .await?;
+            state
+                .canonical_services
+                .ingest
+                .record_stage_event(
+                    state,
+                    RecordStageEventCommand {
+                        attempt_id: attempt.id,
+                        stage_name: INGEST_STAGE_EXTRACT_TECHNICAL_FACTS.to_string(),
+                        stage_state: "started".to_string(),
+                        message: Some(
+                            "extracting technical facts from structured revision".to_string(),
+                        ),
+                        details_json: serde_json::json!({
+                            "revisionId": context.revision_id,
+                        }),
+                        provider_kind: None,
+                        model_name: None,
+                        prompt_tokens: None,
+                        completion_tokens: None,
+                        total_tokens: None,
+                        cached_tokens: None,
+                        estimated_cost: None,
+                        currency_code: None,
+                        elapsed_ms: None,
+                    },
+                )
+                .await?;
+            state
+                .canonical_services
+                .ingest
+                .record_stage_event(
+                    state,
+                    RecordStageEventCommand {
+                        attempt_id: attempt.id,
+                        stage_name: INGEST_STAGE_EXTRACT_TECHNICAL_FACTS.to_string(),
+                        stage_state: "completed".to_string(),
+                        message: Some(
+                            "technical facts extracted from structured revision".to_string(),
+                        ),
+                        details_json: serde_json::json!({
+                            "revisionId": context.revision_id,
+                            "technicalFactCount": preparation.technical_fact_count,
+                            "technicalConflictCount": preparation.technical_conflict_count,
+                        }),
+                        provider_kind: None,
+                        model_name: None,
+                        prompt_tokens: None,
+                        completion_tokens: None,
+                        total_tokens: None,
+                        cached_tokens: None,
+                        estimated_cost: None,
+                        currency_code: None,
+                        elapsed_ms: Some(preparation.extract_technical_facts_elapsed_ms),
+                    },
+                )
+                .await?;
+            self.run_inline_post_chunk_pipeline(state, &context, attempt.id).await
+        }
+        .await;
+        drop(heartbeat_guard);
+
+        match lifecycle_result {
+            Ok(InlineContentPipelineOutcome::Applied) => {
+                invalidate_library_embedding_profile_inventory(context.library_id);
+                if let Err(error) = self
+                    .converge_document_technical_facts(
+                        state,
+                        context.document_id,
+                        Some(context.revision_id),
+                    )
+                    .await
+                {
+                    warn!(
+                        document_id = %context.document_id,
+                        revision_id = %context.revision_id,
+                        mutation_id = %context.mutation_id,
+                        ?error,
+                        "post-publication technical fact convergence failed after inline mutation commit"
+                    );
+                }
+                self.get_mutation_admission(state, context.mutation_id).await
+            }
+            Ok(InlineContentPipelineOutcome::AuthorityLost) => {
+                warn!(
+                    attempt_id = %attempt.id,
+                    mutation_id = %context.mutation_id,
+                    "inline content publication arrived after attempt authority moved; preserving current owner state",
+                );
+                self.get_mutation_admission(state, context.mutation_id).await
+            }
+            Err(failure) => {
+                self.finalize_failed_inline_mutation(state, &context, attempt.id, &failure).await;
+                Err(failure.error)
+            }
+        }
     }
 
     async fn finalize_failed_inline_mutation(
@@ -1148,49 +1107,48 @@ impl ContentService {
         state: &AppState,
         context: &InlineMutationContext,
         attempt_id: Uuid,
-        error: &ApiError,
+        failure: &InlinePipelineFailure,
     ) {
-        if let Err(finalize_error) = state
-            .canonical_services
-            .ingest
-            .finalize_attempt(
-                state,
-                FinalizeAttemptCommand {
-                    attempt_id,
-                    knowledge_generation_id: None,
-                    attempt_state: "failed".to_string(),
-                    current_stage: Some(INGEST_STAGE_FINALIZING.to_string()),
-                    failure_class: Some("content_mutation".to_string()),
-                    failure_code: Some("inline_pipeline_failed".to_string()),
-                    failure_message: Some(format!("inline mutation pipeline failed: {error}")),
-                    retryable: false,
-                },
-            )
-            .await
+        let failure_message = format!("inline mutation pipeline failed: {}", failure.error);
+        match ingest_repository::fail_content_ingest_attempt(
+            &state.persistence.postgres,
+            &ingest_repository::FailContentIngestAttempt {
+                workspace_id: context.workspace_id,
+                library_id: context.library_id,
+                document_id: context.document_id,
+                revision_id: context.revision_id,
+                mutation_id: context.mutation_id,
+                mutation_item_id: context.item_id,
+                attempt_id,
+                current_stage: None,
+                failure_class: Some("content_mutation".to_string()),
+                failure_code: Some("inline_pipeline_failed".to_string()),
+                failure_message: Some(failure_message),
+                retryable: false,
+                delete_vectors: failure.delete_vectors,
+                failed_at: Utc::now(),
+            },
+        )
+        .await
         {
-            warn!(
-                attempt_id = %attempt_id,
-                ?finalize_error,
-                "failed to finalize inline mutation attempt after pipeline error",
-            );
-        }
-        if let Err(reconcile_error) = self
-            .reconcile_failed_ingest_mutation(
-                state,
-                ReconcileFailedIngestMutationCommand {
-                    mutation_id: context.mutation_id,
-                    failure_code: "inline_pipeline_failed".to_string(),
-                    failure_message: format!("inline mutation pipeline failed: {error}"),
-                },
-            )
-            .await
-        {
-            warn!(
-                mutation_id = %context.mutation_id,
-                attempt_id = %attempt_id,
-                ?reconcile_error,
-                "failed to reconcile inline mutation after pipeline error",
-            );
+            Ok(ingest_repository::FailContentIngestAttemptOutcome::Applied { .. }) => {
+                invalidate_library_embedding_profile_inventory(context.library_id);
+            }
+            Ok(ingest_repository::FailContentIngestAttemptOutcome::AuthorityLost { .. }) => {
+                warn!(
+                    mutation_id = %context.mutation_id,
+                    attempt_id = %attempt_id,
+                    "inline failure arrived after attempt authority moved; preserving current owner state",
+                );
+            }
+            Err(finalize_error) => {
+                warn!(
+                    mutation_id = %context.mutation_id,
+                    attempt_id = %attempt_id,
+                    ?finalize_error,
+                    "failed to atomically publish inline mutation failure; lease recovery will reconcile the attempt",
+                );
+            }
         }
     }
 
@@ -1199,7 +1157,7 @@ impl ContentService {
         state: &AppState,
         context: &InlineMutationContext,
         attempt_id: Uuid,
-    ) -> Result<(), ApiError> {
+    ) -> Result<InlineContentPipelineOutcome, InlinePipelineFailure> {
         let cancellation_token = CancellationToken::new();
         // --- Stage: embed_chunk ------------------------------------------
         // Mirrors the background-ingest worker: embed this revision's
@@ -1233,6 +1191,12 @@ impl ContentService {
                 },
             )
             .await?;
+        let vector_write_source_truth_version = repositories::get_library_source_truth_version(
+            &state.persistence.postgres,
+            context.library_id,
+        )
+        .await
+        .map_err(|error| ApiError::internal_with_log(error, "internal"))?;
         let embed_chunk_start = Instant::now();
         let embed_chunk_result = state
             .canonical_services
@@ -1241,46 +1205,42 @@ impl ContentService {
                 state,
                 context.library_id,
                 context.revision_id,
-                Some(attempt_id),
+                attempt_id,
+                vector_write_source_truth_version,
                 &cancellation_token,
             )
             .await;
         let embed_chunk_elapsed_ms = Some(embed_chunk_start.elapsed().as_millis() as i64);
         let mut embed_chunk_failure: Option<String> = None;
-        // Whether persisted chunk vectors must survive a failure so a retry can
-        // resume from them (transient provider / store blip).
-        let mut embed_chunk_preserve_vectors = false;
         match &embed_chunk_result {
             Ok(outcome) => {
                 if let (Some(provider), Some(model), Some(usage_json)) = (
                     outcome.provider_kind.clone(),
                     outcome.model_name.clone(),
                     outcome.usage_json.clone(),
-                ) {
-                    if let Err(error) = state
-                        .canonical_services
-                        .billing
-                        .capture_ingest_attempt(
-                            state,
-                            CaptureIngestAttemptBillingCommand {
-                                workspace_id: context.workspace_id,
-                                library_id: context.library_id,
-                                attempt_id,
-                                binding_id: None,
-                                provider_kind: provider,
-                                model_name: model,
-                                call_kind: "embed_chunk".to_string(),
-                                usage_json,
-                            },
-                        )
-                        .await
-                    {
-                        warn!(
-                            attempt_id = %attempt_id,
-                            ?error,
-                            "embed_chunk billing capture failed; continuing ingest",
-                        );
-                    }
+                ) && let Err(error) = state
+                    .canonical_services
+                    .billing
+                    .capture_ingest_attempt(
+                        state,
+                        CaptureIngestAttemptBillingCommand {
+                            workspace_id: context.workspace_id,
+                            library_id: context.library_id,
+                            attempt_id,
+                            binding_id: None,
+                            provider_kind: provider,
+                            model_name: model,
+                            call_kind: "embed_chunk".to_string(),
+                            usage_json,
+                        },
+                    )
+                    .await
+                {
+                    warn!(
+                        attempt_id = %attempt_id,
+                        ?error,
+                        "embed_chunk billing capture failed; continuing ingest",
+                    );
                 }
                 state
                     .canonical_services
@@ -1313,13 +1273,12 @@ impl ContentService {
                 true
             }
             Err(error) => {
-                embed_chunk_preserve_vectors = error.preserves_partial_vectors();
                 embed_chunk_failure = Some(format!("chunk embedding failed: {error:#}"));
                 warn!(
                     attempt_id = %attempt_id,
                     revision_id = %context.revision_id,
                     ?error,
-                    "chunk embedding failed; vector lane will remain empty for this revision",
+                    "chunk embedding failed; readiness remains count-gated for retry",
                 );
                 state
                     .canonical_services
@@ -1349,25 +1308,52 @@ impl ContentService {
                 false
             }
         };
+        let embed_chunk_profile_key = embed_chunk_result
+            .as_ref()
+            .ok()
+            .and_then(|outcome| outcome.embedding_profile_key.clone());
         drop(embed_chunk_result);
 
         if let Some(reason) = embed_chunk_failure {
-            super::fail_revision_vector_graph_readiness(
-                state,
-                context.revision_id,
-                &reason,
-                !embed_chunk_preserve_vectors,
-            )
-            .await
-            .map_err(|error| {
-                ApiError::internal_with_log(
-                    error,
-                    "failed to mark inline embed_chunk failure readiness",
-                )
-            })?;
-            return Err(ApiError::internal_with_log(&reason, "inline chunk embedding failed"));
+            // `embed_chunks_for_revision` owns terminal exact-ID cleanup.
+            // Repeating a revision-wide delete here could let an expired
+            // attempt erase vectors committed by its replacement attempt.
+            return Err(InlinePipelineFailure::new(
+                ApiError::internal_with_log(&reason, "inline chunk embedding failed"),
+                false,
+            ));
         }
 
+        // From this point chunk vectors exist. Any later hard failure must
+        // request attempt-fenced revision cleanup; otherwise a failed inline
+        // mutation could leave unreachable vectors behind. Graph provider or
+        // reconcile failures are intentionally converted to a degraded success
+        // below and therefore do not enter this cleanup path.
+        let post_embed_result = self
+            .run_inline_graph_and_publish(
+                state,
+                context,
+                attempt_id,
+                &cancellation_token,
+                vector_write_source_truth_version,
+                embed_chunk_profile_key,
+            )
+            .await;
+        post_embed_result.map_err(|mut failure| {
+            failure.delete_vectors = true;
+            failure
+        })
+    }
+
+    async fn run_inline_graph_and_publish(
+        &self,
+        state: &AppState,
+        context: &InlineMutationContext,
+        attempt_id: Uuid,
+        cancellation_token: &CancellationToken,
+        vector_write_source_truth_version: i64,
+        embed_chunk_profile_key: Option<String>,
+    ) -> Result<InlineContentPipelineOutcome, InlinePipelineFailure> {
         state
             .canonical_services
             .ingest
@@ -1404,12 +1390,13 @@ impl ContentService {
                     revision_id: context.revision_id,
                     attempt_id: Some(attempt_id),
                 },
-                &cancellation_token,
+                cancellation_token,
             )
             .await;
         let extract_elapsed_ms = extract_start.elapsed().as_millis() as i64;
         let mut graph_ready = false;
         let mut graph_failure: Option<String> = None;
+        let mut pending_summary_refresh = None;
 
         match graph_materialization {
             Ok(graph_materialization) => {
@@ -1422,13 +1409,14 @@ impl ContentService {
                         context.document_id,
                         context.revision_id,
                         Some(attempt_id),
-                        &cancellation_token,
+                        cancellation_token,
                     )
                     .await;
                 graph_ready = graph_outcome.as_ref().is_ok_and(|outcome| outcome.graph_ready);
 
                 match graph_outcome {
                     Ok(graph_outcome) => {
+                        pending_summary_refresh = graph_outcome.pending_summary_refresh.clone();
                         state
                             .canonical_services
                             .ingest
@@ -1462,9 +1450,9 @@ impl ContentService {
                                     }),
                                     provider_kind: graph_materialization.provider_kind.clone(),
                                     model_name: graph_materialization.model_name.clone(),
-                                    prompt_tokens: graph_materialization.usage_json.get("prompt_tokens").and_then(|v| v.as_i64()).map(|v| v as i32),
-                                    completion_tokens: graph_materialization.usage_json.get("completion_tokens").and_then(|v| v.as_i64()).map(|v| v as i32),
-                                    total_tokens: graph_materialization.usage_json.get("total_tokens").and_then(|v| v.as_i64()).map(|v| v as i32),
+                                    prompt_tokens: graph_materialization.usage_json.get("prompt_tokens").and_then(serde_json::Value::as_i64).map(|v| v as i32),
+                                    completion_tokens: graph_materialization.usage_json.get("completion_tokens").and_then(serde_json::Value::as_i64).map(|v| v as i32),
+                                    total_tokens: graph_materialization.usage_json.get("total_tokens").and_then(serde_json::Value::as_i64).map(|v| v as i32),
                                     cached_tokens: None,
                                     estimated_cost: None,
                                     currency_code: None,
@@ -1506,9 +1494,9 @@ impl ContentService {
 	                                    }),
                                     provider_kind: graph_materialization.provider_kind.clone(),
                                     model_name: graph_materialization.model_name.clone(),
-                                    prompt_tokens: graph_materialization.usage_json.get("prompt_tokens").and_then(|v| v.as_i64()).map(|v| v as i32),
-                                    completion_tokens: graph_materialization.usage_json.get("completion_tokens").and_then(|v| v.as_i64()).map(|v| v as i32),
-                                    total_tokens: graph_materialization.usage_json.get("total_tokens").and_then(|v| v.as_i64()).map(|v| v as i32),
+                                    prompt_tokens: graph_materialization.usage_json.get("prompt_tokens").and_then(serde_json::Value::as_i64).map(|v| v as i32),
+                                    completion_tokens: graph_materialization.usage_json.get("completion_tokens").and_then(serde_json::Value::as_i64).map(|v| v as i32),
+                                    total_tokens: graph_materialization.usage_json.get("total_tokens").and_then(serde_json::Value::as_i64).map(|v| v as i32),
                                     cached_tokens: None,
                                     estimated_cost: None,
                                     currency_code: None,
@@ -1576,27 +1564,80 @@ impl ContentService {
             .ok_or_else(|| {
                 ApiError::resource_not_found("knowledge_revision", context.revision_id)
             })?;
-        let now = Utc::now();
-        state
-            .document_store
-            .update_revision_readiness(
-                revision.revision_id,
-                &revision.text_state,
-                "ready",
-                if graph_degraded {
-                    super::GRAPH_STATE_DEGRADED
-                } else {
-                    graph_state_after_successful_extract(graph_ready)
-                },
-                revision.text_readable_at,
-                revision.vector_ready_at.or(Some(now)),
-                revision.graph_ready_at.or(graph_ready.then_some(now)),
-                revision.superseded_by_revision_id,
+        if let Some(embedding_profile_key) = embed_chunk_profile_key.as_deref()
+            && let Err(error) = ensure_active_embedding_profile_key(
+                state,
+                context.library_id,
+                embedding_profile_key,
             )
             .await
-            .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
+        {
+            return Err(InlinePipelineFailure::new(map_runtime_lifecycle_error(error), true));
+        }
+        let now = Utc::now();
+        let graph_state = if graph_degraded {
+            super::GRAPH_STATE_DEGRADED
+        } else {
+            graph_state_after_successful_extract(graph_ready)
+        };
+        let publication = ingest_repository::publish_content_ingest_success(
+            &state.persistence.postgres,
+            &ingest_repository::PublishContentIngestSuccess {
+                workspace_id: context.workspace_id,
+                library_id: context.library_id,
+                document_id: context.document_id,
+                revision_id: context.revision_id,
+                mutation_id: context.mutation_id,
+                mutation_item_id: context.item_id,
+                attempt_id,
+                expected_source_truth_version: vector_write_source_truth_version,
+                embedding_profile_key: embed_chunk_profile_key,
+                text_state: revision.text_state,
+                graph_state: graph_state.to_string(),
+                text_readable_at: revision.text_readable_at,
+                graph_ready_at: revision.graph_ready_at.or_else(|| graph_ready.then_some(now)),
+                completed_at: now,
+            },
+        )
+        .await
+        .map_err(|error| {
+            InlinePipelineFailure::new(
+                ApiError::internal_with_log(error, "failed to publish inline content ingest"),
+                true,
+            )
+        })?;
 
-        Ok(())
+        Ok(match publication {
+            ingest_repository::PublishContentIngestSuccessOutcome::Applied {
+                source_truth_version,
+                ..
+            } => {
+                if let Some(pending_summary_refresh) = pending_summary_refresh
+                    && let Err(error) = state
+                        .canonical_services
+                        .graph
+                        .apply_published_summary_refresh(
+                            state,
+                            context.library_id,
+                            source_truth_version,
+                            &pending_summary_refresh,
+                        )
+                        .await
+                {
+                    warn!(
+                        library_id = %context.library_id,
+                        revision_id = %context.revision_id,
+                        source_truth_version,
+                        ?error,
+                        "inline content lifecycle committed but canonical summary refresh failed",
+                    );
+                }
+                InlineContentPipelineOutcome::Applied
+            }
+            ingest_repository::PublishContentIngestSuccessOutcome::AuthorityLost { .. } => {
+                InlineContentPipelineOutcome::AuthorityLost
+            }
+        })
     }
 }
 

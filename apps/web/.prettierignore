@@ -1,0 +1,19 @@
+# Build and test output
+coverage/
+dist/
+storybook-static/
+playwright-report/
+test-results/
+visual-qa/.artifacts/
+visual-qa/.storage/
+
+# Generated contracts, SDKs, and vendored browser assets
+package-lock.json
+public/mockServiceWorker.js
+public/openapi.gen.yaml
+public/swagger-ui-bundle.js
+public/swagger-ui-bundle.js.LICENSE.txt
+public/swagger-ui.css
+public/swagger-ui.LICENSE.txt
+src/shared/api/generated/
+src/shared/api/mocks/handlers.ts

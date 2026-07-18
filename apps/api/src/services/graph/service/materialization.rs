@@ -17,6 +17,7 @@ use crate::{
     services::graph::extract::{
         GraphEntityCandidate, GraphExtractionCandidateSet, GraphRelationCandidate,
     },
+    services::query::vector_dimensions::invalidate_library_embedding_profile_inventory,
 };
 
 use super::{
@@ -30,6 +31,111 @@ use super::{
     reconcile_relation_candidate_row, relation_candidate_keys_are_materializable,
     relation_fields_are_semantically_empty, select_canonical_entity_label,
 };
+
+fn select_materialized_relation_predicate<'a>(
+    predicates: impl IntoIterator<Item = &'a str>,
+) -> Option<String> {
+    predicates.into_iter().find_map(|predicate| {
+        let predicate = crate::services::graph::identity::normalize_relation_type(predicate);
+        (!predicate.is_empty()).then_some(predicate)
+    })
+}
+
+struct EntityReconcileGroup {
+    normalization_key: String,
+    revision_context: GraphRevisionContext,
+    candidates: Vec<KnowledgeEntityCandidateRow>,
+    entity_id: Uuid,
+}
+
+struct RelationReconcileGroup {
+    revision_context: GraphRevisionContext,
+    candidates: Vec<ReconciledRelationCandidate>,
+    relation_id: Uuid,
+}
+
+struct ReconciledCandidateCollections {
+    entities: Vec<ReconciledEntityCandidate>,
+    relations: Vec<ReconciledRelationCandidate>,
+}
+
+struct ReconcileSupport {
+    revision_contexts: BTreeMap<Uuid, GraphRevisionContext>,
+    typed_facts_by_revision: BTreeMap<Uuid, Vec<TypedTechnicalFact>>,
+    chunk_rows_by_id: BTreeMap<Uuid, crate::infra::knowledge_rows::KnowledgeChunkRow>,
+    revision_chunk_ids: BTreeMap<Uuid, BTreeSet<Uuid>>,
+}
+
+struct EntityReconciliationPlan {
+    groups: Vec<EntityReconcileGroup>,
+    requests: Vec<NewKnowledgeEntity>,
+    request_ids: BTreeSet<Uuid>,
+}
+
+struct RelationReconciliationPlan {
+    groups: Vec<RelationReconcileGroup>,
+    requests: Vec<NewKnowledgeRelation>,
+    placeholder_requests: BTreeMap<Uuid, NewKnowledgeEntity>,
+}
+
+fn reconcile_candidate_collections(
+    entity_candidates: Vec<KnowledgeEntityCandidateRow>,
+    relation_candidates: Vec<KnowledgeRelationCandidateRow>,
+) -> ReconciledCandidateCollections {
+    let entity_key_index = build_entity_candidate_key_index(&entity_candidates);
+    let entities = entity_candidates
+        .into_iter()
+        .filter_map(|row| reconcile_entity_candidate_row(row, &entity_key_index))
+        .collect::<Vec<_>>();
+    let relations = relation_candidates
+        .into_iter()
+        .filter_map(|row| reconcile_relation_candidate_row(row, &entity_key_index))
+        .filter(|candidate| {
+            relation_candidate_keys_are_materializable(
+                &candidate.subject_candidate_key,
+                &candidate.predicate,
+                &candidate.object_candidate_key,
+            )
+        })
+        .collect::<Vec<_>>();
+    let entity_key_aliases = build_prefixed_entity_key_aliases(&entities);
+    let entities = entities
+        .into_iter()
+        .map(|mut candidate| {
+            if let Some(canonical_key) = entity_key_aliases.get(&candidate.normalization_key) {
+                candidate.normalization_key = canonical_key.clone();
+            }
+            candidate
+        })
+        .collect();
+    let relations = relations
+        .into_iter()
+        .map(|mut candidate| {
+            apply_entity_key_aliases_to_relation_candidate(&mut candidate, &entity_key_aliases);
+            candidate
+        })
+        .collect();
+    ReconciledCandidateCollections { entities, relations }
+}
+
+fn revision_chunk_ids(
+    entities: &[ReconciledEntityCandidate],
+    relations: &[ReconciledRelationCandidate],
+) -> BTreeMap<Uuid, BTreeSet<Uuid>> {
+    let mut by_revision = BTreeMap::<Uuid, BTreeSet<Uuid>>::new();
+    for revision_id_and_chunk in entities
+        .iter()
+        .filter_map(|candidate| {
+            candidate.row.chunk_id.map(|chunk_id| (candidate.row.revision_id, chunk_id))
+        })
+        .chain(relations.iter().filter_map(|candidate| {
+            candidate.row.chunk_id.map(|chunk_id| (candidate.row.revision_id, chunk_id))
+        }))
+    {
+        by_revision.entry(revision_id_and_chunk.0).or_default().insert(revision_id_and_chunk.1);
+    }
+    by_revision
+}
 
 impl GraphService {
     pub(super) async fn reconcile_library_candidates(
@@ -66,61 +172,50 @@ impl GraphService {
         relation_candidates: Vec<KnowledgeRelationCandidateRow>,
         alias_overrides: Option<&BTreeMap<String, BTreeSet<String>>>,
     ) -> Result<GraphRebuildOutcome> {
-        #[derive(Debug)]
-        struct EntityReconcileGroup {
-            normalization_key: String,
-            revision_context: GraphRevisionContext,
-            candidates: Vec<KnowledgeEntityCandidateRow>,
-            entity_id: Uuid,
-        }
+        let reconciled = reconcile_candidate_collections(entity_candidates, relation_candidates);
+        let support =
+            self.load_reconcile_support(state, &reconciled.entities, &reconciled.relations).await?;
+        let mut outcome = GraphRebuildOutcome {
+            scanned_entity_candidates: reconciled.entities.len(),
+            scanned_relation_candidates: reconciled.relations.len(),
+            ..Default::default()
+        };
+        self.upsert_reconcile_source_edges(state, &support, &mut outcome).await?;
+        let entity_plan = self.build_entity_reconciliation_plan(
+            library_id,
+            reconciled.entities,
+            &support.revision_contexts,
+            alias_overrides,
+        )?;
+        let relation_plan = self.build_relation_reconciliation_plan(
+            library_id,
+            reconciled.relations,
+            &support.revision_contexts,
+            &entity_plan.request_ids,
+        )?;
+        self.persist_reconciliation_plan(
+            state,
+            library_id,
+            entity_plan,
+            relation_plan,
+            &support,
+            &mut outcome,
+        )
+        .await?;
+        Ok(outcome)
+    }
 
-        #[derive(Debug)]
-        struct RelationReconcileGroup {
-            revision_context: GraphRevisionContext,
-            candidates: Vec<ReconciledRelationCandidate>,
-            relation_id: Uuid,
-        }
-
-        let entity_key_index = build_entity_candidate_key_index(&entity_candidates);
-        let entity_candidates = entity_candidates
-            .into_iter()
-            .filter_map(|row| reconcile_entity_candidate_row(row, &entity_key_index))
-            .collect::<Vec<_>>();
-        let filtered_relation_candidates = relation_candidates
-            .into_iter()
-            .filter_map(|row| reconcile_relation_candidate_row(row, &entity_key_index))
-            .filter(|candidate| {
-                relation_candidate_keys_are_materializable(
-                    &candidate.subject_candidate_key,
-                    &candidate.predicate,
-                    &candidate.object_candidate_key,
-                )
-            })
-            .collect::<Vec<_>>();
-        let entity_key_aliases = build_prefixed_entity_key_aliases(&entity_candidates);
-        let entity_candidates = entity_candidates
-            .into_iter()
-            .map(|mut candidate| {
-                if let Some(canonical_key) = entity_key_aliases.get(&candidate.normalization_key) {
-                    candidate.normalization_key = canonical_key.clone();
-                }
-                candidate
-            })
-            .collect::<Vec<_>>();
-        let filtered_relation_candidates = filtered_relation_candidates
-            .into_iter()
-            .map(|mut candidate| {
-                apply_entity_key_aliases_to_relation_candidate(&mut candidate, &entity_key_aliases);
-                candidate
-            })
-            .collect::<Vec<_>>();
-
+    async fn load_reconcile_support(
+        &self,
+        state: &AppState,
+        entity_candidates: &[ReconciledEntityCandidate],
+        relation_candidates: &[ReconciledRelationCandidate],
+    ) -> Result<ReconcileSupport> {
         let mut revision_contexts = BTreeMap::<Uuid, GraphRevisionContext>::new();
         for revision_id in entity_candidates
             .iter()
             .map(|candidate| candidate.row.revision_id)
-            .chain(filtered_relation_candidates.iter().map(|candidate| candidate.row.revision_id))
-            .collect::<BTreeSet<_>>()
+            .chain(relation_candidates.iter().map(|candidate| candidate.row.revision_id))
         {
             if let Some(revision) = state
                 .document_store
@@ -131,7 +226,6 @@ impl GraphService {
                 revision_contexts.insert(revision_id, GraphRevisionContext::from(revision));
             }
         }
-
         let mut typed_facts_by_revision = BTreeMap::<Uuid, Vec<TypedTechnicalFact>>::new();
         for revision_id in revision_contexts.keys().copied() {
             let typed_facts = state
@@ -146,25 +240,11 @@ impl GraphService {
                 })?;
             typed_facts_by_revision.insert(revision_id, typed_facts);
         }
-
-        let chunk_ids = entity_candidates
-            .iter()
-            .filter_map(|candidate| candidate.row.chunk_id)
-            .chain(
-                filtered_relation_candidates.iter().filter_map(|candidate| candidate.row.chunk_id),
-            )
+        let revision_chunk_ids = revision_chunk_ids(entity_candidates, relation_candidates);
+        let chunk_ids = revision_chunk_ids
+            .values()
+            .flat_map(|chunk_ids| chunk_ids.iter().copied())
             .collect::<BTreeSet<_>>();
-        let mut revision_chunk_ids = BTreeMap::<Uuid, BTreeSet<Uuid>>::new();
-        for candidate in &entity_candidates {
-            if let Some(chunk_id) = candidate.row.chunk_id {
-                revision_chunk_ids.entry(candidate.row.revision_id).or_default().insert(chunk_id);
-            }
-        }
-        for candidate in &filtered_relation_candidates {
-            if let Some(chunk_id) = candidate.row.chunk_id {
-                revision_chunk_ids.entry(candidate.row.revision_id).or_default().insert(chunk_id);
-            }
-        }
         let mut chunk_rows_by_id =
             BTreeMap::<Uuid, crate::infra::knowledge_rows::KnowledgeChunkRow>::new();
         for chunk_id in chunk_ids {
@@ -176,32 +256,47 @@ impl GraphService {
                 chunk_rows_by_id.insert(chunk_id, chunk);
             }
         }
+        Ok(ReconcileSupport {
+            revision_contexts,
+            typed_facts_by_revision,
+            chunk_rows_by_id,
+            revision_chunk_ids,
+        })
+    }
 
-        let mut outcome = GraphRebuildOutcome {
-            scanned_entity_candidates: entity_candidates.len(),
-            scanned_relation_candidates: filtered_relation_candidates.len(),
-            ..Default::default()
-        };
-
-        for (revision_id, revision_context) in &revision_contexts {
+    async fn upsert_reconcile_source_edges(
+        &self,
+        state: &AppState,
+        support: &ReconcileSupport,
+        outcome: &mut GraphRebuildOutcome,
+    ) -> Result<()> {
+        for (revision_id, revision_context) in &support.revision_contexts {
             self.upsert_revision_edges(state, revision_context).await?;
             outcome.upserted_document_revision_edges += 1;
-            if let Some(chunk_ids) = revision_chunk_ids.get(revision_id) {
+            if let Some(chunk_ids) = support.revision_chunk_ids.get(revision_id) {
                 for chunk_id in chunk_ids {
                     self.upsert_chunk_edge(state, revision_context, *chunk_id).await?;
                     outcome.upserted_revision_chunk_edges += 1;
                 }
             }
         }
+        Ok(())
+    }
 
+    fn build_entity_reconciliation_plan(
+        &self,
+        library_id: Uuid,
+        entity_candidates: Vec<ReconciledEntityCandidate>,
+        revision_contexts: &BTreeMap<Uuid, GraphRevisionContext>,
+        alias_overrides: Option<&BTreeMap<String, BTreeSet<String>>>,
+    ) -> Result<EntityReconciliationPlan> {
         let mut entity_groups = BTreeMap::<String, Vec<ReconciledEntityCandidate>>::new();
         for candidate in entity_candidates {
             entity_groups.entry(candidate.normalization_key.clone()).or_default().push(candidate);
         }
-
-        let mut entity_reconcile_groups = Vec::<EntityReconcileGroup>::new();
-        let mut entity_requests = Vec::<NewKnowledgeEntity>::new();
-        let mut entity_request_ids = BTreeSet::<Uuid>::new();
+        let mut groups = Vec::<EntityReconcileGroup>::new();
+        let mut requests = Vec::<NewKnowledgeEntity>::new();
+        let mut request_ids = BTreeSet::<Uuid>::new();
         for (normalization_key, rows) in entity_groups {
             let row = rows
                 .last()
@@ -235,8 +330,8 @@ impl GraphService {
                     .row
                     .candidate_sub_type
                     .as_deref()
-                    .filter(|s| !s.trim().is_empty())
-                    .map(|s| s.trim().to_string())
+                    .filter(|value| !value.trim().is_empty())
+                    .map(|value| value.trim().to_string())
             });
             let alias_rows = rows.iter().map(|candidate| candidate.row.clone()).collect::<Vec<_>>();
             let aliases = self.collect_entity_aliases(
@@ -250,8 +345,8 @@ impl GraphService {
                 .filter_map(|candidate| candidate.row.confidence)
                 .max_by(|left, right| left.partial_cmp(right).unwrap_or(std::cmp::Ordering::Equal));
             let entity_id = canonical_entity_id(library_id, &normalization_key);
-            entity_request_ids.insert(entity_id);
-            entity_requests.push(NewKnowledgeEntity {
+            request_ids.insert(entity_id);
+            requests.push(NewKnowledgeEntity {
                 entity_id,
                 workspace_id: revision_context.workspace_id,
                 library_id,
@@ -267,25 +362,34 @@ impl GraphService {
                 created_at: None,
                 updated_at: Some(Utc::now()),
             });
-            entity_reconcile_groups.push(EntityReconcileGroup {
+            groups.push(EntityReconcileGroup {
                 normalization_key,
                 revision_context: revision_context.clone(),
                 candidates: rows.into_iter().map(|candidate| candidate.row).collect(),
                 entity_id,
             });
         }
+        Ok(EntityReconciliationPlan { groups, requests, request_ids })
+    }
 
+    fn build_relation_reconciliation_plan(
+        &self,
+        library_id: Uuid,
+        relation_candidates: Vec<ReconciledRelationCandidate>,
+        revision_contexts: &BTreeMap<Uuid, GraphRevisionContext>,
+        entity_request_ids: &BTreeSet<Uuid>,
+    ) -> Result<RelationReconciliationPlan> {
         let mut relation_groups = BTreeMap::<String, Vec<ReconciledRelationCandidate>>::new();
-        for candidate in filtered_relation_candidates {
+        for candidate in relation_candidates {
             relation_groups
                 .entry(candidate.normalized_assertion.clone())
                 .or_default()
                 .push(candidate);
         }
 
-        let mut relation_reconcile_groups = Vec::<RelationReconcileGroup>::new();
-        let mut relation_requests = Vec::<NewKnowledgeRelation>::new();
-        let mut placeholder_entity_requests = BTreeMap::<Uuid, NewKnowledgeEntity>::new();
+        let mut groups = Vec::<RelationReconcileGroup>::new();
+        let mut requests = Vec::<NewKnowledgeRelation>::new();
+        let mut placeholder_requests = BTreeMap::<Uuid, NewKnowledgeEntity>::new();
         for (normalized_assertion, rows) in relation_groups {
             let row = rows
                 .last()
@@ -294,19 +398,21 @@ impl GraphService {
                 revision_contexts.get(&row.row.revision_id).ok_or_else(|| {
                     anyhow::anyhow!("missing revision context for {}", row.row.revision_id)
                 })?;
-            let predicate = rows
-                .iter()
-                .find_map(|candidate| {
-                    (!candidate.predicate.trim().is_empty())
-                        .then(|| candidate.predicate.trim().to_string())
-                })
-                .unwrap_or_else(|| "related_to".to_string());
+            let Some(predicate) = select_materialized_relation_predicate(
+                rows.iter().map(|candidate| candidate.predicate.as_str()),
+            ) else {
+                tracing::warn!(
+                    candidate_count = rows.len(),
+                    "skipping relation candidate group without a structurally valid predicate"
+                );
+                continue;
+            };
             let confidence = rows
                 .iter()
                 .filter_map(|candidate| candidate.row.confidence)
                 .max_by(|left, right| left.partial_cmp(right).unwrap_or(std::cmp::Ordering::Equal));
             let relation_id = canonical_relation_id(library_id, &normalized_assertion);
-            relation_requests.push(NewKnowledgeRelation {
+            requests.push(NewKnowledgeRelation {
                 relation_id,
                 workspace_id: revision_context.workspace_id,
                 library_id,
@@ -320,68 +426,91 @@ impl GraphService {
                 created_at: None,
                 updated_at: Some(Utc::now()),
             });
-            for candidate in &rows {
-                for normalization_key in
-                    [&candidate.subject_candidate_key, &candidate.object_candidate_key]
-                {
-                    let Some((node_type, canonical_label)) =
-                        placeholder_entity_parts_from_key(normalization_key)
-                    else {
-                        continue;
-                    };
-                    let entity_id = canonical_entity_id(library_id, normalization_key);
-                    if entity_request_ids.contains(&entity_id) {
-                        continue;
-                    }
-                    let entry = placeholder_entity_requests.entry(entity_id).or_insert_with(|| {
-                        NewKnowledgeEntity {
-                            entity_id,
-                            workspace_id: revision_context.workspace_id,
-                            library_id,
-                            canonical_label: canonical_label.clone(),
-                            aliases: vec![canonical_label.clone()],
-                            entity_type: crate::services::graph::identity::runtime_node_type_slug(
-                                &node_type,
-                            )
-                            .to_string(),
-                            entity_sub_type: None,
-                            summary: None,
-                            confidence: None,
-                            support_count: 0,
-                            freshness_generation: revision_context.revision_number,
-                            entity_state: "active".to_string(),
-                            created_at: None,
-                            updated_at: Some(Utc::now()),
-                        }
-                    });
-                    entry.support_count += 1;
-                    entry.freshness_generation =
-                        entry.freshness_generation.max(revision_context.revision_number);
-                    entry.updated_at = Some(Utc::now());
-                }
-            }
-            relation_reconcile_groups.push(RelationReconcileGroup {
+            self.collect_placeholder_entity_requests(
+                library_id,
+                &rows,
+                revision_context,
+                entity_request_ids,
+                &mut placeholder_requests,
+            );
+            groups.push(RelationReconcileGroup {
                 revision_context: revision_context.clone(),
                 candidates: rows,
                 relation_id,
             });
         }
+        Ok(RelationReconciliationPlan { groups, requests, placeholder_requests })
+    }
 
-        entity_requests.extend(placeholder_entity_requests.into_values());
+    fn collect_placeholder_entity_requests(
+        &self,
+        library_id: Uuid,
+        candidates: &[ReconciledRelationCandidate],
+        revision_context: &GraphRevisionContext,
+        entity_request_ids: &BTreeSet<Uuid>,
+        requests: &mut BTreeMap<Uuid, NewKnowledgeEntity>,
+    ) {
+        for normalization_key in candidates.iter().flat_map(|candidate| {
+            [&candidate.subject_candidate_key, &candidate.object_candidate_key]
+        }) {
+            let Some((node_type, canonical_label)) =
+                placeholder_entity_parts_from_key(normalization_key)
+            else {
+                continue;
+            };
+            let entity_id = canonical_entity_id(library_id, normalization_key);
+            if entity_request_ids.contains(&entity_id) {
+                continue;
+            }
+            let entry = requests.entry(entity_id).or_insert_with(|| NewKnowledgeEntity {
+                entity_id,
+                workspace_id: revision_context.workspace_id,
+                library_id,
+                canonical_label: canonical_label.clone(),
+                aliases: vec![canonical_label],
+                entity_type: crate::services::graph::identity::runtime_node_type_slug(&node_type)
+                    .to_string(),
+                entity_sub_type: None,
+                summary: None,
+                confidence: None,
+                support_count: 0,
+                freshness_generation: revision_context.revision_number,
+                entity_state: "active".to_string(),
+                created_at: None,
+                updated_at: Some(Utc::now()),
+            });
+            entry.support_count += 1;
+            entry.freshness_generation =
+                entry.freshness_generation.max(revision_context.revision_number);
+            entry.updated_at = Some(Utc::now());
+        }
+    }
+
+    async fn persist_reconciliation_plan(
+        &self,
+        state: &AppState,
+        library_id: Uuid,
+        entity_plan: EntityReconciliationPlan,
+        relation_plan: RelationReconciliationPlan,
+        support: &ReconcileSupport,
+        outcome: &mut GraphRebuildOutcome,
+    ) -> Result<()> {
+        let mut entity_requests = entity_plan.requests;
+        entity_requests.extend(relation_plan.placeholder_requests.into_values());
         self.reset_library_materialization(state, library_id).await?;
         let entity_rows = state.graph_store.upsert_entities(&entity_requests).await?;
         let entity_by_id =
             entity_rows.into_iter().map(|row| (row.entity_id, row)).collect::<BTreeMap<_, _>>();
-
-        for group in entity_reconcile_groups {
+        for group in entity_plan.groups {
             let entity = entity_by_id.get(&group.entity_id).ok_or_else(|| {
                 anyhow::anyhow!("missing canonical entity {} after bulk upsert", group.entity_id)
             })?;
             outcome.upserted_entities += 1;
             for candidate in group.candidates {
                 let supporting_chunk =
-                    candidate.chunk_id.and_then(|chunk_id| chunk_rows_by_id.get(&chunk_id));
-                let revision_facts = typed_facts_by_revision
+                    candidate.chunk_id.and_then(|chunk_id| support.chunk_rows_by_id.get(&chunk_id));
+                let revision_facts = support
+                    .typed_facts_by_revision
                     .get(&candidate.revision_id)
                     .map_or_else(|| &[][..], Vec::as_slice);
                 self.upsert_current_entity_evidence(
@@ -403,12 +532,10 @@ impl GraphService {
                 }
             }
         }
-
-        let relation_rows = state.graph_store.upsert_relations(&relation_requests).await?;
+        let relation_rows = state.graph_store.upsert_relations(&relation_plan.requests).await?;
         let relation_by_id =
             relation_rows.into_iter().map(|row| (row.relation_id, row)).collect::<BTreeMap<_, _>>();
-
-        for group in relation_reconcile_groups {
+        for group in relation_plan.groups {
             let relation = relation_by_id.get(&group.relation_id).ok_or_else(|| {
                 anyhow::anyhow!(
                     "missing canonical relation {} after bulk upsert",
@@ -420,15 +547,18 @@ impl GraphService {
                 let subject_id = canonical_entity_id(library_id, &candidate.subject_candidate_key);
                 let object_id = canonical_entity_id(library_id, &candidate.object_candidate_key);
                 let subject = entity_by_id.get(&subject_id).ok_or_else(|| {
-                    anyhow::anyhow!("missing subject placeholder entity {}", subject_id)
+                    anyhow::anyhow!("missing subject placeholder entity {subject_id}")
                 })?;
                 let object = entity_by_id.get(&object_id).ok_or_else(|| {
-                    anyhow::anyhow!("missing object placeholder entity {}", object_id)
+                    anyhow::anyhow!("missing object placeholder entity {object_id}")
                 })?;
                 self.upsert_relation_edges(state, relation, subject, object).await?;
-                let supporting_chunk =
-                    candidate.row.chunk_id.and_then(|chunk_id| chunk_rows_by_id.get(&chunk_id));
-                let revision_facts = typed_facts_by_revision
+                let supporting_chunk = candidate
+                    .row
+                    .chunk_id
+                    .and_then(|chunk_id| support.chunk_rows_by_id.get(&chunk_id));
+                let revision_facts = support
+                    .typed_facts_by_revision
                     .get(&candidate.row.revision_id)
                     .map_or_else(|| &[][..], Vec::as_slice);
                 self.upsert_current_relation_evidence(
@@ -447,8 +577,7 @@ impl GraphService {
                 outcome.upserted_evidence_support_relation_edges += 1;
             }
         }
-
-        Ok(outcome)
+        Ok(())
     }
 
     pub(super) async fn materialize_current_candidate_batch(
@@ -848,16 +977,27 @@ impl GraphService {
         state: &AppState,
         library_id: Uuid,
     ) -> Result<()> {
+        let _vector_guard = state
+            .canonical_services
+            .search
+            .vector_plane_write_guard(state, library_id)
+            .await
+            .context("failed to acquire graph materialization reset guard")?;
+        let expected_source_truth_version =
+            repositories::get_library_source_truth_version(&state.persistence.postgres, library_id)
+                .await
+                .context("failed to capture graph materialization reset fence")?;
+        state
+            .search_store
+            .delete_entity_vectors_by_library_fenced(library_id, expected_source_truth_version)
+            .await
+            .context("failed to delete stale entity vectors for graph reset")?;
+        invalidate_library_embedding_profile_inventory(library_id);
         state
             .graph_store
             .reset_library_materialized_graph(library_id)
             .await
             .context("failed to reset knowledge graph materialization")?;
-        state
-            .search_store
-            .delete_entity_vectors_by_library(library_id)
-            .await
-            .context("failed to delete stale entity vectors for graph reset")?;
         Ok(())
     }
 
@@ -877,11 +1017,34 @@ impl GraphService {
                 aliases.insert(row.candidate_label.trim().to_string());
             }
         }
-        if let Some(overrides) = alias_overrides {
-            if let Some(values) = overrides.get(normalization_key) {
-                aliases.extend(values.iter().cloned());
-            }
+        if let Some(overrides) = alias_overrides
+            && let Some(values) = overrides.get(normalization_key)
+        {
+            aliases.extend(values.iter().cloned());
         }
         aliases
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn relation_predicate_selection_abstains_when_typed_predicate_is_absent() {
+        assert_eq!(select_materialized_relation_predicate(["", "   "]), None);
+    }
+
+    #[test]
+    fn relation_predicate_selection_accepts_arbitrary_structural_predicate() {
+        assert_eq!(
+            select_materialized_relation_predicate(["", " opaque_predicate_7 "]),
+            Some("opaque_predicate_7".to_string())
+        );
+    }
+
+    #[test]
+    fn relation_predicate_selection_abstains_on_invalid_predicates() {
+        assert_eq!(select_materialized_relation_predicate(["Invalid Predicate"]), None);
     }
 }

@@ -1,7 +1,40 @@
 use super::provider_validation::sync_provider_model_catalog;
 use super::*;
+use crate::shared::secret_encryption::SecretPurpose;
 
 impl AiCatalogService {
+    pub async fn list_account_summaries_exact(
+        &self,
+        state: &AppState,
+        scope: AiScopeRef,
+    ) -> Result<Vec<AiAccountSummary>, ApiError> {
+        let rows = ai_repository::list_account_summaries_exact(
+            &state.persistence.postgres,
+            scope_kind_key(scope.scope_kind),
+            scope.workspace_id,
+            scope.library_id,
+        )
+        .await
+        .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
+        Ok(rows.into_iter().map(map_account_summary_row).collect())
+    }
+
+    pub async fn list_visible_account_summaries(
+        &self,
+        state: &AppState,
+        workspace_id: Option<Uuid>,
+        library_id: Option<Uuid>,
+    ) -> Result<Vec<AiAccountSummary>, ApiError> {
+        let rows = ai_repository::list_visible_account_summaries(
+            &state.persistence.postgres,
+            workspace_id,
+            library_id,
+        )
+        .await
+        .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
+        Ok(rows.into_iter().map(map_account_summary_row).collect())
+    }
+
     pub async fn list_accounts_exact(
         &self,
         state: &AppState,
@@ -15,7 +48,7 @@ impl AiCatalogService {
         )
         .await
         .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
-        Ok(rows.into_iter().map(map_account_row).collect())
+        rows.into_iter().map(|row| map_account_row(&state.credential_cipher, row)).collect()
     }
 
     pub async fn list_visible_accounts(
@@ -31,7 +64,7 @@ impl AiCatalogService {
         )
         .await
         .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
-        Ok(rows.into_iter().map(map_account_row).collect())
+        rows.into_iter().map(|row| map_account_row(&state.credential_cipher, row)).collect()
     }
 
     pub async fn get_account(
@@ -43,7 +76,7 @@ impl AiCatalogService {
             .await
             .map_err(|e| ApiError::internal_with_log(e, "internal"))?
             .ok_or_else(|| ApiError::resource_not_found("provider_credential", account_id))?;
-        Ok(map_account_row(row))
+        map_account_row(&state.credential_cipher, row)
     }
 
     pub async fn create_account(
@@ -66,24 +99,40 @@ impl AiCatalogService {
                 || ApiError::resource_not_found("provider_catalog", command.provider_catalog_id),
             )?;
         let api_key = normalize_optional(command.api_key.as_deref());
+        if api_key.is_some() && !state.settings.credential_encryption_write_enabled {
+            return Err(ApiError::credential_encryption_writes_disabled());
+        }
+        let account_id = Uuid::now_v7();
+        let encrypted_api_key = api_key
+            .as_deref()
+            .map(|plaintext| {
+                state.credential_cipher.encrypt(
+                    SecretPurpose::AiAccountApiKey,
+                    account_id,
+                    plaintext,
+                )
+            })
+            .transpose()
+            .map_err(ApiError::from_secret_encryption)?;
         let base_url =
             provider_credential_base_url_for_create(provider, command.base_url.as_deref())?;
         validate_provider_access(state, provider, &models, api_key.as_deref(), base_url.as_deref())
             .await?;
         let row = ai_repository::create_account(
             &state.persistence.postgres,
+            account_id,
             scope_kind_key(scope.scope_kind),
             scope.workspace_id,
             scope.library_id,
             command.provider_catalog_id,
             &label,
-            api_key.as_deref(),
+            encrypted_api_key.as_ref(),
             base_url.as_deref(),
             command.created_by_principal_id,
         )
         .await
         .map_err(map_ai_write_error)?;
-        let account = map_account_row(row);
+        let account = map_account_row(&state.credential_cipher, row)?;
         sync_provider_model_catalog_after_account_save(state, provider, &account).await;
         Ok(account)
     }
@@ -102,10 +151,31 @@ impl AiCatalogService {
                 || ApiError::resource_not_found("provider_catalog", existing.provider_catalog_id),
             )?;
         let api_key = normalize_optional(command.api_key.as_deref());
+        if api_key.is_some() && !state.settings.credential_encryption_write_enabled {
+            return Err(ApiError::credential_encryption_writes_disabled());
+        }
+        let encrypted_api_key = api_key
+            .as_deref()
+            .map(|plaintext| {
+                state.credential_cipher.encrypt(
+                    SecretPurpose::AiAccountApiKey,
+                    command.account_id,
+                    plaintext,
+                )
+            })
+            .transpose()
+            .map_err(ApiError::from_secret_encryption)?;
         let base_url = provider_credential_base_url_for_update(
             provider,
             existing.base_url.as_deref(),
             command.base_url.as_deref(),
+        )?;
+        validate_provider_base_url_key_reuse(
+            provider,
+            existing.base_url.as_deref(),
+            base_url.as_deref(),
+            existing.api_key.is_some(),
+            api_key.is_some(),
         )?;
         let effective_api_key = api_key.as_deref().or(existing.api_key.as_deref());
         validate_provider_access(state, provider, &models, effective_api_key, base_url.as_deref())
@@ -114,14 +184,14 @@ impl AiCatalogService {
             &state.persistence.postgres,
             command.account_id,
             &label,
-            api_key.as_deref(),
+            encrypted_api_key.as_ref(),
             base_url.as_deref(),
             &command.credential_state,
         )
         .await
         .map_err(map_ai_write_error)?
         .ok_or_else(|| ApiError::resource_not_found("provider_credential", command.account_id))?;
-        let account = map_account_row(row);
+        let account = map_account_row(&state.credential_cipher, row)?;
         sync_provider_model_catalog_after_account_save(state, provider, &account).await;
         Ok(account)
     }
@@ -137,20 +207,46 @@ impl AiCatalogService {
     }
 }
 
-pub(super) fn map_account_row(row: ai_repository::AiAccountRow) -> AiAccount {
-    AiAccount {
+fn map_account_summary_row(mut row: ai_repository::AiAccountSummaryRow) -> AiAccountSummary {
+    AiAccountSummary {
         id: row.id,
         scope_kind: parse_scope_kind(&row.scope_kind).unwrap_or(AiScopeKind::Workspace),
         workspace_id: row.workspace_id,
         library_id: row.library_id,
         provider_catalog_id: row.provider_catalog_id,
-        label: row.label,
-        api_key: row.api_key,
-        base_url: row.base_url,
-        credential_state: row.credential_state,
+        label: std::mem::take(&mut row.label),
+        base_url: row.base_url.take(),
+        credential_state: std::mem::take(&mut row.credential_state),
+        has_api_key: row.has_api_key,
         created_at: row.created_at,
         updated_at: row.updated_at,
     }
+}
+
+pub(super) fn map_account_row(
+    cipher: &crate::shared::secret_encryption::CredentialCipher,
+    mut row: ai_repository::AiAccountRow,
+) -> Result<AiAccount, ApiError> {
+    let api_key = row
+        .api_key
+        .as_deref()
+        .map(|stored| cipher.decrypt(SecretPurpose::AiAccountApiKey, row.id, stored))
+        .transpose()
+        .map_err(ApiError::from_secret_encryption)?
+        .map(|secret| secret.expose_secret().to_owned());
+    Ok(AiAccount {
+        id: row.id,
+        scope_kind: parse_scope_kind(&row.scope_kind).unwrap_or(AiScopeKind::Workspace),
+        workspace_id: row.workspace_id,
+        library_id: row.library_id,
+        provider_catalog_id: row.provider_catalog_id,
+        label: std::mem::take(&mut row.label),
+        api_key,
+        base_url: row.base_url.take(),
+        credential_state: std::mem::take(&mut row.credential_state),
+        created_at: row.created_at,
+        updated_at: row.updated_at,
+    })
 }
 
 async fn sync_provider_model_catalog_after_account_save(

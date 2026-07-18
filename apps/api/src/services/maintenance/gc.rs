@@ -51,7 +51,7 @@ pub struct LibraryGcReport {
 
 impl LibraryGcReport {
     #[must_use]
-    pub fn merge(self, other: Self) -> Self {
+    pub const fn merge(self, other: Self) -> Self {
         Self {
             documents_visited: self.documents_visited + other.documents_visited,
             documents_with_stale: self.documents_with_stale + other.documents_with_stale,
@@ -77,7 +77,7 @@ impl LibraryGcReport {
     /// Useful for the scheduler `rows_removed` metric where the caller
     /// does not care which lane removed each row.
     #[must_use]
-    pub fn total_rows_removed(self) -> i64 {
+    pub const fn total_rows_removed(self) -> i64 {
         self.stale_chunks_removed
             + self.stale_vectors_removed
             + self.null_head_chunks_removed
@@ -114,7 +114,7 @@ impl GcStaleChunksError {
     /// Canonical stable error code for lease-table failures and
     /// Prometheus labels.
     #[must_use]
-    pub fn code(&self) -> &'static str {
+    pub const fn code(&self) -> &'static str {
         match self {
             Self::ActiveIngest { .. } => "active_ingest",
             Self::Sqlx(_) => "postgres",
@@ -277,7 +277,7 @@ pub struct OrphanLibrariesPurgeReport {
     pub failed: usize,
 }
 
-/// Wipe every knowledge-plane row whose `library_id` points at a PostgreSQL
+/// Wipe every knowledge-plane row whose `library_id` points at a `PostgreSQL`
 /// `catalog_library` row that no longer exists.
 ///
 /// Reuses the canonical snapshot-restore replace sweep so the cleanup binary
@@ -317,7 +317,7 @@ impl StaleEvidenceReport {
     /// the scheduler so it can report a single `rows_removed` metric
     /// without needing to know the report shape.
     #[must_use]
-    pub fn total_rows_removed(self) -> i64 {
+    pub const fn total_rows_removed(self) -> i64 {
         self.stale_revision_rows + self.phantom_chunk_rows
     }
 }

@@ -1,4 +1,7 @@
-use super::*;
+use super::{
+    AiAccount, AiBinding, AiBindingPurpose, AiScopeKind, AiScopeRef, ApiError, AppState,
+    BindingValidation, Uuid, ai_repository, catalog_repository,
+};
 
 pub(super) fn normalize_non_empty(
     value: &str,
@@ -40,17 +43,7 @@ pub(super) fn map_ai_delete_error(error: sqlx::Error) -> ApiError {
 }
 
 pub(super) fn parse_binding_purpose(value: &str) -> Result<AiBindingPurpose, ApiError> {
-    match value {
-        "extract_text" => Ok(AiBindingPurpose::ExtractText),
-        "extract_graph" => Ok(AiBindingPurpose::ExtractGraph),
-        "embed_chunk" => Ok(AiBindingPurpose::EmbedChunk),
-        "query_compile" => Ok(AiBindingPurpose::QueryCompile),
-        "query_retrieve" => Ok(AiBindingPurpose::QueryRetrieve),
-        "query_answer" => Ok(AiBindingPurpose::QueryAnswer),
-        "vision" => Ok(AiBindingPurpose::Vision),
-        "agent" => Ok(AiBindingPurpose::Agent),
-        _ => Err(ApiError::Internal),
-    }
+    value.parse().map_err(|_| ApiError::Internal)
 }
 
 pub(super) fn parse_scope_kind(value: &str) -> Result<AiScopeKind, ApiError> {
@@ -62,7 +55,7 @@ pub(super) fn parse_scope_kind(value: &str) -> Result<AiScopeKind, ApiError> {
     }
 }
 
-pub(super) fn scope_kind_key(value: AiScopeKind) -> &'static str {
+pub(super) const fn scope_kind_key(value: AiScopeKind) -> &'static str {
     value.as_str()
 }
 
@@ -109,12 +102,12 @@ pub(super) async fn normalize_scope_ref(
                     .await
                     .map_err(|e| ApiError::internal_with_log(e, "internal"))?
                     .ok_or_else(|| ApiError::resource_not_found("library", library_id))?;
-            if let Some(expected_workspace_id) = workspace_id {
-                if expected_workspace_id != library.workspace_id {
-                    return Err(ApiError::BadRequest(
-                        "libraryId does not belong to workspaceId".to_string(),
-                    ));
-                }
+            if let Some(expected_workspace_id) = workspace_id
+                && expected_workspace_id != library.workspace_id
+            {
+                return Err(ApiError::BadRequest(
+                    "libraryId does not belong to workspaceId".to_string(),
+                ));
             }
             Ok(AiScopeRef {
                 scope_kind,
@@ -135,7 +128,7 @@ pub(super) fn scope_ref_from_binding_row(
     })
 }
 
-pub(super) fn scope_ref_from_account(account: &AiAccount) -> Result<AiScopeRef, ApiError> {
+pub(super) const fn scope_ref_from_account(account: &AiAccount) -> Result<AiScopeRef, ApiError> {
     Ok(AiScopeRef {
         scope_kind: account.scope_kind,
         workspace_id: account.workspace_id,
@@ -161,7 +154,7 @@ pub(super) fn scope_can_use_resource(owner_scope: AiScopeRef, resource_scope: Ai
     }
 }
 
-pub(crate) fn binding_purpose_key(value: AiBindingPurpose) -> &'static str {
+pub(crate) const fn binding_purpose_key(value: AiBindingPurpose) -> &'static str {
     value.as_str()
 }
 

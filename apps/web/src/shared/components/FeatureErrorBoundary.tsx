@@ -1,32 +1,32 @@
-import { Component, type ReactNode } from "react";
-import { AlertTriangle, RotateCw } from "lucide-react";
+import { Component, type ReactNode } from 'react'
+import { AlertTriangle, RotateCw } from 'lucide-react'
 
-import { Alert, AlertDescription, AlertTitle } from "@/shared/components/ui/alert";
-import { Button } from "@/shared/components/ui/button";
+import { Alert, AlertDescription, AlertTitle } from '@/shared/components/ui/alert'
+import { Button } from '@/shared/components/ui/button'
 
 type FeatureErrorBoundaryProps = {
-  feature: string;
-  children: ReactNode;
-};
+  feature: string
+  children: ReactNode
+}
 
 type FeatureErrorBoundaryState = {
-  error: unknown;
-};
+  error: unknown
+}
 
 export class FeatureErrorBoundary extends Component<
   FeatureErrorBoundaryProps,
   FeatureErrorBoundaryState
 > {
-  state: FeatureErrorBoundaryState = { error: null };
+  state: FeatureErrorBoundaryState = { error: null }
 
   static getDerivedStateFromError(error: unknown): FeatureErrorBoundaryState {
-    return { error };
+    return { error }
   }
 
   componentDidCatch(error: unknown) {
-    void import("@/shared/lib/observability").then(({ captureUiException }) =>
+    void import('@/shared/lib/observability').then(({ captureUiException }) =>
       captureUiException(error, { feature: this.props.feature }),
-    );
+    )
   }
 
   render() {
@@ -53,9 +53,9 @@ export class FeatureErrorBoundary extends Component<
             </AlertDescription>
           </Alert>
         </div>
-      );
+      )
     }
 
-    return this.props.children;
+    return this.props.children
   }
 }

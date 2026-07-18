@@ -1,11 +1,8 @@
 use crate::{
     agent_runtime::task::{RuntimeTask, RuntimeTaskSpec, StructuredRuntimeTask},
-    domains::{
-        agent_runtime::{
-            RuntimeOutputMode, RuntimeRecoveryPolicy, RuntimeStageKind, RuntimeSurfaceKind,
-            RuntimeTaskKind,
-        },
-        ai::AiBindingPurpose,
+    domains::agent_runtime::{
+        RuntimeOutputMode, RuntimeRecoveryPolicy, RuntimeStageKind, RuntimeSurfaceKind,
+        RuntimeTaskKind,
     },
     services::query::support::{QueryRerankFailure, QueryRerankTaskInput, RerankOutcome},
 };
@@ -26,7 +23,7 @@ impl RuntimeTask for QueryRerankTask {
         RuntimeTaskSpec {
             task_kind: RuntimeTaskKind::QueryRerank,
             surface_kind: RuntimeSurfaceKind::Internal,
-            binding_purpose: AiBindingPurpose::for_runtime_task_kind(RuntimeTaskKind::QueryRerank),
+            binding_purpose: RuntimeTaskKind::QueryRerank.binding_purpose(),
             machine_consumed: true,
             max_turns: 1,
             max_parallel_actions: 1,

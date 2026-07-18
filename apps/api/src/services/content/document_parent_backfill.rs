@@ -35,6 +35,7 @@ use crate::domains::content::{
     attachment_parent_page_id, derive_document_role, revision_is_raster_image,
     structural_source_numeric_ids,
 };
+use crate::infra::repositories::catalog_repository;
 
 /// Outcome of one document-parentage backfill pass.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -126,6 +127,7 @@ pub async fn backfill_document_parents(
         // the row retrieval actually reads — unsynced.
         update_child_parentage(
             pool,
+            library_id,
             child.id,
             resolved_parent_id,
             resolved_parent_key.as_deref(),
@@ -256,23 +258,43 @@ async fn load_parent_candidates(
 
 async fn update_child_parentage(
     pool: &sqlx::PgPool,
+    library_id: Uuid,
     document_id: Uuid,
     parent_document_id: Option<Uuid>,
     parent_external_key: Option<&str>,
     document_role: &str,
 ) -> anyhow::Result<()> {
-    sqlx::query(
+    let mut transaction =
+        pool.begin().await.context("failed to start document-parentage backfill transaction")?;
+    let parent_locked = sqlx::query_scalar::<_, Uuid>(
+        "select id
+         from catalog_library
+         where id = $1
+         for no key update",
+    )
+    .bind(library_id)
+    .fetch_optional(&mut *transaction)
+    .await
+    .context("failed to lock library during document-parentage backfill")?;
+    anyhow::ensure!(parent_locked.is_some(), "library disappeared during parentage backfill");
+    let content_update = sqlx::query(
         "update content_document
          set parent_document_id = $2,
              parent_external_key = $3,
              document_role = $4
-         where id = $1",
+         where id = $1 and library_id = $5
+           and (
+                parent_document_id is distinct from $2
+                or parent_external_key is distinct from $3
+                or document_role is distinct from $4
+           )",
     )
     .bind(document_id)
     .bind(parent_document_id)
     .bind(parent_external_key)
     .bind(document_role)
-    .execute(pool)
+    .bind(library_id)
+    .execute(&mut *transaction)
     .await
     .context("failed to update document parentage during backfill")?;
     // Mirror the parentage onto the knowledge-plane row that retrieval reads
@@ -281,18 +303,33 @@ async fn update_child_parentage(
     // content-plane-only update would leave every document `primary` at query
     // time. No-op when the document has not been promoted yet (the promote path
     // stamps the role from the same canonical derivation).
-    sqlx::query(
+    let knowledge_update = sqlx::query(
         "update knowledge_document
          set parent_document_id = $2,
-             document_role = $3
-         where document_id = $1",
+             document_role = $3,
+             updated_at = now()
+         where document_id = $1 and library_id = $4
+           and (
+                parent_document_id is distinct from $2
+                or document_role is distinct from $3
+           )",
     )
     .bind(document_id)
     .bind(parent_document_id)
     .bind(document_role)
-    .execute(pool)
+    .bind(library_id)
+    .execute(&mut *transaction)
     .await
     .context("failed to mirror document parentage onto knowledge_document during backfill")?;
+    if content_update.rows_affected() > 0 || knowledge_update.rows_affected() > 0 {
+        catalog_repository::touch_library_source_truth_version_with_executor(
+            &mut *transaction,
+            library_id,
+        )
+        .await
+        .context("failed to advance source generation after document-parentage backfill")?;
+    }
+    transaction.commit().await.context("failed to commit document-parentage backfill")?;
     Ok(())
 }
 
@@ -314,10 +351,10 @@ fn resolve_child_parent(
     }
 
     // 2) Structural recovery from the attachment page id.
-    if let Some(page_id) = child_attachment_page_id(child) {
-        if let Some(parent_id) = parent_index.get(&page_id).copied() {
-            return (Some(parent_id), None);
-        }
+    if let Some(page_id) = child_attachment_page_id(child)
+        && let Some(parent_id) = parent_index.get(&page_id).copied()
+    {
+        return (Some(parent_id), None);
     }
     (None, None)
 }

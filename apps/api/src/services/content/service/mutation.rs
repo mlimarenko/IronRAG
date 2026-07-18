@@ -1,28 +1,108 @@
 use chrono::Utc;
+use sha2::{Digest as _, Sha256};
 use uuid::Uuid;
 
 use crate::{
     app::state::AppState,
     domains::content::{ContentMutation, ContentMutationItem},
     domains::ops::{ASYNC_OP_STATUS_READY, MUTATION_KIND_DELETE},
-    infra::repositories::content_repository::{self, NewContentMutation, NewContentMutationItem},
-    interfaces::http::router_support::ApiError,
-    services::{
-        ingest::service::AdmitIngestJobCommand,
-        ops::service::{CreateAsyncOperationCommand, UpdateAsyncOperationCommand},
+    infra::repositories::{
+        admission_repository::{
+            self, AdmissionError, ContentAdmissionRequest, ContentAdmissionTarget,
+            RevisionAdmission,
+        },
+        content_repository::{self, NewContentMutation, NewContentMutationItem},
     },
+    interfaces::http::router_support::ApiError,
+    services::ops::service::{CreateAsyncOperationCommand, UpdateAsyncOperationCommand},
 };
 
 /// Default priority for content-mutation ingest jobs.
 const DEFAULT_JOB_PRIORITY: i32 = 100;
 
+fn map_atomic_admission_error(error: AdmissionError) -> ApiError {
+    match error {
+        AdmissionError::IdempotencyConflict { .. } => ApiError::Conflict(
+            "idempotency key was already used for a different content request".to_string(),
+        ),
+        AdmissionError::TargetDocumentNotFound { document_id } => {
+            ApiError::resource_not_found("document", document_id)
+        }
+        AdmissionError::TargetDocumentDeleted { .. } => {
+            ApiError::BadRequest("deleted documents do not accept new mutations".to_string())
+        }
+        AdmissionError::TargetDocumentScopeConflict { .. } => {
+            ApiError::Conflict("document scope changed before mutation admission".to_string())
+        }
+        AdmissionError::ConflictingActiveMutation { .. } => ApiError::ConflictingMutation(
+            "document is still processing a previous mutation".to_string(),
+        ),
+        AdmissionError::DuplicateExternalKey { existing_document_id } => {
+            ApiError::DuplicateContent {
+                message: "an active document with this external key already exists".to_string(),
+                existing_document_id,
+            }
+        }
+        error @ AdmissionError::TargetDocumentHeadIntegrity { .. } => {
+            ApiError::internal_with_log(error, "content admission head integrity failure")
+        }
+        other => ApiError::internal_with_log(other, "content admission failed"),
+    }
+}
+
+fn delete_mutation_item_is_reusable(
+    item: &ContentMutationItem,
+    document_id: Uuid,
+    base_revision_id: Option<Uuid>,
+    requested_state: &str,
+    requested_message: &str,
+) -> bool {
+    let owns_target = item.document_id == Some(document_id)
+        && item.base_revision_id == base_revision_id
+        && item.result_revision_id.is_none();
+    owns_target
+        && ((item.item_state == "applied" && requested_state == "pending")
+            || (item.item_state == requested_state
+                && item.message.as_deref() == Some(requested_message)))
+}
+
+fn validate_delete_mutation_item_collection(
+    items: &[ContentMutationItem],
+    document_id: Uuid,
+    multiple_unbound_message: &str,
+    foreign_document_message: &str,
+) -> Result<(), ApiError> {
+    if items.iter().filter(|item| item.document_id.is_none()).count() > 1 {
+        return Err(ApiError::idempotency_conflict(multiple_unbound_message));
+    }
+    if items.iter().any(|item| {
+        item.document_id.is_some_and(|existing_document_id| existing_document_id != document_id)
+    }) {
+        return Err(ApiError::idempotency_conflict(foreign_document_message));
+    }
+    Ok(())
+}
+
+fn delete_mutation_request_identity(document_id: Uuid, source_identity: Option<&str>) -> String {
+    let mut digest = Sha256::new();
+    digest.update(b"ironrag:content-delete:v1\0");
+    digest.update(document_id.as_bytes());
+    match source_identity {
+        Some(source_identity) => {
+            digest.update([1]);
+            digest.update(source_identity.as_bytes());
+        }
+        None => digest.update([0]),
+    }
+    format!("v1:sha256:{}", hex::encode(digest.finalize()))
+}
+
 use super::{
     AcceptMutationCommand, AdmitDocumentCommand, AdmitMutationCommand, ContentMutationAdmission,
-    ContentService, CreateDocumentAdmission, CreateDocumentCommand, CreateMutationItemCommand,
-    PromoteHeadCommand, ReconcileFailedIngestMutationCommand, UpdateMutationCommand,
-    UpdateMutationItemCommand, derive_failed_revision_readiness,
-    ensure_existing_mutation_matches_request, is_content_mutation_idempotency_violation,
-    map_mutation_item_row, map_mutation_row,
+    ContentService, CreateDocumentAdmission, CreateMutationItemCommand, PromoteHeadCommand,
+    ReconcileFailedIngestMutationCommand, UpdateMutationCommand, UpdateMutationItemCommand,
+    derive_failed_revision_readiness, ensure_existing_mutation_matches_request,
+    is_content_mutation_idempotency_violation, map_mutation_item_row, map_mutation_row,
 };
 
 impl ContentService {
@@ -31,196 +111,50 @@ impl ContentService {
         state: &AppState,
         command: AdmitDocumentCommand,
     ) -> Result<CreateDocumentAdmission, ApiError> {
-        let mutation = self
-            .accept_mutation(
-                state,
-                AcceptMutationCommand {
-                    workspace_id: command.workspace_id,
-                    library_id: command.library_id,
-                    operation_kind: "upload".to_string(),
-                    requested_by_principal_id: command.created_by_principal_id,
-                    request_surface: command.request_surface.clone(),
-                    idempotency_key: command.idempotency_key.clone(),
-                    source_identity: command.source_identity.clone(),
-                },
-            )
-            .await?;
-        let mutation_lock = content_repository::acquire_content_mutation_lock(
+        let request = ContentAdmissionRequest {
+            workspace_id: command.workspace_id,
+            library_id: command.library_id,
+            operation_kind: "upload".to_string(),
+            requested_by_principal_id: command.created_by_principal_id,
+            request_surface: command.request_surface,
+            idempotency_key: command.idempotency_key,
+            source_identity: command.source_identity,
+            target: ContentAdmissionTarget::New {
+                external_key: command.external_key,
+                file_name: command.file_name,
+                parent_external_key: command.parent_external_key,
+            },
+            revision: command.revision.map(|revision| RevisionAdmission {
+                content_source_kind: revision.content_source_kind,
+                checksum: revision.checksum,
+                mime_type: revision.mime_type,
+                byte_size: revision.byte_size,
+                title: revision.title,
+                language_code: revision.language_code,
+                source_uri: revision.source_uri,
+                document_hint: revision.document_hint,
+                storage_key: revision.storage_key,
+            }),
+            parent_async_operation_id: None,
+            priority: DEFAULT_JOB_PRIORITY,
+        };
+        let bundle = admission_repository::admit_content_with_failpoint(
             &state.persistence.postgres,
-            mutation.id,
+            &request,
+            None,
         )
         .await
-        .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
-
-        let result = async {
-            let existing_admission = self.get_mutation_admission(state, mutation.id).await?;
-            if let Some(existing_document_id) =
-                existing_admission.items.iter().find_map(|item| item.document_id)
-            {
-                let document = self.get_document(state, existing_document_id).await?;
-                return Ok(CreateDocumentAdmission { document, mutation: existing_admission });
-            }
-
-            let document = self
-                .create_document(
-                    state,
-                    CreateDocumentCommand {
-                        workspace_id: command.workspace_id,
-                        library_id: command.library_id,
-                        external_key: command.external_key,
-                        file_name: command.file_name,
-                        created_by_principal_id: command.created_by_principal_id,
-                        parent_external_key: command.parent_external_key,
-                    },
-                )
-                .await?;
-
-            let async_operation = state
-                .canonical_services
-                .ops
-                .create_async_operation(
-                    state,
-                    CreateAsyncOperationCommand {
-                        workspace_id: command.workspace_id,
-                        library_id: Some(command.library_id),
-                        operation_kind: "content_mutation".to_string(),
-                        surface_kind: "rest".to_string(),
-                        requested_by_principal_id: command.created_by_principal_id,
-                        status: "accepted".to_string(),
-                        subject_kind: "content_mutation".to_string(),
-                        subject_id: Some(mutation.id),
-                        parent_async_operation_id: None,
-                        completed_at: None,
-                        failure_code: None,
-                    },
-                )
-                .await?;
-
-            let (items, job_id, async_operation_id) = if let Some(revision) = command.revision {
-                let revision = self
-                    .create_revision_from_metadata(
-                        state,
-                        document.id,
-                        command.created_by_principal_id,
-                        revision,
-                    )
-                    .await?;
-                let item = self
-                    .create_mutation_item(
-                        state,
-                        CreateMutationItemCommand {
-                            mutation_id: mutation.id,
-                            document_id: Some(document.id),
-                            base_revision_id: None,
-                            result_revision_id: Some(revision.id),
-                            item_state: "pending".to_string(),
-                            message: Some(
-                                "document revision accepted and queued for ingest".to_string(),
-                            ),
-                        },
-                    )
-                    .await?;
-                let job = match state
-                    .canonical_services
-                    .ingest
-                    .admit_job(
-                        state,
-                        AdmitIngestJobCommand {
-                            workspace_id: command.workspace_id,
-                            library_id: command.library_id,
-                            mutation_id: Some(mutation.id),
-                            connector_id: None,
-                            async_operation_id: Some(async_operation.id),
-                            knowledge_document_id: Some(document.id),
-                            knowledge_revision_id: Some(revision.id),
-                            job_kind: "content_mutation".to_string(),
-                            priority: DEFAULT_JOB_PRIORITY,
-                            dedupe_key: command.idempotency_key,
-                            available_at: None,
-                        },
-                    )
-                    .await
-                {
-                    Ok(job) => job,
-                    Err(error) => {
-                        let _ = self
-                            .reconcile_failed_ingest_mutation(
-                                state,
-                                ReconcileFailedIngestMutationCommand {
-                                    mutation_id: mutation.id,
-                                    failure_code: "ingest_job_admission_failed".to_string(),
-                                    failure_message:
-                                        "failed to admit ingest job for uploaded document"
-                                            .to_string(),
-                                },
-                            )
-                            .await;
-                        return Err(error);
-                    }
-                };
-                let _ = self
-                    .promote_pending_document_mutation_head(state, document.id, mutation.id)
-                    .await?;
-                (vec![item], Some(job.id), Some(async_operation.id))
-            } else {
-                let _ = self
-                    .promote_document_head(
-                        state,
-                        PromoteHeadCommand {
-                            document_id: document.id,
-                            active_revision_id: None,
-                            readable_revision_id: None,
-                            latest_mutation_id: Some(mutation.id),
-                            latest_successful_attempt_id: None,
-                        },
-                    )
-                    .await?;
-                let _ = self
-                    .update_mutation(
-                        state,
-                        UpdateMutationCommand {
-                            mutation_id: mutation.id,
-                            mutation_state: "applied".to_string(),
-                            completed_at: Some(Utc::now()),
-                            failure_code: None,
-                            conflict_code: None,
-                        },
-                    )
-                    .await?;
-                let ready_operation = state
-                    .canonical_services
-                    .ops
-                    .update_async_operation(
-                        state,
-                        UpdateAsyncOperationCommand {
-                            operation_id: async_operation.id,
-                            status: "ready".to_string(),
-                            completed_at: Some(Utc::now()),
-                            failure_code: None,
-                        },
-                    )
-                    .await?;
-                (Vec::new(), None, Some(ready_operation.id))
-            };
-
-            let document = self.get_document(state, document.id).await?;
-            let mutation = self.get_mutation(state, mutation.id).await?;
-            Ok(CreateDocumentAdmission {
-                document,
-                mutation: ContentMutationAdmission { mutation, items, job_id, async_operation_id },
-            })
-        }
-        .await;
-        let release_result =
-            content_repository::release_content_mutation_lock(mutation_lock, mutation.id)
-                .await
-                .map_err(|e| ApiError::internal_with_log(e, "internal"));
-        match (result, release_result) {
-            (Ok(admission), Ok(())) => Ok(admission),
-            (Err(error), Ok(())) => Err(error),
-            (Ok(_), Err(error)) => Err(error),
-            (Err(_), Err(error)) => Err(error),
-        }
+        .map_err(map_atomic_admission_error)?
+        .into_bundle();
+        let document_id = bundle.document.id;
+        let mutation = ContentMutationAdmission {
+            mutation: map_mutation_row(bundle.mutation),
+            items: bundle.item.into_iter().map(map_mutation_item_row).collect(),
+            job_id: bundle.job.map(|job| job.id),
+            async_operation_id: Some(bundle.async_operation.id),
+        };
+        let document = self.get_document(state, document_id).await?;
+        Ok(CreateDocumentAdmission { document, mutation })
     }
 
     pub async fn admit_mutation(
@@ -252,114 +186,53 @@ impl ContentService {
             };
         }
 
-        if let Some(existing_admission) =
-            self.get_existing_mutation_admission_for_request(state, &accept_command).await?
-        {
-            return Ok(existing_admission);
-        }
-
         self.ensure_document_accepts_new_mutation(
             state,
             command.document_id,
             &command.operation_kind,
         )
         .await?;
-        let current_head = self.get_document_head(state, command.document_id).await?;
-        let base_revision_id = current_head.as_ref().and_then(|row| row.latest_revision_id());
-
-        let mutation = self.accept_mutation(state, accept_command).await?;
-        let async_operation = state
-            .canonical_services
-            .ops
-            .create_async_operation(
-                state,
-                CreateAsyncOperationCommand {
-                    workspace_id: command.workspace_id,
-                    library_id: Some(command.library_id),
-                    operation_kind: "content_mutation".to_string(),
-                    surface_kind: "rest".to_string(),
-                    requested_by_principal_id: command.requested_by_principal_id,
-                    status: "accepted".to_string(),
-                    subject_kind: "content_mutation".to_string(),
-                    subject_id: Some(mutation.id),
-                    parent_async_operation_id: command.parent_async_operation_id,
-                    completed_at: None,
-                    failure_code: None,
-                },
+        let revision = command.revision.ok_or_else(|| {
+            ApiError::BadRequest(
+                "revision metadata is required for non-delete document mutations".to_string(),
             )
-            .await?;
-
-        let revision = self
-            .create_revision_from_metadata(
-                state,
-                command.document_id,
-                command.requested_by_principal_id,
-                command.revision.ok_or_else(|| {
-                    ApiError::BadRequest(
-                        "revision metadata is required for non-delete document mutations"
-                            .to_string(),
-                    )
-                })?,
-            )
-            .await?;
-
-        let item = self
-            .create_mutation_item(
-                state,
-                CreateMutationItemCommand {
-                    mutation_id: mutation.id,
-                    document_id: Some(command.document_id),
-                    base_revision_id,
-                    result_revision_id: Some(revision.id),
-                    item_state: "pending".to_string(),
-                    message: Some("revision accepted and queued for ingest".to_string()),
-                },
-            )
-            .await?;
-        let job = match state
-            .canonical_services
-            .ingest
-            .admit_job(
-                state,
-                AdmitIngestJobCommand {
-                    workspace_id: command.workspace_id,
-                    library_id: command.library_id,
-                    mutation_id: Some(mutation.id),
-                    connector_id: None,
-                    async_operation_id: Some(async_operation.id),
-                    knowledge_document_id: Some(command.document_id),
-                    knowledge_revision_id: Some(revision.id),
-                    job_kind: "content_mutation".to_string(),
-                    priority: 100,
-                    dedupe_key: command.idempotency_key,
-                    available_at: None,
-                },
-            )
-            .await
-        {
-            Ok(job) => job,
-            Err(error) => {
-                let _ = self
-                    .reconcile_failed_ingest_mutation(
-                        state,
-                        ReconcileFailedIngestMutationCommand {
-                            mutation_id: mutation.id,
-                            failure_code: "ingest_job_admission_failed".to_string(),
-                            failure_message: "failed to admit ingest job for mutation".to_string(),
-                        },
-                    )
-                    .await;
-                return Err(error);
-            }
+        })?;
+        let request = ContentAdmissionRequest {
+            workspace_id: command.workspace_id,
+            library_id: command.library_id,
+            operation_kind: command.operation_kind,
+            requested_by_principal_id: command.requested_by_principal_id,
+            request_surface: command.request_surface,
+            idempotency_key: command.idempotency_key,
+            source_identity: command.source_identity,
+            target: ContentAdmissionTarget::Existing { document_id: command.document_id },
+            revision: Some(RevisionAdmission {
+                content_source_kind: revision.content_source_kind,
+                checksum: revision.checksum,
+                mime_type: revision.mime_type,
+                byte_size: revision.byte_size,
+                title: revision.title,
+                language_code: revision.language_code,
+                source_uri: revision.source_uri,
+                document_hint: revision.document_hint,
+                storage_key: revision.storage_key,
+            }),
+            parent_async_operation_id: command.parent_async_operation_id,
+            priority: DEFAULT_JOB_PRIORITY,
         };
-        let _ = self
-            .promote_pending_document_mutation_head(state, command.document_id, mutation.id)
-            .await?;
+        let bundle = admission_repository::admit_content_with_failpoint(
+            &state.persistence.postgres,
+            &request,
+            None,
+        )
+        .await
+        .map_err(map_atomic_admission_error)?
+        .into_bundle();
         Ok(ContentMutationAdmission {
-            mutation,
-            items: vec![item],
-            job_id: Some(job.id),
-            async_operation_id: Some(async_operation.id),
+            mutation: map_mutation_row(bundle.mutation),
+            items: bundle.item.into_iter().map(map_mutation_item_row).collect(),
+            job_id: bundle.job.map(|job| job.id),
+            async_operation_id: Some(bundle.async_operation.id),
         })
     }
 
@@ -436,7 +309,14 @@ impl ContentService {
             requested_by_principal_id: command.requested_by_principal_id,
             request_surface: command.request_surface.clone(),
             idempotency_key: command.idempotency_key.clone(),
-            source_identity: command.source_identity.clone(),
+            source_identity: if command.operation_kind == MUTATION_KIND_DELETE {
+                Some(delete_mutation_request_identity(
+                    command.document_id,
+                    command.source_identity.as_deref(),
+                ))
+            } else {
+                command.source_identity.clone()
+            },
         }
     }
 
@@ -454,7 +334,9 @@ impl ContentService {
         .map_err(|e| ApiError::internal_with_log(e, "internal"))?
         .ok_or_else(|| ApiError::resource_not_found("document", command.document_id))?;
         let current_head = self.get_document_head(state, command.document_id).await?;
-        let base_revision_id = current_head.as_ref().and_then(|row| row.latest_revision_id());
+        let base_revision_id = current_head
+            .as_ref()
+            .and_then(crate::domains::content::ContentDocumentHead::latest_revision_id);
         let superseded_mutation_id = current_head.as_ref().and_then(|head| head.latest_mutation_id);
 
         if let Some(existing_mutation) =
@@ -474,20 +356,31 @@ impl ContentService {
         }
 
         if current_document.document_state == "deleted" || current_document.deleted_at.is_some() {
-            let canonical_delete_mutation = match superseded_mutation_id {
-                Some(latest_mutation_id) => match content_repository::get_mutation_by_id(
-                    &state.persistence.postgres,
-                    latest_mutation_id,
-                )
-                .await
-                .map_err(|e| ApiError::internal_with_log(e, "internal"))?
-                {
-                    Some(existing_row) if existing_row.operation_kind == MUTATION_KIND_DELETE => {
-                        map_mutation_row(existing_row)
-                    }
-                    _ => self.accept_mutation(state, accept_command.clone()).await?,
-                },
-                None => self.accept_mutation(state, accept_command.clone()).await?,
+            let has_idempotency_key = accept_command
+                .idempotency_key
+                .as_deref()
+                .map(str::trim)
+                .is_some_and(|value| !value.is_empty());
+            let canonical_delete_mutation = if has_idempotency_key {
+                self.accept_mutation(state, accept_command.clone()).await?
+            } else {
+                match superseded_mutation_id {
+                    Some(latest_mutation_id) => match content_repository::get_mutation_by_id(
+                        &state.persistence.postgres,
+                        latest_mutation_id,
+                    )
+                    .await
+                    .map_err(|e| ApiError::internal_with_log(e, "internal"))?
+                    {
+                        Some(existing_row)
+                            if existing_row.operation_kind == MUTATION_KIND_DELETE =>
+                        {
+                            map_mutation_row(existing_row)
+                        }
+                        _ => self.accept_mutation(state, accept_command.clone()).await?,
+                    },
+                    None => self.accept_mutation(state, accept_command.clone()).await?,
+                }
             };
             return self
                 .finalize_delete_mutation_admission(
@@ -762,35 +655,74 @@ impl ContentService {
         item_state: &str,
         message: &str,
     ) -> Result<ContentMutationItem, ApiError> {
-        let existing_items = self.list_mutation_items(state, mutation_id).await?;
-        let existing_item = existing_items
-            .iter()
-            .find(|item| item.document_id == Some(document_id))
-            .cloned()
-            .or_else(|| existing_items.into_iter().next());
+        let mutation_lock = content_repository::acquire_content_mutation_lock(
+            &state.persistence.postgres,
+            mutation_id,
+        )
+        .await
+        .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
+        let result = self
+            .ensure_delete_mutation_item_with_lock_held(
+                state,
+                mutation_id,
+                document_id,
+                base_revision_id,
+                item_state,
+                message,
+            )
+            .await;
+        let release_result =
+            content_repository::release_content_mutation_lock(mutation_lock, mutation_id)
+                .await
+                .map_err(|e| ApiError::internal_with_log(e, "internal"));
+        match (result, release_result) {
+            (Ok(item), Ok(())) => Ok(item),
+            (Err(error), Ok(())) => Err(error),
+            (_, Err(error)) => Err(error),
+        }
+    }
 
-        if let Some(existing_item) = existing_item {
-            if existing_item.item_state == "applied" && item_state == "pending" {
-                return Ok(existing_item);
-            }
-            if existing_item.base_revision_id == base_revision_id
-                && existing_item.result_revision_id.is_none()
-                && existing_item.item_state == item_state
-                && existing_item.message.as_deref() == Some(message)
-            {
-                return Ok(existing_item);
-            }
+    async fn ensure_delete_mutation_item_with_lock_held(
+        &self,
+        state: &AppState,
+        mutation_id: Uuid,
+        document_id: Uuid,
+        base_revision_id: Option<Uuid>,
+        item_state: &str,
+        message: &str,
+    ) -> Result<ContentMutationItem, ApiError> {
+        let existing_items = self.list_mutation_items(state, mutation_id).await?;
+        validate_delete_mutation_item_collection(
+            &existing_items,
+            document_id,
+            "the delete mutation has multiple unbound items and cannot be repaired safely",
+            "the delete mutation already targets a different document",
+        )?;
+        if let Some(existing_item) =
+            existing_items.iter().find(|item| item.document_id == Some(document_id)).cloned()
+        {
             return self
-                .update_mutation_item(
+                .reuse_or_update_delete_mutation_item(
                     state,
-                    UpdateMutationItemCommand {
-                        item_id: existing_item.id,
-                        document_id: Some(document_id),
-                        base_revision_id,
-                        result_revision_id: None,
-                        item_state: item_state.to_string(),
-                        message: Some(message.to_string()),
-                    },
+                    existing_item,
+                    document_id,
+                    base_revision_id,
+                    item_state,
+                    message,
+                )
+                .await;
+        }
+
+        if let Some(unbound_item) = existing_items.iter().find(|item| item.document_id.is_none()) {
+            return self
+                .claim_delete_mutation_item(
+                    state,
+                    mutation_id,
+                    unbound_item.id,
+                    document_id,
+                    base_revision_id,
+                    item_state,
+                    message,
                 )
                 .await;
         }
@@ -805,6 +737,89 @@ impl ContentService {
                 item_state: item_state.to_string(),
                 message: Some(message.to_string()),
             },
+        )
+        .await
+    }
+
+    async fn reuse_or_update_delete_mutation_item(
+        &self,
+        state: &AppState,
+        existing_item: ContentMutationItem,
+        document_id: Uuid,
+        base_revision_id: Option<Uuid>,
+        item_state: &str,
+        message: &str,
+    ) -> Result<ContentMutationItem, ApiError> {
+        if delete_mutation_item_is_reusable(
+            &existing_item,
+            document_id,
+            base_revision_id,
+            item_state,
+            message,
+        ) {
+            return Ok(existing_item);
+        }
+        self.update_mutation_item(
+            state,
+            UpdateMutationItemCommand {
+                item_id: existing_item.id,
+                document_id: Some(document_id),
+                base_revision_id,
+                result_revision_id: None,
+                item_state: item_state.to_string(),
+                message: Some(message.to_string()),
+            },
+        )
+        .await
+    }
+
+    async fn claim_delete_mutation_item(
+        &self,
+        state: &AppState,
+        mutation_id: Uuid,
+        unbound_item_id: Uuid,
+        document_id: Uuid,
+        base_revision_id: Option<Uuid>,
+        item_state: &str,
+        message: &str,
+    ) -> Result<ContentMutationItem, ApiError> {
+        let claimed = content_repository::claim_unbound_mutation_item(
+            &state.persistence.postgres,
+            mutation_id,
+            unbound_item_id,
+            document_id,
+            base_revision_id,
+            None,
+            item_state,
+            Some(message),
+        )
+        .await
+        .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
+        if let Some(claimed) = claimed {
+            return Ok(map_mutation_item_row(claimed));
+        }
+
+        let refreshed_items = self.list_mutation_items(state, mutation_id).await?;
+        validate_delete_mutation_item_collection(
+            &refreshed_items,
+            document_id,
+            "the delete mutation has multiple unbound items and cannot be repaired safely",
+            "the delete mutation item was claimed by a different document",
+        )?;
+        let Some(existing_item) =
+            refreshed_items.into_iter().find(|item| item.document_id == Some(document_id))
+        else {
+            return Err(ApiError::idempotency_conflict(
+                "the delete mutation item changed while its document target was being claimed",
+            ));
+        };
+        self.reuse_or_update_delete_mutation_item(
+            state,
+            existing_item,
+            document_id,
+            base_revision_id,
+            item_state,
+            message,
         )
         .await
     }
@@ -1161,5 +1176,79 @@ impl ContentService {
         }
 
         self.get_mutation_admission(state, command.mutation_id).await
+    }
+}
+
+#[cfg(test)]
+mod admission_error_mapping_tests {
+    use super::*;
+
+    #[test]
+    fn target_state_errors_map_without_reclassifying_unrelated_database_failures() {
+        let document_id = Uuid::now_v7();
+
+        assert!(matches!(
+            map_atomic_admission_error(AdmissionError::TargetDocumentNotFound { document_id }),
+            ApiError::NotFound(_)
+        ));
+        assert!(matches!(
+            map_atomic_admission_error(AdmissionError::TargetDocumentDeleted { document_id }),
+            ApiError::BadRequest(_)
+        ));
+        assert!(matches!(
+            map_atomic_admission_error(AdmissionError::TargetDocumentScopeConflict { document_id }),
+            ApiError::Conflict(_)
+        ));
+        assert!(matches!(
+            map_atomic_admission_error(AdmissionError::TargetDocumentHeadIntegrity { document_id }),
+            ApiError::Internal
+        ));
+        assert!(matches!(
+            map_atomic_admission_error(AdmissionError::ConflictingActiveMutation { document_id }),
+            ApiError::ConflictingMutation(_)
+        ));
+        assert!(matches!(
+            map_atomic_admission_error(AdmissionError::Database(sqlx::Error::RowNotFound)),
+            ApiError::Internal
+        ));
+    }
+
+    #[test]
+    fn delete_item_reuse_requires_the_exact_document_and_revision_scope() {
+        let document_id = Uuid::now_v7();
+        let base_revision_id = Uuid::now_v7();
+        let mut item = ContentMutationItem {
+            id: Uuid::now_v7(),
+            mutation_id: Uuid::now_v7(),
+            document_id: None,
+            base_revision_id: Some(base_revision_id),
+            result_revision_id: None,
+            item_state: "pending".to_string(),
+            message: Some("document delete admitted".to_string()),
+        };
+
+        assert!(!delete_mutation_item_is_reusable(
+            &item,
+            document_id,
+            Some(base_revision_id),
+            "pending",
+            "document delete admitted",
+        ));
+        item.item_state = "applied".to_string();
+        assert!(!delete_mutation_item_is_reusable(
+            &item,
+            document_id,
+            Some(base_revision_id),
+            "pending",
+            "document delete admitted",
+        ));
+        item.document_id = Some(document_id);
+        assert!(delete_mutation_item_is_reusable(
+            &item,
+            document_id,
+            Some(base_revision_id),
+            "pending",
+            "document delete admitted",
+        ));
     }
 }

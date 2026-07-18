@@ -14,14 +14,20 @@ use tokio::{
     time::{Duration, sleep},
 };
 
-pub struct WebTestServer {
+#[cfg(feature = "test-support")]
+pub(crate) fn enable_loopback_test_transport(state: &mut ironrag_backend::app::state::AppState) {
+    state.canonical_services.web_ingest =
+        state.canonical_services.web_ingest.clone().with_loopback_test_transport();
+}
+
+pub(crate) struct WebTestServer {
     base_url: String,
     shutdown_tx: Option<oneshot::Sender<()>>,
     handle: JoinHandle<()>,
 }
 
 impl WebTestServer {
-    pub async fn start() -> Result<Self> {
+    pub(crate) async fn start() -> Result<Self> {
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
             .context("failed to bind local web ingest test server")?;
@@ -56,11 +62,11 @@ impl WebTestServer {
     }
 
     #[must_use]
-    pub fn url(&self, path: &str) -> String {
+    pub(crate) fn url(&self, path: &str) -> String {
         format!("{}{path}", self.base_url)
     }
 
-    pub async fn shutdown(mut self) -> Result<()> {
+    pub(crate) async fn shutdown(mut self) -> Result<()> {
         if let Some(shutdown_tx) = self.shutdown_tx.take() {
             let _ = shutdown_tx.send(());
         }

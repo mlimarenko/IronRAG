@@ -67,8 +67,7 @@ pub struct RuntimeTaskRequest<TTask: RuntimeTask> {
 
 impl<TTask: RuntimeTask> RuntimeTaskRequest<TTask> {
     #[must_use]
-    #[allow(clippy::missing_const_for_fn)]
-    pub fn new(input: TTask::Input, execution_owner: RuntimeExecutionOwner) -> Self {
+    pub const fn new(input: TTask::Input, execution_owner: RuntimeExecutionOwner) -> Self {
         Self {
             input,
             execution_owner,
@@ -81,15 +80,13 @@ impl<TTask: RuntimeTask> RuntimeTaskRequest<TTask> {
     }
 
     #[must_use]
-    #[allow(clippy::missing_const_for_fn)]
-    pub fn with_overrides(mut self, runtime_overrides: RuntimeOverrideBudget) -> Self {
+    pub const fn with_overrides(mut self, runtime_overrides: RuntimeOverrideBudget) -> Self {
         self.runtime_overrides = Some(runtime_overrides);
         self
     }
 
     #[must_use]
-    #[allow(clippy::missing_const_for_fn)]
-    pub fn with_surface_kind(mut self, surface_kind: RuntimeSurfaceKind) -> Self {
+    pub const fn with_surface_kind(mut self, surface_kind: RuntimeSurfaceKind) -> Self {
         self.surface_kind_override = Some(surface_kind);
         self
     }

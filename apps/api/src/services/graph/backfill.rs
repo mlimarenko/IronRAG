@@ -43,13 +43,13 @@ use crate::{
         self,
         ingest_repository::{self, NewIngestJob},
     },
-    services::graph::error::GraphServiceError,
+    services::graph::{error::GraphServiceError, summary::PendingGraphSummaryRefresh},
 };
 
 /// Minimum wall-clock gap between two backfill passes on the same library.
 /// Chosen to comfortably clear a mid-sized missing-node batch (a few hundred
 /// documents × low-millisecond reconcile per doc) before the next burst.
-pub const BACKFILL_INTERVAL: Duration = Duration::from_secs(60);
+pub(crate) const BACKFILL_INTERVAL: Duration = Duration::from_mins(1);
 
 /// Extended debounce applied when a backfill pass finds that *every*
 /// candidate is already skipped by the terminal marker. In that case
@@ -61,12 +61,12 @@ pub const BACKFILL_INTERVAL: Duration = Duration::from_secs(60);
 /// realistic amount of new content could have changed the picture.
 /// The extended window is cleared on the next pass that does produce
 /// at least one active candidate.
-pub const BACKFILL_ALL_TERMINAL_BACKOFF: Duration = Duration::from_secs(300);
+pub(crate) const BACKFILL_ALL_TERMINAL_BACKOFF: Duration = Duration::from_mins(5);
 
 /// Upper bound on documents reconciled per pass. Bounded so one backfill
 /// cannot starve the rest of the worker loop; follow-up passes pick up any
 /// documents that exceed the limit on the next window.
-pub const BACKFILL_BATCH_SIZE: i64 = 256;
+pub(crate) const BACKFILL_BATCH_SIZE: i64 = 256;
 
 /// Concurrent reconcile fan-out inside a single pass on a *small* library
 /// projection. Reconcile is I/O bound (Postgres round-trips; the LLM is
@@ -86,7 +86,7 @@ pub const BACKFILL_BATCH_SIZE: i64 = 256;
 /// targeted path. [`graph_backfill_concurrency`] caps the fan-out to
 /// [`BACKFILL_CONCURRENCY_LARGE_PROJECTION`] above
 /// [`BACKFILL_LARGE_PROJECTION_THRESHOLD`] so the peak stays bounded.
-pub const BACKFILL_CONCURRENCY: usize = 4;
+pub(crate) const BACKFILL_CONCURRENCY: usize = 4;
 
 /// Fan-out used once the canonical projection is large enough that a single
 /// full reconcile build is memory-heavy. Forcing the first build to run
@@ -96,7 +96,7 @@ pub const BACKFILL_CONCURRENCY: usize = 4;
 /// in the pass takes the bounded *targeted* projection path, so serial
 /// execution at this size costs throughput on a background pass only — never
 /// latency on a query.
-pub const BACKFILL_CONCURRENCY_LARGE_PROJECTION: usize = 1;
+pub(crate) const BACKFILL_CONCURRENCY_LARGE_PROJECTION: usize = 1;
 
 /// Admitted-row count (nodes + edges of the active projection) at or above
 /// which the pass drops to [`BACKFILL_CONCURRENCY_LARGE_PROJECTION`]. Set
@@ -106,7 +106,7 @@ pub const BACKFILL_CONCURRENCY_LARGE_PROJECTION: usize = 1;
 /// observed failure size — to engage the safe fan-out long before the cap
 /// is in reach, while leaving genuinely small libraries on the faster
 /// four-way fan-out.
-pub const BACKFILL_LARGE_PROJECTION_THRESHOLD: i64 = 100_000;
+pub(crate) const BACKFILL_LARGE_PROJECTION_THRESHOLD: i64 = 100_000;
 
 /// Chooses the reconcile fan-out for a backfill pass from the size of the
 /// active canonical projection (admitted node + edge count). Pure so the
@@ -118,7 +118,10 @@ pub const BACKFILL_LARGE_PROJECTION_THRESHOLD: i64 = 100_000;
 /// should not occur but are representable in `i64`) are treated as zero, so
 /// a malformed count never accidentally selects the unsafe fan-out.
 #[must_use]
-pub fn graph_backfill_concurrency(admitted_node_count: i64, admitted_edge_count: i64) -> usize {
+pub(crate) fn graph_backfill_concurrency(
+    admitted_node_count: i64,
+    admitted_edge_count: i64,
+) -> usize {
     let combined = admitted_node_count.max(0).saturating_add(admitted_edge_count.max(0));
     if combined >= BACKFILL_LARGE_PROJECTION_THRESHOLD {
         BACKFILL_CONCURRENCY_LARGE_PROJECTION
@@ -137,11 +140,15 @@ pub fn graph_backfill_concurrency(admitted_node_count: i64, admitted_edge_count:
 /// marker is cleared automatically when the document's `active_revision_id`
 /// changes — a fresh revision gets a fresh try.
 const TERMINAL_MARKER_THRESHOLD: u32 = 3;
+const GRAPH_SLOT_CACHE_CAPACITY: usize = 1_024;
+const TERMINAL_MARKER_CAPACITY: usize = 4_096;
+const TERMINAL_MARKER_TTL: Duration = Duration::from_hours(24);
 
 #[derive(Debug, Clone)]
 struct ZeroContributionMarker {
     revision_id: Uuid,
     consecutive_zero_count: u32,
+    last_seen: Instant,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -165,11 +172,27 @@ fn last_run() -> &'static Mutex<HashMap<Uuid, BackfillSlotState>> {
 /// next pass may acquire the slot. Called from inside
 /// `run_library_graph_backfill` after the empty-active branch.
 fn record_all_terminal_backoff(library_id: Uuid) {
-    let extended_until = Instant::now() + BACKFILL_ALL_TERMINAL_BACKOFF;
+    let now = Instant::now();
+    let extended_until = now + BACKFILL_ALL_TERMINAL_BACKOFF;
     let mut guard = last_run().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    guard.entry(library_id).and_modify(|s| s.extended_next_run = Some(extended_until)).or_insert(
-        BackfillSlotState { last_run: Instant::now(), extended_next_run: Some(extended_until) },
-    );
+    prune_backfill_slots(&mut guard, now);
+    guard
+        .entry(library_id)
+        .and_modify(|s| s.extended_next_run = Some(extended_until))
+        .or_insert(BackfillSlotState { last_run: now, extended_next_run: Some(extended_until) });
+}
+
+fn prune_backfill_slots(guard: &mut HashMap<Uuid, BackfillSlotState>, now: Instant) {
+    guard.retain(|_, state| {
+        state.extended_next_run.is_some_and(|until| until > now)
+            || now.duration_since(state.last_run) < BACKFILL_ALL_TERMINAL_BACKOFF
+    });
+    if guard.len() >= GRAPH_SLOT_CACHE_CAPACITY
+        && let Some(oldest) =
+            guard.iter().min_by_key(|(_, state)| state.last_run).map(|(id, _)| *id)
+    {
+        guard.remove(&oldest);
+    }
 }
 
 fn terminal_markers() -> &'static Mutex<HashMap<(Uuid, Uuid), ZeroContributionMarker>> {
@@ -183,13 +206,22 @@ fn terminal_markers() -> &'static Mutex<HashMap<(Uuid, Uuid), ZeroContributionMa
 /// against the same `revision_id`. A change of revision clears the
 /// marker — every new extract gets a fresh chance.
 fn should_skip_by_terminal_marker(library_id: Uuid, document_id: Uuid, revision_id: Uuid) -> bool {
-    let guard = terminal_markers().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    matches!(
-        guard.get(&(library_id, document_id)),
-        Some(marker)
-            if marker.revision_id == revision_id
-                && marker.consecutive_zero_count >= TERMINAL_MARKER_THRESHOLD
-    )
+    let mut guard = terminal_markers().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let key = (library_id, document_id);
+    let Some(marker) = guard.get(&key) else {
+        return false;
+    };
+    if marker.revision_id != revision_id || marker.last_seen.elapsed() >= TERMINAL_MARKER_TTL {
+        guard.remove(&key);
+        return false;
+    }
+    let Some(marker) = guard.get_mut(&key) else {
+        return false;
+    };
+    marker.last_seen = Instant::now();
+    let should_skip = marker.consecutive_zero_count >= TERMINAL_MARKER_THRESHOLD;
+    drop(guard);
+    should_skip
 }
 
 /// Update the terminal marker for `(library, doc)` based on the outcome
@@ -203,6 +235,8 @@ fn record_terminal_marker_result(
     contributed: bool,
 ) {
     let mut guard = terminal_markers().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let now = Instant::now();
+    guard.retain(|_, marker| now.duration_since(marker.last_seen) < TERMINAL_MARKER_TTL);
     if contributed {
         guard.remove(&(library_id, document_id));
         return;
@@ -210,11 +244,18 @@ fn record_terminal_marker_result(
     match guard.get_mut(&(library_id, document_id)) {
         Some(marker) if marker.revision_id == revision_id => {
             marker.consecutive_zero_count = marker.consecutive_zero_count.saturating_add(1);
+            marker.last_seen = now;
         }
         _ => {
+            if guard.len() >= TERMINAL_MARKER_CAPACITY
+                && let Some(oldest) =
+                    guard.iter().min_by_key(|(_, marker)| marker.last_seen).map(|(key, _)| *key)
+            {
+                guard.remove(&oldest);
+            }
             guard.insert(
                 (library_id, document_id),
-                ZeroContributionMarker { revision_id, consecutive_zero_count: 1 },
+                ZeroContributionMarker { revision_id, consecutive_zero_count: 1, last_seen: now },
             );
         }
     }
@@ -230,93 +271,76 @@ pub(crate) fn reset_terminal_markers_for_tests() {
 /// pass — there is no explicit release; the slot becomes available again
 /// once [`BACKFILL_INTERVAL`] has elapsed.
 #[must_use]
-pub fn try_acquire_graph_backfill_slot(library_id: Uuid) -> bool {
+pub(crate) fn try_acquire_graph_backfill_slot(library_id: Uuid) -> bool {
     let now = Instant::now();
     let mut guard = last_run().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    match guard.get(&library_id) {
-        Some(state) => {
-            if let Some(extended) = state.extended_next_run {
-                if now < extended {
-                    return false;
-                }
-            }
-            if now.duration_since(state.last_run) < BACKFILL_INTERVAL {
-                return false;
-            }
-            guard.insert(library_id, BackfillSlotState { last_run: now, extended_next_run: None });
-            true
+    prune_backfill_slots(&mut guard, now);
+    if let Some(state) = guard.get(&library_id) {
+        if let Some(extended) = state.extended_next_run
+            && now < extended
+        {
+            return false;
         }
-        None => {
-            guard.insert(library_id, BackfillSlotState { last_run: now, extended_next_run: None });
-            true
+        if now.duration_since(state.last_run) < BACKFILL_INTERVAL {
+            return false;
         }
+        guard.insert(library_id, BackfillSlotState { last_run: now, extended_next_run: None });
+        true
+    } else {
+        guard.insert(library_id, BackfillSlotState { last_run: now, extended_next_run: None });
+        true
     }
 }
 
 #[derive(Debug, Clone, Default)]
-pub struct GraphBackfillOutcome {
+pub(crate) struct GraphBackfillOutcome {
     pub candidates: usize,
     pub reconciled: usize,
     pub produced_graph: usize,
     pub failures: usize,
 }
 
-/// Runs one backfill pass for `library_id`. Idempotent: documents that are
-/// already in the graph are not revisited, and documents where the replay
-/// still yields zero contributions will reappear on subsequent passes
-/// until extraction produces graph content (or they are handled via a
-/// terminal marker in a follow-up change).
-pub async fn run_library_graph_backfill(
+type GraphBackfillCandidate = (Uuid, Uuid);
+type GraphBackfillReconcileOutcome = (Uuid, Uuid, bool, Option<PendingGraphSummaryRefresh>);
+type GraphBackfillReconcileResult = Result<GraphBackfillReconcileOutcome, anyhow::Error>;
+
+struct GraphBackfillResultSummary {
+    outcome: GraphBackfillOutcome,
+    terminal_promotions: usize,
+    pending_summary_refresh: Option<PendingGraphSummaryRefresh>,
+}
+
+fn active_backfill_candidates(
+    library_id: Uuid,
+    raw_candidates: Vec<GraphBackfillCandidate>,
+) -> (Vec<GraphBackfillCandidate>, usize) {
+    let (active, skipped): (Vec<_>, Vec<_>) =
+        raw_candidates.into_iter().partition(|(document_id, revision_id)| {
+            !should_skip_by_terminal_marker(library_id, *document_id, *revision_id)
+        });
+    (active, skipped.len())
+}
+
+fn all_terminal_backfill_outcome(
+    library_id: Uuid,
+    raw_candidates: usize,
+    skipped_by_marker: usize,
+) -> GraphBackfillOutcome {
+    record_all_terminal_backoff(library_id);
+    tracing::info!(
+        %library_id,
+        raw_candidates,
+        skipped_by_marker,
+        backoff_secs = BACKFILL_ALL_TERMINAL_BACKOFF.as_secs(),
+        "graph backfill pass: all candidates are terminal, extending debounce"
+    );
+    GraphBackfillOutcome { candidates: raw_candidates, ..GraphBackfillOutcome::default() }
+}
+
+async fn resolve_backfill_concurrency(
     state: &AppState,
     library_id: Uuid,
-) -> Result<GraphBackfillOutcome, GraphServiceError> {
-    let raw_candidates = repositories::list_library_documents_missing_graph_node(
-        &state.persistence.postgres,
-        library_id,
-        BACKFILL_BATCH_SIZE,
-    )
-    .await
-    .context("failed to list documents missing graph node for backfill")?;
-
-    if raw_candidates.is_empty() {
-        return Ok(GraphBackfillOutcome::default());
-    }
-
-    // Filter out documents that already hit the terminal-marker threshold
-    // for their current active revision. Those reconciles have already run
-    // 3+ times and produced zero graph contribution each time — repeating
-    // the 15–25 s backfill fan-out against them wastes worker time and
-    // pool-hold budget without changing the projection.
-    let raw_total = raw_candidates.len();
-    let (candidates, skipped_by_marker): (Vec<_>, Vec<_>) =
-        raw_candidates.into_iter().partition(|(doc_id, rev_id)| {
-            !should_skip_by_terminal_marker(library_id, *doc_id, *rev_id)
-        });
-
-    if candidates.is_empty() {
-        record_all_terminal_backoff(library_id);
-        tracing::info!(
-            %library_id,
-            raw_candidates = raw_total,
-            skipped_by_marker = skipped_by_marker.len(),
-            backoff_secs = BACKFILL_ALL_TERMINAL_BACKOFF.as_secs(),
-            "graph backfill pass: all candidates are terminal, extending debounce"
-        );
-        return Ok(GraphBackfillOutcome {
-            candidates: raw_total,
-            reconciled: 0,
-            produced_graph: 0,
-            failures: 0,
-        });
-    }
-
-    // Size the reconcile fan-out from the *actual* admitted projection size,
-    // not the library snapshot counts: when the snapshot still reports an
-    // empty graph (the exact state that drives the OOM loop) those counts are
-    // zero even though the node/edge tables are full, so sizing off the
-    // snapshot would pick the unsafe fan-out in precisely the failure case.
-    // The admitted row count comes straight from the canonical tables for the
-    // active projection version.
+) -> Result<(i64, i64, i64, usize), GraphServiceError> {
     let projection_scope =
         crate::services::graph::projection::resolve_projection_scope(state, library_id)
             .await
@@ -330,92 +354,184 @@ pub async fn run_library_graph_backfill(
     .context("failed to count admitted graph rows for backfill fan-out sizing")?;
     let concurrency =
         graph_backfill_concurrency(projection_counts.node_count, projection_counts.edge_count);
-
-    tracing::info!(
-        %library_id,
-        raw_candidates = raw_total,
-        active_candidates = candidates.len(),
-        skipped_by_marker = skipped_by_marker.len(),
-        projection_version = projection_scope.projection_version,
-        admitted_node_count = projection_counts.node_count,
-        admitted_edge_count = projection_counts.edge_count,
+    Ok((
+        projection_scope.projection_version,
+        projection_counts.node_count,
+        projection_counts.edge_count,
         concurrency,
-        "graph backfill pass: replaying reconcile for documents missing graph node"
-    );
+    ))
+}
 
-    let total = candidates.len();
-    let results: Vec<Result<(Uuid, Uuid, bool), anyhow::Error>> =
-        stream::iter(candidates.into_iter().map(|(document_id, revision_id)| {
-            let graph_service = state.canonical_services.graph.clone();
-            async move {
-                let cancellation_token = tokio_util::sync::CancellationToken::new();
-                let outcome = graph_service
-                    .reconcile_revision_graph(
-                        state,
-                        library_id,
-                        document_id,
-                        revision_id,
-                        None,
-                        &cancellation_token,
-                    )
-                    .await
-                    .with_context(|| {
-                        format!(
-                            "graph backfill reconcile failed for document {document_id} \
-                             revision {revision_id}"
-                        )
-                    })?;
-                Ok::<(Uuid, Uuid, bool), anyhow::Error>((
+async fn reconcile_backfill_candidates(
+    state: &AppState,
+    library_id: Uuid,
+    candidates: Vec<GraphBackfillCandidate>,
+    concurrency: usize,
+) -> Vec<GraphBackfillReconcileResult> {
+    stream::iter(candidates.into_iter().map(|(document_id, revision_id)| {
+        let graph_service = state.canonical_services.graph.clone();
+        async move {
+            let cancellation_token = tokio_util::sync::CancellationToken::new();
+            let outcome = graph_service
+                .reconcile_revision_graph(
+                    state,
+                    library_id,
                     document_id,
                     revision_id,
-                    outcome.graph_contribution_count > 0,
-                ))
-            }
-        }))
-        .buffer_unordered(concurrency)
-        .collect::<Vec<_>>()
-        .await;
+                    None,
+                    &cancellation_token,
+                )
+                .await
+                .with_context(|| {
+                    format!(
+                        "graph backfill reconcile failed for document {document_id} revision {revision_id}"
+                    )
+                })?;
+            Ok((
+                document_id,
+                revision_id,
+                outcome.graph_contribution_count > 0,
+                outcome.pending_summary_refresh,
+            ))
+        }
+    }))
+    .buffer_unordered(concurrency)
+    .collect()
+    .await
+}
 
-    let mut outcome =
-        GraphBackfillOutcome { candidates: raw_total, ..GraphBackfillOutcome::default() };
-    let mut terminal_promotions = 0usize;
+fn merge_pending_summary_refresh(
+    current: Option<PendingGraphSummaryRefresh>,
+    pending: Option<PendingGraphSummaryRefresh>,
+) -> Option<PendingGraphSummaryRefresh> {
+    match (current, pending) {
+        (Some(current), Some(pending)) => Some(current.merge(pending)),
+        (Some(current), None) => Some(current),
+        (None, pending) => pending,
+    }
+}
+
+fn summarize_backfill_results(
+    library_id: Uuid,
+    raw_candidates: usize,
+    results: Vec<GraphBackfillReconcileResult>,
+) -> GraphBackfillResultSummary {
+    let mut summary = GraphBackfillResultSummary {
+        outcome: GraphBackfillOutcome {
+            candidates: raw_candidates,
+            ..GraphBackfillOutcome::default()
+        },
+        terminal_promotions: 0,
+        pending_summary_refresh: None,
+    };
     for result in results {
         match result {
-            Ok((document_id, revision_id, true)) => {
-                record_terminal_marker_result(library_id, document_id, revision_id, true);
-                outcome.reconciled += 1;
-                outcome.produced_graph += 1;
-            }
-            Ok((document_id, revision_id, false)) => {
-                record_terminal_marker_result(library_id, document_id, revision_id, false);
-                // If this attempt just tipped the marker over the
-                // threshold, count it — operator-visible signal that a
-                // specific doc is structurally barren for graph extraction.
-                if should_skip_by_terminal_marker(library_id, document_id, revision_id) {
-                    terminal_promotions += 1;
+            Ok((document_id, revision_id, contributed, pending)) => {
+                summary.pending_summary_refresh =
+                    merge_pending_summary_refresh(summary.pending_summary_refresh.take(), pending);
+                record_terminal_marker_result(library_id, document_id, revision_id, contributed);
+                summary.outcome.reconciled += 1;
+                if contributed {
+                    summary.outcome.produced_graph += 1;
+                } else if should_skip_by_terminal_marker(library_id, document_id, revision_id) {
+                    summary.terminal_promotions += 1;
                 }
-                outcome.reconciled += 1;
             }
             Err(error) => {
-                outcome.failures += 1;
+                summary.outcome.failures += 1;
                 tracing::warn!(%library_id, ?error, "graph backfill reconcile failed for document");
             }
         }
     }
+    summary
+}
+
+async fn publish_backfill_summary_refresh(
+    state: &AppState,
+    library_id: Uuid,
+    pending_summary_refresh: Option<PendingGraphSummaryRefresh>,
+) -> Result<(), GraphServiceError> {
+    let Some(pending_summary_refresh) = pending_summary_refresh else {
+        return Ok(());
+    };
+    let source_truth_version =
+        repositories::catalog_repository::touch_library_source_truth_version(
+            &state.persistence.postgres,
+            library_id,
+        )
+        .await
+        .context("failed to publish graph backfill source generation")?;
+    state
+        .canonical_services
+        .graph
+        .apply_published_summary_refresh(
+            state,
+            library_id,
+            source_truth_version,
+            &pending_summary_refresh,
+        )
+        .await
+        .context("failed to refresh canonical summaries after graph backfill publication")?;
+    Ok(())
+}
+
+/// Runs one backfill pass for `library_id`. Idempotent: documents that are
+/// already in the graph are not revisited, and documents where the replay
+/// still yields zero contributions will reappear on subsequent passes
+/// until extraction produces graph content (or they are handled via a
+/// terminal marker in a follow-up change).
+pub(crate) async fn run_library_graph_backfill(
+    state: &AppState,
+    library_id: Uuid,
+) -> Result<GraphBackfillOutcome, GraphServiceError> {
+    let raw_candidates = repositories::list_library_documents_missing_graph_node(
+        &state.persistence.postgres,
+        library_id,
+        BACKFILL_BATCH_SIZE,
+    )
+    .await
+    .context("failed to list documents missing graph node for backfill")?;
+    if raw_candidates.is_empty() {
+        return Ok(GraphBackfillOutcome::default());
+    }
+
+    let raw_total = raw_candidates.len();
+    let (candidates, skipped_by_marker) = active_backfill_candidates(library_id, raw_candidates);
+    if candidates.is_empty() {
+        return Ok(all_terminal_backfill_outcome(library_id, raw_total, skipped_by_marker));
+    }
+
+    let (projection_version, admitted_node_count, admitted_edge_count, concurrency) =
+        resolve_backfill_concurrency(state, library_id).await?;
+    tracing::info!(
+        %library_id,
+        raw_candidates = raw_total,
+        active_candidates = candidates.len(),
+        skipped_by_marker,
+        projection_version,
+        admitted_node_count,
+        admitted_edge_count,
+        concurrency,
+        "graph backfill pass: replaying reconcile for documents missing graph node"
+    );
+
+    let active_candidates = candidates.len();
+    let results = reconcile_backfill_candidates(state, library_id, candidates, concurrency).await;
+    let summary = summarize_backfill_results(library_id, raw_total, results);
+    publish_backfill_summary_refresh(state, library_id, summary.pending_summary_refresh).await?;
 
     tracing::info!(
         %library_id,
-        candidates = outcome.candidates,
-        active_candidates = total,
-        skipped_by_marker = skipped_by_marker.len(),
-        reconciled = outcome.reconciled,
-        produced_graph = outcome.produced_graph,
-        failures = outcome.failures,
-        terminal_promotions,
+        candidates = summary.outcome.candidates,
+        active_candidates,
+        skipped_by_marker,
+        reconciled = summary.outcome.reconciled,
+        produced_graph = summary.outcome.produced_graph,
+        failures = summary.outcome.failures,
+        terminal_promotions = summary.terminal_promotions,
         "graph backfill pass completed"
     );
-
-    Ok(outcome)
+    Ok(summary.outcome)
 }
 
 /// Process-local debounce state for the graph re-extract pass. Separate
@@ -431,21 +547,28 @@ fn last_reextract_run() -> &'static Mutex<HashMap<Uuid, Instant>> {
 /// library. Larger than backfill because the downstream jobs spend LLM
 /// budget — a tight retry loop on a systematically failing document would
 /// be expensive.
-pub const REEXTRACT_INTERVAL: Duration = Duration::from_secs(300);
+pub(crate) const REEXTRACT_INTERVAL: Duration = Duration::from_mins(5);
 
 /// Upper bound on re-extract jobs enqueued per pass. Prevents one pass
 /// from saturating the ingest queue and blocking other mutations.
-pub const REEXTRACT_BATCH_SIZE: i64 = 64;
+pub(crate) const REEXTRACT_BATCH_SIZE: i64 = 64;
 
 /// Returns `true` when the caller has been granted the re-extract slot
 /// for `library_id` in the current window.
 #[must_use]
-pub fn try_acquire_graph_reextract_slot(library_id: Uuid) -> bool {
+pub(crate) fn try_acquire_graph_reextract_slot(library_id: Uuid) -> bool {
     let now = Instant::now();
     let mut guard = last_reextract_run().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    guard.retain(|_, last| now.duration_since(*last) < REEXTRACT_INTERVAL);
     match guard.get(&library_id) {
         Some(last) if now.duration_since(*last) < REEXTRACT_INTERVAL => false,
         _ => {
+            if guard.len() >= GRAPH_SLOT_CACHE_CAPACITY
+                && let Some(oldest) =
+                    guard.iter().min_by_key(|(_, instant)| **instant).map(|(id, _)| *id)
+            {
+                guard.remove(&oldest);
+            }
             guard.insert(library_id, now);
             true
         }
@@ -453,7 +576,7 @@ pub fn try_acquire_graph_reextract_slot(library_id: Uuid) -> bool {
 }
 
 #[derive(Debug, Clone, Default)]
-pub struct GraphReextractOutcome {
+pub(crate) struct GraphReextractOutcome {
     pub candidates: usize,
     pub enqueued: usize,
     pub skipped_dedupe: usize,
@@ -461,9 +584,9 @@ pub struct GraphReextractOutcome {
 }
 
 /// Runs one re-extract pass for `library_id`. Finds documents whose active
-/// revision has NO extraction record (World B — orphaned on revision
-/// transition) and enqueues a canonical `content_mutation` job so the
-/// ingest worker replays the full pipeline against the current revision.
+/// revision has no extraction record after a revision transition and enqueues
+/// the canonical `graph_refresh` maintenance job. Graph repair must not
+/// masquerade as a user content mutation or rewrite content-head ownership.
 ///
 /// Loop protection is provided by the unique
 /// `idx_ingest_job_dedupe_key` index on `(library_id, dedupe_key)`:
@@ -472,7 +595,7 @@ pub struct GraphReextractOutcome {
 /// still queued, leased, completed, or failed) the insert fails with a
 /// unique violation and the pass moves on. A failed prior run therefore
 /// does not re-trigger the LLM — ops can inspect and retry manually.
-pub async fn run_library_graph_reextract(
+pub(crate) async fn run_library_graph_reextract(
     state: &AppState,
     library_id: Uuid,
 ) -> Result<GraphReextractOutcome, GraphServiceError> {
@@ -491,7 +614,7 @@ pub async fn run_library_graph_reextract(
     tracing::info!(
         %library_id,
         candidates = candidates.len(),
-        "graph re-extract pass: enqueueing content_mutation jobs for orphaned active revisions"
+        "graph re-extract pass: enqueueing graph_refresh jobs for orphaned active revisions"
     );
 
     let total = candidates.len();
@@ -504,11 +627,12 @@ pub async fn run_library_graph_reextract(
             workspace_id,
             library_id,
             mutation_id: None,
+            mutation_item_id: None,
             connector_id: None,
             async_operation_id: None,
             knowledge_document_id: Some(document_id),
             knowledge_revision_id: Some(revision_id),
-            job_kind: "content_mutation".to_string(),
+            job_kind: "graph_refresh".to_string(),
             queue_state: "queued".to_string(),
             priority: 200,
             dedupe_key,

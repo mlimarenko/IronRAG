@@ -1,4 +1,7 @@
-use axum::extract::multipart::{Field, Multipart, MultipartError};
+use axum::{
+    extract::multipart::{Field, Multipart, MultipartError},
+    http::StatusCode,
+};
 use tracing::warn;
 use uuid::Uuid;
 
@@ -8,12 +11,13 @@ use crate::{
         content::types::{normalize_optional_document_hint, normalize_optional_text},
         router_support::ApiError,
     },
-    shared::extraction::file_extract::{UploadAdmissionError, classify_multipart_file_body_error},
+    shared::extraction::file_extract::{
+        MultipartFileBodyErrorKind, UploadAdmissionError, multipart_file_body_error,
+    },
 };
 
 #[derive(Debug)]
 pub struct ParsedUploadMultipart {
-    pub library_id: Uuid,
     pub external_key: Option<String>,
     pub parent_external_key: Option<String>,
     pub idempotency_key: Option<String>,
@@ -43,7 +47,6 @@ pub(super) async fn parse_upload_multipart(
     state: &AppState,
     mut multipart: Multipart,
 ) -> Result<ParsedUploadMultipart, ApiError> {
-    let mut library_id = None;
     let mut external_key = None;
     let mut parent_external_key = None;
     let mut idempotency_key = None;
@@ -58,16 +61,11 @@ pub(super) async fn parse_upload_multipart(
         map_content_multipart_payload_error(state, &error)
     })? {
         match field.name().unwrap_or_default() {
-            "library_id" => {
-                let raw = field
-                    .text()
-                    .await
-                    .map_err(|_| ApiError::BadRequest("invalid library_id".to_string()))?;
-                library_id =
-                    Some(raw.parse().map_err(|_| {
-                        ApiError::BadRequest("library_id must be uuid".to_string())
-                    })?);
-            }
+            // `library_id` is deliberately not read here: the target library
+            // is the path segment the caller already authorized against
+            // (see create_document), and accepting a second, independent
+            // library_id from the form body would just be a second,
+            // divergence-prone source of truth for the same fact.
             "external_key" => {
                 external_key = Some(
                     field
@@ -114,8 +112,6 @@ pub(super) async fn parse_upload_multipart(
     }
 
     Ok(ParsedUploadMultipart {
-        library_id: library_id
-            .ok_or_else(|| ApiError::BadRequest("missing library_id".to_string()))?,
         external_key: external_key.and_then(normalize_optional_text),
         parent_external_key: parent_external_key.and_then(normalize_optional_text),
         idempotency_key: idempotency_key.and_then(normalize_optional_text),
@@ -189,10 +185,8 @@ async fn read_multipart_file_field(
     state: &AppState,
     mut field: Field<'_>,
 ) -> Result<ParsedMultipartFile, ApiError> {
-    let file_name = field
-        .file_name()
-        .map(ToString::to_string)
-        .unwrap_or_else(|| format!("upload-{}", Uuid::now_v7()));
+    let file_name =
+        field.file_name().map_or_else(|| format!("upload-{}", Uuid::now_v7()), ToString::to_string);
     let mime_type = field.content_type().map(ToString::to_string);
     let mut file_bytes = Vec::new();
 
@@ -206,16 +200,20 @@ async fn read_multipart_file_field(
 }
 
 fn map_content_multipart_payload_error(state: &AppState, error: &MultipartError) -> ApiError {
-    let message = error.to_string();
-    let rejection = if message.trim().is_empty() {
-        UploadAdmissionError::invalid_multipart_payload()
-    } else {
-        classify_multipart_file_body_error(
-            None,
-            None,
-            state.ui_runtime.upload_max_size_mb,
-            &message,
-        )
+    let failure_kind = multipart_file_body_error_kind(error);
+    let rejection = match failure_kind {
+        MultipartFileBodyErrorKind::InvalidBody => {
+            UploadAdmissionError::invalid_multipart_payload()
+        }
+        MultipartFileBodyErrorKind::SizeLimit | MultipartFileBodyErrorKind::StreamFailure => {
+            multipart_file_body_error(
+                None,
+                None,
+                state.ui_runtime.upload_max_size_mb,
+                failure_kind,
+                &error.body_text(),
+            )
+        }
     };
     ApiError::from_upload_admission(rejection)
 }
@@ -226,12 +224,22 @@ fn map_content_multipart_file_body_error(
     mime_type: Option<&str>,
     error: &MultipartError,
 ) -> ApiError {
-    ApiError::from_upload_admission(classify_multipart_file_body_error(
+    let failure_kind = multipart_file_body_error_kind(error);
+    ApiError::from_upload_admission(multipart_file_body_error(
         file_name,
         mime_type,
         state.ui_runtime.upload_max_size_mb,
-        &error.to_string(),
+        failure_kind,
+        &error.body_text(),
     ))
+}
+
+fn multipart_file_body_error_kind(error: &MultipartError) -> MultipartFileBodyErrorKind {
+    match error.status() {
+        StatusCode::PAYLOAD_TOO_LARGE => MultipartFileBodyErrorKind::SizeLimit,
+        status if status.is_server_error() => MultipartFileBodyErrorKind::StreamFailure,
+        _ => MultipartFileBodyErrorKind::InvalidBody,
+    }
 }
 
 pub(super) fn resolve_upload_external_key(

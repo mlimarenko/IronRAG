@@ -20,6 +20,19 @@ pub(super) async fn execute_single_page_run(
     row: WebIngestRunRow,
     seed_candidate: WebDiscoveredPageRow,
 ) -> Result<WebIngestRunRow, ApiError> {
+    if seed_candidate.candidate_state == WebCandidateState::Materialized.as_str() {
+        let mutation_item_id = seed_candidate.mutation_item_id.ok_or_else(|| {
+            ApiError::internal_with_log(
+                anyhow::anyhow!("materialized web page is missing mutation_item_id"),
+                "settle materialized single-page retry",
+            )
+        })?;
+        let _ = service.settle_materialized_page_for_mutation_item(state, mutation_item_id).await?;
+        return ingest_repository::get_web_ingest_run_by_id(&state.persistence.postgres, row.id)
+            .await
+            .map_err(|e| ApiError::internal_with_log(e, "internal"))?
+            .ok_or_else(|| ApiError::resource_not_found("web_ingest_run", row.id));
+    }
     let processing_row = ingest_repository::update_web_ingest_run(
         &state.persistence.postgres,
         row.id,
@@ -179,14 +192,10 @@ pub(super) async fn execute_single_page_run(
         }
     };
 
-    let (candidate_state, classification_reason, telemetry_event) = if materialized.is_duplicate() {
-        (
-            WebCandidateState::Duplicate,
-            WebClassificationReason::DuplicateContent,
-            "candidate_duplicate",
-        )
+    let (classification_reason, telemetry_event) = if materialized.is_duplicate() {
+        (WebClassificationReason::DuplicateContent, "candidate_materialized_duplicate")
     } else {
-        (WebCandidateState::Processed, WebClassificationReason::SeedAccepted, "candidate_processed")
+        (WebClassificationReason::SeedAccepted, "candidate_materialized")
     };
     let _ = ingest_repository::update_web_discovered_page(
         &state.persistence.postgres,
@@ -195,7 +204,7 @@ pub(super) async fn execute_single_page_run(
             final_url: Some(materialized.final_url()),
             canonical_url: Some(materialized.final_url()),
             host_classification: None,
-            candidate_state: candidate_state.as_str(),
+            candidate_state: WebCandidateState::Materialized.as_str(),
             classification_reason: Some(classification_reason.as_str()),
             classification_detail: seed_candidate.classification_detail.as_deref(),
             content_type: Some(materialized.content_type()),
@@ -213,14 +222,20 @@ pub(super) async fn execute_single_page_run(
         telemetry_event,
         processing_row.id,
         seed_candidate.id,
-        candidate_state.as_str(),
+        WebCandidateState::Materialized.as_str(),
         materialized.final_url(),
         0,
         Some(classification_reason.as_str()),
         None,
     );
 
-    complete_single_page_run(state, processing_row).await
+    let _ = service
+        .settle_materialized_page_for_mutation_item(state, materialized.mutation_item_id())
+        .await?;
+    ingest_repository::get_web_ingest_run_by_id(&state.persistence.postgres, processing_row.id)
+        .await
+        .map_err(|e| ApiError::internal_with_log(e, "internal"))?
+        .ok_or_else(|| ApiError::resource_not_found("web_ingest_run", processing_row.id))
 }
 
 async fn complete_single_page_run(
@@ -233,6 +248,9 @@ async fn complete_single_page_run(
             .map_err(|e| ApiError::internal_with_log(e, "internal"))?,
     )
     .counts;
+    if counts.queued > 0 || counts.processing > 0 {
+        return Ok(processing_row);
+    }
     let terminal_state = derive_terminal_run_state(&crate::shared::web::ingest::WebRunCounts {
         discovered: counts.discovered,
         eligible: counts.eligible,
@@ -318,18 +336,12 @@ pub(super) async fn fetch_web_resource(
     service: &WebIngestService,
     seed_url: &str,
 ) -> Result<FetchedWebResource, WebRunFailure> {
-    let response = service.fetch_public_http_response(seed_url).await.map_err(|error| {
-        WebRunFailure::inaccessible(format!("failed to fetch seed url: {error}"))
-    })?;
+    let response =
+        service.fetch_http_response(seed_url).await.map_err(WebRunFailure::from_fetch_error)?;
     let http_status = i32::from(response.status().as_u16());
-    let final_url = crate::shared::web::url_identity::normalize_absolute_url(
-        response.url().as_str(),
-    )
-    .map_err(|error| {
-        WebRunFailure::invalid_url(format!(
-            "fetched resource resolved to invalid final url: {error}"
-        ))
-    })?;
+    let final_url =
+        crate::shared::web::url_identity::normalize_absolute_url(response.url().as_str())
+            .map_err(|_| WebRunFailure::invalid_url())?;
     let content_type = response
         .headers()
         .get(reqwest::header::CONTENT_TYPE)
@@ -340,7 +352,6 @@ pub(super) async fn fetch_web_resource(
 
     if !response.status().is_success() {
         return Err(WebRunFailure::inaccessible_with_response(
-            format!("remote server returned status {}", response.status()),
             Some(final_url),
             content_type,
             Some(http_status),
@@ -352,9 +363,8 @@ pub(super) async fn fetch_web_resource(
         super::MAX_WEB_FETCH_BODY_BYTES,
     )
     .await
-    .map_err(|error| {
+    .map_err(|_| {
         WebRunFailure::inaccessible_with_response(
-            format!("failed to read fetched response body: {error}"),
             Some(final_url.clone()),
             content_type.clone(),
             Some(http_status),
@@ -381,10 +391,9 @@ pub(super) async fn persist_resource_snapshot(
             &resource.payload_bytes,
         )
         .await
-        .map_err(|error| {
+        .map_err(|_| {
             WebRunFailure::internal(
                 WebRunFailureCode::WebSnapshotPersistFailed.as_str(),
-                format!("failed to persist fetched resource snapshot: {error}"),
                 Some(resource.final_url.clone()),
                 resource.content_type.clone(),
                 Some(resource.http_status),
@@ -404,7 +413,6 @@ pub(super) async fn load_candidate_snapshot_resource(
         .ok_or_else(|| {
             WebRunFailure::internal(
                 WebRunFailureCode::WebSnapshotMissing.as_str(),
-                "eligible page is missing stored snapshot reference".to_string(),
                 candidate.final_url.clone().or_else(|| candidate.canonical_url.clone()),
                 candidate.content_type.clone(),
                 candidate.http_status,
@@ -415,7 +423,6 @@ pub(super) async fn load_candidate_snapshot_resource(
             || {
                 WebRunFailure::internal(
                     WebRunFailureCode::WebSnapshotMissingFinalUrl.as_str(),
-                    "eligible page is missing final url identity".to_string(),
                     None,
                     candidate.content_type.clone(),
                     candidate.http_status,
@@ -423,10 +430,9 @@ pub(super) async fn load_candidate_snapshot_resource(
             },
         )?;
     let payload_bytes =
-        state.content_storage.read_revision_source(storage_key).await.map_err(|error| {
+        state.content_storage.read_revision_source(storage_key).await.map_err(|_| {
             WebRunFailure::internal(
                 WebRunFailureCode::WebSnapshotUnavailable.as_str(),
-                format!("failed to read stored web snapshot: {error}"),
                 Some(final_url.clone()),
                 candidate.content_type.clone(),
                 candidate.http_status,
@@ -450,8 +456,6 @@ pub(super) async fn materialize_snapshot_resource(
 ) -> Result<MaterializedWebPage, WebRunFailure> {
     if is_direct_image_web_resource(&resource.final_url, resource.content_type.as_deref()) {
         return Err(WebRunFailure::unsupported_content(
-            "web ingest materializes document resources; upload standalone images as files"
-                .to_string(),
             Some(resource.final_url.clone()),
             resource.content_type.clone(),
             Some(resource.http_status),
@@ -471,9 +475,8 @@ pub(super) async fn materialize_snapshot_resource(
             &resource.payload_bytes,
         )
         .await
-        .map_err(|error| {
+        .map_err(|_| {
             WebRunFailure::unsupported_content(
-                error.message().to_string(),
                 Some(resource.final_url.clone()),
                 resource.content_type.clone(),
                 Some(resource.http_status),
@@ -505,7 +508,6 @@ pub(super) async fn materialize_snapshot_resource(
         .map_err(|_| {
             WebRunFailure::internal(
                 WebRunFailureCode::WebCaptureMaterializationFailed.as_str(),
-                "failed to materialize canonical web capture".to_string(),
                 Some(resource.final_url.clone()),
                 resource.content_type.clone(),
                 Some(resource.http_status),

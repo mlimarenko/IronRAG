@@ -29,7 +29,7 @@ use super::types::{build_reprocess_revision_metadata, build_web_refetch_revision
 
 /// Canonical upper bound on `document_ids.len()` for any batch endpoint.
 ///
-/// This is a DoS sanity check against an enormous JSON payload, NOT a
+/// This is a `DoS` sanity check against an enormous JSON payload, NOT a
 /// product limit on how many documents an operator can rerun. The async
 /// batch-reprocess path schedules work lazily with `buffer_unordered` so
 /// memory usage is bounded by `IRONRAG_BATCH_REPROCESS_PARALLELISM`, not
@@ -465,7 +465,6 @@ async fn resolve_single_library_for_documents(
 /// delete. The batch-specific difference is graph convergence: child deletes
 /// remove only document-local artifacts, then the parent deletes graph evidence
 /// for successfully deleted documents and refreshes only those graph targets.
-#[allow(clippy::too_many_arguments)]
 async fn execute_batch_delete(
     state: AppState,
     parent_id: Uuid,
@@ -693,7 +692,6 @@ async fn delete_single_document(
 /// succeeded) or `failed` (at least one child failed). A whole-batch
 /// timeout is enforced via `tokio::time::timeout`; on timeout the parent
 /// is marked failed with `batch_timeout`.
-#[allow(clippy::too_many_arguments)]
 async fn execute_batch_reprocess(
     state: AppState,
     parent_id: Uuid,
@@ -728,8 +726,9 @@ async fn execute_batch_reprocess(
         // failures still leave the parent as `processing`; the children
         // that DID admit will settle on their own and the aggregate will
         // reflect both buckets correctly.
-        if failure_count == total && total > 0 {
-            if let Err(error) = state
+        if failure_count == total
+            && total > 0
+            && let Err(error) = state
                 .canonical_services
                 .ops
                 .update_async_operation(
@@ -742,9 +741,8 @@ async fn execute_batch_reprocess(
                     },
                 )
                 .await
-            {
-                error!(%parent_id, error = %error, "failed to settle batch parent async operation");
-            }
+        {
+            error!(%parent_id, error = %error, "failed to settle batch parent async operation");
         }
         info!(%parent_id, failures = failure_count, total, "batch reprocess admit phase completed");
 
@@ -761,30 +759,27 @@ async fn execute_batch_reprocess(
         settle_parent_when_children_terminal(state.clone(), parent_id).await;
     };
 
-    match tokio::time::timeout(timeout, worker).await {
-        Ok(()) => {}
-        Err(_) => {
-            warn!(
-                %parent_id,
-                timeout_secs = timeout.as_secs(),
-                "batch reprocess exceeded wall-clock budget; marking parent failed"
-            );
-            if let Err(error) = state
-                .canonical_services
-                .ops
-                .update_async_operation(
-                    state.as_ref(),
-                    UpdateAsyncOperationCommand {
-                        operation_id: parent_id,
-                        status: "failed".to_string(),
-                        completed_at: Some(Utc::now()),
-                        failure_code: Some("batch_timeout".to_string()),
-                    },
-                )
-                .await
-            {
-                error!(%parent_id, error = %error, "failed to mark batch parent as timed out");
-            }
+    if tokio::time::timeout(timeout, worker).await != Ok(()) {
+        warn!(
+            %parent_id,
+            timeout_secs = timeout.as_secs(),
+            "batch reprocess exceeded wall-clock budget; marking parent failed"
+        );
+        if let Err(error) = state
+            .canonical_services
+            .ops
+            .update_async_operation(
+                state.as_ref(),
+                UpdateAsyncOperationCommand {
+                    operation_id: parent_id,
+                    status: "failed".to_string(),
+                    completed_at: Some(Utc::now()),
+                    failure_code: Some("batch_timeout".to_string()),
+                },
+            )
+            .await
+        {
+            error!(%parent_id, error = %error, "failed to mark batch parent as timed out");
         }
     }
 }
@@ -814,67 +809,19 @@ async fn settle_parent_when_children_terminal(state: Arc<AppState>, parent_id: U
     // 30 min cap: matches the worst observed reference-scale batch rerun
     // wall time (9929 docs × graph rebuild). Past this window the
     // aggregate polling itself is the bigger cost; fall through.
-    const SETTLE_BUDGET: Duration = Duration::from_secs(30 * 60);
+    const SETTLE_BUDGET: Duration = Duration::from_mins(30);
     const POLL_INTERVAL: Duration = Duration::from_secs(5);
 
     let deadline = tokio::time::Instant::now() + SETTLE_BUDGET;
     loop {
-        let progress = match state
-            .canonical_services
-            .ops
-            .get_async_operation_progress(state.as_ref(), parent_id)
-            .await
-        {
-            Ok(progress) => progress,
-            Err(error) => {
-                error!(
-                    %parent_id,
-                    error = %error,
-                    "failed to read batch parent progress — leaving parent row unsettled"
-                );
-                return;
-            }
+        let Some(progress) = load_batch_parent_progress(&state, parent_id).await else {
+            return;
         };
-        // `total == 0` means the parent admits nothing — happens when
-        // the caller passed an empty document list; `run_batch_reprocess_children`
-        // already handled the all-empty case, so fall through cleanly.
         if progress.total == 0 {
             return;
         }
         if progress.in_flight == 0 {
-            let (status, failure_code) = if progress.failed == 0 {
-                ("ready".to_string(), None)
-            } else {
-                (
-                    "failed".to_string(),
-                    Some(format!("children_failed:{}/{}", progress.failed, progress.total)),
-                )
-            };
-            if let Err(error) = state
-                .canonical_services
-                .ops
-                .update_async_operation(
-                    state.as_ref(),
-                    UpdateAsyncOperationCommand {
-                        operation_id: parent_id,
-                        status: status.clone(),
-                        completed_at: Some(Utc::now()),
-                        failure_code,
-                    },
-                )
-                .await
-            {
-                error!(%parent_id, error = %error, "failed to settle batch parent on children terminal");
-            } else {
-                info!(
-                    %parent_id,
-                    total = progress.total,
-                    completed = progress.completed,
-                    failed = progress.failed,
-                    %status,
-                    "batch parent settled on children terminal"
-                );
-            }
+            settle_terminal_batch_parent(&state, parent_id, progress).await;
             return;
         }
         if tokio::time::Instant::now() >= deadline {
@@ -888,6 +835,63 @@ async fn settle_parent_when_children_terminal(state: Arc<AppState>, parent_id: U
         }
         tokio::time::sleep(POLL_INTERVAL).await;
     }
+}
+
+async fn load_batch_parent_progress(
+    state: &AppState,
+    parent_id: Uuid,
+) -> Option<crate::domains::ops::OpsAsyncOperationProgress> {
+    match state.canonical_services.ops.get_async_operation_progress(state, parent_id).await {
+        Ok(progress) => Some(progress),
+        Err(error) => {
+            error!(
+                %parent_id,
+                error = %error,
+                "failed to read batch parent progress — leaving parent row unsettled"
+            );
+            None
+        }
+    }
+}
+
+async fn settle_terminal_batch_parent(
+    state: &AppState,
+    parent_id: Uuid,
+    progress: crate::domains::ops::OpsAsyncOperationProgress,
+) {
+    let (status, failure_code) = if progress.failed == 0 {
+        ("ready".to_string(), None)
+    } else {
+        (
+            "failed".to_string(),
+            Some(format!("children_failed:{}/{}", progress.failed, progress.total)),
+        )
+    };
+    let result = state
+        .canonical_services
+        .ops
+        .update_async_operation(
+            state,
+            UpdateAsyncOperationCommand {
+                operation_id: parent_id,
+                status: status.clone(),
+                completed_at: Some(Utc::now()),
+                failure_code,
+            },
+        )
+        .await;
+    if let Err(error) = result {
+        error!(%parent_id, error = %error, "failed to settle batch parent on children terminal");
+        return;
+    }
+    info!(
+        %parent_id,
+        total = progress.total,
+        completed = progress.completed,
+        failed = progress.failed,
+        %status,
+        "batch parent settled on children terminal"
+    );
 }
 
 /// Runs the child mutations in bounded parallel and returns the failure count.
@@ -936,7 +940,7 @@ async fn run_batch_reprocess_children(
 ///
 /// Used by BOTH the single-document `/content/documents/{id}/reprocess`
 /// endpoint and the batch-reprocess fan-out. `parent_id` is `Some` only
-/// when the retry is a child of a batch parent async_operation; for
+/// when the retry is a child of a batch parent `async_operation`; for
 /// direct single-document retries it stays `None`.
 ///
 /// This function is also the path that handles failed documents whose

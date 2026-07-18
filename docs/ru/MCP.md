@@ -11,14 +11,15 @@
 ## Endpoint
 
 - Endpoint URL: `http://127.0.0.1:19000/v1/mcp`
-- Transport: **MCP Streamable HTTP, spec `2025-06-18`**. Один endpoint принимает `POST`, `GET` и `DELETE` — никакого отдельного SSE-канала, никакого stdio-прокси.
+- Transport: **MCP Streamable HTTP, spec `2025-11-25`**. Один endpoint принимает `POST`, `GET` и `DELETE` — никакого отдельного SSE-канала, никакого stdio-прокси.
   - `POST` — все JSON-RPC сообщения. Content-negotiation по заголовку `Accept`:
     - `Accept: application/json` → тело ответа в виде обычного JSON (дефолт, удобно для curl).
     - `Accept: application/json, text/event-stream` → один SSE-фрейм `event: message\ndata: …\n\n`; клиент-SDK, который объявляет оба формата, получает тот транспорт, который ждёт.
     - Notification-only запросы (без `id`) подтверждаются голым `202 Accepted`.
-  - `GET` — зарезервирован для server-push stream. IronRAG сейчас не отправляет фоновых уведомлений, поэтому возвращает `200 OK` + `Content-Type: text/event-stream` с одним SSE-комментарием `: ready` и больше ничего не шлёт. Спека 2025-06-18 разрешает и 405, и пустой SSE-поток; мы выбрали второе потому что некоторые bundled MCP-клиенты считают non-200 на handshake фатальной ошибкой и выбрасывают весь MCP-сервер из runtime для этого agent-контекста.
-  - `DELETE` — сигнал завершения сессии. Сервер stateless между запросами, поэтому всегда отвечает `200 OK`, чтобы cleanup-флоу клиента завершался чисто.
-- Ответ на `initialize` содержит заголовок `Mcp-Session-Id` (UUIDv7). Клиенты, которые эхнут его на последующих запросах, принимаются без дополнительной валидации.
+  - `GET` — зарезервирован для server-push stream. IronRAG сейчас не отправляет фоновых уведомлений, поэтому возвращает `200 OK` + `Content-Type: text/event-stream` с одним SSE-комментарием `: ready` и больше ничего не шлёт. Спека 2025-11-25 разрешает и 405, и пустой SSE-поток; мы выбрали второе потому что некоторые bundled MCP-клиенты считают non-200 на handshake фатальной ошибкой и выбрасывают весь MCP-сервер из runtime для этого agent-контекста.
+  - `DELETE` — сигнал завершения принадлежащей клиенту сессии. Сервер записывает ограниченный по TTL распределённый tombstone, отклоняет последующие вызовы этой сессии и отменяет выполняющуюся работу на любой API-реплике. Повторный cleanup того же владельца идемпотентен, пока tombstone активен.
+- Ответ на `initialize` содержит заголовок `Mcp-Session-Id` (UUIDv7). Каждый последующий `POST`, `GET` и `DELETE` обязан вернуть ровно это значение и отправить `Mcp-Protocol-Version: 2025-11-25`. Отсутствующая, некорректная, истёкшая, завершённая или чужая сессия отклоняется; неподдерживаемый либо дублированный заголовок версии также не принимается. На корректный initialize с другой версией сервер возвращает в результате единственную canonical-версию; клиент без её поддержки должен отключиться.
+- Native-клиент может не отправлять `Origin`. Если заголовок присутствует, допускается ровно одно canonical HTTP origin, точно совпадающее с `IRONRAG_FRONTEND_ORIGIN` либо опциональным `IRONRAG_OPENAPI_PUBLIC_ORIGIN`; дубликат, некорректное, неканоническое или недоверенное значение получает HTTP `403` до авторизации, чтения сессии и разбора JSON.
 - Capabilities (для мониторинга и UI): `GET http://127.0.0.1:19000/v1/mcp/capabilities` — это не часть MCP-протокола, а отдельный probe endpoint.
 - Авторизация: `Authorization: Bearer <token>` на каждом запросе (включая `GET`/`DELETE`).
 - Имя MCP-сервера на протокольном уровне: `ironrag-mcp-memory`.
@@ -33,7 +34,7 @@ curl -sS -X POST http://127.0.0.1:19000/v1/mcp \
   -H "Authorization: Bearer $IRONRAG_MCP_TOKEN" \
   -H "Content-Type: application/json" \
   -H "Accept: application/json" \
-  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}'
+  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"manual-probe","version":"1"}}}'
 ```
 
 Быстрая проверка (SSE-фрейм, как у SDK-клиентов):
@@ -43,7 +44,7 @@ curl -sS -X POST http://127.0.0.1:19000/v1/mcp \
   -H "Authorization: Bearer $IRONRAG_MCP_TOKEN" \
   -H "Content-Type: application/json" \
   -H "Accept: application/json, text/event-stream" \
-  -d '{"jsonrpc":"2.0","id":2,"method":"initialize","params":{}}'
+  -d '{"jsonrpc":"2.0","id":2,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"manual-probe","version":"1"}}}'
 ```
 
 Если IronRAG стоит за прокси или под другим доменом, подставьте тот origin, который реально видит клиент.
@@ -68,7 +69,7 @@ JSON-RPC поверхность намеренно маленькая: `initiali
 |------------|----------|----------------------|
 | `grounded_answer` | Задать вопрос естественным языком и получить grounded ответ с evidence references из grounded-answer pipeline IronRAG (QueryCompiler → гибридный поиск → graph-aware context → answer generation → verifier). Предпочитайте этот инструмент `search_documents` + `read_document`, когда пользователю нужен ответ, а не список хитов. | `library`, `query` |
 
-Response структура: текст tool-result содержит ответ; structured output содержит `executionDetail` с chunk, prepared-segment, technical-fact, graph-entity, graph-relation, verifier, runtime, request и response полями. Верхнеуровневые `runtimeExecutionId`, `executionId` и `conversationId` остаются короткими ссылками для trace lookup. Встроенный UI-ассистент сам является tool-using агентом над этим MCP answer surface: он может вызвать `grounded_answer`, инспектировать raw search/read tools или ответить напрямую, когда lookup по библиотеке не нужен. Внешние MCP-клиенты получают тот же словарь инструментов, те же схемы и тот же контракт результата `grounded_answer`.
+Response структура: текст tool-result содержит ответ. Дефолтный профиль `compact` возвращает ограниченные references и warnings, typed verifier/readiness/completion state, repair policy и trace identifiers без дублирования диагностического execution-объекта. Запрашивайте `responseProfile: "full"` только когда операционному клиенту действительно нужен `executionDetail` с chunk, prepared-segment, technical-fact, graph-entity, graph-relation, runtime, request и response полями. Верхнеуровневые `runtimeExecutionId`, `executionId` и `conversationId` остаются короткими ссылками для trace lookup в обоих профилях. Встроенный UI-ассистент сам является tool-using агентом над этим MCP answer surface: он может вызвать `grounded_answer`, инспектировать raw search/read tools или ответить напрямую, когда lookup по библиотеке не нужен. Внешние MCP-клиенты получают тот же словарь инструментов, те же схемы и тот же контракт результата `grounded_answer`.
 
 ### Обнаружение
 

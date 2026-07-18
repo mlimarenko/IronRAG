@@ -18,14 +18,14 @@ export type ShellIntent =
   /** Open the shell's "create library" dialog (operator+). */
   | 'create-library'
   /** Open (toggle) the global command palette. */
-  | 'open-command-palette';
+  | 'open-command-palette'
 
-const EVENT_NAME = 'ironrag:shell-intent';
+const EVENT_NAME = 'ironrag:shell-intent'
 
 /** Dispatch a shell intent. No-ops in non-DOM environments (SSR/tests). */
 export function emitShellIntent(intent: ShellIntent): void {
-  if (typeof window === 'undefined') return;
-  window.dispatchEvent(new CustomEvent<ShellIntent>(EVENT_NAME, { detail: intent }));
+  if (typeof window === 'undefined') return
+  window.dispatchEvent(new CustomEvent<ShellIntent>(EVENT_NAME, { detail: intent }))
 }
 
 /**
@@ -33,10 +33,10 @@ export function emitShellIntent(intent: ShellIntent): void {
  * callers can clean up in a `useEffect` teardown.
  */
 export function onShellIntent(intent: ShellIntent, handler: () => void): () => void {
-  if (typeof window === 'undefined') return () => {};
+  if (typeof window === 'undefined') return () => {}
   const listener = (event: Event) => {
-    if ((event as CustomEvent<ShellIntent>).detail === intent) handler();
-  };
-  window.addEventListener(EVENT_NAME, listener);
-  return () => window.removeEventListener(EVENT_NAME, listener);
+    if ((event as CustomEvent<ShellIntent>).detail === intent) handler()
+  }
+  window.addEventListener(EVENT_NAME, listener)
+  return () => window.removeEventListener(EVENT_NAME, listener)
 }

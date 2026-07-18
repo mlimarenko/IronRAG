@@ -1,8 +1,10 @@
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use uuid::Uuid;
 
+use sha2::{Digest as _, Sha256};
+
 use crate::{
-    app::state::AppState,
+    app::state::{AppState, McpMemorySettings},
     domains::{
         content::ContentMutation,
         ingest::{WebDiscoveredPage, WebIngestRun, WebIngestRunReceipt},
@@ -11,33 +13,28 @@ use crate::{
     interfaces::http::{
         auth::AuthContext,
         authorization::{
-            POLICY_DOCUMENTS_WRITE, POLICY_LIBRARY_READ, POLICY_LIBRARY_WRITE,
+            POLICY_DOCUMENTS_WRITE, POLICY_LIBRARY_READ, POLICY_LIBRARY_WRITE, POLICY_USAGE_READ,
             authorize_document_permission, authorize_library_discovery,
-            authorize_library_permission,
+            authorize_library_permission, load_async_operation_and_authorize,
         },
         router_support::ApiError,
     },
     mcp_types::{
-        McpCancelWebIngestRunRequest, McpDocumentMutationKind, McpGetMutationStatusRequest,
-        McpGetWebIngestRunRequest, McpListWebIngestRunPagesRequest, McpMutationOperationKind,
-        McpMutationReceipt, McpMutationReceiptStatus, McpSubmitWebIngestRunRequest,
+        McpCancelWebIngestRunRequest, McpDocumentMutationKind, McpGetWebIngestRunRequest,
+        McpListWebIngestRunPagesRequest, McpMutationOperationKind, McpMutationReceipt,
+        McpMutationReceiptStatus, McpOperationStatus, McpSubmitWebIngestRunRequest,
         McpUpdateDocumentRequest, McpUploadDocumentInput, McpUploadDocumentsRequest,
     },
     services::content::service::{
-        AppendInlineMutationCommand, ReplaceInlineMutationCommand, UploadInlineDocumentCommand,
+        AppendInlineMutationCommand, ContentMutationAdmission, ReplaceInlineMutationCommand,
+        UploadInlineDocumentCommand,
     },
     services::ingest::web::CreateWebIngestRunCommand,
-    services::mcp::support::{
-        hash_append_payload, hash_replace_payload, hash_upload_payload,
-        map_content_mutation_status_to_receipt_status, normalize_document_idempotency_key,
-        normalize_upload_idempotency_key, parse_mutation_operation_kind,
-        payload_identity_from_source_uri, validate_mcp_upload_batch_size,
-        validate_mcp_upload_file_size,
-    },
+    shared::extraction::file_extract::UploadAdmissionError,
     shared::outbound_http::{get_public_http_following_redirects, read_response_bytes_with_limit},
 };
 
-pub async fn upload_documents(
+pub(crate) async fn upload_documents(
     auth: &AuthContext,
     state: &AppState,
     request: McpUploadDocumentsRequest,
@@ -93,7 +90,9 @@ pub async fn upload_documents(
         )
         .await?
         {
-            receipts.push(resolve_mutation_receipt(state, auth, existing).await?);
+            let admission =
+                state.canonical_services.content.get_mutation_admission(state, existing.id).await?;
+            receipts.push(resolve_mutation_receipt(state, auth, &admission).await?);
             continue;
         }
 
@@ -115,7 +114,7 @@ pub async fn upload_documents(
     Ok(receipts)
 }
 
-pub async fn update_document(
+pub(crate) async fn update_document(
     auth: &AuthContext,
     state: &AppState,
     request: McpUpdateDocumentRequest,
@@ -231,7 +230,9 @@ pub async fn update_document(
     )
     .await?
     {
-        return resolve_mutation_receipt(state, auth, existing).await;
+        let admission =
+            state.canonical_services.content.get_mutation_admission(state, existing.id).await?;
+        return resolve_mutation_receipt(state, auth, &admission).await;
     }
 
     match request.operation_kind {
@@ -277,26 +278,25 @@ pub async fn update_document(
     }
 }
 
-pub async fn get_mutation_status(
+/// Backs the `get_operation` MCP tool. Reads the same canonical
+/// `ops_async_operation` store as `GET /v1/ops/operations/{operationId}`
+/// (authorized the same way, via `POLICY_USAGE_READ`) rather than the
+/// content-mutation-specific receipt store the old `get_mutation_status`
+/// tool used — see plan §6.3/§6.4 convergence.
+pub(crate) async fn get_operation(
     auth: &AuthContext,
     state: &AppState,
-    request: McpGetMutationStatusRequest,
-) -> Result<McpMutationReceipt, ApiError> {
-    auth.require_any_scope(POLICY_DOCUMENTS_WRITE)?;
-    let mutation =
-        state.canonical_services.content.get_mutation(state, request.receipt_id).await.map_err(
-            |error| match error {
-                ApiError::NotFound(_) => {
-                    ApiError::NotFound(format!("mutation receipt {} not found", request.receipt_id))
-                }
-                other => other,
-            },
-        )?;
-
-    resolve_mutation_receipt(state, auth, mutation).await
+    operation_id: Uuid,
+) -> Result<McpOperationStatus, ApiError> {
+    let _ =
+        load_async_operation_and_authorize(auth, state, operation_id, POLICY_USAGE_READ).await?;
+    let operation = state.canonical_services.ops.get_async_operation(state, operation_id).await?;
+    let progress =
+        state.canonical_services.ops.get_async_operation_progress(state, operation_id).await?;
+    Ok(McpOperationStatus { operation, progress })
 }
 
-pub async fn submit_web_ingest_run(
+pub(crate) async fn submit_web_ingest_run(
     auth: &AuthContext,
     state: &AppState,
     request: McpSubmitWebIngestRunRequest,
@@ -342,7 +342,7 @@ pub async fn submit_web_ingest_run(
     })
 }
 
-pub async fn get_web_ingest_run(
+pub(crate) async fn get_web_ingest_run(
     auth: &AuthContext,
     state: &AppState,
     request: McpGetWebIngestRunRequest,
@@ -353,7 +353,7 @@ pub async fn get_web_ingest_run(
     Ok(run)
 }
 
-pub async fn list_web_ingest_run_pages(
+pub(crate) async fn list_web_ingest_run_pages(
     auth: &AuthContext,
     state: &AppState,
     request: McpListWebIngestRunPagesRequest,
@@ -364,7 +364,7 @@ pub async fn list_web_ingest_run_pages(
     state.canonical_services.web_ingest.list_pages(state, request.run_id).await
 }
 
-pub async fn cancel_web_ingest_run(
+pub(crate) async fn cancel_web_ingest_run(
     auth: &AuthContext,
     state: &AppState,
     request: McpCancelWebIngestRunRequest,
@@ -471,7 +471,7 @@ pub(crate) async fn process_upload_mutation(
             },
         )
         .await?;
-    resolve_mutation_receipt(state, auth, admission.mutation.mutation).await
+    resolve_mutation_receipt(state, auth, &admission.mutation).await
 }
 
 fn resolve_upload_file_name(
@@ -494,20 +494,19 @@ fn resolve_upload_file_name(
     if let Some(fetch_url) =
         document.fetch_url.as_deref().map(str::trim).filter(|value| !value.is_empty())
     {
-        if let Ok(parsed) = reqwest::Url::parse(fetch_url) {
-            if let Some(candidate) = parsed
+        if let Ok(parsed) = reqwest::Url::parse(fetch_url)
+            && let Some(candidate) = parsed
                 .path_segments()
-                .and_then(|segments| segments.filter(|s| !s.is_empty()).last())
+                .and_then(|mut segments| segments.rfind(|segment| !segment.is_empty()))
                 .map(str::trim)
                 .filter(|value| !value.is_empty())
-            {
-                return Ok(candidate.to_string());
-            }
+        {
+            return Ok(candidate.to_string());
         }
         return Ok(default_inline_file_name(document.title.as_deref(), Some(fetch_url), index));
     }
 
-    if document.body.as_deref().map(str::trim).filter(|value| !value.is_empty()).is_some() {
+    if document.body.as_deref().map(str::trim).as_ref().is_some_and(|value| !value.is_empty()) {
         return Ok(default_inline_file_name(
             document.title.as_deref(),
             document.source_uri.as_deref(),
@@ -550,10 +549,10 @@ async fn resolve_upload_file_bytes(
         .content_base64
         .as_deref()
         .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .is_some();
+        .as_ref()
+        .is_some_and(|value| !value.is_empty());
     let has_body =
-        document.body.as_deref().map(str::trim).filter(|value| !value.is_empty()).is_some();
+        document.body.as_deref().map(str::trim).as_ref().is_some_and(|value| !value.is_empty());
     let fetch_url = document.fetch_url.as_deref().map(str::trim).filter(|value| !value.is_empty());
 
     let source_count = [has_base64, has_body, fetch_url.is_some()].iter().filter(|v| **v).count();
@@ -710,7 +709,7 @@ pub(crate) async fn process_append_mutation(
             },
         )
         .await?;
-    resolve_mutation_receipt(state, auth, admission.mutation).await
+    resolve_mutation_receipt(state, auth, &admission).await
 }
 
 pub(crate) async fn process_replace_mutation(
@@ -744,15 +743,22 @@ pub(crate) async fn process_replace_mutation(
             },
         )
         .await?;
-    resolve_mutation_receipt(state, auth, admission.mutation).await
+    resolve_mutation_receipt(state, auth, &admission).await
 }
 
+/// Builds the MCP-facing receipt from a [`ContentMutationAdmission`].
+/// `operation_id` on the resulting [`McpMutationReceipt`] is the
+/// canonical async-operation id (pollable via the `get_operation` tool
+/// and `GET /v1/ops/operations/{operationId}`), falling back to the
+/// content-mutation id only for the rare case a mutation settled
+/// synchronously without ever getting an async operation row.
 pub(crate) async fn resolve_mutation_receipt(
     state: &AppState,
     auth: &AuthContext,
-    row: ContentMutation,
+    admission: &ContentMutationAdmission,
 ) -> Result<McpMutationReceipt, ApiError> {
-    let items = state.canonical_services.content.list_mutation_items(state, row.id).await?;
+    let row = &admission.mutation;
+    let items = &admission.items;
     let mut document_id = items.iter().find_map(|item| item.document_id);
     if document_id.is_none()
         && let Some(revision_id) = items.iter().find_map(|item| item.result_revision_id)
@@ -785,7 +791,7 @@ pub(crate) async fn resolve_mutation_receipt(
     }
 
     let mut status = map_content_mutation_status_to_receipt_status(&row.mutation_state);
-    let mut failure_kind = row.failure_code.clone().or(row.conflict_code.clone());
+    let mut failure_kind = row.failure_code.clone().or_else(|| row.conflict_code.clone());
     let last_status_at = row.completed_at.unwrap_or(row.requested_at);
 
     if matches!(status, McpMutationReceiptStatus::Ready)
@@ -819,16 +825,142 @@ pub(crate) async fn resolve_mutation_receipt(
     }
 
     Ok(McpMutationReceipt {
-        receipt_id: row.id,
+        operation_id: admission.async_operation_id.unwrap_or(row.id),
         token_id: auth.token_id,
         workspace_id: row.workspace_id,
         library_id: row.library_id,
         document_id,
         operation_kind: parse_mutation_operation_kind(&row.operation_kind)?,
-        idempotency_key: row.idempotency_key.unwrap_or_default(),
+        idempotency_key: row.idempotency_key.clone().unwrap_or_default(),
         status,
         accepted_at: row.requested_at,
         last_status_at,
         failure_kind,
     })
+}
+
+// --- Idempotency-key / payload-hash / admission helpers ---------------
+//
+// Split out of the former `services/mcp/support.rs` god-file (plan
+// §6.4): every one of these was already only ever called from this
+// module, so the move also tightens visibility from `pub(crate)` to
+// module-private.
+
+fn normalize_upload_idempotency_key(
+    idempotency_key: Option<&str>,
+    library_id: Uuid,
+    document_index: usize,
+    payload_identity: &str,
+) -> String {
+    match idempotency_key.map(str::trim).filter(|value| !value.is_empty()) {
+        Some(base) => format!("mcp:upload:{library_id}:{document_index}:{base}"),
+        None => format!("mcp:upload:{library_id}:{payload_identity}"),
+    }
+}
+
+fn normalize_document_idempotency_key(
+    idempotency_key: Option<&str>,
+    document_id: Uuid,
+    operation_kind: &McpMutationOperationKind,
+    payload_identity: &str,
+) -> String {
+    let operation = operation_kind_key(operation_kind);
+    match idempotency_key.map(str::trim).filter(|value| !value.is_empty()) {
+        Some(base) => format!("mcp:{operation}:{document_id}:{base}"),
+        None => format!("mcp:{operation}:{document_id}:{payload_identity}"),
+    }
+}
+
+fn hash_upload_payload(
+    file_name: &str,
+    mime_type: Option<&str>,
+    title: Option<&str>,
+    file_bytes: &[u8],
+) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(file_name.as_bytes());
+    hasher.update(mime_type.unwrap_or_default().as_bytes());
+    hasher.update(title.unwrap_or_default().as_bytes());
+    hasher.update(file_bytes);
+    hex::encode(hasher.finalize())
+}
+
+fn hash_append_payload(appended_text: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(appended_text.as_bytes());
+    hex::encode(hasher.finalize())
+}
+
+fn hash_replace_payload(file_name: &str, mime_type: Option<&str>, file_bytes: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(file_name.as_bytes());
+    hasher.update(mime_type.unwrap_or_default().as_bytes());
+    hasher.update(file_bytes);
+    hex::encode(hasher.finalize())
+}
+
+fn validate_mcp_upload_file_size(
+    settings: &McpMemorySettings,
+    file_name: &str,
+    mime_type: Option<&str>,
+    file_bytes: &[u8],
+) -> Result<(), ApiError> {
+    let file_size_bytes = u64::try_from(file_bytes.len()).unwrap_or(u64::MAX);
+    if file_size_bytes > settings.max_upload_file_bytes() {
+        return Err(ApiError::from_upload_admission(UploadAdmissionError::file_too_large(
+            file_name,
+            mime_type,
+            file_size_bytes,
+            settings.upload_max_size_mb,
+        )));
+    }
+    Ok(())
+}
+
+fn validate_mcp_upload_batch_size(
+    settings: &McpMemorySettings,
+    total_upload_bytes: u64,
+) -> Result<(), ApiError> {
+    if total_upload_bytes > settings.max_upload_batch_bytes() {
+        return Err(ApiError::from_upload_admission(UploadAdmissionError::upload_batch_too_large(
+            total_upload_bytes,
+            settings.upload_max_size_mb,
+        )));
+    }
+    Ok(())
+}
+
+const fn operation_kind_key(operation_kind: &McpMutationOperationKind) -> &'static str {
+    match operation_kind {
+        McpMutationOperationKind::Upload => "upload",
+        McpMutationOperationKind::Append => "append",
+        McpMutationOperationKind::Replace => "replace",
+    }
+}
+
+fn parse_mutation_operation_kind(value: &str) -> Result<McpMutationOperationKind, ApiError> {
+    match value {
+        "upload" => Ok(McpMutationOperationKind::Upload),
+        "append" => Ok(McpMutationOperationKind::Append),
+        "replace" => Ok(McpMutationOperationKind::Replace),
+        _ => Err(ApiError::Internal),
+    }
+}
+
+fn map_content_mutation_status_to_receipt_status(mutation_state: &str) -> McpMutationReceiptStatus {
+    match mutation_state {
+        "accepted" => McpMutationReceiptStatus::Accepted,
+        "running" => McpMutationReceiptStatus::Processing,
+        "applied" => McpMutationReceiptStatus::Ready,
+        "failed" | "conflicted" | "canceled" => McpMutationReceiptStatus::Failed,
+        _ => McpMutationReceiptStatus::Accepted,
+    }
+}
+
+fn payload_identity_from_source_uri(source_uri: Option<&str>) -> Option<String> {
+    source_uri
+        .and_then(|value| {
+            value.strip_prefix("mcp://payload/").or_else(|| value.strip_prefix("inline://payload/"))
+        })
+        .map(ToString::to_string)
 }

@@ -39,6 +39,14 @@ spec:
         {{- include "ironrag.selectorLabels" . | nindent 8 }}
         app.kubernetes.io/component: s4core
     spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
       containers:
         - name: s4core
           {{- if .Values.storage.s3.image.digest }}
@@ -51,14 +59,24 @@ spec:
             runAsNonRoot: true
             runAsUser: 1000
             runAsGroup: 1000
+            readOnlyRootFilesystem: true
             allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
           env:
             - name: S4_BIND
               value: 0.0.0.0:9000
             - name: S4_ACCESS_KEY_ID
-              value: {{ .Values.storage.s3.accessKeyId | quote }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "ironrag.bundledDependencySecretName" . }}
+                  key: IRONRAG_CONTENT_STORAGE_S3_ACCESS_KEY_ID
             - name: S4_SECRET_ACCESS_KEY
-              value: {{ .Values.storage.s3.secretAccessKey | quote }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "ironrag.bundledDependencySecretName" . }}
+                  key: IRONRAG_CONTENT_STORAGE_S3_SECRET_ACCESS_KEY
             - name: S4_DATA_DIR
               value: /data
           ports:

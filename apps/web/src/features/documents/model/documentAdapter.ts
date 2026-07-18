@@ -1,77 +1,75 @@
-import type { TFunction } from 'i18next';
+import type { TFunction } from 'i18next'
 
-import { buildDocumentFailureNotice, humanizeDocumentStage } from '@/shared/lib/document-processing';
-import { mapSourceAccess } from '@/shared/lib/source-access';
-import type { StatusTone } from '@/shared/components/StatusBadge';
-import type { DocumentListItem } from '@/shared/api/documents';
-import type { DocumentItem, DocumentStatus } from '@/shared/types';
+import { buildDocumentFailureNotice, humanizeDocumentStage } from '@/shared/lib/document-processing'
+import { mapSourceAccess } from '@/shared/lib/source-access'
+import type { StatusTone } from '@/shared/components/StatusBadge'
+import type { DocumentListItem } from '@/shared/api/documents'
+import type { DocumentItem, DocumentStatus } from '@/shared/types'
 
 function safeDecode(value: string): string {
   try {
-    return decodeURIComponent(value);
+    return decodeURIComponent(value)
   } catch {
-    return value;
+    return value
   }
 }
 
 function isHttpUrl(value: string | null | undefined): boolean {
   if (!value) {
-    return false;
+    return false
   }
 
   try {
-    const parsed = new URL(value);
-    return parsed.protocol === 'http:' || parsed.protocol === 'https:';
+    const parsed = new URL(value)
+    return parsed.protocol === 'http:' || parsed.protocol === 'https:'
   } catch {
-    return false;
+    return false
   }
 }
 
 function extensionFromPathLike(value: string): string | null {
-  const normalized = value.trim();
+  const normalized = value.trim()
   if (!normalized) {
-    return null;
+    return null
   }
 
-  const segments = normalized.split(/[\\/]/);
-  const basename = segments[segments.length - 1] ?? normalized;
-  const dotIndex = basename.lastIndexOf('.');
+  const segments = normalized.split(/[\\/]/)
+  const basename = segments[segments.length - 1] ?? normalized
+  const dotIndex = basename.lastIndexOf('.')
   if (dotIndex <= 0 || dotIndex >= basename.length - 1) {
-    return null;
+    return null
   }
 
-  return basename.slice(dotIndex + 1).toLowerCase();
+  return basename.slice(dotIndex + 1).toLowerCase()
 }
 
 function deriveExtension(fileName: string, mimeType?: string | null): string {
-  const normalizedFileName = isHttpUrl(fileName)
-    ? safeDecode(new URL(fileName).pathname)
-    : fileName;
-  const fileNameExtension = extensionFromPathLike(normalizedFileName);
+  const normalizedFileName = isHttpUrl(fileName) ? safeDecode(new URL(fileName).pathname) : fileName
+  const fileNameExtension = extensionFromPathLike(normalizedFileName)
   if (fileNameExtension) {
-    return fileNameExtension;
+    return fileNameExtension
   }
 
   // Strip any `;charset=…` suffix the backend adds to the MIME tag.
-  const baseMime = ((mimeType ?? '').split(';')[0] ?? '').trim().toLowerCase();
+  const baseMime = ((mimeType ?? '').split(';')[0] ?? '').trim().toLowerCase()
   if (!/^[a-z0-9.+-]+\/[a-z0-9.+-]+$/.test(baseMime)) {
-    return 'file';
+    return 'file'
   }
 
-  const slashIndex = baseMime.indexOf('/');
+  const slashIndex = baseMime.indexOf('/')
   if (slashIndex >= 0 && slashIndex < baseMime.length - 1) {
-    return baseMime.slice(slashIndex + 1);
+    return baseMime.slice(slashIndex + 1)
   }
 
-  return 'file';
+  return 'file'
 }
 
 function normalizeProgressPercent(value: number | null | undefined): number | undefined {
   if (typeof value !== 'number' || !Number.isFinite(value)) {
-    return undefined;
+    return undefined
   }
 
-  return Math.max(0, Math.min(100, Math.round(value)));
+  return Math.max(0, Math.min(100, Math.round(value)))
 }
 
 /**
@@ -81,19 +79,19 @@ function normalizeProgressPercent(value: number | null | undefined): number | un
  * URL-encoded name decoding, and `source_access` normalization.
  */
 export function mapListItem(raw: DocumentListItem, t: TFunction): DocumentItem {
-  const fileName = safeDecode(raw.fileName);
-  const fileType = deriveExtension(fileName, raw.fileType);
+  const fileName = safeDecode(raw.fileName)
+  const fileType = deriveExtension(fileName, raw.fileType)
 
   // Per-row cost arrives on every list response (see
   // list_document_page_rows LATERAL on billing_execution_cost). A valid
   // numeric value — including `0` — is preserved; only a missing /
   // non-numeric value collapses to `null`. The render path renders
   // `$0.000` for `0` and `—` for `null`, matching the prior UI.
-  const costValue = parseFloat(raw.cost);
-  const cost = Number.isFinite(costValue) ? costValue : null;
-  const progressPercent = normalizeProgressPercent(raw.progressPercent);
-  const failureCode = raw.failureCode ?? undefined;
-  const failureMessage = raw.failureMessage?.trim() || undefined;
+  const costValue = Number.parseFloat(raw.cost)
+  const cost = Number.isFinite(costValue) ? costValue : null
+  const progressPercent = normalizeProgressPercent(raw.progressPercent)
+  const failureCode = raw.failureCode ?? undefined
+  const failureMessage = raw.failureMessage?.trim() || undefined
   const failureNotice =
     raw.status === 'failed'
       ? buildDocumentFailureNotice(
@@ -104,11 +102,11 @@ export function mapListItem(raw: DocumentListItem, t: TFunction): DocumentItem {
           },
           t,
         )
-      : undefined;
-  const statusReason = failureNotice?.summary;
-  const stage = humanizeDocumentStage(raw.stage, t);
-  const documentHint = raw.documentHint?.trim() || undefined;
-  const sourceAccess = mapSourceAccess(raw.sourceAccess);
+      : undefined
+  const statusReason = failureNotice?.summary
+  const stage = humanizeDocumentStage(raw.stage, t)
+  const documentHint = raw.documentHint?.trim() || undefined
+  const sourceAccess = mapSourceAccess(raw.sourceAccess)
 
   // Every field below is optional on `DocumentItem` without an explicit
   // `| undefined`, so — under `exactOptionalPropertyTypes` — an
@@ -140,16 +138,16 @@ export function mapListItem(raw: DocumentListItem, t: TFunction): DocumentItem {
     ...(raw.sourceKind != null ? { sourceKind: raw.sourceKind } : {}),
     ...(raw.sourceUri != null ? { sourceUri: raw.sourceUri } : {}),
     ...(sourceAccess !== undefined ? { sourceAccess } : {}),
-  };
+  }
 }
 
 function parseTimestampMs(value: string | undefined): number | null {
   if (!value) {
-    return null;
+    return null
   }
 
-  const timestamp = Date.parse(value);
-  return Number.isFinite(timestamp) ? timestamp : null;
+  const timestamp = Date.parse(value)
+  return Number.isFinite(timestamp) ? timestamp : null
 }
 
 /**
@@ -163,23 +161,21 @@ export function getDocumentProcessingDurationMs(
   doc: Pick<DocumentItem, 'status' | 'processingStartedAt' | 'processingFinishedAt'>,
   nowMs = Date.now(),
 ): number | null {
-  const startedAtMs = parseTimestampMs(doc.processingStartedAt);
+  const startedAtMs = parseTimestampMs(doc.processingStartedAt)
   if (startedAtMs == null) {
-    return null;
+    return null
   }
 
-  const workerStillHolding = doc.status === 'processing' || doc.status === 'queued';
-  const finishedAtMs = workerStillHolding
-    ? nowMs
-    : parseTimestampMs(doc.processingFinishedAt);
+  const workerStillHolding = doc.status === 'processing' || doc.status === 'queued'
+  const finishedAtMs = workerStillHolding ? nowMs : parseTimestampMs(doc.processingFinishedAt)
   if (finishedAtMs == null) {
-    return null;
+    return null
   }
 
-  return Math.max(0, finishedAtMs - startedAtMs);
+  return Math.max(0, finishedAtMs - startedAtMs)
 }
 
-type DocumentStatusBadge = { label: string; cls: string; tone: StatusTone };
+type DocumentStatusBadge = { label: string; cls: string; tone: StatusTone }
 
 /**
  * Canonical badge styling and label lookup for every `DocumentStatus`.
@@ -213,7 +209,7 @@ export function buildDocumentStatusBadgeConfig(
       cls: 'status-stalled',
       tone: 'stalled',
     },
-  };
+  }
 }
 
 export function isWebPageDocument(
@@ -221,7 +217,7 @@ export function isWebPageDocument(
   sourceUri?: string,
   fileName?: string,
 ): boolean {
-  return sourceKind === 'web_page' || isHttpUrl(sourceUri) || isHttpUrl(fileName);
+  return sourceKind === 'web_page' || isHttpUrl(sourceUri) || isHttpUrl(fileName)
 }
 
 export function formatDocumentTypeLabel(
@@ -229,21 +225,21 @@ export function formatDocumentTypeLabel(
   sourceKind: DocumentItem['sourceKind'],
   t: TFunction,
   options?: {
-    sourceUri?: string | undefined;
-    fileName?: string | undefined;
+    sourceUri?: string | undefined
+    fileName?: string | undefined
   },
 ): string {
   if (isWebPageDocument(sourceKind, options?.sourceUri, options?.fileName)) {
-    return t('documents.webPageType');
+    return t('documents.webPageType')
   }
 
-  return fileType.toUpperCase();
+  return fileType.toUpperCase()
 }
 
 export function formatSize(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  if (bytes < 1024) return `${bytes} B`
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
 }
 
 export function formatDate(iso: string, locale: string): string {
@@ -252,5 +248,5 @@ export function formatDate(iso: string, locale: string): string {
     day: 'numeric',
     hour: '2-digit',
     minute: '2-digit',
-  }).format(new Date(iso));
+  }).format(new Date(iso))
 }

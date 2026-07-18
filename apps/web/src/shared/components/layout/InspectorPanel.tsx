@@ -1,36 +1,36 @@
-import type { ReactNode } from "react";
+import type { ReactNode } from 'react'
 
-import { cn } from "@/shared/lib/utils";
+import { cn } from '@/shared/lib/utils'
 
 type InspectorMetric = {
-  id?: string;
-  label: ReactNode;
-  value: ReactNode;
-  title?: string;
-  mono?: boolean;
-};
+  id?: string
+  label: ReactNode
+  value: ReactNode
+  title?: string
+  mono?: boolean
+}
 
 type InspectorPanelProps = {
-  title?: ReactNode;
-  titleText?: string;
-  subtitle?: ReactNode;
-  eyebrow?: ReactNode;
-  status?: ReactNode;
-  metrics?: InspectorMetric[];
-  actions?: ReactNode;
-  children?: ReactNode;
-  empty?: ReactNode;
-  className?: string;
-  contentClassName?: string;
-};
+  title?: ReactNode
+  titleText?: string
+  subtitle?: ReactNode
+  eyebrow?: ReactNode
+  status?: ReactNode
+  metrics?: InspectorMetric[]
+  actions?: ReactNode
+  children?: ReactNode
+  empty?: ReactNode
+  className?: string
+  contentClassName?: string
+}
 
 function metricKey(metric: InspectorMetric, index: number) {
-  if (metric.id) return metric.id;
-  if (metric.title) return metric.title;
-  if (typeof metric.label === "string" || typeof metric.label === "number") {
-    return String(metric.label);
+  if (metric.id) return metric.id
+  if (metric.title) return metric.title
+  if (typeof metric.label === 'string' || typeof metric.label === 'number') {
+    return String(metric.label)
   }
-  return `metric-${index}`;
+  return `metric-${index}`
 }
 
 export function InspectorPanel({
@@ -45,29 +45,30 @@ export function InspectorPanel({
   empty,
   className,
   contentClassName,
-}: InspectorPanelProps) {
+}: Readonly<InspectorPanelProps>) {
   return (
-    <aside className={cn("h-full min-h-0 overflow-y-auto bg-surface-sunken/40", className)}>
+    <aside className={cn('h-full min-h-0 overflow-y-auto bg-surface-sunken/40', className)}>
       {empty ? (
         <div className="flex min-h-64 items-center justify-center p-5 text-center text-sm text-muted-foreground">
           {empty}
         </div>
       ) : (
-        <div className={cn("space-y-4 p-4", contentClassName)}>
+        <div className={cn('space-y-4 p-4', contentClassName)}>
           {(title || eyebrow || status || subtitle) && (
             <div className="border-b border-border/70 pb-3">
               <div className="flex items-start justify-between gap-3">
                 <div className="min-w-0">
                   {eyebrow ? <div className="section-label">{eyebrow}</div> : null}
                   {title ? (
-                    <h2 className="mt-1 truncate text-sm font-bold tracking-tight" title={titleText}>
+                    <h2
+                      className="mt-1 truncate text-sm font-bold tracking-tight"
+                      title={titleText}
+                    >
                       {title}
                     </h2>
                   ) : null}
                   {subtitle ? (
-                    <p className="mt-1 truncate text-xs text-muted-foreground">
-                      {subtitle}
-                    </p>
+                    <p className="mt-1 truncate text-xs text-muted-foreground">{subtitle}</p>
                   ) : null}
                 </div>
                 {status ? <div className="shrink-0">{status}</div> : null}
@@ -81,8 +82,8 @@ export function InspectorPanel({
                   <dt className="text-muted-foreground">{metric.label}</dt>
                   <dd
                     className={cn(
-                      "mt-0.5 truncate font-semibold",
-                      metric.mono && "font-mono text-2xs",
+                      'mt-0.5 truncate font-semibold',
+                      metric.mono && 'font-mono text-2xs',
                     )}
                     title={metric.title}
                   >
@@ -97,5 +98,5 @@ export function InspectorPanel({
         </div>
       )}
     </aside>
-  );
+  )
 }

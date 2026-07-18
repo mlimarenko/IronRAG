@@ -13,6 +13,7 @@ pub fn ensure_not_cancelled(cancellation_token: &CancellationToken) -> StageResu
     if cancellation_token.is_cancelled() { Err(StageError::Cancelled) } else { Ok(()) }
 }
 
+#[must_use]
 pub fn anyhow_is_cancelled(error: &anyhow::Error) -> bool {
     error.downcast_ref::<StageError>().is_some()
 }

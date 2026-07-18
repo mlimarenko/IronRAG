@@ -1,28 +1,28 @@
-import { memo } from 'react';
-import type { TFunction } from 'i18next';
-import { Activity, Database, Share2 } from 'lucide-react';
-import { StatusBadge } from '@/shared/components/StatusBadge';
-import type { DashboardGraph } from "../model/types";
-import { formatDateTime, graphStatusClass, toStatusTone } from "../model/format";
+import { memo } from 'react'
+import type { TFunction } from 'i18next'
+import { Activity, Database, Share2 } from 'lucide-react'
+import { StatusBadge } from '@/shared/components/StatusBadge'
+import type { DashboardGraph } from '../model/types'
+import { formatDateTime, graphStatusClass, toStatusTone } from '../model/format'
 
 export type HealthRow = {
-  key: string;
-  label: string;
-  count: number;
-  className: string;
-  actionPath: string;
-};
+  key: string
+  label: string
+  count: number
+  className: string
+  actionPath: string
+}
 
 type LibraryHealthPanelProps = {
-  t: TFunction;
-  locale: string;
-  graph: DashboardGraph;
-  totalDocuments: number;
-  readyCount: number;
-  readableWithoutGraphCount: number;
-  healthRows: HealthRow[];
-  onNavigate: (path: string) => void;
-};
+  t: TFunction
+  locale: string
+  graph: DashboardGraph
+  totalDocuments: number
+  readyCount: number
+  readableWithoutGraphCount: number
+  healthRows: HealthRow[]
+  onNavigate: (path: string) => void
+}
 
 function LibraryHealthPanelImpl({
   t,
@@ -33,9 +33,9 @@ function LibraryHealthPanelImpl({
   readableWithoutGraphCount,
   healthRows,
   onNavigate,
-}: LibraryHealthPanelProps) {
-  const emptyLabel = t('dashboard.notAvailable');
-  const visibleHealthRows = healthRows.filter((row) => row.key === 'graph-ready' || row.count > 0);
+}: Readonly<LibraryHealthPanelProps>) {
+  const emptyLabel = t('dashboard.notAvailable')
+  const visibleHealthRows = healthRows.filter((row) => row.key === 'graph-ready' || row.count > 0)
 
   return (
     <div className="workbench-surface p-4">
@@ -67,9 +67,7 @@ function LibraryHealthPanelImpl({
       <div className="mt-4 space-y-3">
         {visibleHealthRows.map((row) => {
           const ratio =
-            totalDocuments > 0
-              ? Math.min(100, Math.round((row.count / totalDocuments) * 100))
-              : 0;
+            totalDocuments > 0 ? Math.min(100, Math.round((row.count / totalDocuments) * 100)) : 0
 
           return (
             <button
@@ -92,7 +90,7 @@ function LibraryHealthPanelImpl({
                 />
               </div>
             </button>
-          );
+          )
         })}
       </div>
 
@@ -118,9 +116,7 @@ function LibraryHealthPanelImpl({
               <item.icon className="h-3.5 w-3.5 text-muted-foreground" />
             </div>
             <div className="min-w-0 flex-1">
-              <div className="text-base font-semibold tabular-nums">
-                {item.value}
-              </div>
+              <div className="text-base font-semibold tabular-nums">{item.value}</div>
               <div className="text-xs font-medium leading-4 text-muted-foreground">
                 {item.label}
               </div>
@@ -129,7 +125,7 @@ function LibraryHealthPanelImpl({
         ))}
       </div>
     </div>
-  );
+  )
 }
 
-export const LibraryHealthPanel = memo(LibraryHealthPanelImpl);
+export const LibraryHealthPanel = memo(LibraryHealthPanelImpl)

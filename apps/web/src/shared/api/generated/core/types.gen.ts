@@ -53,7 +53,7 @@ export interface Config {
     | RequestInit['headers']
     | Record<
         string,
-        string | number | boolean | (string | number | boolean)[] | null | undefined | unknown
+        unknown
       >;
   /**
    * The request method.
@@ -91,14 +91,13 @@ export interface Config {
   responseValidator?: (data: unknown) => Promise<unknown>;
 }
 
-type IsExactlyNeverOrNeverUndefined<T> = [T] extends [never]
-  ? true
-  : [T] extends [never | undefined]
-    ? [undefined] extends [T]
-      ? false
-      : true
-    : false;
+/**
+ * Arbitrary metadata passed through the `meta` request option.
+ */
+export type ClientMeta = Record<never, never>
+
+type IsNever<T> = [T] extends [never] ? true : false;
 
 export type OmitNever<T extends Record<string, unknown>> = {
-  [K in keyof T as IsExactlyNeverOrNeverUndefined<T[K]> extends true ? never : K]: T[K];
+  [K in keyof T as IsNever<T[K]> extends true ? never : K]: T[K];
 };

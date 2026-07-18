@@ -7,8 +7,11 @@ import argparse
 import json
 import os
 import pathlib
+import re
 import subprocess
 import sys
+import tempfile
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
@@ -17,11 +20,70 @@ from typing import Any
 DEFAULT_BASE_URL = "http://127.0.0.1:19000"
 DEFAULT_LOGIN = "admin"
 PROBE_PASSWORD_ENV = "IRONRAG_PROBE_PASSWORD"  # pragma: allowlist secret
+MCP_TOKEN_ENV = "IRONRAG_MCP_TOKEN"  # pragma: allowlist secret
+PROBE_QUESTION_ENV = "IRONRAG_PROBE_QUESTION"
 SCRIPT_DIR = pathlib.Path(__file__).resolve().parent
 REPO_ROOT = SCRIPT_DIR.parents[1]
 DEFAULT_SUITE_PATH = SCRIPT_DIR / "agent-surface-suite.json"
 DEFAULT_REPORTS_DIR = REPO_ROOT / "tmp" / "agent-surface-suite"
 PROBE_SCRIPT_PATH = SCRIPT_DIR / "profile-agent-surfaces.py"
+SAFE_CASE_ID_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
+SENSITIVE_PROBE_ENV_NAMES = frozenset(
+    {MCP_TOKEN_ENV, PROBE_PASSWORD_ENV, PROBE_QUESTION_ENV}
+)
+
+
+def sanitized_subprocess_environment(
+    source: Mapping[str, str] | None = None,
+) -> dict[str, str]:
+    environment = dict(os.environ if source is None else source)
+    for name in SENSITIVE_PROBE_ENV_NAMES:
+        environment.pop(name, None)
+    return environment
+
+
+def ensure_private_directory(path: pathlib.Path) -> None:
+    path.mkdir(mode=0o700, parents=True, exist_ok=True)
+    path.chmod(0o700)
+
+
+def write_private_text(path: pathlib.Path, content: str) -> None:
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    file_descriptor, temporary_path = tempfile.mkstemp(
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+        dir=path.parent,
+    )
+    try:
+        with os.fdopen(file_descriptor, "w", encoding="utf-8") as output:
+            os.fchmod(output.fileno(), 0o600)
+            output.write(content)
+            output.flush()
+            os.fsync(output.fileno())
+        os.replace(temporary_path, path)
+        path.chmod(0o600)
+    finally:
+        try:
+            os.unlink(temporary_path)
+        except FileNotFoundError:
+            pass
+
+
+def validate_case_id(value: Any) -> str:
+    if not isinstance(value, str) or SAFE_CASE_ID_PATTERN.fullmatch(value) is None:
+        raise ValueError(
+            "case id must be a 1-128 character slug containing only letters, digits, '.', '_', or '-'"
+        )
+    return value
+
+
+def case_report_path(reports_dir: pathlib.Path, case_id: Any) -> pathlib.Path:
+    safe_case_id = validate_case_id(case_id)
+    resolved_reports_dir = reports_dir.resolve()
+    candidate = resolved_reports_dir / f"{safe_case_id}.md"
+    if candidate.parent != resolved_reports_dir:
+        raise ValueError("case id resolves outside the reports directory")
+    return candidate
 
 
 @dataclass(frozen=True)
@@ -50,7 +112,6 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--login", default=DEFAULT_LOGIN)
     parser.add_argument("--library-id", required=True)
     parser.add_argument("--workspace-id")
-    parser.add_argument("--mcp-token")
     parser.add_argument("--reports-dir", default=str(DEFAULT_REPORTS_DIR))
     parser.add_argument("--output-path")
     return parser.parse_args(argv)
@@ -72,7 +133,6 @@ def build_case_command(
     login: str,
     library_id: str,
     workspace_id: str | None,
-    mcp_token: str | None,
     case: dict[str, Any],
     report_path: pathlib.Path,
 ) -> list[str]:
@@ -87,19 +147,16 @@ def build_case_command(
         library_id,
         "--output-path",
         str(report_path),
+        "--probe-input-stdin",
     ]
     if workspace_id:
         command.extend(["--workspace-id", workspace_id])
-    if mcp_token:
-        command.extend(["--mcp-token", mcp_token])
-
     scalar_fields = {
         "entityQuery": "--entity-query",
         "documentQuery": "--document-query",
         "documentLimit": "--document-limit",
         "graphLimit": "--graph-limit",
         "readLength": "--read-length",
-        "question": "--question",
         "assistantTopK": "--assistant-top-k",
         "assistantRuns": "--assistant-runs",
         "graphMinEntities": "--graph-min-entities",
@@ -143,21 +200,37 @@ def run_case(
     library_id: str,
     workspace_id: str | None,
     mcp_token: str | None,
+    probe_password: str,
     reports_dir: pathlib.Path,
     case: dict[str, Any],
 ) -> CaseResult:
-    case_id = str(case["id"])
-    report_path = reports_dir / f"{case_id}.md"
+    case_id = validate_case_id(case.get("id"))
+    report_path = case_report_path(reports_dir, case_id)
     command = build_case_command(
         base_url=base_url,
         login=login,
         library_id=library_id,
         workspace_id=workspace_id,
-        mcp_token=mcp_token,
         case=case,
         report_path=report_path,
     )
-    completed = subprocess.run(command, capture_output=True, text=True, check=False)
+    question = case.get("question")
+    control_payload = json.dumps(
+        {
+            "password": probe_password,
+            "mcpToken": mcp_token,
+            "question": str(question) if question is not None else None,
+        },
+        ensure_ascii=False,
+    )
+    completed = subprocess.run(
+        command,
+        input=control_payload,
+        capture_output=True,
+        text=True,
+        check=False,
+        env=sanitized_subprocess_environment(),
+    )
     stdout_lines = [line.strip() for line in completed.stdout.splitlines() if line.strip()]
     parsed_report_path = stdout_lines[-1] if stdout_lines else None
     stderr_summary = " ".join(line.strip() for line in completed.stderr.splitlines() if line.strip())
@@ -208,13 +281,15 @@ def render_suite_report(
         if not result.stderr_summary:
             continue
         report += f"- `{result.case_id}`: {result.stderr_summary}\n"
-    output_path.write_text(report, encoding="utf-8")
+    write_private_text(output_path, report)
 
 
 def main(argv: list[str]) -> int:
     args = parse_args(argv)
-    if not os.environ.get(PROBE_PASSWORD_ENV):
+    probe_password = os.environ.get(PROBE_PASSWORD_ENV)
+    if not probe_password:
         raise SystemExit(f"{PROBE_PASSWORD_ENV} is required")
+    mcp_token = os.environ.get(MCP_TOKEN_ENV)
     suite_path = pathlib.Path(args.suite_path)
     suite_data = json.loads(suite_path.read_text(encoding="utf-8"))
     cases = suite_data.get("cases")
@@ -222,7 +297,14 @@ def main(argv: list[str]) -> int:
         raise SystemExit("suite must define a non-empty 'cases' list")
 
     reports_dir = pathlib.Path(args.reports_dir)
-    reports_dir.mkdir(parents=True, exist_ok=True)
+    ensure_private_directory(reports_dir)
+    try:
+        for case in cases:
+            if not isinstance(case, dict):
+                raise ValueError("suite cases must be JSON objects")
+            case_report_path(reports_dir, case.get("id"))
+    except ValueError as error:
+        raise SystemExit(str(error)) from error
     output_path = (
         pathlib.Path(args.output_path)
         if args.output_path
@@ -235,7 +317,8 @@ def main(argv: list[str]) -> int:
             login=args.login,
             library_id=args.library_id,
             workspace_id=args.workspace_id,
-            mcp_token=args.mcp_token,
+            mcp_token=mcp_token,
+            probe_password=probe_password,
             reports_dir=reports_dir,
             case=case,
         )

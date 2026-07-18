@@ -3,8 +3,8 @@
 import { type DefaultError, type InfiniteData, infiniteQueryOptions, queryOptions, type UseMutationOptions } from '@tanstack/react-query';
 
 import { client } from '../client.gen';
-import { Admin, Ai, Audit, Automation, Billing, Catalog, Content, Iam, Ingest, Knowledge, Ops, type Options, Query, Runtime, Search, System, Webhooks } from '../sdk.gen';
-import type { AppendContentDocumentData, AppendContentDocumentResponse, BatchCancelContentDocumentsData, BatchCancelContentDocumentsResponse, BatchDeleteContentDocumentsData, BatchDeleteContentDocumentsResponse, BatchReprocessContentDocumentsData, BatchReprocessContentDocumentsResponse, BulkIngestQueueActionData, BulkIngestQueueActionResponse2, CancelContentWebIngestRunData, CancelContentWebIngestRunResponse, CancelIngestQueueJobData, CancelIngestQueueJobResponse, CreateAiAccountData, CreateAiAccountResponse, CreateAiLibraryBindingData, CreateAiLibraryBindingResponse, CreateAiModelData, CreateAiModelResponse, CreateAiPriceOverrideData, CreateAiPriceOverrideResponse, CreateAiProviderData, CreateAiProviderResponse, CreateCatalogLibraryData, CreateCatalogLibraryResponse, CreateCatalogWorkspaceData, CreateCatalogWorkspaceResponse, CreateContentDocumentData, CreateContentDocumentResponse, CreateContentMutationData, CreateContentMutationResponse, CreateContentWebIngestRunData, CreateContentWebIngestRunResponse, CreateIamGrantData, CreateIamGrantResponse, CreateIamUserData, CreateIamUserResponse, CreateQuerySessionData, CreateQuerySessionResponse, CreateQuerySessionTurnData, CreateQuerySessionTurnResponse, CreateWebhookSubscriptionData, CreateWebhookSubscriptionResponse, DeleteAiAccountData, DeleteAiLibraryBindingData, DeleteAiModelData, DeleteAiPriceOverrideData, DeleteAiProviderData, DeleteCatalogLibraryData, DeleteCatalogLibraryResponse, DeleteCatalogWorkspaceData, DeleteCatalogWorkspaceResponse, DeleteContentDocumentData, DeleteContentDocumentResponse, DeleteIamTokenData, DeleteIamTokenResponse, DeleteWebhookSubscriptionData, DeleteWebhookSubscriptionResponse, EditContentDocumentData, EditContentDocumentResponse, ExportLibrarySnapshotData, ExportLibrarySnapshotResponse, ExportWorkspaceSnapshotData, ExportWorkspaceSnapshotResponse, GetAdminSurfaceData, GetAdminSurfaceResponse, GetAssistantSystemPromptData, GetAssistantSystemPromptResponse, GetAsyncOperationData, GetAsyncOperationResponse, GetBillingExecutionCostData, GetBillingExecutionCostResponse, GetBootstrapStatusData, GetBootstrapStatusResponse, GetCatalogLibraryData, GetCatalogLibraryResponse, GetCatalogLibraryRetrievalConfigData, GetCatalogLibraryRetrievalConfigResponse, GetCatalogWorkspaceData, GetCatalogWorkspaceResponse, GetContentDocumentData, GetContentDocumentHeadData, GetContentDocumentHeadResponse, GetContentDocumentResponse, GetContentDocumentSourceData, GetContentDocumentSourceResponse, GetContentMutationData, GetContentMutationResponse, GetContentWebIngestRunData, GetContentWebIngestRunResponse, GetHealthData, GetHealthResponse, GetIamMeData, GetIamMeResponse, GetIamSessionData, GetIamSessionResponse, GetIamUserAccessData, GetIamUserAccessResponse, GetIngestAttemptData, GetIngestAttemptResponse, GetIngestJobData, GetIngestJobResponse, GetKnowledgeContextBundleData, GetKnowledgeContextBundleResponse, GetKnowledgeDocumentData, GetKnowledgeDocumentResponse, GetKnowledgeEntityData, GetKnowledgeEntityResponse, GetKnowledgeGraphWorkbenchData, GetKnowledgeGraphWorkbenchResponse, GetKnowledgeLibrarySummaryData, GetKnowledgeLibrarySummaryResponse, GetKnowledgeRelationData, GetKnowledgeRelationResponse, GetLibraryCostSummaryData, GetLibraryCostSummaryResponse, GetLibraryDashboardData, GetLibraryDashboardResponse, GetLibraryStateData, GetLibraryStateResponse, GetMcpCapabilitiesData, GetMcpCapabilitiesResponse, GetMcpDiagnosticsCapabilitiesData, GetMcpDiagnosticsCapabilitiesResponse, GetOpenApiContractData, GetOpenApiContractResponse, GetQueryExecutionData, GetQueryExecutionLlmContextData, GetQueryExecutionLlmContextResponse, GetQueryExecutionResponse, GetQuerySessionData, GetQuerySessionResponse, GetReadinessData, GetReadinessError, GetReadinessResponse, GetReleaseUpdateData, GetReleaseUpdateResponse, GetRuntimeExecutionData, GetRuntimeExecutionResponse, GetRuntimeExecutionTraceData, GetRuntimeExecutionTraceResponse, GetVersionData, GetVersionResponse, GetWebhookSubscriptionData, GetWebhookSubscriptionResponse, GetWorkspaceCostSummaryData, GetWorkspaceCostSummaryResponse, ImportLibrarySnapshotData, ImportLibrarySnapshotResponse, ImportWorkspaceSnapshotData, ImportWorkspaceSnapshotResponse, ListAiAccountsData, ListAiAccountsResponse, ListAiLibraryBindingsData, ListAiLibraryBindingsResponse, ListAiModelsData, ListAiModelsResponse, ListAiPricesData, ListAiPricesResponse, ListAiProvidersData, ListAiProvidersResponse, ListAuditEventsData, ListAuditEventsResponse, ListBillingChargesData, ListBillingChargesResponse, ListBillingLibraryDocumentCostsData, ListBillingLibraryDocumentCostsResponse, ListBillingProviderCallsData, ListBillingProviderCallsResponse, ListCatalogLibrariesData, ListCatalogLibrariesResponse, ListCatalogWorkspacesData, ListCatalogWorkspacesResponse, ListChunksData, ListChunksResponse, ListContentDocumentsData, ListContentDocumentsResponse, ListContentMutationsData, ListContentMutationsResponse, ListContentPreparedSegmentsData, ListContentPreparedSegmentsResponse, ListContentRevisionsData, ListContentRevisionsResponse, ListContentTechnicalFactsData, ListContentTechnicalFactsResponse, ListContentWebIngestRunPagesData, ListContentWebIngestRunPagesResponse, ListContentWebIngestRunsData, ListContentWebIngestRunsResponse, ListIamGrantsData, ListIamGrantsResponse, ListIamTokensData, ListIamTokensResponse, ListIamUsersData, ListIamUsersResponse, ListIngestJobsData, ListIngestJobsResponse, ListIngestQueueData, ListIngestQueueResponse, ListIngestStageEventsData, ListIngestStageEventsResponse, ListKnowledgeContextBundlesData, ListKnowledgeContextBundlesResponse, ListKnowledgeDocumentsData, ListKnowledgeDocumentsResponse, ListKnowledgeLibraryGenerationsData, ListKnowledgeLibraryGenerationsResponse, ListQuerySessionsData, ListQuerySessionsResponse, ListWebhookDeliveryAttemptsData, ListWebhookDeliveryAttemptsResponse, ListWebhookSubscriptionsData, ListWebhookSubscriptionsResponse, LoginIamSessionData, LoginIamSessionResponse, LogoutIamSessionData, MintIamTokenData, MintIamTokenResponse, MoveIngestQueueJobData, MoveIngestQueueJobResponse, PatchContentDocumentMetadataData, PatchContentDocumentMetadataResponse, PauseIngestQueueJobData, PauseIngestQueueJobResponse, PostBootstrapSetupData, PostBootstrapSetupResponse, PostMcpDiagnosticsRequestData, PostMcpRequestData, ReplaceContentDocumentData, ReplaceContentDocumentResponse, ReprocessContentDocumentData, ReprocessContentDocumentResponse, ResolveIamSessionData, ResolveIamSessionResponse, ResumeIngestQueueJobData, ResumeIngestQueueJobResponse, RetryIngestQueueJobData, RetryIngestQueueJobResponse, RevokeIamGrantData, RevokeIamGrantResponse, RevokeIamTokenData, RevokeIamTokenResponse, SearchDocumentsData, SearchDocumentsResponse, SearchKnowledgeDocumentsData, SearchKnowledgeDocumentsResponse, SetIamUserAccessData, SetIamUserAccessResponse, SetIamUserRoleData, SetIamUserRoleResponse, UpdateAiAccountData, UpdateAiAccountResponse, UpdateAiLibraryBindingData, UpdateAiLibraryBindingResponse, UpdateAiModelData, UpdateAiModelResponse, UpdateAiPriceOverrideData, UpdateAiPriceOverrideResponse, UpdateAiProviderData, UpdateAiProviderResponse, UpdateCatalogLibraryData, UpdateCatalogLibraryRecognitionPolicyData, UpdateCatalogLibraryRecognitionPolicyResponse, UpdateCatalogLibraryResponse, UpdateCatalogLibraryRetrievalConfigData, UpdateCatalogLibraryRetrievalConfigResponse, UpdateCatalogLibraryWebIngestPolicyData, UpdateCatalogLibraryWebIngestPolicyResponse, UpdateWebhookSubscriptionData, UpdateWebhookSubscriptionResponse, UploadContentDocumentData, UploadContentDocumentResponse, ValidateAiLibraryBindingData, ValidateAiLibraryBindingResponse } from '../types.gen';
+import { Admin, Ai, Audit, Automation, Billing, Catalog, Content, Iam, Ingest, Knowledge, Ops, type Options, Query, Runtime, System, Webhooks } from '../sdk.gen';
+import type { BatchCancelContentDocumentsData, BatchCancelContentDocumentsResponse, BatchDeleteContentDocumentsData, BatchDeleteContentDocumentsResponse, BatchReprocessContentDocumentsData, BatchReprocessContentDocumentsResponse, BulkIngestQueueActionData, BulkIngestQueueActionResponse2, CancelContentWebIngestRunData, CancelContentWebIngestRunResponse, CancelIngestQueueJobData, CancelIngestQueueJobResponse, CreateAiAccountData, CreateAiAccountResponse, CreateAiBindingValidationData, CreateAiBindingValidationResponse, CreateAiLibraryBindingData, CreateAiLibraryBindingResponse, CreateAiModelData, CreateAiModelResponse, CreateAiPriceOverrideData, CreateAiPriceOverrideResponse, CreateAiProviderData, CreateAiProviderResponse, CreateCatalogLibraryData, CreateCatalogLibraryResponse, CreateCatalogWorkspaceData, CreateCatalogWorkspaceResponse, CreateContentDocumentData, CreateContentDocumentResponse, CreateContentRevisionData, CreateContentRevisionResponse, CreateContentWebIngestRunData, CreateContentWebIngestRunResponse, CreateIamUserData, CreateIamUserResponse, CreateQuerySessionData, CreateQuerySessionResponse, CreateQuerySessionTurnData, CreateQuerySessionTurnResponse, CreateWebhookSubscriptionData, CreateWebhookSubscriptionResponse, DeleteAiAccountData, DeleteAiAccountResponse, DeleteAiLibraryBindingData, DeleteAiLibraryBindingResponse, DeleteAiModelData, DeleteAiModelResponse, DeleteAiPriceOverrideData, DeleteAiPriceOverrideResponse, DeleteAiProviderData, DeleteAiProviderResponse, DeleteCatalogLibraryData, DeleteCatalogLibraryResponse, DeleteCatalogWorkspaceData, DeleteCatalogWorkspaceResponse, DeleteContentDocumentData, DeleteContentDocumentResponse, DeleteIamTokenData, DeleteIamTokenResponse, DeleteIamUserData, DeleteIamUserResponse, DeleteQuerySessionData, DeleteQuerySessionResponse, DeleteWebhookSubscriptionData, DeleteWebhookSubscriptionResponse, ExportCatalogWorkspaceSnapshotData, ExportCatalogWorkspaceSnapshotResponse, ExportLibrarySnapshotData, ExportLibrarySnapshotResponse, GetAdminSurfaceData, GetAdminSurfaceResponse, GetAiAccountData, GetAiAccountResponse, GetAiBindingValidationData, GetAiBindingValidationResponse, GetAiLibraryBindingData, GetAiLibraryBindingResponse, GetAiModelData, GetAiModelResponse, GetAiPriceOverrideData, GetAiPriceOverrideResponse, GetAiProviderData, GetAiProviderResponse, GetAssistantSystemPromptData, GetAssistantSystemPromptResponse, GetAsyncOperationData, GetAsyncOperationResponse, GetBillingExecutionCostData, GetBillingExecutionCostResponse, GetBootstrapStatusData, GetBootstrapStatusResponse, GetCatalogLibraryData, GetCatalogLibraryResponse, GetCatalogLibraryRetrievalConfigData, GetCatalogLibraryRetrievalConfigResponse, GetCatalogWorkspaceData, GetCatalogWorkspaceResponse, GetContentDocumentData, GetContentDocumentHeadData, GetContentDocumentHeadResponse, GetContentDocumentResponse, GetContentDocumentSourceData, GetContentDocumentSourceResponse, GetContentWebIngestRunData, GetContentWebIngestRunResponse, GetHealthData, GetHealthResponse, GetIamMeData, GetIamMeResponse, GetIamSessionData, GetIamSessionResponse, GetIamTokenData, GetIamTokenResponse, GetIamUserAccessData, GetIamUserAccessResponse, GetIngestAttemptData, GetIngestAttemptResponse, GetIngestJobData, GetIngestJobResponse, GetKnowledgeContextBundleData, GetKnowledgeContextBundleResponse, GetKnowledgeEntityData, GetKnowledgeEntityResponse, GetKnowledgeGraphWorkbenchData, GetKnowledgeGraphWorkbenchResponse, GetKnowledgeLibrarySummaryData, GetKnowledgeLibrarySummaryResponse, GetKnowledgeRelationData, GetKnowledgeRelationResponse, GetLibraryCostSummaryData, GetLibraryCostSummaryResponse, GetLibraryDashboardData, GetLibraryDashboardResponse, GetLibraryStateData, GetLibraryStateResponse, GetMcpCapabilitiesData, GetMcpCapabilitiesResponse, GetMcpDiagnosticsCapabilitiesData, GetMcpDiagnosticsCapabilitiesResponse, GetOpenApiContractData, GetOpenApiContractResponse, GetQueryExecutionData, GetQueryExecutionLlmContextData, GetQueryExecutionLlmContextResponse, GetQueryExecutionResponse, GetQuerySessionData, GetQuerySessionResponse, GetQuerySessionTurnData, GetQuerySessionTurnResponse, GetReadinessData, GetReadinessError, GetReadinessResponse, GetReleaseUpdateData, GetReleaseUpdateResponse, GetRuntimeExecutionData, GetRuntimeExecutionResponse, GetRuntimeExecutionTraceData, GetRuntimeExecutionTraceResponse, GetVersionData, GetVersionResponse, GetWebhookSubscriptionData, GetWebhookSubscriptionResponse, GetWorkspaceCostSummaryData, GetWorkspaceCostSummaryResponse, ImportCatalogWorkspaceSnapshotData, ImportCatalogWorkspaceSnapshotResponse, ImportLibrarySnapshotData, ImportLibrarySnapshotResponse, ListAiAccountsData, ListAiAccountsResponse, ListAiBindingValidationsData, ListAiBindingValidationsResponse, ListAiLibraryBindingsData, ListAiLibraryBindingsResponse, ListAiModelsData, ListAiModelsResponse, ListAiPricesData, ListAiPricesResponse, ListAiProvidersData, ListAiProvidersResponse, ListAuditEventsData, ListAuditEventsResponse, ListBillingChargesData, ListBillingChargesResponse, ListBillingLibraryDocumentCostsData, ListBillingLibraryDocumentCostsResponse, ListBillingProviderCallsData, ListBillingProviderCallsResponse, ListCatalogLibrariesData, ListCatalogLibrariesResponse, ListCatalogWorkspacesData, ListCatalogWorkspacesResponse, ListChunksData, ListChunksResponse, ListContentDocumentsData, ListContentDocumentsResponse, ListContentPreparedSegmentsData, ListContentPreparedSegmentsResponse, ListContentRevisionsData, ListContentRevisionsResponse, ListContentTechnicalFactsData, ListContentTechnicalFactsResponse, ListContentWebIngestRunPagesData, ListContentWebIngestRunPagesResponse, ListContentWebIngestRunsData, ListContentWebIngestRunsResponse, ListIamTokensData, ListIamTokensResponse, ListIamUsersData, ListIamUsersResponse, ListIngestJobAttemptsData, ListIngestJobAttemptsResponse, ListIngestJobsData, ListIngestJobsResponse, ListIngestQueueData, ListIngestQueueResponse, ListIngestStageEventsData, ListIngestStageEventsResponse, ListKnowledgeContextBundlesData, ListKnowledgeContextBundlesResponse, ListKnowledgeLibraryGenerationsData, ListKnowledgeLibraryGenerationsResponse, ListKnowledgeRelationsData, ListKnowledgeRelationsResponse, ListQuerySessionsData, ListQuerySessionsResponse, ListQuerySessionTurnsData, ListQuerySessionTurnsResponse, ListWebhookDeliveryAttemptsData, ListWebhookDeliveryAttemptsResponse, ListWebhookSubscriptionsData, ListWebhookSubscriptionsResponse, LoginIamSessionData, LoginIamSessionResponse, LogoutIamSessionData, MintIamTokenData, MintIamTokenResponse, MoveIngestQueueJobData, MoveIngestQueueJobResponse, PatchContentDocumentMetadataData, PatchContentDocumentMetadataResponse, PatchIamTokenData, PatchIamTokenResponse, PauseIngestQueueJobData, PauseIngestQueueJobResponse, PostBootstrapSetupData, PostBootstrapSetupResponse, PostMcpDiagnosticsRequestData, PostMcpRequestData, RenameQuerySessionData, RenameQuerySessionResponse, ReprocessContentDocumentData, ReprocessContentDocumentResponse, ResolveIamSessionData, ResolveIamSessionResponse, ResumeIngestQueueJobData, ResumeIngestQueueJobResponse, RetryIngestQueueJobData, RetryIngestQueueJobResponse, RevokeIamTokenData, RevokeIamTokenResponse, SearchKnowledgeLibraryData, SearchKnowledgeLibraryResponse, SetIamUserAccessData, SetIamUserAccessResponse, SetIamUserRoleData, SetIamUserRoleResponse, UpdateAiAccountData, UpdateAiAccountResponse, UpdateAiLibraryBindingData, UpdateAiLibraryBindingResponse, UpdateAiModelData, UpdateAiModelResponse, UpdateAiPriceOverrideData, UpdateAiPriceOverrideResponse, UpdateAiProviderData, UpdateAiProviderResponse, UpdateCatalogLibraryData, UpdateCatalogLibraryRecognitionPolicyData, UpdateCatalogLibraryRecognitionPolicyResponse, UpdateCatalogLibraryResponse, UpdateCatalogLibraryRetrievalConfigData, UpdateCatalogLibraryRetrievalConfigResponse, UpdateCatalogLibraryWebIngestPolicyData, UpdateCatalogLibraryWebIngestPolicyResponse, UpdateCatalogWorkspaceData, UpdateCatalogWorkspaceResponse, UpdateWebhookSubscriptionData, UpdateWebhookSubscriptionResponse } from '../types.gen';
 
 export type QueryKey<TOptions extends Options> = [
     Pick<TOptions, 'baseUrl' | 'body' | 'headers' | 'path' | 'query'> & {
@@ -17,7 +17,7 @@ export type QueryKey<TOptions extends Options> = [
 const createQueryKey = <TOptions extends Options>(id: string, options?: TOptions, infinite?: boolean, tags?: ReadonlyArray<string>): [
     QueryKey<TOptions>[0]
 ] => {
-    const params: QueryKey<TOptions>[0] = { _id: id, baseUrl: options?.baseUrl || (options?.client ?? client).getConfig().baseUrl } as QueryKey<TOptions>[0];
+    const params: QueryKey<TOptions>[0] = { _id: id, baseUrl: options?.baseUrl ?? (options?.client ?? client).getConfig().baseUrl } as QueryKey<TOptions>[0];
     if (infinite) {
         params._infinite = infinite;
     }
@@ -103,8 +103,8 @@ export const createAiAccountMutation = (options?: Partial<Options<CreateAiAccoun
  *
  * Manages stored AI provider accounts used by runtime bindings. Use these endpoints from the admin UI or automation when registering, rotating, or listing provider secrets without exposing secret material in responses. Call it to remove or revoke a resource. Destructive operations are authorized, audited, and may return an asynchronous operation when cleanup continues in the background.
  */
-export const deleteAiAccountMutation = (options?: Partial<Options<DeleteAiAccountData>>): UseMutationOptions<unknown, DefaultError, Options<DeleteAiAccountData>> => {
-    const mutationOptions: UseMutationOptions<unknown, DefaultError, Options<DeleteAiAccountData>> = {
+export const deleteAiAccountMutation = (options?: Partial<Options<DeleteAiAccountData>>): UseMutationOptions<DeleteAiAccountResponse, DefaultError, Options<DeleteAiAccountData>> => {
+    const mutationOptions: UseMutationOptions<DeleteAiAccountResponse, DefaultError, Options<DeleteAiAccountData>> = {
         mutationFn: async (fnOptions) => {
             const { data } = await Ai.deleteAiAccount({
                 ...options,
@@ -116,6 +116,26 @@ export const deleteAiAccountMutation = (options?: Partial<Options<DeleteAiAccoun
     };
     return mutationOptions;
 };
+
+export const getAiAccountQueryKey = (options: Options<GetAiAccountData>) => createQueryKey('getAiAccount', options);
+
+/**
+ * Get ai account.
+ *
+ * Manages stored AI provider accounts used by runtime bindings. Use these endpoints from the admin UI or automation when registering, rotating, or listing provider secrets without exposing secret material in responses. Call it when the caller already has the resource identifier and needs the latest authorized server view.
+ */
+export const getAiAccountOptions = (options: Options<GetAiAccountData>) => queryOptions<GetAiAccountResponse, DefaultError, GetAiAccountResponse, ReturnType<typeof getAiAccountQueryKey>>({
+    queryFn: async ({ queryKey, signal }) => {
+        const { data } = await Ai.getAiAccount({
+            ...options,
+            ...queryKey[0],
+            signal,
+            throwOnError: true
+        });
+        return data;
+    },
+    queryKey: getAiAccountQueryKey(options)
+});
 
 /**
  * Update ai account.
@@ -180,8 +200,8 @@ export const createAiLibraryBindingMutation = (options?: Partial<Options<CreateA
  *
  * Manages library-level AI runtime bindings. A binding assigns an account and model to a purpose (embedding, query answering, graph extraction, and other AI purposes) for one library, with tuning parameters (system prompt, temperature, top-p, output token budget) stored inline. Call it to remove or revoke a resource. Destructive operations are authorized, audited, and may return an asynchronous operation when cleanup continues in the background.
  */
-export const deleteAiLibraryBindingMutation = (options?: Partial<Options<DeleteAiLibraryBindingData>>): UseMutationOptions<unknown, DefaultError, Options<DeleteAiLibraryBindingData>> => {
-    const mutationOptions: UseMutationOptions<unknown, DefaultError, Options<DeleteAiLibraryBindingData>> = {
+export const deleteAiLibraryBindingMutation = (options?: Partial<Options<DeleteAiLibraryBindingData>>): UseMutationOptions<DeleteAiLibraryBindingResponse, DefaultError, Options<DeleteAiLibraryBindingData>> => {
+    const mutationOptions: UseMutationOptions<DeleteAiLibraryBindingResponse, DefaultError, Options<DeleteAiLibraryBindingData>> = {
         mutationFn: async (fnOptions) => {
             const { data } = await Ai.deleteAiLibraryBinding({
                 ...options,
@@ -193,6 +213,26 @@ export const deleteAiLibraryBindingMutation = (options?: Partial<Options<DeleteA
     };
     return mutationOptions;
 };
+
+export const getAiLibraryBindingQueryKey = (options: Options<GetAiLibraryBindingData>) => createQueryKey('getAiLibraryBinding', options);
+
+/**
+ * Get ai library binding.
+ *
+ * Manages library-level AI runtime bindings. A binding assigns an account and model to a purpose (embedding, query answering, graph extraction, and other AI purposes) for one library, with tuning parameters (system prompt, temperature, top-p, output token budget) stored inline. Call it when the caller already has the resource identifier and needs the latest authorized server view.
+ */
+export const getAiLibraryBindingOptions = (options: Options<GetAiLibraryBindingData>) => queryOptions<GetAiLibraryBindingResponse, DefaultError, GetAiLibraryBindingResponse, ReturnType<typeof getAiLibraryBindingQueryKey>>({
+    queryFn: async ({ queryKey, signal }) => {
+        const { data } = await Ai.getAiLibraryBinding({
+            ...options,
+            ...queryKey[0],
+            signal,
+            throwOnError: true
+        });
+        return data;
+    },
+    queryKey: getAiLibraryBindingQueryKey(options)
+});
 
 /**
  * Update ai library binding.
@@ -213,15 +253,40 @@ export const updateAiLibraryBindingMutation = (options?: Partial<Options<UpdateA
     return mutationOptions;
 };
 
+export const listAiBindingValidationsQueryKey = (options: Options<ListAiBindingValidationsData>) => createQueryKey('listAiBindingValidations', options);
+
 /**
- * Validate ai library binding.
+ * List ai binding validations.
+ *
+ * Manages library-level AI runtime bindings. A binding assigns an account and model to a purpose (embedding, query answering, graph extraction, and other AI purposes) for one library, with tuning parameters (system prompt, temperature, top-p, output token budget) stored inline. Call it for paginated or filtered table views. Prefer server-side filters and cursors over fetching broad result sets into the client.
+ */
+export const listAiBindingValidationsOptions = (options: Options<ListAiBindingValidationsData>) => queryOptions<ListAiBindingValidationsResponse, DefaultError, ListAiBindingValidationsResponse, ReturnType<typeof listAiBindingValidationsQueryKey>>({
+    queryFn: async ({ queryKey, signal }) => {
+        const { data } = await Ai.listAiBindingValidations({
+            ...options,
+            ...queryKey[0],
+            signal,
+            throwOnError: true
+        });
+        return data;
+    },
+    queryKey: listAiBindingValidationsQueryKey(options)
+});
+
+/**
+ * Creates a binding-validation attempt. Resource-shaped replacement for the
+ * former RPC-verb `POST .../validate`: the handler already created a real
+ * record with a `pending` → `succeeded`/`failed` lifecycle (`ai_binding_validation`,
+ * unchanged by this redesign); the defect was the unpollable verb-shaped
+ * form, not the underlying action. `Location` points at the created
+ * validation's own item-read endpoint below.
  *
  * Manages library-level AI runtime bindings. A binding assigns an account and model to a purpose (embedding, query answering, graph extraction, and other AI purposes) for one library, with tuning parameters (system prompt, temperature, top-p, output token budget) stored inline. Call it to create work or submit a command. Some commands complete synchronously, while ingest, mutation, and runtime work can continue asynchronously.
  */
-export const validateAiLibraryBindingMutation = (options?: Partial<Options<ValidateAiLibraryBindingData>>): UseMutationOptions<ValidateAiLibraryBindingResponse, DefaultError, Options<ValidateAiLibraryBindingData>> => {
-    const mutationOptions: UseMutationOptions<ValidateAiLibraryBindingResponse, DefaultError, Options<ValidateAiLibraryBindingData>> = {
+export const createAiBindingValidationMutation = (options?: Partial<Options<CreateAiBindingValidationData>>): UseMutationOptions<CreateAiBindingValidationResponse, DefaultError, Options<CreateAiBindingValidationData>> => {
+    const mutationOptions: UseMutationOptions<CreateAiBindingValidationResponse, DefaultError, Options<CreateAiBindingValidationData>> = {
         mutationFn: async (fnOptions) => {
-            const { data } = await Ai.validateAiLibraryBinding({
+            const { data } = await Ai.createAiBindingValidation({
                 ...options,
                 ...fnOptions,
                 throwOnError: true
@@ -231,6 +296,26 @@ export const validateAiLibraryBindingMutation = (options?: Partial<Options<Valid
     };
     return mutationOptions;
 };
+
+export const getAiBindingValidationQueryKey = (options: Options<GetAiBindingValidationData>) => createQueryKey('getAiBindingValidation', options);
+
+/**
+ * Get ai binding validation.
+ *
+ * Manages library-level AI runtime bindings. A binding assigns an account and model to a purpose (embedding, query answering, graph extraction, and other AI purposes) for one library, with tuning parameters (system prompt, temperature, top-p, output token budget) stored inline. Call it when the caller already has the resource identifier and needs the latest authorized server view.
+ */
+export const getAiBindingValidationOptions = (options: Options<GetAiBindingValidationData>) => queryOptions<GetAiBindingValidationResponse, DefaultError, GetAiBindingValidationResponse, ReturnType<typeof getAiBindingValidationQueryKey>>({
+    queryFn: async ({ queryKey, signal }) => {
+        const { data } = await Ai.getAiBindingValidation({
+            ...options,
+            ...queryKey[0],
+            signal,
+            throwOnError: true
+        });
+        return data;
+    },
+    queryKey: getAiBindingValidationQueryKey(options)
+});
 
 export const listAiModelsQueryKey = (options?: Options<ListAiModelsData>) => createQueryKey('listAiModels', options);
 
@@ -272,12 +357,15 @@ export const createAiModelMutation = (options?: Partial<Options<CreateAiModelDat
 };
 
 /**
- * Delete ai model.
+ * Real hard delete; 409 when a price override or binding still references
+ * this model. The reversible pause is `PATCH {lifecycleState:"disabled"}`
+ * above — the two are distinct operations, not two paths to the same
+ * result.
  *
  * Reads the AI provider catalog used by the admin configuration screens. Operators use this metadata to choose providers, models, capabilities, and binding targets. Call it to remove or revoke a resource. Destructive operations are authorized, audited, and may return an asynchronous operation when cleanup continues in the background.
  */
-export const deleteAiModelMutation = (options?: Partial<Options<DeleteAiModelData>>): UseMutationOptions<unknown, DefaultError, Options<DeleteAiModelData>> => {
-    const mutationOptions: UseMutationOptions<unknown, DefaultError, Options<DeleteAiModelData>> = {
+export const deleteAiModelMutation = (options?: Partial<Options<DeleteAiModelData>>): UseMutationOptions<DeleteAiModelResponse, DefaultError, Options<DeleteAiModelData>> => {
+    const mutationOptions: UseMutationOptions<DeleteAiModelResponse, DefaultError, Options<DeleteAiModelData>> = {
         mutationFn: async (fnOptions) => {
             const { data } = await Ai.deleteAiModel({
                 ...options,
@@ -290,6 +378,26 @@ export const deleteAiModelMutation = (options?: Partial<Options<DeleteAiModelDat
     return mutationOptions;
 };
 
+export const getAiModelQueryKey = (options: Options<GetAiModelData>) => createQueryKey('getAiModel', options);
+
+/**
+ * Get ai model.
+ *
+ * Reads the AI provider catalog used by the admin configuration screens. Operators use this metadata to choose providers, models, capabilities, and binding targets. Call it when the caller already has the resource identifier and needs the latest authorized server view.
+ */
+export const getAiModelOptions = (options: Options<GetAiModelData>) => queryOptions<GetAiModelResponse, DefaultError, GetAiModelResponse, ReturnType<typeof getAiModelQueryKey>>({
+    queryFn: async ({ queryKey, signal }) => {
+        const { data } = await Ai.getAiModel({
+            ...options,
+            ...queryKey[0],
+            signal,
+            throwOnError: true
+        });
+        return data;
+    },
+    queryKey: getAiModelQueryKey(options)
+});
+
 /**
  * Update ai model.
  *
@@ -299,6 +407,83 @@ export const updateAiModelMutation = (options?: Partial<Options<UpdateAiModelDat
     const mutationOptions: UseMutationOptions<UpdateAiModelResponse, DefaultError, Options<UpdateAiModelData>> = {
         mutationFn: async (fnOptions) => {
             const { data } = await Ai.updateAiModel({
+                ...options,
+                ...fnOptions,
+                throwOnError: true
+            });
+            return data;
+        }
+    };
+    return mutationOptions;
+};
+
+/**
+ * Create ai price override.
+ *
+ * Manages AI price catalog overrides. Billing and cost dashboards use these rows to attribute provider calls and estimate execution cost. Call it to create work or submit a command. Some commands complete synchronously, while ingest, mutation, and runtime work can continue asynchronously.
+ */
+export const createAiPriceOverrideMutation = (options?: Partial<Options<CreateAiPriceOverrideData>>): UseMutationOptions<CreateAiPriceOverrideResponse, DefaultError, Options<CreateAiPriceOverrideData>> => {
+    const mutationOptions: UseMutationOptions<CreateAiPriceOverrideResponse, DefaultError, Options<CreateAiPriceOverrideData>> = {
+        mutationFn: async (fnOptions) => {
+            const { data } = await Ai.createAiPriceOverride({
+                ...options,
+                ...fnOptions,
+                throwOnError: true
+            });
+            return data;
+        }
+    };
+    return mutationOptions;
+};
+
+/**
+ * Delete ai price override.
+ *
+ * Manages AI price catalog overrides. Billing and cost dashboards use these rows to attribute provider calls and estimate execution cost. Call it to remove or revoke a resource. Destructive operations are authorized, audited, and may return an asynchronous operation when cleanup continues in the background.
+ */
+export const deleteAiPriceOverrideMutation = (options?: Partial<Options<DeleteAiPriceOverrideData>>): UseMutationOptions<DeleteAiPriceOverrideResponse, DefaultError, Options<DeleteAiPriceOverrideData>> => {
+    const mutationOptions: UseMutationOptions<DeleteAiPriceOverrideResponse, DefaultError, Options<DeleteAiPriceOverrideData>> = {
+        mutationFn: async (fnOptions) => {
+            const { data } = await Ai.deleteAiPriceOverride({
+                ...options,
+                ...fnOptions,
+                throwOnError: true
+            });
+            return data;
+        }
+    };
+    return mutationOptions;
+};
+
+export const getAiPriceOverrideQueryKey = (options: Options<GetAiPriceOverrideData>) => createQueryKey('getAiPriceOverride', options);
+
+/**
+ * Get ai price override.
+ *
+ * Manages AI price catalog overrides. Billing and cost dashboards use these rows to attribute provider calls and estimate execution cost. Call it when the caller already has the resource identifier and needs the latest authorized server view.
+ */
+export const getAiPriceOverrideOptions = (options: Options<GetAiPriceOverrideData>) => queryOptions<GetAiPriceOverrideResponse, DefaultError, GetAiPriceOverrideResponse, ReturnType<typeof getAiPriceOverrideQueryKey>>({
+    queryFn: async ({ queryKey, signal }) => {
+        const { data } = await Ai.getAiPriceOverride({
+            ...options,
+            ...queryKey[0],
+            signal,
+            throwOnError: true
+        });
+        return data;
+    },
+    queryKey: getAiPriceOverrideQueryKey(options)
+});
+
+/**
+ * Update ai price override.
+ *
+ * Manages AI price catalog overrides. Billing and cost dashboards use these rows to attribute provider calls and estimate execution cost. Call it to replace or partially update server-owned configuration. The request body is validated before changes are persisted.
+ */
+export const updateAiPriceOverrideMutation = (options?: Partial<Options<UpdateAiPriceOverrideData>>): UseMutationOptions<UpdateAiPriceOverrideResponse, DefaultError, Options<UpdateAiPriceOverrideData>> => {
+    const mutationOptions: UseMutationOptions<UpdateAiPriceOverrideResponse, DefaultError, Options<UpdateAiPriceOverrideData>> = {
+        mutationFn: async (fnOptions) => {
+            const { data } = await Ai.updateAiPriceOverride({
                 ...options,
                 ...fnOptions,
                 throwOnError: true
@@ -328,63 +513,6 @@ export const listAiPricesOptions = (options?: Options<ListAiPricesData>) => quer
     },
     queryKey: listAiPricesQueryKey(options)
 });
-
-/**
- * Create ai price override.
- *
- * Manages AI price catalog overrides. Billing and cost dashboards use these rows to attribute provider calls and estimate execution cost. Call it to create work or submit a command. Some commands complete synchronously, while ingest, mutation, and runtime work can continue asynchronously.
- */
-export const createAiPriceOverrideMutation = (options?: Partial<Options<CreateAiPriceOverrideData>>): UseMutationOptions<CreateAiPriceOverrideResponse, DefaultError, Options<CreateAiPriceOverrideData>> => {
-    const mutationOptions: UseMutationOptions<CreateAiPriceOverrideResponse, DefaultError, Options<CreateAiPriceOverrideData>> = {
-        mutationFn: async (fnOptions) => {
-            const { data } = await Ai.createAiPriceOverride({
-                ...options,
-                ...fnOptions,
-                throwOnError: true
-            });
-            return data;
-        }
-    };
-    return mutationOptions;
-};
-
-/**
- * Delete ai price override.
- *
- * Manages AI price catalog overrides. Billing and cost dashboards use these rows to attribute provider calls and estimate execution cost. Call it to remove or revoke a resource. Destructive operations are authorized, audited, and may return an asynchronous operation when cleanup continues in the background.
- */
-export const deleteAiPriceOverrideMutation = (options?: Partial<Options<DeleteAiPriceOverrideData>>): UseMutationOptions<unknown, DefaultError, Options<DeleteAiPriceOverrideData>> => {
-    const mutationOptions: UseMutationOptions<unknown, DefaultError, Options<DeleteAiPriceOverrideData>> = {
-        mutationFn: async (fnOptions) => {
-            const { data } = await Ai.deleteAiPriceOverride({
-                ...options,
-                ...fnOptions,
-                throwOnError: true
-            });
-            return data;
-        }
-    };
-    return mutationOptions;
-};
-
-/**
- * Update ai price override.
- *
- * Manages AI price catalog overrides. Billing and cost dashboards use these rows to attribute provider calls and estimate execution cost. Call it to replace or partially update server-owned configuration. The request body is validated before changes are persisted.
- */
-export const updateAiPriceOverrideMutation = (options?: Partial<Options<UpdateAiPriceOverrideData>>): UseMutationOptions<UpdateAiPriceOverrideResponse, DefaultError, Options<UpdateAiPriceOverrideData>> => {
-    const mutationOptions: UseMutationOptions<UpdateAiPriceOverrideResponse, DefaultError, Options<UpdateAiPriceOverrideData>> = {
-        mutationFn: async (fnOptions) => {
-            const { data } = await Ai.updateAiPriceOverride({
-                ...options,
-                ...fnOptions,
-                throwOnError: true
-            });
-            return data;
-        }
-    };
-    return mutationOptions;
-};
 
 export const listAiProvidersQueryKey = (options?: Options<ListAiProvidersData>) => createQueryKey('listAiProviders', options);
 
@@ -426,12 +554,15 @@ export const createAiProviderMutation = (options?: Partial<Options<CreateAiProvi
 };
 
 /**
- * Delete ai provider.
+ * Real hard delete; 409 when a model still references this provider. The
+ * reversible pause is `PATCH {lifecycleState:"disabled"}` above — the two
+ * are distinct operations (obtained by not deleting FK references but
+ * blocking on them), not two paths to the same result.
  *
  * Reads the AI provider catalog used by the admin configuration screens. Operators use this metadata to choose providers, models, capabilities, and binding targets. Call it to remove or revoke a resource. Destructive operations are authorized, audited, and may return an asynchronous operation when cleanup continues in the background.
  */
-export const deleteAiProviderMutation = (options?: Partial<Options<DeleteAiProviderData>>): UseMutationOptions<unknown, DefaultError, Options<DeleteAiProviderData>> => {
-    const mutationOptions: UseMutationOptions<unknown, DefaultError, Options<DeleteAiProviderData>> = {
+export const deleteAiProviderMutation = (options?: Partial<Options<DeleteAiProviderData>>): UseMutationOptions<DeleteAiProviderResponse, DefaultError, Options<DeleteAiProviderData>> => {
+    const mutationOptions: UseMutationOptions<DeleteAiProviderResponse, DefaultError, Options<DeleteAiProviderData>> = {
         mutationFn: async (fnOptions) => {
             const { data } = await Ai.deleteAiProvider({
                 ...options,
@@ -443,6 +574,26 @@ export const deleteAiProviderMutation = (options?: Partial<Options<DeleteAiProvi
     };
     return mutationOptions;
 };
+
+export const getAiProviderQueryKey = (options: Options<GetAiProviderData>) => createQueryKey('getAiProvider', options);
+
+/**
+ * Get ai provider.
+ *
+ * Reads the AI provider catalog used by the admin configuration screens. Operators use this metadata to choose providers, models, capabilities, and binding targets. Call it when the caller already has the resource identifier and needs the latest authorized server view.
+ */
+export const getAiProviderOptions = (options: Options<GetAiProviderData>) => queryOptions<GetAiProviderResponse, DefaultError, GetAiProviderResponse, ReturnType<typeof getAiProviderQueryKey>>({
+    queryFn: async ({ queryKey, signal }) => {
+        const { data } = await Ai.getAiProvider({
+            ...options,
+            ...queryKey[0],
+            signal,
+            throwOnError: true
+        });
+        return data;
+    },
+    queryKey: getAiProviderQueryKey(options)
+});
 
 /**
  * Update ai provider.
@@ -483,7 +634,15 @@ export const listAuditEventsOptions = (options?: Options<ListAuditEventsData>) =
     queryKey: listAuditEventsQueryKey(options)
 });
 
-const createInfiniteParams = <K extends Pick<QueryKey<Options>[0], 'body' | 'headers' | 'path' | 'query'>>(queryKey: QueryKey<Options>, page: K) => {
+type InfinitePageParams = Pick<QueryKey<Options>[0], 'body' | 'headers' | 'path' | 'query'>;
+
+type InfinitePageParam = number | InfinitePageParams;
+
+type InfiniteStringPageParam = string | InfinitePageParams;
+
+type GenericInfinitePageParams<TData> = Pick<QueryKey<Options<TData>>[0], 'body' | 'headers' | 'path' | 'query'>;
+
+const createInfiniteParams = <K extends InfinitePageParams>(queryKey: QueryKey<Options>, page: K) => {
     const params = { ...queryKey[0] };
     if (page.body) {
         params.body = {
@@ -519,27 +678,30 @@ export const listAuditEventsInfiniteQueryKey = (options?: Options<ListAuditEvent
  *
  * Reads immutable audit events. Security and operations teams use this endpoint to inspect who performed sensitive actions and which resources were affected. Call it for paginated or filtered table views. Prefer server-side filters and cursors over fetching broad result sets into the client.
  */
-export const listAuditEventsInfiniteOptions = (options?: Options<ListAuditEventsData>) => infiniteQueryOptions<ListAuditEventsResponse, DefaultError, InfiniteData<ListAuditEventsResponse>, QueryKey<Options<ListAuditEventsData>>, number | Pick<QueryKey<Options<ListAuditEventsData>>[0], 'body' | 'headers' | 'path' | 'query'>>(
-// @ts-ignore
-{
-    queryFn: async ({ pageParam, queryKey, signal }) => {
-        // @ts-ignore
-        const page: Pick<QueryKey<Options<ListAuditEventsData>>[0], 'body' | 'headers' | 'path' | 'query'> = typeof pageParam === 'object' ? pageParam : {
-            query: {
-                offset: pageParam
-            }
-        };
-        const params = createInfiniteParams(queryKey, page);
-        const { data } = await Audit.listAuditEvents({
-            ...options,
-            ...params,
-            signal,
-            throwOnError: true
-        });
-        return data;
-    },
-    queryKey: listAuditEventsInfiniteQueryKey(options)
-});
+export const listAuditEventsInfiniteOptions = (options?: Options<ListAuditEventsData>) => {
+    const opts = infiniteQueryOptions<ListAuditEventsResponse, DefaultError, InfiniteData<ListAuditEventsResponse>, QueryKey<Options<ListAuditEventsData>>, InfiniteStringPageParam>(
+    // @ts-ignore
+    {
+        queryFn: async ({ pageParam, queryKey, signal }) => {
+            // @ts-ignore
+            const page: GenericInfinitePageParams<ListAuditEventsData> = typeof pageParam === 'object' ? pageParam : {
+                query: {
+                    cursor: pageParam
+                }
+            };
+            const params = createInfiniteParams(queryKey, page);
+            const { data } = await Audit.listAuditEvents({
+                ...options,
+                ...params,
+                signal,
+                throwOnError: true
+            });
+            return data;
+        },
+        queryKey: listAuditEventsInfiniteQueryKey(options)
+    });
+    return opts as Omit<typeof opts, 'initialData'>;
+};
 
 export const getBillingExecutionCostQueryKey = (options: Options<GetBillingExecutionCostData>) => createQueryKey('getBillingExecutionCost', options);
 
@@ -581,6 +743,38 @@ export const listBillingChargesOptions = (options: Options<ListBillingChargesDat
     queryKey: listBillingChargesQueryKey(options)
 });
 
+export const listBillingChargesInfiniteQueryKey = (options: Options<ListBillingChargesData>): QueryKey<Options<ListBillingChargesData>> => createQueryKey('listBillingCharges', options, true);
+
+/**
+ * List billing charges.
+ *
+ * Reads billing and cost attribution data collected from runtime executions. Use these endpoints for dashboards, audits, and per-execution/provider-call cost inspection. Call it for paginated or filtered table views. Prefer server-side filters and cursors over fetching broad result sets into the client.
+ */
+export const listBillingChargesInfiniteOptions = (options: Options<ListBillingChargesData>) => {
+    const opts = infiniteQueryOptions<ListBillingChargesResponse, DefaultError, InfiniteData<ListBillingChargesResponse>, QueryKey<Options<ListBillingChargesData>>, InfiniteStringPageParam>(
+    // @ts-ignore
+    {
+        queryFn: async ({ pageParam, queryKey, signal }) => {
+            // @ts-ignore
+            const page: GenericInfinitePageParams<ListBillingChargesData> = typeof pageParam === 'object' ? pageParam : {
+                query: {
+                    cursor: pageParam
+                }
+            };
+            const params = createInfiniteParams(queryKey, page);
+            const { data } = await Billing.listBillingCharges({
+                ...options,
+                ...params,
+                signal,
+                throwOnError: true
+            });
+            return data;
+        },
+        queryKey: listBillingChargesInfiniteQueryKey(options)
+    });
+    return opts as Omit<typeof opts, 'initialData'>;
+};
+
 export const listBillingProviderCallsQueryKey = (options: Options<ListBillingProviderCallsData>) => createQueryKey('listBillingProviderCalls', options);
 
 /**
@@ -600,6 +794,38 @@ export const listBillingProviderCallsOptions = (options: Options<ListBillingProv
     },
     queryKey: listBillingProviderCallsQueryKey(options)
 });
+
+export const listBillingProviderCallsInfiniteQueryKey = (options: Options<ListBillingProviderCallsData>): QueryKey<Options<ListBillingProviderCallsData>> => createQueryKey('listBillingProviderCalls', options, true);
+
+/**
+ * List billing provider calls.
+ *
+ * Reads billing and cost attribution data collected from runtime executions. Use these endpoints for dashboards, audits, and per-execution/provider-call cost inspection. Call it for paginated or filtered table views. Prefer server-side filters and cursors over fetching broad result sets into the client.
+ */
+export const listBillingProviderCallsInfiniteOptions = (options: Options<ListBillingProviderCallsData>) => {
+    const opts = infiniteQueryOptions<ListBillingProviderCallsResponse, DefaultError, InfiniteData<ListBillingProviderCallsResponse>, QueryKey<Options<ListBillingProviderCallsData>>, InfiniteStringPageParam>(
+    // @ts-ignore
+    {
+        queryFn: async ({ pageParam, queryKey, signal }) => {
+            // @ts-ignore
+            const page: GenericInfinitePageParams<ListBillingProviderCallsData> = typeof pageParam === 'object' ? pageParam : {
+                query: {
+                    cursor: pageParam
+                }
+            };
+            const params = createInfiniteParams(queryKey, page);
+            const { data } = await Billing.listBillingProviderCalls({
+                ...options,
+                ...params,
+                signal,
+                throwOnError: true
+            });
+            return data;
+        },
+        queryKey: listBillingProviderCallsInfiniteQueryKey(options)
+    });
+    return opts as Omit<typeof opts, 'initialData'>;
+};
 
 export const getLibraryCostSummaryQueryKey = (options: Options<GetLibraryCostSummaryData>) => createQueryKey('getLibraryCostSummary', options);
 
@@ -640,6 +866,38 @@ export const listBillingLibraryDocumentCostsOptions = (options: Options<ListBill
     },
     queryKey: listBillingLibraryDocumentCostsQueryKey(options)
 });
+
+export const listBillingLibraryDocumentCostsInfiniteQueryKey = (options: Options<ListBillingLibraryDocumentCostsData>): QueryKey<Options<ListBillingLibraryDocumentCostsData>> => createQueryKey('listBillingLibraryDocumentCosts', options, true);
+
+/**
+ * List billing library document costs.
+ *
+ * Reads billing and cost attribution data collected from runtime executions. Use these endpoints for dashboards, audits, and per-execution/provider-call cost inspection. Call it for paginated or filtered table views. Prefer server-side filters and cursors over fetching broad result sets into the client.
+ */
+export const listBillingLibraryDocumentCostsInfiniteOptions = (options: Options<ListBillingLibraryDocumentCostsData>) => {
+    const opts = infiniteQueryOptions<ListBillingLibraryDocumentCostsResponse, DefaultError, InfiniteData<ListBillingLibraryDocumentCostsResponse>, QueryKey<Options<ListBillingLibraryDocumentCostsData>>, InfiniteStringPageParam>(
+    // @ts-ignore
+    {
+        queryFn: async ({ pageParam, queryKey, signal }) => {
+            // @ts-ignore
+            const page: GenericInfinitePageParams<ListBillingLibraryDocumentCostsData> = typeof pageParam === 'object' ? pageParam : {
+                query: {
+                    cursor: pageParam
+                }
+            };
+            const params = createInfiniteParams(queryKey, page);
+            const { data } = await Billing.listBillingLibraryDocumentCosts({
+                ...options,
+                ...params,
+                signal,
+                throwOnError: true
+            });
+            return data;
+        },
+        queryKey: listBillingLibraryDocumentCostsInfiniteQueryKey(options)
+    });
+    return opts as Omit<typeof opts, 'initialData'>;
+};
 
 export const getWorkspaceCostSummaryQueryKey = (options: Options<GetWorkspaceCostSummaryData>) => createQueryKey('getWorkspaceCostSummary', options);
 
@@ -855,6 +1113,27 @@ export const getCatalogWorkspaceOptions = (options: Options<GetCatalogWorkspaceD
     queryKey: getCatalogWorkspaceQueryKey(options)
 });
 
+/**
+ * Partial update of a workspace's `slug`/`displayName`/`lifecycleState`.
+ * Never existed in any prior version of this API — restricted to system
+ * admins, same authorization boundary as create/delete.
+ *
+ * Manages catalog workspaces. Workspaces group libraries, IAM scope, billing summaries, and administrative ownership boundaries. Call it to replace or partially update server-owned configuration. The request body is validated before changes are persisted.
+ */
+export const updateCatalogWorkspaceMutation = (options?: Partial<Options<UpdateCatalogWorkspaceData>>): UseMutationOptions<UpdateCatalogWorkspaceResponse, DefaultError, Options<UpdateCatalogWorkspaceData>> => {
+    const mutationOptions: UseMutationOptions<UpdateCatalogWorkspaceResponse, DefaultError, Options<UpdateCatalogWorkspaceData>> = {
+        mutationFn: async (fnOptions) => {
+            const { data } = await Catalog.updateCatalogWorkspace({
+                ...options,
+                ...fnOptions,
+                throwOnError: true
+            });
+            return data;
+        }
+    };
+    return mutationOptions;
+};
+
 export const listCatalogLibrariesQueryKey = (options: Options<ListCatalogLibrariesData>) => createQueryKey('listCatalogLibraries', options);
 
 /**
@@ -913,18 +1192,18 @@ export const deleteCatalogLibraryMutation = (options?: Partial<Options<DeleteCat
     return mutationOptions;
 };
 
-export const exportWorkspaceSnapshotQueryKey = (options: Options<ExportWorkspaceSnapshotData>) => createQueryKey('exportWorkspaceSnapshot', options);
+export const exportCatalogWorkspaceSnapshotQueryKey = (options: Options<ExportCatalogWorkspaceSnapshotData>) => createQueryKey('exportCatalogWorkspaceSnapshot', options);
 
 /**
- * Streams a workspace snapshot as a plain `application/x-tar` archive that
- * bundles every library in the workspace (each embedded library archive is
- * already zstd-compressed).
+ * Streams a whole-workspace snapshot as a plain `application/x-tar` archive
+ * that bundles every library in the workspace (each embedded library
+ * archive is already zstd-compressed).
  *
  * Manages catalog workspaces. Workspaces group libraries, IAM scope, billing summaries, and administrative ownership boundaries. Call it to export a portable library archive for backup, migration, or offline inspection.
  */
-export const exportWorkspaceSnapshotOptions = (options: Options<ExportWorkspaceSnapshotData>) => queryOptions<ExportWorkspaceSnapshotResponse, DefaultError, ExportWorkspaceSnapshotResponse, ReturnType<typeof exportWorkspaceSnapshotQueryKey>>({
+export const exportCatalogWorkspaceSnapshotOptions = (options: Options<ExportCatalogWorkspaceSnapshotData>) => queryOptions<ExportCatalogWorkspaceSnapshotResponse, DefaultError, ExportCatalogWorkspaceSnapshotResponse, ReturnType<typeof exportCatalogWorkspaceSnapshotQueryKey>>({
     queryFn: async ({ queryKey, signal }) => {
-        const { data } = await Content.exportWorkspaceSnapshot({
+        const { data } = await Catalog.exportCatalogWorkspaceSnapshot({
             ...options,
             ...queryKey[0],
             signal,
@@ -932,19 +1211,24 @@ export const exportWorkspaceSnapshotOptions = (options: Options<ExportWorkspaceS
         });
         return data;
     },
-    queryKey: exportWorkspaceSnapshotQueryKey(options)
+    queryKey: exportCatalogWorkspaceSnapshotQueryKey(options)
 });
 
 /**
- * Restores a workspace from a plain-tar snapshot body, provisioning one fresh
- * library per embedded archive.
+ * Restores a whole workspace from a plain-tar snapshot body (full-replace
+ * `PUT`), provisioning one fresh library per embedded archive. Admits the
+ * restore for async processing and returns `202 Accepted` with
+ * `Location: /v1/ops/operations/{operationId}` — the same async-admission
+ * pattern used by `content::create_revision` and the library snapshot
+ * import, rather than blocking the request on a potentially very large
+ * multi-library restore.
  *
- * Manages catalog workspaces. Workspaces group libraries, IAM scope, billing summaries, and administrative ownership boundaries. Call it to import a previously exported library archive into the selected library scope.
+ * Manages catalog workspaces. Workspaces group libraries, IAM scope, billing summaries, and administrative ownership boundaries. Call it to replace or partially update server-owned configuration. The request body is validated before changes are persisted.
  */
-export const importWorkspaceSnapshotMutation = (options?: Partial<Options<ImportWorkspaceSnapshotData>>): UseMutationOptions<ImportWorkspaceSnapshotResponse, DefaultError, Options<ImportWorkspaceSnapshotData>> => {
-    const mutationOptions: UseMutationOptions<ImportWorkspaceSnapshotResponse, DefaultError, Options<ImportWorkspaceSnapshotData>> = {
+export const importCatalogWorkspaceSnapshotMutation = (options?: Partial<Options<ImportCatalogWorkspaceSnapshotData>>): UseMutationOptions<ImportCatalogWorkspaceSnapshotResponse, DefaultError, Options<ImportCatalogWorkspaceSnapshotData>> => {
+    const mutationOptions: UseMutationOptions<ImportCatalogWorkspaceSnapshotResponse, DefaultError, Options<ImportCatalogWorkspaceSnapshotData>> = {
         mutationFn: async (fnOptions) => {
-            const { data } = await Content.importWorkspaceSnapshot({
+            const { data } = await Catalog.importCatalogWorkspaceSnapshot({
                 ...options,
                 ...fnOptions,
                 throwOnError: true
@@ -974,80 +1258,6 @@ export const listChunksOptions = (options?: Options<ListChunksData>) => queryOpt
     },
     queryKey: listChunksQueryKey(options)
 });
-
-export const listContentDocumentsQueryKey = (options?: Options<ListContentDocumentsData>) => createQueryKey('listContentDocuments', options);
-
-/**
- * Canonical slim paginated document list.
- *
- * Response shape is `DocumentListPageResponse { items, next_cursor, total_count }`.
- * Each `items[i]` is a `ContentDocumentListItem` with only the fields the
- * documents page actually renders — status/readiness are derived server-side.
- * The inspector panel fetches full detail via `/content/documents/{id}`.
- */
-export const listContentDocumentsOptions = (options?: Options<ListContentDocumentsData>) => queryOptions<ListContentDocumentsResponse, DefaultError, ListContentDocumentsResponse, ReturnType<typeof listContentDocumentsQueryKey>>({
-    queryFn: async ({ queryKey, signal }) => {
-        const { data } = await Content.listContentDocuments({
-            ...options,
-            ...queryKey[0],
-            signal,
-            throwOnError: true
-        });
-        return data;
-    },
-    queryKey: listContentDocumentsQueryKey(options)
-});
-
-export const listContentDocumentsInfiniteQueryKey = (options?: Options<ListContentDocumentsData>): QueryKey<Options<ListContentDocumentsData>> => createQueryKey('listContentDocuments', options, true);
-
-/**
- * Canonical slim paginated document list.
- *
- * Response shape is `DocumentListPageResponse { items, next_cursor, total_count }`.
- * Each `items[i]` is a `ContentDocumentListItem` with only the fields the
- * documents page actually renders — status/readiness are derived server-side.
- * The inspector panel fetches full detail via `/content/documents/{id}`.
- */
-export const listContentDocumentsInfiniteOptions = (options?: Options<ListContentDocumentsData>) => infiniteQueryOptions<ListContentDocumentsResponse, DefaultError, InfiniteData<ListContentDocumentsResponse>, QueryKey<Options<ListContentDocumentsData>>, string | Pick<QueryKey<Options<ListContentDocumentsData>>[0], 'body' | 'headers' | 'path' | 'query'>>(
-// @ts-ignore
-{
-    queryFn: async ({ pageParam, queryKey, signal }) => {
-        // @ts-ignore
-        const page: Pick<QueryKey<Options<ListContentDocumentsData>>[0], 'body' | 'headers' | 'path' | 'query'> = typeof pageParam === 'object' ? pageParam : {
-            query: {
-                cursor: pageParam
-            }
-        };
-        const params = createInfiniteParams(queryKey, page);
-        const { data } = await Content.listContentDocuments({
-            ...options,
-            ...params,
-            signal,
-            throwOnError: true
-        });
-        return data;
-    },
-    queryKey: listContentDocumentsInfiniteQueryKey(options)
-});
-
-/**
- * Create content document.
- *
- * Manages document content and derived document views. These endpoints are used by document workspaces, upload flows, source viewers, revision history, and document-level diagnostics. Call it to create work or submit a command. Some commands complete synchronously, while ingest, mutation, and runtime work can continue asynchronously.
- */
-export const createContentDocumentMutation = (options?: Partial<Options<CreateContentDocumentData>>): UseMutationOptions<CreateContentDocumentResponse, DefaultError, Options<CreateContentDocumentData>> => {
-    const mutationOptions: UseMutationOptions<CreateContentDocumentResponse, DefaultError, Options<CreateContentDocumentData>> = {
-        mutationFn: async (fnOptions) => {
-            const { data } = await Content.createContentDocument({
-                ...options,
-                ...fnOptions,
-                throwOnError: true
-            });
-            return data;
-        }
-    };
-    return mutationOptions;
-};
 
 /**
  * Batch cancel content documents.
@@ -1104,25 +1314,6 @@ export const batchReprocessContentDocumentsMutation = (options?: Partial<Options
     const mutationOptions: UseMutationOptions<BatchReprocessContentDocumentsResponse, DefaultError, Options<BatchReprocessContentDocumentsData>> = {
         mutationFn: async (fnOptions) => {
             const { data } = await Content.batchReprocessContentDocuments({
-                ...options,
-                ...fnOptions,
-                throwOnError: true
-            });
-            return data;
-        }
-    };
-    return mutationOptions;
-};
-
-/**
- * Upload content document.
- *
- * Manages document content and derived document views. These endpoints are used by document workspaces, upload flows, source viewers, revision history, and document-level diagnostics. Call it for multipart or direct document uploads; ingestion continues asynchronously after the document record is accepted.
- */
-export const uploadContentDocumentMutation = (options?: Partial<Options<UploadContentDocumentData>>): UseMutationOptions<UploadContentDocumentResponse, DefaultError, Options<UploadContentDocumentData>> => {
-    const mutationOptions: UseMutationOptions<UploadContentDocumentResponse, DefaultError, Options<UploadContentDocumentData>> = {
-        mutationFn: async (fnOptions) => {
-            const { data } = await Content.uploadContentDocument({
                 ...options,
                 ...fnOptions,
                 throwOnError: true
@@ -1191,44 +1382,6 @@ export const patchContentDocumentMetadataMutation = (options?: Partial<Options<P
     return mutationOptions;
 };
 
-/**
- * Append content document.
- *
- * Manages document content and derived document views. These endpoints are used by document workspaces, upload flows, source viewers, revision history, and document-level diagnostics. Call it to create work or submit a command. Some commands complete synchronously, while ingest, mutation, and runtime work can continue asynchronously.
- */
-export const appendContentDocumentMutation = (options?: Partial<Options<AppendContentDocumentData>>): UseMutationOptions<AppendContentDocumentResponse, DefaultError, Options<AppendContentDocumentData>> => {
-    const mutationOptions: UseMutationOptions<AppendContentDocumentResponse, DefaultError, Options<AppendContentDocumentData>> = {
-        mutationFn: async (fnOptions) => {
-            const { data } = await Content.appendContentDocument({
-                ...options,
-                ...fnOptions,
-                throwOnError: true
-            });
-            return data;
-        }
-    };
-    return mutationOptions;
-};
-
-/**
- * Edit content document.
- *
- * Manages document content and derived document views. These endpoints are used by document workspaces, upload flows, source viewers, revision history, and document-level diagnostics. Call it to create work or submit a command. Some commands complete synchronously, while ingest, mutation, and runtime work can continue asynchronously.
- */
-export const editContentDocumentMutation = (options?: Partial<Options<EditContentDocumentData>>): UseMutationOptions<EditContentDocumentResponse, DefaultError, Options<EditContentDocumentData>> => {
-    const mutationOptions: UseMutationOptions<EditContentDocumentResponse, DefaultError, Options<EditContentDocumentData>> = {
-        mutationFn: async (fnOptions) => {
-            const { data } = await Content.editContentDocument({
-                ...options,
-                ...fnOptions,
-                throwOnError: true
-            });
-            return data;
-        }
-    };
-    return mutationOptions;
-};
-
 export const getContentDocumentHeadQueryKey = (options: Options<GetContentDocumentHeadData>) => createQueryKey('getContentDocumentHead', options);
 
 /**
@@ -1276,45 +1429,29 @@ export const listContentPreparedSegmentsInfiniteQueryKey = (options: Options<Lis
  *
  * Executes an IronRAG HTTP API operation. The endpoint is bearer-authenticated unless explicitly documented otherwise and returns JSON shaped by the OpenAPI schema. Call it for paginated or filtered table views. Prefer server-side filters and cursors over fetching broad result sets into the client.
  */
-export const listContentPreparedSegmentsInfiniteOptions = (options: Options<ListContentPreparedSegmentsData>) => infiniteQueryOptions<ListContentPreparedSegmentsResponse, DefaultError, InfiniteData<ListContentPreparedSegmentsResponse>, QueryKey<Options<ListContentPreparedSegmentsData>>, number | Pick<QueryKey<Options<ListContentPreparedSegmentsData>>[0], 'body' | 'headers' | 'path' | 'query'>>(
-// @ts-ignore
-{
-    queryFn: async ({ pageParam, queryKey, signal }) => {
-        // @ts-ignore
-        const page: Pick<QueryKey<Options<ListContentPreparedSegmentsData>>[0], 'body' | 'headers' | 'path' | 'query'> = typeof pageParam === 'object' ? pageParam : {
-            query: {
-                offset: pageParam
-            }
-        };
-        const params = createInfiniteParams(queryKey, page);
-        const { data } = await Content.listContentPreparedSegments({
-            ...options,
-            ...params,
-            signal,
-            throwOnError: true
-        });
-        return data;
-    },
-    queryKey: listContentPreparedSegmentsInfiniteQueryKey(options)
-});
-
-/**
- * Replace content document.
- *
- * Manages document content and derived document views. These endpoints are used by document workspaces, upload flows, source viewers, revision history, and document-level diagnostics. Call it to create work or submit a command. Some commands complete synchronously, while ingest, mutation, and runtime work can continue asynchronously.
- */
-export const replaceContentDocumentMutation = (options?: Partial<Options<ReplaceContentDocumentData>>): UseMutationOptions<ReplaceContentDocumentResponse, DefaultError, Options<ReplaceContentDocumentData>> => {
-    const mutationOptions: UseMutationOptions<ReplaceContentDocumentResponse, DefaultError, Options<ReplaceContentDocumentData>> = {
-        mutationFn: async (fnOptions) => {
-            const { data } = await Content.replaceContentDocument({
+export const listContentPreparedSegmentsInfiniteOptions = (options: Options<ListContentPreparedSegmentsData>) => {
+    const opts = infiniteQueryOptions<ListContentPreparedSegmentsResponse, DefaultError, InfiniteData<ListContentPreparedSegmentsResponse>, QueryKey<Options<ListContentPreparedSegmentsData>>, InfinitePageParam>(
+    // @ts-ignore
+    {
+        queryFn: async ({ pageParam, queryKey, signal }) => {
+            // @ts-ignore
+            const page: GenericInfinitePageParams<ListContentPreparedSegmentsData> = typeof pageParam === 'object' ? pageParam : {
+                query: {
+                    offset: pageParam
+                }
+            };
+            const params = createInfiniteParams(queryKey, page);
+            const { data } = await Content.listContentPreparedSegments({
                 ...options,
-                ...fnOptions,
+                ...params,
+                signal,
                 throwOnError: true
             });
             return data;
-        }
-    };
-    return mutationOptions;
+        },
+        queryKey: listContentPreparedSegmentsInfiniteQueryKey(options)
+    });
+    return opts as Omit<typeof opts, 'initialData'>;
 };
 
 /**
@@ -1355,6 +1492,31 @@ export const listContentRevisionsOptions = (options: Options<ListContentRevision
     },
     queryKey: listContentRevisionsQueryKey(options)
 });
+
+/**
+ * Creates a new revision of a document. Content-negotiated on
+ * `Content-Type`, mirroring `create_document`'s pattern: `application/json`
+ * with `{mode:"append"|"replace", appendedText|markdown}` covers text
+ * changes (former `.../append` and `.../edit`); `multipart/form-data`
+ * replaces the underlying file bytes (former `.../replace`). One creation
+ * door for revisions, async (202 + Location to the canonical operation),
+ * not three verb-named endpoints.
+ *
+ * Executes an IronRAG HTTP API operation. The endpoint is bearer-authenticated unless explicitly documented otherwise and returns JSON shaped by the OpenAPI schema. Call it to create work or submit a command. Some commands complete synchronously, while ingest, mutation, and runtime work can continue asynchronously.
+ */
+export const createContentRevisionMutation = (options?: Partial<Options<CreateContentRevisionData>>): UseMutationOptions<CreateContentRevisionResponse, DefaultError, Options<CreateContentRevisionData>> => {
+    const mutationOptions: UseMutationOptions<CreateContentRevisionResponse, DefaultError, Options<CreateContentRevisionData>> = {
+        mutationFn: async (fnOptions) => {
+            const { data } = await Content.createContentRevision({
+                ...options,
+                ...fnOptions,
+                throwOnError: true
+            });
+            return data;
+        }
+    };
+    return mutationOptions;
+};
 
 export const getContentDocumentSourceQueryKey = (options: Options<GetContentDocumentSourceData>) => createQueryKey('getContentDocumentSource', options);
 
@@ -1403,27 +1565,112 @@ export const listContentTechnicalFactsInfiniteQueryKey = (options: Options<ListC
  *
  * Executes an IronRAG HTTP API operation. The endpoint is bearer-authenticated unless explicitly documented otherwise and returns JSON shaped by the OpenAPI schema. Call it for paginated or filtered table views. Prefer server-side filters and cursors over fetching broad result sets into the client.
  */
-export const listContentTechnicalFactsInfiniteOptions = (options: Options<ListContentTechnicalFactsData>) => infiniteQueryOptions<ListContentTechnicalFactsResponse, DefaultError, InfiniteData<ListContentTechnicalFactsResponse>, QueryKey<Options<ListContentTechnicalFactsData>>, number | Pick<QueryKey<Options<ListContentTechnicalFactsData>>[0], 'body' | 'headers' | 'path' | 'query'>>(
-// @ts-ignore
-{
-    queryFn: async ({ pageParam, queryKey, signal }) => {
-        // @ts-ignore
-        const page: Pick<QueryKey<Options<ListContentTechnicalFactsData>>[0], 'body' | 'headers' | 'path' | 'query'> = typeof pageParam === 'object' ? pageParam : {
-            query: {
-                offset: pageParam
-            }
-        };
-        const params = createInfiniteParams(queryKey, page);
-        const { data } = await Content.listContentTechnicalFacts({
+export const listContentTechnicalFactsInfiniteOptions = (options: Options<ListContentTechnicalFactsData>) => {
+    const opts = infiniteQueryOptions<ListContentTechnicalFactsResponse, DefaultError, InfiniteData<ListContentTechnicalFactsResponse>, QueryKey<Options<ListContentTechnicalFactsData>>, InfinitePageParam>(
+    // @ts-ignore
+    {
+        queryFn: async ({ pageParam, queryKey, signal }) => {
+            // @ts-ignore
+            const page: GenericInfinitePageParams<ListContentTechnicalFactsData> = typeof pageParam === 'object' ? pageParam : {
+                query: {
+                    offset: pageParam
+                }
+            };
+            const params = createInfiniteParams(queryKey, page);
+            const { data } = await Content.listContentTechnicalFacts({
+                ...options,
+                ...params,
+                signal,
+                throwOnError: true
+            });
+            return data;
+        },
+        queryKey: listContentTechnicalFactsInfiniteQueryKey(options)
+    });
+    return opts as Omit<typeof opts, 'initialData'>;
+};
+
+export const listContentDocumentsQueryKey = (options: Options<ListContentDocumentsData>) => createQueryKey('listContentDocuments', options);
+
+/**
+ * Canonical slim paginated document list.
+ *
+ * Response shape is `DocumentListPageResponse { items, next_cursor, total_count }`.
+ * Each `items[i]` is a `ContentDocumentListItem` with only the fields the
+ * documents page actually renders — status/readiness are derived server-side.
+ * The inspector panel fetches full detail via `/content/documents/{id}`.
+ */
+export const listContentDocumentsOptions = (options: Options<ListContentDocumentsData>) => queryOptions<ListContentDocumentsResponse, DefaultError, ListContentDocumentsResponse, ReturnType<typeof listContentDocumentsQueryKey>>({
+    queryFn: async ({ queryKey, signal }) => {
+        const { data } = await Content.listContentDocuments({
             ...options,
-            ...params,
+            ...queryKey[0],
             signal,
             throwOnError: true
         });
         return data;
     },
-    queryKey: listContentTechnicalFactsInfiniteQueryKey(options)
+    queryKey: listContentDocumentsQueryKey(options)
 });
+
+export const listContentDocumentsInfiniteQueryKey = (options: Options<ListContentDocumentsData>): QueryKey<Options<ListContentDocumentsData>> => createQueryKey('listContentDocuments', options, true);
+
+/**
+ * Canonical slim paginated document list.
+ *
+ * Response shape is `DocumentListPageResponse { items, next_cursor, total_count }`.
+ * Each `items[i]` is a `ContentDocumentListItem` with only the fields the
+ * documents page actually renders — status/readiness are derived server-side.
+ * The inspector panel fetches full detail via `/content/documents/{id}`.
+ */
+export const listContentDocumentsInfiniteOptions = (options: Options<ListContentDocumentsData>) => {
+    const opts = infiniteQueryOptions<ListContentDocumentsResponse, DefaultError, InfiniteData<ListContentDocumentsResponse>, QueryKey<Options<ListContentDocumentsData>>, InfiniteStringPageParam>(
+    // @ts-ignore
+    {
+        queryFn: async ({ pageParam, queryKey, signal }) => {
+            // @ts-ignore
+            const page: GenericInfinitePageParams<ListContentDocumentsData> = typeof pageParam === 'object' ? pageParam : {
+                query: {
+                    cursor: pageParam
+                }
+            };
+            const params = createInfiniteParams(queryKey, page);
+            const { data } = await Content.listContentDocuments({
+                ...options,
+                ...params,
+                signal,
+                throwOnError: true
+            });
+            return data;
+        },
+        queryKey: listContentDocumentsInfiniteQueryKey(options)
+    });
+    return opts as Omit<typeof opts, 'initialData'>;
+};
+
+/**
+ * Creates a document in the target library. Content-negotiated on
+ * `Content-Type`: `application/json` admits metadata/inline-text documents
+ * (former `POST /v1/content/documents`); `multipart/form-data` admits a
+ * file upload (former `POST /v1/content/documents/upload`). Both bodies
+ * converge on the same `CreateDocumentAdmission` result and the same
+ * 201 + Location response — there is one creation door, not two.
+ *
+ * Manages document content and derived document views. These endpoints are used by document workspaces, upload flows, source viewers, revision history, and document-level diagnostics. Call it to create work or submit a command. Some commands complete synchronously, while ingest, mutation, and runtime work can continue asynchronously.
+ */
+export const createContentDocumentMutation = (options?: Partial<Options<CreateContentDocumentData>>): UseMutationOptions<CreateContentDocumentResponse, DefaultError, Options<CreateContentDocumentData>> => {
+    const mutationOptions: UseMutationOptions<CreateContentDocumentResponse, DefaultError, Options<CreateContentDocumentData>> = {
+        mutationFn: async (fnOptions) => {
+            const { data } = await Content.createContentDocument({
+                ...options,
+                ...fnOptions,
+                throwOnError: true
+            });
+            return data;
+        }
+    };
+    return mutationOptions;
+};
 
 export const exportLibrarySnapshotQueryKey = (options: Options<ExportLibrarySnapshotData>) => createQueryKey('exportLibrarySnapshot', options);
 
@@ -1463,65 +1710,6 @@ export const importLibrarySnapshotMutation = (options?: Partial<Options<ImportLi
     };
     return mutationOptions;
 };
-
-export const listContentMutationsQueryKey = (options?: Options<ListContentMutationsData>) => createQueryKey('listContentMutations', options);
-
-/**
- * List content mutations.
- *
- * Manages document mutation receipts. Use these endpoints to create or inspect append, replace, delete, and other asynchronous document lifecycle operations. Call it for paginated or filtered table views. Prefer server-side filters and cursors over fetching broad result sets into the client.
- */
-export const listContentMutationsOptions = (options?: Options<ListContentMutationsData>) => queryOptions<ListContentMutationsResponse, DefaultError, ListContentMutationsResponse, ReturnType<typeof listContentMutationsQueryKey>>({
-    queryFn: async ({ queryKey, signal }) => {
-        const { data } = await Content.listContentMutations({
-            ...options,
-            ...queryKey[0],
-            signal,
-            throwOnError: true
-        });
-        return data;
-    },
-    queryKey: listContentMutationsQueryKey(options)
-});
-
-/**
- * Create content mutation.
- *
- * Manages document mutation receipts. Use these endpoints to create or inspect append, replace, delete, and other asynchronous document lifecycle operations. Call it to create work or submit a command. Some commands complete synchronously, while ingest, mutation, and runtime work can continue asynchronously.
- */
-export const createContentMutationMutation = (options?: Partial<Options<CreateContentMutationData>>): UseMutationOptions<CreateContentMutationResponse, DefaultError, Options<CreateContentMutationData>> => {
-    const mutationOptions: UseMutationOptions<CreateContentMutationResponse, DefaultError, Options<CreateContentMutationData>> = {
-        mutationFn: async (fnOptions) => {
-            const { data } = await Content.createContentMutation({
-                ...options,
-                ...fnOptions,
-                throwOnError: true
-            });
-            return data;
-        }
-    };
-    return mutationOptions;
-};
-
-export const getContentMutationQueryKey = (options: Options<GetContentMutationData>) => createQueryKey('getContentMutation', options);
-
-/**
- * Get content mutation.
- *
- * Manages document mutation receipts. Use these endpoints to create or inspect append, replace, delete, and other asynchronous document lifecycle operations. Call it when the caller already has the resource identifier and needs the latest authorized server view.
- */
-export const getContentMutationOptions = (options: Options<GetContentMutationData>) => queryOptions<GetContentMutationResponse, DefaultError, GetContentMutationResponse, ReturnType<typeof getContentMutationQueryKey>>({
-    queryFn: async ({ queryKey, signal }) => {
-        const { data } = await Content.getContentMutation({
-            ...options,
-            ...queryKey[0],
-            signal,
-            throwOnError: true
-        });
-        return data;
-    },
-    queryKey: getContentMutationQueryKey(options)
-});
 
 export const listContentWebIngestRunsQueryKey = (options?: Options<ListContentWebIngestRunsData>) => createQueryKey('listContentWebIngestRuns', options);
 
@@ -1680,64 +1868,6 @@ export const getBootstrapStatusOptions = (options?: Options<GetBootstrapStatusDa
     queryKey: getBootstrapStatusQueryKey(options)
 });
 
-export const listIamGrantsQueryKey = (options?: Options<ListIamGrantsData>) => createQueryKey('listIamGrants', options);
-
-/**
- * List iam grants.
- *
- * Manages IAM grants. Grants assign scoped permissions to principals so UI users, API tokens, and automation can access only the intended workspaces and libraries. Call it for paginated or filtered table views. Prefer server-side filters and cursors over fetching broad result sets into the client.
- */
-export const listIamGrantsOptions = (options?: Options<ListIamGrantsData>) => queryOptions<ListIamGrantsResponse, DefaultError, ListIamGrantsResponse, ReturnType<typeof listIamGrantsQueryKey>>({
-    queryFn: async ({ queryKey, signal }) => {
-        const { data } = await Iam.listIamGrants({
-            ...options,
-            ...queryKey[0],
-            signal,
-            throwOnError: true
-        });
-        return data;
-    },
-    queryKey: listIamGrantsQueryKey(options)
-});
-
-/**
- * Create iam grant.
- *
- * Manages IAM grants. Grants assign scoped permissions to principals so UI users, API tokens, and automation can access only the intended workspaces and libraries. Call it to create work or submit a command. Some commands complete synchronously, while ingest, mutation, and runtime work can continue asynchronously.
- */
-export const createIamGrantMutation = (options?: Partial<Options<CreateIamGrantData>>): UseMutationOptions<CreateIamGrantResponse, DefaultError, Options<CreateIamGrantData>> => {
-    const mutationOptions: UseMutationOptions<CreateIamGrantResponse, DefaultError, Options<CreateIamGrantData>> = {
-        mutationFn: async (fnOptions) => {
-            const { data } = await Iam.createIamGrant({
-                ...options,
-                ...fnOptions,
-                throwOnError: true
-            });
-            return data;
-        }
-    };
-    return mutationOptions;
-};
-
-/**
- * Revoke iam grant.
- *
- * Manages IAM grants. Grants assign scoped permissions to principals so UI users, API tokens, and automation can access only the intended workspaces and libraries. Call it to remove or revoke a resource. Destructive operations are authorized, audited, and may return an asynchronous operation when cleanup continues in the background.
- */
-export const revokeIamGrantMutation = (options?: Partial<Options<RevokeIamGrantData>>): UseMutationOptions<RevokeIamGrantResponse, DefaultError, Options<RevokeIamGrantData>> => {
-    const mutationOptions: UseMutationOptions<RevokeIamGrantResponse, DefaultError, Options<RevokeIamGrantData>> = {
-        mutationFn: async (fnOptions) => {
-            const { data } = await Iam.revokeIamGrant({
-                ...options,
-                ...fnOptions,
-                throwOnError: true
-            });
-            return data;
-        }
-    };
-    return mutationOptions;
-};
-
 export const getIamMeQueryKey = (options?: Options<GetIamMeData>) => createQueryKey('getIamMe', options);
 
 /**
@@ -1894,6 +2024,45 @@ export const deleteIamTokenMutation = (options?: Partial<Options<DeleteIamTokenD
     return mutationOptions;
 };
 
+export const getIamTokenQueryKey = (options: Options<GetIamTokenData>) => createQueryKey('getIamToken', options);
+
+/**
+ * Get iam token.
+ *
+ * Manages API tokens and token lifecycle. Operators use these endpoints to mint, list, revoke, or delete bearer tokens for users, services, and MCP clients. Call it when the caller already has the resource identifier and needs the latest authorized server view.
+ */
+export const getIamTokenOptions = (options: Options<GetIamTokenData>) => queryOptions<GetIamTokenResponse, DefaultError, GetIamTokenResponse, ReturnType<typeof getIamTokenQueryKey>>({
+    queryFn: async ({ queryKey, signal }) => {
+        const { data } = await Iam.getIamToken({
+            ...options,
+            ...queryKey[0],
+            signal,
+            throwOnError: true
+        });
+        return data;
+    },
+    queryKey: getIamTokenQueryKey(options)
+});
+
+/**
+ * Patch iam token.
+ *
+ * Manages API tokens and token lifecycle. Operators use these endpoints to mint, list, revoke, or delete bearer tokens for users, services, and MCP clients. Call it to replace or partially update server-owned configuration. The request body is validated before changes are persisted.
+ */
+export const patchIamTokenMutation = (options?: Partial<Options<PatchIamTokenData>>): UseMutationOptions<PatchIamTokenResponse, DefaultError, Options<PatchIamTokenData>> => {
+    const mutationOptions: UseMutationOptions<PatchIamTokenResponse, DefaultError, Options<PatchIamTokenData>> = {
+        mutationFn: async (fnOptions) => {
+            const { data } = await Iam.patchIamToken({
+                ...options,
+                ...fnOptions,
+                throwOnError: true
+            });
+            return data;
+        }
+    };
+    return mutationOptions;
+};
+
 /**
  * Revoke iam token.
  *
@@ -1942,6 +2111,25 @@ export const createIamUserMutation = (options?: Partial<Options<CreateIamUserDat
     const mutationOptions: UseMutationOptions<CreateIamUserResponse, DefaultError, Options<CreateIamUserData>> = {
         mutationFn: async (fnOptions) => {
             const { data } = await Iam.createIamUser({
+                ...options,
+                ...fnOptions,
+                throwOnError: true
+            });
+            return data;
+        }
+    };
+    return mutationOptions;
+};
+
+/**
+ * Delete iam user.
+ *
+ * Executes an IronRAG HTTP API operation. The endpoint is bearer-authenticated unless explicitly documented otherwise and returns JSON shaped by the OpenAPI schema. Call it to remove or revoke a resource. Destructive operations are authorized, audited, and may return an asynchronous operation when cleanup continues in the background.
+ */
+export const deleteIamUserMutation = (options?: Partial<Options<DeleteIamUserData>>): UseMutationOptions<DeleteIamUserResponse, DefaultError, Options<DeleteIamUserData>> => {
+    const mutationOptions: UseMutationOptions<DeleteIamUserResponse, DefaultError, Options<DeleteIamUserData>> = {
+        mutationFn: async (fnOptions) => {
+            const { data } = await Iam.deleteIamUser({
                 ...options,
                 ...fnOptions,
                 throwOnError: true
@@ -2050,26 +2238,6 @@ export const listIngestStageEventsOptions = (options: Options<ListIngestStageEve
     queryKey: listIngestStageEventsQueryKey(options)
 });
 
-export const listIngestJobsQueryKey = (options?: Options<ListIngestJobsData>) => createQueryKey('listIngestJobs', options);
-
-/**
- * List ingest jobs.
- *
- * Reads or controls ingest runtime state. Operators use these endpoints to inspect queued work, attempts, stage events, and document-processing failures. Call it for paginated or filtered table views. Prefer server-side filters and cursors over fetching broad result sets into the client.
- */
-export const listIngestJobsOptions = (options?: Options<ListIngestJobsData>) => queryOptions<ListIngestJobsResponse, DefaultError, ListIngestJobsResponse, ReturnType<typeof listIngestJobsQueryKey>>({
-    queryFn: async ({ queryKey, signal }) => {
-        const { data } = await Ingest.listIngestJobs({
-            ...options,
-            ...queryKey[0],
-            signal,
-            throwOnError: true
-        });
-        return data;
-    },
-    queryKey: listIngestJobsQueryKey(options)
-});
-
 export const getIngestJobQueryKey = (options: Options<GetIngestJobData>) => createQueryKey('getIngestJob', options);
 
 /**
@@ -2088,6 +2256,150 @@ export const getIngestJobOptions = (options: Options<GetIngestJobData>) => query
         return data;
     },
     queryKey: getIngestJobQueryKey(options)
+});
+
+export const listIngestJobAttemptsQueryKey = (options: Options<ListIngestJobAttemptsData>) => createQueryKey('listIngestJobAttempts', options);
+
+/**
+ * Paginated attempt history for one job, newest first. Net-new: a job
+ * previously had Get (`GET .../jobs/{jobId}`, latest attempt only) and
+ * Create-via-retry (`POST .../jobs/{jobId}/attempts`), but no List — an
+ * operator diagnosing a flaky ingest had no way to see the full retry
+ * history in one call.
+ *
+ * Reads or controls ingest runtime state. Operators use these endpoints to inspect queued work, attempts, stage events, and document-processing failures. Call it for paginated or filtered table views. Prefer server-side filters and cursors over fetching broad result sets into the client.
+ */
+export const listIngestJobAttemptsOptions = (options: Options<ListIngestJobAttemptsData>) => queryOptions<ListIngestJobAttemptsResponse, DefaultError, ListIngestJobAttemptsResponse, ReturnType<typeof listIngestJobAttemptsQueryKey>>({
+    queryFn: async ({ queryKey, signal }) => {
+        const { data } = await Ingest.listIngestJobAttempts({
+            ...options,
+            ...queryKey[0],
+            signal,
+            throwOnError: true
+        });
+        return data;
+    },
+    queryKey: listIngestJobAttemptsQueryKey(options)
+});
+
+export const listIngestJobAttemptsInfiniteQueryKey = (options: Options<ListIngestJobAttemptsData>): QueryKey<Options<ListIngestJobAttemptsData>> => createQueryKey('listIngestJobAttempts', options, true);
+
+/**
+ * Paginated attempt history for one job, newest first. Net-new: a job
+ * previously had Get (`GET .../jobs/{jobId}`, latest attempt only) and
+ * Create-via-retry (`POST .../jobs/{jobId}/attempts`), but no List — an
+ * operator diagnosing a flaky ingest had no way to see the full retry
+ * history in one call.
+ *
+ * Reads or controls ingest runtime state. Operators use these endpoints to inspect queued work, attempts, stage events, and document-processing failures. Call it for paginated or filtered table views. Prefer server-side filters and cursors over fetching broad result sets into the client.
+ */
+export const listIngestJobAttemptsInfiniteOptions = (options: Options<ListIngestJobAttemptsData>) => {
+    const opts = infiniteQueryOptions<ListIngestJobAttemptsResponse, DefaultError, InfiniteData<ListIngestJobAttemptsResponse>, QueryKey<Options<ListIngestJobAttemptsData>>, InfiniteStringPageParam>(
+    // @ts-ignore
+    {
+        queryFn: async ({ pageParam, queryKey, signal }) => {
+            // @ts-ignore
+            const page: GenericInfinitePageParams<ListIngestJobAttemptsData> = typeof pageParam === 'object' ? pageParam : {
+                query: {
+                    cursor: pageParam
+                }
+            };
+            const params = createInfiniteParams(queryKey, page);
+            const { data } = await Ingest.listIngestJobAttempts({
+                ...options,
+                ...params,
+                signal,
+                throwOnError: true
+            });
+            return data;
+        },
+        queryKey: listIngestJobAttemptsInfiniteQueryKey(options)
+    });
+    return opts as Omit<typeof opts, 'initialData'>;
+};
+
+export const listIngestJobsQueryKey = (options: Options<ListIngestJobsData>) => createQueryKey('listIngestJobs', options);
+
+/**
+ * Paginated job history for one library, newest first.
+ *
+ * Replaces the old flat `GET /v1/ingest/jobs?workspaceId=&libraryId=` — the
+ * handler 400-ed without `libraryId` in practice, so it was already a
+ * lyingly-optional query parameter. `libraryId` is now an honest required
+ * path segment (memory/2026-07-17-rest-api-query-refactor-plan.md §8:
+ * "RESTORED+RENAME").
+ */
+export const listIngestJobsOptions = (options: Options<ListIngestJobsData>) => queryOptions<ListIngestJobsResponse, DefaultError, ListIngestJobsResponse, ReturnType<typeof listIngestJobsQueryKey>>({
+    queryFn: async ({ queryKey, signal }) => {
+        const { data } = await Ingest.listIngestJobs({
+            ...options,
+            ...queryKey[0],
+            signal,
+            throwOnError: true
+        });
+        return data;
+    },
+    queryKey: listIngestJobsQueryKey(options)
+});
+
+export const listIngestJobsInfiniteQueryKey = (options: Options<ListIngestJobsData>): QueryKey<Options<ListIngestJobsData>> => createQueryKey('listIngestJobs', options, true);
+
+/**
+ * Paginated job history for one library, newest first.
+ *
+ * Replaces the old flat `GET /v1/ingest/jobs?workspaceId=&libraryId=` — the
+ * handler 400-ed without `libraryId` in practice, so it was already a
+ * lyingly-optional query parameter. `libraryId` is now an honest required
+ * path segment (memory/2026-07-17-rest-api-query-refactor-plan.md §8:
+ * "RESTORED+RENAME").
+ */
+export const listIngestJobsInfiniteOptions = (options: Options<ListIngestJobsData>) => {
+    const opts = infiniteQueryOptions<ListIngestJobsResponse, DefaultError, InfiniteData<ListIngestJobsResponse>, QueryKey<Options<ListIngestJobsData>>, InfiniteStringPageParam>(
+    // @ts-ignore
+    {
+        queryFn: async ({ pageParam, queryKey, signal }) => {
+            // @ts-ignore
+            const page: GenericInfinitePageParams<ListIngestJobsData> = typeof pageParam === 'object' ? pageParam : {
+                query: {
+                    cursor: pageParam
+                }
+            };
+            const params = createInfiniteParams(queryKey, page);
+            const { data } = await Ingest.listIngestJobs({
+                ...options,
+                ...params,
+                signal,
+                throwOnError: true
+            });
+            return data;
+        },
+        queryKey: listIngestJobsInfiniteQueryKey(options)
+    });
+    return opts as Omit<typeof opts, 'initialData'>;
+};
+
+export const listIngestQueueQueryKey = (options?: Options<ListIngestQueueData>) => createQueryKey('listIngestQueue', options);
+
+/**
+ * Relocated from `GET /v1/ops/ingest-queue` (see the module-level comment
+ * above). Stays `pub` (not `pub(crate)`) because the still-`ops`-scoped
+ * queue mutation handlers (`move`/`retry`/`pause`/`resume`/`cancel`/`bulk`,
+ * a sibling module) call back into this function to return the refreshed
+ * queue after mutating.
+ *
+ * Reads or controls ingest runtime state. Operators use these endpoints to inspect queued work, attempts, stage events, and document-processing failures. Call it for paginated or filtered table views. Prefer server-side filters and cursors over fetching broad result sets into the client.
+ */
+export const listIngestQueueOptions = (options?: Options<ListIngestQueueData>) => queryOptions<ListIngestQueueResponse, DefaultError, ListIngestQueueResponse, ReturnType<typeof listIngestQueueQueryKey>>({
+    queryFn: async ({ queryKey, signal }) => {
+        const { data } = await Ingest.listIngestQueue({
+            ...options,
+            ...queryKey[0],
+            signal,
+            throwOnError: true
+        });
+        return data;
+    },
+    queryKey: listIngestQueueQueryKey(options)
 });
 
 export const getKnowledgeContextBundleQueryKey = (options: Options<GetKnowledgeContextBundleData>) => createQueryKey('getKnowledgeContextBundle', options);
@@ -2130,45 +2442,37 @@ export const listKnowledgeContextBundlesOptions = (options: Options<ListKnowledg
     queryKey: listKnowledgeContextBundlesQueryKey(options)
 });
 
-export const listKnowledgeDocumentsQueryKey = (options: Options<ListKnowledgeDocumentsData>) => createQueryKey('listKnowledgeDocuments', options);
+export const listKnowledgeContextBundlesInfiniteQueryKey = (options: Options<ListKnowledgeContextBundlesData>): QueryKey<Options<ListKnowledgeContextBundlesData>> => createQueryKey('listKnowledgeContextBundles', options, true);
 
 /**
- * List knowledge documents.
+ * List knowledge context bundles.
  *
- * Manages document content and derived document views. These endpoints are used by document workspaces, upload flows, source viewers, revision history, and document-level diagnostics. Call it for paginated or filtered table views. Prefer server-side filters and cursors over fetching broad result sets into the client.
+ * Reads the knowledge model derived from ingested documents. These endpoints power graph workbench views, document memory search, context-bundle inspection, and entity/relation drill-downs. Call it for paginated or filtered table views. Prefer server-side filters and cursors over fetching broad result sets into the client.
  */
-export const listKnowledgeDocumentsOptions = (options: Options<ListKnowledgeDocumentsData>) => queryOptions<ListKnowledgeDocumentsResponse, DefaultError, ListKnowledgeDocumentsResponse, ReturnType<typeof listKnowledgeDocumentsQueryKey>>({
-    queryFn: async ({ queryKey, signal }) => {
-        const { data } = await Knowledge.listKnowledgeDocuments({
-            ...options,
-            ...queryKey[0],
-            signal,
-            throwOnError: true
-        });
-        return data;
-    },
-    queryKey: listKnowledgeDocumentsQueryKey(options)
-});
-
-export const getKnowledgeDocumentQueryKey = (options: Options<GetKnowledgeDocumentData>) => createQueryKey('getKnowledgeDocument', options);
-
-/**
- * Get knowledge document.
- *
- * Manages document content and derived document views. These endpoints are used by document workspaces, upload flows, source viewers, revision history, and document-level diagnostics. Call it when the caller already has the resource identifier and needs the latest authorized server view.
- */
-export const getKnowledgeDocumentOptions = (options: Options<GetKnowledgeDocumentData>) => queryOptions<GetKnowledgeDocumentResponse, DefaultError, GetKnowledgeDocumentResponse, ReturnType<typeof getKnowledgeDocumentQueryKey>>({
-    queryFn: async ({ queryKey, signal }) => {
-        const { data } = await Knowledge.getKnowledgeDocument({
-            ...options,
-            ...queryKey[0],
-            signal,
-            throwOnError: true
-        });
-        return data;
-    },
-    queryKey: getKnowledgeDocumentQueryKey(options)
-});
+export const listKnowledgeContextBundlesInfiniteOptions = (options: Options<ListKnowledgeContextBundlesData>) => {
+    const opts = infiniteQueryOptions<ListKnowledgeContextBundlesResponse, DefaultError, InfiniteData<ListKnowledgeContextBundlesResponse>, QueryKey<Options<ListKnowledgeContextBundlesData>>, InfiniteStringPageParam>(
+    // @ts-ignore
+    {
+        queryFn: async ({ pageParam, queryKey, signal }) => {
+            // @ts-ignore
+            const page: GenericInfinitePageParams<ListKnowledgeContextBundlesData> = typeof pageParam === 'object' ? pageParam : {
+                query: {
+                    cursor: pageParam
+                }
+            };
+            const params = createInfiniteParams(queryKey, page);
+            const { data } = await Knowledge.listKnowledgeContextBundles({
+                ...options,
+                ...params,
+                signal,
+                throwOnError: true
+            });
+            return data;
+        },
+        queryKey: listKnowledgeContextBundlesInfiniteQueryKey(options)
+    });
+    return opts as Omit<typeof opts, 'initialData'>;
+};
 
 export const getKnowledgeEntityQueryKey = (options: Options<GetKnowledgeEntityData>) => createQueryKey('getKnowledgeEntity', options);
 
@@ -2193,9 +2497,18 @@ export const getKnowledgeEntityOptions = (options: Options<GetKnowledgeEntityDat
 export const listKnowledgeLibraryGenerationsQueryKey = (options: Options<ListKnowledgeLibraryGenerationsData>) => createQueryKey('listKnowledgeLibraryGenerations', options);
 
 /**
- * List knowledge library generations.
+ * Paginated history of graph-generation/build runs for the library,
+ * distinct from the single `latestGeneration` field on `/summary`.
  *
- * Manages catalog libraries and their policies. Libraries own documents, knowledge graph data, assistant sessions, ingest settings, and query readiness. Call it for paginated or filtered table views. Prefer server-side filters and cursors over fetching broad result sets into the client.
+ * The derivation this wraps (`derive_library_generation_rows`) currently
+ * synthesizes at most one row — the library's *current* readable
+ * generation state — because there is no build-history table with a
+ * writer in the ingest/graph pipeline yet. This endpoint is the correct,
+ * honest read surface for that state today; `nextCursor` is always
+ * `null` because there is never more than one page. Real multi-row build
+ * history (timings, degraded passes over time) requires a schema change
+ * plus a pipeline write-path and is out of scope for this read-surface
+ * restoration.
  */
 export const listKnowledgeLibraryGenerationsOptions = (options: Options<ListKnowledgeLibraryGenerationsData>) => queryOptions<ListKnowledgeLibraryGenerationsResponse, DefaultError, ListKnowledgeLibraryGenerationsResponse, ReturnType<typeof listKnowledgeLibraryGenerationsQueryKey>>({
     queryFn: async ({ queryKey, signal }) => {
@@ -2230,6 +2543,62 @@ export const getKnowledgeGraphWorkbenchOptions = (options: Options<GetKnowledgeG
     queryKey: getKnowledgeGraphWorkbenchQueryKey(options)
 });
 
+export const listKnowledgeRelationsQueryKey = (options: Options<ListKnowledgeRelationsData>) => createQueryKey('listKnowledgeRelations', options);
+
+/**
+ * Paginated parent collection for the restored relation item read below.
+ * Slim rows only (no per-relation evidence expansion) — callers that need
+ * the full detail follow up with `GET .../relations/{relationId}`.
+ *
+ * Reads the knowledge model derived from ingested documents. These endpoints power graph workbench views, document memory search, context-bundle inspection, and entity/relation drill-downs. Call it for paginated or filtered table views. Prefer server-side filters and cursors over fetching broad result sets into the client.
+ */
+export const listKnowledgeRelationsOptions = (options: Options<ListKnowledgeRelationsData>) => queryOptions<ListKnowledgeRelationsResponse, DefaultError, ListKnowledgeRelationsResponse, ReturnType<typeof listKnowledgeRelationsQueryKey>>({
+    queryFn: async ({ queryKey, signal }) => {
+        const { data } = await Knowledge.listKnowledgeRelations({
+            ...options,
+            ...queryKey[0],
+            signal,
+            throwOnError: true
+        });
+        return data;
+    },
+    queryKey: listKnowledgeRelationsQueryKey(options)
+});
+
+export const listKnowledgeRelationsInfiniteQueryKey = (options: Options<ListKnowledgeRelationsData>): QueryKey<Options<ListKnowledgeRelationsData>> => createQueryKey('listKnowledgeRelations', options, true);
+
+/**
+ * Paginated parent collection for the restored relation item read below.
+ * Slim rows only (no per-relation evidence expansion) — callers that need
+ * the full detail follow up with `GET .../relations/{relationId}`.
+ *
+ * Reads the knowledge model derived from ingested documents. These endpoints power graph workbench views, document memory search, context-bundle inspection, and entity/relation drill-downs. Call it for paginated or filtered table views. Prefer server-side filters and cursors over fetching broad result sets into the client.
+ */
+export const listKnowledgeRelationsInfiniteOptions = (options: Options<ListKnowledgeRelationsData>) => {
+    const opts = infiniteQueryOptions<ListKnowledgeRelationsResponse, DefaultError, InfiniteData<ListKnowledgeRelationsResponse>, QueryKey<Options<ListKnowledgeRelationsData>>, InfiniteStringPageParam>(
+    // @ts-ignore
+    {
+        queryFn: async ({ pageParam, queryKey, signal }) => {
+            // @ts-ignore
+            const page: GenericInfinitePageParams<ListKnowledgeRelationsData> = typeof pageParam === 'object' ? pageParam : {
+                query: {
+                    cursor: pageParam
+                }
+            };
+            const params = createInfiniteParams(queryKey, page);
+            const { data } = await Knowledge.listKnowledgeRelations({
+                ...options,
+                ...params,
+                signal,
+                throwOnError: true
+            });
+            return data;
+        },
+        queryKey: listKnowledgeRelationsInfiniteQueryKey(options)
+    });
+    return opts as Omit<typeof opts, 'initialData'>;
+};
+
 export const getKnowledgeRelationQueryKey = (options: Options<GetKnowledgeRelationData>) => createQueryKey('getKnowledgeRelation', options);
 
 /**
@@ -2250,25 +2619,28 @@ export const getKnowledgeRelationOptions = (options: Options<GetKnowledgeRelatio
     queryKey: getKnowledgeRelationQueryKey(options)
 });
 
-export const searchKnowledgeDocumentsQueryKey = (options: Options<SearchKnowledgeDocumentsData>) => createQueryKey('searchKnowledgeDocuments', options);
-
 /**
- * Search knowledge documents.
+ * Hybrid lexical + vector search over one library's knowledge — the single
+ * canonical search interface. `POST` carries the request because a free-text
+ * query does not fit a URL query string safely or practically (the same
+ * rationale as Elasticsearch `_search`-style endpoints); it is still a pure
+ * read: 200 with a result body, never 201/202 and no `Location` header.
  *
- * Manages document content and derived document views. These endpoints are used by document workspaces, upload flows, source viewers, revision history, and document-level diagnostics. Call it when the caller has a query and needs ranked candidates before reading or drilling into a specific resource.
+ * Manages catalog libraries and their policies. Libraries own documents, knowledge graph data, assistant sessions, ingest settings, and query readiness. Call it when the caller has a query and needs ranked candidates before reading or drilling into a specific resource.
  */
-export const searchKnowledgeDocumentsOptions = (options: Options<SearchKnowledgeDocumentsData>) => queryOptions<SearchKnowledgeDocumentsResponse, DefaultError, SearchKnowledgeDocumentsResponse, ReturnType<typeof searchKnowledgeDocumentsQueryKey>>({
-    queryFn: async ({ queryKey, signal }) => {
-        const { data } = await Search.searchKnowledgeDocuments({
-            ...options,
-            ...queryKey[0],
-            signal,
-            throwOnError: true
-        });
-        return data;
-    },
-    queryKey: searchKnowledgeDocumentsQueryKey(options)
-});
+export const searchKnowledgeLibraryMutation = (options?: Partial<Options<SearchKnowledgeLibraryData>>): UseMutationOptions<SearchKnowledgeLibraryResponse, DefaultError, Options<SearchKnowledgeLibraryData>> => {
+    const mutationOptions: UseMutationOptions<SearchKnowledgeLibraryResponse, DefaultError, Options<SearchKnowledgeLibraryData>> = {
+        mutationFn: async (fnOptions) => {
+            const { data } = await Knowledge.searchKnowledgeLibrary({
+                ...options,
+                ...fnOptions,
+                throwOnError: true
+            });
+            return data;
+        }
+    };
+    return mutationOptions;
+};
 
 export const getKnowledgeLibrarySummaryQueryKey = (options: Options<GetKnowledgeLibrarySummaryData>) => createQueryKey('getKnowledgeLibrarySummary', options);
 
@@ -2293,7 +2665,7 @@ export const getKnowledgeLibrarySummaryOptions = (options: Options<GetKnowledgeL
 /**
  * Execute answer-surface MCP JSON-RPC.
  *
- * Main JSON-RPC endpoint for external MCP clients and other agent runtimes. It supports MCP initialization, tool listing, and tool invocation over the answer surface. Tools on this surface are read-oriented and designed for agentic question answering: catalog discovery, document search/read, graph inspection, runtime trace lookup, and `grounded_answer`. For user-facing answers, clients should let the agent choose tools from the listed schemas. Do not mechanically wrap every user message as a `grounded_answer` call; composite questions often need several document, graph, runtime, and grounded-answer probes before final synthesis.
+ * Main JSON-RPC endpoint for external MCP clients and other agent runtimes. It implements MCP Streamable HTTP 2025-11-25: every well-formed initialize request negotiates to that canonical version, and every subsequent request must send the exact negotiated `Mcp-Protocol-Version` header. It supports MCP initialization, tool listing, and tool invocation over the answer surface. Tools on this surface are read-oriented and designed for agentic question answering: catalog discovery, document search/read, graph inspection, runtime trace lookup, and `grounded_answer`. For user-facing answers, clients should let the agent choose tools from the listed schemas. Do not mechanically wrap every user message as a `grounded_answer` call; composite questions often need several document, graph, runtime, and grounded-answer probes before final synthesis.
  */
 export const postMcpRequestMutation = (options?: Partial<Options<PostMcpRequestData>>): UseMutationOptions<unknown, DefaultError, Options<PostMcpRequestData>> => {
     const mutationOptions: UseMutationOptions<unknown, DefaultError, Options<PostMcpRequestData>> = {
@@ -2332,7 +2704,7 @@ export const getMcpCapabilitiesOptions = (options?: Options<GetMcpCapabilitiesDa
 /**
  * Execute diagnostics MCP JSON-RPC.
  *
- * JSON-RPC endpoint for operational MCP clients. This surface is intended for debugging and automation that needs runtime state or traces, not for ordinary library question answering. Use `/v1/mcp/diagnostics/capabilities` first to check which diagnostic tools the token may call. Keep this surface separate from answer agents when a token should not expose operational inspection tools to normal chat flows.
+ * JSON-RPC endpoint for operational MCP clients using the same MCP Streamable HTTP 2025-11-25 lifecycle as the answer surface. Every well-formed initialize request negotiates to that canonical version, and every subsequent request must send the exact negotiated `Mcp-Protocol-Version` header. This surface is intended for debugging and automation that needs runtime state or traces, not for ordinary library question answering. Use `/v1/mcp/diagnostics/capabilities` first to check which diagnostic tools the token may call. Keep this surface separate from answer agents when a token should not expose operational inspection tools to normal chat flows.
  */
 export const postMcpDiagnosticsRequestMutation = (options?: Partial<Options<PostMcpDiagnosticsRequestData>>): UseMutationOptions<unknown, DefaultError, Options<PostMcpDiagnosticsRequestData>> => {
     const mutationOptions: UseMutationOptions<unknown, DefaultError, Options<PostMcpDiagnosticsRequestData>> = {
@@ -2386,26 +2758,6 @@ export const getOpenApiContractOptions = (options?: Options<GetOpenApiContractDa
         return data;
     },
     queryKey: getOpenApiContractQueryKey(options)
-});
-
-export const listIngestQueueQueryKey = (options?: Options<ListIngestQueueData>) => createQueryKey('listIngestQueue', options);
-
-/**
- * List ingest queue.
- *
- * Reads or controls ingest runtime state. Operators use these endpoints to inspect queued work, attempts, stage events, and document-processing failures. Call it for paginated or filtered table views. Prefer server-side filters and cursors over fetching broad result sets into the client.
- */
-export const listIngestQueueOptions = (options?: Options<ListIngestQueueData>) => queryOptions<ListIngestQueueResponse, DefaultError, ListIngestQueueResponse, ReturnType<typeof listIngestQueueQueryKey>>({
-    queryFn: async ({ queryKey, signal }) => {
-        const { data } = await Ops.listIngestQueue({
-            ...options,
-            ...queryKey[0],
-            signal,
-            throwOnError: true
-        });
-        return data;
-    },
-    queryKey: listIngestQueueQueryKey(options)
 });
 
 /**
@@ -2582,26 +2934,6 @@ export const getAsyncOperationOptions = (options: Options<GetAsyncOperationData>
     queryKey: getAsyncOperationQueryKey(options)
 });
 
-export const getAssistantSystemPromptQueryKey = (options?: Options<GetAssistantSystemPromptData>) => createQueryKey('getAssistantSystemPrompt', options);
-
-/**
- * Get the recommended MCP assistant system prompt.
- *
- * Returns the exact prompt text used by the built-in UI assistant and recommended for external MCP clients. The template teaches a generic tool-using agent how to choose IronRAG tools, pass conversation history, iterate over results, prefer high-signal grounded-answer probes for content questions, and avoid answering from catalog titles alone. Pass `libraryId` when the caller wants the same template rendered with a concrete `<workspace>/<library>` reference for copy-paste setup. Omit it to fetch only the reusable template with the `{LIBRARY_REF}` placeholder.
- */
-export const getAssistantSystemPromptOptions = (options?: Options<GetAssistantSystemPromptData>) => queryOptions<GetAssistantSystemPromptResponse, DefaultError, GetAssistantSystemPromptResponse, ReturnType<typeof getAssistantSystemPromptQueryKey>>({
-    queryFn: async ({ queryKey, signal }) => {
-        const { data } = await Query.getAssistantSystemPrompt({
-            ...options,
-            ...queryKey[0],
-            signal,
-            throwOnError: true
-        });
-        return data;
-    },
-    queryKey: getAssistantSystemPromptQueryKey(options)
-});
-
 export const getQueryExecutionQueryKey = (options: Options<GetQueryExecutionData>) => createQueryKey('getQueryExecution', options);
 
 /**
@@ -2642,14 +2974,14 @@ export const getQueryExecutionLlmContextOptions = (options: Options<GetQueryExec
     queryKey: getQueryExecutionLlmContextQueryKey(options)
 });
 
-export const listQuerySessionsQueryKey = (options?: Options<ListQuerySessionsData>) => createQueryKey('listQuerySessions', options);
+export const listQuerySessionsQueryKey = (options: Options<ListQuerySessionsData>) => createQueryKey('listQuerySessions', options);
 
 /**
  * List assistant sessions for one library.
  *
- * Returns the chat sessions visible to the caller for the requested library. The web UI uses this endpoint to populate the assistant sidebar and restore recent conversations. Clients must provide `libraryId`; authorization is checked against the library before any session metadata is returned.
+ * Returns the chat sessions visible to the caller for the requested library, most recently updated first. The web UI uses this endpoint to populate the assistant sidebar and restore recent conversations. The session list is retention-bounded per library, so the full set always fits on one page and `nextCursor` is always `null`.
  */
-export const listQuerySessionsOptions = (options?: Options<ListQuerySessionsData>) => queryOptions<ListQuerySessionsResponse, DefaultError, ListQuerySessionsResponse, ReturnType<typeof listQuerySessionsQueryKey>>({
+export const listQuerySessionsOptions = (options: Options<ListQuerySessionsData>) => queryOptions<ListQuerySessionsResponse, DefaultError, ListQuerySessionsResponse, ReturnType<typeof listQuerySessionsQueryKey>>({
     queryFn: async ({ queryKey, signal }) => {
         const { data } = await Query.listQuerySessions({
             ...options,
@@ -2665,12 +2997,31 @@ export const listQuerySessionsOptions = (options?: Options<ListQuerySessionsData
 /**
  * Create an assistant session.
  *
- * Creates a persistent assistant conversation scoped to one library. The session stores the user and assistant turns, execution ids, verifier state, citations, runtime traces, and debug snapshots produced by later turns. `workspaceId` is optional for normal callers because the backend derives it from `libraryId`; when supplied it must match the target library.
+ * Creates a persistent assistant conversation scoped to one library. The session stores the user and assistant turns, execution ids, verifier state, citations, runtime traces, and debug snapshots produced by later turns.
  */
 export const createQuerySessionMutation = (options?: Partial<Options<CreateQuerySessionData>>): UseMutationOptions<CreateQuerySessionResponse, DefaultError, Options<CreateQuerySessionData>> => {
     const mutationOptions: UseMutationOptions<CreateQuerySessionResponse, DefaultError, Options<CreateQuerySessionData>> = {
         mutationFn: async (fnOptions) => {
             const { data } = await Query.createQuerySession({
+                ...options,
+                ...fnOptions,
+                throwOnError: true
+            });
+            return data;
+        }
+    };
+    return mutationOptions;
+};
+
+/**
+ * Delete an assistant session.
+ *
+ * Deletes one owned UI assistant session and its query-owned turns, executions, caches, and context snapshots. Active executions and sessions retained as provenance for an external replay are rejected with a conflict; independent audit and runtime records remain available under their retention policies.
+ */
+export const deleteQuerySessionMutation = (options?: Partial<Options<DeleteQuerySessionData>>): UseMutationOptions<DeleteQuerySessionResponse, DefaultError, Options<DeleteQuerySessionData>> => {
+    const mutationOptions: UseMutationOptions<DeleteQuerySessionResponse, DefaultError, Options<DeleteQuerySessionData>> = {
+        mutationFn: async (fnOptions) => {
+            const { data } = await Query.deleteQuerySession({
                 ...options,
                 ...fnOptions,
                 throwOnError: true
@@ -2702,6 +3053,45 @@ export const getQuerySessionOptions = (options: Options<GetQuerySessionData>) =>
 });
 
 /**
+ * Rename an assistant session.
+ *
+ * Persists a bounded, non-empty display title for one UI assistant session. The caller must have query access to the session scope and must either own the session or hold library-management permission.
+ */
+export const renameQuerySessionMutation = (options?: Partial<Options<RenameQuerySessionData>>): UseMutationOptions<RenameQuerySessionResponse, DefaultError, Options<RenameQuerySessionData>> => {
+    const mutationOptions: UseMutationOptions<RenameQuerySessionResponse, DefaultError, Options<RenameQuerySessionData>> = {
+        mutationFn: async (fnOptions) => {
+            const { data } = await Query.renameQuerySession({
+                ...options,
+                ...fnOptions,
+                throwOnError: true
+            });
+            return data;
+        }
+    };
+    return mutationOptions;
+};
+
+export const listQuerySessionTurnsQueryKey = (options: Options<ListQuerySessionTurnsData>) => createQueryKey('listQuerySessionTurns', options);
+
+/**
+ * List turns recorded for one assistant session.
+ *
+ * Returns the bounded, chronological turn history for one assistant session: recorded content, author, and the execution that produced or consumed each turn (without hydrated evidence). Use `GET /v1/query/sessions/{sessionId}/turns/{turnId}` for one turn, or `GET /v1/query/sessions/{sessionId}` for the fully hydrated conversation with evidence.
+ */
+export const listQuerySessionTurnsOptions = (options: Options<ListQuerySessionTurnsData>) => queryOptions<ListQuerySessionTurnsResponse, DefaultError, ListQuerySessionTurnsResponse, ReturnType<typeof listQuerySessionTurnsQueryKey>>({
+    queryFn: async ({ queryKey, signal }) => {
+        const { data } = await Query.listQuerySessionTurns({
+            ...options,
+            ...queryKey[0],
+            signal,
+            throwOnError: true
+        });
+        return data;
+    },
+    queryKey: listQuerySessionTurnsQueryKey(options)
+});
+
+/**
  * Run one UI assistant turn.
  *
  * Executes one user message through the same MCP-style tool loop used to simulate an external agent in the web UI. The model receives the available answer-surface tool schemas, chooses one or more tool calls, may run independent calls in parallel, reads the tool results, and then writes the final answer. For normal JSON clients the endpoint returns the completed `AssistantExecutionDetail`. When the request `Accept` header includes `text/event-stream`, the same endpoint streams `assistant_turn` SSE events: model requests, model responses, tool-call start/finish activity, periodic working heartbeats, and finally a terminal `completed` or `failed` event.
@@ -2719,6 +3109,46 @@ export const createQuerySessionTurnMutation = (options?: Partial<Options<CreateQ
     };
     return mutationOptions;
 };
+
+export const getQuerySessionTurnQueryKey = (options: Options<GetQuerySessionTurnData>) => createQueryKey('getQuerySessionTurn', options);
+
+/**
+ * Load one assistant session turn.
+ *
+ * Returns a single immutable turn from an assistant session: recorded content, author, timestamp, and the execution that produced or consumed it. Turns are append-only historical records — there is no item-level update or delete, only `POST .../turns` to record a new one and `DELETE /v1/query/sessions/{sessionId}` to erase the whole session, preserving the same audit trail that protects execution traces.
+ */
+export const getQuerySessionTurnOptions = (options: Options<GetQuerySessionTurnData>) => queryOptions<GetQuerySessionTurnResponse, DefaultError, GetQuerySessionTurnResponse, ReturnType<typeof getQuerySessionTurnQueryKey>>({
+    queryFn: async ({ queryKey, signal }) => {
+        const { data } = await Query.getQuerySessionTurn({
+            ...options,
+            ...queryKey[0],
+            signal,
+            throwOnError: true
+        });
+        return data;
+    },
+    queryKey: getQuerySessionTurnQueryKey(options)
+});
+
+export const getAssistantSystemPromptQueryKey = (options?: Options<GetAssistantSystemPromptData>) => createQueryKey('getAssistantSystemPrompt', options);
+
+/**
+ * Get the recommended MCP assistant system prompt.
+ *
+ * Returns the exact prompt text used by the built-in UI assistant and recommended for external MCP clients. The template teaches a generic tool-using agent how to choose IronRAG tools, pass conversation history, iterate over results, prefer high-signal grounded-answer probes for content questions, and avoid answering from catalog titles alone. Pass `libraryId` when the caller wants the same template rendered with a concrete `<workspace>/<library>` reference for copy-paste setup. Omit it to fetch only the reusable template with the `{LIBRARY_REF}` placeholder.
+ */
+export const getAssistantSystemPromptOptions = (options?: Options<GetAssistantSystemPromptData>) => queryOptions<GetAssistantSystemPromptResponse, DefaultError, GetAssistantSystemPromptResponse, ReturnType<typeof getAssistantSystemPromptQueryKey>>({
+    queryFn: async ({ queryKey, signal }) => {
+        const { data } = await Query.getAssistantSystemPrompt({
+            ...options,
+            ...queryKey[0],
+            signal,
+            throwOnError: true
+        });
+        return data;
+    },
+    queryKey: getAssistantSystemPromptQueryKey(options)
+});
 
 export const getReadinessQueryKey = (options?: Options<GetReadinessData>) => createQueryKey('getReadiness', options);
 
@@ -2743,9 +3173,9 @@ export const getReadinessOptions = (options?: Options<GetReadinessData>) => quer
 export const getRuntimeExecutionQueryKey = (options: Options<GetRuntimeExecutionData>) => createQueryKey('getRuntimeExecution', options);
 
 /**
- * Get runtime execution.
+ * Inspect one runtime execution.
  *
- * Reads runtime execution traces. Use these endpoints to inspect lifecycle state, stages, actions, policy decisions, failures, and child work for asynchronous operations. Call it when the caller already has the resource identifier and needs the latest authorized server view.
+ * Loads the agent/tool-level runtime execution snapshot: owner, task/surface kind, lifecycle state, active stage, turn budget/count, failure code, and a redaction-safe policy summary. Distinct from a query execution — a runtime execution can be owned by a query turn, a graph-extraction attempt, or another agentic task, and is referenced independently via `runtimeExecutionId` in the audit filter set. The MCP tool `get_runtime_execution` is a thin wrapper over this same read.
  */
 export const getRuntimeExecutionOptions = (options: Options<GetRuntimeExecutionData>) => queryOptions<GetRuntimeExecutionResponse, DefaultError, GetRuntimeExecutionResponse, ReturnType<typeof getRuntimeExecutionQueryKey>>({
     queryFn: async ({ queryKey, signal }) => {
@@ -2763,9 +3193,9 @@ export const getRuntimeExecutionOptions = (options: Options<GetRuntimeExecutionD
 export const getRuntimeExecutionTraceQueryKey = (options: Options<GetRuntimeExecutionTraceData>) => createQueryKey('getRuntimeExecutionTrace', options);
 
 /**
- * Get runtime execution trace.
+ * Inspect the full stage/action/policy trace of one runtime execution.
  *
- * Reads runtime execution traces. Use these endpoints to inspect lifecycle state, stages, actions, policy decisions, failures, and child work for asynchronous operations. Call it when the caller already has the resource identifier and needs the latest authorized server view.
+ * Returns the complete `stages[]`/`actions[]`/`policy_decisions[]` trace recorded for one runtime execution, in addition to the execution snapshot itself. Use this for deep debugging of an agentic run: per-stage timing and outcome, per-action tool calls and usage, and every policy decision with its reason code. Traces are unbounded — long agentic executions can produce large stage/action counts; a size limit or pagination may be added at a later stage. The MCP tool `get_runtime_execution_trace` is a thin wrapper over this same read.
  */
 export const getRuntimeExecutionTraceOptions = (options: Options<GetRuntimeExecutionTraceData>) => queryOptions<GetRuntimeExecutionTraceResponse, DefaultError, GetRuntimeExecutionTraceResponse, ReturnType<typeof getRuntimeExecutionTraceQueryKey>>({
     queryFn: async ({ queryKey, signal }) => {
@@ -2778,26 +3208,6 @@ export const getRuntimeExecutionTraceOptions = (options: Options<GetRuntimeExecu
         return data;
     },
     queryKey: getRuntimeExecutionTraceQueryKey(options)
-});
-
-export const searchDocumentsQueryKey = (options: Options<SearchDocumentsData>) => createQueryKey('searchDocuments', options);
-
-/**
- * Search documents.
- *
- * Manages document content and derived document views. These endpoints are used by document workspaces, upload flows, source viewers, revision history, and document-level diagnostics. Call it when the caller has a query and needs ranked candidates before reading or drilling into a specific resource.
- */
-export const searchDocumentsOptions = (options: Options<SearchDocumentsData>) => queryOptions<SearchDocumentsResponse, DefaultError, SearchDocumentsResponse, ReturnType<typeof searchDocumentsQueryKey>>({
-    queryFn: async ({ queryKey, signal }) => {
-        const { data } = await Search.searchDocuments({
-            ...options,
-            ...queryKey[0],
-            signal,
-            throwOnError: true
-        });
-        return data;
-    },
-    queryKey: searchDocumentsQueryKey(options)
 });
 
 export const getVersionQueryKey = (options?: Options<GetVersionData>) => createQueryKey('getVersion', options);
@@ -2839,45 +3249,6 @@ export const getReleaseUpdateOptions = (options?: Options<GetReleaseUpdateData>)
     },
     queryKey: getReleaseUpdateQueryKey(options)
 });
-
-export const listWebhookSubscriptionsQueryKey = (options: Options<ListWebhookSubscriptionsData>) => createQueryKey('listWebhookSubscriptions', options);
-
-/**
- * List webhook subscriptions.
- *
- * Manages outbound webhook subscriptions and delivery attempts. External systems use these subscriptions to receive document and revision lifecycle notifications. Call it for paginated or filtered table views. Prefer server-side filters and cursors over fetching broad result sets into the client.
- */
-export const listWebhookSubscriptionsOptions = (options: Options<ListWebhookSubscriptionsData>) => queryOptions<ListWebhookSubscriptionsResponse, DefaultError, ListWebhookSubscriptionsResponse, ReturnType<typeof listWebhookSubscriptionsQueryKey>>({
-    queryFn: async ({ queryKey, signal }) => {
-        const { data } = await Webhooks.listWebhookSubscriptions({
-            ...options,
-            ...queryKey[0],
-            signal,
-            throwOnError: true
-        });
-        return data;
-    },
-    queryKey: listWebhookSubscriptionsQueryKey(options)
-});
-
-/**
- * Create webhook subscription.
- *
- * Manages outbound webhook subscriptions and delivery attempts. External systems use these subscriptions to receive document and revision lifecycle notifications. Call it to create work or submit a command. Some commands complete synchronously, while ingest, mutation, and runtime work can continue asynchronously.
- */
-export const createWebhookSubscriptionMutation = (options?: Partial<Options<CreateWebhookSubscriptionData>>): UseMutationOptions<CreateWebhookSubscriptionResponse, DefaultError, Options<CreateWebhookSubscriptionData>> => {
-    const mutationOptions: UseMutationOptions<CreateWebhookSubscriptionResponse, DefaultError, Options<CreateWebhookSubscriptionData>> = {
-        mutationFn: async (fnOptions) => {
-            const { data } = await Webhooks.createWebhookSubscription({
-                ...options,
-                ...fnOptions,
-                throwOnError: true
-            });
-            return data;
-        }
-    };
-    return mutationOptions;
-};
 
 /**
  * Delete webhook subscription.
@@ -2956,3 +3327,106 @@ export const listWebhookDeliveryAttemptsOptions = (options: Options<ListWebhookD
     },
     queryKey: listWebhookDeliveryAttemptsQueryKey(options)
 });
+
+export const listWebhookDeliveryAttemptsInfiniteQueryKey = (options: Options<ListWebhookDeliveryAttemptsData>): QueryKey<Options<ListWebhookDeliveryAttemptsData>> => createQueryKey('listWebhookDeliveryAttempts', options, true);
+
+/**
+ * List webhook delivery attempts.
+ *
+ * Manages outbound webhook subscriptions and delivery attempts. External systems use these subscriptions to receive document and revision lifecycle notifications. Call it for paginated or filtered table views. Prefer server-side filters and cursors over fetching broad result sets into the client.
+ */
+export const listWebhookDeliveryAttemptsInfiniteOptions = (options: Options<ListWebhookDeliveryAttemptsData>) => {
+    const opts = infiniteQueryOptions<ListWebhookDeliveryAttemptsResponse, DefaultError, InfiniteData<ListWebhookDeliveryAttemptsResponse>, QueryKey<Options<ListWebhookDeliveryAttemptsData>>, InfiniteStringPageParam>(
+    // @ts-ignore
+    {
+        queryFn: async ({ pageParam, queryKey, signal }) => {
+            // @ts-ignore
+            const page: GenericInfinitePageParams<ListWebhookDeliveryAttemptsData> = typeof pageParam === 'object' ? pageParam : {
+                query: {
+                    cursor: pageParam
+                }
+            };
+            const params = createInfiniteParams(queryKey, page);
+            const { data } = await Webhooks.listWebhookDeliveryAttempts({
+                ...options,
+                ...params,
+                signal,
+                throwOnError: true
+            });
+            return data;
+        },
+        queryKey: listWebhookDeliveryAttemptsInfiniteQueryKey(options)
+    });
+    return opts as Omit<typeof opts, 'initialData'>;
+};
+
+export const listWebhookSubscriptionsQueryKey = (options: Options<ListWebhookSubscriptionsData>) => createQueryKey('listWebhookSubscriptions', options);
+
+/**
+ * List webhook subscriptions.
+ *
+ * Manages outbound webhook subscriptions and delivery attempts. External systems use these subscriptions to receive document and revision lifecycle notifications. Call it for paginated or filtered table views. Prefer server-side filters and cursors over fetching broad result sets into the client.
+ */
+export const listWebhookSubscriptionsOptions = (options: Options<ListWebhookSubscriptionsData>) => queryOptions<ListWebhookSubscriptionsResponse, DefaultError, ListWebhookSubscriptionsResponse, ReturnType<typeof listWebhookSubscriptionsQueryKey>>({
+    queryFn: async ({ queryKey, signal }) => {
+        const { data } = await Webhooks.listWebhookSubscriptions({
+            ...options,
+            ...queryKey[0],
+            signal,
+            throwOnError: true
+        });
+        return data;
+    },
+    queryKey: listWebhookSubscriptionsQueryKey(options)
+});
+
+export const listWebhookSubscriptionsInfiniteQueryKey = (options: Options<ListWebhookSubscriptionsData>): QueryKey<Options<ListWebhookSubscriptionsData>> => createQueryKey('listWebhookSubscriptions', options, true);
+
+/**
+ * List webhook subscriptions.
+ *
+ * Manages outbound webhook subscriptions and delivery attempts. External systems use these subscriptions to receive document and revision lifecycle notifications. Call it for paginated or filtered table views. Prefer server-side filters and cursors over fetching broad result sets into the client.
+ */
+export const listWebhookSubscriptionsInfiniteOptions = (options: Options<ListWebhookSubscriptionsData>) => {
+    const opts = infiniteQueryOptions<ListWebhookSubscriptionsResponse, DefaultError, InfiniteData<ListWebhookSubscriptionsResponse>, QueryKey<Options<ListWebhookSubscriptionsData>>, InfiniteStringPageParam>(
+    // @ts-ignore
+    {
+        queryFn: async ({ pageParam, queryKey, signal }) => {
+            // @ts-ignore
+            const page: GenericInfinitePageParams<ListWebhookSubscriptionsData> = typeof pageParam === 'object' ? pageParam : {
+                query: {
+                    cursor: pageParam
+                }
+            };
+            const params = createInfiniteParams(queryKey, page);
+            const { data } = await Webhooks.listWebhookSubscriptions({
+                ...options,
+                ...params,
+                signal,
+                throwOnError: true
+            });
+            return data;
+        },
+        queryKey: listWebhookSubscriptionsInfiniteQueryKey(options)
+    });
+    return opts as Omit<typeof opts, 'initialData'>;
+};
+
+/**
+ * Create webhook subscription.
+ *
+ * Manages outbound webhook subscriptions and delivery attempts. External systems use these subscriptions to receive document and revision lifecycle notifications. Call it to create work or submit a command. Some commands complete synchronously, while ingest, mutation, and runtime work can continue asynchronously.
+ */
+export const createWebhookSubscriptionMutation = (options?: Partial<Options<CreateWebhookSubscriptionData>>): UseMutationOptions<CreateWebhookSubscriptionResponse, DefaultError, Options<CreateWebhookSubscriptionData>> => {
+    const mutationOptions: UseMutationOptions<CreateWebhookSubscriptionResponse, DefaultError, Options<CreateWebhookSubscriptionData>> = {
+        mutationFn: async (fnOptions) => {
+            const { data } = await Webhooks.createWebhookSubscription({
+                ...options,
+                ...fnOptions,
+                throwOnError: true
+            });
+            return data;
+        }
+    };
+    return mutationOptions;
+};

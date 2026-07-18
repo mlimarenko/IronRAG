@@ -24,12 +24,12 @@ Vitest writes the text report to the terminal, the machine-readable summary to
 The baseline was captured with the current unit tests and the canonical
 coverage exclusions in `vitest.config.ts`.
 
-| Metric | Current actual | Threshold |
-| --- | ---: | ---: |
-| Lines | 61.54% | 61.5% |
-| Functions | 52.93% | 52.9% |
-| Statements | 59.31% | 59.3% |
-| Branches | 51.75% | 51.7% |
+| Metric     | Current actual | Threshold |
+| ---------- | -------------: | --------: |
+| Lines      |         61.54% |     61.5% |
+| Functions  |         52.93% |     52.9% |
+| Statements |         59.31% |     59.3% |
+| Branches   |         51.75% |     51.7% |
 
 Excluded from coverage:
 

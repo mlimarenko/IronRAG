@@ -189,13 +189,13 @@ pub fn render_table_column_summary(summary: &TableColumnSummary) -> String {
         TableSummaryValueKind::Categorical => {
             segments.push(format!("Most Frequent Count: {}", summary.most_frequent_count));
             segments.push(format!("Most Frequent Tie Count: {}", summary.most_frequent_tie_count));
-            if summary.most_frequent_count > 1 || summary.most_frequent_values.len() <= 5 {
-                if !summary.most_frequent_values.is_empty() {
-                    segments.push(format!(
-                        "Most Frequent Values: {}",
-                        summary.most_frequent_values.join("; ")
-                    ));
-                }
+            if (summary.most_frequent_count > 1 || summary.most_frequent_values.len() <= 5)
+                && !summary.most_frequent_values.is_empty()
+            {
+                segments.push(format!(
+                    "Most Frequent Values: {}",
+                    summary.most_frequent_values.join("; ")
+                ));
             }
         }
     }
@@ -262,10 +262,10 @@ pub fn parse_table_column_summary(text: &str) -> Option<TableColumnSummary> {
             "Min" => min = parse_numeric_value(value),
             "Max" => max = parse_numeric_value(value),
             "Most Frequent Count" => {
-                most_frequent_count = value.trim().parse::<usize>().ok().unwrap_or(0)
+                most_frequent_count = value.trim().parse::<usize>().ok().unwrap_or(0);
             }
             "Most Frequent Tie Count" => {
-                most_frequent_tie_count = value.trim().parse::<usize>().ok().unwrap_or(0)
+                most_frequent_tie_count = value.trim().parse::<usize>().ok().unwrap_or(0);
             }
             "Most Frequent Values" => {
                 most_frequent_values = value
@@ -415,7 +415,7 @@ fn looks_like_email_value(value: &str) -> bool {
 
 fn looks_like_phone_value(value: &str) -> bool {
     let trimmed = value.trim();
-    let digit_count = trimmed.chars().filter(|character| character.is_ascii_digit()).count();
+    let digit_count = trimmed.chars().filter(char::is_ascii_digit).count();
     digit_count >= 7
         && trimmed.chars().all(|character| {
             character.is_ascii_digit()
@@ -425,7 +425,7 @@ fn looks_like_phone_value(value: &str) -> bool {
 
 fn looks_like_temporal_value(value: &str) -> bool {
     let trimmed = value.trim();
-    let digit_count = trimmed.chars().filter(|character| character.is_ascii_digit()).count();
+    let digit_count = trimmed.chars().filter(char::is_ascii_digit).count();
     let separator_count = trimmed
         .chars()
         .filter(|character| matches!(character, '-' | '/' | ':' | 'T' | 'Z' | '+' | '.'))

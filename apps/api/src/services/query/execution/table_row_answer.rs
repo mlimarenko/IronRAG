@@ -2,15 +2,15 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use uuid::Uuid;
 
-use crate::domains::query_ir::{QueryAct, QueryIR};
+use crate::domains::query_ir::{QueryAct, QueryIR, QueryTargetKind};
 use crate::services::query::text_match::normalized_alnum_tokens;
 use crate::shared::extraction::table_markdown::{
     is_markdown_separator_row, parse_markdown_table_row,
 };
 
 use super::{
-    focused_answer_document_id, question_intent::canonical_target_type_tag,
-    requested_initial_table_row_count, retrieve::score_value, types::RuntimeMatchedChunk,
+    focused_answer_document_id, requested_initial_table_row_count, retrieve::score_value,
+    types::RuntimeMatchedChunk,
 };
 
 #[derive(Debug, Clone)]
@@ -50,12 +50,10 @@ pub(crate) fn build_table_row_grounded_answer(
     }
 
     if query_ir_requests_table_column_inventory(ir) {
-        if let Some(answer) = build_table_column_inventory_answer(question, ir, &rows) {
+        if let Some(answer) = build_table_column_inventory_answer(ir, &rows) {
             return Some(answer);
         }
-        if let Some(answer) =
-            build_raw_pipe_table_column_inventory_answer(question, ir, &scoped_chunks)
-        {
+        if let Some(answer) = build_raw_pipe_table_column_inventory_answer(ir, &scoped_chunks) {
             return Some(answer);
         }
         return None;
@@ -72,6 +70,12 @@ pub(crate) fn build_table_row_grounded_answer(
     build_focused_table_row_field_answer(question, &rows)
 }
 
+/// Decodes the canonical row protocol emitted by
+/// [`crate::shared::extraction::table_markdown::build_semantic_table_row_text`].
+///
+/// `Sheet`, `Table`, and `Row` are format markers here, not natural-language
+/// content classifiers. The round-trip regression below keeps this parser tied
+/// to the emitter instead of allowing these markers to spread into routing.
 pub(crate) fn parse_table_row_chunk(chunk: &RuntimeMatchedChunk) -> Option<ParsedTableRow> {
     if !chunk.source_text.starts_with("Sheet: ") || !chunk.source_text.contains(" | Row ") {
         return parse_raw_pipe_table_row_chunk(chunk);
@@ -83,12 +87,12 @@ pub(crate) fn parse_table_row_chunk(chunk: &RuntimeMatchedChunk) -> Option<Parse
     let mut seen_row_marker = false;
     for part in chunk.source_text.split(" | ") {
         let trimmed = part.trim();
-        if let Some(value) = trimmed.strip_prefix("Row ") {
-            if let Ok(parsed) = value.trim().parse::<usize>() {
-                row_number = Some(parsed);
-                seen_row_marker = true;
-                continue;
-            }
+        if let Some(value) = trimmed.strip_prefix("Row ")
+            && let Ok(parsed) = value.trim().parse::<usize>()
+        {
+            row_number = Some(parsed);
+            seen_row_marker = true;
+            continue;
         }
         let Some((key, value)) = part.split_once(": ") else {
             continue;
@@ -272,105 +276,152 @@ fn build_table_value_inventory_answer(rows: &[ParsedTableRow]) -> Option<String>
 }
 
 fn build_table_column_inventory_answer(
-    question: &str,
     ir: Option<&QueryIR>,
     rows: &[ParsedTableRow],
 ) -> Option<String> {
-    let target_tokens = table_column_inventory_target_tokens(question, ir);
-    if target_tokens.is_empty() {
+    let target_tokens = typed_table_inventory_target_tokens(ir);
+    let groups = table_column_inventory_groups(rows);
+    if groups.is_empty() {
         return None;
     }
-    let mut groups = HashMap::<(Uuid, String, String), Vec<&ParsedTableRow>>::new();
+
+    let table_token_counts = table_inventory_token_counts(&groups);
+    let ranked = rank_table_column_inventory_groups(groups, &target_tokens, &table_token_counts);
+    let (_, _, _, table_name, rows) = unique_top_table_inventory_group(&ranked)?;
+    render_table_column_inventory(table_name, rows)
+}
+
+type TableColumnInventoryGroup<'a> = ((Uuid, String, String), Vec<&'a ParsedTableRow>);
+type RankedTableColumnInventoryGroup<'a> = (usize, f32, String, String, Vec<&'a ParsedTableRow>);
+
+fn table_column_inventory_groups(
+    rows: &[ParsedTableRow],
+) -> HashMap<(Uuid, String, String), Vec<&ParsedTableRow>> {
+    let mut groups: HashMap<(Uuid, String, String), Vec<&ParsedTableRow>> = HashMap::new();
     for row in rows {
         let Some(table_name) = row.table_name.as_ref().filter(|value| !value.trim().is_empty())
         else {
             continue;
         };
-        if table_row_field(row, "column").is_none() {
-            continue;
+        if table_row_has_inventory_fields(row) {
+            groups
+                .entry((row.document_id, row.sheet_name.clone(), table_name.clone()))
+                .or_default()
+                .push(row);
         }
-        groups
-            .entry((row.document_id, row.sheet_name.clone(), table_name.clone()))
-            .or_default()
-            .push(row);
     }
-    if groups.is_empty() {
-        return None;
-    }
+    groups
+}
 
-    let mut table_token_counts = BTreeMap::<String, usize>::new();
+fn table_row_has_inventory_fields(row: &ParsedTableRow) -> bool {
+    row.fields.iter().any(|(header, value)| !header.trim().is_empty() && !value.trim().is_empty())
+}
+
+fn table_inventory_token_counts(
+    groups: &HashMap<(Uuid, String, String), Vec<&ParsedTableRow>>,
+) -> BTreeMap<String, usize> {
+    let mut table_token_counts = BTreeMap::new();
     for (_, _, table_name) in groups.keys() {
-        for token in normalized_alnum_tokens(table_name, 2).into_iter().collect::<BTreeSet<_>>() {
-            table_token_counts
-                .entry(token.to_string())
-                .and_modify(|count| *count += 1)
-                .or_insert(1);
+        for token in normalized_alnum_tokens(table_name, 2) {
+            table_token_counts.entry(token).and_modify(|count| *count += 1).or_insert(1);
         }
     }
+    table_token_counts
+}
 
+fn rank_table_column_inventory_groups<'a>(
+    groups: HashMap<(Uuid, String, String), Vec<&'a ParsedTableRow>>,
+    target_tokens: &BTreeSet<String>,
+    table_token_counts: &BTreeMap<String, usize>,
+) -> Vec<RankedTableColumnInventoryGroup<'a>> {
+    let group_count = groups.len();
     let mut ranked = groups
         .into_iter()
-        .filter_map(|((_, sheet_name, table_name), rows)| {
-            let table_tokens = normalized_alnum_tokens(&table_name, 2);
-            let sheet_tokens = normalized_alnum_tokens(&sheet_name, 2);
-            let distinctive_table_hits = table_tokens
-                .iter()
-                .filter(|token| {
-                    target_tokens.contains(token.as_str())
-                        && table_token_counts.get(token.as_str()).copied().unwrap_or_default() == 1
-                })
-                .count();
-            if distinctive_table_hits == 0 {
-                return None;
-            }
-            let sheet_hits =
-                sheet_tokens.iter().filter(|token| target_tokens.contains(token.as_str())).count();
-            let best_score = rows.iter().map(|row| row.score).fold(0.0, f32::max);
-            let score = distinctive_table_hits.saturating_mul(8).saturating_add(sheet_hits);
-            Some((score, best_score, sheet_name, table_name, rows))
+        .filter_map(|group| {
+            rank_table_column_inventory_group(group, target_tokens, table_token_counts, group_count)
         })
         .collect::<Vec<_>>();
-    ranked.sort_by(|left, right| {
-        right
-            .0
-            .cmp(&left.0)
-            .then_with(|| right.1.total_cmp(&left.1))
-            .then_with(|| left.2.cmp(&right.2))
-            .then_with(|| left.3.cmp(&right.3))
-    });
-    let (score, _, _, table_name, rows) = ranked.first()?;
-    if ranked.get(1).is_some_and(|candidate| candidate.0 == *score) {
-        return None;
-    }
+    ranked.sort_by(compare_ranked_table_column_inventory_groups);
+    ranked
+}
 
+fn rank_table_column_inventory_group<'a>(
+    ((_, sheet_name, table_name), rows): TableColumnInventoryGroup<'a>,
+    target_tokens: &BTreeSet<String>,
+    table_token_counts: &BTreeMap<String, usize>,
+    group_count: usize,
+) -> Option<RankedTableColumnInventoryGroup<'a>> {
+    let table_tokens = normalized_alnum_tokens(&table_name, 2);
+    let distinctive_table_hits = distinctive_table_target_hits(
+        &table_tokens,
+        target_tokens,
+        table_token_counts,
+        group_count,
+    )?;
+    let sheet_hits = table_inventory_sheet_hits(&sheet_name, target_tokens);
+    let best_score = rows.iter().map(|row| row.score).fold(0.0, f32::max);
+    let score = distinctive_table_hits.saturating_mul(8).saturating_add(sheet_hits);
+    Some((score, best_score, sheet_name, table_name, rows))
+}
+
+fn table_inventory_sheet_hits(sheet_name: &str, target_tokens: &BTreeSet<String>) -> usize {
+    if target_tokens.is_empty() {
+        return 0;
+    }
+    normalized_alnum_tokens(sheet_name, 2)
+        .iter()
+        .filter(|token| target_tokens.contains(token.as_str()))
+        .count()
+}
+
+fn compare_ranked_table_column_inventory_groups(
+    left: &RankedTableColumnInventoryGroup<'_>,
+    right: &RankedTableColumnInventoryGroup<'_>,
+) -> std::cmp::Ordering {
+    right
+        .0
+        .cmp(&left.0)
+        .then_with(|| right.1.total_cmp(&left.1))
+        .then_with(|| left.2.cmp(&right.2))
+        .then_with(|| left.3.cmp(&right.3))
+}
+
+fn unique_top_table_inventory_group<'group, 'row>(
+    ranked: &'group [RankedTableColumnInventoryGroup<'row>],
+) -> Option<&'group RankedTableColumnInventoryGroup<'row>> {
+    let top = ranked.first()?;
+    ranked.get(1).is_none_or(|candidate| candidate.0 != top.0).then_some(top)
+}
+
+fn render_table_column_inventory(table_name: &str, rows: &[&ParsedTableRow]) -> Option<String> {
     let mut rows_by_number = BTreeMap::<usize, &ParsedTableRow>::new();
     for row in rows {
-        rows_by_number.entry(row.row_number).or_insert(row);
+        rows_by_number.entry(row.row_number).or_insert(*row);
     }
     if rows_by_number.len() < 2 {
         return None;
     }
 
-    let mut lines = vec![format!("`{table_name}` columns:")];
+    let mut lines = vec![format!("`{table_name}`:")];
     for row in rows_by_number.into_values().take(32) {
-        let column = table_row_field(row, "column")?;
-        let mut details = Vec::new();
-        if let Some(value) = table_row_field(row, "type") {
-            details.push(format!("type `{value}`"));
-        }
-        if let Some(value) = table_row_field(row, "constraints") {
-            details.push(format!("constraints `{value}`"));
-        }
-        if let Some(value) = table_row_field(row, "description") {
-            details.push(format!("description `{value}`"));
-        }
-        if details.is_empty() {
-            lines.push(format!("- `{column}`"));
-        } else {
-            lines.push(format!("- `{column}`: {}", details.join("; ")));
+        if let Some(rendered) = render_structured_inventory_row(row) {
+            lines.push(rendered);
         }
     }
-    Some(lines.join("\n"))
+    (lines.len() > 1).then(|| lines.join("\n"))
+}
+
+fn render_structured_inventory_row(row: &ParsedTableRow) -> Option<String> {
+    let fields = row
+        .fields
+        .iter()
+        .filter_map(|(header, value)| {
+            let header = header.trim();
+            let value = value.trim();
+            (!header.is_empty() && !value.is_empty()).then(|| format!("`{header}` = `{value}`"))
+        })
+        .collect::<Vec<_>>();
+    (!fields.is_empty()).then(|| format!("- {}", fields.join("; ")))
 }
 
 #[derive(Debug)]
@@ -383,14 +434,10 @@ struct RawPipeTableSectionRow {
 }
 
 fn build_raw_pipe_table_column_inventory_answer(
-    question: &str,
     ir: Option<&QueryIR>,
     chunks: &[&RuntimeMatchedChunk],
 ) -> Option<String> {
-    let target_tokens = table_column_inventory_target_tokens(question, ir);
-    if target_tokens.is_empty() {
-        return None;
-    }
+    let target_tokens = typed_table_inventory_target_tokens(ir);
     let rows = collect_raw_pipe_section_rows(chunks);
     if rows.is_empty() {
         return None;
@@ -400,13 +447,11 @@ fn build_raw_pipe_table_column_inventory_answer(
     for row in &rows {
         groups.entry((row.document_id, row.table_name.clone())).or_default().push(row);
     }
+    let group_count = groups.len();
     let mut table_token_counts = BTreeMap::<String, usize>::new();
     for (_, table_name) in groups.keys() {
-        for token in normalized_alnum_tokens(table_name, 2).into_iter().collect::<BTreeSet<_>>() {
-            table_token_counts
-                .entry(token.to_string())
-                .and_modify(|count| *count += 1)
-                .or_insert(1);
+        for token in normalized_alnum_tokens(table_name, 2) {
+            table_token_counts.entry(token).and_modify(|count| *count += 1).or_insert(1);
         }
     }
 
@@ -414,16 +459,12 @@ fn build_raw_pipe_table_column_inventory_answer(
         .into_iter()
         .filter_map(|((_, table_name), rows)| {
             let table_tokens = normalized_alnum_tokens(&table_name, 2);
-            let distinctive_table_hits = table_tokens
-                .iter()
-                .filter(|token| {
-                    target_tokens.contains(token.as_str())
-                        && table_token_counts.get(token.as_str()).copied().unwrap_or_default() == 1
-                })
-                .count();
-            if distinctive_table_hits == 0 {
-                return None;
-            }
+            let distinctive_table_hits = distinctive_table_target_hits(
+                &table_tokens,
+                &target_tokens,
+                &table_token_counts,
+                group_count,
+            )?;
             let best_score = rows.iter().map(|row| row.score).fold(0.0, f32::max);
             Some((distinctive_table_hits, best_score, table_name, rows))
         })
@@ -448,25 +489,17 @@ fn build_raw_pipe_table_column_inventory_answer(
         return None;
     }
 
-    let mut lines = vec![format!("`{table_name}` columns:")];
+    let mut lines = vec![format!("`{table_name}`:")];
     for row in rows_by_number.into_values().take(32) {
-        let Some(first_cell) =
-            row.cells.first().map(|value| value.trim()).filter(|value| !value.is_empty())
-        else {
-            continue;
-        };
-        let details = row
+        let cells = row
             .cells
             .iter()
-            .skip(1)
             .map(|value| value.trim())
             .filter(|value| !value.is_empty())
             .map(|value| format!("`{value}`"))
             .collect::<Vec<_>>();
-        if details.is_empty() {
-            lines.push(format!("- `{first_cell}`"));
-        } else {
-            lines.push(format!("- `{first_cell}`: {}", details.join("; ")));
+        if !cells.is_empty() {
+            lines.push(format!("- {}", cells.join("; ")));
         }
     }
     (lines.len() > 1).then(|| lines.join("\n"))
@@ -475,10 +508,7 @@ fn build_raw_pipe_table_column_inventory_answer(
 fn collect_raw_pipe_section_rows(chunks: &[&RuntimeMatchedChunk]) -> Vec<RawPipeTableSectionRow> {
     let mut ordered = chunks
         .iter()
-        .filter(|chunk| {
-            matches!(chunk.chunk_kind.as_deref(), Some("heading") | Some("table_row"))
-                || extract_structural_table_label(&chunk.source_text).is_some()
-        })
+        .filter(|chunk| matches!(chunk.chunk_kind.as_deref(), Some("heading") | Some("table_row")))
         .copied()
         .collect::<Vec<_>>();
     ordered.sort_by(|left, right| {
@@ -495,8 +525,8 @@ fn collect_raw_pipe_section_rows(chunks: &[&RuntimeMatchedChunk]) -> Vec<RawPipe
             current_document_id = Some(chunk.document_id);
             current_table_name = None;
         }
-        if let Some(label) = extract_structural_table_label(&chunk.source_text) {
-            current_table_name = Some(label);
+        if chunk.chunk_kind.as_deref() == Some("heading") {
+            current_table_name = extract_structural_section_label(&chunk.source_text);
             continue;
         }
         if chunk.chunk_kind.as_deref() != Some("table_row") {
@@ -522,30 +552,21 @@ fn collect_raw_pipe_section_rows(chunks: &[&RuntimeMatchedChunk]) -> Vec<RawPipe
     rows
 }
 
-fn extract_structural_table_label(source_text: &str) -> Option<String> {
-    for line in source_text.lines() {
-        let trimmed = line.trim().trim_start_matches('#').trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        let lowered = trimmed.to_lowercase();
-        let Some(index) = lowered.rfind("table:") else {
-            continue;
-        };
-        let label = trimmed[index + "table:".len()..]
+fn extract_structural_section_label(source_text: &str) -> Option<String> {
+    source_text.lines().find_map(|line| {
+        let label = line
             .trim()
-            .trim_matches(|ch: char| ch == '`' || ch == '*' || ch == '_' || ch == ':' || ch == '-')
+            .trim_start_matches('#')
+            .trim()
+            .split(['|', '\t'])
+            .next()
+            .unwrap_or_default()
             .trim();
-        let label =
-            label.split(['|', '\t']).next().unwrap_or_default().trim().trim_end_matches('.');
-        if !label.is_empty() {
-            return Some(label.to_string());
-        }
-    }
-    None
+        (!label.is_empty()).then(|| label.to_string())
+    })
 }
 
-fn table_column_inventory_target_tokens(question: &str, ir: Option<&QueryIR>) -> BTreeSet<String> {
+fn typed_table_inventory_target_tokens(ir: Option<&QueryIR>) -> BTreeSet<String> {
     let mut tokens = ir
         .into_iter()
         .flat_map(|query_ir| {
@@ -568,18 +589,28 @@ fn table_column_inventory_target_tokens(question: &str, ir: Option<&QueryIR>) ->
     {
         tokens.extend(normalized_alnum_tokens(retrieval_query, 2));
     }
-    if tokens.is_empty() {
-        tokens.extend(normalized_alnum_tokens(question, 2));
-    }
     tokens
 }
 
-fn table_row_field<'a>(row: &'a ParsedTableRow, header: &str) -> Option<&'a str> {
-    row.fields
+fn distinctive_table_target_hits(
+    table_tokens: &BTreeSet<String>,
+    target_tokens: &BTreeSet<String>,
+    table_token_counts: &BTreeMap<String, usize>,
+    group_count: usize,
+) -> Option<usize> {
+    if target_tokens.is_empty() {
+        // No compiled target is safe only when the evidence has one possible
+        // section. Multiple sections are semantically ambiguous, so abstain.
+        return (group_count == 1).then_some(1);
+    }
+    let hits = table_tokens
         .iter()
-        .find(|(candidate, _)| normalize_table_header(candidate) == header)
-        .map(|(_, value)| value.trim())
-        .filter(|value| !value.is_empty())
+        .filter(|token| {
+            target_tokens.contains(token.as_str())
+                && table_token_counts.get(token.as_str()).copied().unwrap_or_default() == 1
+        })
+        .count();
+    (hits > 0).then_some(hits)
 }
 
 fn query_ir_requests_table_column_inventory(ir: Option<&QueryIR>) -> bool {
@@ -587,15 +618,11 @@ fn query_ir_requests_table_column_inventory(ir: Option<&QueryIR>) -> bool {
         if ir.source_slice.is_some() {
             return false;
         }
-        if matches!(ir.act, QueryAct::Describe | QueryAct::Enumerate | QueryAct::RetrieveValue) {
-            let target_types = ir
-                .target_types
-                .iter()
-                .map(|target_type| canonical_target_type_tag(target_type))
-                .collect::<BTreeSet<_>>();
-            if target_types.contains("table_row") && target_types.contains("table_summary") {
-                return true;
-            }
+        if matches!(ir.act, QueryAct::Describe | QueryAct::Enumerate | QueryAct::RetrieveValue)
+            && ir.targets(QueryTargetKind::TableRow)
+            && ir.targets(QueryTargetKind::TableSummary)
+        {
+            return true;
         }
     }
     false
@@ -609,7 +636,7 @@ pub(crate) fn question_asks_table_value_inventory(question: &str, ir: Option<&Qu
     let _ = question;
     if let Some(ir) = ir
         && matches!(ir.act, QueryAct::Enumerate)
-        && ir.target_types.iter().any(|tag| tag == "table_row")
+        && ir.targets(QueryTargetKind::TableRow)
     {
         return true;
     }
@@ -749,35 +776,5 @@ fn split_table_header_for_token_match(value: &str) -> String {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::domains::query_ir::{QueryAct, QueryIR, QueryLanguage, QueryScope};
-
-    fn table_inventory_ir(target_types: Vec<String>) -> QueryIR {
-        QueryIR {
-            act: QueryAct::Enumerate,
-            scope: QueryScope::SingleDocument,
-            language: QueryLanguage::Auto,
-            target_types,
-            target_entities: Vec::new(),
-            literal_constraints: Vec::new(),
-            temporal_constraints: Vec::new(),
-            comparison: None,
-            document_focus: None,
-            conversation_refs: Vec::new(),
-            needs_clarification: None,
-            source_slice: None,
-            retrieval_query: Some("sample table columns".to_string()),
-            confidence: 0.95,
-        }
-    }
-
-    #[test]
-    fn table_column_inventory_requires_typed_table_intent() {
-        let untyped = table_inventory_ir(Vec::new());
-        assert!(!query_ir_requests_table_column_inventory(Some(&untyped)));
-
-        let typed = table_inventory_ir(vec!["table_row".to_string(), "table_summary".to_string()]);
-        assert!(query_ir_requests_table_column_inventory(Some(&typed)));
-    }
-}
+#[path = "table_row_answer_tests.rs"]
+mod tests;

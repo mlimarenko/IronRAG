@@ -30,7 +30,6 @@ const INGEST_REQUIRED_BINDINGS: &[AiBindingPurpose] =
 const RUNTIME_REQUIRED_BINDINGS: &[AiBindingPurpose] = &[
     AiBindingPurpose::ExtractGraph,
     AiBindingPurpose::EmbedChunk,
-    AiBindingPurpose::QueryRetrieve,
     AiBindingPurpose::QueryCompile,
     AiBindingPurpose::QueryAnswer,
 ];
@@ -136,13 +135,13 @@ impl CatalogLifecycleError {
     fn into_request_error(self) -> ApiError {
         match self {
             Self::DisabledVocabulary => {
-                ApiError::forbidden_vocabulary("lifecycleState", "disabled", "archived")
+                ApiError::BadRequest("unsupported catalog lifecycle state".to_string())
             }
             Self::InvalidValue => ApiError::Internal,
         }
     }
 
-    fn into_persisted_error(self) -> ApiError {
+    const fn into_persisted_error(self) -> ApiError {
         match self {
             Self::DisabledVocabulary | Self::InvalidValue => ApiError::Internal,
         }
@@ -249,7 +248,8 @@ impl CatalogService {
     ///
     /// # Errors
     ///
-    /// Returns an [`ApiError`] when the workspace cannot be loaded, stashed, or deleted.
+    /// Returns [`ApiError::Conflict`] while durable webhook work is not drained, or another
+    /// [`ApiError`] when the workspace cannot be loaded, stashed, or deleted.
     pub async fn delete_workspace(
         &self,
         state: &AppState,
@@ -268,11 +268,11 @@ impl CatalogService {
                 },
             )?;
 
-        let rows_affected =
+        let delete_outcome =
             match catalog_repository::delete_workspace(&state.persistence.postgres, workspace.id)
                 .await
             {
-                Ok(rows_affected) => rows_affected,
+                Ok(delete_outcome) => delete_outcome,
                 Err(delete_error) => {
                     restore_stashed_directory(state, stashed_directory.as_ref()).await;
                     error!(
@@ -284,9 +284,16 @@ impl CatalogService {
                 }
             };
 
-        if rows_affected == 0 {
-            restore_stashed_directory(state, stashed_directory.as_ref()).await;
-            return Err(ApiError::resource_not_found("workspace", workspace.id));
+        match delete_outcome {
+            catalog_repository::CatalogWorkspaceDeleteOutcome::Deleted => {}
+            catalog_repository::CatalogWorkspaceDeleteOutcome::NotFound => {
+                restore_stashed_directory(state, stashed_directory.as_ref()).await;
+                return Err(ApiError::resource_not_found("workspace", workspace.id));
+            }
+            catalog_repository::CatalogWorkspaceDeleteOutcome::Blocked(blockers) => {
+                restore_stashed_directory(state, stashed_directory.as_ref()).await;
+                return Err(map_catalog_delete_blockers("workspace", blockers));
+            }
         }
 
         purge_stashed_directory(state, stashed_directory.as_ref()).await;
@@ -620,7 +627,8 @@ impl CatalogService {
     ///
     /// # Errors
     ///
-    /// Returns an [`ApiError`] when the library cannot be loaded, stashed, or deleted.
+    /// Returns [`ApiError::Conflict`] while durable webhook work is not drained, or another
+    /// [`ApiError`] when the library cannot be loaded, stashed, or deleted.
     pub async fn delete_library(
         &self,
         state: &AppState,
@@ -641,10 +649,10 @@ impl CatalogService {
                 ApiError::Internal
             })?;
 
-        let rows_affected =
+        let delete_outcome =
             match catalog_repository::delete_library(&state.persistence.postgres, library.id).await
             {
-                Ok(rows_affected) => rows_affected,
+                Ok(delete_outcome) => delete_outcome,
                 Err(delete_error) => {
                     restore_stashed_directory(state, stashed_directory.as_ref()).await;
                     error!(
@@ -657,9 +665,16 @@ impl CatalogService {
                 }
             };
 
-        if rows_affected == 0 {
-            restore_stashed_directory(state, stashed_directory.as_ref()).await;
-            return Err(ApiError::resource_not_found("library", library.id));
+        match delete_outcome {
+            catalog_repository::CatalogLibraryDeleteOutcome::Deleted => {}
+            catalog_repository::CatalogLibraryDeleteOutcome::NotFound => {
+                restore_stashed_directory(state, stashed_directory.as_ref()).await;
+                return Err(ApiError::resource_not_found("library", library.id));
+            }
+            catalog_repository::CatalogLibraryDeleteOutcome::Blocked(blockers) => {
+                restore_stashed_directory(state, stashed_directory.as_ref()).await;
+                return Err(map_catalog_delete_blockers("library", blockers));
+            }
         }
 
         purge_stashed_directory(state, stashed_directory.as_ref()).await;
@@ -969,7 +984,7 @@ fn parse_lifecycle_state(value: &str) -> Result<CatalogLifecycleState, CatalogLi
     }
 }
 
-fn lifecycle_state_as_str(
+const fn lifecycle_state_as_str(
     value: &CatalogLifecycleState,
 ) -> Result<&'static str, CatalogLifecycleError> {
     match value {
@@ -1105,6 +1120,20 @@ fn map_connector_write_error(error: sqlx::Error) -> ApiError {
     }
 }
 
+fn map_catalog_delete_blockers(
+    subject_kind: &'static str,
+    blockers: catalog_repository::CatalogDeleteBlockers,
+) -> ApiError {
+    ApiError::Conflict(format!(
+        "{subject_kind} deletion is blocked until durable webhook work is drained \
+         (undispatched lifecycle events: {}, active delivery jobs: {}, \
+         unresolved delivery attempts: {})",
+        blockers.undispatched_webhook_lifecycle_events,
+        blockers.active_webhook_delivery_jobs,
+        blockers.unresolved_webhook_delivery_attempts,
+    ))
+}
+
 async fn settle_catalog_delete_operation(
     state: &AppState,
     operation_id: Uuid,
@@ -1180,7 +1209,7 @@ mod tests {
     }
 
     #[test]
-    fn runtime_readiness_preserves_distinct_missing_query_purposes() {
+    fn runtime_readiness_uses_the_canonical_embedding_profile() {
         let present = present(&[AiBindingPurpose::ExtractGraph, AiBindingPurpose::EmbedChunk]);
         let ingestion_readiness = CatalogLibraryIngestionReadiness {
             ready: true,
@@ -1195,11 +1224,7 @@ mod tests {
 
         assert_eq!(
             readiness.missing_binding_purposes,
-            vec![
-                AiBindingPurpose::QueryRetrieve,
-                AiBindingPurpose::QueryCompile,
-                AiBindingPurpose::QueryAnswer
-            ]
+            vec![AiBindingPurpose::QueryCompile, AiBindingPurpose::QueryAnswer]
         );
     }
 
@@ -1212,17 +1237,38 @@ mod tests {
     }
 
     #[test]
-    fn runtime_readiness_preserves_vision_when_ingest_requires_it() {
+    fn runtime_readiness_preserves_document_understanding_when_ingest_requires_it() {
         let ingestion_readiness = CatalogLibraryIngestionReadiness {
             ready: false,
-            missing_binding_purposes: vec![AiBindingPurpose::Vision],
+            missing_binding_purposes: vec![AiBindingPurpose::ExtractText],
         };
 
         let readiness = runtime_readiness(None, &ingestion_readiness.missing_binding_purposes);
 
-        assert_eq!(readiness.missing_binding_purposes[0], AiBindingPurpose::Vision);
-        assert!(readiness.missing_binding_purposes.contains(&AiBindingPurpose::QueryRetrieve));
+        assert_eq!(readiness.missing_binding_purposes[0], AiBindingPurpose::ExtractText);
+        assert!(readiness.missing_binding_purposes.contains(&AiBindingPurpose::EmbedChunk));
         assert!(readiness.missing_binding_purposes.contains(&AiBindingPurpose::QueryCompile));
         assert!(readiness.missing_binding_purposes.contains(&AiBindingPurpose::QueryAnswer));
+    }
+
+    #[test]
+    fn webhook_delete_blockers_map_to_catalog_conflict() {
+        let error = map_catalog_delete_blockers(
+            "workspace",
+            catalog_repository::CatalogDeleteBlockers {
+                undispatched_webhook_lifecycle_events: 2,
+                active_webhook_delivery_jobs: 3,
+                unresolved_webhook_delivery_attempts: 4,
+            },
+        );
+
+        assert!(matches!(&error, ApiError::Conflict(_)));
+        assert_eq!(error.kind(), "conflict");
+        assert_eq!(
+            error.to_string(),
+            "conflict: workspace deletion is blocked until durable webhook work is drained \
+             (undispatched lifecycle events: 2, active delivery jobs: 3, \
+             unresolved delivery attempts: 4)"
+        );
     }
 }

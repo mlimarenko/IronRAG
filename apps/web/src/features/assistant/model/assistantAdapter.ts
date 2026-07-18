@@ -1,26 +1,20 @@
-import { mapSourceAccess } from '@/shared/lib/source-access';
-import { mapAssistantVerificationState } from '@/features/assistant/model/verification';
+import { mapSourceAccess } from '@/shared/lib/source-access'
+import { mapAssistantVerificationState } from '@/features/assistant/model/verification'
 import type {
   AssistantConversationMessage,
   AssistantEvidenceBundle,
   AssistantExecutionDetail,
   AssistantSessionListItem,
-} from '@/shared/api/generated';
-import type {
-  AssistantMessage,
-  AssistantSession,
-  EvidenceBundle,
-} from '@/shared/types';
+} from '@/shared/api/generated'
+import type { AssistantMessage, AssistantSession, EvidenceBundle } from '@/shared/types'
 
-type AssistantEvidenceTransport = AssistantEvidenceBundle | AssistantExecutionDetail;
+type AssistantEvidenceTransport = AssistantEvidenceBundle | AssistantExecutionDetail
 
-export function mapAssistantTurnToEvidence(
-  resp: AssistantEvidenceTransport,
-): EvidenceBundle {
+export function mapAssistantTurnToEvidence(resp: AssistantEvidenceTransport): EvidenceBundle {
   return {
     segmentRefs: resp.preparedSegmentReferences.map((r) => {
-      const trail = r.headingTrail;
-      const path = r.sectionPath;
+      const trail = r.headingTrail
+      const path = r.sectionPath
       return {
         documentId: r.documentId ?? r.segmentId,
         documentName:
@@ -32,7 +26,7 @@ export function mapAssistantTurnToEvidence(
         segmentOrdinal: r.rank ?? 0,
         excerpt: trail.join(' > ') || path.join(' > ') || '',
         relevance: r.score ?? 0,
-      };
+      }
     }),
     factRefs: resp.technicalFactReferences.map((r) => ({
       factKind: r.factKind,
@@ -53,9 +47,22 @@ export function mapAssistantTurnToEvidence(
       weight: r.score ?? 0,
     })),
     verificationState: mapAssistantVerificationState(resp.verificationState),
-    verificationWarnings: resp.verificationWarnings.map(
-      (w) => w.message || w.code,
-    ),
+    verificationWarnings: resp.verificationWarnings.map((w) => w.message || w.code),
+    answerDisposition: resp.answerDisposition ?? 'non_terminal',
+    clarification: {
+      required: resp.clarification?.required ?? false,
+      question: resp.clarification?.question ?? null,
+      answerCandidates: (resp.clarification?.answerCandidates ?? []).map((candidate) => ({
+        label: candidate.label,
+        kind: candidate.kind,
+        confidence: candidate.confidence ?? null,
+        provenance: {
+          entityId: candidate.provenance.entityId ?? null,
+          documentId: candidate.provenance.documentId ?? null,
+          chunkId: candidate.provenance.chunkId ?? null,
+        },
+      })),
+    },
     runtimeSummary: {
       totalSegments: resp.preparedSegmentReferences.length,
       totalFacts: resp.technicalFactReferences.length,
@@ -68,7 +75,7 @@ export function mapAssistantTurnToEvidence(
       })),
       policyInterventions: [],
     },
-  };
+  }
 }
 
 export function mapAssistantSession(s: AssistantSessionListItem): AssistantSession {
@@ -78,7 +85,7 @@ export function mapAssistantSession(s: AssistantSessionListItem): AssistantSessi
     title: s.title || '',
     updatedAt: s.updatedAt,
     turnCount: s.turnCount ?? 0,
-  };
+  }
 }
 
 export function mapAssistantMessage(m: AssistantConversationMessage): AssistantMessage {
@@ -89,5 +96,5 @@ export function mapAssistantMessage(m: AssistantConversationMessage): AssistantM
     timestamp: m.timestamp,
     executionId: m.executionId ?? null,
     ...(m.evidence ? { evidence: mapAssistantTurnToEvidence(m.evidence) } : {}),
-  };
+  }
 }

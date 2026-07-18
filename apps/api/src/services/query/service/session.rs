@@ -1,5 +1,4 @@
 use std::collections::{HashMap, HashSet};
-
 use uuid::Uuid;
 
 use crate::{
@@ -9,52 +8,28 @@ use crate::{
     domains::query::{
         QueryConversation, QueryConversationDetail, QueryExecution, QueryTurn, QueryTurnKind,
     },
-    domains::query_ir::literal_text_is_identifier_shaped,
     infra::{
         knowledge_rows::{KnowledgeBundleChunkReferenceRow, KnowledgeChunkRow},
         repositories::query_repository,
     },
     integrations::llm::ChatMessage,
     interfaces::http::router_support::ApiError,
-    services::query::{
-        effective_query::{EFFECTIVE_QUERY_QUESTION_PREFIX, EFFECTIVE_QUERY_SCOPE_PREFIX},
-        planner::strip_leading_question_marker,
-        text_match::{near_token_match, normalized_alnum_tokens},
-    },
 };
 
 use super::{
-    ConversationRuntimeContext, CreateConversationCommand, ExternalConversationTurn,
-    MAX_EFFECTIVE_QUERY_HISTORY_TURNS, MAX_EFFECTIVE_QUERY_TURN_CHARS,
+    ConversationRuntimeContext, CreateConversationCommand, DeleteConversationCommand,
+    ExternalConversationTurn, MAX_EFFECTIVE_QUERY_HISTORY_TURNS, MAX_EFFECTIVE_QUERY_TURN_CHARS,
     MAX_GROUNDED_ANSWER_TOOL_HISTORY_CHARS, MAX_GROUNDED_ANSWER_TOOL_HISTORY_TURNS,
     MAX_LIBRARY_CONVERSATIONS, MAX_PROMPT_HISTORY_TURN_CHARS, MAX_PROMPT_HISTORY_TURNS,
-    QUERY_CONVERSATION_TITLE_LIMIT, QueryService,
+    QUERY_CONVERSATION_TITLE_LIMIT, QueryService, RenameConversationCommand,
 };
 
-const MAX_COREFERENCE_ENTITIES: usize = 64;
-const MAX_QUERY_CONTEXT_ENTITY_HINTS: usize = 48;
-const MAX_EFFECTIVE_QUERY_ENTITY_SCOPE_ITEMS: usize = 64;
 const DENSE_HISTORY_LITERAL_MIN_COUNT: usize = 8;
 const MAX_HISTORY_LITERAL_ITEMS: usize = 64;
 const MAX_HISTORY_LITERAL_CHARS: usize = 160;
 const DENSE_HISTORY_LITERAL_RAW_PROSE_CHARS: usize = 640;
 const DENSE_HISTORY_LITERAL_PREFIX: &str = "ir.memory.literals.v1:";
-const HISTORY_LITERAL_ANCHOR_PREFIX: &str = "ir.memory.anchors.v1:";
 const HISTORY_COMPACT_LITERAL_MEMORY_CONTEXT_PREFIX: &str = "ir.context.compact-literal-memory.v1:";
-const HISTORY_PINNED_LITERAL_ANCHORS_CONTEXT_PREFIX: &str = "ir.context.pinned-literal-anchors.v1:";
-const HISTORY_SYSTEM_TURN_PREFIX: &str = "ir.history.system.v1:";
-const HISTORY_TOOL_TURN_PREFIX: &str = "ir.history.tool.v1:";
-const MAX_HISTORY_LITERAL_ANCHOR_ITEMS: usize = 64;
-const MAX_HISTORY_LITERAL_ANCHOR_CHARS: usize = 1_800;
-const HISTORY_OVERLAP_FOLLOW_UP_MAX_TOKENS: usize = 8;
-const DENSE_LITERAL_HISTORY_FOLLOW_UP_MAX_TOKENS: usize = 24;
-const CONTEXT_DEPENDENT_FOLLOW_UP_MAX_TOKENS: usize = 6;
-const HISTORY_OVERLAP_FOLLOW_UP_MIN_MATCHES: usize = 2;
-const HISTORY_OVERLAP_FOLLOW_UP_MIN_COVERAGE_NUMERATOR: usize = 3;
-const HISTORY_OVERLAP_FOLLOW_UP_MIN_COVERAGE_DENOMINATOR: usize = 5;
-const HISTORY_OVERLAP_FOLLOW_UP_LOOKBACK_TURNS: usize = 6;
-const HISTORY_SUBJECT_TOKEN_CAP: usize = 16;
-const HISTORY_SUBJECT_LOOKBACK_TURNS: usize = 8;
 const PRIOR_GROUNDED_REPLAY_EXECUTION_LIMIT: usize = 2;
 const PRIOR_GROUNDED_REPLAY_CHUNKS_PER_EXECUTION: usize = 4;
 const PRIOR_GROUNDED_REPLAY_CHUNK_CHARS: usize = 520;
@@ -74,6 +49,57 @@ impl QueryService {
         .await
         .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
         Ok(rows.into_iter().map(map_conversation_row).collect())
+    }
+
+    /// Counts persisted turns for one conversation.
+    ///
+    /// # Errors
+    /// Returns an API error when the count query fails.
+    pub async fn count_conversation_turns(
+        &self,
+        state: &AppState,
+        conversation_id: Uuid,
+    ) -> Result<i64, ApiError> {
+        query_repository::count_turns_by_conversation(&state.persistence.postgres, conversation_id)
+            .await
+            .map_err(|e| ApiError::internal_with_log(e, "internal"))
+    }
+
+    /// Lists the persisted turns for one conversation in chronological order.
+    ///
+    /// # Errors
+    /// Returns an API error when the underlying query fails.
+    pub async fn list_turns(
+        &self,
+        state: &AppState,
+        conversation_id: Uuid,
+    ) -> Result<Vec<QueryTurn>, ApiError> {
+        let rows = query_repository::list_turns_by_conversation(
+            &state.persistence.postgres,
+            conversation_id,
+        )
+        .await
+        .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
+        Ok(rows.into_iter().map(map_turn_row).collect())
+    }
+
+    /// Loads one turn, scoped to its owning conversation.
+    ///
+    /// # Errors
+    /// Returns a not-found error when the turn is absent or belongs to a
+    /// different conversation (never leaks cross-session turn identity).
+    pub async fn get_turn(
+        &self,
+        state: &AppState,
+        conversation_id: Uuid,
+        turn_id: Uuid,
+    ) -> Result<QueryTurn, ApiError> {
+        let row = query_repository::get_turn_by_id(&state.persistence.postgres, turn_id)
+            .await
+            .map_err(|e| ApiError::internal_with_log(e, "internal"))?
+            .filter(|row| row.conversation_id == conversation_id)
+            .ok_or_else(|| ApiError::resource_not_found("query_turn", turn_id))?;
+        Ok(map_turn_row(row))
     }
 
     pub async fn get_conversation(
@@ -110,7 +136,8 @@ impl QueryService {
         state: &AppState,
         command: CreateConversationCommand,
     ) -> Result<QueryConversation, ApiError> {
-        let title = normalize_optional_text(command.title.as_deref());
+        let title =
+            command.title.as_deref().map(normalize_explicit_conversation_title).transpose()?;
         let library =
             state.canonical_services.catalog.get_library(state, command.library_id).await?;
         if library.workspace_id != command.workspace_id {
@@ -137,6 +164,83 @@ impl QueryService {
         .await
         .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
         Ok(map_conversation_row(row))
+    }
+
+    /// Persists an explicit title after applying the canonical title contract.
+    ///
+    /// # Errors
+    /// Returns a request error for an invalid title or when the guarded row is unavailable.
+    pub async fn rename_conversation(
+        &self,
+        state: &AppState,
+        command: RenameConversationCommand,
+    ) -> Result<QueryConversation, ApiError> {
+        let title = normalize_explicit_conversation_title(&command.title)?;
+        let row = query_repository::rename_ui_conversation(
+            &state.persistence.postgres,
+            command.conversation_id,
+            command.actor_principal_id,
+            command.allow_manage_all,
+            &title,
+        )
+        .await
+        .map_err(|error| ApiError::internal_with_log(error, "internal"))?
+        .ok_or_else(|| ApiError::resource_not_found("query_session", command.conversation_id))?;
+        Ok(map_conversation_row(row))
+    }
+
+    /// Deletes a UI conversation when ownership, lifecycle, and provenance allow it.
+    ///
+    /// # Errors
+    /// Returns a conflict while work or external replay provenance retains the session.
+    pub async fn delete_conversation(
+        &self,
+        state: &AppState,
+        command: DeleteConversationCommand,
+    ) -> Result<(), ApiError> {
+        let outcome = query_repository::delete_ui_conversation(
+            &state.persistence.postgres,
+            command.conversation_id,
+            command.actor_principal_id,
+            command.allow_manage_all,
+        )
+        .await
+        .map_err(|error| ApiError::internal_with_log(error, "internal"))?;
+        match outcome {
+            query_repository::DeleteQueryConversationOutcome::Deleted => Ok(()),
+            query_repository::DeleteQueryConversationOutcome::NotFoundOrForbidden => {
+                Err(ApiError::resource_not_found("query_session", command.conversation_id))
+            }
+            query_repository::DeleteQueryConversationOutcome::ActiveExecution => {
+                Err(ApiError::Conflict("query session has an active execution".to_string()))
+            }
+            query_repository::DeleteQueryConversationOutcome::RetainedByExternalReplay => {
+                Err(ApiError::Conflict(
+                    "query session is retained by external replay provenance".to_string(),
+                ))
+            }
+        }
+    }
+
+    /// Bounds completed tool-created conversation state stored on the
+    /// non-listable `mcp` surface, regardless of whether the external MCP
+    /// transport or the in-process UI agent initiated the tool call. The
+    /// just-completed conversation is protected so its trace identifiers
+    /// remain available to the current caller.
+    pub async fn enforce_transient_conversation_retention(
+        &self,
+        state: &AppState,
+        library_id: Uuid,
+        protected_conversation_id: Uuid,
+    ) -> Result<u64, ApiError> {
+        query_repository::prune_mcp_conversation_overflow(
+            &state.persistence.postgres,
+            library_id,
+            MAX_LIBRARY_CONVERSATIONS,
+            protected_conversation_id,
+        )
+        .await
+        .map_err(|error| ApiError::internal_with_log(error, "internal"))
     }
 }
 
@@ -188,16 +292,25 @@ pub(crate) fn map_execution_row(row: query_repository::QueryExecutionRow) -> Que
     }
 }
 
-pub(crate) fn normalize_optional_text(value: Option<&str>) -> Option<String> {
-    value.map(str::trim).filter(|value| !value.is_empty()).map(ToString::to_string)
-}
-
 pub(crate) fn normalize_required_text(value: &str, field: &str) -> Result<String, ApiError> {
     let normalized = value.trim();
     if normalized.is_empty() {
         return Err(ApiError::BadRequest(format!("{field} is required")));
     }
     Ok(normalized.to_string())
+}
+
+pub(crate) fn normalize_explicit_conversation_title(value: &str) -> Result<String, ApiError> {
+    let normalized = value.split_whitespace().collect::<Vec<_>>().join(" ");
+    if normalized.is_empty() {
+        return Err(ApiError::BadRequest("title is required".to_string()));
+    }
+    if normalized.chars().count() > QUERY_CONVERSATION_TITLE_LIMIT {
+        return Err(ApiError::BadRequest(format!(
+            "title must not exceed {QUERY_CONVERSATION_TITLE_LIMIT} characters"
+        )));
+    }
+    Ok(normalized)
 }
 
 pub(crate) fn derive_conversation_title(value: &str) -> Option<String> {
@@ -209,18 +322,18 @@ pub(crate) fn derive_conversation_title(value: &str) -> Option<String> {
     let truncated = if collapsed.chars().count() <= QUERY_CONVERSATION_TITLE_LIMIT {
         collapsed
     } else {
-        let cutoff = collapsed
-            .char_indices()
-            .nth(QUERY_CONVERSATION_TITLE_LIMIT)
-            .map_or(collapsed.len(), |(index, _)| index);
-        format!("{}…", collapsed[..cutoff].trim_end())
+        let prefix = collapsed
+            .chars()
+            .take(QUERY_CONVERSATION_TITLE_LIMIT.saturating_sub(1))
+            .collect::<String>();
+        format!("{}…", prefix.trim_end())
     };
 
     Some(truncated)
 }
 
 pub(crate) fn should_refresh_conversation_title(current: Option<&str>, candidate: &str) -> bool {
-    current.map_or(true, |current| {
+    current.is_none_or(|current| {
         is_weak_conversation_title(current) && !is_weak_conversation_title(candidate)
     })
 }
@@ -251,7 +364,7 @@ pub(crate) fn build_conversation_runtime_context(
             content_text: turn.content_text.as_str(),
         })
         .collect::<Vec<_>>();
-    build_conversation_runtime_context_from_views(&views, false)
+    build_conversation_runtime_context_from_views(&views)
 }
 
 pub(crate) fn build_conversation_runtime_context_with_external_history(
@@ -284,13 +397,13 @@ pub(crate) fn build_conversation_runtime_context_with_external_history(
             content_text: current_turn.content_text.as_str(),
         });
     }
-    build_conversation_runtime_context_from_views(&views, !external_prior_turns.is_empty())
+    build_conversation_runtime_context_from_views(&views)
 }
 
 pub(crate) fn should_replay_prior_grounded_answer_context(
     context: &ConversationRuntimeContext,
 ) -> bool {
-    context.contextual_follow_up && !context.prompt_history_messages.is_empty()
+    context.has_prior_conversation && !context.prompt_history_messages.is_empty()
 }
 
 pub(crate) async fn load_prior_grounded_answer_context_messages(
@@ -412,13 +525,16 @@ pub(crate) fn build_prior_grounded_answer_context_messages(
         .map(|row| (row.chunk_id, row))
         .collect::<HashMap<Uuid, &KnowledgeChunkRow>>();
     let mut chunk_ids = Vec::new();
-    let mut lines = vec![
-        "Earlier grounded answer evidence from this conversation.".to_string(),
-        "Use this only to preserve follow-up continuity; call tools again when the current question needs fresh retrieval.".to_string(),
-        format!("executionId: {execution_id}"),
-        format!("query: {}", compact_conversation_turn_text(query_text, 360)),
-        "chunks:".to_string(),
-    ];
+    let mut lines =
+        Vec::with_capacity(PRIOR_GROUNDED_REPLAY_CHUNKS_PER_EXECUTION.saturating_add(5));
+    lines.push("Earlier grounded answer evidence from this conversation.".to_string());
+    lines.push(
+        "Use this only to preserve follow-up continuity; call tools again when the current question needs fresh retrieval."
+            .to_string(),
+    );
+    lines.push(format!("executionId: {execution_id}"));
+    lines.push(format!("query: {}", compact_conversation_turn_text(query_text, 360)));
+    lines.push("chunks:".to_string());
 
     let mut sorted_references = chunk_references.iter().collect::<Vec<_>>();
     sorted_references.sort_by(|left, right| {
@@ -489,17 +605,15 @@ struct RuntimeContextTurn<'a> {
 
 fn build_conversation_runtime_context_from_views(
     turns: &[RuntimeContextTurn<'_>],
-    force_context_scope: bool,
 ) -> ConversationRuntimeContext {
     if turns.is_empty() {
         return ConversationRuntimeContext {
-            effective_query_text: String::new(),
-            contextual_follow_up: false,
-            query_planning_history_text: None,
+            current_question_text: String::new(),
+            has_prior_conversation: false,
+            query_compiler_history: Vec::new(),
             prompt_history_text: None,
             prompt_history_messages: Vec::new(),
             grounded_answer_tool_history: Vec::new(),
-            coreference_entities: Vec::new(),
         };
     }
     let current_turn = turns.last();
@@ -508,122 +622,38 @@ fn build_conversation_runtime_context_from_views(
         .filter(|value| !value.is_empty())
         .unwrap_or_default();
     let previous_turns = turns[..turns.len().saturating_sub(1)].iter().collect::<Vec<_>>();
-    let has_previous_assistant_turn =
-        previous_turns.iter().any(|turn| matches!(turn.turn_kind, QueryTurnKind::Assistant));
-    let follow_up_focus_tokens = effective_query_focus_tokens(&current_text);
-    let subject_tokens = conversation_subject_tokens(&previous_turns);
-    let is_follow_up = has_previous_assistant_turn && is_context_dependent_follow_up(&current_text)
-        || is_history_overlapping_follow_up(
-            &previous_turns,
-            &current_text,
-            &follow_up_focus_tokens,
-        );
-    let should_scope_with_history =
-        is_follow_up || force_context_scope && !turns[..turns.len().saturating_sub(1)].is_empty();
+    let has_prior_conversation = previous_turns
+        .iter()
+        .any(|turn| matches!(turn.turn_kind, QueryTurnKind::User | QueryTurnKind::Assistant));
     let prompt_history_text = render_turn_history(
         &previous_turns,
         MAX_PROMPT_HISTORY_TURNS,
         MAX_PROMPT_HISTORY_TURN_CHARS,
-        should_scope_with_history,
     );
-    let query_planning_history_text = should_scope_with_history
-        .then(|| {
-            render_user_turn_history(
-                &previous_turns,
-                MAX_PROMPT_HISTORY_TURNS,
-                MAX_PROMPT_HISTORY_TURN_CHARS,
-            )
-        })
-        .flatten();
-    let pinned_literal_anchor_scope = pinned_previous_assistant_literal_anchor_scope(
+    let query_compiler_history = render_external_turn_history(
         &previous_turns,
-        &current_text,
-        should_scope_with_history,
+        MAX_EFFECTIVE_QUERY_HISTORY_TURNS,
+        MAX_EFFECTIVE_QUERY_TURN_CHARS,
     );
-    let mut prompt_history_messages = render_prompt_history_messages(
+    let prompt_history_messages = render_prompt_history_messages(
         &previous_turns,
         MAX_PROMPT_HISTORY_TURNS,
         MAX_PROMPT_HISTORY_TURN_CHARS,
-        should_scope_with_history,
     );
-    if let Some(anchor_scope) = &pinned_literal_anchor_scope {
-        prompt_history_messages.insert(0, pinned_literal_anchor_message(anchor_scope.clone()));
-    }
-    let mut grounded_answer_tool_history = render_grounded_answer_tool_history(
+    let grounded_answer_tool_history = render_external_turn_history(
         &previous_turns,
         MAX_GROUNDED_ANSWER_TOOL_HISTORY_TURNS,
         MAX_GROUNDED_ANSWER_TOOL_HISTORY_CHARS,
-        should_scope_with_history,
     );
-    if let Some(anchor_scope) = &pinned_literal_anchor_scope {
-        grounded_answer_tool_history.insert(
-            0,
-            ExternalConversationTurn {
-                turn_kind: QueryTurnKind::Assistant,
-                content_text: anchor_scope.clone(),
-            },
-        );
-    }
-
-    let coreference_entities = if should_scope_with_history {
-        previous_assistant_context_source(&previous_turns, &follow_up_focus_tokens, &subject_tokens)
-            .map(|source| extract_entities_from_previous_answer(&source))
-            .unwrap_or_default()
-    } else {
-        Vec::new()
-    };
-
-    let effective_query_text = if should_scope_with_history {
-        render_effective_query_text(&previous_turns, &current_text).unwrap_or(current_text)
-    } else {
-        current_text
-    };
 
     ConversationRuntimeContext {
-        effective_query_text,
-        contextual_follow_up: should_scope_with_history,
-        query_planning_history_text,
+        current_question_text: current_text,
+        has_prior_conversation,
+        query_compiler_history,
         prompt_history_text,
         prompt_history_messages,
         grounded_answer_tool_history,
-        coreference_entities,
     }
-}
-
-pub(crate) fn enrich_query_with_coreference_entities(query: &str, entities: &[String]) -> String {
-    if entities.is_empty() {
-        return query.to_string();
-    }
-    // Only add entities that are not already mentioned in the query
-    let query_lower = query.to_lowercase();
-    let novel: Vec<&str> = entities
-        .iter()
-        .filter(|entity| !query_lower.contains(&entity.to_lowercase()))
-        .map(String::as_str)
-        .take(MAX_QUERY_CONTEXT_ENTITY_HINTS)
-        .collect();
-    if novel.is_empty() {
-        return query.to_string();
-    }
-    format!("{query} (context entities: {})", novel.join(", "))
-}
-
-fn extract_entities_from_previous_answer(answer: &str) -> Vec<String> {
-    let mut entities = Vec::new();
-
-    // Bare capitalised tokens fed to the coreference resolver; false
-    // positives (spurious "Both" etc.) only cause a missed follow-up-
-    // sharpening, never a wrong answer.
-    for word in answer.split_whitespace() {
-        let clean = word.trim_matches(|c: char| !c.is_alphanumeric() && c != '_' && c != '-');
-        if clean.chars().count() >= 4 && clean.chars().next().is_some_and(char::is_uppercase) {
-            entities.push(clean.to_string());
-        }
-    }
-
-    dedup_preserve_order(&mut entities);
-    entities.truncate(MAX_COREFERENCE_ENTITIES);
-    entities
 }
 
 fn extract_code_literals_from_text(value: &str) -> Vec<String> {
@@ -654,276 +684,20 @@ fn extract_backtick_literals_from_text(value: &str) -> Vec<String> {
     literals
 }
 
-fn previous_assistant_literal_anchor_scope(
-    previous_turns: &[&RuntimeContextTurn<'_>],
-    current_text: &str,
-    focus_tokens: &[String],
-    subject_tokens: &[String],
-) -> Option<String> {
-    if !extract_retrieval_anchor_literals_from_text(current_text).is_empty() {
-        return None;
-    }
-
-    let current_is_short_follow_up = is_context_dependent_follow_up(current_text);
-    let mut fallback_scope = None;
-    for turn in previous_turns
-        .iter()
-        .rev()
-        .filter(|turn| matches!(turn.turn_kind, QueryTurnKind::Assistant))
-    {
-        if let Some(source) = focused_or_subject_conversation_turn_text(
-            turn.content_text,
-            focus_tokens,
-            subject_tokens,
-        ) {
-            let anchors = extract_retrieval_anchor_literals_from_text(&source);
-            if !anchors.is_empty() {
-                return render_literal_anchor_scope(&anchors);
-            }
-            if is_compact_literal_memory(turn.content_text) {
-                let anchors = extract_retrieval_anchor_literals_from_text(turn.content_text);
-                if !anchors.is_empty() {
-                    return render_literal_anchor_scope(&anchors);
-                }
-            }
-            continue;
-        }
-
-        let anchors = extract_retrieval_anchor_literals_from_text(turn.content_text);
-        if anchors.is_empty() {
-            continue;
-        }
-        if current_is_short_follow_up && fallback_scope.is_none() {
-            fallback_scope = render_literal_anchor_scope(&anchors);
-        } else if !current_is_short_follow_up {
-            break;
-        }
-    }
-
-    fallback_scope
-}
-
-fn pinned_previous_assistant_literal_anchor_scope(
-    previous_turns: &[&RuntimeContextTurn<'_>],
-    current_text: &str,
-    should_scope_with_history: bool,
-) -> Option<String> {
-    if !should_scope_with_history
-        || !extract_retrieval_anchor_literals_from_text(current_text).is_empty()
-    {
-        return None;
-    }
-
-    let hidden_turn_cutoff = previous_turns
-        .len()
-        .saturating_sub(MAX_PROMPT_HISTORY_TURNS.max(MAX_GROUNDED_ANSWER_TOOL_HISTORY_TURNS));
-    let mut anchors = Vec::new();
-    for turn in previous_turns
-        .iter()
-        .take(hidden_turn_cutoff)
-        .filter(|turn| matches!(turn.turn_kind, QueryTurnKind::Assistant))
-    {
-        for literal in extract_backtick_literals_from_text(turn.content_text) {
-            push_retrieval_anchor_literal(&literal, &mut anchors);
-            if anchors.len() >= MAX_HISTORY_LITERAL_ANCHOR_ITEMS {
-                return render_literal_anchor_scope(&anchors);
-            }
-        }
-    }
-
-    render_literal_anchor_scope(&anchors)
-}
-
-fn extract_retrieval_anchor_literals_from_text(value: &str) -> Vec<String> {
-    let mut anchors = Vec::new();
-    for literal in extract_backtick_literals_from_text(value) {
-        push_retrieval_anchor_literal(&literal, &mut anchors);
-        if anchors.len() >= MAX_HISTORY_LITERAL_ANCHOR_ITEMS {
-            break;
-        }
-    }
-    anchors
-}
-
-fn push_retrieval_anchor_literal(candidate: &str, anchors: &mut Vec<String>) {
-    let candidate = candidate.trim();
-    let char_count = candidate.chars().count();
-    if candidate.is_empty()
-        || char_count > MAX_HISTORY_LITERAL_CHARS
-        || candidate.chars().any(char::is_whitespace)
-        || anchors.iter().any(|existing| existing == candidate)
-    {
-        return;
-    }
-    let has_alphanumeric = candidate.chars().any(char::is_alphanumeric);
-    let has_structural = candidate.chars().any(|ch| !ch.is_alphanumeric());
-    if !has_alphanumeric || (!literal_text_is_identifier_shaped(candidate) && !has_structural) {
-        return;
-    }
-    anchors.push(candidate.to_string());
-}
-
-fn render_literal_anchor_scope(anchors: &[String]) -> Option<String> {
-    let mut line = HISTORY_LITERAL_ANCHOR_PREFIX.to_string();
-    let mut rendered = 0usize;
-    for anchor in anchors {
-        let separator = if rendered == 0 { " " } else { ", " };
-        let fragment = format!("{separator}`{anchor}`");
-        if line.chars().count().saturating_add(fragment.chars().count())
-            > MAX_HISTORY_LITERAL_ANCHOR_CHARS
-        {
-            break;
-        }
-        line.push_str(&fragment);
-        rendered = rendered.saturating_add(1);
-    }
-
-    (rendered > 0).then_some(line)
-}
-
-fn render_effective_query_text(
-    previous_turns: &[&RuntimeContextTurn<'_>],
-    current_text: &str,
-) -> Option<String> {
-    let focus_tokens = effective_query_focus_tokens(current_text);
-    let subject_tokens = conversation_subject_tokens(previous_turns);
-    let topic_scoped_standalone =
-        topic_scoped_standalone_query(current_text, &focus_tokens, &subject_tokens);
-    let literal_anchor_scope = previous_assistant_literal_anchor_scope(
-        previous_turns,
-        current_text,
-        &focus_tokens,
-        &subject_tokens,
-    );
-    let focused_lines = if focus_tokens.is_empty() {
-        Vec::new()
-    } else {
-        previous_turns
-            .iter()
-            .rev()
-            .filter_map(|turn| focused_conversation_turn_text(&turn.content_text, &focus_tokens))
-            .take(MAX_EFFECTIVE_QUERY_HISTORY_TURNS)
-            .collect::<Vec<_>>()
-    };
-    let mut lines = if topic_scoped_standalone {
-        let mut lines = Vec::new();
-        if let Some(topic) = latest_previous_user_subject_scope(previous_turns, &focus_tokens) {
-            lines.push(topic);
-        }
-        if let Some(entity_scope) =
-            previous_assistant_entity_scope(previous_turns, &focus_tokens, &subject_tokens)
-        {
-            lines.push(entity_scope);
-        }
-        lines
-    } else if !focused_lines.is_empty() {
-        let mut lines = focused_lines;
-        if let Some(entity_scope) =
-            previous_assistant_entity_scope(previous_turns, &focus_tokens, &subject_tokens)
-        {
-            lines.insert(0, entity_scope);
-        }
-        if let Some(anchor) = latest_previous_user_turn_text(previous_turns) {
-            lines.push(anchor);
-        }
-        lines
-    } else if !focus_tokens.is_empty() {
-        let mut lines = Vec::new();
-        if let Some(entity_scope) =
-            previous_assistant_entity_scope(previous_turns, &focus_tokens, &subject_tokens)
-        {
-            lines.push(entity_scope);
-        }
-        if let Some(anchor) = latest_previous_user_turn_text(previous_turns) {
-            lines.push(anchor);
-        }
-        lines
-    } else {
-        let mut lines = previous_turns
-            .iter()
-            .rev()
-            .filter_map(|turn| {
-                let text = compact_conversation_turn_text(
-                    &turn.content_text,
-                    MAX_EFFECTIVE_QUERY_TURN_CHARS,
-                );
-                (!text.is_empty()).then_some(text)
-            })
-            .take(MAX_EFFECTIVE_QUERY_HISTORY_TURNS)
-            .collect::<Vec<_>>();
-        if let Some(entity_scope) = latest_previous_assistant_entity_scope(previous_turns) {
-            lines.insert(0, entity_scope);
-        }
-        lines
-    };
-    if !topic_scoped_standalone && let Some(anchor_scope) = literal_anchor_scope {
-        lines.insert(0, anchor_scope);
-    }
-    if lines.is_empty() {
-        return None;
-    }
-    lines.reverse();
-    dedup_history_lines(&mut lines);
-    let scope_text = lines.join("\n");
-    Some(format!(
-        "{EFFECTIVE_QUERY_SCOPE_PREFIX} {scope_text}\n{EFFECTIVE_QUERY_QUESTION_PREFIX} {current_text}"
-    ))
-}
-
-fn topic_scoped_standalone_query(
-    current_text: &str,
-    focus_tokens: &[String],
-    subject_tokens: &[String],
-) -> bool {
-    !is_context_dependent_follow_up(current_text)
-        && !focus_tokens.is_empty()
-        && !subject_tokens.is_empty()
-        && history_focus_overlap_count(current_text, subject_tokens) >= 1
-}
-
 fn render_turn_history(
     turns: &[&RuntimeContextTurn<'_>],
     limit: usize,
     max_chars_per_turn: usize,
-    include_compact_literal_memory: bool,
 ) -> Option<String> {
     let selected = turns
         .iter()
         .rev()
         .filter_map(|turn| {
-            if !include_compact_literal_memory
-                && matches!(turn.turn_kind, QueryTurnKind::Assistant)
-                && is_compact_literal_memory(turn.content_text)
-            {
+            if matches!(turn.turn_kind, QueryTurnKind::System | QueryTurnKind::Tool) {
                 return None;
             }
             let text =
-                compact_history_turn_text(&turn.turn_kind, &turn.content_text, max_chars_per_turn);
-            (!text.is_empty())
-                .then(|| format!("{}: {}", conversation_turn_speaker(&turn.turn_kind), text))
-        })
-        .take(limit)
-        .collect::<Vec<_>>();
-    if selected.is_empty() {
-        None
-    } else {
-        Some(selected.into_iter().rev().collect::<Vec<_>>().join("\n"))
-    }
-}
-
-fn render_user_turn_history(
-    turns: &[&RuntimeContextTurn<'_>],
-    limit: usize,
-    max_chars_per_turn: usize,
-) -> Option<String> {
-    let selected = turns
-        .iter()
-        .rev()
-        .filter_map(|turn| {
-            if !matches!(turn.turn_kind, QueryTurnKind::User) {
-                return None;
-            }
-            let text = compact_conversation_turn_text(&turn.content_text, max_chars_per_turn);
+                compact_history_turn_text(&turn.turn_kind, turn.content_text, max_chars_per_turn);
             (!text.is_empty())
                 .then(|| format!("{}: {}", conversation_turn_speaker(&turn.turn_kind), text))
         })
@@ -940,36 +714,27 @@ fn render_prompt_history_messages(
     previous_turns: &[&RuntimeContextTurn<'_>],
     limit: usize,
     max_chars_per_turn: usize,
-    include_compact_literal_memory: bool,
 ) -> Vec<ChatMessage> {
     let mut selected = previous_turns
         .iter()
         .rev()
         .filter_map(|turn| {
-            if !include_compact_literal_memory
-                && matches!(turn.turn_kind, QueryTurnKind::Assistant)
-                && is_compact_literal_memory(turn.content_text)
-            {
+            if matches!(turn.turn_kind, QueryTurnKind::System | QueryTurnKind::Tool) {
                 return None;
             }
             let text =
-                compact_history_turn_text(&turn.turn_kind, &turn.content_text, max_chars_per_turn);
-            (!text.is_empty()).then(|| (*turn, text))
+                compact_history_turn_text(&turn.turn_kind, turn.content_text, max_chars_per_turn);
+            (!text.is_empty()).then_some((*turn, text))
         })
         .take(limit)
         .collect::<Vec<_>>();
     selected.reverse();
     selected
         .into_iter()
-        .map(|(turn, text)| match &turn.turn_kind {
-            QueryTurnKind::User => ChatMessage::user(text),
-            QueryTurnKind::Assistant => assistant_history_message(text),
-            QueryTurnKind::System => {
-                ChatMessage::assistant_text(format!("{HISTORY_SYSTEM_TURN_PREFIX}\n{text}"))
-            }
-            QueryTurnKind::Tool => {
-                ChatMessage::assistant_text(format!("{HISTORY_TOOL_TURN_PREFIX}\n{text}"))
-            }
+        .filter_map(|(turn, text)| match &turn.turn_kind {
+            QueryTurnKind::User => Some(ChatMessage::user(text)),
+            QueryTurnKind::Assistant => Some(assistant_history_message(text)),
+            QueryTurnKind::System | QueryTurnKind::Tool => None,
         })
         .collect()
 }
@@ -983,10 +748,6 @@ fn assistant_history_message(text: String) -> ChatMessage {
     ChatMessage::assistant_text(text)
 }
 
-fn pinned_literal_anchor_message(anchor_scope: String) -> ChatMessage {
-    ChatMessage::system(format!("{HISTORY_PINNED_LITERAL_ANCHORS_CONTEXT_PREFIX}\n{anchor_scope}"))
-}
-
 fn is_compact_literal_memory(text: &str) -> bool {
     text.lines()
         .map(str::trim)
@@ -994,26 +755,19 @@ fn is_compact_literal_memory(text: &str) -> bool {
         .is_some_and(|line| line.starts_with(DENSE_HISTORY_LITERAL_PREFIX))
 }
 
-fn render_grounded_answer_tool_history(
+fn render_external_turn_history(
     previous_turns: &[&RuntimeContextTurn<'_>],
     limit: usize,
     max_chars_per_turn: usize,
-    include_compact_literal_memory: bool,
 ) -> Vec<ExternalConversationTurn> {
     let mut selected = previous_turns
         .iter()
         .rev()
         .filter_map(|turn| match &turn.turn_kind {
             QueryTurnKind::User | QueryTurnKind::Assistant => {
-                if !include_compact_literal_memory
-                    && matches!(turn.turn_kind, QueryTurnKind::Assistant)
-                    && is_compact_literal_memory(turn.content_text)
-                {
-                    return None;
-                }
                 let text = compact_history_turn_text(
                     &turn.turn_kind,
-                    &turn.content_text,
+                    turn.content_text,
                     max_chars_per_turn,
                 );
                 (!text.is_empty()).then(|| ExternalConversationTurn {
@@ -1076,318 +830,9 @@ fn compact_conversation_turn_text(value: &str, max_chars: usize) -> String {
     format!("{}…", collapsed[..cutoff].trim_end())
 }
 
-fn latest_previous_user_turn_text(previous_turns: &[&RuntimeContextTurn<'_>]) -> Option<String> {
-    previous_turns.iter().rev().find(|turn| matches!(turn.turn_kind, QueryTurnKind::User)).and_then(
-        |turn| {
-            let text =
-                compact_conversation_turn_text(&turn.content_text, MAX_EFFECTIVE_QUERY_TURN_CHARS);
-            (!text.is_empty()).then_some(text)
-        },
-    )
-}
-
-fn latest_previous_user_subject_scope(
-    previous_turns: &[&RuntimeContextTurn<'_>],
-    focus_tokens: &[String],
-) -> Option<String> {
-    previous_turns
-        .iter()
-        .rev()
-        .filter(|turn| matches!(turn.turn_kind, QueryTurnKind::User))
-        .find_map(|turn| {
-            let turn_focus_tokens = effective_query_focus_tokens(turn.content_text);
-            if turn_focus_tokens.is_empty()
-                || turn_focus_tokens.len() > CONTEXT_DEPENDENT_FOLLOW_UP_MAX_TOKENS
-                || focus_tokens
-                    .iter()
-                    .filter(|focus| {
-                        turn_focus_tokens.iter().any(|candidate| near_token_match(focus, candidate))
-                    })
-                    .take(1)
-                    .count()
-                    == 0
-            {
-                return None;
-            }
-            let text =
-                compact_conversation_turn_text(&turn.content_text, MAX_EFFECTIVE_QUERY_TURN_CHARS);
-            (!text.is_empty()).then(|| format!("topic: {text}"))
-        })
-}
-
-fn previous_assistant_context_source(
-    previous_turns: &[&RuntimeContextTurn<'_>],
-    focus_tokens: &[String],
-    subject_tokens: &[String],
-) -> Option<String> {
-    let mut fallback = None;
-    for turn in previous_turns
-        .iter()
-        .rev()
-        .filter(|turn| matches!(turn.turn_kind, QueryTurnKind::Assistant))
-    {
-        if let Some(source) = focused_or_subject_conversation_turn_text(
-            turn.content_text,
-            focus_tokens,
-            subject_tokens,
-        ) {
-            if !source.is_empty() {
-                return Some(source);
-            }
-        }
-        if fallback.is_none() {
-            fallback = Some(compact_conversation_turn_text(
-                turn.content_text,
-                MAX_EFFECTIVE_QUERY_TURN_CHARS,
-            ));
-        }
-    }
-    fallback.filter(|value| !value.is_empty())
-}
-
-fn focused_or_subject_conversation_turn_text(
-    value: &str,
-    focus_tokens: &[String],
-    subject_tokens: &[String],
-) -> Option<String> {
-    (!focus_tokens.is_empty())
-        .then(|| focused_conversation_turn_text(value, focus_tokens))
-        .flatten()
-        .or_else(|| {
-            (!subject_tokens.is_empty())
-                .then(|| focused_conversation_turn_text(value, subject_tokens))
-                .flatten()
-        })
-}
-
-fn previous_assistant_entity_scope(
-    previous_turns: &[&RuntimeContextTurn<'_>],
-    focus_tokens: &[String],
-    subject_tokens: &[String],
-) -> Option<String> {
-    let entities = previous_assistant_context_source(previous_turns, focus_tokens, subject_tokens)
-        .map(|source| extract_entities_from_previous_answer(&source))
-        .unwrap_or_default();
-    if entities.is_empty() {
-        return None;
-    }
-    Some(format!(
-        "entities: {}",
-        entities
-            .into_iter()
-            .take(MAX_EFFECTIVE_QUERY_ENTITY_SCOPE_ITEMS)
-            .collect::<Vec<_>>()
-            .join(", ")
-    ))
-}
-
-fn latest_previous_assistant_entity_scope(
-    previous_turns: &[&RuntimeContextTurn<'_>],
-) -> Option<String> {
-    let entities = previous_turns
-        .iter()
-        .rev()
-        .find(|turn| matches!(turn.turn_kind, QueryTurnKind::Assistant))
-        .map(|turn| extract_entities_from_previous_answer(&turn.content_text))
-        .unwrap_or_default();
-    if entities.is_empty() {
-        return None;
-    }
-    Some(format!(
-        "entities: {}",
-        entities
-            .into_iter()
-            .take(MAX_EFFECTIVE_QUERY_ENTITY_SCOPE_ITEMS)
-            .collect::<Vec<_>>()
-            .join(", ")
-    ))
-}
-
-fn conversation_subject_tokens(previous_turns: &[&RuntimeContextTurn<'_>]) -> Vec<String> {
-    let mut tokens: Vec<String> = Vec::new();
-    for turn in previous_turns
-        .iter()
-        .rev()
-        .filter(|turn| matches!(turn.turn_kind, QueryTurnKind::User))
-        .take(HISTORY_SUBJECT_LOOKBACK_TURNS)
-    {
-        let turn_tokens = effective_query_focus_tokens(turn.content_text);
-        if turn_tokens.is_empty() || turn_tokens.len() > CONTEXT_DEPENDENT_FOLLOW_UP_MAX_TOKENS {
-            continue;
-        }
-        for token in turn_tokens {
-            if tokens.iter().any(|existing| near_token_match(existing.as_str(), &token)) {
-                continue;
-            }
-            tokens.push(token);
-            if tokens.len() >= HISTORY_SUBJECT_TOKEN_CAP {
-                return tokens;
-            }
-        }
-    }
-    tokens
-}
-
-fn dedup_history_lines(lines: &mut Vec<String>) {
-    let mut seen = HashSet::new();
-    lines.retain(|line| seen.insert(line.to_lowercase()));
-}
-
 fn dedup_preserve_order(values: &mut Vec<String>) {
     let mut seen = HashSet::new();
     values.retain(|value| seen.insert(value.to_lowercase()));
-}
-
-fn focused_conversation_turn_text(value: &str, focus_tokens: &[String]) -> Option<String> {
-    let segments = conversation_text_segments(value)
-        .into_iter()
-        .filter(|segment| !is_dense_history_literal_summary(segment))
-        .filter(|segment| segment_mentions_focus_token(segment, focus_tokens))
-        .map(|segment| compact_conversation_turn_text(segment, MAX_EFFECTIVE_QUERY_TURN_CHARS))
-        .filter(|segment| !segment.is_empty())
-        .take(3)
-        .collect::<Vec<_>>();
-    if segments.is_empty() {
-        None
-    } else {
-        Some(compact_conversation_turn_text(&segments.join(" "), MAX_EFFECTIVE_QUERY_TURN_CHARS))
-    }
-}
-
-fn conversation_text_segments(value: &str) -> Vec<&str> {
-    let mut segments =
-        value.lines().map(str::trim).filter(|line| !line.is_empty()).collect::<Vec<_>>();
-    if segments.len() > 1 {
-        return segments;
-    }
-    segments.clear();
-    let mut start = 0;
-    let mut in_backtick_literal = false;
-    for (index, ch) in value.char_indices() {
-        if ch == '`' {
-            in_backtick_literal = !in_backtick_literal;
-            continue;
-        }
-        if in_backtick_literal {
-            continue;
-        }
-        if matches!(ch, '.' | '!' | '?' | ';') {
-            let segment = value[start..index].trim();
-            if !segment.is_empty() {
-                segments.push(segment);
-            }
-            start = index + ch.len_utf8();
-        }
-    }
-    let tail = value[start..].trim();
-    if !tail.is_empty() {
-        segments.push(tail);
-    }
-    segments
-}
-
-fn is_dense_history_literal_summary(segment: &str) -> bool {
-    let trimmed = segment.trim_start();
-    trimmed.starts_with(DENSE_HISTORY_LITERAL_PREFIX)
-        || trimmed.starts_with(HISTORY_LITERAL_ANCHOR_PREFIX)
-}
-
-fn segment_mentions_focus_token(segment: &str, focus_tokens: &[String]) -> bool {
-    if focus_tokens.is_empty() {
-        return false;
-    }
-    let segment_lower = segment.to_lowercase();
-    if focus_tokens.iter().any(|token| segment_lower.contains(token)) {
-        return true;
-    }
-    let segment_tokens = normalized_alnum_tokens(segment, 4);
-    focus_tokens
-        .iter()
-        .any(|focus| segment_tokens.iter().any(|candidate| near_token_match(focus, candidate)))
-}
-
-fn effective_query_focus_tokens(value: &str) -> Vec<String> {
-    normalized_alnum_tokens(strip_leading_question_marker(value), 4).into_iter().collect()
-}
-
-fn is_history_overlapping_follow_up(
-    previous_turns: &[&RuntimeContextTurn<'_>],
-    current_text: &str,
-    focus_tokens: &[String],
-) -> bool {
-    if previous_turns.is_empty()
-        || focus_tokens.len() < HISTORY_OVERLAP_FOLLOW_UP_MIN_MATCHES
-        || !extract_retrieval_anchor_literals_from_text(current_text).is_empty()
-    {
-        return false;
-    }
-
-    if focus_tokens.len() > HISTORY_OVERLAP_FOLLOW_UP_MAX_TOKENS {
-        return dense_literal_history_overlapping_follow_up(previous_turns, focus_tokens);
-    }
-
-    let min_overlap = history_overlap_follow_up_min_matches(focus_tokens.len());
-    previous_turns
-        .iter()
-        .rev()
-        .take(HISTORY_OVERLAP_FOLLOW_UP_LOOKBACK_TURNS)
-        .filter(|turn| matches!(turn.turn_kind, QueryTurnKind::User | QueryTurnKind::Assistant))
-        .any(|turn| {
-            history_focus_overlap_count_at_least(turn.content_text, focus_tokens, min_overlap)
-                >= min_overlap
-        })
-}
-
-fn history_overlap_follow_up_min_matches(focus_token_count: usize) -> usize {
-    focus_token_count
-        .saturating_mul(HISTORY_OVERLAP_FOLLOW_UP_MIN_COVERAGE_NUMERATOR)
-        .div_ceil(HISTORY_OVERLAP_FOLLOW_UP_MIN_COVERAGE_DENOMINATOR)
-        .max(HISTORY_OVERLAP_FOLLOW_UP_MIN_MATCHES)
-}
-
-fn dense_literal_history_overlapping_follow_up(
-    previous_turns: &[&RuntimeContextTurn<'_>],
-    focus_tokens: &[String],
-) -> bool {
-    if focus_tokens.len() > DENSE_LITERAL_HISTORY_FOLLOW_UP_MAX_TOKENS {
-        return false;
-    }
-    let min_overlap = focus_tokens
-        .len()
-        .div_ceil(2)
-        .min(DENSE_HISTORY_LITERAL_MIN_COUNT / 2)
-        .max(HISTORY_OVERLAP_FOLLOW_UP_MIN_MATCHES);
-    previous_turns
-        .iter()
-        .rev()
-        .take(HISTORY_OVERLAP_FOLLOW_UP_LOOKBACK_TURNS)
-        .filter(|turn| matches!(turn.turn_kind, QueryTurnKind::Assistant))
-        .any(|turn| {
-            extract_retrieval_anchor_literals_from_text(turn.content_text).len()
-                >= DENSE_HISTORY_LITERAL_MIN_COUNT
-                && history_focus_overlap_count_at_least(
-                    turn.content_text,
-                    focus_tokens,
-                    min_overlap,
-                ) >= min_overlap
-        })
-}
-
-fn history_focus_overlap_count(value: &str, focus_tokens: &[String]) -> usize {
-    history_focus_overlap_count_at_least(value, focus_tokens, HISTORY_OVERLAP_FOLLOW_UP_MIN_MATCHES)
-}
-
-fn history_focus_overlap_count_at_least(
-    value: &str,
-    focus_tokens: &[String],
-    min_matches: usize,
-) -> usize {
-    let history_tokens = normalized_alnum_tokens(value, 4);
-    focus_tokens
-        .iter()
-        .filter(|focus| history_tokens.iter().any(|candidate| near_token_match(focus, candidate)))
-        .take(min_matches)
-        .count()
 }
 
 fn conversation_turn_speaker(turn_kind: &QueryTurnKind) -> &'static str {
@@ -1395,20 +840,6 @@ fn conversation_turn_speaker(turn_kind: &QueryTurnKind) -> &'static str {
         QueryTurnKind::Assistant => "Assistant",
         _ => "User",
     }
-}
-
-/// Length-based follow-up heuristic used **only** to decide whether the
-/// retrieval stage should sharpen the current query with entities from
-/// the previous answer. Runs before `QueryCompiler`, so a short question
-/// with prior turns almost always benefits from entity expansion.
-/// Length cutoff is language-agnostic.
-fn is_context_dependent_follow_up(value: &str) -> bool {
-    let token_count = value
-        .split(|ch: char| !ch.is_alphanumeric())
-        .map(str::trim)
-        .filter(|token| !token.is_empty())
-        .count();
-    (1..=CONTEXT_DEPENDENT_FOLLOW_UP_MAX_TOKENS).contains(&token_count)
 }
 
 #[cfg(test)]
@@ -1420,106 +851,90 @@ mod tests {
     }
 
     #[test]
-    fn dense_literal_history_scopes_long_follow_up_without_new_literals() {
-        let previous = [
-            turn(QueryTurnKind::User, "Alpha Connector setup inventory"),
-            turn(
-                QueryTurnKind::Assistant,
-                concat!(
-                    "ir.memory.literals.v1: `alpha-pkg`, `/opt/alpha/alpha.conf`, `[Main]`, ",
-                    "`alphaUrl`, `alphaTimeout`, `alphaSecret`, `alphaCurrency`, ",
-                    "`alphaPayload`, `alphaVisible`\n",
-                    "Configuration fragments and example values are available."
-                ),
-            ),
-            turn(
-                QueryTurnKind::User,
-                "complete configuration fragment inventory example values without own literals please",
-            ),
+    fn current_question_stays_verbatim_while_compiler_history_is_bounded_separately() {
+        let turns = [
+            turn(QueryTurnKind::User, "prior turn zero"),
+            turn(QueryTurnKind::Assistant, "prior turn one"),
+            turn(QueryTurnKind::User, "prior turn two"),
+            turn(QueryTurnKind::Assistant, "prior turn three"),
+            turn(QueryTurnKind::User, "prior turn four"),
+            turn(QueryTurnKind::User, "it"),
         ];
 
-        let context = build_conversation_runtime_context_from_views(&previous, false);
+        let context = build_conversation_runtime_context_from_views(&turns);
 
-        assert!(context.contextual_follow_up);
-        assert!(!context.grounded_answer_tool_history.is_empty());
-    }
-
-    #[test]
-    fn dense_literal_history_does_not_scope_unrelated_long_question() {
-        let previous = [
-            turn(QueryTurnKind::User, "Alpha Connector setup inventory"),
-            turn(
-                QueryTurnKind::Assistant,
-                concat!(
-                    "ir.memory.literals.v1: `alpha-pkg`, `/opt/alpha/alpha.conf`, `[Main]`, ",
-                    "`alphaUrl`, `alphaTimeout`, `alphaSecret`, `alphaCurrency`, ",
-                    "`alphaPayload`, `alphaVisible`"
-                ),
-            ),
-            turn(
-                QueryTurnKind::User,
-                "Zeta Widget deployment migration records independent summary overview details",
-            ),
-        ];
-
-        let context = build_conversation_runtime_context_from_views(&previous, false);
-
-        assert!(!context.contextual_follow_up);
-    }
-
-    #[test]
-    fn dense_literal_history_does_not_scope_self_contained_related_question() {
-        let previous = [
-            turn(QueryTurnKind::User, "Alpha service setup inventory"),
-            turn(
-                QueryTurnKind::Assistant,
-                concat!(
-                    "ir.memory.literals.v1: `alpha-service`, `alpha-worker`, `alpha-cache`, ",
-                    "`alpha-db`, `alpha-api`, `alpha-ui`, `alpha-auth`, `alpha-bus`\n",
-                    "Alpha service ports and local runtime settings are listed."
-                ),
-            ),
-            turn(
-                QueryTurnKind::User,
-                "Which Alpha service workers connect to the message bus and what URL format is used?",
-            ),
-        ];
-
-        let context = build_conversation_runtime_context_from_views(&previous, false);
-
-        assert!(!context.contextual_follow_up);
-        assert_eq!(
-            context.effective_query_text,
-            "Which Alpha service workers connect to the message bus and what URL format is used?"
-        );
-        assert_eq!(context.query_planning_history_text, None);
+        assert_eq!(context.current_question_text, "it");
+        assert!(context.has_prior_conversation);
+        assert_eq!(context.query_compiler_history.len(), MAX_EFFECTIVE_QUERY_HISTORY_TURNS);
         assert!(
-            !should_replay_prior_grounded_answer_context(&context),
-            "self-contained related questions should retrieve fresh evidence instead of replaying prior chunks"
+            context
+                .query_compiler_history
+                .iter()
+                .all(|turn| !turn.content_text.contains("prior turn zero"))
+        );
+        assert!(
+            context
+                .query_compiler_history
+                .iter()
+                .all(|turn| !turn.content_text.contains("question: it"))
         );
     }
 
     #[test]
-    fn dense_literal_history_does_not_override_current_literal_scope() {
-        let previous = [
-            turn(QueryTurnKind::User, "Alpha Connector setup inventory"),
-            turn(
-                QueryTurnKind::Assistant,
-                concat!(
-                    "ir.memory.literals.v1: `alpha-pkg`, `/opt/alpha/alpha.conf`, `[Main]`, ",
-                    "`alphaUrl`, `alphaTimeout`, `alphaSecret`, `alphaCurrency`, ",
-                    "`alphaPayload`, `alphaVisible`\n",
-                    "Configuration fragments and example values are available."
-                ),
-            ),
-            turn(
-                QueryTurnKind::User,
-                "complete configuration fragment inventory for `/opt/beta/beta.conf` instead",
-            ),
+    fn history_availability_does_not_depend_on_question_length_or_letter_case() {
+        for question in ["x", "ALLCAPS", "a deliberately longer independent current question"] {
+            let turns = [
+                turn(QueryTurnKind::User, "first prior turn"),
+                turn(QueryTurnKind::Assistant, "second prior turn"),
+                turn(QueryTurnKind::User, question),
+            ];
+
+            let context = build_conversation_runtime_context_from_views(&turns);
+
+            assert!(context.has_prior_conversation);
+            assert_eq!(context.query_compiler_history.len(), 2);
+            assert_eq!(context.prompt_history_messages.len(), 2);
+            assert_eq!(context.grounded_answer_tool_history.len(), 2);
+            assert!(should_replay_prior_grounded_answer_context(&context));
+        }
+    }
+
+    #[test]
+    fn compiler_history_contains_only_bounded_user_and_assistant_turns() {
+        let turns = [
+            turn(QueryTurnKind::System, "private system state"),
+            turn(QueryTurnKind::Tool, "private tool state"),
+            turn(QueryTurnKind::User, "prior question"),
+            turn(QueryTurnKind::Assistant, "prior answer"),
+            turn(QueryTurnKind::User, "current question"),
         ];
 
-        let context = build_conversation_runtime_context_from_views(&previous, false);
+        let context = build_conversation_runtime_context_from_views(&turns);
+        assert_eq!(context.query_compiler_history.len(), 2);
+        assert_eq!(context.query_compiler_history[0].turn_kind, QueryTurnKind::User);
+        assert_eq!(context.query_compiler_history[0].content_text, "prior question");
+        assert_eq!(context.query_compiler_history[1].turn_kind, QueryTurnKind::Assistant);
+        assert_eq!(context.query_compiler_history[1].content_text, "prior answer");
+        assert!(
+            context
+                .query_compiler_history
+                .iter()
+                .all(|turn| !turn.content_text.contains("private"))
+        );
+    }
 
-        assert!(!context.contextual_follow_up);
+    #[test]
+    fn compiler_history_preserves_multiline_assistant_memory_as_one_typed_turn() {
+        let dense = "`A_1` `A_2` `A_3` `A_4` `A_5` `A_6` `A_7` `A_8`\nstatus: retained";
+        let turns =
+            [turn(QueryTurnKind::Assistant, dense), turn(QueryTurnKind::User, "current question")];
+
+        let context = build_conversation_runtime_context_from_views(&turns);
+
+        assert_eq!(context.query_compiler_history.len(), 1);
+        let history = &context.query_compiler_history[0];
+        assert_eq!(history.turn_kind, QueryTurnKind::Assistant);
+        assert!(history.content_text.contains('\n'));
+        assert!(history.content_text.contains("status: retained"));
     }
 }

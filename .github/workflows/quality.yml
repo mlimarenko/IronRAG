@@ -1,0 +1,228 @@
+name: Quality gates
+
+on:
+  pull_request:
+  push:
+    branches:
+      - master
+      - develop
+  workflow_call:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: quality-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  security:
+    name: Secrets, dependency, and supply-chain audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Set up exact npm toolchain
+        uses: actions/setup-node@v6
+        with:
+          node-version: "26.4.0"
+          cache: npm
+          cache-dependency-path: apps/web/package-lock.json
+
+      - name: Pin npm version declared by the frontend
+        run: |
+          npm install --global --ignore-scripts npm@11.17.0
+          test "$(npm --version)" = "11.17.0"
+
+      - name: Install checksum-verified Gitleaks
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="8.30.1"
+          archive="gitleaks_${version}_linux_x64.tar.gz"
+          expected_sha256="551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb"
+          directory="$(mktemp -d)"
+          trap 'rm -rf "$directory"' EXIT
+          curl --fail --location --retry 3 \
+            --output "$directory/$archive" \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${version}/${archive}"
+          printf '%s  %s\n' "$expected_sha256" "$directory/$archive" | sha256sum --check
+          tar -xzf "$directory/$archive" -C "$directory" gitleaks
+          sudo install -m 0755 "$directory/gitleaks" /usr/local/bin/gitleaks
+          test "$(gitleaks version)" = "$version"
+
+      - name: Scan every commit introduced by this event
+        shell: bash
+        env:
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PUSH_BEFORE_SHA: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          if [[ -n "$PR_BASE_SHA" ]]; then
+            range="$PR_BASE_SHA..$GITHUB_SHA"
+          elif [[ -n "$PUSH_BEFORE_SHA" && ! "$PUSH_BEFORE_SHA" =~ ^0+$ ]]; then
+            range="$PUSH_BEFORE_SHA..$GITHUB_SHA"
+          elif parent="$(git rev-parse --verify --end-of-options 'HEAD^' 2>/dev/null)"; then
+            range="$parent..$GITHUB_SHA"
+          else
+            range="$GITHUB_SHA"
+          fi
+          make secret-check GITLEAKS_LOG_OPTS="$range"
+
+      - name: Install pinned Rust audit tools
+        run: |
+          cargo install --locked cargo-audit --version 0.22.1
+          cargo install --locked cargo-deny --version 0.20.2
+          cargo install --locked cargo-machete --version 0.9.2
+
+      - name: Audit Rust dependency graph and unused declarations
+        run: make audit
+
+      - name: Audit frontend lockfile
+        working-directory: apps/web
+        run: npm audit --audit-level=low
+
+  verify:
+    name: Strict repository verification
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      CARGO_TERM_COLOR: always
+      CARGO_TARGET_DIR: ${{ github.workspace }}/.cargo-target/ci
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+      IRONRAG_DATABASE_URL: postgres://postgres:${{ github.run_id }}@127.0.0.1:5432/ironrag_ci
+      IRONRAG_REDIS_URL: redis://127.0.0.1:6379/
+    services:
+      postgres:
+        image: pgvector/pgvector:pg18
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: ${{ github.run_id }}
+          POSTGRES_DB: ironrag_ci
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d ironrag_ci"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+      redis:
+        image: redis:8.8
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Resolve immutable migration base
+        shell: bash
+        env:
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PUSH_BEFORE_SHA: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+
+          if [[ -n "$PR_BASE_SHA" ]]; then
+            candidate="$PR_BASE_SHA"
+            source_label="pull request base SHA"
+          elif [[ -n "$PUSH_BEFORE_SHA" && ! "$PUSH_BEFORE_SHA" =~ ^0+$ ]]; then
+            candidate="$PUSH_BEFORE_SHA"
+            source_label="push before SHA"
+          elif candidate="$(git rev-parse --verify --end-of-options 'HEAD^{commit}^' 2>/dev/null)"; then
+            source_label="first parent of checked-out commit"
+          else
+            fallback_ref="origin/develop"
+            if ! git rev-parse --verify --end-of-options "${fallback_ref}^{commit}" >/dev/null 2>&1; then
+              echo "Cannot resolve migration fallback ref or HEAD parent: $fallback_ref" >&2
+              exit 1
+            fi
+            if ! candidate="$(git merge-base HEAD "$fallback_ref")" || [[ -z "$candidate" ]]; then
+              echo "Cannot compute migration base from HEAD and $fallback_ref" >&2
+              exit 1
+            fi
+            if [[ "$candidate" == "$(git rev-parse HEAD)" ]]; then
+              echo "Migration fallback resolved to HEAD; refusing to skip changed-migration checks" >&2
+              exit 1
+            fi
+            source_label="merge-base with $fallback_ref"
+          fi
+
+          if ! base_commit="$(git rev-parse --verify --end-of-options "${candidate}^{commit}")"; then
+            echo "Migration base from $source_label does not exist locally: $candidate" >&2
+            exit 1
+          fi
+          echo "Migration base: $base_commit ($source_label)"
+          printf 'MIGRATION_BASE_REF=%s\n' "$base_commit" >> "$GITHUB_ENV"
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: "26.4.0"
+          cache: npm
+          cache-dependency-path: apps/web/package-lock.json
+
+      - name: Pin npm version declared by the frontend
+        run: |
+          npm install --global --ignore-scripts npm@11.17.0
+          test "$(npm --version)" = "11.17.0"
+
+      - name: Set up Helm
+        uses: azure/setup-helm@v4.3.1
+
+      - name: Install native build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends libpq-dev pkg-config
+
+      - name: Install pinned Rust toolchain
+        run: rustup show active-toolchain
+
+      - name: Install pinned whole-workspace static tools
+        run: cargo install --locked cargo-machete --version 0.9.2
+
+      - name: Install frontend dependencies
+        working-directory: apps/web
+        run: npm ci
+
+      - name: Install Playwright browser
+        working-directory: apps/web
+        run: ./node_modules/.bin/playwright install --with-deps chromium
+
+      - name: Run strict quality gates
+        run: make check-strict BACKEND_CARGO_TARGET_DIR="$CARGO_TARGET_DIR" MIGRATION_BASE_REF="$MIGRATION_BASE_REF"
+
+      - name: Run workspace and database-backed lifecycle tests
+        run: |
+          set -euo pipefail
+          cargo test -p ironrag-contracts --all-targets
+          for test_target in \
+            canonical_knowledge_revision_states \
+            atomic_admission \
+            ingest_repository \
+            ingest_publication \
+            web_ingest_repository \
+            graph_snapshot_fencing \
+            extract_graph \
+            graph_projection_repository
+          do
+            cargo test -p ironrag-backend --features test-support \
+              --test "$test_target" -- --ignored --test-threads=1
+          done
+
+      - name: Run frontend coverage and browser flows
+        run: |
+          npm --prefix apps/web run test:coverage
+          npm --prefix apps/web run test:e2e

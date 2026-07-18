@@ -7,7 +7,6 @@ use crate::{
             RuntimeOutputMode, RuntimeRecoveryPolicy, RuntimeStageKind, RuntimeSurfaceKind,
             RuntimeTaskKind,
         },
-        ai::AiBindingPurpose,
         query::{QueryVerificationState, QueryVerificationWarning},
     },
 };
@@ -50,7 +49,7 @@ impl RuntimeTask for QueryVerifyTask {
         RuntimeTaskSpec {
             task_kind: RuntimeTaskKind::QueryVerify,
             surface_kind: RuntimeSurfaceKind::Internal,
-            binding_purpose: AiBindingPurpose::for_runtime_task_kind(RuntimeTaskKind::QueryVerify),
+            binding_purpose: RuntimeTaskKind::QueryVerify.binding_purpose(),
             machine_consumed: true,
             max_turns: 1,
             max_parallel_actions: 1,

@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use anyhow::Context;
 use uuid::Uuid;
@@ -6,26 +6,65 @@ use uuid::Uuid;
 use crate::{
     agent_runtime::pipeline::try_op::run_async_try_op,
     app::state::AppState,
-    domains::{
-        provider_profiles::EffectiveProviderProfile,
-        query::RuntimeQueryMode,
-        query_ir::{QueryAct, QueryIR, QueryScope},
-    },
-    infra::repositories,
+    domains::{query::RuntimeQueryMode, query_ir::QueryIR},
     services::{
-        ingest::runtime::resolve_effective_provider_profile,
         query::latest_versions::query_requests_latest_versions,
         query::planner::{QueryPlanTaskInput, RuntimeQueryPlan, build_task_query_plan},
+        query::provider_billing::QueryProviderExecutionContext,
         query::support::{
             IntentResolutionRequest, derive_query_planning_metadata,
-            derive_query_planning_metadata_for_query_ir, derive_rerank_metadata,
+            derive_query_planning_metadata_for_query_ir,
+        },
+        query::vector_dimensions::{
+            validate_active_embedding_profile_key, validate_embedding_vector_dimensions,
         },
     },
 };
 
+use super::context::build_structured_query_diagnostics;
 use super::embed::QuestionEmbeddingResult;
-use super::retrieve::query_ir_promotes_graph_evidence;
-use super::*;
+use super::retrieve::{prepare_runtime_vector_search_context, query_ir_promotes_graph_evidence};
+#[cfg(test)]
+use super::source_context::SOURCE_UNIT_CHUNK_KIND;
+#[cfg(test)]
+use super::types::QueryGraphIndex;
+use super::{
+    context::{
+        assemble_bounded_context_for_query, assemble_context_metadata_for_query,
+        build_grouped_reference_candidates, group_visible_references_for_query,
+        load_retrieved_document_briefs, target_entity_context_lines,
+    },
+    document_target::resolve_scoped_target_document_ids,
+    embed::embed_question,
+    graph_retrieval::{
+        graph_target_entity_profiles, retrieve_global_bundle, retrieve_local_bundle,
+        retrieve_mixed_graph_bundle,
+    },
+    hyde::generate_hyde_passage,
+    preflight::select_technical_literal_chunks,
+    rerank::apply_configured_rerank,
+    retrieve::{
+        expanded_candidate_limit, graph_evidence_context_top_k, load_document_index,
+        load_graph_evidence_chunks_for_bundle, load_graph_index, merge_graph_evidence_chunks,
+        retain_canonical_document_head_chunks, retrieve_document_chunks, should_skip_vector_search,
+        truncate_bundle_with_semantic_chunk_ranks,
+    },
+    source_context::{
+        is_source_unit_runtime_chunk, source_slice_context_budget_chars,
+        structured_source_context_top_k_for_chunks,
+    },
+    technical_literal_context::{
+        collect_technical_literal_groups, render_exact_technical_literals_section,
+    },
+    technical_literal_focus::technical_literal_focus_keywords,
+    technical_literals::{TechnicalLiteralIntent, technical_literal_candidate_limit},
+    types::{
+        QueryChunkReferenceSnapshot, QueryExecutionEnrichment, RetrievalBundle,
+        RuntimeMatchedChunk, RuntimeStructuredQueryResult, RuntimeVectorSearchContext,
+        SemanticRerankExecutionContext, StructuredQueryAssemblyStage, StructuredQueryPlanningStage,
+        StructuredQueryRerankStage, StructuredQueryRetrievalStage,
+    },
+};
 
 /// Finalize a reranked bundle into a `RuntimeStructuredQueryResult`
 /// (context assembly + diagnostics). Runs AFTER the caller has had a
@@ -91,7 +130,6 @@ pub(crate) async fn finalize_structured_query(
 
     Ok(RuntimeStructuredQueryResult {
         planned_mode: assembly_stage.rerank.retrieval.planning.plan.planned_mode,
-        embedding_usage: assembly_stage.rerank.retrieval.planning.embedding_usage,
         intent_profile: assembly_stage.rerank.retrieval.planning.plan.intent_profile,
         context_text: assembly_stage.context_text,
         technical_literals_text: assembly_stage.technical_literals_text,
@@ -150,32 +188,27 @@ fn collect_ordered_source_units(chunks: &[RuntimeMatchedChunk]) -> Vec<RuntimeMa
 
 pub(crate) async fn plan_structured_query(
     state: &AppState,
-    library_id: Uuid,
+    execution_context: QueryProviderExecutionContext,
     question: &str,
     mode: RuntimeQueryMode,
     top_k: usize,
 ) -> anyhow::Result<StructuredQueryPlanningStage> {
-    let provider_profile = resolve_effective_provider_profile(state, library_id).await?;
-    let source_truth_version =
-        repositories::get_library_source_truth_version(&state.persistence.postgres, library_id)
-            .await
-            .context("failed to load library source-truth version for query planning")?;
+    let library_id = execution_context.library_id;
     let planning = derive_query_planning_metadata(&IntentResolutionRequest {
-        library_id,
         question: question.to_string(),
         explicit_mode: mode,
-        source_truth_version,
     });
     let plan = build_task_query_plan(&QueryPlanTaskInput {
         question: question.to_string(),
         top_k: Some(top_k),
         explicit_mode: Some(mode),
         metadata: Some(planning.clone()),
+        query_ir: None,
     })
     .map_err(|failure| anyhow::anyhow!(failure.summary))?;
     let technical_literal_intent = TechnicalLiteralIntent::default();
-    let (question_embedding, hyde_embedding, embedding_usage) =
-        compute_question_embeddings(state, library_id, &provider_profile, &plan, question).await?;
+    let prepared_embeddings =
+        compute_question_embeddings(state, execution_context, &plan, question, None).await?;
 
     let graph_index_started = std::time::Instant::now();
     let graph_index = load_graph_index(state, library_id).await?;
@@ -204,13 +237,12 @@ pub(crate) async fn plan_structured_query(
     .max(technical_literal_candidate_limit(technical_literal_intent, plan.top_k));
 
     Ok(StructuredQueryPlanningStage {
-        provider_profile,
         planning,
         plan,
         technical_literal_intent,
-        question_embedding,
-        hyde_embedding,
-        embedding_usage,
+        question_embedding: prepared_embeddings.question_embedding,
+        hyde_embedding: prepared_embeddings.hyde_embedding,
+        vector_search_context: prepared_embeddings.vector_search_context,
         graph_index,
         document_index,
         candidate_limit,
@@ -220,33 +252,53 @@ pub(crate) async fn plan_structured_query(
 /// Embed the query string for the vector lane plus, when the plan asks for
 /// it, a HyDE passage. Skipped entirely for exact-literal technical queries
 /// where vector retrieval would only add noise.
+struct PreparedQuestionEmbeddings {
+    question_embedding: Vec<f32>,
+    hyde_embedding: Option<Vec<f32>>,
+    vector_search_context: Option<RuntimeVectorSearchContext>,
+}
+
+impl PreparedQuestionEmbeddings {
+    fn skipped() -> Self {
+        Self { question_embedding: Vec::new(), hyde_embedding: None, vector_search_context: None }
+    }
+}
+
 async fn compute_question_embeddings(
     state: &AppState,
-    library_id: Uuid,
-    provider_profile: &EffectiveProviderProfile,
+    execution_context: QueryProviderExecutionContext,
     plan: &RuntimeQueryPlan,
     question: &str,
-) -> anyhow::Result<(Vec<f32>, Option<Vec<f32>>, Option<QuestionEmbeddingResult>)> {
+    existing_vector_search_context: Option<&RuntimeVectorSearchContext>,
+) -> anyhow::Result<PreparedQuestionEmbeddings> {
+    let library_id = execution_context.library_id;
     if should_skip_vector_search(plan) {
         tracing::info!(
             stage = "embed",
             exact_literal_technical = true,
             "vector retrieval skipped for exact technical literal query"
         );
-        return Ok((Vec::new(), None, None));
+        return Ok(PreparedQuestionEmbeddings::skipped());
     }
-    let embed_result = embed_question(state, library_id, provider_profile, question).await?;
+    let vector_search_context = match existing_vector_search_context {
+        Some(context) => context.clone(),
+        None => {
+            let Some(context) = prepare_runtime_vector_search_context(state, library_id).await?
+            else {
+                return Ok(PreparedQuestionEmbeddings::skipped());
+            };
+            context
+        }
+    };
+    let embed_result =
+        embed_question(state, execution_context, question, &vector_search_context).await?;
+    validate_prepared_query_embedding(library_id, &vector_search_context, &embed_result)?;
     let question_embedding = embed_result.embedding.clone();
     let hyde_embedding = if plan.hyde_recommended {
-        tracing::info!(stage = "hyde", hyde_recommended = true, "HyDE activated for this query");
-        let passage = generate_hyde_passage(state, library_id, question).await?;
-        tracing::debug!(stage = "hyde", passage_len = passage.len(), "HyDE passage generated");
-        tracing::trace!(stage = "hyde", passage = %passage, "HyDE passage content");
-        let hyde_result = embed_question(state, library_id, provider_profile, &passage)
-            .await
-            .context("failed to embed HyDE passage")?;
-        tracing::debug!(stage = "hyde_embed", "HyDE embedding computed");
-        Some(hyde_result.embedding)
+        Some(
+            compute_hyde_embedding(state, execution_context, question, &vector_search_context)
+                .await?,
+        )
     } else {
         tracing::debug!(
             stage = "hyde",
@@ -255,36 +307,64 @@ async fn compute_question_embeddings(
         );
         None
     };
-    Ok((question_embedding, hyde_embedding, Some(embed_result)))
+    Ok(PreparedQuestionEmbeddings {
+        question_embedding,
+        hyde_embedding,
+        vector_search_context: Some(vector_search_context),
+    })
 }
 
-/// Re-derive the question-dependent parts of an already-built planning stage
-/// for a resolved standalone retrieval query (elliptic follow-up case).
-///
-/// The expensive question-independent loads (`graph_index`, `document_index`)
-/// are reused as-is; only the planning metadata, plan, embeddings and
-/// candidate limit are recomputed for the resolved string. The common path
-/// (resolved query == raw question) never calls this.
+fn validate_prepared_query_embedding(
+    library_id: Uuid,
+    context: &RuntimeVectorSearchContext,
+    embedding: &QuestionEmbeddingResult,
+) -> anyhow::Result<()> {
+    validate_active_embedding_profile_key(
+        library_id,
+        &context.embedding_profile_key,
+        &embedding.embedding_profile_key,
+    )?;
+    validate_embedding_vector_dimensions(
+        context.dimensions,
+        &embedding.embedding,
+        "prepared runtime query",
+    )?;
+    Ok(())
+}
+
+async fn compute_hyde_embedding(
+    state: &AppState,
+    execution_context: QueryProviderExecutionContext,
+    question: &str,
+    vector_search_context: &RuntimeVectorSearchContext,
+) -> anyhow::Result<Vec<f32>> {
+    let library_id = execution_context.library_id;
+    tracing::info!(stage = "hyde", hyde_recommended = true, "HyDE activated for this query");
+    let passage = generate_hyde_passage(state, execution_context, question).await?;
+    tracing::debug!(stage = "hyde", passage_len = passage.len(), "HyDE passage generated");
+    tracing::trace!(stage = "hyde", passage = %passage, "HyDE passage content");
+    let hyde_result = embed_question(state, execution_context, &passage, vector_search_context)
+        .await
+        .context("failed to embed HyDE passage")?;
+    validate_prepared_query_embedding(library_id, vector_search_context, &hyde_result)?;
+    tracing::debug!(stage = "hyde_embed", "HyDE embedding computed");
+    Ok(hyde_result.embedding)
+}
+
+/// Re-derive question-dependent planning for a resolved standalone retrieval query.
+/// The loaded indexes are reused; metadata, plan, embeddings, and candidate limit
+/// are recomputed for the resolved string.
 pub(crate) async fn replan_for_resolved_retrieval_query(
     state: &AppState,
-    library_id: Uuid,
+    execution_context: QueryProviderExecutionContext,
     planning: &mut StructuredQueryPlanningStage,
     resolved_query: &str,
     mode: RuntimeQueryMode,
     top_k: usize,
     query_ir: &QueryIR,
 ) -> anyhow::Result<()> {
-    let source_truth_version =
-        repositories::get_library_source_truth_version(&state.persistence.postgres, library_id)
-            .await
-            .context("failed to load library source-truth version for resolved-query replan")?;
     let metadata = derive_query_planning_metadata_for_query_ir(
-        &IntentResolutionRequest {
-            library_id,
-            question: resolved_query.to_string(),
-            explicit_mode: mode,
-            source_truth_version,
-        },
+        &IntentResolutionRequest { question: resolved_query.to_string(), explicit_mode: mode },
         query_ir,
     );
     let plan = build_task_query_plan(&QueryPlanTaskInput {
@@ -292,14 +372,16 @@ pub(crate) async fn replan_for_resolved_retrieval_query(
         top_k: Some(top_k),
         explicit_mode: Some(mode),
         metadata: Some(metadata.clone()),
+        query_ir: Some(query_ir.clone()),
     })
     .map_err(|failure| anyhow::anyhow!(failure.summary))?;
-    let (question_embedding, hyde_embedding, embedding_usage) = compute_question_embeddings(
+    let existing_vector_search_context = planning.vector_search_context.clone();
+    let prepared_embeddings = compute_question_embeddings(
         state,
-        library_id,
-        &planning.provider_profile,
+        execution_context,
         &plan,
         resolved_query,
+        existing_vector_search_context.as_ref(),
     )
     .await?;
     let candidate_limit = expanded_candidate_limit(
@@ -311,27 +393,21 @@ pub(crate) async fn replan_for_resolved_retrieval_query(
     .max(technical_literal_candidate_limit(planning.technical_literal_intent, plan.top_k));
     planning.planning = metadata;
     planning.plan = plan;
-    planning.question_embedding = question_embedding;
-    planning.hyde_embedding = hyde_embedding;
-    planning.embedding_usage = embedding_usage;
+    planning.question_embedding = prepared_embeddings.question_embedding;
+    planning.hyde_embedding = prepared_embeddings.hyde_embedding;
+    planning.vector_search_context = prepared_embeddings.vector_search_context;
     planning.candidate_limit = candidate_limit;
     Ok(())
 }
 
 pub(crate) fn build_compiled_ir_query_plan(
-    library_id: Uuid,
     retrieval_question: &str,
     mode: RuntimeQueryMode,
     top_k: usize,
     query_ir: &QueryIR,
 ) -> anyhow::Result<(crate::domains::query::QueryPlanningMetadata, RuntimeQueryPlan)> {
     let metadata = derive_query_planning_metadata_for_query_ir(
-        &IntentResolutionRequest {
-            library_id,
-            question: retrieval_question.to_string(),
-            explicit_mode: mode,
-            source_truth_version: 0,
-        },
+        &IntentResolutionRequest { question: retrieval_question.to_string(), explicit_mode: mode },
         query_ir,
     );
     let plan = build_task_query_plan(&QueryPlanTaskInput {
@@ -339,13 +415,19 @@ pub(crate) fn build_compiled_ir_query_plan(
         top_k: Some(top_k),
         explicit_mode: Some(mode),
         metadata: Some(metadata.clone()),
+        query_ir: Some(query_ir.clone()),
     })
     .map_err(|failure| anyhow::anyhow!(failure.summary))?;
     Ok((metadata, plan))
 }
 
-pub(crate) fn refresh_query_plan_for_compiled_ir(
-    library_id: Uuid,
+/// Finalize the IR-dependent part of the plan produced in parallel with query
+/// compilation. The common path keeps the original question bytes, so its
+/// base embedding and loaded indexes remain valid; only a newly enabled or
+/// missing HyDE embedding may require provider work here.
+pub(crate) async fn refresh_query_plan_for_compiled_ir(
+    state: &AppState,
+    execution_context: QueryProviderExecutionContext,
     planning: &mut StructuredQueryPlanningStage,
     retrieval_question: &str,
     mode: RuntimeQueryMode,
@@ -354,8 +436,42 @@ pub(crate) fn refresh_query_plan_for_compiled_ir(
     rerank_enabled: bool,
     rerank_candidate_limit: usize,
 ) -> anyhow::Result<()> {
-    let (metadata, plan) =
-        build_compiled_ir_query_plan(library_id, retrieval_question, mode, top_k, query_ir)?;
+    let vector_search_context = planning.vector_search_context.clone();
+    refresh_query_plan_for_compiled_ir_with_hyde(
+        planning,
+        retrieval_question,
+        mode,
+        top_k,
+        query_ir,
+        rerank_enabled,
+        rerank_candidate_limit,
+        move || async move {
+            let context = vector_search_context.as_ref().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "HyDE embedding requested without a ready request-scoped vector preflight"
+                )
+            })?;
+            compute_hyde_embedding(state, execution_context, retrieval_question, context).await
+        },
+    )
+    .await
+}
+
+async fn refresh_query_plan_for_compiled_ir_with_hyde<F, Fut>(
+    planning: &mut StructuredQueryPlanningStage,
+    retrieval_question: &str,
+    mode: RuntimeQueryMode,
+    top_k: usize,
+    query_ir: &QueryIR,
+    rerank_enabled: bool,
+    rerank_candidate_limit: usize,
+    create_hyde_embedding: F,
+) -> anyhow::Result<()>
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = anyhow::Result<Vec<f32>>>,
+{
+    let (metadata, plan) = build_compiled_ir_query_plan(retrieval_question, mode, top_k, query_ir)?;
     let candidate_limit = expanded_candidate_limit(
         plan.planned_mode,
         plan.top_k,
@@ -363,9 +479,22 @@ pub(crate) fn refresh_query_plan_for_compiled_ir(
         rerank_candidate_limit,
     )
     .max(technical_literal_candidate_limit(planning.technical_literal_intent, plan.top_k));
+    let hyde_activation_changed = planning.plan.hyde_recommended != plan.hyde_recommended;
+    let should_create_hyde = planning.vector_search_context.is_some()
+        && plan.hyde_recommended
+        && (hyde_activation_changed || planning.hyde_embedding.is_none());
+    let created_hyde_embedding =
+        if should_create_hyde { Some(create_hyde_embedding().await?) } else { None };
+    let hyde_recommended = plan.hyde_recommended;
+
     planning.planning = metadata;
     planning.plan = plan;
     planning.candidate_limit = candidate_limit;
+    if let Some(hyde_embedding) = created_hyde_embedding {
+        planning.hyde_embedding = Some(hyde_embedding);
+    } else if !hyde_recommended {
+        planning.hyde_embedding = None;
+    }
     Ok(())
 }
 
@@ -384,10 +513,10 @@ pub(crate) async fn retrieve_structured_query(
         .max(technical_literal_candidate_limit(technical_literal_intent, planning.plan.top_k));
 
     let plan = &planning.plan;
-    let provider_profile = &planning.provider_profile;
     let vector_search_embedding =
         planning.hyde_embedding.as_deref().unwrap_or(&planning.question_embedding);
     let question_embedding = vector_search_embedding;
+    let vector_search_context = planning.vector_search_context.as_ref();
     let graph_index = &planning.graph_index;
     let document_index = &planning.document_index;
     let target_profile_started = std::time::Instant::now();
@@ -412,18 +541,18 @@ pub(crate) async fn retrieve_structured_query(
     // each other.
     let (mut bundle, needs_document_chunks) = match plan.planned_mode {
         RuntimeQueryMode::Document => {
-            let chunks = retrieve_document_chunks(
+            let chunks = Box::pin(retrieve_document_chunks(
                 state,
                 library_id,
-                provider_profile,
                 question,
                 locked_target_document_ids,
                 plan,
                 candidate_limit,
                 question_embedding,
+                vector_search_context,
                 document_index,
                 query_ir,
-            )
+            ))
             .await?;
             (RetrievalBundle { entities: Vec::new(), relationships: Vec::new(), chunks }, false)
         }
@@ -431,12 +560,12 @@ pub(crate) async fn retrieve_structured_query(
             retrieve_local_bundle(
                 state,
                 library_id,
-                provider_profile,
                 plan,
                 query_ir,
                 &target_entity_profiles,
                 candidate_limit,
                 question_embedding,
+                vector_search_context,
                 graph_index,
             )
             .await?,
@@ -446,12 +575,12 @@ pub(crate) async fn retrieve_structured_query(
             retrieve_global_bundle(
                 state,
                 library_id,
-                provider_profile,
                 plan,
                 query_ir,
                 &target_entity_profiles,
                 candidate_limit,
                 question_embedding,
+                vector_search_context,
                 graph_index,
             )
             .await?,
@@ -461,12 +590,12 @@ pub(crate) async fn retrieve_structured_query(
             retrieve_local_bundle(
                 state,
                 library_id,
-                provider_profile,
                 plan,
                 query_ir,
                 &target_entity_profiles,
                 candidate_limit,
                 question_embedding,
+                vector_search_context,
                 graph_index,
             )
             .await?,
@@ -476,12 +605,12 @@ pub(crate) async fn retrieve_structured_query(
             retrieve_mixed_graph_bundle(
                 state,
                 library_id,
-                provider_profile,
                 plan,
                 query_ir,
                 &target_entity_profiles,
                 candidate_limit,
                 question_embedding,
+                vector_search_context,
                 graph_index,
             )
             .await?,
@@ -507,18 +636,18 @@ pub(crate) async fn retrieve_structured_query(
     let graph_evidence_started = std::time::Instant::now();
     let document_chunks_future = async {
         if needs_document_chunks {
-            retrieve_document_chunks(
+            Box::pin(retrieve_document_chunks(
                 state,
                 library_id,
-                provider_profile,
                 question,
                 locked_target_document_ids,
                 plan,
                 candidate_limit,
                 question_embedding,
+                vector_search_context,
                 document_index,
                 query_ir,
-            )
+            ))
             .await
             .map(Some)
         } else {
@@ -588,27 +717,25 @@ pub(crate) async fn retrieve_structured_query(
 
 pub(crate) async fn rerank_structured_query(
     state: &AppState,
+    library_id: Uuid,
+    semantic_rerank_context: SemanticRerankExecutionContext,
     question: &str,
     mut retrieval: StructuredQueryRetrievalStage,
 ) -> anyhow::Result<StructuredQueryRerankStage> {
     let plan = &retrieval.planning.plan;
-    let rerank = match plan.planned_mode {
-        RuntimeQueryMode::Hybrid => {
-            apply_hybrid_rerank(state, question, plan, &mut retrieval.bundle)
-        }
-        RuntimeQueryMode::Mix => apply_mix_rerank(state, question, plan, &mut retrieval.bundle),
-        _ => derive_rerank_metadata(&crate::services::query::support::RerankRequest {
-            question: question.to_string(),
-            requested_mode: plan.planned_mode,
-            candidate_count: retrieval.bundle.entities.len()
-                + retrieval.bundle.relationships.len()
-                + retrieval.bundle.chunks.len(),
-            enabled: state.retrieval_intelligence.rerank_enabled,
-            result_limit: plan.top_k,
-        }),
-    };
+    let mut semantic_chunk_ranks = HashMap::new();
+    let rerank = apply_configured_rerank(
+        state,
+        library_id,
+        semantic_rerank_context,
+        question,
+        plan,
+        &mut retrieval.bundle,
+        &mut semantic_chunk_ranks,
+    )
+    .await;
 
-    Ok(StructuredQueryRerankStage { retrieval, rerank })
+    Ok(StructuredQueryRerankStage { retrieval, rerank, semantic_chunk_ranks })
 }
 
 async fn assemble_structured_query(
@@ -626,6 +753,7 @@ async fn assemble_structured_query(
     );
     rerank.retrieval.planning.technical_literal_intent = technical_literal_intent;
     let plan = &rerank.retrieval.planning.plan;
+    let semantic_chunk_ranks = &rerank.semantic_chunk_ranks;
     let bundle = &mut rerank.retrieval.bundle;
     let effective_top_k =
         structured_source_context_top_k_for_chunks(query_ir, plan.top_k, &bundle.chunks);
@@ -670,7 +798,13 @@ async fn assemble_structured_query(
         .filter(|id| Some(*id) != focused_document_id)
         .collect();
 
-    truncate_bundle(bundle, effective_top_k, Some(query_ir), &demoted_document_ids);
+    truncate_bundle_with_semantic_chunk_ranks(
+        bundle,
+        effective_top_k,
+        Some(query_ir),
+        &demoted_document_ids,
+        semantic_chunk_ranks,
+    );
 
     let include_graph_context = include_graph_context_for_query(query_ir);
     if !include_graph_context {
@@ -737,26 +871,7 @@ fn effective_technical_literal_intent(
             super::technical_literals::detect_technical_literal_intent_from_query_ir(question, ir)
         })
         .unwrap_or_default();
-    let mut intent = merge_technical_literal_intent(fallback, query_ir_intent);
-    if query_ir.is_some_and(query_ir_allows_short_technical_literal_inventory)
-        && super::technical_literals::technical_literal_focus_keywords(question, query_ir)
-            .iter()
-            .any(|keyword| keyword.chars().count() < 4)
-    {
-        intent.wants_parameters = true;
-    }
-    intent
-}
-
-fn query_ir_allows_short_technical_literal_inventory(
-    query_ir: &crate::domains::query_ir::QueryIR,
-) -> bool {
-    query_ir.confidence <= 0.3
-        && matches!(query_ir.act, QueryAct::Describe | QueryAct::ConfigureHow)
-        && matches!(query_ir.scope, QueryScope::SingleDocument)
-        && query_ir.source_slice.is_none()
-        && query_ir.target_types.is_empty()
-        && query_ir.literal_constraints.is_empty()
+    merge_technical_literal_intent(fallback, query_ir_intent)
 }
 
 fn merge_technical_literal_intent(
@@ -777,37 +892,18 @@ fn include_graph_context_for_query(query_ir: &crate::domains::query_ir::QueryIR)
 }
 
 #[cfg(test)]
-mod tests {
-    use std::collections::HashMap;
+#[path = "structured_query_pipeline_plan_tests.rs"]
+mod plan_tests;
 
-    use crate::domains::{
-        provider_profiles::{EffectiveProviderProfile, ProviderModelSelection},
-        query_ir::{
-            EntityMention, EntityRole, QueryAct, QueryIR, QueryLanguage, QueryScope,
-            SourceSliceDirection, SourceSliceFilter, SourceSliceSpec,
-        },
+#[cfg(test)]
+mod tests {
+    use crate::domains::query_ir::{
+        QueryAct, QueryIR, QueryLanguage, QueryScope, SourceSliceDirection, SourceSliceFilter,
+        SourceSliceSpec,
     };
     use uuid::Uuid;
 
     use super::*;
-
-    fn sample_model_selection(model_name: &str) -> ProviderModelSelection {
-        ProviderModelSelection {
-            provider_kind: "provider-alpha".to_string(),
-            model_name: model_name.to_string(),
-        }
-    }
-
-    fn sample_provider_profile() -> EffectiveProviderProfile {
-        EffectiveProviderProfile {
-            indexing: sample_model_selection("alpha-index"),
-            embedding: sample_model_selection("alpha-embedding"),
-            query_retrieve: sample_model_selection("alpha-retrieve"),
-            query_compile: sample_model_selection("alpha-compile"),
-            answer: sample_model_selection("alpha-answer"),
-            vision: None,
-        }
-    }
 
     fn runtime_chunk(kind: Option<&str>, score: f32) -> RuntimeMatchedChunk {
         RuntimeMatchedChunk {
@@ -865,90 +961,6 @@ mod tests {
     }
 
     #[test]
-    fn compiled_ir_query_plan_refresh_is_embedding_free() {
-        let library_id = Uuid::now_v7();
-        let retrieval_question = "Common prefix shared alpha gamma";
-        let query_ir = QueryIR {
-            act: QueryAct::Describe,
-            scope: QueryScope::SingleDocument,
-            language: QueryLanguage::Auto,
-            target_types: Vec::new(),
-            target_entities: vec![EntityMention {
-                label: "Gamma Node".to_string(),
-                role: EntityRole::Subject,
-            }],
-            literal_constraints: Vec::new(),
-            temporal_constraints: Vec::new(),
-            comparison: None,
-            document_focus: None,
-            conversation_refs: Vec::new(),
-            needs_clarification: None,
-            source_slice: None,
-            retrieval_query: None,
-            confidence: 0.9,
-        };
-
-        let (metadata, plan) = build_compiled_ir_query_plan(
-            library_id,
-            retrieval_question,
-            RuntimeQueryMode::Hybrid,
-            8,
-            &query_ir,
-        )
-        .expect("compiled IR planning should be pure");
-
-        assert_eq!(metadata.keywords.high_level, vec!["gamma".to_string()]);
-        assert_eq!(plan.high_level_keywords, vec!["gamma".to_string()]);
-        assert!(plan.low_level_keywords.contains(&"common".to_string()));
-
-        let initial_planning = derive_query_planning_metadata(&IntentResolutionRequest {
-            library_id,
-            question: retrieval_question.to_string(),
-            explicit_mode: RuntimeQueryMode::Hybrid,
-            source_truth_version: 0,
-        });
-        let initial_plan = build_task_query_plan(&QueryPlanTaskInput {
-            question: retrieval_question.to_string(),
-            top_k: Some(8),
-            explicit_mode: Some(RuntimeQueryMode::Hybrid),
-            metadata: Some(initial_planning.clone()),
-        })
-        .expect("initial planning should build");
-        let question_embedding = vec![0.1, 0.2, 0.3];
-        let hyde_embedding = Some(vec![0.4, 0.5, 0.6]);
-        let mut planning = StructuredQueryPlanningStage {
-            provider_profile: sample_provider_profile(),
-            planning: initial_planning,
-            plan: initial_plan,
-            technical_literal_intent: TechnicalLiteralIntent::default(),
-            question_embedding: question_embedding.clone(),
-            hyde_embedding: hyde_embedding.clone(),
-            embedding_usage: None,
-            graph_index: QueryGraphIndex::empty(),
-            document_index: HashMap::new(),
-            candidate_limit: 1,
-        };
-
-        refresh_query_plan_for_compiled_ir(
-            library_id,
-            &mut planning,
-            retrieval_question,
-            RuntimeQueryMode::Hybrid,
-            8,
-            &query_ir,
-            false,
-            32,
-        )
-        .expect("compiled IR refresh should not require embeddings");
-
-        assert_eq!(planning.planning.keywords.high_level, vec!["gamma".to_string()]);
-        assert_eq!(planning.plan.high_level_keywords, vec!["gamma".to_string()]);
-        assert_eq!(planning.question_embedding, question_embedding);
-        assert_eq!(planning.hyde_embedding, hyde_embedding);
-        assert_eq!(planning.candidate_limit, 24);
-    }
-
-    #[test]
     fn query_ir_target_types_expand_technical_literal_selection() {
         let question = "Which commands and settings configure scanning through RareProtocol?";
         let query_ir = QueryIR {
@@ -956,9 +968,9 @@ mod tests {
             scope: QueryScope::SingleDocument,
             language: QueryLanguage::Auto,
             target_types: vec![
-                "protocol".to_string(),
-                "path".to_string(),
-                "config_key".to_string(),
+                crate::domains::query_ir::QueryTargetKind::Protocol,
+                crate::domains::query_ir::QueryTargetKind::Path,
+                crate::domains::query_ir::QueryTargetKind::ConfigKey,
             ],
             target_entities: Vec::new(),
             literal_constraints: Vec::new(),
@@ -1048,7 +1060,10 @@ mod tests {
             act: QueryAct::ConfigureHow,
             scope: QueryScope::SingleDocument,
             language: QueryLanguage::Auto,
-            target_types: vec!["config_key".to_string(), "path".to_string()],
+            target_types: vec![
+                crate::domains::query_ir::QueryTargetKind::ConfigKey,
+                crate::domains::query_ir::QueryTargetKind::Path,
+            ],
             target_entities: Vec::new(),
             literal_constraints: Vec::new(),
             temporal_constraints: Vec::new(),
@@ -1074,47 +1089,15 @@ mod tests {
     }
 
     #[test]
-    fn low_confidence_short_technical_fallback_enables_parameter_inventory() {
-        let mut query_ir = QueryIR {
-            act: QueryAct::Describe,
-            scope: QueryScope::SingleDocument,
-            language: QueryLanguage::Auto,
-            target_types: Vec::new(),
-            target_entities: Vec::new(),
-            literal_constraints: Vec::new(),
-            temporal_constraints: Vec::new(),
-            comparison: None,
-            document_focus: None,
-            conversation_refs: Vec::new(),
-            needs_clarification: None,
-            source_slice: None,
-            retrieval_query: None,
-            confidence: 0.25,
-        };
-
-        let intent = effective_technical_literal_intent(
-            "Which QR setting should be used?",
-            Some(&query_ir),
-            TechnicalLiteralIntent::default(),
-        );
-        assert!(intent.wants_parameters);
-
-        query_ir.confidence = 0.9;
-        let ordinary_intent = effective_technical_literal_intent(
-            "Which QR setting should be used?",
-            Some(&query_ir),
-            TechnicalLiteralIntent::default(),
-        );
-        assert!(!ordinary_intent.any());
-    }
-
-    #[test]
     fn latest_version_queries_do_not_include_graph_context() {
         let query_ir = QueryIR {
             act: QueryAct::Enumerate,
             scope: QueryScope::LibraryMeta,
             language: QueryLanguage::Auto,
-            target_types: vec!["release".to_string(), "version".to_string()],
+            target_types: vec![
+                crate::domains::query_ir::QueryTargetKind::Release,
+                crate::domains::query_ir::QueryTargetKind::Version,
+            ],
             target_entities: Vec::new(),
             literal_constraints: Vec::new(),
             temporal_constraints: Vec::new(),

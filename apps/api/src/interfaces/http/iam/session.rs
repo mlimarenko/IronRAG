@@ -141,22 +141,22 @@ pub async fn setup_bootstrap_admin(
     State(state): State<AppState>,
     request_headers: HeaderMap,
     request_id: Option<axum::Extension<RequestId>>,
-    Json(payload): Json<BootstrapSetupRequest>,
+    Json(mut payload): Json<BootstrapSetupRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
     let request_id = request_id.map_or_else(|| Uuid::now_v7().to_string(), |value| value.0.0);
-    let outcome = state
+    let mut outcome = state
         .canonical_services
         .iam
         .setup_bootstrap_admin(
             &state,
             BootstrapSetupCommand {
-                login: payload.login,
-                display_name: payload.display_name,
-                password: payload.password,
-                ai_setup: payload.ai_setup.map(|ai_setup| BootstrapSetupAiCommand {
-                    provider_kind: ai_setup.provider_kind,
-                    api_key: ai_setup.api_key,
-                    base_url: ai_setup.base_url,
+                login: std::mem::take(&mut payload.login),
+                display_name: payload.display_name.take(),
+                password: std::mem::take(&mut payload.password),
+                ai_setup: payload.ai_setup.take().map(|mut ai_setup| BootstrapSetupAiCommand {
+                    provider_kind: std::mem::take(&mut ai_setup.provider_kind),
+                    api_key: ai_setup.api_key.take(),
+                    base_url: ai_setup.base_url.take(),
                 }),
                 ttl_hours: state.ui_session_cookie.ttl_hours,
                 request_id: request_id.clone(),
@@ -223,9 +223,9 @@ pub async fn setup_bootstrap_admin(
             expires_at: outcome.expires_at,
             user: SessionUserResponse {
                 principal_id: outcome.principal_id,
-                login: outcome.login,
-                email: outcome.email,
-                display_name: outcome.display_name,
+                login: std::mem::take(&mut outcome.login),
+                email: std::mem::take(&mut outcome.email),
+                display_name: std::mem::take(&mut outcome.display_name),
             },
         }),
     ))
@@ -248,18 +248,18 @@ pub async fn login_session(
     State(state): State<AppState>,
     request_headers: HeaderMap,
     request_id: Option<axum::Extension<RequestId>>,
-    Json(payload): Json<LoginSessionRequest>,
+    Json(mut payload): Json<LoginSessionRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
     let ttl_hours =
         if payload.remember_me.unwrap_or(false) { state.ui_session_cookie.ttl_hours } else { 24 };
-    let outcome = state
+    let mut outcome = state
         .canonical_services
         .iam
         .authenticate_session(
             &state,
             AuthenticateSessionCommand {
-                login: payload.login,
-                password: payload.password,
+                login: std::mem::take(&mut payload.login),
+                password: std::mem::take(&mut payload.password),
                 ttl_hours,
             },
         )
@@ -296,8 +296,7 @@ pub async fn login_session(
                     result_kind: "succeeded".to_string(),
                     redacted_message: Some("session login succeeded".to_string()),
                     internal_message: Some(format!(
-                        "principal {} created session {}",
-                        audit_principal_id, audit_session_id
+                        "principal {audit_principal_id} created session {audit_session_id}"
                     )),
                     subjects: vec![AppendAuditEventSubjectCommand {
                         subject_kind: "session".to_string(),
@@ -326,9 +325,9 @@ pub async fn login_session(
             expires_at: outcome.expires_at,
             user: SessionUserResponse {
                 principal_id: outcome.principal_id,
-                login: outcome.login,
-                email: outcome.email,
-                display_name: outcome.display_name,
+                login: std::mem::take(&mut outcome.login),
+                email: std::mem::take(&mut outcome.email),
+                display_name: std::mem::take(&mut outcome.display_name),
             },
         }),
     ))
@@ -419,7 +418,7 @@ pub async fn logout_session(
     Ok((response_headers, StatusCode::NO_CONTENT))
 }
 
-fn session_mode_from_bootstrap(
+const fn session_mode_from_bootstrap(
     bootstrap_status: &ironrag_contracts::auth::BootstrapStatus,
 ) -> ironrag_contracts::auth::SessionMode {
     if bootstrap_status.setup_required {

@@ -21,10 +21,12 @@ use crate::{
 /// tighter idle window trades a slightly higher cache-miss rate for a
 /// substantially lower steady-state RSS. A fresh load is triggered on the
 /// next cache miss.
-const PROJECTION_FRESHNESS_TTL: Duration = Duration::from_secs(180);
+const PROJECTION_FRESHNESS_TTL: Duration = Duration::from_mins(3);
+const PROJECTION_CACHE_MAX_ENTRIES: usize = 8;
+const PROJECTION_LOAD_LOCK_MAX_ENTRIES: usize = 64;
 
 #[derive(Debug, Clone)]
-pub struct ActiveRuntimeGraphProjection {
+pub(crate) struct ActiveRuntimeGraphProjection {
     pub nodes: Vec<RuntimeGraphQueryNodeRow>,
     pub edges: Vec<RuntimeGraphQueryEdgeRow>,
 }
@@ -79,10 +81,19 @@ impl RuntimeGraphProjectionCache {
         guard.retain(|(lib, _, _), entry| {
             *lib != library_id && entry.inserted_at.elapsed() < PROJECTION_FRESHNESS_TTL
         });
+        while guard.len() >= PROJECTION_CACHE_MAX_ENTRIES {
+            let Some(oldest) =
+                guard.iter().min_by_key(|(_, entry)| entry.inserted_at).map(|(key, _)| *key)
+            else {
+                break;
+            };
+            guard.remove(&oldest);
+        }
         guard.insert(
             (library_id, projection_version, topology_generation),
             CacheEntry { projection, inserted_at: Instant::now() },
         );
+        drop(guard);
 
         let mut load_locks = self.load_locks.lock().await;
         load_locks.retain(|(lib, version, generation), _| {
@@ -99,11 +110,21 @@ impl RuntimeGraphProjectionCache {
     ) -> Arc<Mutex<()>> {
         let key = (library_id, projection_version, topology_generation);
         let mut guard = self.load_locks.lock().await;
+        guard.retain(|_, lock| Arc::strong_count(lock) > 1);
+        if let Some(lock) = guard.get(&key) {
+            return Arc::clone(lock);
+        }
+        if guard.len() >= PROJECTION_LOAD_LOCK_MAX_ENTRIES {
+            // Every retained lock is currently referenced by an active load.
+            // Avoid growing the registry; this caller can still load safely,
+            // it merely loses singleflight coalescing until capacity returns.
+            return Arc::new(Mutex::new(()));
+        }
         Arc::clone(guard.entry(key).or_insert_with(|| Arc::new(Mutex::new(()))))
     }
 }
 
-pub async fn load_active_runtime_graph_projection(
+pub(crate) async fn load_active_runtime_graph_projection(
     state: &AppState,
     library_id: Uuid,
 ) -> Result<Arc<ActiveRuntimeGraphProjection>, KnowledgeServiceError> {

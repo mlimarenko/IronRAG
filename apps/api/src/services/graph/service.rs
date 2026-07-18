@@ -27,7 +27,7 @@ use crate::{
         graph::merge::{GraphMergeOutcome, GraphMergeScope},
         graph::projection::{GraphProjectionOutcome, GraphProjectionScope},
         graph::rebuild::RevisionGraphReconcileOutcome,
-        graph::summary::{GraphSummaryRefreshRequest, GraphSummaryService},
+        graph::summary::{PendingGraphSummaryRefresh, PublishedGraphSummaryRefreshOutcome},
     },
 };
 
@@ -85,38 +85,16 @@ impl GraphRebuildOutcome {
     }
 }
 
-/// Per-library mutex registry that serializes graph merge work for the same
-/// library while keeping different libraries fully parallel. The merge phase
-/// of the ingest pipeline upserts overlapping `runtime_graph_evidence` rows
-/// keyed by `(library_id, evidence_identity_key)`. Without per-library
-/// serialization, parallel workers contend on row-level locks and the latency
-/// of every UPSERT in the same library grows quadratically with concurrency.
+/// Canonical graph application service. Library merge serialization is owned
+/// by a `PostgreSQL` transaction-scoped advisory lock so it works across worker
+/// replicas and cannot grow a process-local lock registry without bound.
 #[derive(Clone, Default)]
-pub struct GraphService {
-    library_merge_locks: std::sync::Arc<
-        std::sync::Mutex<std::collections::HashMap<Uuid, std::sync::Arc<tokio::sync::Mutex<()>>>>,
-    >,
-}
+pub struct GraphService;
 
 impl GraphService {
     #[must_use]
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    fn library_merge_lock(&self, library_id: Uuid) -> std::sync::Arc<tokio::sync::Mutex<()>> {
-        // Poisoned-mutex recovery: the inner state is a simple HashMap of
-        // `Uuid -> Arc<Mutex>` and a previous panic while holding the guard
-        // cannot leave it in a semantically broken state — the worst case is
-        // a partially-inserted entry which the `entry(...).or_insert_with` on
-        // the next line reconciles. Recovering via `into_inner` is strictly
-        // safer than panicking on every subsequent merge.
-        let mut guard =
-            self.library_merge_locks.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        guard
-            .entry(library_id)
-            .or_insert_with(|| std::sync::Arc::new(tokio::sync::Mutex::new(())))
-            .clone()
+    pub const fn new() -> Self {
+        Self
     }
 
     #[must_use]
@@ -182,8 +160,7 @@ impl GraphService {
             .await
             .with_context(|| {
                 format!(
-                    "failed to materialize knowledge graph candidates for revision {}",
-                    revision_id
+                    "failed to materialize knowledge graph candidates for revision {revision_id}"
                 )
             })?;
 
@@ -315,7 +292,7 @@ impl GraphService {
                     .set_revision_text_state(
                         state,
                         revision.revision_id,
-                        "readable",
+                        "text_readable",
                         None,
                         None,
                         Some(Utc::now()),
@@ -448,22 +425,18 @@ impl GraphService {
         }
     }
 
-    pub async fn refresh_summaries(
+    pub async fn apply_published_summary_refresh(
         &self,
         state: &AppState,
         library_id: Uuid,
-        refresh: &GraphSummaryRefreshRequest,
-    ) -> Result<u64, GraphServiceError> {
-        GraphSummaryService::default().refresh_summaries(state, library_id, refresh).await
-    }
-
-    pub async fn invalidate_summaries(
-        &self,
-        state: &AppState,
-        library_id: Uuid,
-        refresh: &GraphSummaryRefreshRequest,
-    ) -> Result<u64, GraphServiceError> {
-        GraphSummaryService::default().invalidate_summaries(state, library_id, refresh).await
+        source_truth_version: i64,
+        pending: &PendingGraphSummaryRefresh,
+    ) -> Result<PublishedGraphSummaryRefreshOutcome, GraphServiceError> {
+        state
+            .retrieval_intelligence_services
+            .graph_summary
+            .apply_published_refresh(state, library_id, source_truth_version, pending)
+            .await
     }
 
     pub async fn project_canonical_graph(
@@ -498,17 +471,20 @@ impl GraphService {
         )
         .await
         .context("failed to acquire content document advisory lock for graph reconcile")?;
-        let lock = self.library_merge_lock(library_id);
-        let guard_result = tokio::select! {
-            _ = cancellation_token.cancelled() => {
+        let merge_lock_result = tokio::select! {
+            () = cancellation_token.cancelled() => {
                 Err(anyhow::Error::new(
                     crate::services::ingest::cancellation::StageError::Cancelled,
                 ))
             }
-            guard = lock.lock() => Ok(guard),
+            result = repositories::acquire_runtime_library_graph_merge_lock(
+                &state.persistence.postgres,
+                library_id,
+            ) => result
+                .context("failed to acquire cross-process graph merge advisory lock"),
         };
-        let _guard = match guard_result {
-            Ok(guard) => guard,
+        let merge_lock = match merge_lock_result {
+            Ok(lock) => lock,
             Err(error) => {
                 let release_result = repositories::content_repository::release_content_document_lock(
                     document_lock,
@@ -533,16 +509,29 @@ impl GraphService {
             cancellation_token,
         )
         .await;
-        let release_result = repositories::content_repository::release_content_document_lock(
-            document_lock,
-            document_id,
-        )
-        .await
-        .context("failed to release content document advisory lock after graph reconcile");
-        match (result, release_result) {
+        let merge_release_result =
+            repositories::release_runtime_library_graph_merge_lock(merge_lock, library_id)
+                .await
+                .context("failed to release cross-process graph merge advisory lock");
+        let document_release_result =
+            repositories::content_repository::release_content_document_lock(
+                document_lock,
+                document_id,
+            )
+            .await
+            .context("failed to release content document advisory lock after graph reconcile");
+        let result = match (result, merge_release_result) {
             (Ok(outcome), Ok(())) => Ok(outcome),
             (Err(error), Ok(())) => Err(error),
-            (Ok(_), Err(release_error)) => Err(release_error.into()),
+            (Ok(_), Err(release_error)) => Err(GraphServiceError::from(release_error)),
+            (Err(error), Err(release_error)) => {
+                Err(GraphServiceError::from(release_error.context(error.to_string())))
+            }
+        };
+        match (result, document_release_result) {
+            (Ok(outcome), Ok(())) => Ok(outcome),
+            (Err(error), Ok(())) => Err(error),
+            (Ok(_), Err(release_error)) => Err(GraphServiceError::from(release_error)),
             (Err(error), Err(release_error)) => {
                 Err(GraphServiceError::from(release_error.context(error.to_string())))
             }

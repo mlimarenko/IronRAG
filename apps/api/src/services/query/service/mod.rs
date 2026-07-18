@@ -1,14 +1,3 @@
-#![allow(
-    clippy::all,
-    clippy::expect_used,
-    clippy::missing_const_for_fn,
-    clippy::missing_errors_doc,
-    clippy::needless_pass_by_value,
-    clippy::result_large_err,
-    clippy::too_many_arguments,
-    clippy::too_many_lines
-)]
-
 mod context;
 mod formatting;
 mod session;
@@ -17,6 +6,7 @@ mod turn;
 pub(crate) use turn::ASSISTANT_AGENT_LOOP_DEADLINE_MS;
 
 #[cfg(test)]
+#[allow(clippy::expect_used, reason = "test assertions require descriptive failures")]
 mod tests;
 
 use std::collections::{BTreeSet, HashMap};
@@ -26,10 +16,11 @@ use uuid::Uuid;
 use crate::{
     domains::agent_runtime::{RuntimeExecutionSummary, RuntimeSurfaceKind},
     domains::query::{
-        PreparedSegmentReference, QueryChunkReference, QueryConversation, QueryExecution,
-        QueryGraphEdgeReference, QueryGraphNodeReference, QueryRuntimeStageSummary, QueryTurn,
-        QueryTurnKind, QueryVerificationState, RuntimeQueryMode, TechnicalFactReference,
+        PreparedSegmentReference, QueryChunkReference, QueryClarification, QueryConversation,
+        QueryExecution, QueryGraphEdgeReference, QueryGraphNodeReference, QueryRuntimeStageSummary,
+        QueryTurn, QueryTurnKind, QueryVerificationState, RuntimeQueryMode, TechnicalFactReference,
     },
+    domains::query_ir::QueryIR,
     infra::knowledge_rows::KnowledgeContextBundleReferenceSetRow,
 };
 
@@ -51,16 +42,58 @@ pub(crate) const MAX_DETAIL_GRAPH_EDGE_REFERENCES: usize = 96;
 /// prepared-segment ranking. Length cutoff is language-agnostic; mirrors
 /// `planner.rs::TOKEN_MIN_LEN`.
 pub(crate) const PREPARED_SEGMENT_FOCUS_MIN_TOKEN_LEN: usize = 4;
+const MAX_RUNTIME_FAILURE_PUBLIC_SUMMARY_CHARS: usize = 120;
+
+/// Returns a public-safe summary only for a canonical typed failure code.
+///
+/// Runtime diagnostics are intentionally not accepted here. Failure codes are
+/// protocol identifiers and therefore must use bounded ASCII snake_case. This
+/// keeps public and persisted summaries useful without treating arbitrary
+/// provider or query text as redacted merely because it was truncated.
+pub(crate) fn runtime_failure_summary_from_typed_code(code: &str) -> Option<String> {
+    let bytes = code.as_bytes();
+    let first = bytes.first().copied()?;
+    let last = bytes.last().copied()?;
+    let is_canonical = bytes.len() <= MAX_RUNTIME_FAILURE_PUBLIC_SUMMARY_CHARS
+        && first.is_ascii_lowercase()
+        && last.is_ascii_alphanumeric()
+        && bytes
+            .iter()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || *byte == b'_');
+    is_canonical.then(|| code.to_string())
+}
+
+/// Identifies protocol-level failures whose accompanying summary originates
+/// at the typed runtime-policy boundary and is already redacted.
+pub(crate) fn is_runtime_policy_failure_code(code: &str) -> bool {
+    matches!(
+        code,
+        "runtime_policy_rejected" | "runtime_policy_terminated" | "runtime_policy_blocked"
+    )
+}
+
+/// Bounds a summary whose policy-domain type already guarantees redaction.
+/// This must not be used for provider, repository, query, or user-supplied
+/// diagnostics; those paths use [`runtime_failure_summary_from_typed_code`].
+pub(crate) fn bounded_runtime_policy_summary(summary_redacted: &str) -> Option<String> {
+    let summary_redacted = summary_redacted.trim();
+    if summary_redacted.is_empty() {
+        return None;
+    }
+    Some(summary_redacted.chars().take(MAX_RUNTIME_FAILURE_PUBLIC_SUMMARY_CHARS).collect())
+}
 
 #[derive(Debug, Clone)]
 pub(crate) struct ConversationRuntimeContext {
-    pub(crate) effective_query_text: String,
-    pub(crate) contextual_follow_up: bool,
-    pub(crate) query_planning_history_text: Option<String>,
+    /// Verbatim current user turn. Prior conversation is carried separately
+    /// so the typed QueryCompiler remains the only semantic boundary.
+    pub(crate) current_question_text: String,
+    /// Structural availability only; this does not classify the current turn.
+    pub(crate) has_prior_conversation: bool,
+    pub(crate) query_compiler_history: Vec<ExternalConversationTurn>,
     pub(crate) prompt_history_text: Option<String>,
     pub(crate) prompt_history_messages: Vec<crate::integrations::llm::ChatMessage>,
     pub(crate) grounded_answer_tool_history: Vec<ExternalConversationTurn>,
-    pub(crate) coreference_entities: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -99,6 +132,30 @@ pub struct CreateConversationCommand {
 }
 
 #[derive(Debug, Clone)]
+/// Authorized explicit-title mutation for one assistant conversation.
+pub struct RenameConversationCommand {
+    /// Conversation selected by the caller.
+    pub conversation_id: Uuid,
+    /// Principal performing the mutation.
+    pub actor_principal_id: Uuid,
+    /// Whether scoped library-management permission may override ownership.
+    pub allow_manage_all: bool,
+    /// Requested durable display title.
+    pub title: String,
+}
+
+#[derive(Debug, Clone, Copy)]
+/// Authorized deletion request for one assistant conversation.
+pub struct DeleteConversationCommand {
+    /// Conversation selected by the caller.
+    pub conversation_id: Uuid,
+    /// Principal performing the mutation.
+    pub actor_principal_id: Uuid,
+    /// Whether scoped library-management permission may override ownership.
+    pub allow_manage_all: bool,
+}
+
+#[derive(Debug, Clone)]
 pub struct ExternalConversationTurn {
     pub turn_kind: QueryTurnKind,
     pub content_text: String,
@@ -131,11 +188,14 @@ pub struct QueryTurnExecutionResult {
     pub graph_edge_references: Vec<QueryGraphEdgeReference>,
     pub verification_state: QueryVerificationState,
     pub verification_warnings: Vec<crate::domains::query::QueryVerificationWarning>,
-    /// Typed clarification metadata for this turn. Carried in-memory from the
-    /// answer pipeline (the persisted execution detail re-read by
-    /// `get_execution` cannot reconstruct it); default for ordinary answers
-    /// and for paths that do not run the single-shot grounded answer pipeline.
-    pub clarification: crate::services::query::execution::RuntimeClarification,
+    /// Persisted finalizer-owned answer disposition. Live and result-cache
+    /// replay paths both read this from the execution context bundle.
+    pub answer_disposition: crate::domains::query::QueryAnswerDisposition,
+    /// Canonical typed compiler output for the answer. MCP completion policy
+    /// consumes this directly instead of reclassifying the raw question.
+    pub query_ir: Option<QueryIR>,
+    /// Typed clarification metadata persisted with the final answer outcome.
+    pub clarification: QueryClarification,
 }
 
 #[derive(Clone, Default)]

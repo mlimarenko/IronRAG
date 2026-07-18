@@ -11,11 +11,10 @@
 //!    pick exactly one, the type system refuses anything else. These are the
 //!    axes that actually change pipeline routing, so they must be typed.
 //!
-//! 2. **Open-ended classifications are plain strings backed by a knowledge
-//!    ontology.** `target_types`, `comparison.dimension`, `document_focus.hint`
-//!    are free-form tags. Adding a new kind of question (say "kafka topic"
-//!    instead of "endpoint") is an ontology record, not a code change. The
-//!    compiler is few-shot-primed from the ontology at prompt time.
+//! 2. **Behavioral classifications are typed.** `target_types` is a finite
+//!    protocol enum because downstream routing depends on it. Open ontology
+//!    labels belong in evidence or entity metadata and must never drive query
+//!    control flow as unchecked strings.
 //!
 //! 3. **Unresolved references are first-class.** `conversation_refs` captures
 //!    anaphora/deixis/ellipsis that the compiler *could not* resolve on its
@@ -28,7 +27,7 @@
 //!    user, instead of the current binary "suppress to stub" reaction.
 //!
 //! The JSON schema produced by [`query_ir_json_schema`] is fed to the LLM
-//! through provider structured outputs (OpenAI `json_schema` strict mode,
+//! through provider structured outputs (`OpenAI` `json_schema` strict mode,
 //! or `json_object` + prompt-engineering fallback for providers that don't
 //! support strict mode — see `docs/query_compiler_provider_audit.md`).
 
@@ -152,7 +151,7 @@ pub enum LiteralKind {
     Url,
     /// Filesystem or URL path (`/etc/app/config.ini`, `/api/v1/orders`).
     Path,
-    /// Identifier in camelCase / snake_case / SCREAMING_CASE
+    /// Identifier in camelCase / `snake_case` / `SCREAMING_CASE`
     /// (`fetchUserDetails`, `DATABASE_URL`, `with_cards`).
     Identifier,
     /// Semver / release version (`4.5.1`, `1.2`).
@@ -215,16 +214,129 @@ pub enum ClarificationReason {
     UnknownTargetType,
 }
 
+/// Finite semantic target contract emitted by `QueryCompiler`.
+///
+/// These values are protocol identifiers, not natural-language keywords. The
+/// compiler may select only a value advertised by the structured-output
+/// schema; serde rejects every other value so an unknown provider response is
+/// retried or recovered by the compiler boundary instead of being silently
+/// ignored by downstream routing.
+macro_rules! define_query_target_kinds {
+    ($($variant:ident => $wire:literal),+ $(,)?) => {
+        #[derive(
+            Debug,
+            Clone,
+            Copy,
+            Serialize,
+            Deserialize,
+            PartialEq,
+            Eq,
+            PartialOrd,
+            Ord,
+            Hash,
+            utoipa::ToSchema,
+        )]
+        pub enum QueryTargetKind {
+            $(#[serde(rename = $wire)] $variant),+
+        }
+
+        impl QueryTargetKind {
+            pub const ALL: &'static [Self] = &[$(Self::$variant),+];
+
+            #[must_use]
+            pub const fn as_str(self) -> &'static str {
+                match self {
+                    $(Self::$variant => $wire),+
+                }
+            }
+
+            /// Parse an exact wire identifier. This intentionally performs no
+            /// trimming, case folding, aliases, or natural-language recovery.
+            #[must_use]
+            pub fn from_wire(value: &str) -> Option<Self> {
+                match value {
+                    $($wire => Some(Self::$variant),)+
+                    _ => None,
+                }
+            }
+        }
+    };
+}
+
+define_query_target_kinds! {
+    Artifact => "artifact",
+    Attribute => "attribute",
+    BaseUrl => "base_url",
+    Changelog => "changelog",
+    Concept => "concept",
+    ConfigKey => "config_key",
+    Configuration => "configuration",
+    ConfigurationFile => "configuration_file",
+    Connection => "connection",
+    ConversationTurn => "conversation_turn",
+    Credential => "credential",
+    Document => "document",
+    Endpoint => "endpoint",
+    Entity => "entity",
+    Entry => "entry",
+    EnvVar => "env_var",
+    ErrorCode => "error_code",
+    ErrorMessage => "error_message",
+    Event => "event",
+    Facet => "facet",
+    Field => "field",
+    FilesystemPath => "filesystem_path",
+    Flag => "flag",
+    FormatsUnderTest => "formats_under_test",
+    Group => "group",
+    HttpMethod => "http_method",
+    Item => "item",
+    Location => "location",
+    Metric => "metric",
+    Natural => "natural",
+    Network => "network",
+    Organization => "organization",
+    Package => "package",
+    Parameter => "parameter",
+    Path => "path",
+    Person => "person",
+    Port => "port",
+    PrimaryHeading => "primary_heading",
+    Procedure => "procedure",
+    Process => "process",
+    Protocol => "protocol",
+    Record => "record",
+    Relationship => "relationship",
+    Release => "release",
+    Remediation => "remediation",
+    Route => "route",
+    SecondaryHeading => "secondary_heading",
+    Service => "service",
+    SoftwareModule => "software_module",
+    State => "state",
+    Status => "status",
+    TableAverage => "table_average",
+    TableFrequency => "table_frequency",
+    TableRow => "table_row",
+    TableSummary => "table_summary",
+    Troubleshooting => "troubleshooting",
+    Transition => "transition",
+    Url => "url",
+    Value => "value",
+    Version => "version",
+    Wsdl => "wsdl",
+}
+
 // =============================================================================
 // Composite types
 // =============================================================================
 
 /// Named thing the user talks about, with role in the question.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, utoipa::ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, utoipa::ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct EntityMention {
-    /// Surface label as written by the user, after light normalisation
-    /// (trimmed, collapsed whitespace, case preserved).
+    /// Exact non-empty, surrounding-whitespace-free substring as written by
+    /// the user in the current question or supplied conversation history.
     pub label: String,
     pub role: EntityRole,
 }
@@ -236,7 +348,7 @@ pub struct EntityMention {
 /// auto-classified by [`LiteralKind::infer`]. Both the golden set
 /// (hand-labelled strings) and future LLM outputs (strict schema objects)
 /// round-trip through the same type.
-#[derive(Debug, Clone, Serialize, PartialEq, utoipa::ToSchema)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq, utoipa::ToSchema)]
 pub struct LiteralSpan {
     /// Exact substring from the question.
     pub text: String,
@@ -301,38 +413,73 @@ pub fn literal_text_is_identifier_shaped(text: &str) -> bool {
         return false;
     }
 
-    let mut has_alphabetic = false;
-    let mut has_lowercase = false;
-    let mut has_uppercase = false;
-    let mut has_numeric = false;
-    let mut has_separator = false;
-    let mut seen_lowercase_before = false;
-    let mut has_uppercase_after_lowercase = false;
+    identifier_shape_signals(trimmed).is_some_and(IdentifierShapeSignals::identifier_shaped)
+}
 
-    for ch in trimmed.chars() {
-        if ch.is_alphabetic() {
-            has_alphabetic = true;
-            if ch.is_uppercase() {
-                has_uppercase = true;
-                has_uppercase_after_lowercase |= seen_lowercase_before;
+#[derive(Default)]
+struct IdentifierShapeSignals {
+    has_alphabetic: bool,
+    has_lowercase: bool,
+    has_uppercase: bool,
+    has_numeric: bool,
+    has_separator: bool,
+    seen_lowercase_before: bool,
+    has_uppercase_after_lowercase: bool,
+}
+
+impl IdentifierShapeSignals {
+    fn record(mut self, ch: char) -> Option<Self> {
+        match identifier_character_kind(ch) {
+            IdentifierCharacterKind::Alphabetic => {
+                self.has_alphabetic = true;
+                self.has_uppercase |= ch.is_uppercase();
+                self.has_uppercase_after_lowercase |=
+                    ch.is_uppercase() && self.seen_lowercase_before;
+                self.has_lowercase |= ch.is_lowercase();
+                self.seen_lowercase_before |= ch.is_lowercase();
+                Some(self)
             }
-            if ch.is_lowercase() {
-                has_lowercase = true;
-                seen_lowercase_before = true;
+            IdentifierCharacterKind::Numeric => {
+                self.has_numeric = true;
+                Some(self)
             }
-        } else if ch.is_numeric() {
-            has_numeric = true;
-        } else if matches!(ch, '_' | '-' | '.') {
-            has_separator = true;
-        } else {
-            return false;
+            IdentifierCharacterKind::Separator => {
+                self.has_separator = true;
+                Some(self)
+            }
+            IdentifierCharacterKind::Invalid => None,
         }
     }
 
-    has_separator
-        || has_numeric
-        || (has_lowercase && has_uppercase_after_lowercase)
-        || (has_alphabetic && has_uppercase && !has_lowercase)
+    const fn identifier_shaped(self) -> bool {
+        self.has_separator
+            || self.has_numeric
+            || (self.has_lowercase && self.has_uppercase_after_lowercase)
+            || (self.has_alphabetic && self.has_uppercase && !self.has_lowercase)
+    }
+}
+
+fn identifier_shape_signals(text: &str) -> Option<IdentifierShapeSignals> {
+    text.chars().try_fold(IdentifierShapeSignals::default(), IdentifierShapeSignals::record)
+}
+
+enum IdentifierCharacterKind {
+    Alphabetic,
+    Numeric,
+    Separator,
+    Invalid,
+}
+
+fn identifier_character_kind(ch: char) -> IdentifierCharacterKind {
+    if ch.is_alphabetic() {
+        IdentifierCharacterKind::Alphabetic
+    } else if ch.is_numeric() {
+        IdentifierCharacterKind::Numeric
+    } else if matches!(ch, '_' | '-' | '.') {
+        IdentifierCharacterKind::Separator
+    } else {
+        IdentifierCharacterKind::Invalid
+    }
 }
 
 #[must_use]
@@ -354,7 +501,7 @@ pub fn literal_kind_has_exact_technical_shape(kind: LiteralKind, text: &str) -> 
 /// naming both sides explicitly ("compare both services", "compare these two").
 /// The resolver picks the implicit sides from session state or document
 /// focus when possible.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, utoipa::ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, utoipa::ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ComparisonSpec {
     #[serde(default)]
@@ -362,13 +509,13 @@ pub struct ComparisonSpec {
     #[serde(default)]
     pub b: Option<String>,
     /// Free-form ontology tag ("protocol", "performance",
-    /// "feature_coverage"). Not enforced by the type system — grown via
+    /// "`feature_coverage`"). Not enforced by the type system — grown via
     /// ontology entries.
     pub dimension: String,
 }
 
 /// Hint that pins the question to a specific document.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, utoipa::ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, utoipa::ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct DocumentHint {
     /// Surface string the user used to identify the document
@@ -377,7 +524,7 @@ pub struct DocumentHint {
 }
 
 /// Unresolved reference the session resolver will fill from prior turns.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, utoipa::ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, utoipa::ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct UnresolvedRef {
     /// The exact surface form used ("here", "this", "the same", "that one").
@@ -388,7 +535,7 @@ pub struct UnresolvedRef {
 /// Ordered slice request over a sequential source. The compiler sets this
 /// only when the user explicitly asks for a positional range of records/items
 /// in an ordered source. Ordinary summaries and needle lookups leave it null.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, utoipa::ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, utoipa::ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct SourceSliceSpec {
     pub direction: SourceSliceDirection,
@@ -405,7 +552,7 @@ impl SourceSliceSpec {
 }
 
 /// Date/time or date-range constraint normalized by the query compiler.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, utoipa::ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, utoipa::ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct TemporalConstraint {
     /// Exact surface span from the user-visible question or history.
@@ -422,7 +569,7 @@ pub struct TemporalConstraint {
 /// (`{"reason":"...", "suggestion":"..."}`) or a bare reason string
 /// (`"anaphora_unresolved"`). Golden-set labellers use the bare form for
 /// brevity; the LLM path will emit the full form through strict schema.
-#[derive(Debug, Clone, Serialize, PartialEq, utoipa::ToSchema)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq, utoipa::ToSchema)]
 pub struct ClarificationSpec {
     pub reason: ClarificationReason,
     /// Short prompt the UI could show the user, in their language.
@@ -474,13 +621,11 @@ pub struct QueryIR {
     pub scope: QueryScope,
     pub language: QueryLanguage,
 
-    /// Open-ended ontology tags (e.g. `"endpoint"`, `"port"`, `"config_key"`,
-    /// `"procedure"`, `"protocol"`, `"error_code"`, `"env_var"`, `"metric"`,
-    /// `"table_row"`, `"document"`, `"concept"`). Built-in tags are canonical
-    /// singular snake_case strings; new tags are added as ontology rows, never
-    /// as Rust enum variants.
+    /// Typed semantic target identifiers selected by the query compiler.
+    /// Unknown provider values fail deserialization at the compiler boundary;
+    /// downstream stages never route on unchecked ontology strings.
     #[serde(default)]
-    pub target_types: Vec<String>,
+    pub target_types: Vec<QueryTargetKind>,
 
     #[serde(default)]
     pub target_entities: Vec<EntityMention>,
@@ -522,7 +667,7 @@ pub struct QueryIR {
     /// current question already stands on its own this is the question
     /// verbatim; when it depends on prior turns (ellipsis, anaphora, a
     /// bare disambiguating selection) the compiler folds the recovered
-    /// subject and scope into a standalone phrasing so the vector, HyDE,
+    /// subject and scope into a standalone phrasing so the vector, `HyDE`,
     /// lexical, and technical-fact lanes search the resolved intent
     /// instead of the elliptic fragment. Never a translation: preserves
     /// the original writing system and spelling of every surfaced token.
@@ -548,6 +693,20 @@ const fn default_ground_truth_confidence() -> f32 {
 // =============================================================================
 
 impl QueryIR {
+    /// Test a compiler-selected semantic target without string normalization
+    /// or alias matching.
+    #[must_use]
+    pub fn targets(&self, kind: QueryTargetKind) -> bool {
+        self.target_types.contains(&kind)
+    }
+
+    /// Test a finite target family without exposing serialized identifiers to
+    /// downstream control flow.
+    #[must_use]
+    pub fn targets_any(&self, kinds: &[QueryTargetKind]) -> bool {
+        self.target_types.iter().any(|kind| kinds.contains(kind))
+    }
+
     /// `true` when the query targets an exact configuration value.
     /// Drives verifier strictness and fact-search bias.
     #[must_use]
@@ -562,6 +721,26 @@ impl QueryIR {
         })
     }
 
+    /// `true` when a broad setup question may be answered by multiple
+    /// independently actionable procedure documents. This derives only from
+    /// compiler-selected typed fields; observed document cardinality remains a
+    /// separate retrieval-stage check.
+    #[must_use]
+    pub fn requests_broad_procedure_variant_coverage(&self) -> bool {
+        matches!(self.act, QueryAct::ConfigureHow)
+            && self.document_focus.is_none()
+            && self.source_slice.is_none()
+            && self.literal_constraints.is_empty()
+            && self.comparison.is_none()
+            && !self.targets_any(&[
+                QueryTargetKind::Document,
+                QueryTargetKind::Version,
+                QueryTargetKind::Release,
+                QueryTargetKind::Changelog,
+            ])
+            && self.targets(QueryTargetKind::Procedure)
+    }
+
     /// `true` when the query scope spans multiple documents.
     #[must_use]
     pub const fn is_multi_document(&self) -> bool {
@@ -571,7 +750,7 @@ impl QueryIR {
     /// `true` when the query is a follow-up — either explicitly declared
     /// by the compiler or evidenced by unresolved conversation refs.
     #[must_use]
-    pub fn is_follow_up(&self) -> bool {
+    pub const fn is_follow_up(&self) -> bool {
         matches!(self.act, QueryAct::FollowUp) || !self.conversation_refs.is_empty()
     }
 
@@ -641,7 +820,7 @@ impl QueryIR {
     }
 
     /// Verifier strictness derived from IR, replacing the implicit
-    /// "unsupported_literal → stub" guard. `Strict` = suppress on
+    /// "`unsupported_literal` → stub" guard. `Strict` = suppress on
     /// hallucinated literals; `Moderate` = warnings only; `Lenient` =
     /// metadata annotation only.
     #[must_use]
@@ -662,7 +841,7 @@ impl QueryIR {
     /// canonical reason to interrupt a grounded answer path once
     /// retrieval has enough evidence to proceed.
     #[must_use]
-    pub fn should_request_clarification(&self) -> bool {
+    pub const fn should_request_clarification(&self) -> bool {
         self.needs_clarification.is_some()
     }
 }
@@ -670,8 +849,10 @@ impl QueryIR {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum VerificationLevel {
-    /// Drop the answer to a safe stub if any literal is unsupported.
-    /// Reserved for exact-value requests where hallucination cost is high.
+    /// Surface only answers that pass the deterministic literal, named-claim,
+    /// conflict, and structural checks; replace every other result with a safe
+    /// response after the final repair and verification pass. Reserved for
+    /// exact-value requests where hallucination cost is high.
     Strict,
     /// Emit verification warnings but surface the answer to the user.
     Moderate,
@@ -686,12 +867,12 @@ pub enum VerificationLevel {
 /// Returns the OpenAI-strict-compatible JSON Schema describing [`QueryIR`].
 ///
 /// Written by hand (rather than generated via `schemars`) so we can guarantee
-/// the result validates under OpenAI's `strict: true` mode, which disallows
+/// the result validates under `OpenAI`'s `strict: true` mode, which disallows
 /// several JSON Schema constructs that generators emit by default
 /// (`oneOf`, `anyOf` at top level, untyped `additionalProperties`, etc.).
 ///
 /// For providers that don't support strict JSON Schema (Ollama, older
-/// DeepSeek builds), the same schema is attached in the prompt as a
+/// `DeepSeek` builds), the same schema is attached in the prompt as a
 /// documentation block and the request uses `response_format: json_object`.
 #[must_use]
 pub fn query_ir_json_schema() -> Value {
@@ -737,7 +918,13 @@ pub fn query_ir_json_schema() -> Value {
             },
             "target_types": {
                 "type": "array",
-                "items": { "type": "string" }
+                "items": {
+                    "type": "string",
+                    "enum": QueryTargetKind::ALL
+                        .iter()
+                        .map(|kind| kind.as_str())
+                        .collect::<Vec<_>>()
+                }
             },
             "target_entities": {
                 "type": "array",
@@ -876,12 +1063,74 @@ mod tests {
     use super::*;
 
     #[test]
+    fn broad_procedure_variant_coverage_excludes_versioned_and_focused_requests() {
+        let mut ir = QueryIR {
+            act: QueryAct::ConfigureHow,
+            scope: QueryScope::SingleDocument,
+            language: QueryLanguage::Auto,
+            target_types: vec![QueryTargetKind::ConfigurationFile, QueryTargetKind::Procedure],
+            target_entities: Vec::new(),
+            literal_constraints: Vec::new(),
+            temporal_constraints: Vec::new(),
+            comparison: None,
+            document_focus: None,
+            conversation_refs: Vec::new(),
+            needs_clarification: None,
+            source_slice: None,
+            retrieval_query: None,
+            confidence: 0.95,
+        };
+
+        assert!(ir.requests_broad_procedure_variant_coverage());
+        ir.target_types.push(QueryTargetKind::Version);
+        assert!(!ir.requests_broad_procedure_variant_coverage());
+        ir.target_types.retain(|target| *target != QueryTargetKind::Version);
+        ir.document_focus = Some(DocumentHint { hint: "Sample setup guide".to_string() });
+        assert!(!ir.requests_broad_procedure_variant_coverage());
+    }
+
+    #[test]
+    fn query_target_kind_preserves_canonical_wire_values() {
+        let kinds = [
+            QueryTargetKind::Procedure,
+            QueryTargetKind::ConfigurationFile,
+            QueryTargetKind::TableRow,
+            QueryTargetKind::ErrorCode,
+        ];
+
+        assert_eq!(
+            serde_json::to_value(kinds).expect("serialize target kinds"),
+            json!(["procedure", "configuration_file", "table_row", "error_code"])
+        );
+    }
+
+    #[test]
+    fn query_target_kind_rejects_unknown_compiler_value() {
+        let error = serde_json::from_value::<QueryTargetKind>(json!("unregistered_target"))
+            .expect_err("unknown target kind must fail closed");
+
+        assert!(error.to_string().contains("unknown variant"));
+    }
+
+    #[test]
+    fn query_ir_schema_restricts_target_types_to_typed_enum() {
+        let schema = query_ir_json_schema();
+        let target_schema = &schema["properties"]["target_types"]["items"];
+
+        assert_eq!(target_schema["type"], "string");
+        assert!(target_schema["enum"].as_array().is_some_and(|values| {
+            values.iter().any(|value| value == "procedure")
+                && values.iter().any(|value| value == "configuration_file")
+        }));
+    }
+
+    #[test]
     fn minimal_descriptive_question_round_trips() {
         let ir = QueryIR {
             act: QueryAct::ConfigureHow,
             scope: QueryScope::SingleDocument,
             language: QueryLanguage::Ru,
-            target_types: vec!["procedure".to_string()],
+            target_types: vec![crate::domains::query_ir::QueryTargetKind::Procedure],
             target_entities: vec![EntityMention {
                 label: "payment module".to_string(),
                 role: EntityRole::Subject,
@@ -907,7 +1156,7 @@ mod tests {
             act: QueryAct::RetrieveValue,
             scope: QueryScope::SingleDocument,
             language: QueryLanguage::En,
-            target_types: vec!["endpoint".to_string()],
+            target_types: vec![crate::domains::query_ir::QueryTargetKind::Endpoint],
             target_entities: vec![],
             literal_constraints: vec![LiteralSpan {
                 text: "/system/info".to_string(),
@@ -933,7 +1182,7 @@ mod tests {
             act: QueryAct::RetrieveValue,
             scope: QueryScope::SingleDocument,
             language: QueryLanguage::Auto,
-            target_types: vec!["concept".to_string()],
+            target_types: vec![crate::domains::query_ir::QueryTargetKind::Concept],
             target_entities: vec![],
             literal_constraints: vec![LiteralSpan {
                 text: "alpha".to_string(),
@@ -1052,7 +1301,7 @@ mod tests {
             act: QueryAct::Enumerate,
             scope: QueryScope::SingleDocument,
             language: QueryLanguage::Auto,
-            target_types: vec!["record".to_string()],
+            target_types: vec![crate::domains::query_ir::QueryTargetKind::Record],
             target_entities: vec![],
             literal_constraints: vec![],
             temporal_constraints: Vec::new(),
@@ -1258,7 +1507,7 @@ mod tests {
             act: QueryAct::Enumerate,
             scope: QueryScope::SingleDocument,
             language: QueryLanguage::Auto,
-            target_types: vec!["record".to_string()],
+            target_types: vec![crate::domains::query_ir::QueryTargetKind::Record],
             target_entities: vec![],
             literal_constraints: vec![],
             temporal_constraints: vec![TemporalConstraint {
@@ -1348,10 +1597,10 @@ mod tests {
     }
 }
 
-/// Canonical QueryIR cache discriminator. When compiler semantics change,
+/// Canonical `QueryIR` cache discriminator. When compiler semantics change,
 /// obsolete cache rows are discarded instead of read through compatibility
 /// aliases or parallel cache generations.
-pub const QUERY_IR_SCHEMA_VERSION: u16 = 11;
+pub const QUERY_IR_SCHEMA_VERSION: u16 = 12;
 
 /// Maximum age of a Postgres-tier `query_ir_cache` row before it is
 /// treated as a miss. Redis already holds its own 24h hot tier; the
@@ -1360,10 +1609,9 @@ pub const QUERY_IR_SCHEMA_VERSION: u16 = 11;
 /// while protecting against unbounded row growth on a busy library.
 pub const QUERY_IR_CACHE_MAX_AGE_DAYS: i64 = 30;
 
-/// Self-consistency issue picked up by [`validate_ir`]. Caught in debug
-/// builds as an assertion so it shouts early in tests; production paths
-/// log and keep going (a minor invariant failure is not worth bringing
-/// the pipeline down for).
+/// Self-consistency issue picked up by [`validate_ir`]. The query compiler
+/// rejects these invariants in every build before an IR can reach planning or
+/// retrieval; tests exercise the same validation path used in production.
 #[derive(Debug, Clone, PartialEq)]
 pub enum QueryIrValidationError {
     CompareWithoutComparison,

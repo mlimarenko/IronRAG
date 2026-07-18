@@ -2,10 +2,11 @@ use anyhow::{Context, Result, anyhow};
 use async_trait::async_trait;
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use reqwest::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE};
-use reqwest::{Client, Url};
+use reqwest::{Method, Url};
 use serde::{Deserialize, Serialize};
-use std::net::IpAddr;
+use std::sync::Arc;
 use std::time::Duration;
+use zeroize::Zeroize as _;
 
 mod openai_compatible;
 mod streaming;
@@ -27,29 +28,30 @@ use crate::{
     app::config::Settings,
     domains::provider_profiles::{
         OPENAI_COMPATIBLE_RUNTIME_KIND, ProviderAuthScheme, ProviderBaseUrlPolicy,
-        ProviderCredentialPolicy, ProviderRuntimeProfile, ProviderStructuredOutputMode,
+        ProviderCredentialPolicy, ProviderRequestPolicy, ProviderRuntimeProfile,
+        ProviderSamplingPolicy, ProviderStructuredOutputMode, ProviderToolChoicePolicy,
     },
     integrations::retry::{ProviderCallError, RetryPolicy, provider_http_status_error, with_retry},
-    shared::provider_base_url::resolve_runtime_provider_base_url,
+    shared::{
+        outbound_http::read_response_bytes_with_limit,
+        provider_base_url::{is_private_provider_url, resolve_runtime_provider_base_url},
+        provider_http::{
+            PROVIDER_ERROR_BODY_MAX_BYTES, PROVIDER_SUCCESS_BODY_MAX_BYTES, PreparedProviderTarget,
+            ProviderHttpTransport, ProviderHttpTransportConfig,
+        },
+    },
 };
 
 #[cfg(test)]
 use crate::domains::provider_profiles::ProviderTokenLimitParameter;
 
-const DEFAULT_GPT_56_TOOL_MAX_OUTPUT_TOKENS: i32 = 65_536;
-
-fn is_gpt_56_family_model(model_name: &str) -> bool {
-    model_name
-        .rsplit('/')
-        .next()
-        .is_some_and(|name| name.to_ascii_lowercase().starts_with("gpt-5.6"))
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+#[derive(Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct ChatRequest {
     pub provider_kind: String,
     pub model_name: String,
     pub prompt: String,
+    #[serde(skip)]
+    #[schema(ignore)]
     pub api_key_override: Option<String>,
     pub base_url_override: Option<String>,
     pub system_prompt: Option<String>,
@@ -60,10 +62,12 @@ pub struct ChatRequest {
     pub extra_parameters_json: serde_json::Value,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+#[derive(Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct ChatRequestSeed {
     pub provider_kind: String,
     pub model_name: String,
+    #[serde(skip)]
+    #[schema(ignore)]
     pub api_key_override: Option<String>,
     pub base_url_override: Option<String>,
     pub system_prompt: Option<String>,
@@ -74,40 +78,40 @@ pub struct ChatRequestSeed {
 }
 
 #[must_use]
-pub fn build_text_chat_request(seed: ChatRequestSeed, prompt: String) -> ChatRequest {
+pub fn build_text_chat_request(mut seed: ChatRequestSeed, prompt: String) -> ChatRequest {
     ChatRequest {
-        provider_kind: seed.provider_kind,
-        model_name: seed.model_name,
+        provider_kind: std::mem::take(&mut seed.provider_kind),
+        model_name: std::mem::take(&mut seed.model_name),
         prompt,
-        api_key_override: seed.api_key_override,
-        base_url_override: seed.base_url_override,
-        system_prompt: seed.system_prompt,
+        api_key_override: seed.api_key_override.take(),
+        base_url_override: seed.base_url_override.take(),
+        system_prompt: seed.system_prompt.take(),
         temperature: seed.temperature,
         top_p: seed.top_p,
         max_output_tokens_override: seed.max_output_tokens_override,
         response_format: None,
-        extra_parameters_json: seed.extra_parameters_json,
+        extra_parameters_json: std::mem::take(&mut seed.extra_parameters_json),
     }
 }
 
 #[must_use]
 pub fn build_structured_chat_request(
-    seed: ChatRequestSeed,
+    mut seed: ChatRequestSeed,
     prompt: String,
     response_format: serde_json::Value,
 ) -> ChatRequest {
     ChatRequest {
-        provider_kind: seed.provider_kind,
-        model_name: seed.model_name,
+        provider_kind: std::mem::take(&mut seed.provider_kind),
+        model_name: std::mem::take(&mut seed.model_name),
         prompt,
-        api_key_override: seed.api_key_override,
-        base_url_override: seed.base_url_override,
-        system_prompt: seed.system_prompt,
+        api_key_override: seed.api_key_override.take(),
+        base_url_override: seed.base_url_override.take(),
+        system_prompt: seed.system_prompt.take(),
         temperature: seed.temperature,
         top_p: seed.top_p,
         max_output_tokens_override: seed.max_output_tokens_override,
         response_format: Some(response_format),
-        extra_parameters_json: seed.extra_parameters_json,
+        extra_parameters_json: std::mem::take(&mut seed.extra_parameters_json),
     }
 }
 
@@ -141,9 +145,8 @@ pub struct ChatToolCall {
 }
 
 /// Multi-turn conversation message used by answer calls and external
-/// tool-capable agents. Mirrors the OpenAI chat.completions message shape
-/// so the same wire format works for every OpenAI-compatible provider
-/// (OpenAI, Qwen, DeepSeek, Ollama, etc.).
+/// tool-capable agents. Mirrors the `OpenAI` chat.completions message shape
+/// so the same wire format works across OpenAI-compatible runtimes.
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct ChatMessage {
     /// One of: "system", "user", "assistant", "tool".
@@ -152,9 +155,8 @@ pub struct ChatMessage {
     /// tool-call only.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub content: Option<String>,
-    /// Provider-emitted reasoning trace echoed back by DeepSeek thinking
-    /// models when continuing a multi-turn tool-loop. Other providers
-    /// ignore the field.
+    /// Optional provider-emitted reasoning trace echoed back when an upstream
+    /// runtime requires it for continuation of a multi-turn tool loop.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_content: Option<String>,
     /// Tool calls produced by the assistant on its previous turn.
@@ -218,9 +220,8 @@ impl ChatMessage {
     }
 
     /// Assistant turn that carries a `reasoning_content` echo plus its tool
-    /// calls. DeepSeek thinking-mode rejects subsequent tool-loop calls
-    /// when the prior reasoning is not echoed back, so the agent loop must
-    /// preserve it across iterations.
+    /// calls. Runtimes that require reasoning continuity can reject a later
+    /// tool-loop request when this trace is not preserved.
     #[must_use]
     pub fn assistant_with_reasoning_and_tool_calls(
         reasoning_content: Option<String>,
@@ -253,10 +254,12 @@ impl ChatMessage {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+#[derive(Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct ToolUseRequest {
     pub provider_kind: String,
     pub model_name: String,
+    #[serde(skip)]
+    #[schema(ignore)]
     pub api_key_override: Option<String>,
     pub base_url_override: Option<String>,
     pub temperature: Option<f64>,
@@ -277,34 +280,38 @@ pub struct ToolUseRequest {
 pub struct ToolUseResponse {
     pub provider_kind: String,
     pub model_name: String,
-    /// Final text output. Populated when finish_reason is "stop".
+    /// Final text output. Populated when `finish_reason` is "stop".
     pub output_text: String,
     /// Tool calls the model wants the caller to execute. Populated when
-    /// finish_reason is "tool_calls".
+    /// `finish_reason` is "`tool_calls`".
     pub tool_calls: Vec<ChatToolCall>,
     pub finish_reason: Option<String>,
     pub usage_json: serde_json::Value,
-    /// Provider reasoning trace, used by DeepSeek thinking models — must
-    /// be echoed back on the next turn or the provider returns 400.
+    /// Provider reasoning trace for runtimes that require continuity across
+    /// tool-loop turns.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_content: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+#[derive(Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct EmbeddingRequest {
     pub provider_kind: String,
     pub model_name: String,
     pub input: String,
+    #[serde(skip)]
+    #[schema(ignore)]
     pub api_key_override: Option<String>,
     pub base_url_override: Option<String>,
     pub extra_parameters_json: serde_json::Value,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+#[derive(Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct EmbeddingBatchRequest {
     pub provider_kind: String,
     pub model_name: String,
     pub inputs: Vec<String>,
+    #[serde(skip)]
+    #[schema(ignore)]
     pub api_key_override: Option<String>,
     pub base_url_override: Option<String>,
     pub extra_parameters_json: serde_json::Value,
@@ -328,13 +335,35 @@ pub struct EmbeddingBatchResponse {
     pub usage_json: serde_json::Value,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+/// Parameters that are sent to the embedding endpoint in addition to the
+/// protocol-owned `model` and `input` fields. Provider-control metadata is
+/// consumed locally and therefore cannot define the remote vector space.
+pub(crate) fn embedding_request_parameters(
+    extra_parameters_json: &serde_json::Value,
+) -> serde_json::Value {
+    let Some(extra) = extra_parameters_json.as_object() else {
+        return serde_json::json!({});
+    };
+    serde_json::Value::Object(
+        extra
+            .iter()
+            .filter(|(key, _)| {
+                !matches!(key.as_str(), "model" | "input") && !key.starts_with("_provider")
+            })
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect(),
+    )
+}
+
+#[derive(Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct VisionRequest {
     pub provider_kind: String,
     pub model_name: String,
     pub prompt: String,
     pub image_bytes: Vec<u8>,
     pub mime_type: String,
+    #[serde(skip)]
+    #[schema(ignore)]
     pub api_key_override: Option<String>,
     pub base_url_override: Option<String>,
     pub system_prompt: Option<String>,
@@ -352,6 +381,39 @@ pub struct VisionResponse {
     pub usage_json: serde_json::Value,
 }
 
+macro_rules! impl_redacted_api_key_holder {
+    ($type:ty, $name:literal) => {
+        impl Drop for $type {
+            fn drop(&mut self) {
+                if let Some(api_key) = self.api_key_override.as_mut() {
+                    api_key.zeroize();
+                }
+            }
+        }
+
+        impl std::fmt::Debug for $type {
+            fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter
+                    .debug_struct($name)
+                    .field("provider_kind", &self.provider_kind)
+                    .field("model_name", &self.model_name)
+                    .field(
+                        "api_key_override",
+                        &self.api_key_override.as_ref().map(|_| "<redacted>"),
+                    )
+                    .finish_non_exhaustive()
+            }
+        }
+    };
+}
+
+impl_redacted_api_key_holder!(ChatRequest, "ChatRequest");
+impl_redacted_api_key_holder!(ChatRequestSeed, "ChatRequestSeed");
+impl_redacted_api_key_holder!(ToolUseRequest, "ToolUseRequest");
+impl_redacted_api_key_holder!(EmbeddingRequest, "EmbeddingRequest");
+impl_redacted_api_key_holder!(EmbeddingBatchRequest, "EmbeddingBatchRequest");
+impl_redacted_api_key_holder!(VisionRequest, "VisionRequest");
+
 #[async_trait]
 pub trait LlmGateway: Send + Sync {
     async fn generate(&self, request: ChatRequest) -> Result<ChatResponse>;
@@ -366,8 +428,7 @@ pub trait LlmGateway: Send + Sync {
         }
         Ok(response)
     }
-    /// Tool-use capable chat completion. The provider must be OpenAI-compatible
-    /// (OpenAI, Qwen, DeepSeek, Ollama with tool-capable models, etc.).
+    /// Tool-use capable chat completion for an OpenAI-compatible runtime.
     /// Default implementation rejects the request — concrete gateways MUST
     /// override it. Test fakes are free to keep the default.
     async fn generate_with_tools(&self, _request: ToolUseRequest) -> Result<ToolUseResponse> {
@@ -402,18 +463,72 @@ struct RuntimeProviderProfileEnvelope {
     runtime: ProviderRuntimeProfile,
     base_url: ProviderBaseUrlPolicy,
     credentials: Option<ProviderCredentialPolicy>,
+    #[serde(default)]
+    request_policy: ProviderRequestPolicy,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 struct ResolvedProviderRuntime {
     api_key: Option<String>,
     base_url: String,
+    allow_private_network: bool,
     runtime: ProviderRuntimeProfile,
+    request_policy: ProviderRequestPolicy,
+}
+
+impl Drop for ResolvedProviderRuntime {
+    fn drop(&mut self) {
+        if let Some(api_key) = self.api_key.as_mut() {
+            api_key.zeroize();
+        }
+    }
+}
+
+impl std::fmt::Debug for ResolvedProviderRuntime {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ResolvedProviderRuntime")
+            .field("api_key", &self.api_key.as_ref().map(|_| "<redacted>"))
+            .field("base_url", &"<redacted>")
+            .field("allow_private_network", &self.allow_private_network)
+            .field("runtime", &self.runtime)
+            .field("request_policy", &self.request_policy)
+            .finish()
+    }
+}
+
+impl ProviderRequestPolicy {
+    const fn sampling_params(
+        self,
+        temperature: Option<f64>,
+        top_p: Option<f64>,
+    ) -> (Option<f64>, Option<f64>) {
+        match self.sampling {
+            ProviderSamplingPolicy::Forward => (temperature, top_p),
+            ProviderSamplingPolicy::Omit => (None, None),
+        }
+    }
+
+    const fn tool_choice(self, has_tools: bool, require_tool_call: bool) -> Option<&'static str> {
+        if !has_tools {
+            return None;
+        }
+        match (self.tool_choice, require_tool_call) {
+            (ProviderToolChoicePolicy::RequiredCapable, true) => Some("required"),
+            (ProviderToolChoicePolicy::RequiredCapable | ProviderToolChoicePolicy::AutoOnly, _) => {
+                Some("auto")
+            }
+        }
+    }
+
+    fn tool_max_output_tokens(self, requested: Option<i32>) -> Option<i32> {
+        requested.or(self.default_tool_max_output_tokens)
+    }
 }
 
 #[derive(Clone)]
 pub struct UnifiedGateway {
-    client: Client,
+    transport: Arc<ProviderHttpTransport>,
 }
 
 async fn read_provider_response_body(
@@ -423,16 +538,21 @@ async fn read_provider_response_body(
 ) -> Result<(reqwest::StatusCode, reqwest::header::HeaderMap, Vec<u8>), ProviderCallError> {
     let status = response.status();
     let headers = response.headers().clone();
-    let body_bytes = response
-        .bytes()
-        .await
-        .map_err(|source| {
-            ProviderCallError::response_body(
+    let body_limit = if status.is_success() {
+        PROVIDER_SUCCESS_BODY_MAX_BYTES
+    } else {
+        PROVIDER_ERROR_BODY_MAX_BYTES
+    };
+    let body_bytes = match read_response_bytes_with_limit(response, body_limit).await {
+        Ok(bytes) => bytes,
+        Err(_error) if !status.is_success() => Vec::new(),
+        Err(error) => {
+            return Err(ProviderCallError::response_policy(
                 format!("failed to read {operation} response body: provider={provider_kind}"),
-                source,
-            )
-        })?
-        .to_vec();
+                error,
+            ));
+        }
+    };
     Ok((status, headers, body_bytes))
 }
 
@@ -454,8 +574,11 @@ fn parse_provider_json_body(
 }
 
 impl UnifiedGateway {
-    #[must_use]
-    pub fn from_settings(settings: &Settings) -> Self {
+    /// Builds the provider gateway with a fail-closed HTTP transport.
+    ///
+    /// # Errors
+    /// Returns an error when the bounded no-redirect client cannot be built.
+    pub fn from_settings(settings: &Settings) -> Result<Self> {
         let timeout = Duration::from_secs(settings.llm_http_timeout_seconds.max(1));
         // Aggressive pool / keep-alive tuning to defeat a 90-second
         // stale-connection hang observed on the canonical SBP turn:
@@ -471,34 +594,47 @@ impl UnifiedGateway {
         // the gateway still aborts after `llm_http_timeout_seconds`
         // — they only prevent the path from blocking on a known-dead
         // socket.
-        let client = Client::builder()
-            .connect_timeout(Duration::from_secs(10))
-            .timeout(timeout)
-            .pool_idle_timeout(Duration::from_secs(30))
-            .tcp_keepalive(Duration::from_secs(15))
-            .http2_keep_alive_interval(Duration::from_secs(15))
-            .http2_keep_alive_timeout(Duration::from_secs(10))
-            .http2_keep_alive_while_idle(true)
-            .build()
-            .unwrap_or_else(|_| Client::new());
-        Self { client }
+        let transport = ProviderHttpTransport::try_new(ProviderHttpTransportConfig::llm(timeout))
+            .context("failed to build provider HTTP transport")?;
+        Ok(Self { transport: Arc::new(transport) })
+    }
+
+    fn prepared_request(
+        target: &PreparedProviderTarget,
+        method: Method,
+        endpoint: &Url,
+        provider_kind: &str,
+    ) -> Result<reqwest::RequestBuilder, ProviderCallError> {
+        target.request(method, endpoint).map_err(|error| {
+            ProviderCallError::protocol(format!(
+                "provider request policy failed: provider={provider_kind}: {error}"
+            ))
+        })
     }
 
     async fn call_openai_compatible(
         &self,
         request: OpenAiCompatibleRequest<'_>,
+        allow_private_network: bool,
     ) -> Result<(String, serde_json::Value)> {
         let request_body = request.body()?;
         let endpoint_url =
             provider_endpoint_url(request.provider_kind, request.base_url, &request.chat_path)?;
+        let target =
+            self.transport.prepare(&endpoint_url, allow_private_network).await.with_context(
+                || format!("provider target policy failed: provider={}", request.provider_kind),
+            )?;
 
         with_retry(
             || async {
-                let request_builder = self
-                    .client
-                    .post(endpoint_url.clone())
-                    .header(CONTENT_TYPE, "application/json")
-                    .header(ACCEPT, "application/json");
+                let request_builder = Self::prepared_request(
+                    &target,
+                    Method::POST,
+                    &endpoint_url,
+                    request.provider_kind,
+                )?
+                .header(CONTENT_TYPE, "application/json")
+                .header(ACCEPT, "application/json");
                 let request_builder =
                     apply_provider_auth(request_builder, request.auth_scheme, request.api_key);
                 let request_builder = crate::observability::inject_trace_context(request_builder);
@@ -551,19 +687,27 @@ impl UnifiedGateway {
     async fn call_openai_compatible_stream(
         &self,
         request: OpenAiCompatibleRequest<'_>,
+        allow_private_network: bool,
         on_delta: &mut (dyn FnMut(String) + Send),
     ) -> Result<(String, serde_json::Value)> {
         let request_body = request.body()?;
         let endpoint_url =
             provider_endpoint_url(request.provider_kind, request.base_url, &request.chat_path)?;
+        let target =
+            self.transport.prepare(&endpoint_url, allow_private_network).await.with_context(
+                || format!("provider target policy failed: provider={}", request.provider_kind),
+            )?;
 
         let response = with_retry(
             || async {
-                let request_builder = self
-                    .client
-                    .post(endpoint_url.clone())
-                    .header(CONTENT_TYPE, "application/json")
-                    .header(ACCEPT, "text/event-stream");
+                let request_builder = Self::prepared_request(
+                    &target,
+                    Method::POST,
+                    &endpoint_url,
+                    request.provider_kind,
+                )?
+                .header(CONTENT_TYPE, "application/json")
+                .header(ACCEPT, "text/event-stream");
                 let request_builder =
                     apply_provider_auth(request_builder, request.auth_scheme, request.api_key);
                 let request_builder = crate::observability::inject_trace_context(request_builder);
@@ -585,7 +729,9 @@ impl UnifiedGateway {
 
                 let headers = response.headers().clone();
                 let body_bytes =
-                    response.bytes().await.map(|bytes| bytes.to_vec()).unwrap_or_default();
+                    read_response_bytes_with_limit(response, PROVIDER_ERROR_BODY_MAX_BYTES)
+                        .await
+                        .unwrap_or_default();
                 let body_text = provider_response_body_text(&body_bytes);
                 Err(provider_http_status_error(request.provider_kind, status, &headers, &body_text))
             },
@@ -596,22 +742,22 @@ impl UnifiedGateway {
         drain_openai_compatible_stream(response, on_delta).await
     }
 
-    fn parse_embedding_vector(value: &serde_json::Value) -> Vec<f32> {
-        value
-            .as_array()
-            .map(|arr| {
-                #[allow(clippy::cast_possible_truncation)]
-                arr.iter()
-                    .filter_map(serde_json::Value::as_f64)
-                    .filter(|embedding_value| embedding_value.is_finite())
-                    .filter(|embedding_value| {
-                        *embedding_value >= f64::from(f32::MIN)
-                            && *embedding_value <= f64::from(f32::MAX)
-                    })
-                    .map(|embedding_value| embedding_value as f32)
-                    .collect::<Vec<f32>>()
+    fn parse_embedding_vector(value: &serde_json::Value) -> Result<Vec<f32>> {
+        let values = value.as_array().context("embedding must be a JSON array")?;
+        values
+            .iter()
+            .enumerate()
+            .map(|(index, value)| {
+                let value = value
+                    .as_f64()
+                    .ok_or_else(|| anyhow!("embedding element {index} must be a number"))?;
+                if !value.is_finite() || value < f64::from(f32::MIN) || value > f64::from(f32::MAX)
+                {
+                    return Err(anyhow!("embedding element {index} is not a finite f32 value"));
+                }
+                Ok(value as f32)
             })
-            .unwrap_or_default()
+            .collect()
     }
 
     fn embedding_request_body(
@@ -623,13 +769,8 @@ impl UnifiedGateway {
         body.insert("model".to_string(), serde_json::Value::String(model_name.to_string()));
         body.insert("input".to_string(), input);
 
-        if let Some(extra) = extra_parameters_json.as_object() {
-            for (key, value) in extra {
-                if key == "model" || key == "input" || key.starts_with("_provider") {
-                    continue;
-                }
-                body.insert(key.clone(), value.clone());
-            }
+        if let Some(extra) = embedding_request_parameters(extra_parameters_json).as_object() {
+            body.extend(extra.clone());
         }
 
         serde_json::Value::Object(body)
@@ -662,99 +803,6 @@ impl UnifiedGateway {
         serde_json::Value::Object(filtered)
     }
 
-    fn tool_use_extra_parameters(
-        provider_kind: &str,
-        model_name: &str,
-        has_tools: bool,
-        extra_parameters_json: &serde_json::Value,
-    ) -> serde_json::Value {
-        let mut upstream_extra = Self::upstream_extra_parameters(extra_parameters_json);
-        if !has_tools {
-            return upstream_extra;
-        }
-        let serde_json::Value::Object(ref mut object) = upstream_extra else {
-            return upstream_extra;
-        };
-        if provider_kind.eq_ignore_ascii_case("qwen") {
-            object.entry("enable_thinking".to_string()).or_insert(serde_json::Value::Bool(false));
-        }
-        if is_gpt_56_family_model(model_name) {
-            // OpenAI-compatible Chat Completions providers can forward this
-            // family to the same upstream constraint: function tools require
-            // reasoning to be disabled. Responses API support can lift this.
-            object.insert(
-                "reasoning_effort".to_string(),
-                serde_json::Value::String("none".to_string()),
-            );
-        }
-        upstream_extra
-    }
-
-    fn openai_compatible_sampling_params(
-        provider_kind: &str,
-        model_name: &str,
-        temperature: Option<f64>,
-        top_p: Option<f64>,
-    ) -> (Option<f64>, Option<f64>) {
-        let model_lc = model_name.to_ascii_lowercase();
-        if (provider_kind.eq_ignore_ascii_case("openai") && model_lc.starts_with("gpt-5.5"))
-            || is_gpt_56_family_model(model_name)
-        {
-            // These families only accept provider defaults for sampling. Omit
-            // both knobs together so default-only constraints fail closed.
-            return (None, None);
-        }
-
-        (temperature, top_p)
-    }
-
-    fn openai_compatible_tool_max_output_tokens(
-        _provider_kind: &str,
-        model_name: &str,
-        requested: Option<i32>,
-    ) -> Option<i32> {
-        if requested.is_some() {
-            return requested;
-        }
-        if is_gpt_56_family_model(model_name) {
-            return Some(DEFAULT_GPT_56_TOOL_MAX_OUTPUT_TOKENS);
-        }
-        None
-    }
-
-    fn openai_compatible_tool_choice(
-        provider_kind: &str,
-        model_name: &str,
-        has_tools: bool,
-        require_tool_call: bool,
-    ) -> Option<&'static str> {
-        if !has_tools {
-            return None;
-        }
-
-        // Some OpenAI-compatible models only accept automatic tool routing
-        // even when the caller would prefer to require a tool call. Keep
-        // those families on explicit "auto" so providers do not reject the
-        // request with `does not support this tool_choice`.
-        let model_lc = model_name.to_ascii_lowercase();
-        let provider_lc = provider_kind.to_ascii_lowercase();
-        // DeepSeek's hosted API exposes every `deepseek-v4-*` model
-        // through the reasoner backend (verified empirically: v4-flash,
-        // v4-pro, and the `*-reasoner` aliases all return
-        // `deepseek-reasoner does not support this tool_choice` when
-        // sent `tool_choice="required"`). Treat the entire DeepSeek v4
-        // family as auto-only; OpenAI/Qwen/etc. only need the provider
-        // families below plus explicit reasoner suffix detection.
-        let is_auto_only_tool_choice = model_lc.contains("reasoner")
-            || model_lc.starts_with("o1")
-            || model_lc.starts_with("o3")
-            || model_lc.starts_with("o4")
-            || (provider_lc == "openai" && model_lc.starts_with("gpt-5.5"))
-            || (provider_lc == "deepseek" && model_lc.contains("v4"));
-
-        if require_tool_call && !is_auto_only_tool_choice { Some("required") } else { Some("auto") }
-    }
-
     fn resolve_provider(
         provider_kind: &str,
         api_key_override: Option<&str>,
@@ -782,9 +830,32 @@ impl UnifiedGateway {
                 runtime_profile.base_url.allow_private_network,
                 base_url,
             ),
+            allow_private_network: runtime_profile.base_url.allow_private_network,
             runtime: runtime_profile.runtime,
+            request_policy: runtime_profile.request_policy,
         })
     }
+}
+
+fn resolve_provider_request_policy(
+    provider_kind: &str,
+    extra_parameters_json: &serde_json::Value,
+    profile_policy: ProviderRequestPolicy,
+) -> Result<ProviderRequestPolicy> {
+    let policy = match extra_parameters_json.get("_providerRequestPolicy") {
+        Some(value) => serde_json::from_value::<ProviderRequestPolicy>(value.clone())
+            .with_context(|| {
+                format!("invalid provider request policy for provider={provider_kind}")
+            })?,
+        None => profile_policy,
+    };
+    if !policy.is_valid() {
+        return Err(anyhow!(
+            "invalid provider request policy for provider={provider_kind}: \
+             defaultToolMaxOutputTokens must be greater than zero"
+        ));
+    }
+    Ok(policy)
 }
 
 fn resolve_runtime_profile(
@@ -792,13 +863,18 @@ fn resolve_runtime_profile(
     extra_parameters_json: &serde_json::Value,
 ) -> Result<RuntimeProviderProfileEnvelope> {
     if let Some(value) = extra_parameters_json.get("_providerProfile") {
-        let profile = serde_json::from_value::<RuntimeProviderProfileEnvelope>(value.clone())
+        let mut profile = serde_json::from_value::<RuntimeProviderProfileEnvelope>(value.clone())
             .with_context(|| {
-                format!("invalid runtime provider profile for provider={provider_kind}")
-            })?;
+            format!("invalid runtime provider profile for provider={provider_kind}")
+        })?;
         if profile.runtime.kind != OPENAI_COMPATIBLE_RUNTIME_KIND {
             return Err(anyhow!("unsupported provider runtime kind for provider={provider_kind}"));
         }
+        profile.request_policy = resolve_provider_request_policy(
+            provider_kind,
+            extra_parameters_json,
+            profile.request_policy,
+        )?;
         return Ok(profile);
     }
 
@@ -861,40 +937,12 @@ fn validate_runtime_base_url(
     if policy.require_https && url.scheme() != "https" {
         return Err(anyhow!("provider base URL must use https for provider={provider_kind}"));
     }
-    if !policy.allow_private_network && is_private_runtime_url(&url) {
+    if !policy.allow_private_network && is_private_provider_url(&url) {
         return Err(anyhow!(
             "provider base URL must not target a private, loopback, or link-local network for provider={provider_kind}"
         ));
     }
     Ok(())
-}
-
-fn is_private_runtime_url(url: &Url) -> bool {
-    match url.host() {
-        Some(url::Host::Domain(host)) => host.eq_ignore_ascii_case("localhost"),
-        Some(url::Host::Ipv4(host)) => is_private_runtime_ip(IpAddr::V4(host)),
-        Some(url::Host::Ipv6(host)) => is_private_runtime_ip(IpAddr::V6(host)),
-        None => false,
-    }
-}
-
-fn is_private_runtime_ip(ip: IpAddr) -> bool {
-    match ip {
-        IpAddr::V4(value) => {
-            value.is_private()
-                || value.is_loopback()
-                || value.is_link_local()
-                || value.is_broadcast()
-                || value.is_documentation()
-                || value.is_unspecified()
-        }
-        IpAddr::V6(value) => {
-            value.is_loopback()
-                || value.is_unique_local()
-                || value.is_unicast_link_local()
-                || value.is_unspecified()
-        }
-    }
 }
 
 fn apply_provider_auth(
@@ -952,7 +1000,7 @@ fn parse_tool_use_response(
                         .get("arguments")
                         .and_then(|v| v.as_str())
                         .map(str::to_string)
-                        .or_else(|| function.get("arguments").map(|v| v.to_string()))
+                        .or_else(|| function.get("arguments").map(std::string::ToString::to_string))
                         .unwrap_or_default();
                     Some(ChatToolCall { id, name, arguments_json: arguments })
                 })
@@ -1027,7 +1075,7 @@ this schema; do not invent alternate keys.\nJSON Schema:\n",
 
 #[async_trait]
 impl LlmGateway for UnifiedGateway {
-    async fn generate(&self, request: ChatRequest) -> Result<ChatResponse> {
+    async fn generate(&self, mut request: ChatRequest) -> Result<ChatResponse> {
         let resolved = Self::resolve_provider(
             &request.provider_kind,
             request.api_key_override.as_deref(),
@@ -1046,37 +1094,36 @@ impl LlmGateway for UnifiedGateway {
             request.response_format.as_ref(),
             resolved.runtime.structured_output,
         )?;
-        let (temperature, top_p) = Self::openai_compatible_sampling_params(
-            &request.provider_kind,
-            &request.model_name,
-            request.temperature,
-            request.top_p,
-        );
+        let (temperature, top_p) =
+            resolved.request_policy.sampling_params(request.temperature, request.top_p);
         let (output_text, usage_json) = self
-            .call_openai_compatible(OpenAiCompatibleRequest {
-                provider_kind: &request.provider_kind,
-                api_key: resolved.api_key.as_deref(),
-                base_url: resolved.base_url.as_str(),
-                auth_scheme: resolved.runtime.auth_scheme,
-                chat_path: resolved.runtime.chat_path.clone(),
-                model_name: &request.model_name,
-                messages: vec![OpenAiCompatibleMessage {
-                    role: "user".to_string(),
-                    content: OpenAiCompatibleMessageContent::Text(request.prompt.clone()),
-                }],
-                system_prompt: system_prompt.as_deref(),
-                temperature,
-                top_p,
-                max_output_tokens: request.max_output_tokens_override,
-                token_limit_parameter: resolved.runtime.token_limit_parameter,
-                response_format: response_format.as_ref(),
-                extra_parameters_json: &upstream_extra,
-                stream: false,
-            })
+            .call_openai_compatible(
+                OpenAiCompatibleRequest {
+                    provider_kind: &request.provider_kind,
+                    api_key: resolved.api_key.as_deref(),
+                    base_url: resolved.base_url.as_str(),
+                    auth_scheme: resolved.runtime.auth_scheme,
+                    chat_path: resolved.runtime.chat_path.clone(),
+                    model_name: &request.model_name,
+                    messages: vec![OpenAiCompatibleMessage {
+                        role: "user".to_string(),
+                        content: OpenAiCompatibleMessageContent::Text(request.prompt.clone()),
+                    }],
+                    system_prompt: system_prompt.as_deref(),
+                    temperature,
+                    top_p,
+                    max_output_tokens: request.max_output_tokens_override,
+                    token_limit_parameter: resolved.runtime.token_limit_parameter,
+                    response_format: response_format.as_ref(),
+                    extra_parameters_json: &upstream_extra,
+                    stream: false,
+                },
+                resolved.allow_private_network,
+            )
             .await?;
         Ok(ChatResponse {
-            provider_kind: request.provider_kind,
-            model_name: request.model_name,
+            provider_kind: std::mem::take(&mut request.provider_kind),
+            model_name: std::mem::take(&mut request.model_name),
             output_text,
             usage_json,
         })
@@ -1084,7 +1131,7 @@ impl LlmGateway for UnifiedGateway {
 
     async fn generate_stream(
         &self,
-        request: ChatRequest,
+        mut request: ChatRequest,
         on_delta: &mut (dyn FnMut(String) + Send),
     ) -> Result<ChatResponse> {
         let resolved = Self::resolve_provider(
@@ -1105,12 +1152,8 @@ impl LlmGateway for UnifiedGateway {
             request.response_format.as_ref(),
             resolved.runtime.structured_output,
         )?;
-        let (temperature, top_p) = Self::openai_compatible_sampling_params(
-            &request.provider_kind,
-            &request.model_name,
-            request.temperature,
-            request.top_p,
-        );
+        let (temperature, top_p) =
+            resolved.request_policy.sampling_params(request.temperature, request.top_p);
         let (output_text, usage_json) = self
             .call_openai_compatible_stream(
                 OpenAiCompatibleRequest {
@@ -1133,18 +1176,19 @@ impl LlmGateway for UnifiedGateway {
                     extra_parameters_json: &upstream_extra,
                     stream: true,
                 },
+                resolved.allow_private_network,
                 on_delta,
             )
             .await?;
         Ok(ChatResponse {
-            provider_kind: request.provider_kind,
-            model_name: request.model_name,
+            provider_kind: std::mem::take(&mut request.provider_kind),
+            model_name: std::mem::take(&mut request.model_name),
             output_text,
             usage_json,
         })
     }
 
-    async fn generate_with_tools(&self, request: ToolUseRequest) -> Result<ToolUseResponse> {
+    async fn generate_with_tools(&self, mut request: ToolUseRequest) -> Result<ToolUseResponse> {
         let resolved = Self::resolve_provider(
             &request.provider_kind,
             request.api_key_override.as_deref(),
@@ -1155,33 +1199,17 @@ impl LlmGateway for UnifiedGateway {
         let messages =
             request.messages.iter().map(OpenAiCompatibleToolUseMessage::from).collect::<Vec<_>>();
         let tools = request.tools.iter().map(OpenAiCompatibleToolDef::from).collect::<Vec<_>>();
-        let max_output_tokens = Self::openai_compatible_tool_max_output_tokens(
-            &request.provider_kind,
-            &request.model_name,
-            request.max_output_tokens_override,
-        );
+        let max_output_tokens =
+            resolved.request_policy.tool_max_output_tokens(request.max_output_tokens_override);
         let (max_completion_tokens, max_tokens) = openai_compatible_token_limit_fields(
             resolved.runtime.token_limit_parameter,
             max_output_tokens,
         );
-        let upstream_extra = Self::tool_use_extra_parameters(
-            &request.provider_kind,
-            &request.model_name,
-            !tools.is_empty(),
-            &request.extra_parameters_json,
-        );
-        let tool_choice = Self::openai_compatible_tool_choice(
-            &request.provider_kind,
-            &request.model_name,
-            !tools.is_empty(),
-            request.require_tool_call,
-        );
-        let (temperature, top_p) = Self::openai_compatible_sampling_params(
-            &request.provider_kind,
-            &request.model_name,
-            request.temperature,
-            request.top_p,
-        );
+        let upstream_extra = Self::upstream_extra_parameters(&request.extra_parameters_json);
+        let tool_choice =
+            resolved.request_policy.tool_choice(!tools.is_empty(), request.require_tool_call);
+        let (temperature, top_p) =
+            resolved.request_policy.sampling_params(request.temperature, request.top_p);
 
         let payload = OpenAiCompatibleToolUseChatRequest {
             model: &request.model_name,
@@ -1203,14 +1231,24 @@ impl LlmGateway for UnifiedGateway {
             &resolved.base_url,
             &resolved.runtime.chat_path,
         )?;
+        let target = self
+            .transport
+            .prepare(&endpoint_url, resolved.allow_private_network)
+            .await
+            .with_context(|| {
+                format!("provider target policy failed: provider={}", request.provider_kind)
+            })?;
 
         let (output_text, tool_calls, finish_reason, usage_json, reasoning_content) = with_retry(
             || async {
-                let request_builder = self
-                    .client
-                    .post(endpoint_url.clone())
-                    .header(CONTENT_TYPE, "application/json")
-                    .header(ACCEPT, "application/json");
+                let request_builder = Self::prepared_request(
+                    &target,
+                    Method::POST,
+                    &endpoint_url,
+                    &request.provider_kind,
+                )?
+                .header(CONTENT_TYPE, "application/json")
+                .header(ACCEPT, "application/json");
                 let request_builder = apply_provider_auth(
                     request_builder,
                     resolved.runtime.auth_scheme,
@@ -1251,8 +1289,8 @@ impl LlmGateway for UnifiedGateway {
         .await?;
 
         Ok(ToolUseResponse {
-            provider_kind: request.provider_kind,
-            model_name: request.model_name,
+            provider_kind: std::mem::take(&mut request.provider_kind),
+            model_name: std::mem::take(&mut request.model_name),
             output_text,
             tool_calls,
             finish_reason,
@@ -1263,7 +1301,7 @@ impl LlmGateway for UnifiedGateway {
 
     async fn generate_with_tools_stream(
         &self,
-        request: ToolUseRequest,
+        mut request: ToolUseRequest,
         on_text_delta: &mut (dyn FnMut(String) + Send),
     ) -> Result<ToolUseResponse> {
         let resolved = Self::resolve_provider(
@@ -1276,33 +1314,17 @@ impl LlmGateway for UnifiedGateway {
         let messages =
             request.messages.iter().map(OpenAiCompatibleToolUseMessage::from).collect::<Vec<_>>();
         let tools = request.tools.iter().map(OpenAiCompatibleToolDef::from).collect::<Vec<_>>();
-        let max_output_tokens = Self::openai_compatible_tool_max_output_tokens(
-            &request.provider_kind,
-            &request.model_name,
-            request.max_output_tokens_override,
-        );
+        let max_output_tokens =
+            resolved.request_policy.tool_max_output_tokens(request.max_output_tokens_override);
         let (max_completion_tokens, max_tokens) = openai_compatible_token_limit_fields(
             resolved.runtime.token_limit_parameter,
             max_output_tokens,
         );
-        let upstream_extra = Self::tool_use_extra_parameters(
-            &request.provider_kind,
-            &request.model_name,
-            !tools.is_empty(),
-            &request.extra_parameters_json,
-        );
-        let tool_choice = Self::openai_compatible_tool_choice(
-            &request.provider_kind,
-            &request.model_name,
-            !tools.is_empty(),
-            request.require_tool_call,
-        );
-        let (temperature, top_p) = Self::openai_compatible_sampling_params(
-            &request.provider_kind,
-            &request.model_name,
-            request.temperature,
-            request.top_p,
-        );
+        let upstream_extra = Self::upstream_extra_parameters(&request.extra_parameters_json);
+        let tool_choice =
+            resolved.request_policy.tool_choice(!tools.is_empty(), request.require_tool_call);
+        let (temperature, top_p) =
+            resolved.request_policy.sampling_params(request.temperature, request.top_p);
 
         let payload = OpenAiCompatibleToolUseChatRequest {
             model: &request.model_name,
@@ -1324,14 +1346,24 @@ impl LlmGateway for UnifiedGateway {
             &resolved.base_url,
             &resolved.runtime.chat_path,
         )?;
+        let target = self
+            .transport
+            .prepare(&endpoint_url, resolved.allow_private_network)
+            .await
+            .with_context(|| {
+                format!("provider target policy failed: provider={}", request.provider_kind)
+            })?;
 
         let response = with_retry(
             || async {
-                let request_builder = self
-                    .client
-                    .post(endpoint_url.clone())
-                    .header(CONTENT_TYPE, "application/json")
-                    .header(ACCEPT, "text/event-stream");
+                let request_builder = Self::prepared_request(
+                    &target,
+                    Method::POST,
+                    &endpoint_url,
+                    &request.provider_kind,
+                )?
+                .header(CONTENT_TYPE, "application/json")
+                .header(ACCEPT, "text/event-stream");
                 let request_builder = apply_provider_auth(
                     request_builder,
                     resolved.runtime.auth_scheme,
@@ -1356,7 +1388,9 @@ impl LlmGateway for UnifiedGateway {
 
                 let headers = response.headers().clone();
                 let body_bytes =
-                    response.bytes().await.map(|bytes| bytes.to_vec()).unwrap_or_default();
+                    read_response_bytes_with_limit(response, PROVIDER_ERROR_BODY_MAX_BYTES)
+                        .await
+                        .unwrap_or_default();
                 let body_text = provider_response_body_text(&body_bytes);
                 Err(provider_http_status_error(
                     &request.provider_kind,
@@ -1372,8 +1406,8 @@ impl LlmGateway for UnifiedGateway {
         let stream_state = drain_tool_use_stream(response, on_text_delta).await?;
         let (output_text, finish_reason, usage_json, tool_calls) = stream_state.finalize();
         Ok(ToolUseResponse {
-            provider_kind: request.provider_kind,
-            model_name: request.model_name,
+            provider_kind: std::mem::take(&mut request.provider_kind),
+            model_name: std::mem::take(&mut request.model_name),
             output_text,
             tool_calls,
             finish_reason,
@@ -1386,7 +1420,7 @@ impl LlmGateway for UnifiedGateway {
         })
     }
 
-    async fn embed(&self, request: EmbeddingRequest) -> Result<EmbeddingResponse> {
+    async fn embed(&self, mut request: EmbeddingRequest) -> Result<EmbeddingResponse> {
         let resolved = Self::resolve_provider(
             &request.provider_kind,
             request.api_key_override.as_deref(),
@@ -1399,10 +1433,22 @@ impl LlmGateway for UnifiedGateway {
 
         let endpoint_url =
             provider_endpoint_url(&request.provider_kind, &resolved.base_url, embeddings_path)?;
+        let target = self
+            .transport
+            .prepare(&endpoint_url, resolved.allow_private_network)
+            .await
+            .with_context(|| {
+                format!("provider target policy failed: provider={}", request.provider_kind)
+            })?;
 
         let body = with_retry(
             || async {
-                let request_builder = self.client.post(endpoint_url.clone());
+                let request_builder = Self::prepared_request(
+                    &target,
+                    Method::POST,
+                    &endpoint_url,
+                    &request.provider_kind,
+                )?;
                 let request_builder = apply_provider_auth(
                     request_builder,
                     resolved.runtime.auth_scheme,
@@ -1445,30 +1491,34 @@ impl LlmGateway for UnifiedGateway {
         )
         .await?;
 
-        let embedding = body
+        let embedding_value = body
             .get("data")
             .and_then(|v| v.as_array())
             .and_then(|arr| arr.first())
             .and_then(|v| v.get("embedding"))
-            .map(Self::parse_embedding_vector)
-            .unwrap_or_default();
+            .context("embedding response did not contain data[0].embedding")?;
+        let embedding = Self::parse_embedding_vector(embedding_value)
+            .context("embedding response contained an invalid vector")?;
 
         let usage_json = body.get("usage").cloned().unwrap_or_else(|| serde_json::json!({}));
 
         Ok(EmbeddingResponse {
-            provider_kind: request.provider_kind,
-            model_name: request.model_name,
+            provider_kind: std::mem::take(&mut request.provider_kind),
+            model_name: std::mem::take(&mut request.model_name),
             dimensions: embedding.len(),
             embedding,
             usage_json,
         })
     }
 
-    async fn embed_many(&self, request: EmbeddingBatchRequest) -> Result<EmbeddingBatchResponse> {
+    async fn embed_many(
+        &self,
+        mut request: EmbeddingBatchRequest,
+    ) -> Result<EmbeddingBatchResponse> {
         if request.inputs.is_empty() {
             return Ok(EmbeddingBatchResponse {
-                provider_kind: request.provider_kind,
-                model_name: request.model_name,
+                provider_kind: std::mem::take(&mut request.provider_kind),
+                model_name: std::mem::take(&mut request.model_name),
                 dimensions: 0,
                 embeddings: Vec::new(),
                 usage_json: serde_json::json!({}),
@@ -1506,10 +1556,22 @@ impl LlmGateway for UnifiedGateway {
         })?;
         let endpoint_url =
             provider_endpoint_url(&request.provider_kind, &resolved.base_url, embeddings_path)?;
+        let target = self
+            .transport
+            .prepare(&endpoint_url, resolved.allow_private_network)
+            .await
+            .with_context(|| {
+                format!("provider target policy failed: provider={}", request.provider_kind)
+            })?;
 
         let body = with_retry(
             || async {
-                let request_builder = self.client.post(endpoint_url.clone());
+                let request_builder = Self::prepared_request(
+                    &target,
+                    Method::POST,
+                    &endpoint_url,
+                    &request.provider_kind,
+                )?;
                 let request_builder = apply_provider_auth(
                     request_builder,
                     resolved.runtime.auth_scheme,
@@ -1555,31 +1617,34 @@ impl LlmGateway for UnifiedGateway {
         )
         .await?;
 
-        let embeddings = body
+        let items = body
             .get("data")
             .and_then(serde_json::Value::as_array)
-            .map(|items| {
-                items
-                    .iter()
-                    .map(|item| {
-                        item.get("embedding").map(Self::parse_embedding_vector).unwrap_or_default()
-                    })
-                    .collect::<Vec<_>>()
+            .context("embedding batch response did not contain a data array")?;
+        let embeddings = items
+            .iter()
+            .enumerate()
+            .map(|(index, item)| {
+                let value = item.get("embedding").ok_or_else(|| {
+                    anyhow!("embedding batch item {index} did not contain an embedding")
+                })?;
+                Self::parse_embedding_vector(value)
+                    .with_context(|| format!("embedding batch item {index} was invalid"))
             })
-            .unwrap_or_default();
+            .collect::<Result<Vec<_>>>()?;
         let dimensions = embeddings.first().map(Vec::len).unwrap_or_default();
         let usage_json = body.get("usage").cloned().unwrap_or_else(|| serde_json::json!({}));
 
         Ok(EmbeddingBatchResponse {
-            provider_kind: request.provider_kind,
-            model_name: request.model_name,
+            provider_kind: std::mem::take(&mut request.provider_kind),
+            model_name: std::mem::take(&mut request.model_name),
             dimensions,
             embeddings,
             usage_json,
         })
     }
 
-    async fn vision_extract(&self, request: VisionRequest) -> Result<VisionResponse> {
+    async fn vision_extract(&self, mut request: VisionRequest) -> Result<VisionResponse> {
         let resolved = Self::resolve_provider(
             &request.provider_kind,
             request.api_key_override.as_deref(),
@@ -1587,42 +1652,47 @@ impl LlmGateway for UnifiedGateway {
             &request.extra_parameters_json,
         )?;
         let upstream_extra = Self::upstream_extra_parameters(&request.extra_parameters_json);
+        let (temperature, top_p) =
+            resolved.request_policy.sampling_params(request.temperature, request.top_p);
         let image_data_url = format!(
             "data:{};base64,{}",
             request.mime_type,
             BASE64_STANDARD.encode(&request.image_bytes)
         );
         let (output_text, usage_json) = self
-            .call_openai_compatible(OpenAiCompatibleRequest {
-                provider_kind: &request.provider_kind,
-                api_key: resolved.api_key.as_deref(),
-                base_url: resolved.base_url.as_str(),
-                auth_scheme: resolved.runtime.auth_scheme,
-                chat_path: resolved.runtime.chat_path.clone(),
-                model_name: &request.model_name,
-                messages: vec![OpenAiCompatibleMessage {
-                    role: "user".to_string(),
-                    content: OpenAiCompatibleMessageContent::Parts(vec![
-                        OpenAiCompatibleContentPart::Text { text: request.prompt.clone() },
-                        OpenAiCompatibleContentPart::ImageUrl {
-                            image_url: OpenAiCompatibleImageUrl { url: image_data_url },
-                        },
-                    ]),
-                }],
-                system_prompt: request.system_prompt.as_deref(),
-                temperature: request.temperature,
-                top_p: request.top_p,
-                max_output_tokens: request.max_output_tokens_override,
-                token_limit_parameter: resolved.runtime.token_limit_parameter,
-                response_format: None,
-                extra_parameters_json: &upstream_extra,
-                stream: false,
-            })
+            .call_openai_compatible(
+                OpenAiCompatibleRequest {
+                    provider_kind: &request.provider_kind,
+                    api_key: resolved.api_key.as_deref(),
+                    base_url: resolved.base_url.as_str(),
+                    auth_scheme: resolved.runtime.auth_scheme,
+                    chat_path: resolved.runtime.chat_path.clone(),
+                    model_name: &request.model_name,
+                    messages: vec![OpenAiCompatibleMessage {
+                        role: "user".to_string(),
+                        content: OpenAiCompatibleMessageContent::Parts(vec![
+                            OpenAiCompatibleContentPart::Text { text: request.prompt.clone() },
+                            OpenAiCompatibleContentPart::ImageUrl {
+                                image_url: OpenAiCompatibleImageUrl { url: image_data_url },
+                            },
+                        ]),
+                    }],
+                    system_prompt: request.system_prompt.as_deref(),
+                    temperature,
+                    top_p,
+                    max_output_tokens: request.max_output_tokens_override,
+                    token_limit_parameter: resolved.runtime.token_limit_parameter,
+                    response_format: None,
+                    extra_parameters_json: &upstream_extra,
+                    stream: false,
+                },
+                resolved.allow_private_network,
+            )
             .await?;
 
         Ok(VisionResponse {
-            provider_kind: request.provider_kind,
-            model_name: request.model_name,
+            provider_kind: std::mem::take(&mut request.provider_kind),
+            model_name: std::mem::take(&mut request.model_name),
             output_text,
             usage_json,
         })
@@ -1632,13 +1702,111 @@ impl LlmGateway for UnifiedGateway {
 #[cfg(test)]
 mod tests {
     use super::{
-        ChatToolDef, DEFAULT_GPT_56_TOOL_MAX_OUTPUT_TOKENS, OpenAiCompatibleMessage,
-        OpenAiCompatibleMessageContent, OpenAiCompatibleRequest, OpenAiCompatibleToolDef,
-        OpenAiCompatibleToolUseChatRequest, ProviderAuthScheme, ProviderStructuredOutputMode,
-        ProviderTokenLimitParameter, UnifiedGateway, consume_openai_compatible_stream_frame,
-        extract_message_content_text, parse_provider_json_body, parse_tool_use_response,
-        provider_response_format, provider_system_prompt,
+        ChatRequest, ChatRequestSeed, ChatToolDef, EmbeddingBatchRequest, EmbeddingRequest,
+        OpenAiCompatibleMessage, OpenAiCompatibleMessageContent, OpenAiCompatibleRequest,
+        OpenAiCompatibleToolDef, OpenAiCompatibleToolUseChatRequest, ProviderAuthScheme,
+        ProviderRequestPolicy, ProviderSamplingPolicy, ProviderStructuredOutputMode,
+        ProviderTokenLimitParameter, ProviderToolChoicePolicy, ToolUseRequest, UnifiedGateway,
+        VisionRequest, consume_openai_compatible_stream_frame, extract_message_content_text,
+        parse_provider_json_body, parse_tool_use_response, provider_response_format,
+        provider_system_prompt, resolve_provider_request_policy,
     };
+
+    fn assert_runtime_secret_is_redacted(
+        value: &(impl serde::Serialize + std::fmt::Debug),
+        secret: &str,
+    ) {
+        let serialized = serde_json::to_value(value).expect("request should serialize safely");
+        let debug = format!("{value:?}");
+
+        assert!(serialized.get("api_key_override").is_none());
+        assert!(!serialized.to_string().contains(secret));
+        assert!(!debug.contains(secret));
+        assert!(debug.contains("<redacted>"));
+    }
+
+    #[test]
+    fn internal_chat_request_never_serializes_provider_credentials() {
+        let request = ChatRequest {
+            provider_kind: "provider-alpha".to_string(),
+            model_name: "model-alpha".to_string(),
+            prompt: "synthetic prompt".to_string(),
+            api_key_override: Some("serialization-regression-secret".to_string()),
+            base_url_override: Some("https://example.com".to_string()),
+            system_prompt: None,
+            temperature: None,
+            top_p: None,
+            max_output_tokens_override: None,
+            response_format: None,
+            extra_parameters_json: serde_json::json!({}),
+        };
+
+        assert_runtime_secret_is_redacted(&request, "serialization-regression-secret");
+
+        let seed = ChatRequestSeed {
+            provider_kind: "provider-alpha".to_string(),
+            model_name: "model-alpha".to_string(),
+            api_key_override: Some("seed-regression-secret".to_string()),
+            base_url_override: Some("https://example.com".to_string()),
+            system_prompt: None,
+            temperature: None,
+            top_p: None,
+            max_output_tokens_override: None,
+            extra_parameters_json: serde_json::json!({}),
+        };
+        assert_runtime_secret_is_redacted(&seed, "seed-regression-secret");
+
+        let tool = ToolUseRequest {
+            provider_kind: "provider-alpha".to_string(),
+            model_name: "model-alpha".to_string(),
+            api_key_override: Some("tool-regression-secret".to_string()),
+            base_url_override: Some("https://example.com".to_string()),
+            temperature: None,
+            top_p: None,
+            max_output_tokens_override: None,
+            messages: Vec::new(),
+            tools: Vec::new(),
+            extra_parameters_json: serde_json::json!({}),
+            require_tool_call: false,
+        };
+        assert_runtime_secret_is_redacted(&tool, "tool-regression-secret");
+
+        let embedding = EmbeddingRequest {
+            provider_kind: "provider-alpha".to_string(),
+            model_name: "model-alpha".to_string(),
+            input: "synthetic input".to_string(),
+            api_key_override: Some("embedding-regression-secret".to_string()),
+            base_url_override: Some("https://example.com".to_string()),
+            extra_parameters_json: serde_json::json!({}),
+        };
+        assert_runtime_secret_is_redacted(&embedding, "embedding-regression-secret");
+
+        let embedding_batch = EmbeddingBatchRequest {
+            provider_kind: "provider-alpha".to_string(),
+            model_name: "model-alpha".to_string(),
+            inputs: vec!["synthetic input".to_string()],
+            api_key_override: Some("batch-regression-secret".to_string()),
+            base_url_override: Some("https://example.com".to_string()),
+            extra_parameters_json: serde_json::json!({}),
+        };
+        assert_runtime_secret_is_redacted(&embedding_batch, "batch-regression-secret");
+
+        let vision = VisionRequest {
+            provider_kind: "provider-alpha".to_string(),
+            model_name: "model-alpha".to_string(),
+            prompt: "synthetic prompt".to_string(),
+            image_bytes: vec![0],
+            mime_type: "image/png".to_string(),
+            api_key_override: Some("vision-regression-secret".to_string()),
+            base_url_override: Some("https://example.com".to_string()),
+            system_prompt: None,
+            temperature: None,
+            top_p: None,
+            max_output_tokens_override: None,
+            extra_parameters_json: serde_json::json!({}),
+        };
+        assert_runtime_secret_is_redacted(&vision, "vision-regression-secret");
+    }
 
     #[test]
     fn extracts_plain_string_content() {
@@ -1800,108 +1968,25 @@ mod tests {
         assert_eq!(value.get("tool_choice").and_then(serde_json::Value::as_str), Some("auto"));
     }
 
-    #[test]
-    fn openai_gpt_55_sampling_params_omit_configured_values() {
-        let (temperature, top_p) = UnifiedGateway::openai_compatible_sampling_params(
-            "openai",
-            "gpt-5.5",
-            Some(0.3),
-            Some(0.9),
-        );
-
-        assert_eq!(temperature, None);
-        assert_eq!(top_p, None);
-    }
-
-    #[test]
-    fn openai_gpt_56_sampling_params_omit_configured_values() {
-        let (temperature, top_p) = UnifiedGateway::openai_compatible_sampling_params(
-            "openai",
-            "gpt-5.6-luna",
-            Some(0.3),
-            Some(0.9),
-        );
-
-        assert_eq!(temperature, None);
-        assert_eq!(top_p, None);
-    }
-
-    #[test]
-    fn openai_gpt_56_tool_calls_get_bounded_default_output_tokens() {
-        assert_eq!(
-            UnifiedGateway::openai_compatible_tool_max_output_tokens("openai", "gpt-5.6-sol", None,),
-            Some(DEFAULT_GPT_56_TOOL_MAX_OUTPUT_TOKENS)
-        );
-        assert_eq!(
-            UnifiedGateway::openai_compatible_tool_max_output_tokens(
-                "openai",
-                "gpt-5.6-sol",
-                Some(1024),
-            ),
-            Some(1024)
-        );
-    }
-
-    #[test]
-    fn openai_gpt_54_mini_sampling_params_preserve_configured_values() {
-        let (temperature, top_p) = UnifiedGateway::openai_compatible_sampling_params(
-            "openai",
-            "gpt-5.4-mini",
-            Some(0.3),
-            Some(0.9),
-        );
-
-        assert_eq!(temperature, Some(0.3));
-        assert_eq!(top_p, Some(0.9));
-    }
-
-    #[test]
-    fn openai_gpt_55_chat_payload_omits_sampling_params() {
-        let (temperature, top_p) = UnifiedGateway::openai_compatible_sampling_params(
-            "openai",
-            "gpt-5.5",
-            Some(0.3),
-            Some(0.9),
-        );
-        let body = OpenAiCompatibleRequest {
-            provider_kind: "openai",
-            api_key: Some("test"),
-            base_url: "https://api.openai.com/v1",
-            auth_scheme: ProviderAuthScheme::Bearer,
-            chat_path: "/chat/completions".to_string(),
-            model_name: "gpt-5.5",
-            messages: vec![OpenAiCompatibleMessage {
-                role: "user".to_string(),
-                content: OpenAiCompatibleMessageContent::Text("hello".to_string()),
-            }],
-            system_prompt: None,
-            temperature,
-            top_p,
-            max_output_tokens: None,
-            token_limit_parameter: ProviderTokenLimitParameter::MaxCompletionTokens,
-            response_format: None,
-            extra_parameters_json: &serde_json::json!({}),
-            stream: false,
-        }
-        .body()
-        .expect("request body should serialize");
-        let value: serde_json::Value =
-            serde_json::from_slice(&body).expect("serialized body should stay valid json");
-
-        assert!(value.get("temperature").is_none());
-        assert!(value.get("top_p").is_none());
-    }
-
-    #[test]
-    fn openai_gpt_54_mini_tool_payload_preserves_sampling_and_required_tool_choice() {
-        let (temperature, top_p) = UnifiedGateway::openai_compatible_sampling_params(
-            "openai",
-            "gpt-5.4-mini",
-            Some(0.3),
-            Some(0.9),
+    fn normalized_tool_request_projection(
+        provider_kind: &str,
+        model_name: &str,
+        extra_parameters_json: &serde_json::Value,
+    ) -> serde_json::Value {
+        let policy = resolve_provider_request_policy(
+            provider_kind,
+            extra_parameters_json,
+            ProviderRequestPolicy::default(),
+        )
+        .expect("synthetic request policy should resolve");
+        let (temperature, top_p) = policy.sampling_params(Some(0.3), Some(0.9));
+        let max_output_tokens = policy.tool_max_output_tokens(None);
+        let (max_completion_tokens, max_tokens) = super::openai_compatible_token_limit_fields(
+            ProviderTokenLimitParameter::MaxTokens,
+            max_output_tokens,
         );
         let payload = OpenAiCompatibleToolUseChatRequest {
-            model: "gpt-5.4-mini",
+            model: model_name,
             messages: vec![],
             tools: vec![OpenAiCompatibleToolDef::from(&ChatToolDef {
                 name: "lookup".to_string(),
@@ -1910,57 +1995,133 @@ mod tests {
             })],
             temperature,
             top_p,
-            max_completion_tokens: None,
-            max_tokens: None,
-            tool_choice: UnifiedGateway::openai_compatible_tool_choice(
-                "openai",
-                "gpt-5.4-mini",
-                true,
-                true,
-            ),
+            max_completion_tokens,
+            max_tokens,
+            tool_choice: policy.tool_choice(true, true),
             stream: false,
-            extra: serde_json::json!({}),
+            extra: UnifiedGateway::upstream_extra_parameters(extra_parameters_json),
         };
-        let value =
+        let mut projection =
             serde_json::to_value(payload).expect("tool-use request should serialize to JSON");
-
-        assert_eq!(value.get("temperature").and_then(serde_json::Value::as_f64), Some(0.3));
-        assert_eq!(value.get("top_p").and_then(serde_json::Value::as_f64), Some(0.9));
-        assert_eq!(value.get("tool_choice").and_then(serde_json::Value::as_str), Some("required"));
+        projection.as_object_mut().expect("tool-use request should be an object").remove("model");
+        projection
     }
 
     #[test]
-    fn openai_gpt_55_tool_payload_omits_sampling_and_uses_auto_tool_choice() {
-        let (temperature, top_p) = UnifiedGateway::openai_compatible_sampling_params(
-            "openai",
-            "gpt-5.5",
-            Some(0.3),
-            Some(0.9),
+    fn unseen_provider_and_model_names_share_standard_request_behavior() {
+        let first = normalized_tool_request_projection(
+            "provider-nebula",
+            "model-orbit",
+            &serde_json::json!({}),
         );
-        let payload = OpenAiCompatibleToolUseChatRequest {
-            model: "gpt-5.5",
-            messages: vec![],
-            tools: vec![OpenAiCompatibleToolDef::from(&ChatToolDef {
-                name: "lookup".to_string(),
-                description: "Lookup structured facts".to_string(),
-                parameters: serde_json::json!({"type": "object"}),
-            })],
-            temperature,
-            top_p,
-            max_completion_tokens: None,
-            max_tokens: None,
-            tool_choice: UnifiedGateway::openai_compatible_tool_choice(
-                "openai", "gpt-5.5", true, true,
-            ),
-            stream: false,
-            extra: serde_json::json!({}),
-        };
-        let value =
-            serde_json::to_value(payload).expect("tool-use request should serialize to JSON");
+        let second = normalized_tool_request_projection(
+            "provider-quartz",
+            "model-vector",
+            &serde_json::json!({}),
+        );
 
-        assert!(value.get("temperature").is_none());
-        assert!(value.get("top_p").is_none());
-        assert_eq!(value.get("tool_choice").and_then(serde_json::Value::as_str), Some("auto"));
+        assert_eq!(first, second);
+        assert_eq!(first.get("temperature").and_then(serde_json::Value::as_f64), Some(0.3));
+        assert_eq!(first.get("top_p").and_then(serde_json::Value::as_f64), Some(0.9));
+        assert_eq!(first.get("tool_choice").and_then(serde_json::Value::as_str), Some("required"));
+        assert!(first.get("max_tokens").is_none());
+    }
+
+    #[test]
+    fn explicit_typed_policy_changes_request_behavior() {
+        let projection = normalized_tool_request_projection(
+            "provider-nebula",
+            "model-orbit",
+            &serde_json::json!({
+                "_providerRequestPolicy": {
+                    "sampling": "omit",
+                    "toolChoice": "auto_only",
+                    "defaultToolMaxOutputTokens": 2048
+                }
+            }),
+        );
+
+        assert!(projection.get("temperature").is_none());
+        assert!(projection.get("top_p").is_none());
+        assert_eq!(projection.get("tool_choice").and_then(serde_json::Value::as_str), Some("auto"));
+        assert_eq!(projection.get("max_tokens").and_then(serde_json::Value::as_i64), Some(2048));
+    }
+
+    #[test]
+    fn partial_explicit_policy_uses_standard_field_defaults() {
+        let resolved = resolve_provider_request_policy(
+            "provider-nebula",
+            &serde_json::json!({
+                "_providerRequestPolicy": {"sampling": "omit"}
+            }),
+            ProviderRequestPolicy::default(),
+        )
+        .expect("partial binding policy should resolve with serde defaults");
+
+        assert_eq!(resolved.sampling, ProviderSamplingPolicy::Omit);
+        assert_eq!(resolved.tool_choice, ProviderToolChoicePolicy::RequiredCapable);
+        assert_eq!(resolved.default_tool_max_output_tokens, None);
+    }
+
+    #[test]
+    fn binding_policy_has_explicit_precedence_over_profile_policy() {
+        let profile_policy = ProviderRequestPolicy {
+            sampling: ProviderSamplingPolicy::Omit,
+            tool_choice: ProviderToolChoicePolicy::AutoOnly,
+            default_tool_max_output_tokens: Some(1024),
+        };
+        let resolved = resolve_provider_request_policy(
+            "provider-nebula",
+            &serde_json::json!({
+                "_providerRequestPolicy": {
+                    "sampling": "forward",
+                    "toolChoice": "required_capable",
+                    "defaultToolMaxOutputTokens": 4096
+                }
+            }),
+            profile_policy,
+        )
+        .expect("binding policy should resolve");
+
+        assert_eq!(resolved.sampling, ProviderSamplingPolicy::Forward);
+        assert_eq!(resolved.tool_choice, ProviderToolChoicePolicy::RequiredCapable);
+        assert_eq!(resolved.default_tool_max_output_tokens, Some(4096));
+    }
+
+    #[test]
+    fn invalid_explicit_policy_fails_closed() {
+        let unknown_mode = resolve_provider_request_policy(
+            "provider-nebula",
+            &serde_json::json!({
+                "_providerRequestPolicy": {"sampling": "guess_from_model_name"}
+            }),
+            ProviderRequestPolicy::default(),
+        )
+        .expect_err("unknown policy variants must not be ignored");
+        assert!(unknown_mode.to_string().contains("invalid provider request policy"));
+
+        let invalid_limit = resolve_provider_request_policy(
+            "provider-nebula",
+            &serde_json::json!({
+                "_providerRequestPolicy": {"defaultToolMaxOutputTokens": 0}
+            }),
+            ProviderRequestPolicy::default(),
+        )
+        .expect_err("non-positive default token limits must fail closed");
+        assert!(invalid_limit.to_string().contains("greater than zero"));
+    }
+
+    #[test]
+    fn internal_request_policy_is_never_forwarded_upstream() {
+        let upstream = UnifiedGateway::upstream_extra_parameters(&serde_json::json!({
+            "_providerRequestPolicy": {"sampling": "omit"},
+            "_providerProfile": {"requestPolicy": {"toolChoice": "auto_only"}},
+            "vendor_option": true
+        }));
+
+        assert!(upstream.get("_providerRequestPolicy").is_none());
+        assert!(upstream.get("_providerProfile").is_none());
+        assert_eq!(upstream.get("vendor_option").and_then(serde_json::Value::as_bool), Some(true));
     }
 
     #[test]
@@ -1987,104 +2148,11 @@ mod tests {
     }
 
     #[test]
-    fn openai_compatible_tool_choice_omits_choice_without_tools() {
-        let tool_choice =
-            UnifiedGateway::openai_compatible_tool_choice("openai", "gpt-5.5", false, true);
+    fn standard_policy_omits_choice_without_tools_and_honors_explicit_max_tokens() {
+        let policy = ProviderRequestPolicy::default();
 
-        assert_eq!(tool_choice, None);
-    }
-
-    #[test]
-    fn openai_compatible_tool_choice_preserves_required_for_gpt_54_mini() {
-        let tool_choice =
-            UnifiedGateway::openai_compatible_tool_choice("openai", "gpt-5.4-mini", true, true);
-
-        assert_eq!(tool_choice, Some("required"));
-    }
-
-    #[test]
-    fn openai_compatible_tool_choice_uses_auto_for_gpt_55_required_tools() {
-        let tool_choice =
-            UnifiedGateway::openai_compatible_tool_choice("openai", "gpt-5.5", true, true);
-
-        assert_eq!(tool_choice, Some("auto"));
-    }
-
-    #[test]
-    fn qwen_tool_use_disables_thinking_by_default() {
-        let extra = UnifiedGateway::tool_use_extra_parameters(
-            "qwen",
-            "qwen-plus",
-            true,
-            &serde_json::json!({}),
-        );
-
-        assert_eq!(extra.get("enable_thinking").and_then(serde_json::Value::as_bool), Some(false));
-    }
-
-    #[test]
-    fn qwen_tool_use_preserves_explicit_thinking_override() {
-        let extra = UnifiedGateway::tool_use_extra_parameters(
-            "qwen",
-            "qwen-plus",
-            true,
-            &serde_json::json!({ "enable_thinking": true }),
-        );
-
-        assert_eq!(extra.get("enable_thinking").and_then(serde_json::Value::as_bool), Some(true));
-    }
-
-    #[test]
-    fn non_qwen_tool_use_does_not_add_thinking_flag() {
-        let extra = UnifiedGateway::tool_use_extra_parameters(
-            "openai",
-            "gpt-5.5",
-            true,
-            &serde_json::json!({}),
-        );
-
-        assert!(extra.get("enable_thinking").is_none());
-    }
-
-    #[test]
-    fn openai_gpt_56_tool_use_disables_reasoning_for_chat_completions() {
-        let extra = UnifiedGateway::tool_use_extra_parameters(
-            "openai",
-            "gpt-5.6-sol",
-            true,
-            &serde_json::json!({}),
-        );
-
-        assert_eq!(extra.get("reasoning_effort").and_then(serde_json::Value::as_str), Some("none"));
-    }
-
-    #[test]
-    fn proxied_gpt_56_tool_use_disables_reasoning_for_chat_completions() {
-        for provider_kind in ["gptunnel", "openrouter", "routerai"] {
-            let model_name =
-                if provider_kind == "gptunnel" { "gpt-5.6-sol" } else { "openai/gpt-5.6-sol" };
-            let extra = UnifiedGateway::tool_use_extra_parameters(
-                provider_kind,
-                model_name,
-                true,
-                &serde_json::json!({}),
-            );
-
-            assert_eq!(
-                extra.get("reasoning_effort").and_then(serde_json::Value::as_str),
-                Some("none"),
-                "provider={provider_kind}",
-            );
-            assert_eq!(
-                UnifiedGateway::openai_compatible_tool_max_output_tokens(
-                    provider_kind,
-                    model_name,
-                    None,
-                ),
-                Some(DEFAULT_GPT_56_TOOL_MAX_OUTPUT_TOKENS),
-                "provider={provider_kind}",
-            );
-        }
+        assert_eq!(policy.tool_choice(false, true), None);
+        assert_eq!(policy.tool_max_output_tokens(Some(512)), Some(512));
     }
 
     #[test]
@@ -2424,7 +2492,13 @@ mod tests {
         )
         .expect("ollama should resolve without token");
         assert!(resolved.api_key.is_none());
-        assert_eq!(resolved.base_url, "http://localhost:11434/v1");
+        assert!(
+            crate::shared::provider_base_url::provider_base_url_candidates(
+                true,
+                "http://localhost:11434/v1"
+            )
+            .contains(&resolved.base_url)
+        );
     }
 
     #[test]
@@ -2455,6 +2529,11 @@ mod tests {
                         "baseUrlRequired": false,
                         "baseUrlMode": "fixed",
                         "validationMode": "model_list"
+                    },
+                    "requestPolicy": {
+                        "sampling": "omit",
+                        "toolChoice": "auto_only",
+                        "defaultToolMaxOutputTokens": 1024
                     }
                 }
             }),
@@ -2462,6 +2541,9 @@ mod tests {
         .expect("raw authorization profile should resolve");
         assert_eq!(resolved.api_key.as_deref(), Some("plain-secret"));
         assert_eq!(resolved.runtime.auth_scheme, ProviderAuthScheme::RawAuthorization);
+        assert_eq!(resolved.request_policy.sampling, ProviderSamplingPolicy::Omit);
+        assert_eq!(resolved.request_policy.tool_choice, ProviderToolChoicePolicy::AutoOnly);
+        assert_eq!(resolved.request_policy.default_tool_max_output_tokens, Some(1024));
         assert_eq!(resolved.base_url, "https://router.example/v1");
     }
 
@@ -2628,6 +2710,22 @@ mod tests {
         assert_eq!(body.get("dimensions").and_then(serde_json::Value::as_i64), Some(1024));
         assert_eq!(body.get("encoding_format").and_then(serde_json::Value::as_str), Some("float"));
         assert!(body.get("_providerProfile").is_none());
+    }
+
+    #[test]
+    fn embedding_vector_parser_rejects_invalid_elements_instead_of_dropping_them() {
+        assert_eq!(
+            UnifiedGateway::parse_embedding_vector(&serde_json::json!([0.25, -0.5])).unwrap(),
+            vec![0.25, -0.5],
+        );
+        assert!(
+            UnifiedGateway::parse_embedding_vector(&serde_json::json!([0.25, "invalid", -0.5]))
+                .is_err()
+        );
+        assert!(
+            UnifiedGateway::parse_embedding_vector(&serde_json::json!([0.25, 1.0e100])).is_err()
+        );
+        assert!(UnifiedGateway::parse_embedding_vector(&serde_json::json!({})).is_err());
     }
 
     #[test]

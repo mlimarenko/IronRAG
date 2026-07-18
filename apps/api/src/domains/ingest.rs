@@ -4,6 +4,43 @@ use uuid::Uuid;
 
 use crate::shared::web::ingest::{WebClassificationReason, WebIngestUrlFilter, WebRunFailureCode};
 
+/// Maximum number of attempts for one canonical ingest job before a requested
+/// retry is promoted to a terminal failure.
+pub(crate) const MAX_INGEST_ATTEMPTS: i32 = 5;
+const INGEST_RETRY_BACKOFF_BASE_SECONDS: i64 = 15;
+const INGEST_RETRY_BACKOFF_MAX_SECONDS: i64 = 600;
+
+/// Exponential retry delay for a 1-based attempt number, bounded so corrupted
+/// counters cannot defer a job indefinitely.
+pub(crate) fn retry_backoff_after_attempt(attempt_number: i32) -> chrono::Duration {
+    let exponent = attempt_number.saturating_sub(1).clamp(0, 16) as u32;
+    let scaled = INGEST_RETRY_BACKOFF_BASE_SECONDS
+        .saturating_mul(1_i64.checked_shl(exponent).unwrap_or(i64::MAX));
+    chrono::Duration::seconds(scaled.min(INGEST_RETRY_BACKOFF_MAX_SECONDS))
+}
+
+#[must_use]
+pub(crate) fn is_retry_budget_exhausted(
+    attempt_state: &str,
+    retryable: bool,
+    attempt_number: i32,
+) -> bool {
+    attempt_state == "failed" && retryable && attempt_number >= MAX_INGEST_ATTEMPTS
+}
+
+#[must_use]
+pub(crate) fn next_job_queue_state_after_finalize(
+    attempt_state: &str,
+    effective_retryable: bool,
+) -> &str {
+    match attempt_state {
+        "succeeded" => "completed",
+        "failed" if effective_retryable => "queued",
+        "failed" | "abandoned" | "canceled" => "failed",
+        other => other,
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct IngestJob {
     pub id: Uuid,

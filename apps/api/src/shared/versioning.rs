@@ -1,5 +1,6 @@
 use std::collections::BTreeSet;
 
+#[must_use]
 pub fn dotted_version_terms(text: &str) -> Vec<String> {
     let mut seen = BTreeSet::new();
     let mut terms = Vec::new();
@@ -19,6 +20,7 @@ pub fn dotted_version_terms(text: &str) -> Vec<String> {
     terms
 }
 
+#[must_use]
 pub fn dotted_version_key(text: &str) -> Option<[u32; 4]> {
     if let Some(candidate) = dotted_version_terms(text).into_iter().next() {
         let parts =
@@ -76,7 +78,7 @@ mod tests {
 
     #[test]
     fn dotted_version_terms_extract_prefix_with_trailing_dot() {
-        assert_eq!(dotted_version_terms("Alpha Suite 4.6."), vec!["4.6"]);
+        assert_eq!(dotted_version_terms("Alpha Suite 7.8."), vec!["7.8"]);
     }
 
     #[test]

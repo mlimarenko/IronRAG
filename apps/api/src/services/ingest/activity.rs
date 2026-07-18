@@ -41,22 +41,18 @@ impl IngestActivityService {
         run_status: RuntimeIngestionStatus,
         claimed_at: Option<DateTime<Utc>>,
         last_activity_at: Option<DateTime<Utc>>,
-        latest_error: Option<&str>,
+        _latest_error: Option<&str>,
         now: DateTime<Utc>,
     ) -> RuntimeDocumentActivityStatus {
         match run_status {
             RuntimeIngestionStatus::Ready => RuntimeDocumentActivityStatus::Ready,
             RuntimeIngestionStatus::Failed => RuntimeDocumentActivityStatus::Failed,
             RuntimeIngestionStatus::Queued => {
-                derive_queued_status(claimed_at, latest_error, now, self.stalled_after)
+                derive_queued_status(claimed_at, now, self.stalled_after)
             }
             RuntimeIngestionStatus::Processing => {
                 if self.is_activity_fresh(last_activity_at, now) {
                     RuntimeDocumentActivityStatus::Active
-                } else if latest_error.is_some_and(is_blocked_message) {
-                    RuntimeDocumentActivityStatus::Blocked
-                } else if latest_error.is_some_and(is_retry_message) {
-                    RuntimeDocumentActivityStatus::Retrying
                 } else {
                     RuntimeDocumentActivityStatus::Stalled
                 }
@@ -75,8 +71,7 @@ impl IngestActivityService {
     ) -> Option<String> {
         match run_status {
             RuntimeIngestionStatus::Queued => {
-                let status =
-                    derive_queued_status(claimed_at, latest_error, now, self.stalled_after);
+                let status = derive_queued_status(claimed_at, now, self.stalled_after);
                 if status != RuntimeDocumentActivityStatus::Stalled {
                     return None;
                 }
@@ -229,35 +224,23 @@ fn map_job_queue_state(
     }
 }
 
-fn ready_ingestion_status(text_ready: bool, graph_ready: bool) -> Option<RuntimeIngestionStatus> {
+const fn ready_ingestion_status(
+    text_ready: bool,
+    graph_ready: bool,
+) -> Option<RuntimeIngestionStatus> {
     if graph_ready || text_ready { Some(RuntimeIngestionStatus::Ready) } else { None }
 }
 
 fn derive_queued_status(
     claimed_at: Option<DateTime<Utc>>,
-    latest_error: Option<&str>,
     now: DateTime<Utc>,
     stalled_after: Duration,
 ) -> RuntimeDocumentActivityStatus {
-    if latest_error.is_some_and(is_retry_message) {
-        RuntimeDocumentActivityStatus::Retrying
-    } else if latest_error.is_some_and(is_blocked_message) {
-        RuntimeDocumentActivityStatus::Blocked
-    } else if claimed_at.is_some_and(|value| now - value >= stalled_after) {
+    if claimed_at.is_some_and(|value| now - value >= stalled_after) {
         RuntimeDocumentActivityStatus::Stalled
     } else {
         RuntimeDocumentActivityStatus::Queued
     }
-}
-
-fn is_retry_message(message: &str) -> bool {
-    let lowered = message.to_ascii_lowercase();
-    lowered.contains("retry") || lowered.contains("requeue")
-}
-
-fn is_blocked_message(message: &str) -> bool {
-    let lowered = message.to_ascii_lowercase();
-    lowered.contains("blocked") || lowered.contains("waiting")
 }
 
 #[cfg(test)]
@@ -284,7 +267,7 @@ mod tests {
     }
 
     #[test]
-    fn queued_retry_message_maps_to_retrying() {
+    fn queued_status_is_not_inferred_from_untyped_error_text() {
         let service = IngestActivityService::default();
         let now = Utc::now();
 
@@ -296,7 +279,24 @@ mod tests {
                 Some("worker heartbeat stalled before completion; requeued for retry"),
                 now,
             ),
-            RuntimeDocumentActivityStatus::Retrying
+            RuntimeDocumentActivityStatus::Queued
+        );
+    }
+
+    #[test]
+    fn stale_processing_status_is_not_inferred_from_untyped_error_text() {
+        let service = IngestActivityService::default();
+        let now = Utc::now();
+
+        assert_eq!(
+            service.derive_status(
+                RuntimeIngestionStatus::Processing,
+                None,
+                Some(now - Duration::seconds(300)),
+                Some("blocked while waiting; requeue for retry"),
+                now,
+            ),
+            RuntimeDocumentActivityStatus::Stalled
         );
     }
 

@@ -1,15 +1,17 @@
-import { render, screen } from '@testing-library/react';
-import { describe, expect, it, vi } from 'vitest';
+import { render, screen } from '@testing-library/react'
+import { describe, expect, it, vi } from 'vitest'
 
-import i18n from '@/shared/i18n';
-import type { EvidenceBundle } from '@/shared/types';
+import i18n from '@/shared/i18n'
+import type { EvidenceBundle } from '@/shared/types'
 
-import { EvidencePanel } from './EvidencePanel';
+import { EvidencePanel } from './EvidencePanel'
 
 function evidenceWithLongSourceList(): EvidenceBundle {
   return {
     verificationState: 'passed',
     verificationWarnings: [],
+    answerDisposition: 'factual_ready',
+    clarification: { required: false, question: null, answerCandidates: [] },
     runtimeSummary: {
       totalSegments: 24,
       totalFacts: 0,
@@ -31,7 +33,7 @@ function evidenceWithLongSourceList(): EvidenceBundle {
     factRefs: [],
     entityRefs: [],
     relationRefs: [],
-  };
+  }
 }
 
 describe('EvidencePanel', () => {
@@ -44,13 +46,13 @@ describe('EvidencePanel', () => {
         onOpenDocuments={vi.fn()}
         onOpenGraph={vi.fn()}
       />,
-    );
+    )
 
-    const panel = container.firstElementChild;
-    const scrollRegion = screen.getByTestId('assistant-evidence-scroll');
+    const panel = container.firstElementChild
+    const scrollRegion = screen.getByTestId('assistant-evidence-scroll')
 
-    expect(panel).toHaveClass('flex', 'h-full', 'min-h-0', 'overflow-hidden');
-    expect(scrollRegion).toHaveClass('min-h-0', 'flex-1', 'overflow-y-auto');
-    expect(screen.getByText('Document 23')).toBeInTheDocument();
-  });
-});
+    expect(panel).toHaveClass('flex', 'h-full', 'min-h-0', 'overflow-hidden')
+    expect(scrollRegion).toHaveClass('min-h-0', 'flex-1', 'overflow-y-auto')
+    expect(screen.getByText('Document 23')).toBeInTheDocument()
+  })
+})

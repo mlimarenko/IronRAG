@@ -1,4 +1,4 @@
-import { useTranslation } from 'react-i18next';
+import { useTranslation } from 'react-i18next'
 
 import {
   Select,
@@ -6,15 +6,15 @@ import {
   SelectItem,
   SelectTrigger,
   SelectValue,
-} from '@/shared/components/ui/select';
-import type { AIScopeKind } from '@/shared/types';
+} from '@/shared/components/ui/select'
+import type { AIScopeKind } from '@/shared/types'
 
-type ScopePickerProps = {
-  selectedScope: AIScopeKind;
-  activeWorkspaceName?: string | undefined;
-  activeLibraryName?: string | undefined;
-  onScopeChange: (scope: AIScopeKind) => void;
-};
+type ScopePickerProps = Readonly<{
+  selectedScope: AIScopeKind
+  activeWorkspaceName?: string | undefined
+  activeLibraryName?: string | undefined
+  onScopeChange: (scope: AIScopeKind) => void
+}>
 
 export function ScopePicker({
   selectedScope,
@@ -22,7 +22,7 @@ export function ScopePicker({
   activeLibraryName,
   onScopeChange,
 }: ScopePickerProps) {
-  const { t } = useTranslation();
+  const { t } = useTranslation()
   const scopes: Array<{ kind: AIScopeKind; title: string; disabled: boolean }> = [
     {
       kind: 'instance',
@@ -39,20 +39,17 @@ export function ScopePicker({
       title: activeLibraryName ?? t('admin.aiPanel.scopeCards.libraryTitle'),
       disabled: !activeLibraryName,
     },
-  ];
+  ]
 
   return (
     <div className="min-w-0 rounded-lg bg-surface-sunken p-2 sm:min-w-[22rem]">
       <div className="mb-1 section-label">{t('admin.scope')}</div>
-      <Select
-        value={selectedScope}
-        onValueChange={(value) => onScopeChange(value as AIScopeKind)}
-      >
+      <Select value={selectedScope} onValueChange={(value) => onScopeChange(value as AIScopeKind)}>
         <SelectTrigger className="h-9 w-full min-w-0 bg-card text-sm font-semibold">
           <SelectValue />
         </SelectTrigger>
         <SelectContent>
-          {scopes.map(scope => (
+          {scopes.map((scope) => (
             <SelectItem key={scope.kind} value={scope.kind} disabled={scope.disabled}>
               {scope.title}
             </SelectItem>
@@ -60,5 +57,5 @@ export function ScopePicker({
         </SelectContent>
       </Select>
     </div>
-  );
+  )
 }

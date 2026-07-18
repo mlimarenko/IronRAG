@@ -1,11 +1,11 @@
-//! Persistent tier of the two-level QueryCompiler cache.
+//! Persistent tier of the two-level `QueryCompiler` cache.
 //!
 //! Redis is the hot tier (24h TTL, opaque JSON blobs keyed by
 //! `ir_cache:{library_id}:{question_hash}`); this repository backs the
 //! Postgres tier that survives Redis restarts and lets operators audit
 //! every (library, question) → IR compilation decision offline. Rows are
 //! scoped by `schema_version`, and the question hash includes the compiler
-//! runtime plus resolved QueryCompile binding fingerprint, so stale entries
+//! runtime plus resolved `QueryCompile` binding fingerprint, so stale entries
 //! are skipped without requiring a compatibility reader. A `compiled_at` TTL
 //! (`QUERY_IR_CACHE_MAX_AGE_DAYS`) keeps cold rows from accumulating
 //! indefinitely.

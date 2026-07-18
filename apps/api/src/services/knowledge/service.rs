@@ -1,12 +1,3 @@
-#![allow(
-    clippy::all,
-    clippy::missing_const_for_fn,
-    clippy::missing_errors_doc,
-    clippy::needless_pass_by_value,
-    clippy::result_large_err,
-    clippy::too_many_lines
-)]
-
 use sha2::Digest;
 use uuid::Uuid;
 
@@ -22,6 +13,7 @@ use crate::{
     },
     infra::repositories,
     interfaces::http::router_support::ApiError,
+    services::query::vector_dimensions::invalidate_library_embedding_profile_inventory,
     shared::extraction::technical_facts::{
         TechnicalFactKind, TechnicalFactQualifier, TechnicalFactValue,
     },
@@ -68,11 +60,6 @@ pub struct CreateKnowledgeRevisionCommand {
 #[derive(Debug, Clone)]
 pub struct PromoteKnowledgeDocumentCommand {
     pub document_id: Uuid,
-    pub document_state: String,
-    pub active_revision_id: Option<Uuid>,
-    pub readable_revision_id: Option<Uuid>,
-    pub latest_revision_no: Option<i64>,
-    pub deleted_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 #[derive(Debug, Clone)]
@@ -188,15 +175,10 @@ impl KnowledgeService {
             })
             .await
             .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
-        state
-            .graph_store
-            .upsert_document_revision_edge(
-                command.document_id,
-                command.revision_id,
-                command.library_id,
-            )
-            .await
-            .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
+        // PostgreSQL collapses the document→revision edge into the mandatory
+        // `knowledge_revision.document_id` column written above. A second
+        // graph-store update would only rewrite the same value in another
+        // transaction and cannot add consistency.
         Ok(map_revision_row(row))
     }
 
@@ -205,78 +187,34 @@ impl KnowledgeService {
         state: &AppState,
         command: PromoteKnowledgeDocumentCommand,
     ) -> Result<KnowledgeDocument, ApiError> {
-        let content_document = repositories::content_repository::get_document_by_id(
+        // The command is only a wake-up hint. The repository transaction locks
+        // and reads the canonical head, so a delayed request cannot carry stale
+        // state capable of regressing the projection.
+        match repositories::content_repository::materialize_knowledge_document_from_canonical_head(
             &state.persistence.postgres,
             command.document_id,
         )
         .await
         .map_err(|e| ApiError::internal_with_log(e, "internal"))?
-        .ok_or_else(|| ApiError::resource_not_found("document", command.document_id))?;
-        let existing_projection = state
+        {
+            repositories::content_repository::MaterializeKnowledgeDocumentOutcome::Materialized => {}
+            repositories::content_repository::MaterializeKnowledgeDocumentOutcome::DocumentNotFound => {
+                return Err(ApiError::resource_not_found("document", command.document_id));
+            }
+            repositories::content_repository::MaterializeKnowledgeDocumentOutcome::DocumentHeadNotFound
+            | repositories::content_repository::MaterializeKnowledgeDocumentOutcome::RevisionNotFound => {
+                return Err(ApiError::service_unavailable(
+                    "document projection is converging; retry the promotion shortly",
+                    "document_projection_converging",
+                ));
+            }
+        }
+        let row = state
             .document_store
             .get_document(command.document_id)
             .await
-            .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
-        let title_source_revision_id = command.readable_revision_id.or(command.active_revision_id);
-        let title_source_revision = match title_source_revision_id {
-            Some(revision_id) => state
-                .document_store
-                .get_revision(revision_id)
-                .await
-                .map_err(|e| ApiError::internal_with_log(e, "internal"))?,
-            None => None,
-        };
-        let resolved_title = title_source_revision.as_ref().and_then(|row| row.title.clone());
-        // Finalize the typed role from structural inputs now that a revision has
-        // landed and its media class is known. The role is decided once, here,
-        // from the canonical media-class classifier — never from extension/MIME
-        // parsing in retrieval. The document's `external_key` carries the
-        // attachment file name for the extension signal; the revision supplies
-        // the declared MIME type.
-        let file_name_for_media_class = existing_projection
-            .as_ref()
-            .and_then(|row| row.file_name.clone())
-            .unwrap_or_else(|| content_document.external_key.clone());
-        let is_raster_image = title_source_revision.as_ref().is_some_and(|revision| {
-            crate::domains::content::revision_is_raster_image(
-                Some(file_name_for_media_class.as_str()),
-                Some(revision.mime_type.as_str()),
-            )
-        });
-        let document_role = crate::domains::content::derive_document_role(
-            content_document.parent_document_id.is_some(),
-            is_raster_image,
-        )
-        .to_string();
-        let row = state
-            .document_store
-            .upsert_document(&crate::infra::knowledge_rows::KnowledgeDocumentRow {
-                document_id: command.document_id,
-                workspace_id: content_document.workspace_id,
-                library_id: content_document.library_id,
-                external_key: content_document.external_key,
-                file_name: existing_projection.as_ref().and_then(|row| row.file_name.clone()),
-                title: resolved_title
-                    .or_else(|| existing_projection.as_ref().and_then(|row| row.title.clone())),
-                source_uri: existing_projection.as_ref().and_then(|row| row.source_uri.clone()),
-                document_hint: existing_projection
-                    .as_ref()
-                    .and_then(|row| row.document_hint.clone()),
-                document_state: command.document_state,
-                active_revision_id: command.active_revision_id,
-                readable_revision_id: command.readable_revision_id,
-                latest_revision_no: command.latest_revision_no,
-                parent_document_id: content_document.parent_document_id,
-                document_role,
-                created_at: existing_projection
-                    .as_ref()
-                    .map(|row| row.created_at)
-                    .unwrap_or(content_document.created_at),
-                updated_at: chrono::Utc::now(),
-                deleted_at: command.deleted_at,
-            })
-            .await
-            .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
+            .map_err(|e| ApiError::internal_with_log(e, "internal"))?
+            .ok_or_else(|| ApiError::resource_not_found("document", command.document_id))?;
         Ok(map_document_row(row))
     }
 
@@ -318,18 +256,24 @@ impl KnowledgeService {
         normalized_text: Option<&str>,
         text_checksum: Option<&str>,
     ) -> Result<KnowledgeRevision, ApiError> {
-        let text_readable_at = matches!(extract_state, "readable" | "ready")
+        let text_state = match extract_state {
+            "accepted" => "accepted",
+            "processing" => "extracting_text",
+            "ready" => "text_readable",
+            "failed" => "failed",
+            unsupported => {
+                return Err(ApiError::BadRequest(format!(
+                    "unsupported extract state: {unsupported}"
+                )));
+            }
+        };
+        let text_readable_at = (extract_state == "ready")
             .then_some(chrono::Utc::now())
             .filter(|_| normalized_text.is_some_and(|text| !text.trim().is_empty()));
         self.set_revision_text_state(
             state,
             revision_id,
-            match extract_state {
-                "readable" | "ready" => "text_readable",
-                "failed" => "failed",
-                "processing" => "extracting_text",
-                _ => "accepted",
-            },
+            text_state,
             normalized_text,
             text_checksum,
             text_readable_at,
@@ -545,14 +489,37 @@ impl KnowledgeService {
         state: &AppState,
         revision_id: Uuid,
     ) -> Result<Vec<KnowledgeChunk>, ApiError> {
+        let revision = state
+            .document_store
+            .get_revision(revision_id)
+            .await
+            .map_err(|e| ApiError::internal_with_log(e, "internal"))?
+            .ok_or_else(|| ApiError::resource_not_found("knowledge_revision", revision_id))?;
+        let _vector_guard = state
+            .canonical_services
+            .search
+            .vector_plane_write_guard(state, revision.library_id)
+            .await
+            .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
+        let expected_source_truth_version = repositories::get_library_source_truth_version(
+            &state.persistence.postgres,
+            revision.library_id,
+        )
+        .await
+        .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
+        let _ = state
+            .search_store
+            .delete_chunk_vectors_by_revision_fenced(
+                revision.library_id,
+                revision_id,
+                expected_source_truth_version,
+            )
+            .await
+            .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
+        invalidate_library_embedding_profile_inventory(revision.library_id);
         let _ = state
             .graph_store
             .delete_revision_chunk_edges(revision_id)
-            .await
-            .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
-        let _ = state
-            .search_store
-            .delete_chunk_vectors_by_revision(revision_id)
             .await
             .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
         let rows = state
@@ -911,7 +878,7 @@ fn library_generation_signals_cache_key(library_id: Uuid) -> String {
 ///
 /// The aggregate spans every `knowledge_revision` row in the library and can be
 /// expensive under concurrent ingest. The hot callers — dashboard polling every
-/// 2.5 s, knowledge summary, and the library_summary branch of assistant turns —
+/// 2.5 s, knowledge summary, and the `library_summary` branch of assistant turns —
 /// all tolerate a 30 s staleness window on the generation fingerprint (it tracks
 /// revision completion, not per-turn state), so a short TTL swaps the aggregate
 /// read for a 1–5 ms Redis GET without changing the contract.
@@ -922,15 +889,12 @@ async fn aggregate_library_generation_signals_cached(
     use redis::AsyncCommands;
     let cache_key = library_generation_signals_cache_key(library_id);
 
-    if let Ok(mut conn) = state.persistence.redis.get_multiplexed_async_connection().await {
-        if let Ok(Some(bytes)) = conn.get::<_, Option<Vec<u8>>>(&cache_key).await {
-            if let Ok(signals) = serde_json::from_slice::<
-                crate::infra::knowledge_rows::LibraryGenerationSignals,
-            >(&bytes)
-            {
-                return Ok(signals);
-            }
-        }
+    if let Ok(mut conn) = state.persistence.redis.get_multiplexed_async_connection().await
+        && let Ok(Some(bytes)) = conn.get::<_, Option<Vec<u8>>>(&cache_key).await
+        && let Ok(signals) =
+            serde_json::from_slice::<crate::infra::knowledge_rows::LibraryGenerationSignals>(&bytes)
+    {
+        return Ok(signals);
     }
 
     let signals = state
@@ -939,16 +903,12 @@ async fn aggregate_library_generation_signals_cached(
         .await
         .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
 
-    if let Ok(mut conn) = state.persistence.redis.get_multiplexed_async_connection().await {
-        if let Ok(encoded) = serde_json::to_vec(&signals) {
-            let _: Result<(), _> = conn
-                .set_ex::<_, _, ()>(
-                    cache_key,
-                    encoded,
-                    LIBRARY_GENERATION_SIGNALS_CACHE_TTL_SECONDS,
-                )
-                .await;
-        }
+    if let Ok(mut conn) = state.persistence.redis.get_multiplexed_async_connection().await
+        && let Ok(encoded) = serde_json::to_vec(&signals)
+    {
+        let _: Result<(), _> = conn
+            .set_ex::<_, _, ()>(cache_key, encoded, LIBRARY_GENERATION_SIGNALS_CACHE_TTL_SECONDS)
+            .await;
     }
 
     Ok(signals)

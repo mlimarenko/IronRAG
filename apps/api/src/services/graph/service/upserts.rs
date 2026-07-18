@@ -15,6 +15,31 @@ use super::{
     GraphRevisionContext, GraphService, canonical_entity_id, placeholder_entity_parts_from_key,
 };
 
+const CANONICAL_UPSERT_MAX_RETRIES: usize = 2;
+const CANONICAL_UPSERT_BASE_BACKOFF_MS: u64 = 50;
+const PG_SQLSTATE_SERIALIZATION_FAILURE: &str = "40001";
+const PG_SQLSTATE_DEADLOCK_DETECTED: &str = "40P01";
+const PG_SQLSTATE_LOCK_NOT_AVAILABLE: &str = "55P03";
+
+fn is_retryable_upsert_contention(error: &anyhow::Error) -> bool {
+    error
+        .downcast_ref::<sqlx::Error>()
+        .and_then(sqlx::Error::as_database_error)
+        .and_then(sqlx::error::DatabaseError::code)
+        .is_some_and(|code| {
+            matches!(
+                code.as_ref(),
+                PG_SQLSTATE_SERIALIZATION_FAILURE
+                    | PG_SQLSTATE_DEADLOCK_DETECTED
+                    | PG_SQLSTATE_LOCK_NOT_AVAILABLE
+            )
+        })
+}
+
+const fn canonical_upsert_backoff(retry_count: usize) -> std::time::Duration {
+    std::time::Duration::from_millis(CANONICAL_UPSERT_BASE_BACKOFF_MS * (1_u64 << retry_count))
+}
+
 impl GraphService {
     pub(super) async fn upsert_canonical_entity(
         &self,
@@ -70,26 +95,23 @@ impl GraphService {
             created_at: existing.as_ref().map(|row| row.created_at),
             updated_at: Some(Utc::now()),
         };
-        let mut last_err = None;
-        for attempt in 0..3 {
+        let mut retry_count = 0;
+        loop {
             match state.graph_store.upsert_entity(&entity).await {
                 Ok(row) => return Ok(row),
-                Err(e) => {
-                    let msg = format!("{e:#}");
-                    if msg.contains("409") && msg.contains("write-write conflict") && attempt < 2 {
-                        let backoff = std::time::Duration::from_millis(50 * (1 << attempt));
+                Err(error) => {
+                    if is_retryable_upsert_contention(&error)
+                        && retry_count < CANONICAL_UPSERT_MAX_RETRIES
+                    {
+                        let backoff = canonical_upsert_backoff(retry_count);
+                        retry_count += 1;
                         tokio::time::sleep(backoff).await;
-                        last_err = Some(e);
                         continue;
                     }
-                    return Err(e).context("failed to upsert canonical knowledge entity");
+                    return Err(error).context("failed to upsert canonical knowledge entity");
                 }
             }
         }
-        Err(last_err.ok_or_else(|| {
-            anyhow::anyhow!("canonical knowledge entity upsert exhausted retries without an error")
-        })?)
-        .context("failed to upsert canonical knowledge entity after retries")
     }
 
     pub(super) async fn upsert_placeholder_entity_for_key(
@@ -161,35 +183,29 @@ impl GraphService {
             support_count,
             contradiction_state: existing
                 .as_ref()
-                .map(|row| row.contradiction_state.clone())
-                .unwrap_or_else(|| "unknown".to_string()),
+                .map_or_else(|| "unknown".to_string(), |row| row.contradiction_state.clone()),
             freshness_generation,
             relation_state: "active".to_string(),
             created_at: existing.as_ref().map(|row| row.created_at),
             updated_at: Some(Utc::now()),
         };
-        let mut last_err = None;
-        for attempt in 0..3 {
+        let mut retry_count = 0;
+        loop {
             match state.graph_store.upsert_relation(&relation).await {
                 Ok(row) => return Ok(row),
-                Err(e) => {
-                    let msg = format!("{e:#}");
-                    if msg.contains("409") && msg.contains("write-write conflict") && attempt < 2 {
-                        let backoff = std::time::Duration::from_millis(50 * (1 << attempt));
+                Err(error) => {
+                    if is_retryable_upsert_contention(&error)
+                        && retry_count < CANONICAL_UPSERT_MAX_RETRIES
+                    {
+                        let backoff = canonical_upsert_backoff(retry_count);
+                        retry_count += 1;
                         tokio::time::sleep(backoff).await;
-                        last_err = Some(e);
                         continue;
                     }
-                    return Err(e).context("failed to upsert canonical knowledge relation");
+                    return Err(error).context("failed to upsert canonical knowledge relation");
                 }
             }
         }
-        Err(last_err.ok_or_else(|| {
-            anyhow::anyhow!(
-                "canonical knowledge relation upsert exhausted retries without an error"
-            )
-        })?)
-        .context("failed to upsert canonical knowledge relation after retries")
     }
 
     pub(super) async fn upsert_relation_edges(
@@ -268,5 +284,73 @@ impl GraphService {
             )
             .await
             .context("failed to upsert chunk-mentions-entity edge")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{borrow::Cow, error::Error as StdError, fmt};
+
+    use sqlx::error::{DatabaseError, ErrorKind};
+
+    use super::is_retryable_upsert_contention;
+
+    #[derive(Debug)]
+    struct FakeDatabaseError {
+        code: &'static str,
+    }
+
+    impl fmt::Display for FakeDatabaseError {
+        fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+            formatter.write_str("opaque database failure")
+        }
+    }
+
+    impl StdError for FakeDatabaseError {}
+
+    impl DatabaseError for FakeDatabaseError {
+        fn message(&self) -> &str {
+            "opaque database failure"
+        }
+
+        fn code(&self) -> Option<Cow<'_, str>> {
+            Some(Cow::Borrowed(self.code))
+        }
+
+        fn as_error(&self) -> &(dyn StdError + Send + Sync + 'static) {
+            self
+        }
+
+        fn as_error_mut(&mut self) -> &mut (dyn StdError + Send + Sync + 'static) {
+            self
+        }
+
+        fn into_error(self: Box<Self>) -> Box<dyn StdError + Send + Sync + 'static> {
+            self
+        }
+
+        fn kind(&self) -> ErrorKind {
+            ErrorKind::Other
+        }
+    }
+
+    fn database_error(code: &'static str) -> anyhow::Error {
+        anyhow::Error::new(sqlx::Error::Database(Box::new(FakeDatabaseError { code })))
+            .context("canonical graph upsert failed")
+    }
+
+    #[test]
+    fn retries_only_typed_database_contention_codes() {
+        assert!(is_retryable_upsert_contention(&database_error("40001")));
+        assert!(is_retryable_upsert_contention(&database_error("40P01")));
+        assert!(is_retryable_upsert_contention(&database_error("55P03")));
+        assert!(!is_retryable_upsert_contention(&database_error("23505")));
+    }
+
+    #[test]
+    fn legacy_conflict_text_does_not_trigger_retry() {
+        let error = anyhow::anyhow!("409 write-write conflict");
+
+        assert!(!is_retryable_upsert_contention(&error));
     }
 }

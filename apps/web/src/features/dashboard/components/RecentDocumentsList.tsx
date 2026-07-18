@@ -1,22 +1,22 @@
-import { memo } from 'react';
-import type { TFunction } from 'i18next';
-import { FileText } from 'lucide-react';
-import { StatusBadge } from '@/shared/components/StatusBadge';
-import { humanizeDocumentFailure, humanizeDocumentStage } from '@/shared/lib/document-processing';
-import type { RecentDocument } from "../model/types";
-import { buildDocumentsPath } from "../model/types";
-import { formatRelativeTime, formatSize, readinessClass, toStatusTone } from "../model/format";
+import { memo } from 'react'
+import type { TFunction } from 'i18next'
+import { FileText } from 'lucide-react'
+import { StatusBadge } from '@/shared/components/StatusBadge'
+import { humanizeDocumentFailure, humanizeDocumentStage } from '@/shared/lib/document-processing'
+import type { RecentDocument } from '../model/types'
+import { buildDocumentsPath } from '../model/types'
+import { formatRelativeTime, formatSize, readinessClass, toStatusTone } from '../model/format'
 
-type RecentDocumentsListProps = {
-  t: TFunction;
-  locale: string;
-  recentDocuments: RecentDocument[];
-  totalDocuments: number;
-  onNavigate: (path: string) => void;
-};
+type RecentDocumentsListProps = Readonly<{
+  t: TFunction
+  locale: string
+  recentDocuments: RecentDocument[]
+  totalDocuments: number
+  onNavigate: (path: string) => void
+}>
 
 function buildDetailBits(doc: RecentDocument, t: TFunction): string[] {
-  const bits: string[] = [];
+  const bits: string[] = []
 
   if (doc.readiness === 'failed' && doc.failureMessage) {
     bits.push(
@@ -27,21 +27,21 @@ function buildDetailBits(doc: RecentDocument, t: TFunction): string[] {
         },
         t,
       ) ?? doc.failureMessage,
-    );
+    )
   } else if (doc.readiness === 'processing' && doc.stageLabel) {
-    bits.push(humanizeDocumentStage(doc.stageLabel, t) ?? doc.stageLabel);
+    bits.push(humanizeDocumentStage(doc.stageLabel, t) ?? doc.stageLabel)
   } else {
     if ((doc.preparedSegmentCount ?? 0) > 0) {
-      bits.push(t('dashboard.segmentsSummary', { count: doc.preparedSegmentCount ?? 0 }));
+      bits.push(t('dashboard.segmentsSummary', { count: doc.preparedSegmentCount ?? 0 }))
     }
     if ((doc.technicalFactCount ?? 0) > 0) {
-      bits.push(t('dashboard.factsSummary', { count: doc.technicalFactCount ?? 0 }));
+      bits.push(t('dashboard.factsSummary', { count: doc.technicalFactCount ?? 0 }))
     }
   }
 
-  if (doc.canRetry) bits.push(t('dashboard.retryAvailable'));
+  if (doc.canRetry) bits.push(t('dashboard.retryAvailable'))
 
-  return bits;
+  return bits
 }
 
 function RecentDocumentsListImpl({
@@ -66,7 +66,7 @@ function RecentDocumentsListImpl({
       {recentDocuments.length > 0 ? (
         <div className="mt-4 grid gap-3 xl:grid-cols-2">
           {recentDocuments.map((doc) => {
-            const detailBits = buildDetailBits(doc, t);
+            const detailBits = buildDetailBits(doc, t)
 
             return (
               <button
@@ -91,7 +91,10 @@ function RecentDocumentsListImpl({
                           {formatSize(doc.fileSize)}
                         </div>
                       </div>
-                      <StatusBadge tone={toStatusTone(readinessClass(doc.readiness))} className="shrink-0">
+                      <StatusBadge
+                        tone={toStatusTone(readinessClass(doc.readiness))}
+                        className="shrink-0"
+                      >
                         {t(`dashboard.readinessLabels.${doc.readiness}`)}
                       </StatusBadge>
                     </div>
@@ -110,7 +113,7 @@ function RecentDocumentsListImpl({
                   </div>
                 </div>
               </button>
-            );
+            )
           })}
         </div>
       ) : (
@@ -119,7 +122,7 @@ function RecentDocumentsListImpl({
         </div>
       )}
     </div>
-  );
+  )
 }
 
-export const RecentDocumentsList = memo(RecentDocumentsListImpl);
+export const RecentDocumentsList = memo(RecentDocumentsListImpl)

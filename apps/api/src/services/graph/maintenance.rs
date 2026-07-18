@@ -16,7 +16,7 @@
 //! before document finalization and maintenance only has to eventually catch
 //! up with that canonical graph state.
 //!
-//! The throttle lives in process-local state (a `Mutex<HashMap>`)
+//! The bounded throttle lives in process-local state (a `Mutex<HashMap>`)
 //! because it guards a process-local CPU hot path — cross-worker
 //! coordination would introduce a DB round-trip on a fast path that
 //! we specifically want to avoid.
@@ -41,7 +41,8 @@ fn last_run() -> &'static Mutex<HashMap<Uuid, Instant>> {
 }
 
 /// How long a maintenance slot stays claimed once it has been acquired.
-pub const MAINTENANCE_INTERVAL: Duration = Duration::from_secs(30);
+pub(crate) const MAINTENANCE_INTERVAL: Duration = Duration::from_secs(30);
+const MAINTENANCE_SLOT_CAPACITY: usize = 1_024;
 
 /// Returns `true` if the caller has been granted the maintenance slot
 /// for `library_id` in the current window. The caller then MUST run
@@ -54,12 +55,21 @@ pub const MAINTENANCE_INTERVAL: Duration = Duration::from_secs(30);
 /// maintenance block entirely; the library will converge on the next
 /// finished job.
 #[must_use]
-pub fn try_acquire_graph_maintenance_slot(library_id: Uuid) -> bool {
+pub(crate) fn try_acquire_graph_maintenance_slot(library_id: Uuid) -> bool {
     let now = Instant::now();
     let mut guard = last_run().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    guard.retain(|_, last| now.duration_since(*last) < MAINTENANCE_INTERVAL);
     match guard.get(&library_id) {
         Some(last) if now.duration_since(*last) < MAINTENANCE_INTERVAL => false,
         _ => {
+            if guard.len() >= MAINTENANCE_SLOT_CAPACITY
+                && let Some(oldest) = guard
+                    .iter()
+                    .min_by_key(|(_, instant)| **instant)
+                    .map(|(library_id, _)| *library_id)
+            {
+                guard.remove(&oldest);
+            }
             guard.insert(library_id, now);
             true
         }

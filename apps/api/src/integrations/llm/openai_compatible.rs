@@ -23,7 +23,7 @@ pub(super) struct OpenAiCompatibleToolUseMessage {
     pub(super) role: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) content: Option<String>,
-    /// DeepSeek thinking-mode requires that any `reasoning_content` the
+    /// `DeepSeek` thinking-mode requires that any `reasoning_content` the
     /// assistant emitted on a previous turn be echoed back verbatim on
     /// subsequent calls. Other OpenAI-compatible providers ignore the
     /// field, so it stays optional and is omitted when absent.
@@ -216,7 +216,7 @@ impl OpenAiCompatibleRequest<'_> {
     }
 }
 
-pub(super) fn openai_compatible_token_limit_fields(
+pub(super) const fn openai_compatible_token_limit_fields(
     token_limit_parameter: ProviderTokenLimitParameter,
     max_output_tokens: Option<i32>,
 ) -> (Option<i32>, Option<i32>) {

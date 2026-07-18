@@ -1,17 +1,17 @@
 export type DirtyStateBaseline = {
-  loadedMarkdown: string;
-  normalizedLoadedMarkdown: string;
-};
+  loadedMarkdown: string
+  normalizedLoadedMarkdown: string
+}
 
 export function normalizeEditorMarkdown(markdown: string): string {
-  return markdown.replace(/\r\n?/g, '\n').trim();
+  return markdown.replace(/\r\n?/g, '\n').trim()
 }
 
 export function createEditorBaseline(markdown: string): DirtyStateBaseline {
   return {
     loadedMarkdown: markdown,
     normalizedLoadedMarkdown: normalizeEditorMarkdown(markdown),
-  };
+  }
 }
 
 export function isEditorContentDirty(
@@ -19,7 +19,7 @@ export function isEditorContentDirty(
   currentMarkdown: string,
 ): boolean {
   if (!baseline) {
-    return false;
+    return false
   }
-  return normalizeEditorMarkdown(currentMarkdown) !== baseline.normalizedLoadedMarkdown;
+  return normalizeEditorMarkdown(currentMarkdown) !== baseline.normalizedLoadedMarkdown
 }

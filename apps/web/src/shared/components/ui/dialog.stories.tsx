@@ -1,5 +1,5 @@
-import type { Meta, StoryObj } from "@storybook/react";
-import { Button } from "./button";
+import type { Meta, StoryObj } from '@storybook/react'
+import { Button } from './button'
 import {
   Dialog,
   DialogClose,
@@ -9,17 +9,17 @@ import {
   DialogHeader,
   DialogTitle,
   DialogTrigger,
-} from "./dialog";
-import { Input } from "./input";
-import { Label } from "./label";
+} from './dialog'
+import { Input } from './input'
+import { Label } from './label'
 
 const meta = {
-  title: "UI/Dialog",
+  title: 'UI/Dialog',
   component: Dialog,
-} satisfies Meta<typeof Dialog>;
+} satisfies Meta<typeof Dialog>
 
-export default meta;
-type Story = StoryObj<typeof meta>;
+export default meta
+type Story = StoryObj<typeof meta>
 
 export const ClosedTrigger: Story = {
   render: () => (
@@ -45,7 +45,7 @@ export const ClosedTrigger: Story = {
       </DialogContent>
     </Dialog>
   ),
-};
+}
 
 export const Open: Story = {
   render: () => (
@@ -63,7 +63,7 @@ export const Open: Story = {
       </DialogContent>
     </Dialog>
   ),
-};
+}
 
 export const WithFooterActions: Story = {
   render: () => (
@@ -88,4 +88,4 @@ export const WithFooterActions: Story = {
       </DialogContent>
     </Dialog>
   ),
-};
+}

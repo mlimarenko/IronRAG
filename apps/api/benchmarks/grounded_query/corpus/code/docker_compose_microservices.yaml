@@ -485,7 +485,7 @@ services:
       NODE_ENV: ${NODE_ENV:-production}
       DATABASE_URL: postgresql://${POSTGRES_USER:-admin}:${POSTGRES_PASSWORD:-changeme_in_production}@postgres:5432/payment_db
       REDIS_URL: redis://:${REDIS_PASSWORD:-changeme_redis}@redis:6379/3
-      STRIPE_SECRET_KEY: ${STRIPE_SECRET_KEY:-sk_test_placeholder}
+      PAYMENT_API_TOKEN: ${PAYMENT_API_TOKEN}
       STRIPE_WEBHOOK_SECRET: ${STRIPE_WEBHOOK_SECRET:-whsec_placeholder}
       AUTH_SERVICE_URL: http://auth-service:3001
       RABBITMQ_URL: amqp://${RABBITMQ_USER:-rabbit_admin}:${RABBITMQ_PASSWORD:-changeme_rabbit}@rabbitmq:5672/${RABBITMQ_VHOST:-/microservices}

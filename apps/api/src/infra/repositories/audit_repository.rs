@@ -70,13 +70,20 @@ pub struct ListAuditEventsQuery {
     pub result_kind: Option<String>,
     pub search: Option<String>,
     pub limit: i64,
-    pub offset: i64,
+    /// Keyset cursor: `(created_at, id)` of the last row on the previous
+    /// page. Rows strictly older than the cursor on the `(created_at desc,
+    /// id desc)` keyset are returned. `None` starts from the top.
+    pub cursor: Option<(DateTime<Utc>, Uuid)>,
 }
 
 #[derive(Debug, Clone)]
 pub struct AuditEventPage {
     pub items: Vec<AuditEventRow>,
     pub total: i64,
+    /// `(created_at, id)` of the last returned row, present only when more
+    /// rows exist beyond this page. Callers encode this into an opaque
+    /// continuation token.
+    pub next_cursor: Option<(DateTime<Utc>, Uuid)>,
 }
 
 pub async fn append_audit_event(
@@ -159,6 +166,9 @@ pub async fn list_audit_events(
     push_list_audit_event_filters(&mut count_builder, query);
     let total = count_builder.build_query_scalar::<i64>().fetch_one(postgres).await?;
 
+    // Fetch `limit + 1` rows so a next-page cursor can be reported without a
+    // second round-trip; the extra row is trimmed below.
+    let fetch_limit = query.limit + 1;
     let mut builder = QueryBuilder::<Postgres>::new(
         "select
             ae.id,
@@ -175,13 +185,25 @@ pub async fn list_audit_events(
          where 1 = 1",
     );
     push_list_audit_event_filters(&mut builder, query);
+    if let Some((cursor_created_at, cursor_id)) = query.cursor {
+        builder.push(" and (ae.created_at, ae.id) < (");
+        builder.push_bind(cursor_created_at);
+        builder.push(", ");
+        builder.push_bind(cursor_id);
+        builder.push(")");
+    }
     builder.push(" order by ae.created_at desc, ae.id desc limit ");
-    builder.push_bind(query.limit);
-    builder.push(" offset ");
-    builder.push_bind(query.offset);
+    builder.push_bind(fetch_limit);
 
-    let items = builder.build_query_as::<AuditEventRow>().fetch_all(postgres).await?;
-    Ok(AuditEventPage { items, total })
+    let mut items = builder.build_query_as::<AuditEventRow>().fetch_all(postgres).await?;
+    let limit = usize::try_from(query.limit).unwrap_or(usize::MAX);
+    let next_cursor = if items.len() > limit {
+        items.truncate(limit);
+        items.last().map(|row| (row.created_at, row.id))
+    } else {
+        None
+    };
+    Ok(AuditEventPage { items, total, next_cursor })
 }
 
 fn push_list_audit_event_filters(

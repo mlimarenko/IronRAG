@@ -8,25 +8,67 @@ pub struct TextQualityAssessment {
     pub reasons: Vec<&'static str>,
 }
 
+struct TextQualityMetrics {
+    token_count: usize,
+    unstable_token_count: usize,
+    unstable_token_ratio: f32,
+    digit_or_script_noise_count: usize,
+    digit_or_script_noise_ratio: f32,
+    code_like_context: bool,
+    replacement_ratio: f32,
+    control_ratio: f32,
+}
+
+struct TextQualitySignals {
+    dense_unstable_tokens: bool,
+    widespread_unstable_tokens: bool,
+    dense_digit_or_script_noise: bool,
+    dominant_structural_noise: bool,
+}
+
 #[must_use]
 pub fn assess_text_quality(text: &str) -> TextQualityAssessment {
     let trimmed = text.trim();
     if trimmed.chars().count() < 24 {
-        return TextQualityAssessment {
-            score: 1.0,
-            low_confidence: false,
-            unstable_token_ratio: 0.0,
-            unstable_token_count: 0,
-            token_count: 0,
-            reasons: Vec::new(),
-        };
+        return high_confidence_short_text();
     }
 
-    let char_count = trimmed.chars().count().max(1);
-    let replacement_count = trimmed.chars().filter(|&ch| ch == '\u{FFFD}').count();
+    let metrics = text_quality_metrics(trimmed);
+    let signals = text_quality_signals(&metrics);
+    let reasons = text_quality_reasons(&metrics, &signals);
+    let mut score = text_quality_score_from_metrics(&metrics, &signals);
+    let low_confidence = text_quality_is_low_confidence(&metrics, &signals, score);
+    if low_confidence {
+        score = score.min(0.30);
+    }
+
+    TextQualityAssessment {
+        score,
+        low_confidence,
+        unstable_token_ratio: metrics.unstable_token_ratio,
+        unstable_token_count: metrics.unstable_token_count,
+        token_count: metrics.token_count,
+        reasons,
+    }
+}
+
+fn high_confidence_short_text() -> TextQualityAssessment {
+    TextQualityAssessment {
+        score: 1.0,
+        low_confidence: false,
+        unstable_token_ratio: 0.0,
+        unstable_token_count: 0,
+        token_count: 0,
+        reasons: Vec::new(),
+    }
+}
+
+fn text_quality_metrics(text: &str) -> TextQualityMetrics {
+    let char_count = text.chars().count().max(1);
+    let replacement_count = text.chars().filter(|&ch| ch == '\u{FFFD}').count();
     let control_count =
-        trimmed.chars().filter(|&ch| ch.is_control() && !matches!(ch, '\n' | '\r' | '\t')).count();
-    let raw_tokens = trimmed.split_whitespace().collect::<Vec<_>>();
+        text.chars().filter(|&ch| ch.is_control() && !matches!(ch, '\n' | '\r' | '\t')).count();
+    let raw_tokens = text.split_whitespace().collect::<Vec<_>>();
     let tokens = raw_tokens
         .iter()
         .map(|token| clean_token(token))
@@ -37,72 +79,98 @@ pub fn assess_text_quality(text: &str) -> TextQualityAssessment {
         tokens.iter().filter(|token| token_is_structurally_unstable(token)).count();
     let digit_or_script_noise_count =
         tokens.iter().filter(|token| token_has_digit_or_script_noise(token)).count();
-    let unstable_token_ratio =
-        if token_count == 0 { 0.0 } else { unstable_token_count as f32 / token_count as f32 };
-    let digit_or_script_noise_ratio = if token_count == 0 {
-        0.0
-    } else {
-        digit_or_script_noise_count as f32 / token_count as f32
-    };
-    let code_like_context = has_code_like_context(&raw_tokens, token_count);
-    let replacement_ratio = replacement_count as f32 / char_count as f32;
-    let control_ratio = control_count as f32 / char_count as f32;
 
+    TextQualityMetrics {
+        token_count,
+        unstable_token_count,
+        unstable_token_ratio: ratio(unstable_token_count, token_count),
+        digit_or_script_noise_count,
+        digit_or_script_noise_ratio: ratio(digit_or_script_noise_count, token_count),
+        code_like_context: has_code_like_context(&raw_tokens, token_count),
+        replacement_ratio: replacement_count as f32 / char_count as f32,
+        control_ratio: control_count as f32 / char_count as f32,
+    }
+}
+
+fn ratio(numerator: usize, denominator: usize) -> f32 {
+    if denominator == 0 { 0.0 } else { numerator as f32 / denominator as f32 }
+}
+
+fn text_quality_signals(metrics: &TextQualityMetrics) -> TextQualitySignals {
+    let dense_unstable_tokens = !metrics.code_like_context
+        && metrics.unstable_token_count >= 4
+        && metrics.unstable_token_ratio >= 0.18;
+    let widespread_unstable_tokens = !metrics.code_like_context
+        && metrics.unstable_token_count >= 8
+        && metrics.unstable_token_ratio >= 0.12;
+    let dense_digit_or_script_noise = !metrics.code_like_context
+        && metrics.digit_or_script_noise_count >= 3
+        && metrics.digit_or_script_noise_ratio >= 0.08;
+    let dominant_structural_noise = metrics.unstable_token_count >= 12
+        && metrics.unstable_token_ratio >= 0.35
+        && (metrics.digit_or_script_noise_count >= 8
+            || metrics.digit_or_script_noise_ratio >= 0.12);
+
+    TextQualitySignals {
+        dense_unstable_tokens,
+        widespread_unstable_tokens,
+        dense_digit_or_script_noise,
+        dominant_structural_noise,
+    }
+}
+
+fn text_quality_reasons(
+    metrics: &TextQualityMetrics,
+    signals: &TextQualitySignals,
+) -> Vec<&'static str> {
     let mut reasons = Vec::new();
-    if replacement_ratio >= 0.01 {
+    if metrics.replacement_ratio >= 0.01 {
         reasons.push("replacement_chars");
     }
-    if control_ratio >= 0.01 {
+    if metrics.control_ratio >= 0.01 {
         reasons.push("control_chars");
     }
-    let dense_unstable_tokens =
-        !code_like_context && unstable_token_count >= 4 && unstable_token_ratio >= 0.18;
-    let widespread_unstable_tokens =
-        !code_like_context && unstable_token_count >= 8 && unstable_token_ratio >= 0.12;
-    let dense_digit_or_script_noise = !code_like_context
-        && digit_or_script_noise_count >= 3
-        && digit_or_script_noise_ratio >= 0.08;
-    let dominant_structural_noise = unstable_token_count >= 12
-        && unstable_token_ratio >= 0.35
-        && (digit_or_script_noise_count >= 8 || digit_or_script_noise_ratio >= 0.12);
-    if dense_unstable_tokens {
+    if signals.dense_unstable_tokens {
         reasons.push("dense_unstable_tokens");
-    } else if widespread_unstable_tokens {
+    } else if signals.widespread_unstable_tokens {
         reasons.push("widespread_unstable_tokens");
     }
-    if dense_digit_or_script_noise {
+    if signals.dense_digit_or_script_noise {
         reasons.push("dense_digit_or_script_noise");
     }
-    if dominant_structural_noise {
+    if signals.dominant_structural_noise {
         reasons.push("dominant_structural_noise");
     }
+    reasons
+}
 
-    let instability_penalty =
-        if dense_unstable_tokens || widespread_unstable_tokens || dominant_structural_noise {
-            unstable_token_ratio * 1.35
-        } else {
-            unstable_token_ratio * 0.85
-        };
-    let mut score = (1.0 - instability_penalty - (replacement_ratio * 8.0) - (control_ratio * 8.0))
-        .clamp(0.0, 1.0);
-    let low_confidence = replacement_ratio >= 0.01
-        || control_ratio >= 0.01
-        || dense_unstable_tokens
-        || dominant_structural_noise
-        || dense_digit_or_script_noise
-        || (widespread_unstable_tokens && score < 0.75);
-    if low_confidence {
-        score = score.min(0.30);
-    }
+fn text_quality_score_from_metrics(
+    metrics: &TextQualityMetrics,
+    signals: &TextQualitySignals,
+) -> f32 {
+    let instability_penalty = if signals.dense_unstable_tokens
+        || signals.widespread_unstable_tokens
+        || signals.dominant_structural_noise
+    {
+        metrics.unstable_token_ratio * 1.35
+    } else {
+        metrics.unstable_token_ratio * 0.85
+    };
+    (1.0 - instability_penalty - (metrics.replacement_ratio * 8.0) - (metrics.control_ratio * 8.0))
+        .clamp(0.0, 1.0)
+}
 
-    TextQualityAssessment {
-        score,
-        low_confidence,
-        unstable_token_ratio,
-        unstable_token_count,
-        token_count,
-        reasons,
-    }
+fn text_quality_is_low_confidence(
+    metrics: &TextQualityMetrics,
+    signals: &TextQualitySignals,
+    score: f32,
+) -> bool {
+    metrics.replacement_ratio >= 0.01
+        || metrics.control_ratio >= 0.01
+        || signals.dense_unstable_tokens
+        || signals.dominant_structural_noise
+        || signals.dense_digit_or_script_noise
+        || (signals.widespread_unstable_tokens && score < 0.75)
 }
 
 #[must_use]
@@ -157,22 +225,81 @@ fn clean_token(token: &str) -> &str {
 fn token_is_structurally_unstable(token: &str) -> bool {
     let token = clean_token(token);
     let chars = token.chars().collect::<Vec<_>>();
-    if chars.len() < 4 {
-        return false;
-    }
-    if token.contains("://") || token.matches('/').count() >= 2 || token.matches('_').count() >= 2 {
+    if chars.len() < 4 || token_has_stable_structure(token) {
         return false;
     }
 
-    let letters = chars.iter().filter(|ch| ch.is_alphabetic()).count();
-    if letters < 4 {
+    let profile = TokenStructureProfile::from_chars(&chars);
+    if profile.letters < 4 {
         return false;
     }
-    let digits = chars.iter().filter(|ch| ch.is_ascii_digit()).count();
-    let uppercase = chars.iter().filter(|ch| ch.is_uppercase()).count();
-    let lowercase = chars.iter().filter(|ch| ch.is_lowercase()).count();
-    let max_internal_uppercase_run = max_internal_uppercase_run(&chars);
-    let case_transitions = chars
+    token_structure_is_unstable(&chars, profile)
+}
+
+#[derive(Clone, Copy)]
+struct TokenStructureProfile {
+    letters: usize,
+    digits: usize,
+    uppercase: usize,
+    lowercase: usize,
+    case_transitions: usize,
+}
+
+impl TokenStructureProfile {
+    fn from_chars(chars: &[char]) -> Self {
+        Self {
+            letters: chars.iter().filter(|ch| ch.is_alphabetic()).count(),
+            digits: chars.iter().filter(|ch| ch.is_ascii_digit()).count(),
+            uppercase: chars.iter().filter(|ch| ch.is_uppercase()).count(),
+            lowercase: chars.iter().filter(|ch| ch.is_lowercase()).count(),
+            case_transitions: case_transition_count(chars),
+        }
+    }
+
+    fn is_mixed_case(self) -> bool {
+        self.uppercase > 0 && self.lowercase > 0
+    }
+}
+
+fn token_structure_is_unstable(chars: &[char], profile: TokenStructureProfile) -> bool {
+    turbulent_token_case(chars, profile)
+        || compact_token_case_noise(chars, profile)
+        || embedded_digit_word(chars, profile)
+        || script_switch_count(chars) >= 2
+        || uppercase_digit_noise(profile)
+}
+
+fn turbulent_token_case(chars: &[char], profile: TokenStructureProfile) -> bool {
+    profile.is_mixed_case()
+        && profile.case_transitions >= 3
+        && (max_internal_uppercase_run(chars) >= 2 || profile.digits > 0)
+}
+
+fn compact_token_case_noise(chars: &[char], profile: TokenStructureProfile) -> bool {
+    chars.len() <= 5
+        && profile.is_mixed_case()
+        && profile.uppercase >= 2
+        && profile.lowercase >= 2
+        && profile.case_transitions >= 3
+}
+
+fn embedded_digit_word(chars: &[char], profile: TokenStructureProfile) -> bool {
+    profile.digits > 0
+        && profile.letters >= 4
+        && (digit_letter_switch_count(chars) >= 1
+            || (profile.uppercase >= 2 && profile.lowercase >= 2))
+}
+
+fn uppercase_digit_noise(profile: TokenStructureProfile) -> bool {
+    profile.digits > 0 && profile.lowercase == 0 && profile.uppercase >= 5
+}
+
+fn token_has_stable_structure(token: &str) -> bool {
+    token.contains("://") || token.matches('/').count() >= 2 || token.matches('_').count() >= 2
+}
+
+fn case_transition_count(chars: &[char]) -> usize {
+    chars
         .windows(2)
         .filter(|pair| {
             let left = pair[0];
@@ -180,34 +307,26 @@ fn token_is_structurally_unstable(token: &str) -> bool {
             (left.is_lowercase() && right.is_uppercase())
                 || (left.is_uppercase() && right.is_lowercase())
         })
-        .count();
-    let digit_letter_switches = chars
+        .count()
+}
+
+fn digit_letter_switch_count(chars: &[char]) -> usize {
+    chars
         .windows(2)
         .filter(|pair| {
             let left_is_digit = pair[0].is_ascii_digit();
             let right_is_digit = pair[1].is_ascii_digit();
             left_is_digit != right_is_digit && (pair[0].is_alphabetic() || pair[1].is_alphabetic())
         })
-        .count();
-    let script_switches = chars
+        .count()
+}
+
+fn script_switch_count(chars: &[char]) -> usize {
+    chars
         .windows(2)
         .filter_map(|pair| Some((letter_script_class(pair[0])?, letter_script_class(pair[1])?)))
         .filter(|(left, right)| left != right)
-        .count();
-
-    let mixed_case = uppercase > 0 && lowercase > 0;
-    let turbulent_case =
-        mixed_case && case_transitions >= 3 && (max_internal_uppercase_run >= 2 || digits > 0);
-    let compact_case_noise =
-        chars.len() <= 5 && mixed_case && uppercase >= 2 && lowercase >= 2 && case_transitions >= 3;
-    let embedded_digit_word = digits > 0
-        && letters >= 4
-        && (digit_letter_switches >= 1 || (uppercase >= 2 && lowercase >= 2));
-    turbulent_case
-        || compact_case_noise
-        || embedded_digit_word
-        || script_switches >= 2
-        || (digits > 0 && lowercase == 0 && uppercase >= 5)
+        .count()
 }
 
 fn token_is_short_fragment_noise(token: &str) -> bool {

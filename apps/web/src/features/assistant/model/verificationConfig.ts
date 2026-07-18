@@ -1,12 +1,12 @@
-import { AlertTriangle, Brain, CheckCircle2, XCircle } from 'lucide-react';
-import type { LucideIcon } from 'lucide-react';
-import type { TFunction } from 'i18next';
-import type { VerificationState } from '@/shared/types';
+import { AlertTriangle, Brain, CheckCircle2, XCircle } from 'lucide-react'
+import type { LucideIcon } from 'lucide-react'
+import type { TFunction } from 'i18next'
+import type { VerificationState } from '@/shared/types'
 
 type VerificationBadgeConfig = {
-  icon: LucideIcon;
-  cls: string;
-};
+  icon: LucideIcon
+  cls: string
+}
 
 /**
  * Static lookup table for verification badge styling. Lives outside the
@@ -39,21 +39,21 @@ export const VERIFICATION_CONFIG: Record<VerificationState, VerificationBadgeCon
     icon: Brain,
     cls: 'text-muted-foreground',
   },
-};
+}
 
 export function verificationLabel(state: VerificationState, t: TFunction): string {
   switch (state) {
     case 'passed':
-      return t('assistant.verified');
+      return t('assistant.verified')
     case 'partially_supported':
-      return t('assistant.partiallySupported');
+      return t('assistant.partiallySupported')
     case 'conflicting':
-      return t('assistant.conflictingEvidence');
+      return t('assistant.conflictingEvidence')
     case 'insufficient_evidence':
-      return t('assistant.insufficientEvidence');
+      return t('assistant.insufficientEvidence')
     case 'failed':
-      return t('assistant.verificationFailed');
+      return t('assistant.verificationFailed')
     case 'not_run':
-      return t('assistant.verificationNotRun');
+      return t('assistant.verificationNotRun')
   }
 }

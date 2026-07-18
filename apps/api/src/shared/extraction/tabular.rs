@@ -52,7 +52,7 @@ impl ExtractedTable {
         self.headers.len().max(self.rows.iter().map(Vec::len).max().unwrap_or(0))
     }
 
-    fn row_count(&self) -> usize {
+    const fn row_count(&self) -> usize {
         self.rows.len()
     }
 }
@@ -161,8 +161,7 @@ fn detect_tabular_format(
     }
 
     if let Some(mime_type) = mime_type.map(str::trim).filter(|value| !value.is_empty()) {
-        let essence =
-            mime_type.split(';').next().map(str::trim).unwrap_or(mime_type).to_ascii_lowercase();
+        let essence = mime_type.split(';').next().map_or(mime_type, str::trim).to_ascii_lowercase();
         return match essence.as_str() {
             "text/csv" | "application/csv" | "application/vnd.ms-excel" => {
                 if std::str::from_utf8(file_bytes).is_ok() {
@@ -207,7 +206,7 @@ fn extract_delimited_tables(
         .collect::<std::result::Result<Vec<StringRecord>, csv::Error>>()
         .context("failed to parse delimited table")?
         .into_iter()
-        .map(|record| record.iter().map(|cell| cell.to_string()).collect::<Vec<_>>())
+        .map(|record| record.iter().map(std::string::ToString::to_string).collect::<Vec<_>>())
         .filter(|row| row.iter().any(|cell| !cell.trim().is_empty()))
         .collect::<Vec<_>>();
     let inferred = infer_tabular_shape(&rows);
@@ -235,7 +234,7 @@ fn extract_delimited_tables(
 }
 
 fn detect_delimiter(text: &str) -> u8 {
-    let candidates = [b',', b';', b'\t', b'|'];
+    let candidates = *b",;\t|";
     candidates.into_iter().max_by_key(|delimiter| score_delimiter(text, *delimiter)).unwrap_or(b',')
 }
 
@@ -281,7 +280,7 @@ fn extract_workbook_tables(
         ));
     }
 
-    let sheet_names = workbook.sheet_names().to_owned();
+    let sheet_names = workbook.sheet_names();
     let mut tables = Vec::new();
     for sheet_name in &sheet_names {
         let explicit_tables = extract_explicit_sheet_tables(&mut workbook, sheet_name, warnings);

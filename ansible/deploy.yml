@@ -87,8 +87,8 @@
           {{
             (
               ironrag_env_lines
-              | select('match', '^(IRONRAG_OPENAI_API_KEY|IRONRAG_DEEPSEEK_API_KEY|IRONRAG_QWEN_API_KEY)=')
-              | map('regex_replace', '^(IRONRAG_OPENAI_API_KEY|IRONRAG_DEEPSEEK_API_KEY|IRONRAG_QWEN_API_KEY)=', '')
+              | select('match', '^IRONRAG_AI_PROVIDER_API_KEYS_JSON_B64=')
+              | map('regex_replace', '^IRONRAG_AI_PROVIDER_API_KEYS_JSON_B64=', '')
               | map('trim')
               | reject('equalto', '')
               | list
@@ -126,7 +126,7 @@
             + (
               [ '  Provider key(s) in .env.' ]
               if ironrag_llm_key_configured | bool
-              else [ '  Add IRONRAG_*_API_KEY or UI.' ]
+              else [ '  Add IRONRAG_AI_PROVIDER_API_KEYS_JSON_B64 or use the UI.' ]
             )
             + [ '---' ]
           }}

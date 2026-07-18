@@ -1,4 +1,4 @@
-import { chromium, type FullConfig } from '@playwright/test';
+import { chromium, type FullConfig } from '@playwright/test'
 
 /**
  * Log in to the real backend once before the visual QA run, and persist
@@ -9,38 +9,34 @@ import { chromium, type FullConfig } from '@playwright/test';
  * Credentials are injected via `QA_LOGIN` / `QA_PASSWORD` env vars.
  */
 async function globalSetup(_config: FullConfig) {
-  const login = process.env.QA_LOGIN ?? 'admin';
-  const password = process.env.QA_PASSWORD;
-  const baseURL = process.env.QA_BASE_URL ?? 'http://127.0.0.1:4173';
+  const login = process.env.QA_LOGIN ?? 'admin'
+  const password = process.env.QA_PASSWORD
+  const baseURL = process.env.QA_BASE_URL ?? 'http://127.0.0.1:4173'
   if (!password) {
-    throw new Error('QA_PASSWORD is required for visual QA login');
+    throw new Error('QA_PASSWORD is required for visual QA login')
   }
 
-  const browser = await chromium.launch();
+  const browser = await chromium.launch()
   try {
-    const context = await browser.newContext({ baseURL });
+    const context = await browser.newContext({ baseURL })
     const response = await context.request.post(`${baseURL}/v1/iam/session/login`, {
       data: { login, password },
       headers: { 'content-type': 'application/json' },
-    });
+    })
     if (!response.ok()) {
-      throw new Error(
-        `Login failed: HTTP ${response.status()} — ${await response.text()}`,
-      );
+      throw new Error(`Login failed: HTTP ${response.status()} — ${await response.text()}`)
     }
     // Fetch /iam/session/resolve so we have a fresh session record and the
     // backend sees one full round-trip before the scenarios run.
-    const resolve = await context.request.get(`${baseURL}/v1/iam/session/resolve`);
+    const resolve = await context.request.get(`${baseURL}/v1/iam/session/resolve`)
     if (!resolve.ok()) {
-      throw new Error(
-        `Session resolve failed: HTTP ${resolve.status()} — ${await resolve.text()}`,
-      );
+      throw new Error(`Session resolve failed: HTTP ${resolve.status()} — ${await resolve.text()}`)
     }
-    await context.storageState({ path: 'visual-qa/.storage/state.json' });
-    await context.close();
+    await context.storageState({ path: 'visual-qa/.storage/state.json' })
+    await context.close()
   } finally {
-    await browser.close();
+    await browser.close()
   }
 }
 
-export default globalSetup;
+export default globalSetup

@@ -1,8 +1,7 @@
-#![allow(clippy::unwrap_used, clippy::expect_used)]
-
 #[path = "greenfield_contracts.rs"]
 mod greenfield_contracts;
 
+use anyhow::Context as _;
 use serde_json::json;
 use serde_yaml::Value;
 use uuid::Uuid;
@@ -20,37 +19,39 @@ use ironrag_backend::{
     },
 };
 
-fn openapi_contract() -> Value {
+fn openapi_contract() -> anyhow::Result<Value> {
     serde_yaml::from_str(&greenfield_contracts::load_openapi_contract_text())
-        .expect("OpenAPI contract must be valid YAML")
+        .context("OpenAPI contract is not valid YAML")
 }
 
-fn mapping_child<'a>(value: &'a Value, key: &str) -> &'a Value {
+fn mapping_child<'a>(value: &'a Value, key: &str) -> anyhow::Result<&'a Value> {
     value
         .as_mapping()
         .and_then(|mapping| mapping.get(Value::String(key.to_string())))
-        .expect("OpenAPI mapping key must exist")
+        .with_context(|| format!("OpenAPI mapping key `{key}` is absent"))
 }
 
-fn component_schema<'a>(contract: &'a Value, name: &str) -> &'a Value {
-    mapping_child(mapping_child(mapping_child(contract, "components"), "schemas"), name)
+fn component_schema<'a>(contract: &'a Value, name: &str) -> anyhow::Result<&'a Value> {
+    let components = mapping_child(contract, "components")?;
+    let schemas = mapping_child(components, "schemas")?;
+    mapping_child(schemas, name)
 }
 
-fn property_schema<'a>(schema: &'a Value, name: &str) -> &'a Value {
-    mapping_child(mapping_child(schema, "properties"), name)
+fn property_schema<'a>(schema: &'a Value, name: &str) -> anyhow::Result<&'a Value> {
+    let properties = mapping_child(schema, "properties")?;
+    mapping_child(properties, name)
 }
 
-fn string_array(value: &Value) -> Vec<String> {
-    value
-        .as_sequence()
-        .expect("OpenAPI value must be an array")
+fn string_array(value: &Value) -> anyhow::Result<Vec<String>> {
+    let values = value.as_sequence().context("OpenAPI value is not an array")?;
+    values
         .iter()
-        .map(|item| item.as_str().expect("OpenAPI array item must be a string").to_string())
+        .map(|item| item.as_str().map(str::to_string).context("OpenAPI array item is not a string"))
         .collect()
 }
 
-fn string_array_child(value: &Value, key: &str) -> Vec<String> {
-    string_array(mapping_child(value, key))
+fn string_array_child(value: &Value, key: &str) -> anyhow::Result<Vec<String>> {
+    string_array(mapping_child(value, key)?)
 }
 
 fn string_array_from<const N: usize>(values: [&str; N]) -> Vec<String> {
@@ -58,9 +59,9 @@ fn string_array_from<const N: usize>(values: [&str; N]) -> Vec<String> {
 }
 
 #[test]
-fn web_ingest_rest_surface_keeps_canonical_routes_and_runtime_defaults() {
+fn web_ingest_rest_surface_keeps_canonical_routes_and_runtime_defaults() -> anyhow::Result<()> {
     let contract = greenfield_contracts::load_openapi_contract_text();
-    let openapi = openapi_contract();
+    let openapi = openapi_contract()?;
 
     for path in [
         "/v1/content/web-runs:",
@@ -71,26 +72,26 @@ fn web_ingest_rest_surface_keeps_canonical_routes_and_runtime_defaults() {
         assert!(contract.contains(path), "missing web ingest REST path `{path}`");
     }
 
-    let request_schema = component_schema(&openapi, "CreateWebIngestRunRequest");
+    let request_schema = component_schema(&openapi, "CreateWebIngestRunRequest")?;
     assert_eq!(
-        string_array_child(request_schema, "required"),
+        string_array_child(request_schema, "required")?,
         ["libraryId", "seedUrl", "mode", "crawlFilter", "materializationFilter"],
         "CreateWebIngestRunRequest must keep canonical required fields",
     );
     assert_eq!(
-        mapping_child(property_schema(request_schema, "mode"), "$ref")
+        mapping_child(property_schema(request_schema, "mode")?, "$ref")?
             .as_str()
-            .expect("mode must reference WebIngestMode"),
+            .context("mode reference is not a string")?,
         "#/components/schemas/WebIngestMode",
         "CreateWebIngestRunRequest.mode must use the canonical mode enum",
     );
     assert_eq!(
-        string_array_child(component_schema(&openapi, "WebIngestMode"), "enum"),
+        string_array_child(component_schema(&openapi, "WebIngestMode")?, "enum")?,
         ["single_page", "recursive_crawl"],
         "web ingest mode enum must stay canonical in OpenAPI",
     );
     assert_eq!(
-        string_array_child(component_schema(&openapi, "WebBoundaryPolicy"), "enum"),
+        string_array_child(component_schema(&openapi, "WebBoundaryPolicy")?, "enum")?,
         [
             WebBoundaryPolicy::SameHost.as_str(),
             WebBoundaryPolicy::SameHostAndSubdomains.as_str(),
@@ -100,26 +101,28 @@ fn web_ingest_rest_surface_keeps_canonical_routes_and_runtime_defaults() {
     );
 
     let single_page_defaults = validate_web_run_settings("single_page", None, Some(9), None)
-        .expect("single page settings");
+        .map_err(anyhow::Error::msg)?;
     assert_eq!(single_page_defaults.mode, "single_page");
     assert_eq!(single_page_defaults.boundary_policy, "same_host");
     assert_eq!(single_page_defaults.max_depth, 0);
     assert_eq!(single_page_defaults.max_pages, DEFAULT_WEB_CRAWL_MAX_PAGES);
 
-    let recursive_defaults =
-        validate_web_run_settings("recursive_crawl", None, None, None).expect("recursive settings");
+    let recursive_defaults = validate_web_run_settings("recursive_crawl", None, None, None)
+        .map_err(anyhow::Error::msg)?;
     assert_eq!(recursive_defaults.mode, "recursive_crawl");
     assert_eq!(recursive_defaults.boundary_policy, "same_host");
     assert_eq!(recursive_defaults.max_depth, DEFAULT_WEB_CRAWL_DEPTH);
     assert_eq!(recursive_defaults.max_pages, DEFAULT_WEB_CRAWL_MAX_PAGES);
+    Ok(())
 }
 
 #[test]
-fn web_ingest_contract_enums_cover_runtime_vocabulary_and_partial_count_grammar() {
-    let openapi = openapi_contract();
+fn web_ingest_contract_enums_cover_runtime_vocabulary_and_partial_count_grammar()
+-> anyhow::Result<()> {
+    let openapi = openapi_contract()?;
 
     assert_eq!(
-        string_array_child(component_schema(&openapi, "WebIngestRunState"), "enum"),
+        string_array_child(component_schema(&openapi, "WebIngestRunState")?, "enum")?,
         [
             "accepted",
             "discovering",
@@ -132,7 +135,7 @@ fn web_ingest_contract_enums_cover_runtime_vocabulary_and_partial_count_grammar(
         "run state enum must keep completed_partial in OpenAPI",
     );
     assert_eq!(
-        string_array_child(component_schema(&openapi, "WebRunCounts"), "required"),
+        string_array_child(component_schema(&openapi, "WebRunCounts")?, "required")?,
         [
             "discovered",
             "eligible",
@@ -149,12 +152,12 @@ fn web_ingest_contract_enums_cover_runtime_vocabulary_and_partial_count_grammar(
     );
 
     assert_eq!(
-        string_array_child(component_schema(&openapi, "WebClassificationReason"), "enum"),
+        string_array_child(component_schema(&openapi, "WebClassificationReason")?, "enum")?,
         string_array_from(WebClassificationReason::ALL.map(WebClassificationReason::as_str)),
         "classification reason enum must cover the runtime vocabulary",
     );
     assert_eq!(
-        string_array_child(component_schema(&openapi, "WebRunFailureCode"), "enum"),
+        string_array_child(component_schema(&openapi, "WebRunFailureCode")?, "enum")?,
         string_array_from(WebRunFailureCode::ALL.map(WebRunFailureCode::as_str)),
         "failure code enum must cover the runtime vocabulary",
     );
@@ -165,16 +168,12 @@ fn web_ingest_contract_enums_cover_runtime_vocabulary_and_partial_count_grammar(
         ..WebRunCounts::default()
     });
     assert_eq!(completed_partial.as_str(), "completed_partial");
+    Ok(())
 }
 
 #[test]
-fn web_ingest_mcp_tool_vocabulary_and_request_fields_stay_canonical() {
-    for tool_name in [
-        "submit_web_ingest_run",
-        "get_web_ingest_run",
-        "list_web_ingest_run_pages",
-        "cancel_web_ingest_run",
-    ] {
+fn web_ingest_mcp_tool_vocabulary_and_request_fields_stay_canonical() -> anyhow::Result<()> {
+    for tool_name in ["submit_web_run", "get_web_run", "list_web_run_pages", "cancel_web_run"] {
         assert!(
             MCP_DIAGNOSTICS_TOOL_NAMES.contains(&tool_name),
             "missing MCP tool `{tool_name}` from canonical tool list"
@@ -201,8 +200,7 @@ fn web_ingest_mcp_tool_vocabulary_and_request_fields_stay_canonical() {
             "blockPatterns": []
         },
         "idempotencyKey": "crawl-1"
-    }))
-    .expect("submit request should deserialize");
+    }))?;
     assert_eq!(submit_request.library, "default/docs");
     assert_eq!(submit_request.seed_url, "https://example.com/docs");
     assert_eq!(submit_request.mode, "recursive_crawl");
@@ -215,13 +213,11 @@ fn web_ingest_mcp_tool_vocabulary_and_request_fields_stay_canonical() {
 
     let run_id = Uuid::now_v7();
     let get_request: McpGetWebIngestRunRequest =
-        serde_json::from_value(json!({ "runId": run_id })).expect("get request should deserialize");
+        serde_json::from_value(json!({ "runId": run_id }))?;
     let list_pages_request: McpListWebIngestRunPagesRequest =
-        serde_json::from_value(json!({ "runId": run_id }))
-            .expect("list pages request should deserialize");
+        serde_json::from_value(json!({ "runId": run_id }))?;
     let cancel_request: McpCancelWebIngestRunRequest =
-        serde_json::from_value(json!({ "runId": run_id }))
-            .expect("cancel request should deserialize");
+        serde_json::from_value(json!({ "runId": run_id }))?;
 
     assert_eq!(get_request.run_id, run_id);
     assert_eq!(list_pages_request.run_id, run_id);
@@ -251,13 +247,16 @@ fn web_ingest_mcp_tool_vocabulary_and_request_fields_stay_canonical() {
             "blockPatterns": []
         }
     });
-    single_stage_filter_request.as_object_mut().expect("request object").insert(
-        single_stage_filter_key,
-        json!({
-            "mode": "blocklist",
-            "patterns": []
-        }),
-    );
+    single_stage_filter_request
+        .as_object_mut()
+        .context("synthetic request is not an object")?
+        .insert(
+            single_stage_filter_key,
+            json!({
+                "mode": "blocklist",
+                "patterns": []
+            }),
+        );
     assert!(
         serde_json::from_value::<McpSubmitWebIngestRunRequest>(single_stage_filter_request)
             .is_err(),
@@ -278,4 +277,5 @@ fn web_ingest_mcp_tool_vocabulary_and_request_fields_stay_canonical() {
         .is_err(),
         "filter objects must require both allowPatterns and blockPatterns"
     );
+    Ok(())
 }

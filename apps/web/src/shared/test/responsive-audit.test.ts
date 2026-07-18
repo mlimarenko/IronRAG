@@ -1,6 +1,6 @@
-import { readFileSync } from 'node:fs';
-import { resolve } from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { readFileSync } from 'node:fs'
+import { resolve } from 'node:path'
+import { describe, expect, it } from 'vitest'
 
 /**
  * Static audit that every extracted dashboard component still carries its
@@ -10,16 +10,16 @@ import { describe, expect, it } from 'vitest';
  * reshuffling Tailwind classes" regression during refactors.
  */
 
-const repoRoot = resolve(__dirname, '../../..');
+const repoRoot = resolve(__dirname, '../../..')
 
 function readSrc(relativePath: string): string {
-  return readFileSync(resolve(repoRoot, 'src', relativePath), 'utf8');
+  return readFileSync(resolve(repoRoot, 'src', relativePath), 'utf8')
 }
 
 type ResponsiveExpectation = {
-  file: string;
-  mustContain: RegExp[];
-};
+  file: string
+  mustContain: RegExp[]
+}
 
 const expectations: ResponsiveExpectation[] = [
   {
@@ -51,24 +51,28 @@ const expectations: ResponsiveExpectation[] = [
     mustContain: [/w-12/, /w-64/, /aria-expanded/],
   },
   {
-    // Assistant evidence now uses the shared DataView inspector contract
+    // Assistant evidence now uses the shared DataWorkspaceView inspector contract
     // instead of page-local fixed/lg drawer classes.
     file: 'features/assistant/AssistantPage.tsx',
-    mustContain: [/DataView/, /inspectorOpen=\{showEvidencePanel\}/, /showDrawerHeader=\{false\}/],
+    mustContain: [
+      /DataWorkspaceView/,
+      /inspectorOpen=\{showEvidencePanel\}/,
+      /showDrawerHeader=\{false\}/,
+    ],
   },
   {
     file: 'features/graph/components/GraphInspector.tsx',
     mustContain: [/md:w-\[24rem\]/, /lg:w-\[28rem\]/, /xl:w-\[30rem\]/],
   },
-];
+]
 
 describe('wave-2 responsive breakpoint audit', () => {
   for (const { file, mustContain } of expectations) {
     it(`${file} keeps its breakpoint classes`, () => {
-      const source = readSrc(file);
+      const source = readSrc(file)
       for (const pattern of mustContain) {
-        expect(source, `${file} must still contain ${pattern}`).toMatch(pattern);
+        expect(source, `${file} must still contain ${pattern}`).toMatch(pattern)
       }
-    });
+    })
   }
-});
+})

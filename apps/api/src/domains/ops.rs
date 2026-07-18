@@ -35,7 +35,8 @@ impl UnknownOpsAsyncOperationStatus {
 }
 
 impl OpsAsyncOperationStatus {
-    pub fn as_str(self) -> &'static str {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
         match self {
             Self::Accepted => "accepted",
             Self::Processing => ASYNC_OP_STATUS_PROCESSING,

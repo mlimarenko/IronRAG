@@ -1,5 +1,3 @@
-#![allow(clippy::missing_const_for_fn, clippy::missing_errors_doc)]
-
 use chrono::{DateTime, Utc};
 use sqlx::{FromRow, PgPool};
 use uuid::Uuid;
@@ -706,6 +704,6 @@ fn parse_runtime_decision_kind(value: &str) -> Result<RuntimeDecisionKind, sqlx:
     value.parse().map_err(invalid_enum_value)
 }
 
-fn invalid_enum_value(message: String) -> sqlx::Error {
+const fn invalid_enum_value(message: String) -> sqlx::Error {
     sqlx::Error::Protocol(message)
 }

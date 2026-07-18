@@ -1,6 +1,6 @@
 use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
-use sqlx::{FromRow, PgPool};
+use sqlx::{Executor, FromRow, PgPool, Postgres};
 use uuid::Uuid;
 
 #[derive(Debug, Clone, FromRow)]
@@ -17,6 +17,29 @@ pub struct AiPriceCatalogRow {
     pub effective_to: Option<DateTime<Utc>>,
     pub catalog_scope: String,
     pub workspace_id: Option<Uuid>,
+}
+
+/// Minimal typed catalog policy needed to interpret usage counters before
+/// pricing them. Provider and model identities are deliberately excluded:
+/// token accounting semantics belong to protocol policy, never identifiers.
+#[derive(Debug, Clone, FromRow)]
+pub struct ProviderBillingUsageProfileRow {
+    pub usage_policy_json: Option<serde_json::Value>,
+}
+
+pub async fn get_provider_billing_usage_profile<'e>(
+    executor: impl Executor<'e, Database = Postgres>,
+    provider_catalog_id: Uuid,
+) -> Result<Option<ProviderBillingUsageProfileRow>, sqlx::Error> {
+    sqlx::query_as::<_, ProviderBillingUsageProfileRow>(
+        "select
+            capability_flags_json -> 'usagePolicy' as usage_policy_json
+         from ai_provider_catalog
+         where id = $1",
+    )
+    .bind(provider_catalog_id)
+    .fetch_optional(executor)
+    .await
 }
 
 pub async fn list_price_catalog(
@@ -167,8 +190,8 @@ pub async fn get_price_catalog_by_id(
     .await
 }
 
-pub async fn get_effective_price_catalog_entry(
-    postgres: &PgPool,
+pub async fn get_effective_price_catalog_entry<'e>(
+    executor: impl Executor<'e, Database = Postgres>,
     model_catalog_id: Uuid,
     billing_unit: &str,
     workspace_id: Option<Uuid>,
@@ -206,7 +229,7 @@ pub async fn get_effective_price_catalog_entry(
             .bind(billing_unit)
             .bind(effective_at)
             .bind(workspace_id)
-            .fetch_all(postgres)
+            .fetch_all(executor)
             .await?
         }
         None => {
@@ -233,7 +256,7 @@ pub async fn get_effective_price_catalog_entry(
             .bind(model_catalog_id)
             .bind(billing_unit)
             .bind(effective_at)
-            .fetch_all(postgres)
+            .fetch_all(executor)
             .await?
         }
     };
@@ -276,17 +299,11 @@ fn effective_price_sort_key(
     let catalog_scope_rank = if row.catalog_scope == "workspace_override" { 2 } else { 1 };
     let variant_rank = if row.price_variant_key == price_variant_key {
         2
-    } else if row.price_variant_key == "default" {
-        1
     } else {
-        0
+        i32::from(row.price_variant_key == "default")
     };
     let tier_rank =
-        if row.request_input_tokens_min.is_some() || row.request_input_tokens_max.is_some() {
-            1
-        } else {
-            0
-        };
+        i32::from(row.request_input_tokens_min.is_some() || row.request_input_tokens_max.is_some());
     let tier_floor = row.request_input_tokens_min.unwrap_or(-1);
     (catalog_scope_rank, variant_rank, tier_rank, tier_floor, row.effective_from, row.id)
 }

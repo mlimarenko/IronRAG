@@ -16,7 +16,7 @@ this directory is the entry point for deeper technical material.
 | [FRONTEND-TRANSPORT.md](./FRONTEND-TRANSPORT.md) | Frontend nginx: HTTP default, optional TLS/HTTP2/HTTP3, reverse-proxy checklist. |
 | [CAPACITY-PLANNING.md](./CAPACITY-PLANNING.md) | Host profiles, disk and vector sizing, large-host memory caps. |
 | [WEBHOOK.md](./WEBHOOK.md) | Outbound webhook subsystem: events, payload contract, signing, retry policy. |
-| [AI-BINDINGS.md](./AI-BINDINGS.md) | AI binding model: 8 purposes, scope ladder, wire-level prompt layout, model-choice tradeoffs, prompt-cache pitfalls. |
+| [AI-BINDINGS.md](./AI-BINDINGS.md) | Six canonical AI profiles, scope ladder, wire-level prompt layout, model-choice tradeoffs, and prompt-cache pitfalls. |
 | [BENCHMARKS.md](./BENCHMARKS.md) | Grounded-query benchmark suites, retrieval rank metrics, ingest smoke checks, and comparison workflow. |
 | [Upgrade from 0.4.x](../../README.md#upgrading-from-04x) | Short 0.4.x to 0.5.0 upgrade path; the full procedure is in the changelog. |
 
@@ -34,8 +34,8 @@ flowchart TD
   Detect{"file kind + recognition policy"}:::decision
   Native["native parsers<br/>text / md / html / code / xls"]:::worker
   Docling["Docling CPU<br/>PDF page checkpoints / DOCX / PPTX / image OCR"]:::worker
-  Vision["vision binding<br/>raster OCR alternative"]:::worker
-  MissingVision["fail loud — no vision binding"]:::fail
+  Vision["extract_text profile<br/>visual raster analysis"]:::worker
+  MissingVision["fail loud — no multimodal extract_text profile"]:::fail
   Chunk["chunk_content + structured blocks"]:::worker
   Embed["embed_chunk (provider binding)"]:::worker
   Facts["extract_technical_facts"]:::worker
@@ -65,9 +65,9 @@ Recognition policy is per-library
 (`PUT /v1/catalog/libraries/{libraryId}/recognition-policy` with
 `{"rasterImageEngine":"docling"}` or `{"rasterImageEngine":"vision"}`).
 New libraries inherit
-`IRONRAG_RECOGNITION_DEFAULT_RASTER_IMAGE_ENGINE=docling`. Missing vision
-bindings fail loud when the policy selects `vision`; there is no silent
-provider fallback.
+`IRONRAG_RECOGNITION_DEFAULT_RASTER_IMAGE_ENGINE=docling`. A missing
+multimodal Document Understanding (`extract_text`) profile fails loud when the
+policy selects `vision`; there is no silent provider substitution.
 
 Stored PDFs are restart-safe: completed Docling page ranges are persisted as
 ingest units and reused after worker restarts, backend restarts, lease recovery,
@@ -109,9 +109,9 @@ flowchart LR
   Route -->|broad / ambiguous| Response
 ```
 
-`query_retrieve` and `embed_chunk` bindings are kept in sync. When an operator
-switches to an embedding model with a different dimension, they must run the
-vector rebuild utility from a source library using that binding. PostgreSQL
+Index and query embeddings use the same `embed_chunk` profile. When an operator
+switches to a different embedding space, they must run the vector rebuild
+utility for the affected source library, even if dimensions stay equal. PostgreSQL
 stores vector material in per-`(library, dim)` pgvector relations tracked by a
 manifest, so the rebuild recalculates the affected vector material before the
 new retrieval lane is used.
@@ -125,31 +125,31 @@ back to the full extracted keyword set.
 
 | Store | Role |
 |---|---|
-| **PostgreSQL** | Catalog (workspaces, libraries, documents, revisions), durable ingest units, AI catalog (providers, models, presets, prices), bindings, IAM, sessions, query executions, billing, knowledge documents, chunks, technical facts, graph data, context bundles, pgvector embeddings, and PostgreSQL full-text search indexes. |
+| **PostgreSQL** | Catalog (workspaces, libraries, documents, revisions), durable ingest units, AI catalog (providers, models, prices, accounts, and inline binding profiles), IAM, sessions, query executions, billing, knowledge documents, chunks, technical facts, graph data, context bundles, pgvector embeddings, and PostgreSQL full-text search indexes. |
 | **Redis** (redis:8.8) | Graph topology cache, IR cache, answer-context cache, prewarm coordination. |
 | **Filesystem / S3** | Source-document blobs (configurable; bundled `s4core` provides a built-in S3-compatible blob store). |
 
 ## Multi-provider router
 
-Bindings select a `(provider_credential, model_preset)` pair per
-pipeline purpose (`extract_text`, `extract_graph`,
-`embed_chunk`, `query_compile`, `query_retrieve`, `query_answer`, `agent`,
-`vision`). The catalog ships eight provider profiles — OpenAI,
-DeepSeek, Qwen / DashScope-intl, GPTunnel, OpenRouter, RouterAI,
-MiniMax, and Ollama — each declared in `ai_provider_catalog` with capability
-flags, runtime paths, model-discovery configuration, and a
-bootstrap-preset list.
+Each binding selects an `ai_account` and `ai_model_catalog` row, with prompt and
+sampling settings stored inline in `ai_binding`. Exactly five profiles are
+required: `extract_graph`, `embed_chunk`, `query_compile`, `query_answer`, and
+`agent`. Multimodal `extract_text` is optional. The catalog ships eight
+provider profiles — OpenAI, DeepSeek, Qwen / DashScope-intl, GPTunnel,
+OpenRouter, RouterAI, MiniMax, and Ollama — each declared in
+`ai_provider_catalog` with capability flags, runtime paths, model-discovery
+configuration, and bootstrap model entries.
 
-Binding writes enforce two invariants the runtime depends on:
+Binding writes enforce these runtime invariants:
 
 - The model selected for a binding must declare the binding's
   purpose in its `defaultRoles`
   (`ai_catalog_service::catalog::validate_model_binding_purpose`).
-- `embed_chunk` and `query_retrieve` must point at the same model
-  catalog entry; the vector-counterpart sync upserts the partner
-  on every write to keep the active retrieval path consistent.
-- A dimension-changing embedding model switch is finalized by running the
-  vector rebuild utility, so pgvector relations and stored vectors move together.
+- `embed_chunk` is the single profile for both stored and query vectors; no
+  second binding can select an incompatible embedding space.
+- Any embedding-space change is finalized by running the vector rebuild
+  utility, so pgvector relations and stored vectors move together even when
+  dimensions happen to match.
 
 Per-purpose binding scopes resolve from library → workspace →
 instance, so a workspace can override the instance default for a

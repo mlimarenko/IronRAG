@@ -1,24 +1,24 @@
-import { useQuery } from '@tanstack/react-query';
-import type { TFunction } from 'i18next';
-import { Link } from 'react-router-dom';
-import { ArrowRight, Copy, Terminal, Code2, Brain, KeyRound } from 'lucide-react';
-import { Button } from '@/shared/components/ui/button';
-import { DataState } from '@/shared/components/DataState';
-import { queries } from '@/shared/api';
+import { useQuery } from '@tanstack/react-query'
+import type { TFunction } from 'i18next'
+import { Link } from 'react-router-dom'
+import { ArrowRight, Copy, Terminal, Code2, Brain, KeyRound } from 'lucide-react'
+import { Button } from '@/shared/components/ui/button'
+import { DataState } from '@/shared/components/DataState'
+import { queries } from '@/shared/api'
 
 type McpClientConfig = {
-  name: string;
-  icon: typeof Terminal;
-  config: string;
-};
+  name: string
+  icon: typeof Terminal
+  config: string
+}
 
-// All snippets assume the MCP Streamable HTTP transport (spec 2025-06-18)
+// All snippets assume the MCP Streamable HTTP transport (spec 2025-11-25)
 // that IronRAG now speaks natively. No stdio proxy, no bespoke SSE
 // endpoint — just the canonical `POST/GET/DELETE /v1/mcp` URL plus a
 // bearer token. `${IRONRAG_MCP_TOKEN}` placeholder reminds operators to
 // store the token in an env var, not inline in their dotfile.
 function getMcpConfigs(origin: string): McpClientConfig[] {
-  const mcpUrl = `${origin}/v1/mcp`;
+  const mcpUrl = `${origin}/v1/mcp`
   return [
     {
       name: 'Claude Code',
@@ -65,13 +65,13 @@ function getMcpConfigs(origin: string): McpClientConfig[] {
   }
 }`,
     },
-  ];
+  ]
 }
 
-type McpConnectGuideProps = {
-  t: TFunction;
-  libraryId?: string;
-};
+type McpConnectGuideProps = Readonly<{
+  t: TFunction
+  libraryId?: string
+}>
 
 /**
  * Instance-level MCP connect guide (RM-06): server URLs, token/scope note,
@@ -83,17 +83,14 @@ type McpConnectGuideProps = {
  */
 export function McpConnectGuide({ t, libraryId }: McpConnectGuideProps) {
   const promptQuery = useQuery({
-    ...queries.getAssistantSystemPromptOptions(
-      libraryId ? { query: { libraryId } } : {},
-    ),
-  });
+    ...queries.getAssistantSystemPromptOptions(libraryId ? { query: { libraryId } } : {}),
+  })
   const promptResponse = promptQuery.data as
-    | { rendered?: string | null; template?: string }
-    | undefined;
-  const systemPrompt = promptResponse?.rendered ?? promptResponse?.template ?? null;
+    { rendered?: string | null; template?: string } | undefined
+  const systemPrompt = promptResponse?.rendered ?? promptResponse?.template ?? null
 
-  const origin = window.location.origin;
-  const configs = getMcpConfigs(origin);
+  const origin = window.location.origin
+  const configs = getMcpConfigs(origin)
 
   return (
     <>
@@ -138,13 +135,19 @@ export function McpConnectGuide({ t, libraryId }: McpConnectGuideProps) {
             size="sm"
             disabled={!systemPrompt}
             onClick={() => {
-              if (systemPrompt) void navigator.clipboard.writeText(systemPrompt);
+              if (systemPrompt) void navigator.clipboard.writeText(systemPrompt)
             }}
           >
             <Copy className="mr-1.5 h-3.5 w-3.5" /> {t('admin.copy')}
           </Button>
         </div>
-        <DataState query={{ isLoading: promptQuery.isLoading, error: promptQuery.error, data: systemPrompt ?? undefined }}>
+        <DataState
+          query={{
+            isLoading: promptQuery.isLoading,
+            error: promptQuery.error,
+            data: systemPrompt ?? undefined,
+          }}
+        >
           {(prompt) => (
             <pre className="max-h-96 overflow-x-auto overflow-y-auto whitespace-pre-wrap rounded-xl bg-surface-sunken p-4 font-mono text-xs leading-relaxed">
               {prompt}
@@ -182,5 +185,5 @@ export function McpConnectGuide({ t, libraryId }: McpConnectGuideProps) {
         ))}
       </div>
     </>
-  );
+  )
 }

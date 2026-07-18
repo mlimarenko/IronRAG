@@ -1,33 +1,32 @@
-#![allow(clippy::unwrap_used, clippy::expect_used)]
-
 #[path = "support/iam_token_support.rs"]
 mod iam_token_support;
+#[path = "support/mcp_tool_call_support.rs"]
+mod mcp_tool_call_support;
+#[cfg(feature = "test-support")]
 #[path = "support/web_ingest_support.rs"]
 mod web_ingest_support;
 
 use anyhow::Context;
-use axum::{
-    Router,
-    body::Body,
-    http::{Request, StatusCode, header},
-};
-use http_body_util::BodyExt;
+use axum::Router;
 use serde_json::{Value, json};
-use tokio::{sync::broadcast, time};
-use tower::ServiceExt;
 use uuid::Uuid;
 
 use ironrag_backend::{
     app::{config::Settings, state::AppState},
     infra::repositories::{catalog_repository, content_repository},
     interfaces::http::router,
-    services::ingest::worker,
 };
+
+#[cfg(feature = "test-support")]
+use ironrag_backend::services::ingest::worker;
+#[cfg(feature = "test-support")]
+use tokio::{sync::broadcast, time};
 
 struct McpReadFixture {
     state: AppState,
     workspace_id: Uuid,
     library_id: Uuid,
+    #[cfg(feature = "test-support")]
     library_ref: String,
 }
 
@@ -58,6 +57,7 @@ impl McpReadFixture {
             state,
             workspace_id: workspace.id,
             library_id: library.id,
+            #[cfg(feature = "test-support")]
             library_ref: format!("{}/{}", workspace.slug, library.slug),
         })
     }
@@ -94,42 +94,15 @@ impl McpReadFixture {
         tool_name: &str,
         arguments: Value,
     ) -> anyhow::Result<Value> {
-        let response = self
-            .app()
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/v1/mcp")
-                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
-                    .header(header::CONTENT_TYPE, "application/json")
-                    .body(Body::from(
-                        json!({
-                            "jsonrpc": "2.0",
-                            "id": "read-test",
-                            "method": "tools/call",
-                            "params": {
-                                "name": tool_name,
-                                "arguments": arguments,
-                            },
-                        })
-                        .to_string(),
-                    ))
-                    .expect("build mcp read request"),
-            )
-            .await
-            .with_context(|| format!("MCP read tool call {tool_name} failed"))?;
-
-        if response.status() != StatusCode::OK {
-            anyhow::bail!("unexpected status {} for tool {tool_name}", response.status());
-        }
-
-        let bytes = response
-            .into_body()
-            .collect()
-            .await
-            .context("failed to collect mcp read response body")?
-            .to_bytes();
-        serde_json::from_slice(&bytes).context("failed to decode mcp read response json")
+        mcp_tool_call_support::call_tool(
+            self.app(),
+            "/v1/mcp",
+            token,
+            "read-test",
+            tool_name,
+            arguments,
+        )
+        .await
     }
 
     async fn create_document_state(
@@ -547,12 +520,14 @@ async fn failed_documents_with_extracted_text_remain_readable_for_memory_reads()
     result
 }
 
+#[cfg(feature = "test-support")]
 #[tokio::test]
 #[ignore = "requires local postgres and redis services"]
 async fn web_ingest_documents_are_readable_through_mcp_read_document() -> anyhow::Result<()> {
     let settings =
         Settings::from_env().context("failed to load settings for web-ingest read test")?;
-    let fixture = McpReadFixture::create(settings).await?;
+    let mut fixture = McpReadFixture::create(settings).await?;
+    web_ingest_support::enable_loopback_test_transport(&mut fixture.state);
     let server = web_ingest_support::WebTestServer::start().await?;
 
     let result = async {
@@ -562,7 +537,7 @@ async fn web_ingest_documents_are_readable_through_mcp_read_document() -> anyhow
         let submit = fixture
             .mcp_tool_call(
                 &token,
-                "submit_web_ingest_run",
+                "submit_web_run",
                 json!({
                     "library": fixture.library_ref.clone(),
                     "seedUrl": server.url("/seed"),
@@ -595,9 +570,8 @@ async fn web_ingest_documents_are_readable_through_mcp_read_document() -> anyhow
             }
             time::sleep(std::time::Duration::from_millis(250)).await;
         }
-        let pages = fixture
-            .mcp_tool_call(&token, "list_web_ingest_run_pages", json!({ "runId": run_id }))
-            .await?;
+        let pages =
+            fixture.mcp_tool_call(&token, "list_web_run_pages", json!({ "runId": run_id })).await?;
         let page_items = pages["result"]["structuredContent"]["pages"]
             .as_array()
             .context("pages payload missing")?;

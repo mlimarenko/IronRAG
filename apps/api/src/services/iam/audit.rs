@@ -56,15 +56,18 @@ pub struct ListAuditEventsQuery {
     pub result_kind: Option<String>,
     pub search: Option<String>,
     pub limit: i64,
-    pub offset: i64,
+    /// Keyset cursor `(created_at, id)` of the last row on the previous
+    /// page. `None` starts from the top.
+    pub cursor: Option<(chrono::DateTime<chrono::Utc>, Uuid)>,
 }
 
 #[derive(Debug, Clone)]
 pub struct AuditEventPage<T> {
     pub items: Vec<T>,
     pub total: i64,
-    pub limit: i64,
-    pub offset: i64,
+    /// `(created_at, id)` of the last row on this page, present only when
+    /// more rows exist beyond it.
+    pub next_cursor: Option<(chrono::DateTime<chrono::Utc>, Uuid)>,
 }
 
 #[derive(Debug, Clone)]
@@ -241,8 +244,7 @@ impl AuditService {
         Ok(AuditEventPage {
             items: page.items.into_iter().map(map_redacted_event).collect(),
             total: page.total,
-            limit: query.limit,
-            offset: query.offset,
+            next_cursor: page.next_cursor,
         })
     }
 
@@ -265,8 +267,7 @@ impl AuditService {
         Ok(AuditEventPage {
             items: page.items.into_iter().map(map_internal_event).collect(),
             total: page.total,
-            limit: query.limit,
-            offset: query.offset,
+            next_cursor: page.next_cursor,
         })
     }
 
@@ -308,8 +309,7 @@ impl AuditService {
         Ok(AuditEventPage {
             items: page.items.into_iter().map(map_event).collect(),
             total: page.total,
-            limit: query.limit,
-            offset: query.offset,
+            next_cursor: page.next_cursor,
         })
     }
 
@@ -554,7 +554,7 @@ fn map_list_query(query: &ListAuditEventsQuery) -> audit_repository::ListAuditEv
         result_kind: query.result_kind.clone(),
         search: query.search.clone(),
         limit: query.limit,
-        offset: query.offset,
+        cursor: query.cursor,
     }
 }
 
@@ -671,7 +671,7 @@ fn format_assistant_call_summary_for_audit(summary: &AuditAssistantCallSummary) 
         _ => String::new(),
     };
 
-    format!("calls: {} | {}{}", summary.provider_call_count, models_fragment, cost_fragment,)
+    format!("calls: {} | {}{}", summary.provider_call_count, models_fragment, cost_fragment)
 }
 
 fn truncate_on_char_boundary(text: &str, max_chars: usize) -> String {

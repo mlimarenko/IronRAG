@@ -37,7 +37,7 @@ kind: Secret
 metadata:
   name: dotfile-secret
 data:
-  .secret-file: dmFsdWUtMg0KDQo=
+  .secret-file: REPLACE_ME
 ---
 apiVersion: v1
 kind: Pod
@@ -167,7 +167,7 @@ metadata:
 type: Opaque
 data:
   username: YWRtaW4=
-  password: MWYyZDFlMmU2N2Rm
+  password: REPLACE_ME
 ```
 
 ### Editing a Secret

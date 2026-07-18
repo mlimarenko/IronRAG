@@ -209,6 +209,7 @@ worker'а.
 | «Retrieval медленный, подозреваю плохие индексы» | [`audit index-bloat`](#audit-index-bloat) |
 | «Документ загрузился, но в ответах не появляется» | [`audit null-head-docs`](#audit-null-head-docs), потом [`repair null-heads`](#repair-null-heads) |
 | «Удалили библиотеки на той неделе, knowledge-plane rows вычищены?» | [`audit orphan-libraries`](#audit-orphan-libraries) |
+| «Lifecycle webhook ушёл в dead-letter и блокирует catalog delete» | [`audit webhook-outbox`](#audit-webhook-outbox), затем requeue через [`repair webhook-outbox-dead-letter`](#repair-webhook-outbox-dead-letter) или явный discard через [`repair webhook-outbox-dead-letter-resolve`](#repair-webhook-outbox-dead-letter-resolve) |
 | «Старые чанки копятся после замены ревизий» | [`gc stale-chunks`](#gc-stale-chunks) |
 | «`runtime_graph_evidence` больше остальной БД вместе взятой» | [`gc stale-evidence`](#gc-stale-evidence) |
 | «Подтверждённый orphan-след в knowledge plane, нужно вычистить» | [`gc orphan-libraries --yes`](#gc-orphan-libraries) |
@@ -338,6 +339,26 @@ ironrag-maintenance audit orphan-libraries --json
 
 Непустой отчёт — каноничный pre-flight перед
 [`gc orphan-libraries --yes`](#gc-orphan-libraries).
+
+### `audit webhook-outbox`
+
+**Что показывает.** Bounded и redacted inventory lifecycle outbox. По умолчанию используется
+`--state dead-letter`, есть фильтр `--library`, на одной keyset-странице не больше 500 строк.
+Payload, event ID, URL, credentials, headers, lease identity и raw errors исключены. Среди state
+есть и `resolved`; вывод показывает только типизированные `last_error_code` /
+`resolution_reason_code` и их несекретные timestamps.
+
+**Пример.**
+
+```bash
+ironrag-maintenance audit webhook-outbox --state dead-letter --limit 100 --json
+```
+
+Если `has_more` равен true, продолжайте с обоими полями `next_cursor` через
+`--before-created-at` и `--before-id`. Курсор опирается на неизменяемый порядок создания; поскольку
+принадлежность state-фильтру меняется в реальном времени, после requeue во время paging начните новый
+проход. Полный safety-контракт описан в
+[webhook operations](./WEBHOOK.md#операции-с-lifecycle-outbox-dead-letter).
 
 ---
 
@@ -492,6 +513,35 @@ ironrag-maintenance repair null-heads-auto --library <uuid> --json
 
 ```bash
 ironrag-maintenance repair clear-recovery-dead-letter --document <uuid>
+```
+
+### `repair webhook-outbox-dead-letter`
+
+**Что делает.** Атомарно переводит один точный UUID outbox из `dead_letter` в `pending`, сбрасывает
+attempt/lease/error state и делает строку доступной сейчас. HTTP не отправляет: доставку выполняет
+штатный worker. Аудит показывает только стабильный типизированный `last_error_code`, но не сырые
+ошибки транспорта и не payload. Отсутствующая строка или несовпадение state завершаются без изменений.
+
+```bash
+ironrag-maintenance repair webhook-outbox-dead-letter --outbox <uuid> --json
+```
+
+### `repair webhook-outbox-dead-letter-resolve`
+
+**Что делает.** Навсегда переводит один точный UUID из `dead_letter` в отдельный terminal state
+`resolved`, не выдавая это за доставку. Timestamp по часам PostgreSQL и bounded typed reason
+атомарно сохраняются в outbox и durable redacted audit log. `dispatched` и все прочие состояния
+защищены compare-and-set. Catalog delete считает `resolved` неблокирующим, а audit event переживает
+catalog cascade.
+
+Reason должен быть длиной 1–64 ASCII bytes в lowercase `snake_case`; free-form текст отклоняется.
+Используйте команду только когда доставка намеренно больше не нужна. Если получатель всё ещё должен
+получить событие, используйте requeue-команду выше. Без явного
+`--acknowledge-not-delivered` команда ничего не меняет.
+
+```bash
+ironrag-maintenance repair webhook-outbox-dead-letter-resolve \
+  --outbox <uuid> --reason-code receiver_retired --acknowledge-not-delivered --json
 ```
 
 ---

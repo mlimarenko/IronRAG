@@ -1,24 +1,31 @@
-import type { TFunction } from "i18next";
-import type { Dispatch, SetStateAction } from "react";
-import { FileText, Loader2, MousePointerSquareDashed, RotateCw, Upload, XCircle } from "lucide-react";
+import type { TFunction } from 'i18next'
+import type { Dispatch, ReactNode, SetStateAction } from 'react'
+import {
+  FileText,
+  Loader2,
+  MousePointerSquareDashed,
+  RotateCw,
+  Upload,
+  XCircle,
+} from 'lucide-react'
 
 import type {
   DocumentListPageResponse,
   DocumentListSortKey,
   DocumentListSortOrder,
   DocumentListStatusFilter,
-} from "@/shared/api";
-import { Button } from "@/shared/components/ui/button";
-import { DataState } from "@/shared/components/DataState";
-import { WorkbenchEmptyState } from "@/shared/components/layout/WorkbenchEmptyState";
-import type { DocumentItem, Library, Locale } from "@/shared/types";
+} from '@/shared/api'
+import { Button } from '@/shared/components/ui/button'
+import { DataState } from '@/shared/components/DataState'
+import { WorkbenchEmptyState } from '@/shared/components/layout/WorkbenchEmptyState'
+import type { DocumentItem, Library, Locale } from '@/shared/types'
 
-import { BulkRerunProgressBanner } from "@/features/documents/components/BulkRerunProgressBanner";
+import { BulkRerunProgressBanner } from '@/features/documents/components/BulkRerunProgressBanner'
 
-import { BulkSelectionBar } from "./BulkSelectionBar";
-import { DocumentsFiltersBar } from "./DocumentsFiltersBar";
-import { DocumentsPaginationFooter } from "./DocumentsPaginationFooter";
-import { DocumentsTable } from "./DocumentsTable";
+import { BulkSelectionBar } from './BulkSelectionBar'
+import { DocumentsFiltersBar } from './DocumentsFiltersBar'
+import { DocumentsPaginationFooter } from './DocumentsPaginationFooter'
+import { DocumentsTable } from './DocumentsTable'
 import type {
   DocumentsTableState,
   DocumentsStatusBucket,
@@ -27,60 +34,77 @@ import type {
   SortValue,
   UpdateSearchParamState,
   UploadQueueItem,
-} from "./documentsPageState";
-import type { UploadQueueController } from "./useUploadQueueController";
-import { useDocumentsListController } from "./useDocumentsListController";
+} from './documentsPageState'
+import type { UploadQueueController } from './useUploadQueueController'
+import { useDocumentsListController } from './useDocumentsListController'
 
 type PaginationState = {
-  canGoNext: boolean;
-  canGoPrevious: boolean;
-  currentPageNumber: number;
-  goToNextPage: () => void;
-  goToPreviousPage: () => void;
-  goToPage: (target: number) => void;
-  pageSize: PageSizeOption;
-  show: boolean;
-  totalPages: number | null;
-  visibleRangeEnd: number;
-  visibleRangeStart: number;
-};
+  canGoNext: boolean
+  canGoPrevious: boolean
+  currentPageNumber: number
+  goToNextPage: () => void
+  goToPreviousPage: () => void
+  goToPage: (target: number) => void
+  pageSize: PageSizeOption
+  show: boolean
+  totalPages: number | null
+  visibleRangeEnd: number
+  visibleRangeStart: number
+}
 
 type DocumentsListSectionProps = {
-  activeLibrary: Library;
-  activateListPollGrace: () => void;
-  canUpload: boolean;
-  debouncedSearch: string;
-  errorMessage: (error: unknown, fallback: string) => string;
-  filteredTotal: number | null;
-  isLoading: boolean;
-  items: DocumentItem[];
-  libraryCost: number;
-  loadError: string | null;
-  loadFirstPage: () => Promise<void>;
-  locale: Locale;
-  localSort: LocalSortState;
-  onSelectionModeChange: (selectionMode: boolean) => void;
-  pageSize: PageSizeOption;
-  pagination: PaginationState;
-  pendingUploads: UploadQueueItem[];
-  searchQuery: string;
-  selectedDoc: DocumentItem | null;
-  selectDoc: (doc: DocumentItem) => void;
-  showDetailColumns: boolean;
-  sortBy: DocumentListSortKey;
-  sortOrder: DocumentListSortOrder;
-  sortValue: SortValue;
-  statusBackendFilter: DocumentListStatusFilter[];
-  statusBucket: DocumentsStatusBucket;
-  statusCounts: DocumentListPageResponse["statusCounts"] | null;
-  t: TFunction;
-  setTableState: Dispatch<SetStateAction<DocumentsTableState>>;
-  updateSearchParamState: UpdateSearchParamState;
-  uploadController: UploadQueueController;
-  workspaceCost: number;
-};
+  activeLibrary: Library
+  activateListPollGrace: () => void
+  canUpload: boolean
+  debouncedSearch: string
+  errorMessage: (error: unknown, fallback: string) => string
+  filteredTotal: number | null
+  isLoading: boolean
+  items: DocumentItem[]
+  libraryCost: number
+  loadError: string | null
+  loadFirstPage: () => Promise<void>
+  locale: Locale
+  localSort: LocalSortState
+  onSelectionModeChange: (selectionMode: boolean) => void
+  pageSize: PageSizeOption
+  pagination: PaginationState
+  pendingUploads: UploadQueueItem[]
+  searchQuery: string
+  selectedDoc: DocumentItem | null
+  selectDoc: (doc: DocumentItem) => void
+  showDetailColumns: boolean
+  sortBy: DocumentListSortKey
+  sortOrder: DocumentListSortOrder
+  sortValue: SortValue
+  statusBackendFilter: DocumentListStatusFilter[]
+  statusBucket: DocumentsStatusBucket
+  statusCounts: DocumentListPageResponse['statusCounts'] | null
+  t: TFunction
+  setTableState: Dispatch<SetStateAction<DocumentsTableState>>
+  updateSearchParamState: UpdateSearchParamState
+  uploadController: UploadQueueController
+  workspaceCost: number
+}
 
-export function DocumentsListSection(props: DocumentsListSectionProps) {
+type DocumentsListErrorRenderer = (error: unknown) => ReactNode
+
+function renderDocumentsListError(
+  loadFirstPage: () => Promise<void>,
+  t: TFunction,
+  error: unknown,
+): ReactNode {
+  return <ErrorState error={String(error)} loadFirstPage={loadFirstPage} t={t} />
+}
+
+function getDocumentsListErrorRenderer(
+  loadFirstPage: () => Promise<void>,
+  t: TFunction,
+): DocumentsListErrorRenderer {
+  return renderDocumentsListError.bind(null, loadFirstPage, t)
+}
+
+export function DocumentsListSection(props: Readonly<DocumentsListSectionProps>) {
   const list = useDocumentsListController({
     activeLibrary: props.activeLibrary,
     activateListPollGrace: props.activateListPollGrace,
@@ -99,12 +123,13 @@ export function DocumentsListSection(props: DocumentsListSectionProps) {
     t: props.t,
     setTableState: props.setTableState,
     updateSearchParamState: props.updateSearchParamState,
-  });
+  })
 
   // The drop target is only live for roles that can upload; viewers get the
   // ordinary list with no ghost drag affordance (DOC-01 / role matrix §8).
-  const dropTargetProps = props.canUpload ? props.uploadController.dropTargetProps : {};
-  const dragActive = props.canUpload && props.uploadController.dragOver;
+  const dropTargetProps = props.canUpload ? props.uploadController.dropTargetProps : {}
+  const dragActive = props.canUpload && props.uploadController.dragOver
+  const errorRender = getDocumentsListErrorRenderer(props.loadFirstPage, props.t)
 
   return (
     <>
@@ -123,7 +148,7 @@ export function DocumentsListSection(props: DocumentsListSectionProps) {
         workspaceCost={props.workspaceCost}
       />
       <div
-        className={`relative flex-1 min-w-0 overflow-hidden ${dragActive ? "ring-2 ring-primary ring-inset bg-primary/5" : ""}`}
+        className={`relative flex-1 min-w-0 overflow-hidden ${dragActive ? 'ring-2 ring-primary ring-inset bg-primary/5' : ''}`}
         {...dropTargetProps}
       >
         {list.bulkProgress && (
@@ -138,7 +163,9 @@ export function DocumentsListSection(props: DocumentsListSectionProps) {
         {list.showSelectAllMatching && (
           <SelectAllMatchingBanner
             expanding={list.expandingSelection}
-            onSelectAll={() => void list.selectAllMatching()}
+            onSelectAll={async () => {
+              await list.selectAllMatching()
+            }}
             selectedCount={list.selectedIds.size}
             t={props.t}
             total={props.filteredTotal ?? props.items.length}
@@ -148,29 +175,14 @@ export function DocumentsListSection(props: DocumentsListSectionProps) {
         <DataState
           query={{
             isLoading: props.isLoading && props.items.length === 0,
-            error:
-              props.loadError && props.items.length === 0
-                ? props.loadError
-                : null,
+            error: props.loadError && props.items.length === 0 ? props.loadError : null,
             data: props.items,
           }}
           loading={<LoadingState t={props.t} />}
-          errorRender={(error) => (
-            <ErrorState
-              error={String(error)}
-              onRetry={() => void props.loadFirstPage()}
-              t={props.t}
-            />
-          )}
-          emptyCheck={() =>
-            props.items.length === 0 && props.pendingUploads.length === 0
-          }
+          errorRender={errorRender}
+          emptyCheck={() => props.items.length === 0 && props.pendingUploads.length === 0}
           emptyRender={
-            <EmptyState
-              canUpload={props.canUpload}
-              searchQuery={props.searchQuery}
-              t={props.t}
-            />
+            <EmptyState canUpload={props.canUpload} searchQuery={props.searchQuery} t={props.t} />
           }
         >
           {() => (
@@ -196,9 +208,7 @@ export function DocumentsListSection(props: DocumentsListSectionProps) {
                   sortOrder={props.sortOrder}
                   t={props.t}
                 />
-                {props.canUpload && !list.selectionMode && (
-                  <DragHintFooter t={props.t} />
-                )}
+                {props.canUpload && !list.selectionMode && <DragHintFooter t={props.t} />}
               </div>
               {props.pagination.show && (
                 <DocumentsPaginationFooter
@@ -215,14 +225,20 @@ export function DocumentsListSection(props: DocumentsListSectionProps) {
       </div>
       <BulkSelectionBar
         clearSelection={list.clearSelection}
-        onBulkCancel={() => void list.handleBulkCancel()}
-        onBulkDelete={() => void list.handleBulkDelete()}
-        onBulkReprocess={() => void list.handleBulkReprocess()}
+        onBulkCancel={async () => {
+          await list.handleBulkCancel()
+        }}
+        onBulkDelete={async () => {
+          await list.handleBulkDelete()
+        }}
+        onBulkReprocess={async () => {
+          await list.handleBulkReprocess()
+        }}
         selectedCount={list.selectedIds.size}
         t={props.t}
       />
     </>
-  );
+  )
 }
 
 function SelectAllMatchingBanner({
@@ -231,39 +247,45 @@ function SelectAllMatchingBanner({
   selectedCount,
   t,
   total,
-}: {
-  expanding: boolean;
-  onSelectAll: () => void;
-  selectedCount: number;
-  t: TFunction;
-  total: number;
-}) {
+}: Readonly<{
+  expanding: boolean
+  onSelectAll: () => void
+  selectedCount: number
+  t: TFunction
+  total: number
+}>) {
   return (
     <div className="mx-4 mt-4 rounded-xl border border-primary/20 bg-primary/5 px-4 py-2.5 text-sm flex items-center justify-between gap-3">
-      <span>{t("documents.selectAllBannerSelected", { count: selectedCount })}</span>
-      <Button size="sm" variant="default" className="h-7 text-xs shrink-0" disabled={expanding} onClick={onSelectAll}>
+      <span>{t('documents.selectAllBannerSelected', { count: selectedCount })}</span>
+      <Button
+        size="sm"
+        variant="default"
+        className="h-7 text-xs shrink-0"
+        disabled={expanding}
+        onClick={onSelectAll}
+      >
         {expanding ? (
           <>
             <Loader2 className="h-3.5 w-3.5 mr-1.5 animate-spin" />
-            {t("documents.selectAllBannerExpanding")}
+            {t('documents.selectAllBannerExpanding')}
           </>
         ) : (
-          t("documents.selectAllBannerAction", { total })
+          t('documents.selectAllBannerAction', { total })
         )}
       </Button>
     </div>
-  );
+  )
 }
 
-function DropOverlay({ t }: { t: TFunction }) {
+function DropOverlay({ t }: Readonly<{ t: TFunction }>) {
   return (
     <div className="absolute inset-0 z-10 flex items-center justify-center pointer-events-none">
       <div className="rounded-xl border border-dashed border-primary/70 bg-card/95 px-5 py-4 shadow-lifted">
         <Upload className="mx-auto mb-2 h-5 w-5 text-primary" />
-        <p className="text-sm font-semibold">{t("documents.dropToUpload")}</p>
+        <p className="text-sm font-semibold">{t('documents.dropToUpload')}</p>
       </div>
     </div>
-  );
+  )
 }
 
 /**
@@ -271,79 +293,67 @@ function DropOverlay({ t }: { t: TFunction }) {
  * sits under the table so the affordance is discoverable before the user ever
  * begins a drag, which is exactly when the DropOverlay is invisible.
  */
-function DragHintFooter({ t }: { t: TFunction }) {
+function DragHintFooter({ t }: Readonly<{ t: TFunction }>) {
   return (
     <div className="mx-4 my-3 flex items-center justify-center gap-2 rounded-lg border border-dashed border-border bg-surface-sunken/40 px-4 py-2.5 text-xs text-muted-foreground">
       <MousePointerSquareDashed className="h-3.5 w-3.5 shrink-0 text-primary/70" />
-      <span>{t("documents.dragHint")}</span>
+      <span>{t('documents.dragHint')}</span>
     </div>
-  );
+  )
 }
 
-function LoadingState({ t }: { t: TFunction }) {
+function LoadingState({ t }: Readonly<{ t: TFunction }>) {
   return (
     <WorkbenchEmptyState
       icon={<Loader2 className="h-7 w-7 animate-spin text-primary/70" />}
-      title={t("documents.loadingDocs")}
+      title={t('documents.loadingDocs')}
     />
-  );
+  )
 }
 
 function ErrorState({
   error,
-  onRetry,
+  loadFirstPage,
   t,
-}: {
-  error: string;
-  onRetry: () => void;
-  t: TFunction;
-}) {
+}: Readonly<{ error: unknown; loadFirstPage: () => Promise<void>; t: TFunction }>) {
   return (
     <WorkbenchEmptyState
       icon={<XCircle className="h-7 w-7 text-destructive" />}
-      title={t("documents.failedToLoad")}
-      description={error}
+      title={t('documents.failedToLoad')}
+      description={String(error)}
       action={
-        <Button size="sm" variant="outline" onClick={onRetry}>
+        <Button size="sm" variant="outline" onClick={() => void loadFirstPage()}>
           <RotateCw className="h-3.5 w-3.5 mr-1.5" />
-          {t("documents.retry")}
+          {t('documents.retry')}
         </Button>
       }
     />
-  );
+  )
 }
 
 function EmptyState({
   canUpload,
   searchQuery,
   t,
-}: {
-  canUpload: boolean;
-  searchQuery: string;
-  t: TFunction;
-}) {
+}: Readonly<{
+  canUpload: boolean
+  searchQuery: string
+  t: TFunction
+}>) {
   return (
     <WorkbenchEmptyState
       icon={<FileText className="h-7 w-7 text-muted-foreground" />}
-      title={searchQuery ? t("documents.noMatchingDocs") : t("documents.noDocs")}
-      description={
-        searchQuery
-          ? t("documents.noMatchingDocsDesc")
-          : t("documents.noDocsDesc")
-      }
+      title={searchQuery ? t('documents.noMatchingDocs') : t('documents.noDocs')}
+      description={searchQuery ? t('documents.noMatchingDocsDesc') : t('documents.noDocsDesc')}
       action={
         !searchQuery && canUpload ? (
           <div className="flex flex-col items-center gap-2">
             <Upload className="h-6 w-6 text-primary/70" />
-            <p className="text-sm font-semibold text-foreground">
-              {t("documents.dropZoneTitle")}
-            </p>
-            <p className="text-xs text-muted-foreground">
-              {t("documents.dropZoneHint")}
-            </p>
+            <p className="text-sm font-semibold text-foreground">{t('documents.dropZoneTitle')}</p>
+            <p className="text-xs text-muted-foreground">{t('documents.dropZoneHint')}</p>
           </div>
         ) : undefined
       }
     />
-  );
+  )
 }

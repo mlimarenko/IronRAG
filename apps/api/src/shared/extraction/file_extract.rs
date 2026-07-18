@@ -17,15 +17,15 @@ use crate::{
     },
     integrations::{docling, llm::LlmGateway},
     shared::extraction::{
-        self, ExtractionOutput, ExtractionSourceMetadata, ExtractionStructureHints,
+        self, ExtractedImage, ExtractionOutput, ExtractionSourceMetadata, ExtractionStructureHints,
     },
 };
 
 use self::normalization::{normalize_extracted_content, with_extraction_quality_markers};
 pub use self::{
     errors::{
-        FileExtractError, UploadAdmissionError, UploadRejectionDetails,
-        classify_multipart_file_body_error,
+        FileExtractError, MultipartFileBodyErrorKind, UploadAdmissionError, UploadRejectionDetails,
+        multipart_file_body_error,
     },
     mime_detection::{
         detect_declared_upload_file_kind, detect_upload_file_kind, validate_upload_file_admission,
@@ -685,7 +685,7 @@ fn build_plan_from_extraction(
     }
 }
 
-/// Run the active `vision` binding over every embedded picture
+/// Run the active document-understanding binding over every embedded picture
 /// reported by Docling, then append the per-picture OCR text to the
 /// extraction's `content_text` so chunking, embedding, and graph
 /// extraction see it.
@@ -712,7 +712,8 @@ async fn augment_with_vision_picture_ocr(
     let Some(vision_provider) = vision_provider else {
         return Err(FileExtractError::ExtractionFailed {
             file_kind,
-            message: "vision binding is not configured for embedded picture OCR".to_string(),
+            message: "document-understanding binding is not configured for embedded picture OCR"
+                .to_string(),
         });
     };
     let empty_extra_parameters = serde_json::json!({});
@@ -722,35 +723,21 @@ async fn augment_with_vision_picture_ocr(
     let mut usage_items = Vec::with_capacity(image_count);
     let mut failed_picture_count = 0usize;
     for (idx, image) in extracted_images.into_iter().enumerate() {
-        let mime = if image.mime_type.is_empty() { "image/png" } else { image.mime_type.as_str() };
-        match extraction::image::extract_image_with_provider(
+        match extract_picture_ocr(
             gateway,
-            vision_provider.provider_kind.as_str(),
-            &vision_provider.model_name,
-            api_key.unwrap_or_default(),
+            vision_provider,
+            api_key,
             base_url,
             extra_parameters_json,
-            mime,
-            image.image_bytes.as_slice(),
+            idx,
+            image,
         )
         .await
         {
-            Ok(picture_output) => {
-                let trimmed = picture_output.content_text.trim();
-                usage_items.push(picture_output.usage_json);
-                tracing::debug!(
-                    picture_index = idx,
-                    snippet_len = trimmed.len(),
-                    "augment_with_vision_picture_ocr per-picture result"
-                );
-                if !trimmed.is_empty() {
-                    snippets.push(format!(
-                        "--- Embedded image {} ({}x{}) ---\n{}",
-                        idx + 1,
-                        image.width,
-                        image.height,
-                        trimmed
-                    ));
+            Ok((snippet, usage)) => {
+                usage_items.push(usage);
+                if let Some(snippet) = snippet {
+                    snippets.push(snippet);
                 }
             }
             Err(error) => {
@@ -778,6 +765,50 @@ async fn augment_with_vision_picture_ocr(
         "snippetCount": snippets.len(),
         "failedImageCount": failed_picture_count,
     });
+    apply_picture_ocr_content(output, snippets);
+    Ok(())
+}
+
+async fn extract_picture_ocr(
+    gateway: &dyn LlmGateway,
+    vision_provider: &ProviderModelSelection,
+    api_key: Option<&str>,
+    base_url: Option<&str>,
+    extra_parameters_json: &serde_json::Value,
+    idx: usize,
+    image: ExtractedImage,
+) -> Result<(Option<String>, serde_json::Value), anyhow::Error> {
+    let mime = if image.mime_type.is_empty() { "image/png" } else { image.mime_type.as_str() };
+    let picture_output = extraction::image::extract_image_with_provider(
+        gateway,
+        vision_provider.provider_kind.as_str(),
+        &vision_provider.model_name,
+        api_key.unwrap_or_default(),
+        base_url,
+        extra_parameters_json,
+        mime,
+        image.image_bytes.as_slice(),
+    )
+    .await?;
+    let trimmed = picture_output.content_text.trim();
+    tracing::debug!(
+        picture_index = idx,
+        snippet_len = trimmed.len(),
+        "augment_with_vision_picture_ocr per-picture result"
+    );
+    let snippet = (!trimmed.is_empty()).then(|| {
+        format!(
+            "--- Embedded image {} ({}x{}) ---\n{}",
+            idx + 1,
+            image.width,
+            image.height,
+            trimmed
+        )
+    });
+    Ok((snippet, picture_output.usage_json))
+}
+
+fn apply_picture_ocr_content(output: &mut ExtractionOutput, snippets: Vec<String>) {
     tracing::debug!(
         snippet_count = snippets.len(),
         content_text_len_before = output.content_text.len(),
@@ -785,18 +816,7 @@ async fn augment_with_vision_picture_ocr(
     );
     let stripped_content = strip_docling_picture_ocr_scaffold(&output.content_text);
     let content_changed = stripped_content != output.content_text;
-    if !snippets.is_empty() {
-        let block = snippets.join("\n\n");
-        if stripped_content.trim().is_empty() {
-            output.content_text = block;
-        } else {
-            output.content_text = format!("{stripped_content}\n\n{block}");
-        }
-        tracing::debug!(
-            content_text_len_after = output.content_text.len(),
-            "augment_with_vision_picture_ocr appended"
-        );
-    } else {
+    if snippets.is_empty() {
         output.warnings.push(
             "vision OCR returned no embedded picture text; kept Docling picture OCR fallback"
                 .to_string(),
@@ -806,14 +826,21 @@ async fn augment_with_vision_picture_ocr(
             output.content_text = stripped_content;
             append_docling_picture_ocr_fallback(output);
         }
+    } else {
+        let block = snippets.join("\n\n");
+        output.content_text = if stripped_content.trim().is_empty() {
+            block
+        } else {
+            format!("{stripped_content}\n\n{block}")
+        };
+        tracing::debug!(
+            content_text_len_after = output.content_text.len(),
+            "augment_with_vision_picture_ocr appended"
+        );
     }
     if !snippets.is_empty() || content_changed {
-        // Rebuild structure_hints from the augmented content_text so the
-        // downstream normalizer / chunker actually sees the appended OCR
-        // lines. structure_hints.lines is built from a snapshot of
-        // content_text; without this rebuild the structured preparation
-        // step drops everything it can't align to a known line and the
-        // vision OCR snippets vanish before chunk_content runs.
+        // Rebuild line hints from the augmented content so downstream structured
+        // preparation cannot discard OCR lines that were absent from the original layout.
         let layout =
             crate::shared::extraction::build_text_layout_from_content(output.content_text.trim());
         output.content_text = layout.content_text;
@@ -821,7 +848,6 @@ async fn augment_with_vision_picture_ocr(
         output.source_metadata.line_count =
             i32::try_from(output.structure_hints.lines.len()).unwrap_or(i32::MAX);
     }
-    Ok(())
 }
 
 pub(crate) fn aggregate_vision_picture_usage_json(
@@ -944,6 +970,7 @@ pub fn raster_image_vision_enabled(
     recognition_policy.raster_image_engine == RecognitionEngine::Vision && vision_binding_available
 }
 
+#[must_use]
 pub fn build_docling_pdf_extraction_plan(output: ExtractionOutput) -> FileExtractionPlan {
     build_plan_from_extraction(
         UploadFileKind::Pdf,
@@ -970,7 +997,8 @@ async fn extract_image_with_vision_provider(
     let Some(vision_provider) = vision_provider else {
         return Err(FileExtractError::ExtractionFailed {
             file_kind,
-            message: "vision binding is not configured for image recognition".to_string(),
+            message: "document-understanding binding is not configured for image recognition"
+                .to_string(),
         });
     };
     let detected_mime = mime_type.unwrap_or("image/png");
@@ -1000,7 +1028,7 @@ async fn extract_image_with_vision_provider(
     Ok(build_plan_from_extraction(file_kind, output, recognition_profile))
 }
 
-fn deterministic_recognition_profile(file_kind: UploadFileKind) -> RecognitionProfile {
+const fn deterministic_recognition_profile(file_kind: UploadFileKind) -> RecognitionProfile {
     match file_kind {
         UploadFileKind::Spreadsheet => RecognitionProfile {
             capability: RecognitionCapability::TabularParse,
@@ -1331,10 +1359,10 @@ mod tests {
             unreachable!("embed_many is not used in file extraction tests")
         }
 
-        async fn vision_extract(&self, request: VisionRequest) -> Result<VisionResponse> {
+        async fn vision_extract(&self, mut request: VisionRequest) -> Result<VisionResponse> {
             Ok(VisionResponse {
-                provider_kind: request.provider_kind,
-                model_name: request.model_name,
+                provider_kind: std::mem::take(&mut request.provider_kind),
+                model_name: std::mem::take(&mut request.model_name),
                 output_text: "Acme Corp\nBudget 2026".to_string(),
                 usage_json: serde_json::json!({
                     "prompt_tokens": 11,
@@ -1362,10 +1390,10 @@ mod tests {
             unreachable!("embed_many is not used in file extraction tests")
         }
 
-        async fn vision_extract(&self, request: VisionRequest) -> Result<VisionResponse> {
+        async fn vision_extract(&self, mut request: VisionRequest) -> Result<VisionResponse> {
             Ok(VisionResponse {
-                provider_kind: request.provider_kind,
-                model_name: request.model_name,
+                provider_kind: std::mem::take(&mut request.provider_kind),
+                model_name: std::mem::take(&mut request.model_name),
                 output_text: String::new(),
                 usage_json: serde_json::json!({}),
             })
@@ -1389,14 +1417,14 @@ mod tests {
             unreachable!("embed_many is not used in file extraction tests")
         }
 
-        async fn vision_extract(&self, request: VisionRequest) -> Result<VisionResponse> {
+        async fn vision_extract(&self, mut request: VisionRequest) -> Result<VisionResponse> {
             let call = self.calls.fetch_add(1, Ordering::SeqCst);
             if call == 1 {
                 return Err(anyhow!("synthetic picture OCR failure"));
             }
             Ok(VisionResponse {
-                provider_kind: request.provider_kind,
-                model_name: request.model_name,
+                provider_kind: std::mem::take(&mut request.provider_kind),
+                model_name: std::mem::take(&mut request.model_name),
                 output_text: "First embedded diagram text".to_string(),
                 usage_json: serde_json::json!({
                     "prompt_tokens": 7,
@@ -1618,11 +1646,12 @@ mod tests {
     }
 
     #[test]
-    fn classifies_stream_limit_body_errors_as_upload_limit_exceeded() {
-        let rejection = classify_multipart_file_body_error(
+    fn typed_stream_limit_body_errors_map_to_upload_limit_exceeded() {
+        let rejection = multipart_file_body_error(
             Some("large.pdf"),
             Some("application/pdf"),
             4,
+            MultipartFileBodyErrorKind::SizeLimit,
             "field size exceeded",
         );
 
@@ -1632,16 +1661,30 @@ mod tests {
     }
 
     #[test]
-    fn classifies_stream_failures_as_multipart_stream_failure() {
-        let rejection = classify_multipart_file_body_error(
+    fn typed_stream_failures_map_to_multipart_stream_failure() {
+        let rejection = multipart_file_body_error(
             Some("report.pdf"),
             Some("application/pdf"),
             4,
+            MultipartFileBodyErrorKind::StreamFailure,
             "failed to read stream to end",
         );
 
         assert_eq!(rejection.error_kind(), "multipart_stream_failure");
         assert_eq!(rejection.details().rejection_kind.as_deref(), Some("multipart_stream_failure"));
+    }
+
+    #[test]
+    fn untyped_error_text_cannot_override_multipart_failure_kind() {
+        let rejection = multipart_file_body_error(
+            Some("payload.bin"),
+            Some("application/octet-stream"),
+            4,
+            MultipartFileBodyErrorKind::InvalidBody,
+            "field size exceeded while retrying a blocked stream",
+        );
+
+        assert_eq!(rejection.error_kind(), "invalid_file_body");
     }
 
     #[test]
@@ -1913,7 +1956,7 @@ mod tests {
 
         let profile =
             docling_owned_recognition_profile(UploadFileKind::Image, "png", &policy, false).expect(
-                "missing vision binding should fall back to Docling for Docling-supported images",
+                "missing document-understanding binding should fall back to Docling for Docling-supported images",
             );
 
         assert_eq!(profile.engine, RecognitionEngine::Docling);

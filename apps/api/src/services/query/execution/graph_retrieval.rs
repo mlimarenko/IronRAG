@@ -1,6 +1,6 @@
 use std::{
     cmp::Ordering,
-    collections::{BTreeMap, BTreeSet, HashMap},
+    collections::{BTreeSet, HashMap},
 };
 
 use unicode_normalization::UnicodeNormalization;
@@ -8,9 +8,9 @@ use uuid::Uuid;
 
 use crate::{
     app::state::AppState,
-    domains::{
-        provider_profiles::EffectiveProviderProfile,
-        query_ir::{EntityRole, QueryAct, QueryIR, QueryScope, literal_text_is_identifier_shaped},
+    domains::query_ir::{
+        EntityRole, QueryAct, QueryIR, QueryScope, QueryTargetKind,
+        literal_text_is_identifier_shaped,
     },
     services::query::{
         planner::RuntimeQueryPlan,
@@ -19,28 +19,17 @@ use crate::{
             near_token_overlap_count, normalized_alnum_token_sequence, normalized_alnum_tokens,
             select_related_overlap_tokens_from_candidates, token_sequence_exact_or_contains_tokens,
         },
-        vector_dimensions::{
-            library_vector_index_dimensions, validate_embedding_vector_dimensions,
-        },
     },
     shared::text_tokens::literal_wildcard_prefixes,
 };
 
 use super::{
     QueryGraphIndex, RetrievalBundle, RuntimeMatchedEntity, RuntimeMatchedRelationship,
-    resolve_runtime_vector_search_context, score_value,
+    associative_graph_retrieval::associative_edges_for_entities_with_relevance, score_value,
+    types::RuntimeVectorSearchContext, vector_retrieval::retrieve_entity_vector_hits,
 };
 
 use super::tuning::EXACT_LABEL_TERM_SENSE_DOMINANCE_RATIO;
-
-const ASSOCIATIVE_GRAPH_EXPANSION_HOPS: usize = 2;
-const ASSOCIATIVE_GRAPH_MAX_CANDIDATE_EDGES: usize = 512;
-const ASSOCIATIVE_GRAPH_MAX_FRONTIER_NODES: usize = 128;
-const ASSOCIATIVE_GRAPH_MAX_EDGES_PER_FRONTIER_NODE: usize = 64;
-const ASSOCIATIVE_GRAPH_RANK_ITERATIONS: usize = 8;
-const ASSOCIATIVE_GRAPH_DAMPING: f32 = 0.85;
-const ASSOCIATIVE_EDGE_SUPPORT_WEIGHT: f32 = 0.015;
-const ASSOCIATIVE_EDGE_TEXT_RELEVANCE_WEIGHT: f32 = 16.0;
 
 struct EntityRetrievalLanes {
     vector_hits: Vec<RuntimeMatchedEntity>,
@@ -50,70 +39,22 @@ struct EntityRetrievalLanes {
 async fn retrieve_entity_hit_lanes_with_relevance(
     state: &AppState,
     library_id: Uuid,
-    provider_profile: &EffectiveProviderProfile,
     relevance_profile: &GraphQueryRelevanceProfile,
     target_entity_profiles: &[GraphTargetEntityProfile],
     limit: usize,
     question_embedding: &[f32],
+    vector_search_context: Option<&RuntimeVectorSearchContext>,
     graph_index: &QueryGraphIndex,
 ) -> anyhow::Result<EntityRetrievalLanes> {
-    let vector_hits = if question_embedding.is_empty() {
-        Vec::new()
-    } else if let Some(context) =
-        resolve_runtime_vector_search_context(state, library_id, provider_profile).await?
-    {
-        let _vector_guard = state.canonical_services.search.vector_plane_read_guard(state).await?;
-        let library_dim = library_vector_index_dimensions(state, library_id).await?;
-        validate_embedding_vector_dimensions(
-            library_dim,
-            question_embedding,
-            "runtime entity search",
-        )?;
-        let entity_vector_result = state
-            .search_store
-            .search_entity_vectors_by_similarity(
-                library_dim,
-                library_id,
-                &context.model_catalog_id.to_string(),
-                question_embedding,
-                limit.max(1),
-                None,
-            )
-            .await;
-        let raw_hits = match entity_vector_result {
-            Ok(hits) => hits,
-            Err(ref err) if is_vector_relation_not_found(err) => {
-                tracing::info!(
-                    library_id = %library_id,
-                    "entity vector search: empty layer, returning no graph evidence"
-                );
-                Vec::new()
-            }
-            Err(err) => {
-                return Err(
-                    err.context("failed to search canonical entity vectors for runtime query")
-                );
-            }
-        };
-        raw_hits
-            .into_iter()
-            .filter_map(|hit| {
-                let node = graph_index.node(hit.entity_id)?;
-                if node.node_type.eq_ignore_ascii_case("document") {
-                    return None;
-                }
-                Some(RuntimeMatchedEntity {
-                    node_id: node.id,
-                    label: node.label.clone(),
-                    node_type: node.node_type.clone(),
-                    summary: node.summary.clone(),
-                    score: Some(hit.score as f32),
-                })
-            })
-            .collect::<Vec<_>>()
-    } else {
-        Vec::new()
-    };
+    let vector_hits = retrieve_entity_vector_hits(
+        state,
+        library_id,
+        limit,
+        question_embedding,
+        vector_search_context,
+        graph_index,
+    )
+    .await?;
 
     let lexical_hits = query_relevant_entity_hits_with_relevance(
         relevance_profile,
@@ -127,12 +68,12 @@ async fn retrieve_entity_hit_lanes_with_relevance(
 pub(crate) async fn retrieve_relationship_hits(
     state: &AppState,
     library_id: Uuid,
-    provider_profile: &EffectiveProviderProfile,
     plan: &RuntimeQueryPlan,
     query_ir: Option<&QueryIR>,
     target_entity_profiles: &[GraphTargetEntityProfile],
     limit: usize,
     question_embedding: &[f32],
+    vector_search_context: Option<&RuntimeVectorSearchContext>,
     graph_index: &QueryGraphIndex,
 ) -> anyhow::Result<Vec<RuntimeMatchedRelationship>> {
     let entity_seed_limit = limit.saturating_mul(2).max(8);
@@ -140,11 +81,11 @@ pub(crate) async fn retrieve_relationship_hits(
     let lanes = retrieve_entity_hit_lanes_with_relevance(
         state,
         library_id,
-        provider_profile,
         &relevance_profile,
         target_entity_profiles,
         entity_seed_limit,
         question_embedding,
+        vector_search_context,
         graph_index,
     )
     .await?;
@@ -163,23 +104,23 @@ pub(crate) async fn retrieve_relationship_hits(
 pub(crate) async fn retrieve_local_bundle(
     state: &AppState,
     library_id: Uuid,
-    provider_profile: &EffectiveProviderProfile,
     plan: &RuntimeQueryPlan,
     query_ir: Option<&QueryIR>,
     target_entity_profiles: &[GraphTargetEntityProfile],
     limit: usize,
     question_embedding: &[f32],
+    vector_search_context: Option<&RuntimeVectorSearchContext>,
     graph_index: &QueryGraphIndex,
 ) -> anyhow::Result<RetrievalBundle> {
     let relevance_profile = graph_relevance_profile(plan, query_ir);
     let lanes = retrieve_entity_hit_lanes_with_relevance(
         state,
         library_id,
-        provider_profile,
         &relevance_profile,
         target_entity_profiles,
         limit,
         question_embedding,
+        vector_search_context,
         graph_index,
     )
     .await?;
@@ -196,23 +137,23 @@ pub(crate) async fn retrieve_local_bundle(
 pub(crate) async fn retrieve_global_bundle(
     state: &AppState,
     library_id: Uuid,
-    provider_profile: &EffectiveProviderProfile,
     plan: &RuntimeQueryPlan,
     query_ir: Option<&QueryIR>,
     target_entity_profiles: &[GraphTargetEntityProfile],
     limit: usize,
     question_embedding: &[f32],
+    vector_search_context: Option<&RuntimeVectorSearchContext>,
     graph_index: &QueryGraphIndex,
 ) -> anyhow::Result<RetrievalBundle> {
     let relationships = retrieve_relationship_hits(
         state,
         library_id,
-        provider_profile,
         plan,
         query_ir,
         target_entity_profiles,
         limit,
         question_embedding,
+        vector_search_context,
         graph_index,
     )
     .await?;
@@ -223,12 +164,12 @@ pub(crate) async fn retrieve_global_bundle(
 pub(crate) async fn retrieve_mixed_graph_bundle(
     state: &AppState,
     library_id: Uuid,
-    provider_profile: &EffectiveProviderProfile,
     plan: &RuntimeQueryPlan,
     query_ir: Option<&QueryIR>,
     target_entity_profiles: &[GraphTargetEntityProfile],
     limit: usize,
     question_embedding: &[f32],
+    vector_search_context: Option<&RuntimeVectorSearchContext>,
     graph_index: &QueryGraphIndex,
 ) -> anyhow::Result<RetrievalBundle> {
     let started = std::time::Instant::now();
@@ -245,11 +186,11 @@ pub(crate) async fn retrieve_mixed_graph_bundle(
     let lanes = retrieve_entity_hit_lanes_with_relevance(
         state,
         library_id,
-        provider_profile,
         &relevance_profile,
         target_entity_profiles,
         entity_seed_limit,
         question_embedding,
+        vector_search_context,
         graph_index,
     )
     .await?;
@@ -482,11 +423,11 @@ pub(crate) fn score_desc_relationships(
 }
 
 #[derive(Debug, Clone)]
-struct GraphQueryRelevanceProfile {
+pub(super) struct GraphQueryRelevanceProfile {
     keywords: Vec<String>,
-    keyword_tokens: BTreeSet<String>,
+    pub(super) keyword_tokens: BTreeSet<String>,
     relationship_keywords: Vec<String>,
-    target_types: BTreeSet<String>,
+    target_types: BTreeSet<QueryTargetKind>,
     inventory_support_fallback: bool,
 }
 
@@ -784,58 +725,66 @@ fn graph_target_profiles_from_labels(
 ) -> Vec<GraphTargetEntityProfile> {
     labels
         .into_iter()
-        .filter_map(|label| {
-            let label = label.trim();
-            if label.is_empty() {
-                return None;
-            }
-            let target_label_tokens = normalized_alnum_token_sequence(label, 3);
-            let target_tokens = target_label_tokens.iter().cloned().collect::<BTreeSet<_>>();
-            let wildcard_prefixes = literal_wildcard_prefixes(label, 2);
-            // Third branch: short identifier-shaped mentions (e.g. all-uppercase
-            // acronyms) produce zero alnum tokens under the min-3 filter and no
-            // wildcard prefixes. Instead of bailing, build an exact-label-term
-            // profile so the field scorer can match against the node's label or
-            // aliases_json entries by exact case-insensitive equality. This is the
-            // consumption path for corpus-gloss aliases attached by L4/L5.
-            let exact_label_terms: Vec<String> =
-                if target_tokens.is_empty() && wildcard_prefixes.is_empty() {
-                    let alnum_count = label.chars().filter(|ch| ch.is_alphanumeric()).count();
-                    if alnum_count >= 2 && literal_text_is_identifier_shaped(label) {
-                        vec![label.trim().to_string()]
-                    } else {
-                        return None;
-                    }
-                } else {
-                    Vec::new()
-                };
-            if target_tokens.is_empty()
-                && wildcard_prefixes.is_empty()
-                && exact_label_terms.is_empty()
-            {
-                return None;
-            }
-            let profile_key = if !exact_label_terms.is_empty() {
-                format!("exact:{}", exact_label_terms.join("\u{0}"))
-            } else if wildcard_prefixes.is_empty() {
-                target_tokens.iter().cloned().collect::<Vec<_>>().join("\u{0}")
-            } else {
-                format!("wildcard:{}", wildcard_prefixes.join("\u{0}"))
-            };
-            if !seen.insert(profile_key.clone()) {
-                return None;
-            }
-            let related_tokens =
-                select_related_overlap_tokens_from_candidates(label, related_candidates, 3);
-            Some(GraphTargetEntityProfile {
-                profile_key,
-                target_label_tokens,
-                wildcard_prefixes,
-                exact_label_terms,
-                related_tokens,
-            })
-        })
+        .filter_map(|label| graph_target_profile_from_label(&label, related_candidates, seen))
         .collect()
+}
+
+fn graph_target_profile_from_label(
+    label: &str,
+    related_candidates: &[RelatedTokenCandidate],
+    seen: &mut BTreeSet<String>,
+) -> Option<GraphTargetEntityProfile> {
+    let label = label.trim();
+    if label.is_empty() {
+        return None;
+    }
+
+    let target_label_tokens = normalized_alnum_token_sequence(label, 3);
+    let target_tokens = target_label_tokens.iter().cloned().collect::<BTreeSet<_>>();
+    let wildcard_prefixes = literal_wildcard_prefixes(label, 2);
+    let exact_label_terms =
+        exact_label_terms_for_profile(label, &target_tokens, &wildcard_prefixes)?;
+    let profile_key =
+        graph_target_profile_key(&target_tokens, &wildcard_prefixes, &exact_label_terms);
+    if !seen.insert(profile_key.clone()) {
+        return None;
+    }
+
+    Some(GraphTargetEntityProfile {
+        profile_key,
+        target_label_tokens,
+        wildcard_prefixes,
+        exact_label_terms,
+        related_tokens: select_related_overlap_tokens_from_candidates(label, related_candidates, 3),
+    })
+}
+
+fn exact_label_terms_for_profile(
+    label: &str,
+    target_tokens: &BTreeSet<String>,
+    wildcard_prefixes: &[String],
+) -> Option<Vec<String>> {
+    if !target_tokens.is_empty() || !wildcard_prefixes.is_empty() {
+        return Some(Vec::new());
+    }
+
+    let alphanumeric_count = label.chars().filter(|ch| ch.is_alphanumeric()).count();
+    (alphanumeric_count >= 2 && literal_text_is_identifier_shaped(label))
+        .then(|| vec![label.to_string()])
+}
+
+fn graph_target_profile_key(
+    target_tokens: &BTreeSet<String>,
+    wildcard_prefixes: &[String],
+    exact_label_terms: &[String],
+) -> String {
+    if !exact_label_terms.is_empty() {
+        return format!("exact:{}", exact_label_terms.join("\u{0}"));
+    }
+    if wildcard_prefixes.is_empty() {
+        return target_tokens.iter().cloned().collect::<Vec<_>>().join("\u{0}");
+    }
+    format!("wildcard:{}", wildcard_prefixes.join("\u{0}"))
 }
 
 fn graph_target_profiles_need_entity_fallback(
@@ -1082,7 +1031,7 @@ const fn graph_target_entity_related_field_score(
     }
 }
 
-fn graph_target_types(query_ir: Option<&QueryIR>) -> BTreeSet<String> {
+fn graph_target_types(query_ir: Option<&QueryIR>) -> BTreeSet<QueryTargetKind> {
     let Some(ir) = query_ir else {
         return BTreeSet::new();
     };
@@ -1094,11 +1043,7 @@ fn graph_target_types(query_ir: Option<&QueryIR>) -> BTreeSet<String> {
     if !ir.target_entities.is_empty() && !matches!(ir.act, QueryAct::Enumerate | QueryAct::Meta) {
         return BTreeSet::new();
     }
-    ir.target_types
-        .iter()
-        .map(|value| value.trim().to_ascii_lowercase())
-        .filter(|value| !value.is_empty())
-        .collect()
+    ir.target_types.iter().copied().collect()
 }
 
 fn should_use_inventory_support_fallback(query_ir: Option<&QueryIR>) -> bool {
@@ -1168,7 +1113,9 @@ fn graph_node_relevance<'a>(
         return Some(GraphNodeRelevance { node, score });
     }
 
-    if relevance_profile.target_types.contains(&node_type) {
+    if QueryTargetKind::from_wire(&node.node_type)
+        .is_some_and(|target| relevance_profile.target_types.contains(&target))
+    {
         return Some(GraphNodeRelevance { node, score: 0.18 });
     }
 
@@ -1212,289 +1159,6 @@ pub(crate) fn associative_edges_for_entities(
     associative_edges_for_entities_with_relevance(entities, graph_index, &relevance_profile, top_k)
 }
 
-fn associative_edges_for_entities_with_relevance(
-    entities: &[RuntimeMatchedEntity],
-    graph_index: &QueryGraphIndex,
-    relevance_profile: &GraphQueryRelevanceProfile,
-    top_k: usize,
-) -> Vec<RuntimeMatchedRelationship> {
-    if top_k == 0 || entities.is_empty() {
-        return Vec::new();
-    }
-
-    let mut seed_scores = associative_seed_scores(entities, graph_index, false);
-    if seed_scores.is_empty() {
-        seed_scores = associative_seed_scores(entities, graph_index, true);
-    }
-    if seed_scores.is_empty() {
-        return Vec::new();
-    }
-
-    let candidate_edges =
-        associative_candidate_edges(&seed_scores, graph_index, relevance_profile, top_k);
-    if candidate_edges.is_empty() {
-        return Vec::new();
-    }
-
-    let node_scores = propagate_associative_node_scores(&seed_scores, &candidate_edges);
-    let mut relationships = candidate_edges
-        .iter()
-        .filter_map(|candidate| {
-            let from_score = node_scores.get(&candidate.from_node_id).copied().unwrap_or_default();
-            let to_score = node_scores.get(&candidate.to_node_id).copied().unwrap_or_default();
-            let endpoint_score = from_score.max(to_score) + (from_score.min(to_score) * 0.5);
-            let relevance = endpoint_score
-                + (candidate.text_relevance * ASSOCIATIVE_EDGE_TEXT_RELEVANCE_WEIGHT)
-                + candidate.support_bonus;
-            map_edge_hit(candidate.edge_id, Some(relevance), graph_index)
-        })
-        .collect::<Vec<_>>();
-    relationships.sort_by(score_desc_relationships);
-    relationships.truncate(top_k);
-    relationships
-}
-
-fn associative_seed_scores(
-    entities: &[RuntimeMatchedEntity],
-    graph_index: &QueryGraphIndex,
-    include_documents: bool,
-) -> BTreeMap<Uuid, f32> {
-    entities
-        .iter()
-        .enumerate()
-        .filter_map(|(rank, entity)| {
-            let node = graph_index.node(entity.node_id)?;
-            if !include_documents && node.node_type.eq_ignore_ascii_case("document") {
-                return None;
-            }
-            Some((entity.node_id, associative_seed_score_for_rank(rank)))
-        })
-        .collect()
-}
-
-fn associative_seed_score_for_rank(rank: usize) -> f32 {
-    1.0 + (1.0 / (rank as f32 + 1.0))
-}
-
-fn is_document_node(graph_index: &QueryGraphIndex, node_id: &Uuid) -> bool {
-    graph_index.node(*node_id).is_some_and(|node| node.node_type.eq_ignore_ascii_case("document"))
-}
-
-#[derive(Debug, Clone)]
-struct AssociativeCandidateEdge {
-    edge_id: Uuid,
-    from_node_id: Uuid,
-    to_node_id: Uuid,
-    text_relevance: f32,
-    support_bonus: f32,
-    walk_weight: f32,
-    pre_score: f32,
-}
-
-fn associative_candidate_edges(
-    seed_scores: &BTreeMap<Uuid, f32>,
-    graph_index: &QueryGraphIndex,
-    relevance_profile: &GraphQueryRelevanceProfile,
-    top_k: usize,
-) -> Vec<AssociativeCandidateEdge> {
-    let max_candidate_edges =
-        top_k.saturating_mul(16).clamp(64, ASSOCIATIVE_GRAPH_MAX_CANDIDATE_EDGES);
-    let mut selected_edges = Vec::new();
-    let mut selected_edge_ids = BTreeSet::new();
-    let mut known_node_ids = seed_scores.keys().copied().collect::<BTreeSet<_>>();
-    let mut frontier = known_node_ids.clone();
-
-    for _ in 0..ASSOCIATIVE_GRAPH_EXPANSION_HOPS {
-        if frontier.is_empty() || selected_edges.len() >= max_candidate_edges {
-            break;
-        }
-
-        let mut depth_edge_ids = BTreeSet::new();
-        let mut depth_edges = Vec::new();
-        for node_id in frontier.iter().take(ASSOCIATIVE_GRAPH_MAX_FRONTIER_NODES) {
-            let mut incident_edges = graph_index
-                .incident_edges(*node_id)
-                .filter(|edge| !selected_edge_ids.contains(&edge.id))
-                .filter(|edge| depth_edge_ids.insert(edge.id))
-                .filter_map(|edge| {
-                    associative_candidate_edge(
-                        edge,
-                        graph_index,
-                        relevance_profile,
-                        seed_scores,
-                        &known_node_ids,
-                    )
-                })
-                .collect::<Vec<_>>();
-            incident_edges.sort_by(|left, right| {
-                right
-                    .pre_score
-                    .total_cmp(&left.pre_score)
-                    .then_with(|| left.edge_id.cmp(&right.edge_id))
-            });
-            depth_edges.extend(
-                incident_edges.into_iter().take(ASSOCIATIVE_GRAPH_MAX_EDGES_PER_FRONTIER_NODE),
-            );
-        }
-
-        depth_edges.sort_by(|left, right| {
-            right
-                .pre_score
-                .total_cmp(&left.pre_score)
-                .then_with(|| left.edge_id.cmp(&right.edge_id))
-        });
-
-        let remaining = max_candidate_edges.saturating_sub(selected_edges.len());
-        let mut next_frontier = BTreeSet::new();
-        for edge in depth_edges.into_iter().take(remaining) {
-            selected_edge_ids.insert(edge.edge_id);
-            for node_id in [edge.from_node_id, edge.to_node_id] {
-                if is_document_node(graph_index, &node_id) {
-                    continue;
-                }
-                if known_node_ids.insert(node_id) {
-                    next_frontier.insert(node_id);
-                }
-            }
-            selected_edges.push(edge);
-        }
-        frontier = next_frontier;
-    }
-
-    selected_edges
-}
-
-fn associative_candidate_edge(
-    edge: &crate::infra::repositories::RuntimeGraphQueryEdgeRow,
-    graph_index: &QueryGraphIndex,
-    relevance_profile: &GraphQueryRelevanceProfile,
-    seed_scores: &BTreeMap<Uuid, f32>,
-    known_node_ids: &BTreeSet<Uuid>,
-) -> Option<AssociativeCandidateEdge> {
-    if graph_index.node(edge.from_node_id).is_none() || graph_index.node(edge.to_node_id).is_none()
-    {
-        return None;
-    }
-    let text_relevance = graph_edge_text_relevance(edge, graph_index, relevance_profile);
-    let support_bonus =
-        (edge.support_count.max(1) as f32).ln_1p() * ASSOCIATIVE_EDGE_SUPPORT_WEIGHT;
-    let seed_score = seed_scores
-        .get(&edge.from_node_id)
-        .copied()
-        .unwrap_or_default()
-        .max(seed_scores.get(&edge.to_node_id).copied().unwrap_or_default());
-    let known_endpoint_bonus = if known_node_ids.contains(&edge.from_node_id)
-        || known_node_ids.contains(&edge.to_node_id)
-    {
-        0.05
-    } else {
-        0.0
-    };
-    let stored_weight = edge
-        .weight
-        .map(|weight| weight as f32)
-        .filter(|weight| weight.is_finite() && *weight > 0.0)
-        .unwrap_or(1.0 + support_bonus)
-        .min(10.0);
-    let weighted_text_relevance = text_relevance * ASSOCIATIVE_EDGE_TEXT_RELEVANCE_WEIGHT;
-    let pre_score = seed_score + weighted_text_relevance + support_bonus + known_endpoint_bonus;
-    Some(AssociativeCandidateEdge {
-        edge_id: edge.id,
-        from_node_id: edge.from_node_id,
-        to_node_id: edge.to_node_id,
-        text_relevance,
-        support_bonus,
-        walk_weight: stored_weight + weighted_text_relevance,
-        pre_score,
-    })
-}
-
-fn propagate_associative_node_scores(
-    seed_scores: &BTreeMap<Uuid, f32>,
-    candidate_edges: &[AssociativeCandidateEdge],
-) -> BTreeMap<Uuid, f32> {
-    let seed_total = seed_scores.values().copied().sum::<f32>();
-    if seed_total <= 0.0 {
-        return BTreeMap::new();
-    }
-
-    let teleport = seed_scores
-        .iter()
-        .map(|(node_id, score)| (*node_id, *score / seed_total))
-        .collect::<BTreeMap<_, _>>();
-    let mut adjacency = BTreeMap::<Uuid, Vec<(Uuid, f32)>>::new();
-    for edge in candidate_edges {
-        adjacency.entry(edge.from_node_id).or_default().push((edge.to_node_id, edge.walk_weight));
-        adjacency.entry(edge.to_node_id).or_default().push((edge.from_node_id, edge.walk_weight));
-    }
-
-    let mut ranks = teleport.clone();
-    for _ in 0..ASSOCIATIVE_GRAPH_RANK_ITERATIONS {
-        let mut next = teleport
-            .iter()
-            .map(|(node_id, score)| (*node_id, score * (1.0 - ASSOCIATIVE_GRAPH_DAMPING)))
-            .collect::<BTreeMap<_, _>>();
-        let mut dangling_mass = 0.0;
-
-        for (node_id, rank) in &ranks {
-            let Some(neighbors) = adjacency.get(node_id) else {
-                dangling_mass += *rank;
-                continue;
-            };
-            let total_weight = neighbors.iter().map(|(_, weight)| *weight).sum::<f32>();
-            if total_weight <= 0.0 {
-                dangling_mass += *rank;
-                continue;
-            }
-            for (neighbor_id, weight) in neighbors {
-                let propagated = ASSOCIATIVE_GRAPH_DAMPING * *rank * (*weight / total_weight);
-                *next.entry(*neighbor_id).or_default() += propagated;
-            }
-        }
-
-        if dangling_mass > 0.0 {
-            for (node_id, score) in &teleport {
-                *next.entry(*node_id).or_default() +=
-                    ASSOCIATIVE_GRAPH_DAMPING * dangling_mass * *score;
-            }
-        }
-        ranks = next;
-    }
-
-    ranks
-}
-
-fn graph_edge_text_relevance(
-    edge: &crate::infra::repositories::RuntimeGraphQueryEdgeRow,
-    graph_index: &QueryGraphIndex,
-    relevance_profile: &GraphQueryRelevanceProfile,
-) -> f32 {
-    if relevance_profile.keyword_tokens.is_empty() {
-        return 0.0;
-    }
-    let Some(from_node) = graph_index.node(edge.from_node_id) else {
-        return 0.0;
-    };
-    let Some(to_node) = graph_index.node(edge.to_node_id) else {
-        return 0.0;
-    };
-    let mut edge_tokens = BTreeSet::new();
-    for value in [
-        edge.relation_type.as_str(),
-        edge.summary.as_deref().unwrap_or_default(),
-        from_node.label.as_str(),
-        from_node.node_type.as_str(),
-        from_node.summary.as_deref().unwrap_or_default(),
-        to_node.label.as_str(),
-        to_node.node_type.as_str(),
-        to_node.summary.as_deref().unwrap_or_default(),
-    ] {
-        edge_tokens.extend(normalized_alnum_tokens(value, 3));
-    }
-    let overlap = near_token_overlap_count(&relevance_profile.keyword_tokens, &edge_tokens);
-    (overlap.min(8) as f32) * 0.015
-}
-
 pub(crate) fn entities_from_relationships(
     relationships: &[RuntimeMatchedRelationship],
     graph_index: &QueryGraphIndex,
@@ -1526,15 +1190,6 @@ pub(crate) fn entities_from_relationships(
     entities
 }
 
-/// Returns `true` when PostgreSQL reports the target vector relation does not
-/// exist. This is a valid no-data state for libraries whose entity layer has not
-/// been extracted yet; callers should treat it as an empty result rather than a
-/// fatal infrastructure failure.
-fn is_vector_relation_not_found(err: &anyhow::Error) -> bool {
-    let msg = format!("{err:#}");
-    msg.contains("42P01") || msg.contains("does not exist")
-}
-
 #[cfg(test)]
 mod tests {
     use chrono::Utc;
@@ -1543,21 +1198,22 @@ mod tests {
 
     use super::{
         GraphTargetEntityCoverageField, GraphTargetEntityCoverageFieldKind,
-        associative_edges_for_entities, associative_seed_score_for_rank,
-        entities_from_relationships, graph_relevance_profile, graph_target_entity_coverage_score,
-        graph_target_entity_profiles, lexical_entity_hits, lexical_relationship_hits,
-        merge_entity_retrieval_lane_slices, merge_entity_retrieval_lanes,
-        merge_primary_then_expanded_entities, query_relevant_entity_hits, score_value,
+        associative_edges_for_entities, entities_from_relationships, graph_relevance_profile,
+        graph_target_entity_coverage_score, graph_target_entity_profiles, lexical_entity_hits,
+        lexical_relationship_hits, merge_entity_retrieval_lane_slices,
+        merge_entity_retrieval_lanes, merge_primary_then_expanded_entities,
+        query_relevant_entity_hits, score_value,
     };
     use crate::{
         domains::query_ir::{
             ComparisonSpec, DocumentHint, EntityMention, EntityRole, QueryAct, QueryIR,
-            QueryLanguage, QueryScope,
+            QueryLanguage, QueryScope, QueryTargetKind,
         },
         infra::repositories::{RuntimeGraphQueryEdgeRow, RuntimeGraphQueryNodeRow},
         services::{
             knowledge::runtime_read::ActiveRuntimeGraphProjection,
             query::{
+                execution::associative_graph_retrieval::associative_seed_score_for_rank,
                 execution::{QueryGraphIndex, RuntimeMatchedEntity, RuntimeMatchedRelationship},
                 planner::{RuntimeQueryPlan, build_query_plan},
             },
@@ -1641,7 +1297,12 @@ mod tests {
             act: QueryAct::Enumerate,
             scope: QueryScope::LibraryMeta,
             language: QueryLanguage::Auto,
-            target_types: target_types.iter().map(|value| (*value).to_string()).collect(),
+            target_types: target_types
+                .iter()
+                .map(|value| {
+                    QueryTargetKind::from_wire(value).expect("test target type must be canonical")
+                })
+                .collect(),
             target_entities: Vec::new(),
             literal_constraints: Vec::new(),
             temporal_constraints: Vec::new(),
@@ -1670,7 +1331,7 @@ mod tests {
             act: QueryAct::ConfigureHow,
             scope: QueryScope::SingleDocument,
             language: QueryLanguage::Auto,
-            target_types: vec!["path".to_string(), "procedure".to_string()],
+            target_types: vec![QueryTargetKind::Path, QueryTargetKind::Procedure],
             target_entities: vec![EntityMention {
                 label: target_label.to_string(),
                 role: EntityRole::Subject,
@@ -1710,7 +1371,7 @@ mod tests {
             act: QueryAct::Compare,
             scope: QueryScope::SingleDocument,
             language: QueryLanguage::Auto,
-            target_types: vec!["document".to_string(), "concept".to_string()],
+            target_types: vec![QueryTargetKind::Document, QueryTargetKind::Concept],
             target_entities: facet_labels
                 .iter()
                 .map(|label| EntityMention {

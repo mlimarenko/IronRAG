@@ -72,6 +72,40 @@ export const createClient = (config: Config = {}): Client => {
     return { opts: resolvedOpts, url };
   };
 
+  const validateAndTransform = async (data: any, opts: ResolvedRequestOptions) => {
+    if (opts.responseValidator) await opts.responseValidator(data);
+    return opts.responseTransformer ? opts.responseTransformer(data) : data;
+  };
+
+  const emptyResponseData = async (response: Response, parseAs: NonNullable<Exclude<Config['parseAs'], 'auto'>>) => {
+    if (parseAs === 'formData') return new FormData();
+    if (parseAs === 'stream') return response.body;
+    if (parseAs === 'json') return {};
+    return response[parseAs]();
+  };
+
+  const parseSuccessResponse = async (response: Response, opts: ResolvedRequestOptions, request: Request) => {
+    const result = { request, response };
+    const parseAs = (opts.parseAs === 'auto' ? getParseAs(response.headers.get('Content-Type')) : opts.parseAs) ?? 'json';
+    if (response.status === 204 || response.headers.get('Content-Length') === '0') {
+      const emptyData = await emptyResponseData(response, parseAs);
+      return opts.responseStyle === 'data' ? emptyData : { data: emptyData, ...result };
+    }
+    if (parseAs === 'stream') return opts.responseStyle === 'data' ? response.body : { data: response.body, ...result };
+    let data: any;
+    if (parseAs === 'json') {
+      const text = await response.text();
+      data = await validateAndTransform(text ? JSON.parse(text) : {}, opts);
+    } else data = await response[parseAs]();
+    return opts.responseStyle === 'data' ? data : { data, ...result };
+  };
+
+  const applyInterceptors = async <T>(value: T, fns: Array<((value: T, ...args: any[]) => T | Promise<T>) | null | undefined>, ...args: any[]): Promise<T> => {
+    let current = value;
+    for (const fn of fns) if (fn) current = await fn(current, ...args);
+    return current;
+  };
+
   const request: Client['request'] = async (options) => {
     const throwOnError = options.throwOnError ?? _config.throwOnError;
     const responseStyle = options.responseStyle ?? _config.responseStyle;
@@ -89,11 +123,7 @@ export const createClient = (config: Config = {}): Client => {
 
       request = new Request(url, requestInit);
 
-      for (const fn of interceptors.request.fns) {
-        if (fn) {
-          request = await fn(request, opts as ResolvedRequestOptions);
-        }
-      }
+      request = await applyInterceptors(request, interceptors.request.fns, opts as ResolvedRequestOptions);
 
       // fetch must be assigned here, otherwise it would throw the error:
       // TypeError: Failed to execute 'fetch' on 'Window': Illegal invocation
@@ -101,91 +131,9 @@ export const createClient = (config: Config = {}): Client => {
 
       response = await _fetch(request);
 
-      for (const fn of interceptors.response.fns) {
-        if (fn) {
-          response = await fn(response, request, opts as ResolvedRequestOptions);
-        }
-      }
+      response = await applyInterceptors(response, interceptors.response.fns, request, opts as ResolvedRequestOptions);
 
-      const result = {
-        request,
-        response,
-      };
-
-      if (response.ok) {
-        const parseAs =
-          (opts.parseAs === 'auto'
-            ? getParseAs(response.headers.get('Content-Type'))
-            : opts.parseAs) ?? 'json';
-
-        if (response.status === 204 || response.headers.get('Content-Length') === '0') {
-          let emptyData: any;
-          switch (parseAs) {
-            case 'arrayBuffer':
-            case 'blob':
-            case 'text':
-              emptyData = await response[parseAs]();
-              break;
-            case 'formData':
-              emptyData = new FormData();
-              break;
-            case 'stream':
-              emptyData = response.body;
-              break;
-            case 'json':
-            default:
-              emptyData = {};
-              break;
-          }
-          return opts.responseStyle === 'data'
-            ? emptyData
-            : {
-                data: emptyData,
-                ...result,
-              };
-        }
-
-        let data: any;
-        switch (parseAs) {
-          case 'arrayBuffer':
-          case 'blob':
-          case 'formData':
-          case 'text':
-            data = await response[parseAs]();
-            break;
-          case 'json': {
-            // Some servers return 200 with no Content-Length and empty body.
-            // response.json() would throw; read as text and parse if non-empty.
-            const text = await response.text();
-            data = text ? JSON.parse(text) : {};
-            break;
-          }
-          case 'stream':
-            return opts.responseStyle === 'data'
-              ? response.body
-              : {
-                  data: response.body,
-                  ...result,
-                };
-        }
-
-        if (parseAs === 'json') {
-          if (opts.responseValidator) {
-            await opts.responseValidator(data);
-          }
-
-          if (opts.responseTransformer) {
-            data = await opts.responseTransformer(data);
-          }
-        }
-
-        return opts.responseStyle === 'data'
-          ? data
-          : {
-              data,
-              ...result,
-            };
-      }
+      if (response.ok) return parseSuccessResponse(response, opts as ResolvedRequestOptions, request);
 
       const textError = await response.text();
       let jsonError: unknown;
@@ -212,7 +160,6 @@ export const createClient = (config: Config = {}): Client => {
         throw finalError;
       }
 
-      // TODO: we probably want to return error and improve types
       return responseStyle === 'data'
         ? undefined
         : {
@@ -236,7 +183,7 @@ export const createClient = (config: Config = {}): Client => {
         let request = new Request(url, init);
         for (const fn of interceptors.request.fns) {
           if (fn) {
-            request = await fn(request, opts as ResolvedRequestOptions);
+            request = await fn(request, opts);
           }
         }
         return request;

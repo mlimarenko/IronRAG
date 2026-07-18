@@ -15,23 +15,51 @@ pub enum PricingCapability {
     GraphExtract,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum PricingBillingUnit {
     Per1MInputTokens,
     Per1MCachedInputTokens,
+    #[serde(rename = "per_1m_cache_write_input_tokens")]
+    Per1MCacheWriteInputTokens,
     Per1MOutputTokens,
     Per1MTokens,
     FixedPerCall,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+impl PricingBillingUnit {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Per1MInputTokens => "per_1m_input_tokens",
+            Self::Per1MCachedInputTokens => "per_1m_cached_input_tokens",
+            Self::Per1MCacheWriteInputTokens => "per_1m_cache_write_input_tokens",
+            Self::Per1MOutputTokens => "per_1m_output_tokens",
+            Self::Per1MTokens => "per_1m_tokens",
+            Self::FixedPerCall => "fixed_per_call",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum PricingResolutionStatus {
     Priced,
     Unpriced,
     UsageMissing,
     PricingMissing,
+}
+
+impl PricingResolutionStatus {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Priced => "priced",
+            Self::Unpriced => "unpriced",
+            Self::UsageMissing => "usage_missing",
+            Self::PricingMissing => "pricing_missing",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, utoipa::ToSchema)]
@@ -64,6 +92,22 @@ pub enum BillingExecutionOwnerKind {
     IngestAttempt,
 }
 
+impl BillingExecutionOwnerKind {
+    /// Canonical `billing_owning_execution_kind` Postgres enum key. Also
+    /// used as the wire string for `executionKind` HTTP path segments (kept
+    /// in sync with the `#[serde(rename_all = "snake_case")]` above, which
+    /// axum's `Path` extractor uses directly to parse this type from a
+    /// single path segment).
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::QueryExecution => "query_execution",
+            Self::GraphExtractionAttempt => "graph_extraction_attempt",
+            Self::IngestAttempt => "ingest_attempt",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct BillingProviderCall {
@@ -81,17 +125,6 @@ pub struct BillingProviderCall {
     pub call_state: String,
     pub started_at: DateTime<Utc>,
     pub completed_at: Option<DateTime<Utc>>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
-#[serde(rename_all = "camelCase")]
-pub struct BillingUsage {
-    pub id: Uuid,
-    pub provider_call_id: Uuid,
-    pub usage_kind: String,
-    pub billing_unit: String,
-    pub quantity: Decimal,
-    pub observed_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]

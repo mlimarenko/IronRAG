@@ -6,7 +6,7 @@
 /// # Errors
 /// Returns a `String` describing the rejection reason.
 pub async fn validate_target_url(target_url: &str) -> Result<(), String> {
-    let allow_http = std::env::var("IRONRAG_WEBHOOK_ALLOW_HTTP").map(|v| v == "1").unwrap_or(false);
+    let allow_http = std::env::var("IRONRAG_WEBHOOK_ALLOW_HTTP").is_ok_and(|v| v == "1");
     crate::shared::outbound_http::resolve_public_http_url(target_url, allow_http)
         .await
         .map(|_| ())

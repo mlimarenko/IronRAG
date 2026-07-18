@@ -1,26 +1,30 @@
-#![allow(clippy::cast_possible_wrap, clippy::missing_const_for_fn, clippy::struct_excessive_bools)]
+use std::collections::BTreeSet;
 
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use serde::Deserialize;
+use serde::de::{Error as _, MapAccess, Visitor};
+use url::Url;
+use zeroize::Zeroize as _;
 
 use crate::domains::{
+    ai::AiBindingPurpose,
     deployment::{
         ContentStorageProvider, DependencyKind, DependencyMode, DeploymentTopology, ServiceRole,
         StartupAuthorityMode,
     },
+    query::SemanticRerankMode,
     recognition::{LibraryRecognitionPolicy, RecognitionEngine},
 };
 
 const DEFAULT_UI_BOOTSTRAP_ADMIN_EMAIL_DOMAIN: &str = "ironrag.local";
 const DEFAULT_UI_BOOTSTRAP_ADMIN_NAME: &str = "Admin";
-const BOOTSTRAP_PROVIDER_SECRET_ENVS: &[(&str, &str)] = &[
-    ("openai", "IRONRAG_OPENAI_API_KEY"),
-    ("deepseek", "IRONRAG_DEEPSEEK_API_KEY"),
-    ("qwen", "IRONRAG_QWEN_API_KEY"),
-    ("openrouter", "IRONRAG_OPENROUTER_API_KEY"),
-    ("gptunnel", "IRONRAG_GPTUNNEL_API_KEY"),
-    ("routerai", "IRONRAG_ROUTERAI_API_KEY"),
-    ("minimax", "IRONRAG_MINIMAX_API_KEY"),
-];
+const BOOTSTRAP_PROVIDER_API_KEYS_JSON_B64_ENV: &str = "IRONRAG_AI_PROVIDER_API_KEYS_JSON_B64";
+const MAX_BOOTSTRAP_PROVIDER_KIND_BYTES: usize = 128;
+const MAX_BOOTSTRAP_PROVIDER_API_KEY_BYTES: usize = 65_536;
+const MAX_BOOTSTRAP_PROVIDER_SECRETS: usize = 256;
+const MAX_BOOTSTRAP_PROVIDER_MAP_JSON_BYTES: usize = 1_048_576;
+const MAX_BOOTSTRAP_PROVIDER_MAP_BASE64_BYTES: usize =
+    MAX_BOOTSTRAP_PROVIDER_MAP_JSON_BYTES.div_ceil(3) * 4;
 pub const DEFAULT_RUNTIME_DIAGNOSTIC_PAYLOAD_BUDGET_BYTES: usize = 32_768;
 pub const DEFAULT_RUNTIME_POLICY_REASON_BUDGET_CHARS: usize = 2_000;
 const MIN_DATABASE_CONNECTIONS_PER_RUNTIME_REPLICA: u32 = 4;
@@ -30,7 +34,7 @@ pub enum RuntimeHookBehavior {
     ObserveOnly,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct UiBootstrapAdmin {
     pub login: String,
     pub email: String,
@@ -39,21 +43,59 @@ pub struct UiBootstrapAdmin {
     pub api_token: Option<String>,
 }
 
+impl std::fmt::Debug for UiBootstrapAdmin {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("UiBootstrapAdmin")
+            .field("login", &self.login)
+            .field("email", &self.email)
+            .field("display_name", &self.display_name)
+            .field("password", &"<redacted>")
+            .field("api_token", &self.api_token.as_ref().map(|_| "<redacted>"))
+            .finish()
+    }
+}
+
+impl Drop for UiBootstrapAdmin {
+    fn drop(&mut self) {
+        self.password.zeroize();
+        if let Some(api_token) = self.api_token.as_mut() {
+            api_token.zeroize();
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct UiBootstrapAiSetup {
     pub provider_secrets: Vec<UiBootstrapAiProviderSecret>,
     pub binding_defaults: Vec<UiBootstrapAiBindingDefault>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct UiBootstrapAiProviderSecret {
     pub provider_kind: String,
     pub api_key: String,
 }
 
+impl std::fmt::Debug for UiBootstrapAiProviderSecret {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("UiBootstrapAiProviderSecret")
+            .field("provider_kind", &self.provider_kind)
+            .field("api_key", &"<redacted>")
+            .finish()
+    }
+}
+
+impl Drop for UiBootstrapAiProviderSecret {
+    fn drop(&mut self) {
+        self.api_key.zeroize();
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct UiBootstrapAiBindingDefault {
-    pub binding_purpose: String,
+    pub binding_purpose: AiBindingPurpose,
     pub provider_kind: Option<String>,
     pub model_name: Option<String>,
 }
@@ -70,12 +112,72 @@ pub struct PublicOriginSettings {
     pub session_cookie_secure: bool,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct CanonicalHttpOrigin(String);
+
+impl CanonicalHttpOrigin {
+    fn parse(raw: &str) -> Result<Self, String> {
+        if raw.is_empty() || raw != raw.trim() {
+            return Err("origin must be a non-empty canonical value".into());
+        }
+        let parsed = Url::parse(raw).map_err(|_| "origin must be an absolute HTTP URL")?;
+        if !matches!(parsed.scheme(), "http" | "https")
+            || parsed.host().is_none()
+            || !parsed.username().is_empty()
+            || parsed.password().is_some()
+            || parsed.path() != "/"
+            || parsed.query().is_some()
+            || parsed.fragment().is_some()
+        {
+            return Err("origin must contain only an HTTP scheme, host, and optional port".into());
+        }
+        let canonical = parsed.origin().ascii_serialization();
+        if canonical != raw {
+            return Err("origin must use its exact canonical ASCII serialization".into());
+        }
+        Ok(Self(canonical))
+    }
+}
+
+/// Exact allowlist for the MCP Streamable HTTP `Origin` security boundary.
+///
+/// Absence of the header is handled by the transport middleware so native MCP
+/// clients remain valid. Any present value must parse to one canonical HTTP
+/// origin and match this typed set exactly.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct McpHttpOriginPolicy {
+    allowed_origins: BTreeSet<CanonicalHttpOrigin>,
+}
+
+impl McpHttpOriginPolicy {
+    pub(crate) fn try_from_origins<'a>(
+        allowed_origins: impl IntoIterator<Item = &'a str>,
+        canonical_public_origin: Option<&'a str>,
+    ) -> Result<Self, String> {
+        let mut parsed_origins = BTreeSet::new();
+        for raw in allowed_origins.into_iter().chain(canonical_public_origin) {
+            if raw.is_empty() {
+                continue;
+            }
+            parsed_origins.insert(CanonicalHttpOrigin::parse(raw)?);
+        }
+        Ok(Self { allowed_origins: parsed_origins })
+    }
+
+    #[must_use]
+    pub(crate) fn allows(&self, raw: &str) -> bool {
+        CanonicalHttpOrigin::parse(raw)
+            .ok()
+            .is_some_and(|origin| self.allowed_origins.contains(&origin))
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DestructiveFreshBootstrapSettings {
     pub required: bool,
 }
 
-#[derive(Clone, Debug, Deserialize, utoipa::ToSchema)]
+#[derive(Clone, Deserialize, utoipa::ToSchema)]
 pub struct Settings {
     pub bind_addr: String,
     pub service_role: String,
@@ -93,6 +195,17 @@ pub struct Settings {
     /// When set, OpenAPI/Swagger uses this value as the only `servers` URL (API origin without a
     /// duplicate `/v1`; paths in the contract already start with `/v1/`). Env: `IRONRAG_OPENAPI_PUBLIC_ORIGIN`.
     pub openapi_public_origin: Option<String>,
+    /// Dedicated encryption key for credentials persisted in `PostgreSQL`.
+    /// Must be canonical standard-base64 for exactly 32 random bytes.
+    pub credential_master_key: Option<String>,
+    /// Identifier embedded and authenticated in newly encrypted v3 envelopes.
+    pub credential_master_key_id: Option<String>,
+    /// Sorted `key-id=base64-key` map used only to decrypt and rewrap old values.
+    pub credential_previous_master_keys: Option<String>,
+    /// Explicit second phase of the dual-read-first rollout. While false,
+    /// credential-bearing create/update operations fail closed so older pods
+    /// can overlap this release without receiving ciphertext as plaintext.
+    pub credential_encryption_write_enabled: bool,
     pub ui_session_secret: String,
     pub ui_default_locale: String,
     pub ui_bootstrap_admin_login: Option<String>,
@@ -100,18 +213,18 @@ pub struct Settings {
     pub ui_bootstrap_admin_name: Option<String>,
     pub ui_bootstrap_admin_password: Option<String>,
     pub ui_bootstrap_admin_api_token: Option<String>,
+    pub ui_bootstrap_extract_text_provider_kind: Option<String>,
+    pub ui_bootstrap_extract_text_model_name: Option<String>,
     pub ui_bootstrap_extract_graph_provider_kind: Option<String>,
     pub ui_bootstrap_extract_graph_model_name: Option<String>,
     pub ui_bootstrap_embed_chunk_provider_kind: Option<String>,
     pub ui_bootstrap_embed_chunk_model_name: Option<String>,
-    pub ui_bootstrap_query_retrieve_provider_kind: Option<String>,
-    pub ui_bootstrap_query_retrieve_model_name: Option<String>,
     pub ui_bootstrap_query_compile_provider_kind: Option<String>,
     pub ui_bootstrap_query_compile_model_name: Option<String>,
     pub ui_bootstrap_query_answer_provider_kind: Option<String>,
     pub ui_bootstrap_query_answer_model_name: Option<String>,
-    pub ui_bootstrap_vision_provider_kind: Option<String>,
-    pub ui_bootstrap_vision_model_name: Option<String>,
+    pub ui_bootstrap_agent_provider_kind: Option<String>,
+    pub ui_bootstrap_agent_model_name: Option<String>,
     pub ui_session_ttl_hours: u64,
     pub upload_max_size_mb: u64,
     pub recognition_default_raster_image_engine: String,
@@ -162,7 +275,7 @@ pub struct Settings {
     /// `pending` so a healthy scheduler can pick it up again.
     pub maintenance_stale_lease_seconds: u64,
     /// Number of embedding batches sent in parallel within one job.
-    /// Each batch contains EMBEDDING_BATCH_SIZE inputs. Higher values speed up
+    /// Each batch contains `EMBEDDING_BATCH_SIZE` inputs. Higher values speed up
     /// long documents but may hit provider rate limits.
     pub ingestion_embedding_parallelism: usize,
     /// Max concurrent per-chunk graph-extract LLM calls *within* a single
@@ -191,6 +304,11 @@ pub struct Settings {
     pub graph_gc_hours: u64,
     pub query_rerank_enabled: bool,
     pub query_rerank_candidate_limit: usize,
+    pub query_semantic_rerank_mode: SemanticRerankMode,
+    pub query_semantic_rerank_timeout_ms: u64,
+    pub query_semantic_rerank_candidate_limit: usize,
+    pub query_semantic_rerank_candidate_text_chars: usize,
+    pub query_semantic_rerank_total_text_chars: usize,
     pub query_balanced_context_enabled: bool,
     pub runtime_graph_extract_recovery_enabled: bool,
     pub runtime_graph_extract_recovery_max_attempts: usize,
@@ -228,17 +346,21 @@ pub struct Settings {
     pub chunking_overlap_chars: usize,
     /// Maximum concurrent outbound calls to a single provider endpoint
     /// (keyed by `provider_kind` + base URL), shared across the ingest and
-    /// query lanes. `0` (the default) means unlimited, which is a full
-    /// no-op: no semaphore is created and no call ever waits. Set a positive
-    /// cap to protect a self-hosted or rate-limited provider from being
-    /// overwhelmed by concurrent ingest fan-out plus query turns.
+    /// query lanes. `0` is an explicit unlimited mode; the production-safe
+    /// default is bounded.
     pub provider_concurrency_max_outbound: usize,
     /// Permits reserved exclusively for the query lane out of
     /// `provider_concurrency_max_outbound`. Guarantees latency-sensitive
     /// query turns at least this many concurrent permits even under a fully
-    /// saturating ingest load. Clamped to the max; ignored when the max is
-    /// `0` (unlimited).
+    /// saturating ingest load. Must be smaller than the max, or zero when the
+    /// max is zero.
     pub provider_concurrency_query_reserved: usize,
+    /// Maximum time an outbound call waits for a provider permit.
+    pub provider_concurrency_acquire_timeout_ms: u64,
+    /// Maximum endpoint identities retained by one gateway-local registry.
+    pub provider_concurrency_registry_max_entries: usize,
+    /// Idle registry entry retention before eviction.
+    pub provider_concurrency_registry_idle_ttl_seconds: u64,
 }
 
 impl Settings {
@@ -272,6 +394,20 @@ impl Settings {
             settings.content_storage_topology.trim().to_ascii_lowercase();
         settings.service_name = settings.service_name.trim().to_string();
         settings.release_check_repository = settings.release_check_repository.trim().to_string();
+        // Validate the dynamic secret namespace at the startup boundary. The
+        // returned values are immediately dropped (and zeroized); operations
+        // that need them read the environment again for the shortest possible
+        // plaintext lifetime.
+        read_bootstrap_provider_api_keys_from_env().map_err(config::ConfigError::Message)?;
+        if settings.credential_master_key.as_deref() == Some("") {
+            settings.credential_master_key = None;
+        }
+        if settings.credential_master_key_id.as_deref() == Some("") {
+            settings.credential_master_key_id = None;
+        }
+        if settings.credential_previous_master_keys.as_deref() == Some("") {
+            settings.credential_previous_master_keys = None;
+        }
         validate_service_role(&settings).map_err(config::ConfigError::Message)?;
         validate_startup_authority_mode(&settings).map_err(config::ConfigError::Message)?;
         validate_dependency_modes(&settings).map_err(config::ConfigError::Message)?;
@@ -279,14 +415,49 @@ impl Settings {
         validate_knowledge_plane_backend(&settings).map_err(config::ConfigError::Message)?;
         validate_content_storage_settings(&settings).map_err(config::ConfigError::Message)?;
         validate_service_name(&settings).map_err(config::ConfigError::Message)?;
+        settings.mcp_http_origin_policy().map_err(config::ConfigError::Message)?;
         validate_ingestion_settings(&settings).map_err(config::ConfigError::Message)?;
+        validate_provider_concurrency_settings(&settings).map_err(config::ConfigError::Message)?;
         validate_recognition_settings(&settings).map_err(config::ConfigError::Message)?;
         validate_runtime_agent_settings(&settings).map_err(config::ConfigError::Message)?;
+        validate_query_rerank_settings(&settings).map_err(config::ConfigError::Message)?;
         validate_release_monitor_settings(&settings).map_err(config::ConfigError::Message)?;
         validate_graph_gc_settings(&settings).map_err(config::ConfigError::Message)?;
         validate_mcp_memory_settings(&settings).map_err(config::ConfigError::Message)?;
+        if let Err(message) = validate_credential_master_key(&settings) {
+            settings.discard_credential_master_key();
+            return Err(config::ConfigError::Message(message));
+        }
 
         Ok(settings)
+    }
+
+    /// Removes and zeroizes raw credential key configuration when a process
+    /// only needs non-secret settings (for example, database-only admin
+    /// commands).
+    pub fn discard_credential_master_key(&mut self) {
+        if let Some(mut encoded_master_key) = self.credential_master_key.take() {
+            encoded_master_key.zeroize();
+        }
+        if let Some(mut encoded_previous_keys) = self.credential_previous_master_keys.take() {
+            encoded_previous_keys.zeroize();
+        }
+        self.credential_master_key_id = None;
+    }
+
+    /// Removes plaintext bootstrap administrator credentials after the
+    /// startup-only owner has been prepared.
+    ///
+    /// Login, email and display name are not credentials and remain available
+    /// for diagnostics. Password and API-token buffers are zeroized before the
+    /// retained settings value can be cloned into application state.
+    pub fn discard_ui_bootstrap_admin_secrets(&mut self) {
+        if let Some(mut password) = self.ui_bootstrap_admin_password.take() {
+            password.zeroize();
+        }
+        if let Some(mut api_token) = self.ui_bootstrap_admin_api_token.take() {
+            api_token.zeroize();
+        }
     }
 
     #[must_use]
@@ -322,10 +493,28 @@ impl Settings {
         }
     }
 
+    pub(crate) fn mcp_http_origin_policy(&self) -> Result<McpHttpOriginPolicy, String> {
+        let frontend_origins =
+            self.frontend_origin.split(',').map(str::trim).filter(|origin| !origin.is_empty());
+        let canonical_public_origin = self
+            .openapi_public_origin
+            .as_deref()
+            .map(str::trim)
+            .filter(|origin| !origin.is_empty());
+        McpHttpOriginPolicy::try_from_origins(frontend_origins, canonical_public_origin).map_err(
+            |reason| format!(
+                "frontend_origin and openapi_public_origin must contain canonical HTTP origins: {reason}"
+            ),
+        )
+    }
+
     #[must_use]
     pub fn default_recognition_policy(&self) -> LibraryRecognitionPolicy {
         // validated at startup; parse failure here is a programming error.
-        #[allow(clippy::expect_used)]
+        #[allow(
+            clippy::expect_used,
+            reason = "startup validation guarantees the configured recognition engine parses"
+        )]
         let raster_image_engine = self
             .recognition_default_raster_image_engine
             .parse::<RecognitionEngine>()
@@ -334,7 +523,7 @@ impl Settings {
     }
 
     #[must_use]
-    pub fn destructive_fresh_bootstrap_settings(&self) -> DestructiveFreshBootstrapSettings {
+    pub const fn destructive_fresh_bootstrap_settings(&self) -> DestructiveFreshBootstrapSettings {
         DestructiveFreshBootstrapSettings { required: self.destructive_fresh_bootstrap_required }
     }
 
@@ -382,60 +571,41 @@ impl Settings {
 
     #[must_use]
     pub fn resolved_ui_bootstrap_ai_setup(&self) -> Option<UiBootstrapAiSetup> {
-        let provider_secrets = BOOTSTRAP_PROVIDER_SECRET_ENVS
-            .iter()
-            .map(|(provider_kind, env_name)| {
-                (*provider_kind, resolved_bootstrap_provider_api_key(env_name))
-            })
-            .filter_map(|(provider_kind, api_key)| {
-                api_key.map(|api_key| UiBootstrapAiProviderSecret {
-                    provider_kind: provider_kind.to_string(),
-                    api_key,
-                })
-            })
-            .collect::<Vec<_>>();
+        // Settings::from_env validates this namespace before AppState exists.
+        // If a test or embedding mutates the process environment afterwards,
+        // fail closed by exposing no dynamic credentials.
+        let provider_secrets = read_bootstrap_provider_api_keys_from_env().unwrap_or_default();
 
         let binding_defaults = [
             resolved_ui_bootstrap_ai_binding_default(
-                "extract_graph",
+                AiBindingPurpose::ExtractText,
+                self.ui_bootstrap_extract_text_provider_kind.as_deref(),
+                self.ui_bootstrap_extract_text_model_name.as_deref(),
+            ),
+            resolved_ui_bootstrap_ai_binding_default(
+                AiBindingPurpose::ExtractGraph,
                 self.ui_bootstrap_extract_graph_provider_kind.as_deref(),
                 self.ui_bootstrap_extract_graph_model_name.as_deref(),
             ),
             resolved_ui_bootstrap_ai_binding_default(
-                "embed_chunk",
+                AiBindingPurpose::EmbedChunk,
                 self.ui_bootstrap_embed_chunk_provider_kind.as_deref(),
                 self.ui_bootstrap_embed_chunk_model_name.as_deref(),
             ),
             resolved_ui_bootstrap_ai_binding_default(
-                "query_retrieve",
-                self.ui_bootstrap_query_retrieve_provider_kind.as_deref(),
-                self.ui_bootstrap_query_retrieve_model_name.as_deref(),
-            ),
-            resolved_ui_bootstrap_ai_binding_default(
-                "query_compile",
+                AiBindingPurpose::QueryCompile,
                 self.ui_bootstrap_query_compile_provider_kind.as_deref(),
                 self.ui_bootstrap_query_compile_model_name.as_deref(),
             ),
             resolved_ui_bootstrap_ai_binding_default(
-                "query_answer",
+                AiBindingPurpose::QueryAnswer,
                 self.ui_bootstrap_query_answer_provider_kind.as_deref(),
                 self.ui_bootstrap_query_answer_model_name.as_deref(),
             ),
             resolved_ui_bootstrap_ai_binding_default(
-                "vision",
-                self.ui_bootstrap_vision_provider_kind.as_deref(),
-                self.ui_bootstrap_vision_model_name.as_deref(),
-            ),
-            // The in-product agent turn orchestrates grounded answers with the
-            // same chat model as `query_answer` (MCP-UI parity: the UI agent and
-            // external MCP clients share one answer tool surface). Default the
-            // `agent` binding to the query_answer provider/model so a clean stack
-            // resolves an active agent binding without extra operator config;
-            // operators can still override per-workspace/library via the UI.
-            resolved_ui_bootstrap_ai_binding_default(
-                "agent",
-                self.ui_bootstrap_query_answer_provider_kind.as_deref(),
-                self.ui_bootstrap_query_answer_model_name.as_deref(),
+                AiBindingPurpose::Agent,
+                self.ui_bootstrap_agent_provider_kind.as_deref(),
+                self.ui_bootstrap_agent_model_name.as_deref(),
             ),
         ]
         .into_iter()
@@ -507,6 +677,27 @@ impl Settings {
     }
 }
 
+fn validate_credential_master_key(settings: &Settings) -> Result<(), String> {
+    if settings.credential_encryption_write_enabled
+        && settings.credential_master_key.as_deref().is_none_or(str::is_empty)
+    {
+        return Err(
+            "IRONRAG_CREDENTIAL_MASTER_KEY is required when IRONRAG_CREDENTIAL_ENCRYPTION_WRITE_ENABLED=true"
+                .to_string(),
+        );
+    }
+    crate::shared::secret_encryption::CredentialCipher::from_keyring_base64(
+        settings.credential_master_key_id.as_deref(),
+        settings.credential_master_key.as_deref(),
+        settings.credential_previous_master_keys.as_deref(),
+    )
+    .map(|_| ())
+    .map_err(|_| {
+        "IRONRAG_CREDENTIAL_MASTER_KEY, IRONRAG_CREDENTIAL_MASTER_KEY_ID and IRONRAG_CREDENTIAL_PREVIOUS_MASTER_KEYS must define a canonical bounded credential keyring"
+            .to_string()
+    })
+}
+
 fn settings_config_builder()
 -> Result<config::ConfigBuilder<config::builder::DefaultState>, config::ConfigError> {
     config::Config::builder()
@@ -523,6 +714,7 @@ fn settings_config_builder()
         .set_default("log_filter", "info")?
         .set_default("destructive_fresh_bootstrap_required", false)?
         .set_default("frontend_origin", "http://127.0.0.1:19000,http://localhost:19000")?
+        .set_default("credential_encryption_write_enabled", false)?
         .set_default("ui_session_secret", "local-ui-session-secret")?
         .set_default("ui_default_locale", "ru")?
         .set_default("ui_session_ttl_hours", 720)?
@@ -555,8 +747,11 @@ fn settings_config_builder()
         .set_default("web_ingest_user_agent", "IronRAG-WebIngest/0.1")?
         .set_default("web_ingest_crawl_concurrency", 4)?
         .set_default("llm_http_timeout_seconds", 120)?
-        .set_default("provider_concurrency_max_outbound", 0)?
-        .set_default("provider_concurrency_query_reserved", 0)?
+        .set_default("provider_concurrency_max_outbound", 16)?
+        .set_default("provider_concurrency_query_reserved", 4)?
+        .set_default("provider_concurrency_acquire_timeout_ms", 30_000)?
+        .set_default("provider_concurrency_registry_max_entries", 64)?
+        .set_default("provider_concurrency_registry_idle_ttl_seconds", 900)?
         .set_default("runtime_agent_max_turns", 4)?
         .set_default("runtime_agent_max_parallel_actions", 4)?
         .set_default(
@@ -574,6 +769,11 @@ fn settings_config_builder()
         .set_default("graph_gc_hours", 24)?
         .set_default("query_rerank_enabled", true)?
         .set_default("query_rerank_candidate_limit", 24)?
+        .set_default("query_semantic_rerank_mode", "off")?
+        .set_default("query_semantic_rerank_timeout_ms", 1_500)?
+        .set_default("query_semantic_rerank_candidate_limit", 16)?
+        .set_default("query_semantic_rerank_candidate_text_chars", 1_200)?
+        .set_default("query_semantic_rerank_total_text_chars", 18_000)?
         .set_default("query_balanced_context_enabled", true)?
         .set_default("runtime_graph_extract_recovery_enabled", true)?
         .set_default("runtime_graph_extract_recovery_max_attempts", 4)?
@@ -711,7 +911,7 @@ fn validate_content_storage_settings(settings: &Settings) -> Result<(), String> 
                     settings.content_storage_s3_secret_access_key.as_deref(),
                 ),
             ] {
-                if value.map(str::trim).filter(|item| !item.is_empty()).is_none() {
+                if value.map(str::trim).as_ref().is_none_or(|item| item.is_empty()) {
                     return Err(format!(
                         "{field} must not be empty when content_storage_provider=s3"
                     ));
@@ -737,15 +937,182 @@ fn validate_service_name(settings: &Settings) -> Result<(), String> {
     Ok(())
 }
 
-fn resolved_bootstrap_provider_api_key(env_name: &str) -> Option<String> {
-    std::env::var(env_name)
-        .ok()
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
+fn read_bootstrap_provider_api_keys_from_env() -> Result<Vec<UiBootstrapAiProviderSecret>, String> {
+    let mut removed_names = std::env::vars_os()
+        .filter_map(|(name, _)| name.into_string().ok())
+        .filter(|name| is_removed_provider_api_key_env_name(name))
+        .collect::<Vec<_>>();
+    removed_names.sort_unstable();
+    if let Some(removed_name) = removed_names.first() {
+        return Err(format!(
+            "{removed_name} uses the removed provider-specific credential convention; move the exact provider kind and credential into {BOOTSTRAP_PROVIDER_API_KEYS_JSON_B64_ENV}"
+        ));
+    }
+
+    let Some(raw_encoded_map) = std::env::var_os(BOOTSTRAP_PROVIDER_API_KEYS_JSON_B64_ENV) else {
+        return Ok(Vec::new());
+    };
+    let mut raw_encoded_map = raw_encoded_map.into_string().map_err(|_| {
+        format!("{BOOTSTRAP_PROVIDER_API_KEYS_JSON_B64_ENV} must contain valid UTF-8 base64")
+    })?;
+    let result = parse_bootstrap_provider_api_keys_b64(&raw_encoded_map);
+    raw_encoded_map.zeroize();
+    result
+}
+
+fn is_removed_provider_api_key_env_name(env_name: &str) -> bool {
+    let Some(provider_fragment) =
+        env_name.strip_prefix("IRONRAG_").and_then(|value| value.strip_suffix("_API_KEY"))
+    else {
+        return false;
+    };
+    !provider_fragment.is_empty()
+        && provider_fragment
+            .bytes()
+            .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit() || byte == b'_')
+}
+
+fn parse_bootstrap_provider_api_keys_b64(
+    encoded_map: &str,
+) -> Result<Vec<UiBootstrapAiProviderSecret>, String> {
+    if encoded_map.is_empty() {
+        return Ok(Vec::new());
+    }
+    if encoded_map != encoded_map.trim()
+        || encoded_map.len() > MAX_BOOTSTRAP_PROVIDER_MAP_BASE64_BYTES
+    {
+        return Err(format!(
+            "{BOOTSTRAP_PROVIDER_API_KEYS_JSON_B64_ENV} must be canonical standard-base64 JSON within the configured size limit"
+        ));
+    }
+    let mut decoded = BASE64_STANDARD.decode(encoded_map).map_err(|_| {
+        format!("{BOOTSTRAP_PROVIDER_API_KEYS_JSON_B64_ENV} must be canonical standard-base64 JSON")
+    })?;
+    if decoded.len() > MAX_BOOTSTRAP_PROVIDER_MAP_JSON_BYTES {
+        decoded.zeroize();
+        return Err(format!(
+            "{BOOTSTRAP_PROVIDER_API_KEYS_JSON_B64_ENV} decoded JSON exceeds the configured size limit"
+        ));
+    }
+    let mut canonical_encoding = BASE64_STANDARD.encode(&decoded);
+    let is_canonical = canonical_encoding == encoded_map;
+    canonical_encoding.zeroize();
+    if !is_canonical {
+        decoded.zeroize();
+        return Err(format!(
+            "{BOOTSTRAP_PROVIDER_API_KEYS_JSON_B64_ENV} must be canonical standard-base64 JSON"
+        ));
+    }
+    let mut raw_json = match String::from_utf8(decoded) {
+        Ok(raw_json) => raw_json,
+        Err(error) => {
+            drop(zeroize::Zeroizing::new(error.into_bytes()));
+            return Err(format!(
+                "{BOOTSTRAP_PROVIDER_API_KEYS_JSON_B64_ENV} must decode to valid UTF-8 JSON"
+            ));
+        }
+    };
+    let result = parse_bootstrap_provider_api_keys_json(&raw_json);
+    raw_json.zeroize();
+    result
+}
+
+struct BootstrapProviderSecrets(Vec<UiBootstrapAiProviderSecret>);
+
+impl<'de> Deserialize<'de> for BootstrapProviderSecrets {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        deserializer.deserialize_map(BootstrapProviderSecretsVisitor)
+    }
+}
+
+struct BootstrapProviderSecretsVisitor;
+
+impl<'de> Visitor<'de> for BootstrapProviderSecretsVisitor {
+    type Value = BootstrapProviderSecrets;
+
+    fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("a JSON object mapping exact provider kinds to API-key strings")
+    }
+
+    fn visit_map<A>(self, mut entries: A) -> Result<Self::Value, A::Error>
+    where
+        A: MapAccess<'de>,
+    {
+        let mut secrets = std::collections::BTreeMap::new();
+        let mut entry_count = 0_usize;
+        while let Some((provider_kind, mut raw_api_key)) = entries.next_entry::<String, String>()? {
+            entry_count += 1;
+            if entry_count > MAX_BOOTSTRAP_PROVIDER_SECRETS {
+                raw_api_key.zeroize();
+                return Err(A::Error::custom("provider credential map has too many entries"));
+            }
+            if let Err(reason) = validate_bootstrap_provider_kind(&provider_kind) {
+                raw_api_key.zeroize();
+                return Err(A::Error::custom(format!("provider kind {reason}")));
+            }
+            if raw_api_key.len() > MAX_BOOTSTRAP_PROVIDER_API_KEY_BYTES {
+                raw_api_key.zeroize();
+                return Err(A::Error::custom("provider credential exceeds the size limit"));
+            }
+            if raw_api_key.is_empty() {
+                continue;
+            }
+            // JSON and base64 already provide an unambiguous transport. Keep
+            // credential bytes exact: whitespace may be significant to an
+            // operator-defined provider and must never be normalized here.
+            let api_key = std::mem::take(&mut raw_api_key);
+            let candidate =
+                UiBootstrapAiProviderSecret { provider_kind: provider_kind.clone(), api_key };
+            match secrets.entry(provider_kind) {
+                std::collections::btree_map::Entry::Vacant(entry) => {
+                    entry.insert(candidate);
+                }
+                std::collections::btree_map::Entry::Occupied(entry) => {
+                    return Err(A::Error::custom(format!(
+                        "duplicate provider kind {}",
+                        entry.key()
+                    )));
+                }
+            }
+        }
+        Ok(BootstrapProviderSecrets(secrets.into_values().collect()))
+    }
+}
+
+fn parse_bootstrap_provider_api_keys_json(
+    raw_json: &str,
+) -> Result<Vec<UiBootstrapAiProviderSecret>, String> {
+    let mut deserializer = serde_json::Deserializer::from_str(raw_json);
+    let BootstrapProviderSecrets(secrets) =
+        BootstrapProviderSecrets::deserialize(&mut deserializer).map_err(|_| {
+            // serde diagnostics can include the unexpected scalar value. Do
+            // not propagate them because this document consists of secrets.
+            format!("{BOOTSTRAP_PROVIDER_API_KEYS_JSON_B64_ENV} decoded JSON is invalid")
+        })?;
+    deserializer.end().map_err(|_| {
+        format!("{BOOTSTRAP_PROVIDER_API_KEYS_JSON_B64_ENV} decoded JSON is invalid")
+    })?;
+    Ok(secrets)
+}
+
+fn validate_bootstrap_provider_kind(provider_kind: &str) -> Result<(), &'static str> {
+    if provider_kind.is_empty() || provider_kind.len() > MAX_BOOTSTRAP_PROVIDER_KIND_BYTES {
+        return Err("must contain between 1 and 128 UTF-8 bytes");
+    }
+    if provider_kind.chars().any(char::is_whitespace) {
+        return Err("must not contain whitespace");
+    }
+    if provider_kind.chars().any(char::is_control) {
+        return Err("must not contain control characters");
+    }
+    Ok(())
 }
 
 fn resolved_ui_bootstrap_ai_binding_default(
-    binding_purpose: &str,
+    binding_purpose: AiBindingPurpose,
     provider_kind: Option<&str>,
     model_name: Option<&str>,
 ) -> Option<UiBootstrapAiBindingDefault> {
@@ -758,11 +1125,7 @@ fn resolved_ui_bootstrap_ai_binding_default(
     if provider_kind.is_none() && model_name.is_none() {
         return None;
     }
-    Some(UiBootstrapAiBindingDefault {
-        binding_purpose: binding_purpose.to_string(),
-        provider_kind,
-        model_name,
-    })
+    Some(UiBootstrapAiBindingDefault { binding_purpose, provider_kind, model_name })
 }
 
 fn validate_ingestion_settings(settings: &Settings) -> Result<(), String> {
@@ -789,6 +1152,38 @@ fn validate_ingestion_settings(settings: &Settings) -> Result<(), String> {
         return Err(
             "ingestion_max_parallel_jobs_per_library must be less than or equal to ingestion_max_parallel_jobs_per_workspace"
                 .into(),
+        );
+    }
+    Ok(())
+}
+
+fn validate_provider_concurrency_settings(settings: &Settings) -> Result<(), String> {
+    match (settings.provider_concurrency_max_outbound, settings.provider_concurrency_query_reserved)
+    {
+        (0, 0) => {}
+        (0, _) => {
+            return Err(
+                "provider_concurrency_query_reserved must be zero when provider_concurrency_max_outbound is zero"
+                    .into(),
+            );
+        }
+        (max, reserved) if reserved >= max => {
+            return Err(
+                "provider_concurrency_query_reserved must be smaller than provider_concurrency_max_outbound"
+                    .into(),
+            );
+        }
+        _ => {}
+    }
+    if settings.provider_concurrency_acquire_timeout_ms == 0 {
+        return Err("provider_concurrency_acquire_timeout_ms must be greater than zero".into());
+    }
+    if settings.provider_concurrency_registry_max_entries == 0 {
+        return Err("provider_concurrency_registry_max_entries must be greater than zero".into());
+    }
+    if settings.provider_concurrency_registry_idle_ttl_seconds == 0 {
+        return Err(
+            "provider_concurrency_registry_idle_ttl_seconds must be greater than zero".into()
         );
     }
     Ok(())
@@ -827,6 +1222,18 @@ fn validate_runtime_agent_settings(settings: &Settings) -> Result<(), String> {
         target_kind
             .parse::<crate::domains::agent_runtime::RuntimeDecisionTargetKind>()
             .map_err(|error| format!("runtime_policy_reject_target_kinds contains {error}"))?;
+    }
+    Ok(())
+}
+
+fn validate_query_rerank_settings(settings: &Settings) -> Result<(), String> {
+    if !settings.query_rerank_enabled
+        && settings.query_semantic_rerank_mode != SemanticRerankMode::Off
+    {
+        return Err(
+            "query_semantic_rerank_mode requires query_rerank_enabled=true for shadow or active"
+                .into(),
+        );
     }
     Ok(())
 }
@@ -904,4 +1311,8 @@ fn validate_mcp_memory_settings(settings: &Settings) -> Result<(), String> {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::expect_used,
+    reason = "unit-test module uses panic-style diagnostics to identify broken fixture invariants"
+)]
 mod tests;

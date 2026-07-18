@@ -29,14 +29,14 @@ use thiserror::Error;
 use uuid::Uuid;
 
 /// Sentinel uuid used in the unique index on `maintenance_job_run` so that
-/// scope_id NULL (`Scope::Instance`) still has a deterministic key.
+/// `scope_id` NULL (`Scope::Instance`) still has a deterministic key.
 const INSTANCE_SCOPE_SENTINEL: Uuid = Uuid::nil();
 
 /// Default retry ceiling before a run is marked `dead_letter`.
 pub const DEFAULT_MAX_ATTEMPTS: i32 = 3;
 
 /// Default stale-lease cutoff for the reaper.
-pub const DEFAULT_STALE_LEASE: Duration = Duration::from_secs(5 * 60);
+pub const DEFAULT_STALE_LEASE: Duration = Duration::from_mins(5);
 
 /// Canonical scheduler class identifier. Stored as text in the
 /// `maintenance_job_run.class` column so adding a new class is a code-only
@@ -84,7 +84,7 @@ impl MaintenanceClass {
     /// Parse the stored class string back into the enum. Returns `None` for
     /// unknown classes (e.g. a row written by a newer binary).
     #[must_use]
-    pub fn from_str(value: &str) -> Option<Self> {
+    pub fn parse_wire(value: &str) -> Option<Self> {
         Some(match value {
             "gc.stale-chunks" => Self::GcStaleChunks,
             "gc.stale-evidence" => Self::GcStaleEvidence,
@@ -129,14 +129,14 @@ pub enum Scope {
 }
 
 impl Scope {
-    fn kind(self) -> &'static str {
+    const fn kind(self) -> &'static str {
         match self {
             Self::Instance => "instance",
             Self::Library(_) => "library",
         }
     }
 
-    fn id(self) -> Option<Uuid> {
+    const fn id(self) -> Option<Uuid> {
         match self {
             Self::Instance => None,
             Self::Library(id) => Some(id),
@@ -177,7 +177,7 @@ impl MaintenanceJobRun {
     /// classes a newer binary may have introduced.
     #[must_use]
     pub fn class_enum(&self) -> Option<MaintenanceClass> {
-        MaintenanceClass::from_str(&self.class)
+        MaintenanceClass::parse_wire(&self.class)
     }
 
     /// Convenience: rebuild the typed scope from the persisted columns.
@@ -533,9 +533,9 @@ pub struct StateCounts {
 /// Backoff schedule for failed runs. Pure function so it is easy to assert.
 const fn retry_backoff(attempts: i32) -> Duration {
     match attempts {
-        1 => Duration::from_secs(60),
-        2 => Duration::from_secs(5 * 60),
-        _ => Duration::from_secs(30 * 60),
+        1 => Duration::from_mins(1),
+        2 => Duration::from_mins(5),
+        _ => Duration::from_mins(30),
     }
 }
 
@@ -561,9 +561,9 @@ mod tests {
             MaintenanceClass::RetentionWebDiscoveredPages,
         ] {
             let text = class.as_str();
-            assert_eq!(MaintenanceClass::from_str(text), Some(class), "{text}");
+            assert_eq!(MaintenanceClass::parse_wire(text), Some(class), "{text}");
         }
-        assert_eq!(MaintenanceClass::from_str("does.not.exist"), None);
+        assert_eq!(MaintenanceClass::parse_wire("does.not.exist"), None);
     }
 
     #[test]

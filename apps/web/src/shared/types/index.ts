@@ -1,40 +1,38 @@
 import type {
   AiBindingPurpose,
-  BootstrapBindingPurpose,
   DocumentReadiness as GeneratedDocumentReadiness,
   DocumentStatus as GeneratedDocumentStatus,
   GraphStatus as GeneratedGraphStatus,
-} from "@/shared/api/generated";
-import type { DocumentFailureNotice } from "@/shared/lib/document-processing";
+  ProviderCapabilities as GeneratedProviderCapabilities,
+} from '@/shared/api/generated'
+import type { DocumentFailureNotice } from '@/shared/lib/document-processing'
 
 // Core domain types for IronRAG
 
 export interface User {
-  id: string;
-  login: string;
-  displayName: string;
-  accessLabel: string;
-  role: "admin" | "operator" | "viewer";
+  id: string
+  login: string
+  displayName: string
+  accessLabel: string
+  role: 'admin' | 'operator' | 'viewer'
 }
 
 export interface Workspace {
-  id: string;
-  name: string;
-  createdAt: string;
+  id: string
+  name: string
+  createdAt: string
 }
 
 export interface Library {
-  id: string;
-  workspaceId: string;
-  name: string;
-  createdAt: string;
-  includeDocumentHintInMcpAnswers: boolean;
-  ingestionReady: boolean;
-  queryReady: boolean;
-  missingBindingPurposes: BootstrapBindingPurpose[];
+  id: string
+  workspaceId: string
+  name: string
+  createdAt: string
+  includeDocumentHintInMcpAnswers: boolean
+  ingestionReady: boolean
+  queryReady: boolean
+  missingBindingPurposes: AiBindingPurpose[]
 }
-
-export type AIPurpose = AiBindingPurpose;
 
 /**
  * Document status enum — mirrors the backend `derived_status`
@@ -42,136 +40,127 @@ export type AIPurpose = AiBindingPurpose;
  * values the list API will ever emit; the UI stays 1:1 with the server
  * so nothing has to re-derive buckets client-side.
  */
-export type DocumentStatus = GeneratedDocumentStatus;
-export type DocumentReadiness = GeneratedDocumentReadiness;
-type SourceAccessKind = "stored_document" | "external_url";
+export type DocumentStatus = GeneratedDocumentStatus
+export type DocumentReadiness = GeneratedDocumentReadiness
+type SourceAccessKind = 'stored_document' | 'external_url'
 
 export interface SourceAccess {
-  kind: SourceAccessKind;
-  href: string;
+  kind: SourceAccessKind
+  href: string
 }
 
 export interface DocumentItem {
-  id: string;
-  fileName: string;
-  fileType: string;
-  fileSize: number;
-  uploadedAt: string;
-  completedAt?: string | undefined;
-  cost: number | null;
-  status: DocumentStatus;
-  readiness: DocumentReadiness;
-  stage?: string | undefined;
-  progressPercent?: number | undefined;
-  processingStartedAt?: string | undefined;
-  processingFinishedAt?: string | undefined;
-  failureCode?: string | undefined;
-  failureMessage?: string | undefined;
-  statusReason?: string | undefined;
-  failureNotice?: DocumentFailureNotice | undefined;
-  canRetry?: boolean | undefined;
-  documentHint?: string | undefined;
-  externalKey?: string | undefined;
-  sourceKind?:
-    | "upload"
-    | "web_page"
-    | "append"
-    | "edit"
-    | "replace"
-    | "connector_sync"
-    | "import"
-    | string
-    | undefined;
-  sourceUri?: string | undefined;
-  sourceAccess?: SourceAccess | undefined;
+  id: string
+  fileName: string
+  fileType: string
+  fileSize: number
+  uploadedAt: string
+  completedAt?: string | undefined
+  cost: number | null
+  status: DocumentStatus
+  readiness: DocumentReadiness
+  stage?: string | undefined
+  progressPercent?: number | undefined
+  processingStartedAt?: string | undefined
+  processingFinishedAt?: string | undefined
+  failureCode?: string | undefined
+  failureMessage?: string | undefined
+  statusReason?: string | undefined
+  failureNotice?: DocumentFailureNotice | undefined
+  canRetry?: boolean | undefined
+  documentHint?: string | undefined
+  externalKey?: string | undefined
+  sourceKind?: string | undefined
+  sourceUri?: string | undefined
+  sourceAccess?: SourceAccess | undefined
 }
 
 // Graph types
-export type GraphStatus = GeneratedGraphStatus;
+export type GraphStatus = GeneratedGraphStatus
 export type GraphNodeType =
-  | "document"
-  | "person"
-  | "organization"
-  | "location"
-  | "event"
-  | "artifact"
-  | "natural"
-  | "process"
-  | "concept"
-  | "attribute"
-  | "entity";
+  | 'document'
+  | 'person'
+  | 'organization'
+  | 'location'
+  | 'event'
+  | 'artifact'
+  | 'natural'
+  | 'process'
+  | 'concept'
+  | 'attribute'
+  | 'entity'
 
 export interface GraphNode {
-  id: string;
-  label: string;
-  type: GraphNodeType;
-  subType?: string;
-  summary?: string;
-  canonicalSummary?: string;
-  properties: Record<string, string>;
-  edgeCount: number;
-  convergenceStatus?: string;
-  warnings?: string[];
-  sourceDocumentIds?: string[];
+  id: string
+  label: string
+  type: GraphNodeType
+  subType?: string
+  summary?: string
+  canonicalSummary?: string
+  properties: Record<string, string>
+  edgeCount: number
+  convergenceStatus?: string
+  warnings?: string[]
+  sourceDocumentIds?: string[]
 }
 
 export interface GraphEdge {
-  id: string;
-  sourceId: string;
-  targetId: string;
-  label: string;
-  weight: number;
+  id: string
+  sourceId: string
+  targetId: string
+  label: string
+  weight: number
 }
 
 export interface GraphMetadata {
-  nodeCount: number;
-  edgeCount: number;
-  hiddenDisconnectedCount: number;
-  status: GraphStatus;
-  convergenceStatus: string;
-  recommendedLayout?: string;
+  nodeCount: number
+  edgeCount: number
+  hiddenDisconnectedCount: number
+  status: GraphStatus
+  convergenceStatus: string
+  recommendedLayout?: string
 }
 
 // Assistant types
 export interface AssistantSession {
-  id: string;
-  libraryId: string;
-  title: string;
-  updatedAt: string;
-  turnCount: number;
+  id: string
+  libraryId: string
+  title: string
+  updatedAt: string
+  turnCount: number
 }
 
-type AssistantStage = "planning" | "grounding" | "response";
+type AssistantStage = 'planning' | 'grounding' | 'response'
 
-export type AssistantAgentActivityEventType =
-  | "started"
-  | "model_request"
-  | "model_response"
-  | "tool_call_started"
-  | "tool_call_finished"
-  | "working"
-  | "persisting";
+type AssistantAgentActivityEventType =
+  | 'started'
+  | 'model_request'
+  | 'model_response'
+  | 'tool_call_started'
+  | 'tool_call_finished'
+  | 'working'
+  | 'persisting'
 
 export type AssistantAgentActivityEvent = {
-  type: AssistantAgentActivityEventType;
-  deadline_ms?: number;
-  iteration?: number;
-  provider_kind?: string;
-  model_name?: string;
-  tool_call_count?: number;
-  has_final_answer?: boolean;
-  tool_name?: string;
-  is_error?: boolean;
-  child_execution_id?: string | null;
-  result_preview?: string;
-  elapsed_ms?: number;
-};
+  type: AssistantAgentActivityEventType
+  deadline_ms?: number
+  iteration?: number
+  provider_kind?: string
+  model_name?: string
+  tool_call_count?: number
+  has_final_answer?: boolean
+  tool_name?: string
+  is_error?: boolean
+  child_execution_id?: string | null
+  result_preview?: string
+  elapsed_ms?: number
+}
 
 export interface AssistantMessage {
-  id: string;
-  role: "user" | "assistant";
-  content: string;
-  timestamp: string;
+  id: string
+  role: 'user' | 'assistant'
+  content: string
+  timestamp: string
   /**
    * Server-authoritative wall-clock for the turn, in milliseconds. Measured
    * end-to-end on the API host (`execution.completedAt − execution.startedAt`)
@@ -180,314 +169,333 @@ export interface AssistantMessage {
    * would. Absent on messages hydrated from history (reload path), where the
    * server-vs-server timestamp delta is used instead.
    */
-  durationMs?: number;
-  executionId?: string | null;
-  attachments?: FileAttachment[];
-  stage?: AssistantStage;
-  isStreaming?: boolean;
-  evidence?: EvidenceBundle;
-  activityEvents?: AssistantAgentActivityEvent[];
+  durationMs?: number
+  executionId?: string | null
+  attachments?: FileAttachment[]
+  stage?: AssistantStage
+  isStreaming?: boolean
+  evidence?: EvidenceBundle
+  activityEvents?: AssistantAgentActivityEvent[]
 }
 
 interface FileAttachment {
-  id: string;
-  name: string;
-  size: number;
-  type: string;
+  id: string
+  name: string
+  size: number
+  type: string
 }
 
 export interface EvidenceBundle {
-  segmentRefs: SegmentReference[];
-  factRefs: FactReference[];
-  entityRefs: EntityReference[];
-  relationRefs: RelationReference[];
-  verificationState: VerificationState;
-  verificationWarnings: string[];
-  runtimeSummary?: RuntimeSummary;
+  segmentRefs: SegmentReference[]
+  factRefs: FactReference[]
+  entityRefs: EntityReference[]
+  relationRefs: RelationReference[]
+  verificationState: VerificationState
+  verificationWarnings: string[]
+  answerDisposition: AssistantAnswerDisposition
+  clarification: AssistantClarification
+  runtimeSummary?: RuntimeSummary
+}
+
+type AssistantAnswerDisposition =
+  'non_terminal' | 'factual_ready' | 'safe_fallback' | 'clarification'
+
+interface AssistantClarification {
+  required: boolean
+  question: string | null
+  answerCandidates: AssistantAnswerCandidate[]
+}
+
+interface AssistantAnswerCandidate {
+  label: string
+  kind: string
+  confidence: number | null
+  provenance: {
+    entityId: string | null
+    documentId: string | null
+    chunkId: string | null
+  }
 }
 
 interface SegmentReference {
-  documentId: string;
-  documentName: string;
-  documentTitle: string | null;
-  sourceUri: string | null;
-  sourceAccess: SourceAccess | null;
-  segmentOrdinal: number;
-  excerpt: string;
-  relevance: number;
+  documentId: string
+  documentName: string
+  documentTitle: string | null
+  sourceUri: string | null
+  sourceAccess: SourceAccess | null
+  segmentOrdinal: number
+  excerpt: string
+  relevance: number
 }
 
 interface FactReference {
-  factKind: string;
-  value: string;
-  confidence: number;
-  documentName: string;
+  factKind: string
+  value: string
+  confidence: number
+  documentName: string
 }
 
 interface EntityReference {
-  entityId: string;
-  label: string;
-  type: string;
-  relevance: number;
+  entityId: string
+  label: string
+  type: string
+  relevance: number
 }
 
 interface RelationReference {
-  sourceLabel: string;
-  targetLabel: string;
-  relation: string;
-  weight: number;
+  sourceLabel: string
+  targetLabel: string
+  relation: string
+  weight: number
 }
 
 export type VerificationState =
-  | "passed"
-  | "partially_supported"
-  | "conflicting"
-  | "insufficient_evidence"
-  | "failed"
-  | "not_run";
+  'passed' | 'partially_supported' | 'conflicting' | 'insufficient_evidence' | 'failed' | 'not_run'
 
 interface RuntimeSummary {
-  totalSegments: number;
-  totalFacts: number;
-  totalEntities: number;
-  totalRelations: number;
-  stages: RuntimeStageSummary[];
-  policyInterventions: PolicyIntervention[];
+  totalSegments: number
+  totalFacts: number
+  totalEntities: number
+  totalRelations: number
+  stages: RuntimeStageSummary[]
+  policyInterventions: PolicyIntervention[]
 }
 
 interface RuntimeStageSummary {
-  stage: string;
-  durationMs: number;
-  itemCount: number;
+  stage: string
+  durationMs: number
+  itemCount: number
 }
 
 interface PolicyIntervention {
-  kind: "rejected" | "terminated" | "blocked";
-  reason: string;
-  timestamp: string;
+  kind: 'rejected' | 'terminated' | 'blocked'
+  reason: string
+  timestamp: string
 }
 
 // Admin types
 export interface APIToken {
-  id: string;
-  label: string;
-  tokenPrefix: string;
-  status: "active" | "expired" | "revoked";
-  expiresAt?: string;
-  revokedAt?: string;
-  issuedBy?: TokenIssuer;
-  lastUsedAt?: string;
-  scope: TokenScope;
-  grants: TokenGrant[];
+  id: string
+  label: string
+  tokenPrefix: string
+  status: 'active' | 'expired' | 'revoked'
+  expiresAt?: string
+  revokedAt?: string
+  issuedBy?: TokenIssuer
+  lastUsedAt?: string
+  scope: TokenScope
+  grants: TokenGrant[]
 }
 
 interface TokenIssuer {
-  id: string;
-  displayLabel: string;
+  id: string
+  displayLabel: string
 }
 
 interface TokenScopeWorkspace {
-  id: string;
-  displayName: string;
+  id: string
+  displayName: string
 }
 
 interface TokenScopeLibrary {
-  id: string;
-  workspaceId: string;
-  displayName: string;
+  id: string
+  workspaceId: string
+  displayName: string
 }
 
 interface TokenScope {
-  kind: "system" | "workspace" | "library";
-  workspace?: TokenScopeWorkspace;
-  libraries: TokenScopeLibrary[];
+  kind: 'system' | 'workspace' | 'library'
+  workspace?: TokenScopeWorkspace
+  libraries: TokenScopeLibrary[]
 }
 
 interface TokenGrant {
-  resourceKind: string;
-  resourceId: string;
-  permission: string;
-  workspace?: TokenScopeWorkspace;
-  library?: TokenScopeLibrary;
+  resourceKind: string
+  resourceId: string
+  permission: string
+  workspace?: TokenScopeWorkspace
+  library?: TokenScopeLibrary
 }
 
-export type AIScopeKind = "instance" | "workspace" | "library";
+export type AIScopeKind = 'instance' | 'workspace' | 'library'
 
-export type AIProviderCapabilities = Record<string, unknown>;
-export type AIProviderRuntime = Record<string, unknown>;
-export type AIProviderUiHints = Record<string, unknown>;
-export type AIProviderBaseUrlMode = "fixed" | "required" | "optional";
-export type AIProviderCredentialValidationMode = "chat_round_trip" | "model_list" | "none";
+type AIProviderCapabilities = Partial<GeneratedProviderCapabilities>
+type AIProviderRuntime = Record<string, unknown>
+type AIProviderUiHints = Record<string, unknown>
+type AIProviderBaseUrlMode = 'fixed' | 'required' | 'optional'
+type AIProviderCredentialValidationMode = 'chat_round_trip' | 'model_list' | 'none'
 
 export interface AIProviderCredentialPolicy {
-  apiKeyRequired: boolean;
-  baseUrlRequired: boolean;
-  baseUrlMode: AIProviderBaseUrlMode;
-  validationMode: AIProviderCredentialValidationMode;
+  apiKeyRequired: boolean
+  baseUrlRequired: boolean
+  baseUrlMode: AIProviderBaseUrlMode
+  validationMode: AIProviderCredentialValidationMode
 }
 
 export interface AIProviderBaseUrlPolicy {
-  allowOverride: boolean;
-  requireHttps: boolean;
-  allowPrivateNetwork: boolean;
-  trimSuffixes: string[];
+  allowOverride: boolean
+  requireHttps: boolean
+  allowPrivateNetwork: boolean
+  trimSuffixes: string[]
 }
 
 export interface AIProviderModelDiscovery {
-  mode: "shared" | "credential" | "unsupported";
+  mode: 'shared' | 'credential' | 'unsupported'
   paths: Array<{
-    capabilityKind: string;
-    path: string;
-  }>;
+    capabilityKind: string
+    path: string
+  }>
 }
 
 export interface AIProvider {
-  id: string;
-  displayName: string;
-  kind: string;
-  apiStyle: string;
-  lifecycleState: "active" | "deprecated" | "preview" | "disabled";
-  defaultBaseUrl?: string;
-  apiKeyRequired: boolean;
-  baseUrlRequired: boolean;
-  credentialPolicy: AIProviderCredentialPolicy;
-  baseUrlPolicy: AIProviderBaseUrlPolicy;
-  modelDiscovery: AIProviderModelDiscovery;
-  capabilities: AIProviderCapabilities;
-  runtime: AIProviderRuntime;
-  uiHints: AIProviderUiHints;
-  modelCount: number;
-  credentialCount: number;
+  id: string
+  displayName: string
+  kind: string
+  apiStyle: string
+  lifecycleState: 'active' | 'deprecated' | 'preview' | 'disabled'
+  defaultBaseUrl?: string
+  apiKeyRequired: boolean
+  baseUrlRequired: boolean
+  credentialPolicy: AIProviderCredentialPolicy
+  baseUrlPolicy: AIProviderBaseUrlPolicy
+  modelDiscovery: AIProviderModelDiscovery
+  capabilities: AIProviderCapabilities
+  runtime: AIProviderRuntime
+  uiHints: AIProviderUiHints
+  modelCount: number
+  credentialCount: number
 }
 
 export interface AIAccount {
-  id: string;
-  scopeKind: AIScopeKind;
-  workspaceId?: string;
-  libraryId?: string;
-  providerId: string;
-  providerName: string;
-  providerKind: string;
-  provider?: AIProvider;
-  label: string;
-  state: "active" | "invalid" | "revoked" | "unchecked";
-  createdAt: string;
-  updatedAt: string;
-  baseUrl?: string;
-  apiKeySummary: string;
+  id: string
+  scopeKind: AIScopeKind
+  workspaceId?: string
+  libraryId?: string
+  providerId: string
+  providerName: string
+  providerKind: string
+  provider?: AIProvider
+  label: string
+  state: 'active' | 'invalid' | 'revoked' | 'unchecked'
+  createdAt: string
+  updatedAt: string
+  baseUrl?: string
+  apiKeySummary: string
 }
 
-type AIModelAvailabilityState = "available" | "unavailable" | "unknown";
+type AIModelAvailabilityState = 'available' | 'unavailable' | 'unknown'
 
 export interface AIModelOption {
-  id: string;
-  providerCatalogId: string;
-  modelName: string;
-  capabilityKind: string;
-  modalityKind: string;
-  allowedBindingPurposes: AIPurpose[];
-  lifecycleState?: "active" | "deprecated" | "preview" | "disabled";
-  contextWindow?: number;
-  maxOutputTokens?: number;
-  availabilityState: AIModelAvailabilityState;
-  availableAccountIds: string[];
+  id: string
+  providerCatalogId: string
+  modelName: string
+  capabilityKind: string
+  modalityKind: string
+  allowedBindingPurposes: AiBindingPurpose[]
+  lifecycleState?: 'active' | 'deprecated' | 'preview' | 'disabled'
+  contextWindow?: number
+  maxOutputTokens?: number
+  availabilityState: AIModelAvailabilityState
+  availableAccountIds: string[]
 }
 
-export interface AIBindingAssignment {
-  id: string;
-  scopeKind: AIScopeKind;
-  workspaceId?: string;
-  libraryId?: string;
-  purpose: AIPurpose;
-  accountId: string;
-  modelCatalogId: string;
-  systemPrompt?: string;
-  temperature?: number;
-  topP?: number;
-  maxOutputTokens?: number;
-  extraParams?: Record<string, unknown>;
-  state: "configured" | "inactive" | "invalid";
+export type AIBindingState = 'active' | 'invalid' | 'disabled'
+
+export interface AIBinding {
+  id: string
+  scopeKind: AIScopeKind
+  workspaceId?: string
+  libraryId?: string
+  purpose: AiBindingPurpose
+  accountId: string
+  modelCatalogId: string
+  systemPrompt?: string
+  temperature?: number
+  topP?: number
+  maxOutputTokens?: number
+  extraParams?: Record<string, unknown>
+  state: AIBindingState
 }
 
 export interface PricingRule {
-  id: string;
-  modelCatalogId: string;
-  workspaceId?: string;
-  provider: string;
-  model: string;
-  billingUnit: string;
-  unitPrice: number;
-  currency: string;
-  effectiveFrom: string;
-  effectiveTo?: string;
-  priceVariant?: string;
-  inputTokenMin?: number;
-  inputTokenMax?: number;
-  sourceOrigin: string;
+  id: string
+  modelCatalogId: string
+  workspaceId?: string
+  provider: string
+  model: string
+  billingUnit: string
+  unitPrice: number
+  currency: string
+  effectiveFrom: string
+  effectiveTo?: string
+  priceVariant?: string
+  inputTokenMin?: number
+  inputTokenMax?: number
+  sourceOrigin: string
 }
 
 export interface OperationsSnapshot {
-  queueDepth: number;
-  runningAttempts: number;
-  readableDocCount: number;
-  failedDocCount: number;
-  status: "healthy" | "processing" | "rebuilding" | "degraded";
-  knowledgeGenerationState: string;
-  lastRecomputedAt: string;
-  warnings: OperationsWarning[];
+  queueDepth: number
+  runningAttempts: number
+  readableDocCount: number
+  failedDocCount: number
+  status: 'healthy' | 'processing' | 'rebuilding' | 'degraded'
+  knowledgeGenerationState: string
+  lastRecomputedAt: string
+  warnings: OperationsWarning[]
 }
 
 export interface OperationsWarning {
-  id: string;
-  warningKind: string;
-  severity: string;
-  createdAt: string;
-  resolvedAt?: string;
+  id: string
+  warningKind: string
+  severity: string
+  createdAt: string
+  resolvedAt?: string
 }
 
 interface AuditAssistantModel {
-  providerKind: string;
-  modelName: string;
+  providerKind: string
+  modelName: string
 }
 
 interface AuditAssistantCall {
-  queryExecutionId: string;
-  conversationId?: string;
-  runtimeExecutionId?: string;
-  models: AuditAssistantModel[];
-  totalCost?: string | number | null;
-  currencyCode?: string | null;
-  providerCallCount: number;
+  queryExecutionId: string
+  conversationId?: string
+  runtimeExecutionId?: string
+  models: AuditAssistantModel[]
+  totalCost?: string | number | null
+  currencyCode?: string | null
+  providerCallCount: number
 }
 
 export interface AuditEvent {
-  id: string;
-  action: string;
-  resultKind: "succeeded" | "rejected" | "failed";
-  surfaceKind: string;
-  timestamp: string;
-  message: string;
-  subjectSummary: string;
-  actor: string;
-  assistantCall?: AuditAssistantCall;
+  id: string
+  action: string
+  resultKind: 'succeeded' | 'rejected' | 'failed'
+  surfaceKind: string
+  timestamp: string
+  message: string
+  subjectSummary: string
+  actor: string
+  assistantCall?: AuditAssistantCall
 }
 
 export interface AuditEventPage {
-  items: AuditEvent[];
-  total: number;
-  limit: number;
-  offset: number;
+  items: AuditEvent[]
+  total: number
+  limit: number
+  offset: number
 }
-
-export type Locale = string;
 
 interface LocaleOption {
-  code: string;
-  label: string;
-  nativeLabel: string;
+  code: string
+  label: string
+  nativeLabel: string
 }
 
-export const AVAILABLE_LOCALES: LocaleOption[] = [
-  { code: "en", label: "English", nativeLabel: "English" },
-  { code: "ru", label: "Russian", nativeLabel: "Русский" },
-];
+export const AVAILABLE_LOCALES = [
+  { code: 'en', label: 'English', nativeLabel: 'English' },
+  { code: 'ru', label: 'Russian', nativeLabel: 'Русский' },
+] as const satisfies ReadonlyArray<LocaleOption>
+
+export type Locale = (typeof AVAILABLE_LOCALES)[number]['code']

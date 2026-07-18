@@ -1,33 +1,33 @@
-import { act } from 'react';
-import { createRoot, type Root } from 'react-dom/client';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { act } from 'react'
+import { createRoot, type Root } from 'react-dom/client'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-import i18n from '@/shared/i18n';
+import i18n from '@/shared/i18n'
 
-import { DocumentsTable } from './DocumentsTable';
+import { DocumentsTable } from './DocumentsTable'
 
 describe('DocumentsTable', () => {
-  let container: HTMLDivElement;
-  let root: Root | null;
+  let container: HTMLDivElement
+  let root: Root | null
 
   beforeEach(() => {
-    container = document.createElement('div');
-    document.body.appendChild(container);
-    root = null;
-  });
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    root = null
+  })
 
   afterEach(async () => {
     if (root) {
       await act(async () => {
-        root?.unmount();
-      });
+        root?.unmount()
+      })
     }
-    container.remove();
-  });
+    container.remove()
+  })
 
   async function renderTable() {
     await act(async () => {
-      root = createRoot(container);
+      root = createRoot(container)
       root.render(
         <DocumentsTable
           documents={[]}
@@ -58,29 +58,29 @@ describe('DocumentsTable', () => {
           sortOrder="desc"
           t={i18n.t.bind(i18n)}
         />,
-      );
-    });
+      )
+    })
   }
 
   it('renders pending upload errors with recovery action and secondary diagnostics', async () => {
-    await renderTable();
+    await renderTable()
 
     const row = Array.from(container.querySelectorAll('tr')).find((candidate) =>
       candidate.textContent?.includes('broken.pdf'),
-    );
-    const cells = Array.from(row?.querySelectorAll('td') ?? []);
-    const statusCell = row?.querySelector('td:last-child');
+    )
+    const cells = Array.from(row?.querySelectorAll('td') ?? [])
+    const statusCell = row?.querySelector('td:last-child')
 
-    expect(row).toBeTruthy();
-    expect(cells).toHaveLength(3);
-    expect(cells[1]?.getAttribute('colspan')).toBe('2');
+    expect(row).toBeTruthy()
+    expect(cells).toHaveLength(3)
+    expect(cells[1]?.getAttribute('colspan')).toBe('2')
     expect(statusCell?.textContent).toContain(
       'The upload stream ended before the file body was complete.',
-    );
-    expect(statusCell?.textContent).toContain('Retry the upload or upload the file individually.');
-    expect(statusCell?.textContent).not.toContain('invalid_file_body');
+    )
+    expect(statusCell?.textContent).toContain('Retry the upload or upload the file individually.')
+    expect(statusCell?.textContent).not.toContain('invalid_file_body')
     expect(statusCell?.querySelector('[title]')?.getAttribute('title')).toContain(
       'invalid_file_body',
-    );
-  });
-});
+    )
+  })
+})

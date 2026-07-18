@@ -1,6 +1,8 @@
+pub mod custom_headers;
 pub mod delivery;
 pub mod error;
 pub mod outbound;
+pub mod outbox;
 pub mod signature;
 pub mod ssrf;
 
@@ -14,7 +16,7 @@ pub struct WebhookService;
 
 impl WebhookService {
     #[must_use]
-    pub fn new() -> Self {
+    pub const fn new() -> Self {
         Self
     }
 }

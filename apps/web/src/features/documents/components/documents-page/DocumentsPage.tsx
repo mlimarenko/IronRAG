@@ -1,49 +1,44 @@
-import { useState } from "react";
-import { useTranslation } from "react-i18next";
-import { useNavigate } from "react-router-dom";
+import { useState } from 'react'
+import { useTranslation } from 'react-i18next'
+import { useNavigate } from 'react-router-dom'
 
-import { useApp } from "@/shared/contexts/app-context";
-import { useCan } from "@/shared/auth/useCan";
-import { DataView } from "@/shared/components/layout/DataView";
-import { PageShell } from "@/shared/components/layout/PageShell";
+import { useApp } from '@/shared/contexts/app-context'
+import { useCan } from '@/shared/auth/useCan'
+import { DataWorkspaceView } from '@/shared/components/layout/DataView'
+import { PageShell } from '@/shared/components/layout/PageShell'
 
-import { DocumentsPageHeader } from "@/features/documents/components/DocumentsPageHeader";
+import { DocumentsPageHeader } from '@/features/documents/components/DocumentsPageHeader'
 
-import { DocumentsListSection } from "./DocumentsListSection";
-import { InspectorSection } from "./InspectorSection";
-import { NoLibraryState } from "./NoLibraryState";
-import { UploadQueueSection } from "./UploadQueueSection";
-import { useUploadQueueController } from "./useUploadQueueController";
-import { WebIngestSection } from "./WebIngestSection";
+import { DocumentsListSection } from './DocumentsListSection'
+import { InspectorSection } from './InspectorSection'
+import { NoLibraryState } from './NoLibraryState'
+import { UploadQueueSection } from './UploadQueueSection'
+import { useUploadQueueController } from './useUploadQueueController'
+import { WebIngestSection } from './WebIngestSection'
 import {
   useDocumentsPageUrlState,
   useDocumentsTableState,
   type DocumentsPageTab,
-} from "./documentsPageState";
-import { useDocumentsQueries } from "./useDocumentsQueries";
-import { useWebIngestController } from "./useWebIngestController";
+} from './documentsPageState'
+import { useDocumentsQueries } from './useDocumentsQueries'
+import { useWebIngestController } from './useWebIngestController'
 
-const TERMINAL_RUN_STATES = new Set([
-  "completed",
-  "completed_partial",
-  "failed",
-  "canceled",
-]);
+const TERMINAL_RUN_STATES = new Set(['completed', 'completed_partial', 'failed', 'canceled'])
 
 export function DocumentsPage() {
-  const { t } = useTranslation();
-  const navigate = useNavigate();
-  const { activeLibrary, activeWorkspace, locale } = useApp();
-  const { can } = useCan();
-  const canUpload = can("content.upload");
-  const canEdit = can("content.edit");
-  const canDelete = can("library.delete");
-  const documentHintEditable = can("content.edit");
+  const { t } = useTranslation()
+  const navigate = useNavigate()
+  const { activeLibrary, activeWorkspace, locale } = useApp()
+  const { can } = useCan()
+  const canUpload = can('content.upload')
+  const canEdit = can('content.edit')
+  const canDelete = can('library.delete')
+  const documentHintEditable = can('content.edit')
 
-  const [tableState, setTableState] = useDocumentsTableState();
-  const urlState = useDocumentsPageUrlState({ tableState, setTableState });
-  const [activeTab, setActiveTab] = useState<DocumentsPageTab>("documents");
-  const [selectionMode, setSelectionMode] = useState(false);
+  const [tableState, setTableState] = useDocumentsTableState()
+  const urlState = useDocumentsPageUrlState({ tableState, setTableState })
+  const [activeTab, setActiveTab] = useState<DocumentsPageTab>('documents')
+  const [selectionMode, setSelectionMode] = useState(false)
   const documents = useDocumentsQueries({
     activeLibrary,
     activeWorkspace,
@@ -55,7 +50,7 @@ export function DocumentsPage() {
     statusBucket: urlState.statusBucket,
     t,
     updateSearchParamState: urlState.updateSearchParamState,
-  });
+  })
   const uploadQueue = useUploadQueueController({
     activeLibrary,
     activateListPollGrace: documents.activateListPollGrace,
@@ -63,7 +58,7 @@ export function DocumentsPage() {
     items: documents.items,
     loadFirstPage: documents.loadFirstPage,
     t,
-  });
+  })
   const webIngest = useWebIngestController({
     activeLibrary,
     errorMessage: documents.errorMessage,
@@ -76,12 +71,12 @@ export function DocumentsPage() {
     t,
     webRuns: documents.webRuns,
     webRunsRefreshing: documents.webRunsRefreshing,
-  });
+  })
 
   const hasActiveWebRun = webIngest.webRuns.some(
-    (r) => !TERMINAL_RUN_STATES.has(r.runState?.toLowerCase() ?? ""),
-  );
-  if (!activeLibrary) return <NoLibraryState t={t} />;
+    (r) => !TERMINAL_RUN_STATES.has(r.runState?.toLowerCase() ?? ''),
+  )
+  if (!activeLibrary) return <NoLibraryState t={t} />
 
   return (
     <PageShell
@@ -96,7 +91,9 @@ export function DocumentsPage() {
           handleFileSelect={uploadQueue.handleFileSelect}
           handleFolderSelect={uploadQueue.handleFolderSelect}
           hasActiveWebRun={hasActiveWebRun}
-          onRefreshWebRuns={() => void webIngest.refreshWebRuns()}
+          onRefreshWebRuns={async () => {
+            await webIngest.refreshWebRuns()
+          }}
           setActiveTab={setActiveTab}
           setAddLinkOpen={webIngest.setAddLinkOpen}
           setBoundaryPolicy={webIngest.setBoundaryPolicy}
@@ -108,14 +105,14 @@ export function DocumentsPage() {
           webRunsCount={webIngest.webRuns.length}
           webRunsRefreshing={webIngest.webRunsRefreshing}
           ingestionReady={activeLibrary.ingestionReady}
-          onOpenAiSettings={() => navigate("/admin/ai")}
+          onOpenAiSettings={() => navigate('/admin/ai')}
         />
       }
     >
-      <DataView
+      <DataWorkspaceView
         className="flex-1"
         inspector={
-          activeTab === "documents" && documents.selectedDoc ? (
+          activeTab === 'documents' && documents.selectedDoc ? (
             <InspectorSection
               activateListPollGrace={documents.activateListPollGrace}
               canEdit={canEdit}
@@ -136,15 +133,15 @@ export function DocumentsPage() {
             />
           ) : null
         }
-        inspectorCloseLabel={t("common.close")}
-        inspectorLabel={documents.selectedDoc?.fileName ?? t("documents.title")}
-        inspectorOpen={activeTab === "documents" && documents.selectedDoc != null}
+        inspectorCloseLabel={t('common.close')}
+        inspectorLabel={documents.selectedDoc?.fileName ?? t('documents.title')}
+        inspectorOpen={activeTab === 'documents' && documents.selectedDoc != null}
         showDrawerHeader={false}
         onInspectorOpenChange={(open) => {
-          if (!open) documents.clearSelectedDoc();
+          if (!open) documents.clearSelectedDoc()
         }}
       >
-        {activeTab === "documents" ? (
+        {activeTab === 'documents' ? (
           <div className="flex flex-1 min-w-0 flex-col">
             <DocumentsListSection
               activeLibrary={activeLibrary}
@@ -186,8 +183,8 @@ export function DocumentsPage() {
             <WebIngestSection controller={webIngest} t={t} />
           </div>
         )}
-      </DataView>
+      </DataWorkspaceView>
       <UploadQueueSection controller={uploadQueue} t={t} />
     </PageShell>
-  );
+  )
 }

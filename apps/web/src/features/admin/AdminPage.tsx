@@ -1,13 +1,13 @@
-import { Navigate, Route, Routes } from 'react-router-dom';
+import { Navigate, Route, Routes } from 'react-router-dom'
 
-import { useCan } from '@/shared/auth/useCan';
-import AdminLibrariesPage from '@/features/admin/components/AdminLibrariesPage';
-import AdminAiPage from '@/features/admin/components/AdminAiPage';
-import AdminAccessPage from '@/features/admin/components/AdminAccessPage';
-import AdminAuditPage from '@/features/admin/components/AdminAuditPage';
-import AdminQueuePage from '@/features/admin/components/AdminQueuePage';
-import AdminUsersPage from '@/features/admin/components/AdminUsersPage';
-import AdminSystemPage from '@/features/admin/components/AdminSystemPage';
+import { useCan } from '@/shared/auth/useCan'
+import AdminLibrariesPage from '@/features/admin/components/AdminLibrariesPage'
+import AdminAiPage from '@/features/admin/components/AdminAiPage'
+import AdminAccessPage from '@/features/admin/components/AdminAccessPage'
+import AdminAuditPage from '@/features/admin/components/AdminAuditPage'
+import AdminQueuePage from '@/features/admin/components/AdminQueuePage'
+import AdminUsersPage from '@/features/admin/components/AdminUsersPage'
+import AdminSystemPage from '@/features/admin/components/AdminSystemPage'
 
 /**
  * Admin router (§3.4 of the 0.5.0 UX plan). The flat eight-tab `?tab=` page is
@@ -27,7 +27,7 @@ import AdminSystemPage from '@/features/admin/components/AdminSystemPage';
  * every non-admin route uses, so the whole app reads as one product.
  */
 export default function AdminPage() {
-  const { can } = useCan();
+  const { can } = useCan()
 
   return (
     <Routes>
@@ -45,5 +45,5 @@ export default function AdminPage() {
       <Route index element={<Navigate to="/admin/libraries" replace />} />
       <Route path="*" element={<Navigate to="/admin/libraries" replace />} />
     </Routes>
-  );
+  )
 }

@@ -6,12 +6,19 @@ use uuid::Uuid;
 
 use crate::{
     app::state::AppState,
-    domains::ingest::{IngestAttempt, IngestJob, IngestStageEvent},
     domains::ops::{
         ASYNC_OP_STATUS_FAILED, ASYNC_OP_STATUS_PROCESSING, ASYNC_OP_STATUS_READY,
         OpsAsyncOperation, OpsAsyncOperationStatus,
     },
+    domains::{
+        ingest::{
+            IngestAttempt, IngestJob, IngestStageEvent, is_retry_budget_exhausted,
+            next_job_queue_state_after_finalize, retry_backoff_after_attempt,
+        },
+        webhook::{WebhookEvent, revision_ready_event_id},
+    },
     infra::repositories::{
+        content_repository,
         ingest_repository::{
             self, IngestStageEventRow, NewIngestAttempt, NewIngestJob, NewIngestStageEvent,
             UpdateIngestAttempt, UpdateIngestJob,
@@ -34,57 +41,8 @@ pub const INGEST_STAGE_WEB_DISCOVERY: &str = "web_discovery";
 pub const INGEST_STAGE_WEB_MATERIALIZE_PAGE: &str = "web_materialize_page";
 pub const INGEST_STAGE_WEBHOOK_DELIVERY: &str = "webhook_delivery";
 
-/// Maximum number of `ingest_attempt` rows a single job may accumulate before a
-/// retryable stage failure is escalated to a terminal `failed`. A transient
-/// provider blip (429 / timeout / connection reset) must not permanently kill a
-/// document, but an unbounded requeue loop would pin a poisoned job in the queue
-/// forever. Five attempts gives exponential backoff (see
-/// [`retry_backoff_after_attempt`]) room to ride out a multi-minute provider
-/// outage while still surfacing a genuinely broken document within a bounded
-/// number of tries. The budget is derived purely from the existing
-/// `ingest_attempt.attempt_number` counter — no schema change.
-const MAX_INGEST_ATTEMPTS: i32 = 5;
-
-/// Base backoff applied to the first retry; doubled per subsequent attempt.
-const INGEST_RETRY_BACKOFF_BASE_SECONDS: i64 = 15;
-
-/// Upper bound on the computed backoff so a late attempt cannot push a job
-/// arbitrarily far into the future.
-const INGEST_RETRY_BACKOFF_MAX_SECONDS: i64 = 600;
 pub(crate) const QUEUE_STALE_LEASE_SECONDS: i64 = 60;
-
-/// Exponential backoff for the next retry of a job whose current attempt
-/// (`attempt_number`, 1-based) just failed retryably. Attempt 1 → base, attempt
-/// 2 → 2×base, … capped at [`INGEST_RETRY_BACKOFF_MAX_SECONDS`]. Delivered via
-/// the existing `ingest_job.available_at` mechanism so the dispatcher simply
-/// skips the job until the delay elapses.
-fn retry_backoff_after_attempt(attempt_number: i32) -> chrono::Duration {
-    let exponent = attempt_number.saturating_sub(1).clamp(0, 16) as u32;
-    let scaled = INGEST_RETRY_BACKOFF_BASE_SECONDS
-        .saturating_mul(1_i64.checked_shl(exponent).unwrap_or(i64::MAX));
-    chrono::Duration::seconds(scaled.min(INGEST_RETRY_BACKOFF_MAX_SECONDS))
-}
-
-/// Whether a retryable failure has run out of its attempt budget and must be
-/// escalated to a terminal `failed`. Only `failed` attempts the worker marked
-/// retryable are subject to the budget; succeeded / canceled / abandoned states
-/// pass through unchanged.
-fn is_retry_budget_exhausted(attempt_state: &str, retryable: bool, attempt_number: i32) -> bool {
-    attempt_state == "failed" && retryable && attempt_number >= MAX_INGEST_ATTEMPTS
-}
-
-/// The job `queue_state` a finalized attempt transitions the job into. A
-/// retryable `failed` attempt that still has budget goes back to `queued` (so
-/// the dispatcher re-leases it after the backoff window); everything else is
-/// terminal or pass-through.
-fn next_job_queue_state_after_finalize(attempt_state: &str, effective_retryable: bool) -> &str {
-    match attempt_state {
-        "succeeded" => "completed",
-        "failed" if effective_retryable => "queued",
-        "failed" | "abandoned" | "canceled" => "failed",
-        other => other,
-    }
-}
+const INLINE_QUEUE_LEASE_OWNER: &str = "inline";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CanonicalIngestProgressProfile {
@@ -181,7 +139,7 @@ pub struct CanonicalIngestStageMetadata {
     pub lifecycle_kind: &'static str,
 }
 
-fn progress_weights_for_profile(
+const fn progress_weights_for_profile(
     profile: CanonicalIngestProgressProfile,
 ) -> &'static [CanonicalIngestStageProgressWeight; 7] {
     match profile {
@@ -307,6 +265,7 @@ pub struct AdmitIngestJobCommand {
     pub workspace_id: Uuid,
     pub library_id: Uuid,
     pub mutation_id: Option<Uuid>,
+    pub mutation_item_id: Option<Uuid>,
     pub connector_id: Option<Uuid>,
     pub async_operation_id: Option<Uuid>,
     pub knowledge_document_id: Option<Uuid>,
@@ -390,6 +349,209 @@ pub struct IngestAttemptHandle {
 #[derive(Clone, Default)]
 pub struct IngestService;
 
+struct FinalizeDecision {
+    effective_retryable: bool,
+    failure_message: Option<String>,
+    next_queue_state: String,
+    completed_at: Option<chrono::DateTime<Utc>>,
+}
+
+async fn load_leased_finalize_rows(
+    state: &AppState,
+    command: &FinalizeAttemptCommand,
+) -> Result<(ingest_repository::IngestAttemptRow, ingest_repository::IngestJobRow), ApiError> {
+    let attempt = ingest_repository::get_ingest_attempt_by_id(
+        &state.persistence.postgres,
+        command.attempt_id,
+    )
+    .await
+    .map_err(|error| ApiError::internal_with_log(error, "internal"))?
+    .ok_or_else(|| ApiError::resource_not_found("ingest_attempt", command.attempt_id))?;
+    if attempt.attempt_state != "leased" {
+        return Err(ApiError::Conflict(format!(
+            "ingest attempt {} is no longer leased; current state is {}",
+            command.attempt_id, attempt.attempt_state
+        )));
+    }
+    let job = ingest_repository::get_ingest_job_by_id(&state.persistence.postgres, attempt.job_id)
+        .await
+        .map_err(|error| ApiError::internal_with_log(error, "internal"))?
+        .ok_or_else(|| ApiError::resource_not_found("ingest_job", attempt.job_id))?;
+    if job.queue_state != "leased" {
+        return Err(ApiError::Conflict(format!(
+            "ingest job {} is no longer leased; current state is {}",
+            job.id, job.queue_state
+        )));
+    }
+    Ok((attempt, job))
+}
+
+fn finalize_decision(
+    command: &FinalizeAttemptCommand,
+    attempt: &ingest_repository::IngestAttemptRow,
+) -> FinalizeDecision {
+    let budget_exhausted = is_retry_budget_exhausted(
+        &command.attempt_state,
+        command.retryable,
+        attempt.attempt_number,
+    );
+    let effective_retryable = command.retryable && !budget_exhausted;
+    let failure_message = finalized_failure_message(command, attempt, budget_exhausted);
+    let next_queue_state =
+        next_job_queue_state_after_finalize(&command.attempt_state, effective_retryable)
+            .to_string();
+    let completed_at = matches!(next_queue_state.as_str(), "completed" | "failed").then(Utc::now);
+    FinalizeDecision { effective_retryable, failure_message, next_queue_state, completed_at }
+}
+
+fn finalized_failure_message(
+    command: &FinalizeAttemptCommand,
+    attempt: &ingest_repository::IngestAttemptRow,
+    budget_exhausted: bool,
+) -> Option<String> {
+    if command.attempt_state == "succeeded" {
+        return None;
+    }
+    let message = command.failure_message.clone().or_else(|| attempt.failure_message.clone());
+    if !budget_exhausted {
+        return message;
+    }
+    Some(format!(
+        "{} (exhausted retry budget after {} attempts)",
+        message.unwrap_or_else(|| "ingest attempt failed".to_string()),
+        attempt.attempt_number,
+    ))
+}
+
+async fn build_finalize_lifecycle_event(
+    state: &AppState,
+    command: &FinalizeAttemptCommand,
+    job: &ingest_repository::IngestJobRow,
+    next_queue_state: &str,
+) -> Result<Option<WebhookEvent>, ApiError> {
+    if command.attempt_state != "succeeded"
+        || next_queue_state != "completed"
+        || job.job_kind != "content_mutation"
+    {
+        return Ok(None);
+    }
+    let document_id = job.knowledge_document_id.ok_or_else(|| {
+        ApiError::InternalMessage(
+            "completed content mutation is missing knowledge_document_id".to_string(),
+        )
+    })?;
+    let revision_id = job.knowledge_revision_id.ok_or_else(|| {
+        ApiError::InternalMessage(
+            "completed content mutation is missing knowledge_revision_id".to_string(),
+        )
+    })?;
+    let head = content_repository::get_document_head(&state.persistence.postgres, document_id)
+        .await
+        .map_err(|error| ApiError::internal_with_log(error, "internal"))?
+        .ok_or_else(|| {
+            ApiError::InternalMessage(
+                "completed content mutation is missing its document head".to_string(),
+            )
+        })?;
+    if head.readable_revision_id != Some(revision_id) {
+        return Err(ApiError::Conflict(format!(
+            "content mutation job {} cannot finalize before revision {} is readable",
+            job.id, revision_id
+        )));
+    }
+    Ok(Some(WebhookEvent {
+        event_type: "revision.ready".to_string(),
+        event_id: revision_ready_event_id(revision_id),
+        occurred_at: Utc::now(),
+        workspace_id: job.workspace_id,
+        library_id: job.library_id,
+        payload_json: serde_json::json!({
+            "document_id": document_id,
+            "revision_id": revision_id,
+            "library_id": job.library_id,
+        }),
+    }))
+}
+
+async fn persist_finalized_attempt(
+    state: &AppState,
+    command: &FinalizeAttemptCommand,
+    current_stage: Option<String>,
+    attempt: &ingest_repository::IngestAttemptRow,
+    job: &ingest_repository::IngestJobRow,
+    decision: &FinalizeDecision,
+    lifecycle_event: Option<&WebhookEvent>,
+) -> Result<ingest_repository::IngestAttemptRow, ApiError> {
+    ingest_repository::finalize_leased_ingest_attempt_and_update_job(
+        &state.persistence.postgres,
+        command.attempt_id,
+        &UpdateIngestAttempt {
+            worker_principal_id: attempt.worker_principal_id,
+            lease_token: attempt.lease_token.clone(),
+            knowledge_generation_id: command
+                .knowledge_generation_id
+                .or(attempt.knowledge_generation_id),
+            attempt_state: command.attempt_state.clone(),
+            current_stage,
+            heartbeat_at: Some(Utc::now()),
+            finished_at: Some(Utc::now()),
+            failure_class: command.failure_class.clone(),
+            failure_code: command.failure_code.clone(),
+            failure_message: decision.failure_message.clone(),
+            progress_percent: if command.attempt_state == "succeeded" {
+                100
+            } else {
+                attempt.progress_percent
+            },
+            retryable: decision.effective_retryable,
+        },
+        &UpdateIngestJob {
+            mutation_id: job.mutation_id,
+            connector_id: job.connector_id,
+            async_operation_id: job.async_operation_id,
+            knowledge_document_id: job.knowledge_document_id,
+            knowledge_revision_id: job.knowledge_revision_id,
+            job_kind: job.job_kind.clone(),
+            queue_state: decision.next_queue_state.clone(),
+            priority: job.priority,
+            dedupe_key: job.dedupe_key.clone(),
+            available_at: if decision.effective_retryable {
+                Utc::now() + retry_backoff_after_attempt(attempt.attempt_number)
+            } else {
+                job.available_at
+            },
+            completed_at: decision.completed_at,
+        },
+        lifecycle_event,
+    )
+    .await
+    .map_err(|error| ApiError::internal_with_log(error, "internal"))?
+    .ok_or_else(|| {
+        ApiError::Conflict(format!(
+            "ingest attempt {} or job {} lost its lease before finalization",
+            command.attempt_id, job.id
+        ))
+    })
+}
+
+async fn update_finalize_async_operation(
+    state: &AppState,
+    operation_id: Option<Uuid>,
+    next_queue_state: &str,
+    failure_code: Option<String>,
+) -> Result<(), ApiError> {
+    let status = match next_queue_state {
+        "completed" => ASYNC_OP_STATUS_READY,
+        "failed" => ASYNC_OP_STATUS_FAILED,
+        "queued" => "accepted",
+        _ => ASYNC_OP_STATUS_PROCESSING,
+    };
+    let completed_at =
+        matches!(status, ASYNC_OP_STATUS_READY | ASYNC_OP_STATUS_FAILED).then(Utc::now);
+    let failure_code = (status == ASYNC_OP_STATUS_FAILED).then_some(failure_code).flatten();
+    update_linked_async_operation(state, operation_id, status, completed_at, failure_code).await
+}
+
 impl IngestService {
     #[must_use]
     pub const fn new() -> Self {
@@ -414,14 +576,31 @@ impl IngestService {
         Ok(rows.into_iter().map(map_job_row).collect())
     }
 
-    pub async fn list_job_handles(
+    /// Keyset-paginated job history for `GET
+    /// /v1/ingest/libraries/{libraryId}/jobs`. Returns the built handles for
+    /// the page plus whether a further page exists. Unlike `list_jobs`
+    /// (unpaginated, still used by the MCP mutation-failure lookup path),
+    /// this is the canonical REST list surface.
+    pub async fn list_job_handles_page(
         &self,
         state: &AppState,
-        workspace_id: Option<Uuid>,
-        library_id: Option<Uuid>,
-    ) -> Result<Vec<IngestJobHandle>, ApiError> {
-        let jobs = self.list_jobs(state, workspace_id, library_id).await?;
-        self.build_job_handles(state, jobs).await
+        library_id: Uuid,
+        cursor: Option<(chrono::DateTime<Utc>, Uuid)>,
+        limit: i64,
+        status_filter: &[String],
+    ) -> Result<(Vec<IngestJobHandle>, bool), ApiError> {
+        let page = ingest_repository::list_ingest_jobs_page(
+            &state.persistence.postgres,
+            library_id,
+            cursor,
+            limit,
+            status_filter,
+        )
+        .await
+        .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
+        let jobs = page.rows.into_iter().map(map_job_row).collect();
+        let handles = self.build_job_handles(state, jobs).await?;
+        Ok((handles, page.has_more))
     }
 
     pub async fn list_job_handles_by_mutation_ids(
@@ -537,17 +716,15 @@ impl IngestService {
     ) -> Result<IngestJob, ApiError> {
         if let Some(dedupe_key) =
             command.dedupe_key.as_deref().map(str::trim).filter(|value| !value.is_empty())
-        {
-            if let Some(existing) = ingest_repository::get_ingest_job_by_dedupe_key(
+            && let Some(existing) = ingest_repository::get_ingest_job_by_dedupe_key(
                 &state.persistence.postgres,
                 command.library_id,
                 dedupe_key,
             )
             .await
             .map_err(|e| ApiError::internal_with_log(e, "internal"))?
-            {
-                return Ok(map_job_row(existing));
-            }
+        {
+            return Ok(map_job_row(existing));
         }
 
         let row = ingest_repository::create_ingest_job(
@@ -556,6 +733,7 @@ impl IngestService {
                 workspace_id: command.workspace_id,
                 library_id: command.library_id,
                 mutation_id: command.mutation_id,
+                mutation_item_id: command.mutation_item_id,
                 connector_id: command.connector_id,
                 async_operation_id: command.async_operation_id,
                 knowledge_document_id: command.knowledge_document_id,
@@ -584,6 +762,31 @@ impl IngestService {
                 .await
                 .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
         Ok(rows.into_iter().map(map_attempt_row).collect())
+    }
+
+    /// Keyset-paginated attempt history for `GET
+    /// /v1/ingest/jobs/{jobId}/attempts`. Returns the page plus whether a
+    /// further page exists. Unlike `list_attempts` (unpaginated, used
+    /// internally by the MCP retry/diagnostics path), this is the canonical
+    /// REST list surface for a flaky-ingest operator drilling into one job's
+    /// full retry history.
+    pub async fn list_attempts_page(
+        &self,
+        state: &AppState,
+        job_id: Uuid,
+        cursor: Option<(i32, Uuid)>,
+        limit: i64,
+    ) -> Result<(Vec<IngestAttempt>, bool), ApiError> {
+        let page = ingest_repository::list_ingest_attempts_by_job_page(
+            &state.persistence.postgres,
+            job_id,
+            cursor,
+            limit,
+        )
+        .await
+        .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
+        let attempts = page.rows.into_iter().map(map_attempt_row).collect();
+        Ok((attempts, page.has_more))
     }
 
     pub async fn get_attempt(
@@ -659,47 +862,24 @@ impl IngestService {
                 ))
             })?
         } else {
-            let latest_attempt = ingest_repository::get_latest_ingest_attempt_by_job(
+            let inline_queue_lease_token = new_attempt.lease_token.as_deref().ok_or_else(|| {
+                ApiError::BadRequest("inline ingest lease token is required".to_string())
+            })?;
+            ingest_repository::create_ingest_attempt_for_inline_lease(
                 &state.persistence.postgres,
-                command.job_id,
+                &new_attempt,
+                inline_queue_lease_token,
+                INLINE_QUEUE_LEASE_OWNER,
             )
             .await
-            .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
-            let next_attempt_number =
-                latest_attempt.as_ref().map_or(1, |row| row.attempt_number + 1);
-            let mut fallback_attempt = new_attempt;
-            fallback_attempt.attempt_number = next_attempt_number;
-            let attempt = ingest_repository::create_ingest_attempt(
-                &state.persistence.postgres,
-                &fallback_attempt,
-            )
-            .await
-            .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
-
-            let _ = ingest_repository::update_ingest_job(
-                &state.persistence.postgres,
-                job.id,
-                &UpdateIngestJob {
-                    mutation_id: job.mutation_id,
-                    connector_id: job.connector_id,
-                    async_operation_id: job.async_operation_id,
-                    knowledge_document_id: job.knowledge_document_id,
-                    knowledge_revision_id: job.knowledge_revision_id,
-                    job_kind: job.job_kind,
-                    queue_state: "leased".to_string(),
-                    priority: job.priority,
-                    dedupe_key: job.dedupe_key,
-                    available_at: job.available_at,
-                    completed_at: job.completed_at,
-                },
-            )
-            .await
-            .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
-            attempt
+            .map_err(|e| ApiError::internal_with_log(e, "internal"))?
+            .ok_or_else(|| {
+                ApiError::Conflict(format!(
+                    "ingest job {} cannot be claimed by an inline attempt",
+                    job.id
+                ))
+            })?
         };
-
-        update_linked_async_operation(state, job.async_operation_id, "processing", None, None)
-            .await?;
 
         Ok(map_attempt_row(attempt))
     }
@@ -751,137 +931,28 @@ impl IngestService {
     ) -> Result<IngestAttempt, ApiError> {
         let current_stage = normalize_optional_stage(command.current_stage.clone())?;
         let failure_code = command.failure_code.clone();
-        let attempt = ingest_repository::get_ingest_attempt_by_id(
-            &state.persistence.postgres,
-            command.attempt_id,
-        )
-        .await
-        .map_err(|e| ApiError::internal_with_log(e, "internal"))?
-        .ok_or_else(|| ApiError::resource_not_found("ingest_attempt", command.attempt_id))?;
-        if attempt.attempt_state != "leased" {
-            return Err(ApiError::Conflict(format!(
-                "ingest attempt {} is no longer leased; current state is {}",
-                command.attempt_id, attempt.attempt_state
-            )));
-        }
-
-        let job =
-            ingest_repository::get_ingest_job_by_id(&state.persistence.postgres, attempt.job_id)
-                .await
-                .map_err(|e| ApiError::internal_with_log(e, "internal"))?
-                .ok_or_else(|| ApiError::resource_not_found("ingest_job", attempt.job_id))?;
-        if job.queue_state != "leased" {
-            return Err(ApiError::Conflict(format!(
-                "ingest job {} is no longer leased; current state is {}",
-                job.id, job.queue_state
-            )));
-        }
-
-        // Attempt-budget gate. A stage failure the worker flagged as retryable is
-        // only actually requeued while the job still has retries left in its
-        // budget (counted via the monotonic `attempt_number`). Once the budget is
-        // exhausted the failure is escalated to a terminal `failed` so a poisoned
-        // document cannot loop in the queue forever, and the attempts count is
-        // surfaced in the persisted failure message for the operator.
-        let budget_exhausted = is_retry_budget_exhausted(
-            &command.attempt_state,
-            command.retryable,
-            attempt.attempt_number,
-        );
-        let effective_retryable = command.retryable && !budget_exhausted;
-        let failure_message = if command.attempt_state == "succeeded" {
-            None
-        } else if budget_exhausted {
-            Some(format!(
-                "{} (exhausted retry budget after {} attempts)",
-                command
-                    .failure_message
-                    .clone()
-                    .or(attempt.failure_message.clone())
-                    .unwrap_or_else(|| "ingest attempt failed".to_string()),
-                attempt.attempt_number,
-            ))
-        } else {
-            command.failure_message.clone().or(attempt.failure_message.clone())
-        };
-
-        let next_queue_state =
-            next_job_queue_state_after_finalize(&command.attempt_state, effective_retryable);
-        let completed_at = if next_queue_state == "completed" || next_queue_state == "failed" {
-            Some(Utc::now())
-        } else {
-            None
-        };
-        let row = ingest_repository::finalize_leased_ingest_attempt_and_update_job(
-            &state.persistence.postgres,
-            command.attempt_id,
-            &UpdateIngestAttempt {
-                worker_principal_id: attempt.worker_principal_id,
-                lease_token: attempt.lease_token,
-                knowledge_generation_id: command
-                    .knowledge_generation_id
-                    .or(attempt.knowledge_generation_id),
-                attempt_state: command.attempt_state.clone(),
-                current_stage,
-                heartbeat_at: Some(Utc::now()),
-                finished_at: Some(Utc::now()),
-                failure_class: command.failure_class,
-                failure_code: failure_code.clone(),
-                failure_message,
-                progress_percent: if command.attempt_state == "succeeded" {
-                    100
-                } else {
-                    attempt.progress_percent
-                },
-                retryable: effective_retryable,
-            },
-            &UpdateIngestJob {
-                mutation_id: job.mutation_id,
-                connector_id: job.connector_id,
-                async_operation_id: job.async_operation_id,
-                knowledge_document_id: job.knowledge_document_id,
-                knowledge_revision_id: job.knowledge_revision_id,
-                job_kind: job.job_kind,
-                queue_state: next_queue_state.to_string(),
-                priority: job.priority,
-                dedupe_key: job.dedupe_key,
-                available_at: if effective_retryable {
-                    Utc::now() + retry_backoff_after_attempt(attempt.attempt_number)
-                } else {
-                    job.available_at
-                },
-                completed_at,
-            },
-        )
-        .await
-        .map_err(|e| ApiError::internal_with_log(e, "internal"))?
-        .ok_or_else(|| {
-            ApiError::Conflict(format!(
-                "ingest attempt {} or job {} lost its lease before finalization",
-                command.attempt_id, job.id
-            ))
-        })?;
-
-        let operation_status = match next_queue_state {
-            "completed" => ASYNC_OP_STATUS_READY,
-            "failed" => ASYNC_OP_STATUS_FAILED,
-            "queued" => "accepted",
-            _ => ASYNC_OP_STATUS_PROCESSING,
-        };
-        let operation_completed_at = (operation_status == ASYNC_OP_STATUS_READY
-            || operation_status == ASYNC_OP_STATUS_FAILED)
-            .then(Utc::now);
-        let operation_failure_code =
-            (operation_status == ASYNC_OP_STATUS_FAILED).then(|| failure_code.clone()).flatten();
-        update_linked_async_operation(
+        let (attempt, job) = load_leased_finalize_rows(state, &command).await?;
+        let decision = finalize_decision(&command, &attempt);
+        let lifecycle_event =
+            build_finalize_lifecycle_event(state, &command, &job, &decision.next_queue_state)
+                .await?;
+        let row = persist_finalized_attempt(
             state,
-            job.async_operation_id,
-            operation_status,
-            operation_completed_at,
-            operation_failure_code,
+            &command,
+            current_stage,
+            &attempt,
+            &job,
+            &decision,
+            lifecycle_event.as_ref(),
         )
         .await?;
-
+        update_finalize_async_operation(
+            state,
+            job.async_operation_id,
+            &decision.next_queue_state,
+            failure_code,
+        )
+        .await?;
         Ok(map_attempt_row(row))
     }
 
@@ -1030,8 +1101,9 @@ impl IngestService {
                     &stage_state,
                     &stage_details,
                 )
-                .map(|progress| progress.max(attempt.progress_percent))
-                .unwrap_or(attempt.progress_percent),
+                .map_or(attempt.progress_percent, |progress| {
+                    progress.max(attempt.progress_percent)
+                }),
                 retryable: attempt.retryable,
             },
         )
@@ -1344,14 +1416,17 @@ mod tests {
         INGEST_STAGE_EXTRACT_CONTENT, INGEST_STAGE_EXTRACT_GRAPH,
         INGEST_STAGE_EXTRACT_TECHNICAL_FACTS, INGEST_STAGE_FINALIZING,
         INGEST_STAGE_PREPARE_STRUCTURE, INGEST_STAGE_WEB_DISCOVERY,
-        INGEST_STAGE_WEB_MATERIALIZE_PAGE, MAX_INGEST_ATTEMPTS,
-        canonical_ingest_attempt_stage_unit_progress_percent, canonical_ingest_progress_profile,
-        canonical_ingest_stage_metadata, canonical_ingest_stage_progress_percent_for_profile,
+        INGEST_STAGE_WEB_MATERIALIZE_PAGE, canonical_ingest_attempt_stage_unit_progress_percent,
+        canonical_ingest_progress_profile, canonical_ingest_stage_metadata,
+        canonical_ingest_stage_progress_percent_for_profile,
         canonical_ingest_stage_unit_progress_percent_for_profile, is_retry_budget_exhausted,
         next_job_queue_state_after_finalize, normalize_stage_name,
         progress_profile_from_stage_details, retry_backoff_after_attempt,
     };
-    use crate::infra::repositories::ingest_repository::IngestStageEventRow;
+    use crate::{
+        domains::ingest::MAX_INGEST_ATTEMPTS,
+        infra::repositories::ingest_repository::IngestStageEventRow,
+    };
     use chrono::Utc;
     use serde_json::json;
     use uuid::Uuid;

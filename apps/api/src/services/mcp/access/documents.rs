@@ -3,17 +3,25 @@ use serde_json::json;
 use tracing::warn;
 use uuid::Uuid;
 
+use std::collections::HashMap;
+
 use crate::{
     app::state::AppState,
     domains::{ai::AiBindingPurpose, content::revision_text_state_is_readable},
-    infra::repositories::{catalog_repository, content_repository},
+    infra::{
+        knowledge_rows::{
+            KnowledgeChunkRow, KnowledgeChunkSearchRow, KnowledgeChunkVectorSearchRow,
+            KnowledgeDocumentRow, KnowledgeRevisionRow,
+        },
+        repositories::{catalog_repository, content_repository},
+    },
     integrations::llm::EmbeddingRequest,
     interfaces::http::{
         auth::AuthContext,
         authorization::{
             POLICY_MCP_MEMORY_READ, authorize_library_discovery, load_library_and_authorize,
         },
-        router_support::ApiError,
+        router_support::{ApiError, map_runtime_lifecycle_error},
     },
     mcp_types::{
         McpChunkReference, McpContentSourceAccess, McpDocumentHit, McpEntityReference,
@@ -22,10 +30,16 @@ use crate::{
         McpSearchDocumentsResponse, McpTechnicalFactReference,
     },
     services::{
-        mcp::support::{
-            char_slice, encode_continuation_token, normalize_read_request, saturating_rank,
+        mcp::tokens::{char_slice, encode_continuation_token, normalize_read_request},
+        query::{
+            error::QueryServiceError,
+            vector_dimensions::{
+                EmbeddingProfileIndexState, ensure_active_embedding_profile_key,
+                ensure_embedding_profile_inventory_version_current,
+                ensure_library_embedding_profile_indexed, load_embedding_profile_inventory_version,
+                validate_embedding_vector_dimensions,
+            },
         },
-        query::vector_dimensions::library_vector_index_dimensions,
     },
     shared::versioning::dotted_version_key,
 };
@@ -39,7 +53,241 @@ use super::{
     },
 };
 
-pub async fn search_documents(
+struct SearchLibraryMaterial {
+    metadata_hits:
+        Vec<crate::infra::repositories::content_repository::ContentDocumentMetadataSearchRow>,
+    lexical_chunk_hits: Vec<KnowledgeChunkSearchRow>,
+    vector_chunk_hits: Vec<KnowledgeChunkVectorSearchRow>,
+    chunk_map: HashMap<Uuid, KnowledgeChunkRow>,
+    document_map: HashMap<Uuid, KnowledgeDocumentRow>,
+    revision_map: HashMap<Uuid, KnowledgeRevisionRow>,
+}
+
+async fn load_search_library_material(
+    state: &AppState,
+    library: &VisibleLibraryContext,
+    query: &str,
+    lexical_limit: usize,
+) -> Result<SearchLibraryMaterial, ApiError> {
+    let metadata_hits = content_repository::search_document_metadata_rows(
+        &state.persistence.postgres,
+        library.library.id,
+        query,
+        lexical_limit as u32,
+    )
+    .await
+    .map_err(|error| ApiError::internal_with_log(error, "internal"))?;
+    let lexical_chunk_hits =
+        search_chunks_with_query_variants(state, library.library.id, query, lexical_limit).await?;
+    let embedding_context =
+        resolve_search_embedding_context(state, library.library.id, query).await?;
+    let vector_chunk_hits = load_vector_search_hits(
+        state,
+        library.library.id,
+        embedding_context.as_ref(),
+        lexical_limit,
+    )
+    .await?;
+    let all_chunk_ids = lexical_chunk_hits
+        .iter()
+        .map(|hit| hit.chunk_id)
+        .chain(vector_chunk_hits.iter().map(|hit| hit.chunk_id))
+        .collect::<Vec<_>>();
+    let chunk_map = load_knowledge_chunks_by_ids(state, &all_chunk_ids)
+        .await?
+        .into_iter()
+        .map(|row| (row.chunk_id, row))
+        .collect::<HashMap<_, _>>();
+    let chunk_document_ids = unique_chunk_document_ids(&chunk_map);
+    let chunk_revision_ids = unique_chunk_revision_ids(&chunk_map);
+    let (document_rows, revision_rows) = tokio::try_join!(
+        state.document_store.list_documents_by_ids(&chunk_document_ids),
+        state.document_store.list_revisions_by_ids(&chunk_revision_ids),
+    )
+    .map_err(|error| ApiError::internal_with_log(error, "internal"))?;
+    Ok(SearchLibraryMaterial {
+        metadata_hits,
+        lexical_chunk_hits,
+        vector_chunk_hits,
+        chunk_map,
+        document_map: document_rows.into_iter().map(|row| (row.document_id, row)).collect(),
+        revision_map: revision_rows.into_iter().map(|row| (row.revision_id, row)).collect(),
+    })
+}
+
+async fn load_vector_search_hits(
+    state: &AppState,
+    library_id: Uuid,
+    embedding_context: Option<&McpSearchEmbeddingContext>,
+    lexical_limit: usize,
+) -> Result<Vec<KnowledgeChunkVectorSearchRow>, ApiError> {
+    let Some(context) = embedding_context else {
+        return Ok(Vec::new());
+    };
+    let _vector_guard = state
+        .canonical_services
+        .search
+        .vector_plane_read_guard(state, library_id)
+        .await
+        .map_err(|error| ApiError::internal_with_log(error, "internal"))?;
+    ensure_active_embedding_profile_key(state, library_id, &context.embedding_profile_key)
+        .await
+        .map_err(map_runtime_lifecycle_error)?;
+    ensure_embedding_profile_inventory_version_current(
+        state,
+        library_id,
+        context.inventory_version,
+    )
+    .await
+    .map_err(map_runtime_lifecycle_error)?;
+    validate_embedding_vector_dimensions(
+        context.dimensions,
+        &context.query_vector,
+        "MCP document search query",
+    )
+    .map_err(|error| ApiError::internal_with_log(error, "internal"))?;
+    match state
+        .search_store
+        .search_chunk_vectors_by_similarity(
+            context.dimensions,
+            library_id,
+            &context.embedding_profile_key,
+            &context.query_vector,
+            lexical_limit.saturating_mul(2),
+            None,
+            None,
+            None,
+        )
+        .await
+    {
+        Ok(rows) => Ok(rows),
+        Err(error) => {
+            warn!(
+                %library_id,
+                model_catalog_id = %context.model_catalog_id,
+                error = ?error,
+                "mcp search vector lookup failed; degrading to lexical-only MCP search",
+            );
+            Ok(Vec::new())
+        }
+    }
+}
+
+/// 1-based, saturating conversion from a search-hit index to an `i32`
+/// rank. Split out of the former `services/mcp/support.rs` god-file
+/// (plan §6.4) as a module-private helper: this was its only caller in
+/// the MCP domain (`services::query::service` independently defines an
+/// equivalent for its own ranking, tracked separately, out of scope
+/// here).
+fn saturating_rank(index: usize) -> i32 {
+    i32::try_from(index.saturating_add(1)).unwrap_or(i32::MAX)
+}
+
+fn unique_chunk_document_ids(chunk_map: &HashMap<Uuid, KnowledgeChunkRow>) -> Vec<Uuid> {
+    chunk_map
+        .values()
+        .map(|chunk| chunk.document_id)
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
+fn unique_chunk_revision_ids(chunk_map: &HashMap<Uuid, KnowledgeChunkRow>) -> Vec<Uuid> {
+    chunk_map
+        .values()
+        .map(|chunk| chunk.revision_id)
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
+fn accumulate_metadata_search_hits(
+    accumulators: &mut HashMap<Uuid, McpDocumentAccumulator>,
+    metadata_hits: &[crate::infra::repositories::content_repository::ContentDocumentMetadataSearchRow],
+    query: &str,
+) {
+    for (index, hit) in metadata_hits.iter().enumerate() {
+        let accumulator = accumulators
+            .entry(hit.document_id)
+            .or_insert_with(|| McpDocumentAccumulator::from_metadata(hit));
+        accumulator.observe_lane(SearchLane::Metadata, saturating_rank(index));
+        accumulator.populate_excerpt_from_text(&hit.matched_text, query);
+    }
+}
+
+fn accumulate_lexical_search_hits(
+    accumulators: &mut HashMap<Uuid, McpDocumentAccumulator>,
+    hits: &[KnowledgeChunkSearchRow],
+    chunk_map: &HashMap<Uuid, KnowledgeChunkRow>,
+    document_map: &HashMap<Uuid, KnowledgeDocumentRow>,
+    revision_map: &HashMap<Uuid, KnowledgeRevisionRow>,
+    query: &str,
+    read_window_chars: usize,
+) {
+    for (index, hit) in hits.iter().enumerate() {
+        let Some((chunk, document, revision)) =
+            search_hit_context(hit.chunk_id, chunk_map, document_map, revision_map)
+        else {
+            continue;
+        };
+        let accumulator = accumulators
+            .entry(document.document_id)
+            .or_insert_with(|| McpDocumentAccumulator::from_knowledge(document, revision));
+        accumulator.observe_lane(SearchLane::LexicalChunk, saturating_rank(index));
+        accumulator.merge_chunk_span_anchor(chunk.span_start, hit.score, read_window_chars);
+        accumulator.merge_chunk_reference(
+            chunk.chunk_id,
+            saturating_rank(index),
+            hit.score,
+            Some("lexical_chunk".to_string()),
+        );
+        accumulator.populate_excerpt_from_text(&hit.normalized_text, query);
+    }
+}
+
+fn accumulate_vector_search_hits(
+    accumulators: &mut HashMap<Uuid, McpDocumentAccumulator>,
+    hits: &[KnowledgeChunkVectorSearchRow],
+    chunk_map: &HashMap<Uuid, KnowledgeChunkRow>,
+    document_map: &HashMap<Uuid, KnowledgeDocumentRow>,
+    revision_map: &HashMap<Uuid, KnowledgeRevisionRow>,
+    query: &str,
+    read_window_chars: usize,
+) {
+    for (index, hit) in hits.iter().enumerate() {
+        let Some((chunk, document, revision)) =
+            search_hit_context(hit.chunk_id, chunk_map, document_map, revision_map)
+        else {
+            continue;
+        };
+        let accumulator = accumulators
+            .entry(document.document_id)
+            .or_insert_with(|| McpDocumentAccumulator::from_knowledge(document, revision));
+        accumulator.observe_lane(SearchLane::VectorChunk, saturating_rank(index));
+        accumulator.merge_chunk_span_anchor(chunk.span_start, hit.score, read_window_chars);
+        accumulator.merge_chunk_reference(
+            chunk.chunk_id,
+            saturating_rank(index),
+            hit.score,
+            Some("vector_chunk".to_string()),
+        );
+        accumulator.populate_excerpt_from_text(&chunk.normalized_text, query);
+    }
+}
+
+fn search_hit_context<'a>(
+    chunk_id: Uuid,
+    chunk_map: &'a HashMap<Uuid, KnowledgeChunkRow>,
+    document_map: &'a HashMap<Uuid, KnowledgeDocumentRow>,
+    revision_map: &'a HashMap<Uuid, KnowledgeRevisionRow>,
+) -> Option<(&'a KnowledgeChunkRow, &'a KnowledgeDocumentRow, &'a KnowledgeRevisionRow)> {
+    let chunk = chunk_map.get(&chunk_id)?;
+    let document = document_map.get(&chunk.document_id)?;
+    let revision = revision_map.get(&chunk.revision_id)?;
+    Some((chunk, document, revision))
+}
+
+pub(crate) async fn search_documents(
     auth: &AuthContext,
     state: &AppState,
     request: McpSearchDocumentsRequest,
@@ -63,165 +311,35 @@ pub async fn search_documents(
     let mut hits = Vec::new();
     for library in libraries {
         let lexical_limit = limit.saturating_mul(3).max(6);
-        let metadata_hits = content_repository::search_document_metadata_rows(
-            &state.persistence.postgres,
-            library.library.id,
+        let SearchLibraryMaterial {
+            metadata_hits,
+            lexical_chunk_hits,
+            vector_chunk_hits,
+            chunk_map,
+            document_map,
+            revision_map,
+        } = load_search_library_material(state, &library, query, lexical_limit).await?;
+        let mut document_accumulators = HashMap::<Uuid, McpDocumentAccumulator>::new();
+
+        accumulate_metadata_search_hits(&mut document_accumulators, &metadata_hits, query);
+        accumulate_lexical_search_hits(
+            &mut document_accumulators,
+            &lexical_chunk_hits,
+            &chunk_map,
+            &document_map,
+            &revision_map,
             query,
-            lexical_limit as u32,
-        )
-        .await
-        .map_err(|error| ApiError::internal_with_log(error, "internal"))?;
-        let lexical_chunk_hits =
-            search_chunks_with_query_variants(state, library.library.id, query, lexical_limit)
-                .await?;
-        let embedding_context =
-            resolve_search_embedding_context(state, library.library.id, query).await?;
-        let vector_chunk_hits = if let Some(context) = embedding_context.as_ref() {
-            let _vector_guard = state
-                .canonical_services
-                .search
-                .vector_plane_read_guard(state)
-                .await
-                .map_err(|error| ApiError::internal_with_log(error, "internal"))?;
-            let library_dim = library_vector_index_dimensions(state, library.library.id)
-                .await
-                .map_err(|error| ApiError::internal_with_log(error, "internal"))?;
-            match state
-                .search_store
-                .search_chunk_vectors_by_similarity(
-                    library_dim,
-                    library.library.id,
-                    &context.model_catalog_id.to_string(),
-                    &context.query_vector,
-                    lexical_limit.saturating_mul(2),
-                    None,
-                    None,
-                    None,
-                )
-                .await
-            {
-                Ok(rows) => rows,
-                Err(error) => {
-                    warn!(
-                        library_id = %library.library.id,
-                        model_catalog_id = %context.model_catalog_id,
-                        error = ?error,
-                        "mcp search vector lookup failed; degrading to lexical-only MCP search",
-                    );
-                    Vec::new()
-                }
-            }
-        } else {
-            Vec::new()
-        };
-
-        let all_chunk_ids = lexical_chunk_hits
-            .iter()
-            .map(|hit| hit.chunk_id)
-            .chain(vector_chunk_hits.iter().map(|hit| hit.chunk_id))
-            .collect::<Vec<_>>();
-        let chunk_rows = load_knowledge_chunks_by_ids(state, &all_chunk_ids).await?;
-        let chunk_map = chunk_rows
-            .into_iter()
-            .map(|row| (row.chunk_id, row))
-            .collect::<std::collections::HashMap<_, _>>();
-        let chunk_document_ids = chunk_map
-            .values()
-            .map(|chunk| chunk.document_id)
-            .collect::<std::collections::BTreeSet<_>>()
-            .into_iter()
-            .collect::<Vec<_>>();
-        let chunk_revision_ids = chunk_map
-            .values()
-            .map(|chunk| chunk.revision_id)
-            .collect::<std::collections::BTreeSet<_>>()
-            .into_iter()
-            .collect::<Vec<_>>();
-        let (document_rows, revision_rows) = tokio::try_join!(
-            state.document_store.list_documents_by_ids(&chunk_document_ids),
-            state.document_store.list_revisions_by_ids(&chunk_revision_ids),
-        )
-        .map_err(|error| ApiError::internal_with_log(error, "internal"))?;
-        let document_map = document_rows
-            .into_iter()
-            .map(|row| (row.document_id, row))
-            .collect::<std::collections::HashMap<_, _>>();
-        let revision_map = revision_rows
-            .into_iter()
-            .map(|row| (row.revision_id, row))
-            .collect::<std::collections::HashMap<_, _>>();
-        let mut document_accumulators =
-            std::collections::HashMap::<Uuid, McpDocumentAccumulator>::new();
-
-        for (index, metadata_hit) in metadata_hits.iter().enumerate() {
-            let accumulator = document_accumulators
-                .entry(metadata_hit.document_id)
-                .or_insert_with(|| McpDocumentAccumulator::from_metadata(metadata_hit));
-            accumulator.observe_lane(SearchLane::Metadata, saturating_rank(index));
-            accumulator.populate_excerpt_from_text(&metadata_hit.matched_text, query);
-        }
-
-        for (index, hit) in lexical_chunk_hits.iter().enumerate() {
-            let Some(chunk) = chunk_map.get(&hit.chunk_id) else {
-                continue;
-            };
-            // Search index can hold stale chunks whose parent document
-            // has been tombstoned (crashed ingest, manual cleanup); skip
-            // them rather than failing the call.
-            let Some(document) = document_map.get(&chunk.document_id) else {
-                continue;
-            };
-            let Some(revision) = revision_map.get(&chunk.revision_id) else {
-                continue;
-            };
-            let accumulator = document_accumulators
-                .entry(document.document_id)
-                .or_insert_with(|| McpDocumentAccumulator::from_knowledge(document, revision));
-            accumulator.observe_lane(SearchLane::LexicalChunk, saturating_rank(index));
-            accumulator.merge_chunk_span_anchor(
-                chunk.span_start,
-                hit.score,
-                settings.default_read_window_chars,
-            );
-            accumulator.merge_chunk_reference(
-                chunk.chunk_id,
-                saturating_rank(index),
-                hit.score,
-                Some("lexical_chunk".to_string()),
-            );
-            accumulator.populate_excerpt_from_text(&hit.normalized_text, query);
-        }
-
-        for (index, hit) in vector_chunk_hits.iter().enumerate() {
-            let Some(chunk) = chunk_map.get(&hit.chunk_id) else {
-                continue;
-            };
-            // Same drift-tolerance as the lexical branch above: skip
-            // hits pointing at tombstoned / missing documents and
-            // revisions instead of failing the whole search.
-            let Some(document) = document_map.get(&chunk.document_id) else {
-                continue;
-            };
-            let Some(revision) = revision_map.get(&chunk.revision_id) else {
-                continue;
-            };
-            let accumulator = document_accumulators
-                .entry(document.document_id)
-                .or_insert_with(|| McpDocumentAccumulator::from_knowledge(document, revision));
-            accumulator.observe_lane(SearchLane::VectorChunk, saturating_rank(index));
-            accumulator.merge_chunk_span_anchor(
-                chunk.span_start,
-                hit.score,
-                settings.default_read_window_chars,
-            );
-            accumulator.merge_chunk_reference(
-                chunk.chunk_id,
-                saturating_rank(index),
-                hit.score,
-                Some("vector_chunk".to_string()),
-            );
-            accumulator.populate_excerpt_from_text(&chunk.normalized_text, query);
-        }
+            settings.default_read_window_chars,
+        );
+        accumulate_vector_search_hits(
+            &mut document_accumulators,
+            &vector_chunk_hits,
+            &chunk_map,
+            &document_map,
+            &revision_map,
+            query,
+            settings.default_read_window_chars,
+        );
 
         let mut library_hits = Vec::new();
         for accumulator in document_accumulators.into_values() {
@@ -292,7 +410,7 @@ pub async fn search_documents(
     })
 }
 
-fn search_readability_rank(state: &McpReadabilityState) -> u8 {
+const fn search_readability_rank(state: &McpReadabilityState) -> u8 {
     match state {
         McpReadabilityState::Readable => 0,
         McpReadabilityState::Processing => 1,
@@ -311,7 +429,7 @@ fn search_document_hit_order(left: &McpDocumentHit, right: &McpDocumentHit) -> s
         .then_with(|| left.document_id.cmp(&right.document_id))
 }
 
-pub async fn read_document(
+pub(crate) async fn read_document(
     auth: &AuthContext,
     state: &AppState,
     request: McpReadDocumentRequest,
@@ -490,51 +608,7 @@ fn chunk_search_query_variants(query: &str) -> Vec<String> {
     if trimmed.is_empty() {
         return Vec::new();
     }
-
-    let mut variants = vec![trimmed.to_string()];
-    let canonical_terms = suffix_trimmed_query_terms(trimmed);
-    if !canonical_terms.is_empty() {
-        let canonical_query = canonical_terms.join(" ");
-        if !canonical_query.eq_ignore_ascii_case(trimmed) {
-            variants.push(canonical_query);
-        }
-    }
-    variants
-}
-
-fn suffix_trimmed_query_terms(query: &str) -> Vec<String> {
-    let mut terms = Vec::new();
-    let mut seen = std::collections::BTreeSet::new();
-    for raw_token in query
-        .split(|character: char| {
-            !character.is_alphanumeric() && character != '_' && character != '/'
-        })
-        .map(str::trim)
-        .filter(|token| token.chars().count() >= 2)
-    {
-        let token = raw_token.to_lowercase();
-        let mut token_terms = vec![token.clone()];
-        if token.chars().count() >= 7 && token.chars().all(char::is_alphabetic) {
-            for trim_chars in 1..=2 {
-                let keep_chars = token.chars().count().saturating_sub(trim_chars);
-                if keep_chars >= 5 {
-                    token_terms.push(token.chars().take(keep_chars).collect());
-                }
-            }
-        }
-        for term in token_terms {
-            if seen.insert(term.clone()) {
-                terms.push(term);
-            }
-            if terms.len() >= 12 {
-                break;
-            }
-        }
-        if terms.len() >= 12 {
-            break;
-        }
-    }
-    terms
+    vec![trimmed.to_string()]
 }
 
 fn effective_read_start_offset(
@@ -550,7 +624,7 @@ fn effective_read_start_offset(
     }
 }
 
-pub async fn authorize_library_for_mcp(
+pub(crate) async fn authorize_library_for_mcp(
     auth: &AuthContext,
     state: &AppState,
     library_ref: &str,
@@ -558,7 +632,7 @@ pub async fn authorize_library_for_mcp(
     load_library_by_catalog_ref(auth, state, library_ref, POLICY_MCP_MEMORY_READ).await
 }
 
-pub async fn list_documents(
+pub(crate) async fn list_documents(
     auth: &AuthContext,
     state: &AppState,
     library_id: Uuid,
@@ -586,8 +660,7 @@ pub async fn list_documents(
             let readiness_kind = summary
                 .readiness_summary
                 .as_ref()
-                .map(|row| row.readiness_kind.as_str())
-                .unwrap_or("unknown");
+                .map_or("unknown", |row| row.readiness_kind.as_str());
             let source_uri =
                 summary.active_revision.as_ref().and_then(|row| row.source_uri.as_deref());
             let byte_size = summary.active_revision.as_ref().map(|row| row.byte_size);
@@ -644,7 +717,7 @@ fn list_documents_matches_status_filter(
     }
 }
 
-pub async fn delete_document(
+pub(crate) async fn delete_document(
     auth: &AuthContext,
     state: &AppState,
     document_id: Uuid,
@@ -898,7 +971,7 @@ async fn load_source_visual_description(
     let Some(binding) = state
         .canonical_services
         .ai_catalog
-        .resolve_active_runtime_binding(state, state_view.library.id, AiBindingPurpose::Vision)
+        .resolve_active_runtime_binding(state, state_view.library.id, AiBindingPurpose::ExtractText)
         .await?
     else {
         return Ok(None);
@@ -984,27 +1057,51 @@ pub(crate) async fn resolve_search_embedding_context(
     library_id: Uuid,
     query_text: &str,
 ) -> Result<Option<McpSearchEmbeddingContext>, ApiError> {
-    let Some(binding) = state
+    let _vector_guard = state
+        .canonical_services
+        .search
+        .vector_plane_read_guard(state, library_id)
+        .await
+        .map_err(|error| ApiError::internal_with_log(error, "internal"))?;
+    let inventory_version = load_embedding_profile_inventory_version(state, library_id)
+        .await
+        .map_err(|error| ApiError::internal_with_log(error, "internal"))?;
+    let binding = state
         .canonical_services
         .ai_catalog
         .resolve_active_runtime_binding(state, library_id, AiBindingPurpose::EmbedChunk)
         .await?
-    else {
-        return Ok(None);
-    };
+        .ok_or_else(|| {
+            map_runtime_lifecycle_error(anyhow::Error::new(QueryServiceError::StateConflict {
+                message: format!(
+                    "active embed_chunk binding is unavailable while proving the exact vector inventory for library {library_id}; configure the binding and rebuild before querying"
+                ),
+            }))
+        })?;
 
-    let generations = state
-        .canonical_services
-        .knowledge
-        .derive_library_generation_rows(state, library_id)
-        .await
-        .map_err(|error| ApiError::internal_with_log(error, "internal"))?;
-    let Some(generation) = generations.first() else {
-        return Ok(None);
+    let embedding_profile_key = binding.embedding_execution_profile_key();
+    let index_state = ensure_library_embedding_profile_indexed(
+        state,
+        library_id,
+        &embedding_profile_key,
+        inventory_version,
+    )
+    .await
+    .map_err(map_runtime_lifecycle_error)?;
+    let dimensions = match index_state {
+        EmbeddingProfileIndexState::Empty => {
+            ensure_embedding_profile_inventory_version_current(
+                state,
+                library_id,
+                inventory_version,
+            )
+            .await
+            .map_err(map_runtime_lifecycle_error)?;
+            return Ok(None);
+        }
+        EmbeddingProfileIndexState::Ready { dimensions } => dimensions,
     };
-    if generation.active_vector_generation <= 0 {
-        return Ok(None);
-    }
+    drop(_vector_guard);
 
     let embedding = state
         .llm_gateway
@@ -1021,9 +1118,24 @@ pub(crate) async fn resolve_search_embedding_context(
             ApiError::ProviderFailure(format!("failed to embed MCP memory search query: {error}"))
         })?;
 
-    let _ = generation;
+    ensure_active_embedding_profile_key(state, library_id, &embedding_profile_key)
+        .await
+        .map_err(map_runtime_lifecycle_error)?;
+    ensure_embedding_profile_inventory_version_current(state, library_id, inventory_version)
+        .await
+        .map_err(map_runtime_lifecycle_error)?;
+    validate_embedding_vector_dimensions(
+        dimensions,
+        &embedding.embedding,
+        "MCP document search query",
+    )
+    .map_err(|error| ApiError::internal_with_log(error, "internal"))?;
+
     Ok(Some(McpSearchEmbeddingContext {
         model_catalog_id: binding.model_catalog_id,
+        embedding_profile_key,
+        inventory_version,
+        dimensions,
         query_vector: embedding.embedding,
     }))
 }
@@ -1249,7 +1361,7 @@ pub(crate) fn readable_status_reason(
         )
 }
 
-pub(crate) fn readability_state_from_kind(
+pub(crate) const fn readability_state_from_kind(
     readiness_kind: DocumentReadiness,
 ) -> McpReadabilityState {
     match readiness_kind {
@@ -1385,7 +1497,7 @@ mod tests {
 
     #[test]
     fn search_document_hits_rank_readable_before_failed_even_with_lower_score() {
-        let mut hits = vec![
+        let mut hits = [
             McpDocumentHit {
                 document_id: Uuid::from_u128(2),
                 library_id: Uuid::nil(),
@@ -1452,11 +1564,12 @@ mod tests {
     }
 
     #[test]
-    fn chunk_search_query_variants_add_suffix_trimmed_terms() {
-        let variants = chunk_search_query_variants("latest service releases");
-        assert_eq!(variants[0], "latest service releases");
-        assert!(variants.iter().skip(1).any(|variant| variant.contains("release")));
-        assert!(variants.iter().skip(1).any(|variant| variant.contains("releas")));
+    fn chunk_search_query_variants_preserve_only_the_normalized_query() {
+        assert_eq!(
+            chunk_search_query_variants("  exact service releases  "),
+            vec!["exact service releases"]
+        );
+        assert!(chunk_search_query_variants("   ").is_empty());
     }
 
     #[test]

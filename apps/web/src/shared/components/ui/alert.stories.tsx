@@ -1,14 +1,14 @@
-import { AlertTriangle, Terminal } from "lucide-react";
-import type { Meta, StoryObj } from "@storybook/react";
-import { Alert, AlertDescription, AlertTitle } from "./alert";
+import { AlertTriangle, Terminal } from 'lucide-react'
+import type { Meta, StoryObj } from '@storybook/react'
+import { Alert, AlertDescription, AlertTitle } from './alert'
 
 const meta = {
-  title: "UI/Alert",
+  title: 'UI/Alert',
   component: Alert,
-} satisfies Meta<typeof Alert>;
+} satisfies Meta<typeof Alert>
 
-export default meta;
-type Story = StoryObj<typeof meta>;
+export default meta
+type Story = StoryObj<typeof meta>
 
 export const Default: Story = {
   render: () => (
@@ -20,7 +20,7 @@ export const Default: Story = {
       </AlertDescription>
     </Alert>
   ),
-};
+}
 
 export const Destructive: Story = {
   render: () => (
@@ -32,4 +32,4 @@ export const Destructive: Story = {
       </AlertDescription>
     </Alert>
   ),
-};
+}

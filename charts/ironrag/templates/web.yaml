@@ -6,7 +6,9 @@ metadata:
     {{- include "ironrag.labels" . | nindent 4 }}
     app.kubernetes.io/component: web
 spec:
+  {{- if not (and .Values.autoscaling.enabled .Values.autoscaling.web.enabled) }}
   replicas: {{ .Values.web.replicaCount }}
+  {{- end }}
   selector:
     matchLabels:
       {{- include "ironrag.selectorLabels" . | nindent 6 }}
@@ -22,8 +24,14 @@ spec:
       {{- end }}
     spec:
       serviceAccountName: {{ include "ironrag.serviceAccountName" . }}
+      automountServiceAccountToken: false
       securityContext:
+        runAsNonRoot: true
+        runAsUser: {{ .Values.security.runAsUser | default 1000 }}
+        runAsGroup: {{ .Values.security.runAsUser | default 1000 }}
         fsGroup: {{ .Values.security.runAsUser | default 1000 }}
+        seccompProfile:
+          type: RuntimeDefault
       containers:
         - name: web
           image: "{{ include "ironrag.appImage" (dict "root" . "image" .Values.web.image) }}"
@@ -32,10 +40,14 @@ spec:
             runAsNonRoot: true
             runAsUser: {{ .Values.security.runAsUser | default 1000 }}
             runAsGroup: {{ .Values.security.runAsUser | default 1000 }}
+            readOnlyRootFilesystem: true
             allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
           ports:
             - name: http
-              containerPort: 80
+              containerPort: 8080
           env:
             - name: IRONRAG_API_UPSTREAM
               value: {{ include "ironrag.apiUpstream" . | quote }}

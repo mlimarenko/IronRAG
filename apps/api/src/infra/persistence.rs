@@ -1,5 +1,3 @@
-#![allow(clippy::missing_errors_doc)]
-
 use std::{collections::HashMap, time::Duration};
 
 use redis::Client as RedisClient;
@@ -10,11 +8,10 @@ use crate::{app::config::Settings, domains::deployment::ServiceRole};
 // Forces the crate to rebuild whenever the migration set changes, including file deletions.
 const _SQLX_MIGRATIONS_FINGERPRINT: &str = env!("IRONRAG_MIGRATIONS_FINGERPRINT");
 
-const SEEDED_PROVIDER_KINDS: [&str; 3] = ["openai", "deepseek", "qwen"];
 const POSTGRES_POOL_MIN_BUDGET: u32 = 4;
 const POSTGRES_POOL_MAX_PROCESS_BUDGET: u32 = 16;
-const POSTGRES_POOL_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
-const POSTGRES_POOL_MAX_LIFETIME: Duration = Duration::from_secs(1_800);
+const POSTGRES_POOL_IDLE_TIMEOUT: Duration = Duration::from_mins(1);
+const POSTGRES_POOL_MAX_LIFETIME: Duration = Duration::from_mins(30);
 const POSTGRES_MAIN_MIN_CONNECTIONS: u32 = 1;
 const API_CONTROL_POOL_CONNECTIONS: u32 = 2;
 const STARTUP_PROCESS_POOL_BUDGET: u32 = 4;
@@ -313,22 +310,21 @@ pub async fn canonical_ai_catalog_seeded(postgres: &PgPool) -> anyhow::Result<bo
         return Ok(false);
     }
 
-    let provider_count = sqlx::query_scalar::<_, i64>(
-        "select count(*) from ai_provider_catalog where provider_kind = any($1)",
+    let has_complete_catalog_chain = sqlx::query_scalar::<_, bool>(
+        "select exists (
+            select 1
+            from ai_provider_catalog provider
+            join ai_model_catalog model on model.provider_catalog_id = provider.id
+            join ai_price_catalog price on price.model_catalog_id = model.id
+            where provider.lifecycle_state = 'active'
+              and model.lifecycle_state = 'active'
+              and (price.effective_to is null or price.effective_to > now())
+        )",
     )
-    .bind(SEEDED_PROVIDER_KINDS)
     .fetch_one(postgres)
     .await?;
-    let model_count = sqlx::query_scalar::<_, i64>("select count(*) from ai_model_catalog")
-        .fetch_one(postgres)
-        .await?;
-    let price_count = sqlx::query_scalar::<_, i64>("select count(*) from ai_price_catalog")
-        .fetch_one(postgres)
-        .await?;
 
-    Ok(provider_count >= i64::try_from(SEEDED_PROVIDER_KINDS.len()).unwrap_or(0)
-        && model_count > 0
-        && price_count > 0)
+    Ok(has_complete_catalog_chain)
 }
 
 async fn table_exists(postgres: &PgPool, table_name: &str) -> anyhow::Result<bool> {

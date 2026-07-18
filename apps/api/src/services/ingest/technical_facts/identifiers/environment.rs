@@ -1,78 +1,20 @@
 use std::collections::BTreeSet;
 
 use super::super::{
-    FactCandidate, StructuredBlockData, TechnicalFactKind, build_candidate, matches_any_substring,
-    technical_tokens, trim_technical_token,
+    FactCandidate, StructuredBlockData, TechnicalFactKind, build_candidate, technical_tokens,
+    trim_technical_token,
 };
+
+const QUOTED_ENVIRONMENT_PATTERNS: [&str; 5] =
+    ["os.getenv(", "os.environ[", "env::var(", "std::env::var(", "ENV["];
 
 pub(crate) fn extract_environment_variable_candidates(
     block: &StructuredBlockData,
     line: &str,
 ) -> Vec<FactCandidate> {
     let mut env_vars = BTreeSet::<String>::new();
-
-    let tokens = technical_tokens(line);
-    let lower = line.to_ascii_lowercase();
-    let has_env_context = matches_any_substring(
-        &lower,
-        &["environment", "env", "variable", "export", "getenv", "environ"],
-    );
-
-    for token in &tokens {
-        if token.starts_with('$') {
-            let name = token.trim_start_matches('$').trim_start_matches('{').trim_end_matches('}');
-            if is_env_var_name(name) {
-                env_vars.insert(name.to_string());
-            }
-        }
-
-        if let Some(rest) = token.strip_prefix("process.env.") {
-            let name = trim_technical_token(rest);
-            if is_env_var_name(name) {
-                env_vars.insert(name.to_string());
-            }
-        }
-    }
-
-    for pattern in &["os.getenv(", "os.environ["] {
-        if let Some(pos) = lower.find(pattern) {
-            let after = &line[pos + pattern.len()..];
-            if let Some(name) = extract_quoted_argument(after)
-                && is_env_var_name(&name)
-            {
-                env_vars.insert(name);
-            }
-        }
-    }
-
-    for pattern in &["env::var(", "std::env::var("] {
-        if let Some(pos) = line.find(pattern) {
-            let after = &line[pos + pattern.len()..];
-            if let Some(name) = extract_quoted_argument(after)
-                && is_env_var_name(&name)
-            {
-                env_vars.insert(name);
-            }
-        }
-    }
-
-    if let Some(pos) = line.find("ENV[") {
-        let after = &line[pos + 4..];
-        if let Some(name) = extract_quoted_argument(after)
-            && is_env_var_name(&name)
-        {
-            env_vars.insert(name);
-        }
-    }
-
-    if has_env_context {
-        for token in &tokens {
-            let candidate = trim_technical_token(token);
-            if is_env_var_name(candidate) {
-                env_vars.insert(candidate.to_string());
-            }
-        }
-    }
+    collect_token_environment_variables(line, &mut env_vars);
+    collect_quoted_environment_variables(line, &mut env_vars);
 
     env_vars
         .into_iter()
@@ -87,6 +29,36 @@ pub(crate) fn extract_environment_variable_candidates(
             )
         })
         .collect()
+}
+
+fn collect_token_environment_variables(line: &str, env_vars: &mut BTreeSet<String>) {
+    for token in technical_tokens(line) {
+        let shell_name =
+            token.trim_start_matches('$').trim_start_matches('{').trim_end_matches('}');
+        if token.starts_with('$') && is_env_var_name(shell_name) {
+            env_vars.insert(shell_name.to_string());
+        }
+
+        if let Some(rest) = token.strip_prefix("process.env.") {
+            let name = trim_technical_token(rest);
+            if is_env_var_name(name) {
+                env_vars.insert(name.to_string());
+            }
+        }
+    }
+}
+
+fn collect_quoted_environment_variables(line: &str, env_vars: &mut BTreeSet<String>) {
+    for pattern in QUOTED_ENVIRONMENT_PATTERNS {
+        for (position, _) in line.match_indices(pattern) {
+            let after_pattern = &line[position + pattern.len()..];
+            if let Some(name) =
+                extract_quoted_argument(after_pattern).filter(|name| is_env_var_name(name))
+            {
+                env_vars.insert(name);
+            }
+        }
+    }
 }
 
 fn is_env_var_name(candidate: &str) -> bool {
@@ -110,4 +82,37 @@ fn extract_quoted_argument(after: &str) -> Option<String> {
     let rest = &trimmed[1..];
     let end = rest.find(quote)?;
     Some(rest[..end].to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{collect_quoted_environment_variables, collect_token_environment_variables};
+    use std::collections::BTreeSet;
+
+    #[test]
+    fn collects_supported_environment_variable_forms_once() {
+        let line = concat!(
+            "$ALPHA_MODE ${BETA_MODE} process.env.GAMMA_MODE ",
+            "os.getenv('DELTA_MODE') os.environ[\"EPSILON_MODE\"] ",
+            "env::var(\"ZETA_MODE\") std::env::var('ETA_MODE') ENV[\"THETA_MODE\"]"
+        );
+        let mut values = BTreeSet::new();
+
+        collect_token_environment_variables(line, &mut values);
+        collect_quoted_environment_variables(line, &mut values);
+
+        assert_eq!(
+            values.into_iter().collect::<Vec<_>>(),
+            vec![
+                "ALPHA_MODE",
+                "BETA_MODE",
+                "DELTA_MODE",
+                "EPSILON_MODE",
+                "ETA_MODE",
+                "GAMMA_MODE",
+                "THETA_MODE",
+                "ZETA_MODE",
+            ]
+        );
+    }
 }

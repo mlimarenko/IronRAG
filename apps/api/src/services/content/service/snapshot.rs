@@ -39,7 +39,10 @@ use uuid::Uuid;
 
 use crate::{
     app::state::AppState,
-    infra::repositories::content_repository,
+    infra::{
+        postgres::pg_vector_config::{PgVectorStorage, pg_hnsw_index_params},
+        repositories::content_repository,
+    },
     services::content::{error::ContentServiceError, storage::StashedContentDirectory},
 };
 
@@ -47,11 +50,6 @@ use crate::{
 const PER_DIM_CHUNK_VECTOR_PREFIX: &str = "knowledge_chunk_vector_d";
 /// Prefix of every per-dim entity-vector shard.
 const PER_DIM_ENTITY_VECTOR_PREFIX: &str = "knowledge_entity_vector_d";
-const PGVECTOR_HNSW_VECTOR_MAX_DIM: u64 = 2000;
-const PG_HNSW_DEFAULT_BUILD_BUDGET_BYTES: u64 = 3_000_000_000;
-const PG_HNSW_MIN_M: u64 = 8;
-const PG_HNSW_MID_M: u64 = 16;
-const PG_HNSW_LARGE_M: u64 = 24;
 
 /// Parse the dim suffix off a per-dim vector shard name.
 /// Returns `None` when the name does not match the per-dim shape.
@@ -70,13 +68,7 @@ fn parse_per_dim_vector_suffix_dim(suffix: &str) -> Option<u64> {
 }
 
 fn is_canonical_per_dim_vector_collection_name(name: &str) -> bool {
-    let Some(suffix) = name
-        .strip_prefix(PER_DIM_CHUNK_VECTOR_PREFIX)
-        .or_else(|| name.strip_prefix(PER_DIM_ENTITY_VECTOR_PREFIX))
-    else {
-        return false;
-    };
-    parse_per_dim_vector_suffix_dim(suffix).is_some()
+    canonical_per_dim_vector_relation_name(name).as_deref() == Some(name)
 }
 
 /// `true` when `name` is a per-dim chunk-vector shard
@@ -115,6 +107,9 @@ pub struct VectorShardEntry {
 /// way.
 pub const SNAPSHOT_SCHEMA_VERSION: u32 = 7;
 const MIN_SUPPORTED_SNAPSHOT_SCHEMA_VERSION: u32 = 6;
+/// Schema version that made `vector_shards` a required, exact declaration of
+/// every per-dimension vector relation listed in `postgres_tables`.
+const VECTOR_SHARD_DECLARATION_SCHEMA_VERSION: u32 = 7;
 
 /// Soft cap for a single NDJSON part inside the tar stream. Small enough
 /// that no individual table part holds the entire table in memory, large
@@ -150,9 +145,9 @@ pub enum IncludeKind {
     /// secrets or binding state.
     Workspace,
     /// Portable AI configuration that makes the exported library resolvable
-    /// on another stack: provider/model catalogs, prices, provider
-    /// credentials (with `api_key` stripped), model presets and binding
-    /// assignments. Includes instance-scoped (deployment-global) bindings as
+    /// on another stack: `ai_provider_catalog`, `ai_model_catalog`,
+    /// `ai_price_catalog`, `ai_account` (with `api_key` stripped), and
+    /// `ai_binding`. Includes instance-scoped (deployment-global) bindings as
     /// well as workspace/library-scoped ones, because deployments commonly
     /// configure embed/answer bindings at instance scope. `iam_principal`
     /// author references are nulled (principals never travel in a snapshot),
@@ -161,7 +156,7 @@ pub enum IncludeKind {
     /// deployment's existing AI configuration.
     AiConfig,
     /// Everything owned by a library that is NOT a raw source file —
-    /// PostgreSQL rows for content, runtime graph, and knowledge data.
+    /// `PostgreSQL` rows for content, runtime graph, and knowledge data.
     LibraryData,
     /// Original uploaded files (PDFs, docx, images, …) keyed by
     /// `content_revision.storage_key`.
@@ -201,7 +196,7 @@ impl IncludeKind {
         Ok(out)
     }
 
-    /// Enforce dependency ordering. Blobs without LibraryData would
+    /// Enforce dependency ordering. Blobs without `LibraryData` would
     /// produce orphan files with no `content_revision` row pointing
     /// at them — rejected. `Workspace` is independent and can travel
     /// alone (useful for cloning AI settings between stands).
@@ -225,7 +220,7 @@ pub enum OverwriteMode {
     Reject,
     /// Delete all owned content/runtime rows and blobs under this library id,
     /// then insert everything from the archive under the selected library
-    /// identity. PostgreSQL rows are restored atomically; blob writes are staged
+    /// identity. `PostgreSQL` rows are restored atomically; blob writes are staged
     /// and rolled back separately when possible.
     Replace,
 }
@@ -242,7 +237,7 @@ impl OverwriteMode {
     }
 }
 
-/// Whether a single library restore should refresh PostgreSQL planner stats
+/// Whether a single library restore should refresh `PostgreSQL` planner stats
 /// itself, or defer to one ANALYZE pass run by the caller (Workstream R / R1).
 ///
 /// Snapshot tables (`runtime_graph_*`, `knowledge_*`, the per-dim vector
@@ -307,9 +302,10 @@ pub struct SnapshotManifest {
     pub has_blobs: bool,
     /// Per-dim vector shards (`knowledge_chunk_vector_d<dim>` /
     /// `knowledge_entity_vector_d<dim>`) observed at export time. The
-    /// restore path lazy-ensures each shard before streaming its rows
-    /// back so the target deployment ends up with the same per-dim
-    /// layout the source had. `#[serde(default)]` keeps v6 manifests parseable.
+    /// Schema v7 requires this list to match the vector relations in
+    /// `postgres_tables` exactly. Restore derives its execution plan from that
+    /// authoritative table list; `#[serde(default)]` keeps v6 manifests
+    /// parseable even though they did not carry this field.
     #[serde(default)]
     pub vector_shards: Vec<VectorShardEntry>,
 }
@@ -407,21 +403,10 @@ const POSTGRES_WORKSPACE_TABLES: &[&str] = &["catalog_workspace"];
 /// FK-dependency order so a restore that re-enables FK enforcement (or a
 /// human reading the archive) sees parents before children. Provider and
 /// model catalogs and system prices are deployment-seeded with stable ids;
-/// accounts and bindings are workspace/library-scoped config (migration
-/// 0004 merged `ai_model_preset` inline into `ai_binding`, so there is no
-/// separate preset table to export any more).
+/// accounts and bindings are workspace/library-scoped config, with generation
+/// settings stored inline on each `ai_binding` row.
 const POSTGRES_AI_CONFIG_TABLES: &[&str] =
     &["ai_provider_catalog", "ai_model_catalog", "ai_price_catalog", "ai_account", "ai_binding"];
-
-/// Pre-0004 archive table names, accepted only on import for backward
-/// compatibility with snapshots taken before the AI-config simplification.
-/// `ai_provider_credential` → `ai_account` and `ai_binding_assignment` →
-/// `ai_binding` are 1:1 renames (identical columns); `ai_model_preset` has
-/// no canonical storage table any more — its rows are buffered and merged
-/// into the `ai_binding` row that referenced them (see
-/// `LegacyModelPreset`/`merge_legacy_binding_row`). Never written by export.
-const POSTGRES_LEGACY_AI_CONFIG_TABLES: &[&str] =
-    &["ai_provider_credential", "ai_model_preset", "ai_binding_assignment"];
 
 const POSTGRES_LIBRARY_ROOT_TABLES: &[&str] = &["catalog_library"];
 
@@ -608,16 +593,7 @@ impl SnapshotRowScope {
                 // System-seeded catalogs carry no workspace/library scope and
                 // keep their stable ids; nothing to remap.
             }
-            "ai_price_catalog"
-            | "ai_account"
-            | "ai_binding"
-            // Pre-0004 archive names, accepted for backward-compatible
-            // import (see `POSTGRES_LEGACY_AI_CONFIG_TABLES`). Scope
-            // columns are identical to the renamed tables, so the same
-            // normalizer applies unchanged.
-            | "ai_provider_credential"
-            | "ai_model_preset"
-            | "ai_binding_assignment" => {
+            "ai_price_catalog" | "ai_account" | "ai_binding" => {
                 self.normalize_ai_config_scope(table, row)?;
             }
             other => bail!("snapshot import has no row-scope validator for table `{other}`"),
@@ -648,10 +624,8 @@ impl SnapshotRowScope {
         Ok(())
     }
 
-    /// Normalizes an AI-config row (`ai_price_catalog`, `ai_account`,
-    /// `ai_binding`, or their pre-0004 archive equivalents
-    /// `ai_provider_credential` / `ai_model_preset` / `ai_binding_assignment`).
-    /// `workspace_id` / `library_id` are nullable scope columns: a
+    /// Normalizes an AI-config row (`ai_price_catalog`, `ai_account`, or
+    /// `ai_binding`). `workspace_id` / `library_id` are nullable scope columns: a
     /// workspace-scoped row carries only `workspace_id`, a library-scoped row
     /// carries both, a system-scoped price carries neither. Each non-null
     /// scope id is rewritten to the restore target; `library_id`, when
@@ -804,25 +778,33 @@ fn null_field_if_present(row: &mut serde_json::Value, field: &str) {
 #[derive(Debug)]
 struct SnapshotManifestSections {
     postgres_tables: HashSet<String>,
+    /// Canonical vector relations derived from the authoritative Postgres
+    /// section list. Schema-v6 archives predate `vector_shards`, so restore may
+    /// never depend on that optional compatibility field to establish storage
+    /// invariants.
+    vector_shards: BTreeMap<String, u64>,
 }
 
 impl SnapshotManifestSections {
     fn from_manifest(manifest: &SnapshotManifest) -> anyhow::Result<Self> {
-        IncludeKind::validate(&manifest.include_kinds)?;
-        let declares_blobs = manifest.include_kinds.contains(&IncludeKind::Blobs);
-        if manifest.has_blobs != declares_blobs {
-            bail!("snapshot manifest has inconsistent blob declaration");
+        validate_snapshot_manifest_blob_declaration(manifest)?;
+        let (postgres_tables, postgres_vector_shards) =
+            collect_manifest_postgres_sections(&manifest.postgres_tables)?;
+        let declared_vector_shards = collect_declared_manifest_vector_shards(
+            &manifest.vector_shards,
+            &postgres_vector_shards,
+        )?;
+
+        if manifest.schema_version >= VECTOR_SHARD_DECLARATION_SCHEMA_VERSION
+            && declared_vector_shards != postgres_vector_shards
+        {
+            bail!(
+                "snapshot schema v{} vector_shards must exactly match declared postgres vector tables",
+                manifest.schema_version
+            );
         }
 
-        let mut postgres_tables = HashSet::new();
-        for table in &manifest.postgres_tables {
-            let table = validate_snapshot_pg_table_name(table)?;
-            if !postgres_tables.insert(table.to_string()) {
-                bail!("snapshot manifest declares postgres table `{table}` more than once");
-            }
-        }
-
-        Ok(Self { postgres_tables })
+        Ok(Self { postgres_tables, vector_shards: postgres_vector_shards })
     }
 
     fn require_postgres_table<'a>(&self, table: &'a str) -> anyhow::Result<&'a str> {
@@ -835,11 +817,83 @@ impl SnapshotManifestSections {
     }
 }
 
+fn validate_snapshot_manifest_blob_declaration(manifest: &SnapshotManifest) -> anyhow::Result<()> {
+    IncludeKind::validate(&manifest.include_kinds)?;
+    let declares_blobs = manifest.include_kinds.contains(&IncludeKind::Blobs);
+    if manifest.has_blobs != declares_blobs {
+        bail!("snapshot manifest has inconsistent blob declaration");
+    }
+    Ok(())
+}
+
+fn collect_manifest_postgres_sections(
+    tables: &[String],
+) -> anyhow::Result<(HashSet<String>, BTreeMap<String, u64>)> {
+    let mut postgres_tables = HashSet::new();
+    let mut postgres_vector_shards = BTreeMap::new();
+    for table in tables {
+        let table = validate_snapshot_pg_table_name(table)?;
+        if !postgres_tables.insert(table.to_string()) {
+            bail!("snapshot manifest declares postgres table `{table}` more than once");
+        }
+        if is_runtime_vector_relation_name(table) {
+            let dim = parse_per_dim_vector_collection_dim(table).ok_or_else(|| {
+                anyhow!("snapshot manifest declares malformed vector relation `{table}`")
+            })?;
+            checked_vector_dim_i32(dim).with_context(|| {
+                format!("snapshot manifest vector relation `{table}` has an invalid dimension")
+            })?;
+            postgres_vector_shards.insert(table.to_string(), dim);
+        }
+    }
+    Ok((postgres_tables, postgres_vector_shards))
+}
+
+fn collect_declared_manifest_vector_shards(
+    shards: &[VectorShardEntry],
+    postgres_vector_shards: &BTreeMap<String, u64>,
+) -> anyhow::Result<BTreeMap<String, u64>> {
+    let mut declared_vector_shards = BTreeMap::new();
+    for shard in shards {
+        let canonical_name =
+            canonical_per_dim_vector_relation_name(&shard.name).ok_or_else(|| {
+                anyhow!("snapshot manifest declares malformed vector shard `{}`", shard.name)
+            })?;
+        if canonical_name != shard.name {
+            bail!(
+                "snapshot manifest vector shard `{}` is not a canonical relation name",
+                shard.name
+            );
+        }
+        let name_dimension = parse_per_dim_vector_collection_dim(&canonical_name)
+            .ok_or_else(|| anyhow!("snapshot manifest vector shard has no dimension"))?;
+        checked_vector_dim_i32(name_dimension).with_context(|| {
+            format!("snapshot manifest vector shard `{}` has an invalid dimension", shard.name)
+        })?;
+        if shard.dim != name_dimension {
+            bail!(
+                "snapshot manifest vector shard `{}` declares dimension {} but its name encodes {}",
+                shard.name,
+                shard.dim,
+                name_dimension
+            );
+        }
+        if declared_vector_shards.insert(canonical_name.clone(), shard.dim).is_some() {
+            bail!("snapshot manifest declares vector shard `{canonical_name}` more than once");
+        }
+        if postgres_vector_shards.get(&canonical_name) != Some(&shard.dim) {
+            bail!(
+                "snapshot manifest vector shard `{canonical_name}` has no matching postgres table"
+            );
+        }
+    }
+    Ok(declared_vector_shards)
+}
+
 fn require_known_snapshot_pg_table(table: &str) -> anyhow::Result<&'static str> {
     POSTGRES_WORKSPACE_TABLES
         .iter()
         .chain(POSTGRES_AI_CONFIG_TABLES.iter())
-        .chain(POSTGRES_LEGACY_AI_CONFIG_TABLES.iter())
         .chain(POSTGRES_LIBRARY_ROOT_TABLES.iter())
         .chain(POSTGRES_CONTENT_TABLES.iter())
         .chain(POSTGRES_RUNTIME_GRAPH_TABLES.iter())
@@ -885,8 +939,14 @@ fn quote_pg_identifier(identifier: &str) -> anyhow::Result<String> {
 const RESTORE_SAVEPOINT_MAX_ATTEMPTS: u32 = 5;
 /// Base backoff between savepoint retries; multiplied by the attempt index.
 const RESTORE_SAVEPOINT_BACKOFF_BASE: std::time::Duration = std::time::Duration::from_millis(25);
+/// Archive replay is idempotent only for the exact physical key. A different
+/// key carrying the same logical object/profile/generation must reach the
+/// logical unique index and abort the outer restore transaction rather than
+/// being silently selected as a winner.
+const PG_VECTOR_RESTORE_KEY_REPLAY_CONFLICT: &str = "ON CONFLICT (key) DO NOTHING";
+const PG_VECTOR_LOGICAL_KEY_INDEX_SUFFIX: &str = "_logical_key";
 
-/// PostgreSQL deadlock SQLSTATE — the transaction was chosen as the deadlock
+/// `PostgreSQL` deadlock SQLSTATE — the transaction was chosen as the deadlock
 /// victim and rolled back. Safe to retry after rolling back to a savepoint.
 const PG_SQLSTATE_DEADLOCK_DETECTED: &str = "40P01";
 
@@ -894,22 +954,33 @@ const PG_SQLSTATE_DEADLOCK_DETECTED: &str = "40P01";
 /// transient contention that a savepoint rollback + retry can recover from
 /// (Workstream R / R2 + in-transaction R3):
 ///
-/// - `40P01` deadlock_detected — parallel restores fight over the shared
+/// - `40P01` `deadlock_detected` — parallel restores fight over the shared
 ///   per-dim vector shard; the loser is rolled back and can replay.
-/// - `42P07` duplicate_table / `42710` duplicate_object — two sessions both
+/// - `42P07` `duplicate_table` / `42710` `duplicate_object` — two sessions both
 ///   passed the `CREATE ... IF NOT EXISTS` existence check and raced the
 ///   catalog insert; on retry the relation already exists and the create
 ///   no-ops.
-/// - `23505` unique_violation — the same race surfacing as a `pg_catalog`
-///   unique-index collision.
-/// - `XX000` internal_error — Postgres reports "tuple concurrently
-///   updated/inserted" for concurrent DDL under this generic code.
+/// - `23505` `unique_violation` — the same race surfacing as a `pg_catalog`
+///   unique-index collision. A violation of the vector logical-key index is a
+///   deterministic archive conflict and is explicitly not retried.
 fn pg_error_is_retryable_restore_contention(error: &sqlx::Error) -> bool {
-    error.as_database_error().and_then(sqlx::error::DatabaseError::code).is_some_and(|code| {
-        matches!(code.as_ref(), PG_SQLSTATE_DEADLOCK_DETECTED | "42P07" | "42710" | "23505")
-            || (code.as_ref() == "XX000"
-                && error.to_string().to_ascii_lowercase().contains("concurrently"))
-    })
+    let Some(database_error) = error.as_database_error() else {
+        return false;
+    };
+    let Some(code) = database_error.code() else {
+        return false;
+    };
+    pg_restore_sqlstate_is_retryable(code.as_ref(), database_error.constraint())
+}
+
+fn pg_restore_sqlstate_is_retryable(code: &str, constraint: Option<&str>) -> bool {
+    match code {
+        PG_SQLSTATE_DEADLOCK_DETECTED | "42P07" | "42710" => true,
+        "23505" => {
+            !constraint.is_some_and(|name| name.ends_with(PG_VECTOR_LOGICAL_KEY_INDEX_SUFFIX))
+        }
+        _ => false,
+    }
 }
 
 // ===========================================================================
@@ -938,7 +1009,7 @@ where
             error_chain = format!("{error:#}"),
             "snapshot export failed with full chain",
         );
-        ContentServiceError::from_message(error.to_string())
+        ContentServiceError::from(error)
     })
 }
 
@@ -1038,56 +1109,8 @@ where
     W: AsyncWrite + Unpin + Send + Sync,
 {
     let pool = &state.persistence.postgres;
-
-    // Resolve the library row first so we can fail fast and populate the
-    // manifest's `library_slug` field.
-    let library_row = sqlx::query("SELECT slug FROM catalog_library WHERE id = $1")
-        .bind(library_id)
-        .fetch_optional(pool)
-        .await
-        .context("load catalog_library slug")?
-        .ok_or_else(|| anyhow!("library {library_id} does not exist"))?;
-    let library_slug: String =
-        library_row.try_get("slug").context("decode catalog_library slug")?;
-
-    // Build the section plan from the include set. `LibraryData`
-    // implies every content + runtime graph + knowledge table, which
-    // is the only scope the UI ever exposes — storage-tier granular
-    // flags leaked internal detail without helping the operator.
-    let include_library_data = include_set.contains(&IncludeKind::LibraryData);
-    let mut manifest_postgres_tables: Vec<String> = Vec::new();
-    if include_set.contains(&IncludeKind::Workspace) {
-        manifest_postgres_tables
-            .extend(POSTGRES_WORKSPACE_TABLES.iter().map(|table| (*table).to_string()));
-    }
-    if include_set.contains(&IncludeKind::AiConfig) {
-        manifest_postgres_tables
-            .extend(POSTGRES_AI_CONFIG_TABLES.iter().map(|table| (*table).to_string()));
-    }
-    let mut library_postgres_tables: Vec<String> = Vec::new();
-    if include_library_data {
-        manifest_postgres_tables
-            .extend(POSTGRES_LIBRARY_ROOT_TABLES.iter().map(|table| (*table).to_string()));
-        library_postgres_tables.extend(POSTGRES_CONTENT_TABLES.iter().map(|s| (*s).to_string()));
-        library_postgres_tables
-            .extend(POSTGRES_RUNTIME_GRAPH_TABLES.iter().map(|s| (*s).to_string()));
-        library_postgres_tables.extend(POSTGRES_KNOWLEDGE_TABLES.iter().map(|s| (*s).to_string()));
-        library_postgres_tables
-            .extend(list_pg_vector_relations_for_library(pool, library_id).await?);
-        manifest_postgres_tables.extend(library_postgres_tables.iter().cloned());
-    }
-    let mut vector_shards: Vec<VectorShardEntry> = Vec::new();
-    if include_library_data {
-        for shard in
-            library_postgres_tables.iter().filter(|name| is_runtime_vector_relation_name(name))
-        {
-            let dim = parse_per_dim_vector_collection_dim(&shard).ok_or_else(|| {
-                anyhow!("malformed per-dim vector relation `{shard}` discovered during export")
-            })?;
-            vector_shards.push(VectorShardEntry { name: shard.clone(), dim });
-        }
-    }
-    let has_blobs = include_set.contains(&IncludeKind::Blobs);
+    let library_slug = load_library_slug(pool, library_id).await?;
+    let export_plan = build_library_export_plan(pool, library_id, include_set).await?;
 
     // 1. manifest.json — first so readers can learn the shape immediately.
     let manifest = SnapshotManifest {
@@ -1097,101 +1120,221 @@ where
         exported_at: chrono::Utc::now(),
         source_version: env!("CARGO_PKG_VERSION").to_string(),
         include_kinds: include.to_vec(),
-        postgres_tables: manifest_postgres_tables.clone(),
-        has_blobs,
-        vector_shards,
+        postgres_tables: export_plan.manifest_postgres_tables.clone(),
+        has_blobs: export_plan.has_blobs,
+        vector_shards: export_plan.vector_shards,
     };
     append_json_entry(builder, "manifest.json", &manifest).await?;
 
-    // 2. postgres tables (content_document, content_revision, ...) — stream
-    //    row-by-row via sqlx cursor, chunk into ~64 MiB parts, capture
-    //    storage_key values along the way so we can export blobs later.
     let mut summary = SnapshotSummary::default();
-    let mut storage_keys: HashSet<String> = HashSet::new();
-    // When the caller asked for the workspace scope, its rows must land
-    // in the archive BEFORE `catalog_library` so a restore can satisfy
-    // the `catalog_library.workspace_id` FK without disabling replication.
-    if include_set.contains(&IncludeKind::Workspace) {
-        let counts = export_pg_workspace_scope(builder, pool, library_id).await?;
-        for (table, count) in counts {
-            summary.postgres_row_counts.insert(table, count);
-        }
-    }
-    // AI config rows land after the workspace row (their `workspace_id` FK
-    // target) and before catalog_library; library-scoped AI rows reference
-    // catalog_library but the import disables FK enforcement, so a restore
-    // accepts them in any order within the single transaction.
-    if include_set.contains(&IncludeKind::AiConfig) {
-        let counts = export_pg_ai_config_scope(builder, pool, library_id).await?;
-        for (table, count) in counts {
-            summary.postgres_row_counts.insert(table, count);
-        }
-    }
-    // catalog_library is exported implicitly as the very first library
-    // pg entry whenever the caller asked for library data, so a restore
-    // recreates the row before any child table points at it.
+    let mut storage_keys = HashSet::new();
+    export_library_postgres_sections(
+        builder,
+        pool,
+        library_id,
+        include_set,
+        &export_plan.library_postgres_tables,
+        &mut summary,
+        &mut storage_keys,
+    )
+    .await?;
+    export_library_blobs(
+        state,
+        builder,
+        library_id,
+        export_plan.has_blobs,
+        &storage_keys,
+        &mut summary,
+    )
+    .await?;
+
+    // 4. summary.json — last, so it carries the real observed counts.
+    append_json_entry(builder, "summary.json", &summary).await?;
+    Ok(())
+}
+
+struct LibraryExportPlan {
+    manifest_postgres_tables: Vec<String>,
+    library_postgres_tables: Vec<String>,
+    vector_shards: Vec<VectorShardEntry>,
+    has_blobs: bool,
+}
+
+async fn load_library_slug(pool: &PgPool, library_id: Uuid) -> anyhow::Result<String> {
+    let library_row = sqlx::query("SELECT slug FROM catalog_library WHERE id = $1")
+        .bind(library_id)
+        .fetch_optional(pool)
+        .await
+        .context("load catalog_library slug")?
+        .ok_or_else(|| anyhow!("library {library_id} does not exist"))?;
+    library_row.try_get("slug").context("decode catalog_library slug")
+}
+
+async fn build_library_export_plan(
+    pool: &PgPool,
+    library_id: Uuid,
+    include_set: &HashSet<IncludeKind>,
+) -> anyhow::Result<LibraryExportPlan> {
+    let include_library_data = include_set.contains(&IncludeKind::LibraryData);
+    let mut manifest_postgres_tables = included_export_scope_tables(include_set);
+    let mut library_postgres_tables = Vec::new();
     if include_library_data {
+        manifest_postgres_tables
+            .extend(POSTGRES_LIBRARY_ROOT_TABLES.iter().map(|table| (*table).to_string()));
+        library_postgres_tables
+            .extend(POSTGRES_CONTENT_TABLES.iter().map(|table| (*table).to_string()));
+        library_postgres_tables
+            .extend(POSTGRES_RUNTIME_GRAPH_TABLES.iter().map(|table| (*table).to_string()));
+        library_postgres_tables
+            .extend(POSTGRES_KNOWLEDGE_TABLES.iter().map(|table| (*table).to_string()));
+        library_postgres_tables
+            .extend(list_pg_vector_relations_for_library(pool, library_id).await?);
+        manifest_postgres_tables.extend(library_postgres_tables.iter().cloned());
+    }
+
+    Ok(LibraryExportPlan {
+        vector_shards: vector_shards_from_tables(&library_postgres_tables)?,
+        manifest_postgres_tables,
+        library_postgres_tables,
+        has_blobs: include_set.contains(&IncludeKind::Blobs),
+    })
+}
+
+fn included_export_scope_tables(include_set: &HashSet<IncludeKind>) -> Vec<String> {
+    let mut tables = Vec::new();
+    if include_set.contains(&IncludeKind::Workspace) {
+        tables.extend(POSTGRES_WORKSPACE_TABLES.iter().map(|table| (*table).to_string()));
+    }
+    if include_set.contains(&IncludeKind::AiConfig) {
+        tables.extend(POSTGRES_AI_CONFIG_TABLES.iter().map(|table| (*table).to_string()));
+    }
+    tables
+}
+
+fn vector_shards_from_tables(tables: &[String]) -> anyhow::Result<Vec<VectorShardEntry>> {
+    tables
+        .iter()
+        .filter(|table| is_runtime_vector_relation_name(table))
+        .map(|shard| {
+            let dim = parse_per_dim_vector_collection_dim(shard).ok_or_else(|| {
+                anyhow!("malformed per-dim vector relation `{shard}` discovered during export")
+            })?;
+            Ok(VectorShardEntry { name: shard.clone(), dim })
+        })
+        .collect()
+}
+
+async fn export_library_postgres_sections<W>(
+    builder: &mut Builder<W>,
+    pool: &PgPool,
+    library_id: Uuid,
+    include_set: &HashSet<IncludeKind>,
+    library_postgres_tables: &[String],
+    summary: &mut SnapshotSummary,
+    storage_keys: &mut HashSet<String>,
+) -> anyhow::Result<()>
+where
+    W: AsyncWrite + Unpin + Send + Sync,
+{
+    if include_set.contains(&IncludeKind::Workspace) {
+        merge_export_counts(summary, export_pg_workspace_scope(builder, pool, library_id).await?);
+    }
+    if include_set.contains(&IncludeKind::AiConfig) {
+        merge_export_counts(summary, export_pg_ai_config_scope(builder, pool, library_id).await?);
+    }
+    if include_set.contains(&IncludeKind::LibraryData) {
         let count = export_pg_catalog_library(builder, pool, library_id).await?;
         summary.postgres_row_counts.insert("catalog_library".to_string(), count);
     }
+
     let pg_stage_started = std::time::Instant::now();
-    for table in &library_postgres_tables {
-        let table_started = std::time::Instant::now();
-        let count = export_pg_table(
-            builder,
-            pool,
-            table,
-            library_id,
-            if table == "content_revision" { Some(&mut storage_keys) } else { None },
-        )
-        .await
-        .with_context(|| format!("export postgres `{table}`"))?;
-        summary.postgres_row_counts.insert(table.clone(), count);
-        tracing::info!(
-            %library_id,
-            table = %table,
-            rows = count,
-            elapsed_ms = table_started.elapsed().as_millis() as u64,
-            "snapshot export stage postgres",
-        );
+    for table in library_postgres_tables {
+        export_library_postgres_table(builder, pool, table, library_id, storage_keys, summary)
+            .await?;
     }
     tracing::info!(
         %library_id,
         stage_elapsed_ms = pg_stage_started.elapsed().as_millis() as u64,
         "snapshot export stage postgres done",
     );
+    Ok(())
+}
 
-    // 3. blobs (if included). Each storage_key gathered from the
-    //    content_revision pass becomes one raw entry under `blobs/`.
-    if has_blobs {
-        for storage_key in &storage_keys {
-            match state.content_storage.read_revision_source(storage_key).await {
-                Ok(bytes) => {
-                    append_raw_entry(
-                        builder,
-                        &format!("blobs/{}", encode_blob_path(storage_key)),
-                        &bytes,
-                    )
-                    .await
-                    .with_context(|| format!("append blob {storage_key}"))?;
-                    summary.blob_count += 1;
-                }
-                Err(error) => {
-                    tracing::warn!(
-                        %library_id,
-                        storage_key = %storage_key,
-                        error = format!("{error:#}"),
-                        "snapshot skipping missing blob",
-                    );
-                    summary.missing_blob_keys.push(storage_key.clone());
-                }
+fn merge_export_counts(summary: &mut SnapshotSummary, counts: Vec<(String, u64)>) {
+    for (table, count) in counts {
+        summary.postgres_row_counts.insert(table, count);
+    }
+}
+
+async fn export_library_postgres_table<W>(
+    builder: &mut Builder<W>,
+    pool: &PgPool,
+    table: &str,
+    library_id: Uuid,
+    storage_keys: &mut HashSet<String>,
+    summary: &mut SnapshotSummary,
+) -> anyhow::Result<()>
+where
+    W: AsyncWrite + Unpin + Send + Sync,
+{
+    let table_started = std::time::Instant::now();
+    let count = export_pg_table(
+        builder,
+        pool,
+        table,
+        library_id,
+        (table == "content_revision").then_some(storage_keys),
+    )
+    .await
+    .with_context(|| format!("export postgres `{table}`"))?;
+    summary.postgres_row_counts.insert(table.to_string(), count);
+    tracing::info!(
+        %library_id,
+        %table,
+        rows = count,
+        elapsed_ms = table_started.elapsed().as_millis() as u64,
+        "snapshot export stage postgres",
+    );
+    Ok(())
+}
+
+async fn export_library_blobs<W>(
+    state: &AppState,
+    builder: &mut Builder<W>,
+    library_id: Uuid,
+    has_blobs: bool,
+    storage_keys: &HashSet<String>,
+    summary: &mut SnapshotSummary,
+) -> anyhow::Result<()>
+where
+    W: AsyncWrite + Unpin + Send + Sync,
+{
+    if !has_blobs {
+        return Ok(());
+    }
+    for storage_key in storage_keys {
+        match state.content_storage.read_revision_source(storage_key).await {
+            Ok(bytes) => {
+                append_raw_entry(
+                    builder,
+                    &format!("blobs/{}", encode_blob_path(storage_key)),
+                    &bytes,
+                )
+                .await
+                .with_context(|| format!("append blob {storage_key}"))?;
+                summary.blob_count += 1;
+            }
+            Err(error) => {
+                tracing::warn!(
+                    %library_id,
+                    %storage_key,
+                    error = format!("{error:#}"),
+                    "snapshot skipping missing blob",
+                );
+                summary.missing_blob_keys.push(storage_key.clone());
             }
         }
     }
-
-    // 4. summary.json — last, so it carries the real observed counts.
-    append_json_entry(builder, "summary.json", &summary).await?;
-
     Ok(())
 }
 
@@ -1265,7 +1408,7 @@ where
 /// Exports the workspace row that owns `library_id` plus the AI catalog
 /// rows scoped to that workspace or library, so an import on a clean
 /// stack satisfies `catalog_library.workspace_id` and recreates inherited
-/// AI provider credentials, presets, and bindings in one shot.
+/// canonical AI accounts and bindings in one shot.
 ///
 /// Intentionally does NOT include `iam_api_token` / `iam_api_token_secret`
 /// / `iam_principal` — those hashes are tied to a specific deployment
@@ -1669,7 +1812,7 @@ fn build_pg_select(table: &str) -> anyhow::Result<String> {
 // Import
 // ===========================================================================
 
-/// Maximum number of rows included in a single PostgreSQL INSERT statement
+/// Maximum number of rows included in a single `PostgreSQL` INSERT statement
 /// during restore. 1000 strikes a good balance: large
 /// enough to amortize round-trip latency across a ten-thousand-row
 /// table, small enough that a single statement's JSONB payload stays
@@ -1678,7 +1821,7 @@ const IMPORT_BATCH_ROWS: usize = 1000;
 /// Restores a library from a tar.zst archive body. `body` is any
 /// `AsyncRead` — typically the request body stream. Rows are flushed
 /// to storage in batches as the archive streams in, so memory footprint
-/// stays roughly one PostgreSQL batch rather than scaling with total archive
+/// stays roughly one `PostgreSQL` batch rather than scaling with total archive
 /// size.
 pub async fn restore_library_archive<R>(
     state: &AppState,
@@ -1701,96 +1844,13 @@ where
                 error_chain = format!("{error:#}"),
                 "snapshot import failed with full chain",
             );
-            ContentServiceError::from_message(error.to_string())
+            ContentServiceError::from(error)
         })
 }
 
-/// Maps a pre-0004 archive table name to the canonical storage table its
-/// rows land in on restore. `ai_model_preset` is deliberately absent — it
-/// has no canonical storage table any more; its rows are buffered
-/// separately (see [`LegacyModelPreset`]) and merged into the owning
-/// `ai_binding` row instead of being routed through here. Canonical table
-/// names pass through unchanged.
-fn canonical_ai_config_storage_table(table: &str) -> &str {
-    match table {
-        "ai_provider_credential" => "ai_account",
-        "ai_binding_assignment" => "ai_binding",
-        other => other,
-    }
-}
-
-/// A buffered pre-0004 `ai_model_preset` row, captured during restore so its
-/// fields can be spliced into the `ai_binding` row that references it via
-/// `model_preset_id` — the FK column migration 0004 dropped once presets
-/// were merged inline.
-struct LegacyModelPreset {
-    model_catalog_id: serde_json::Value,
-    system_prompt: serde_json::Value,
-    temperature: serde_json::Value,
-    top_p: serde_json::Value,
-    max_output_tokens_override: serde_json::Value,
-    extra_parameters_json: serde_json::Value,
-}
-
-impl LegacyModelPreset {
-    fn from_row(row: &serde_json::Value) -> anyhow::Result<(Uuid, Self)> {
-        let id = required_uuid_field("ai_model_preset", row, "id")?;
-        let field = |name: &str| row.get(name).cloned().unwrap_or(serde_json::Value::Null);
-        Ok((
-            id,
-            Self {
-                model_catalog_id: field("model_catalog_id"),
-                system_prompt: field("system_prompt"),
-                temperature: field("temperature"),
-                top_p: field("top_p"),
-                max_output_tokens_override: field("max_output_tokens_override"),
-                extra_parameters_json: field("extra_parameters_json"),
-            },
-        ))
-    }
-}
-
-/// Splices a pre-0004 `ai_binding_assignment` row into the canonical
-/// `ai_binding` shape: renames `provider_credential_id` → `account_id` and
-/// replaces `model_preset_id` with the inline fields of the preset it
-/// pointed at, looked up from `legacy_presets` (populated while streaming
-/// the archive's `ai_model_preset` section, which always precedes
-/// `ai_binding_assignment` in FK-dependency export order).
-fn merge_legacy_binding_row(
-    row: &mut serde_json::Value,
-    legacy_presets: &HashMap<Uuid, LegacyModelPreset>,
-) -> anyhow::Result<()> {
-    let object = row
-        .as_object_mut()
-        .ok_or_else(|| anyhow!("snapshot ai_binding_assignment row is not a JSON object"))?;
-    let account_id = object.remove("provider_credential_id").ok_or_else(|| {
-        anyhow!("snapshot ai_binding_assignment row missing provider_credential_id")
-    })?;
-    object.insert("account_id".to_string(), account_id);
-    let preset_id_value = object
-        .remove("model_preset_id")
-        .ok_or_else(|| anyhow!("snapshot ai_binding_assignment row missing model_preset_id"))?;
-    let preset_id =
-        preset_id_value.as_str().and_then(|value| Uuid::parse_str(value).ok()).ok_or_else(
-            || anyhow!("snapshot ai_binding_assignment row has malformed model_preset_id"),
-        )?;
-    let preset = legacy_presets.get(&preset_id).ok_or_else(|| {
-        anyhow!(
-            "snapshot ai_binding_assignment row references model_preset_id {preset_id} \
-             not present in the archive's ai_model_preset section"
-        )
-    })?;
-    object.insert("model_catalog_id".to_string(), preset.model_catalog_id.clone());
-    object.insert("system_prompt".to_string(), preset.system_prompt.clone());
-    object.insert("temperature".to_string(), preset.temperature.clone());
-    object.insert("top_p".to_string(), preset.top_p.clone());
-    object.insert(
-        "max_output_tokens_override".to_string(),
-        preset.max_output_tokens_override.clone(),
-    );
-    object.insert("extra_parameters_json".to_string(), preset.extra_parameters_json.clone());
-    Ok(())
-}
+type SnapshotArchiveReader<R> = ZstdDecoder<BufReader<R>>;
+type SnapshotArchiveEntries<R> = async_tar::Entries<SnapshotArchiveReader<R>>;
+type SnapshotArchiveEntry<R> = async_tar::Entry<Archive<SnapshotArchiveReader<R>>>;
 
 async fn restore_library_archive_inner<R>(
     state: &AppState,
@@ -1805,273 +1865,473 @@ where
     let decoder = ZstdDecoder::new(BufReader::new(body));
     let archive = Archive::new(decoder);
     let mut entries = archive.entries().context("open tar archive")?;
+    let (manifest, manifest_sections) = read_library_snapshot_manifest(&mut entries).await?;
+    let mut report = SnapshotImportReport {
+        library_id,
+        overwrite_mode: overwrite,
+        include_kinds: manifest.include_kinds.clone(),
+        ..Default::default()
+    };
+    let mut stashed_storage = None;
+    let restore_result = restore_library_archive_transaction(
+        state,
+        library_id,
+        overwrite,
+        stats_mode,
+        &mut entries,
+        &manifest,
+        &manifest_sections,
+        &mut report,
+        &mut stashed_storage,
+    )
+    .await;
 
-    let mut report =
-        SnapshotImportReport { library_id, overwrite_mode: overwrite, ..Default::default() };
-    let mut counts_pg: BTreeMap<String, u64> = BTreeMap::new();
+    restore_stashed_storage_after_restore(
+        state,
+        library_id,
+        stashed_storage.as_ref(),
+        &restore_result,
+    )
+    .await;
+    restore_result?;
+    Ok(report)
+}
 
-    // Stage 1 — manifest must be the first tar entry. Any archive that
-    // puts data ahead of it violates the snapshot protocol.
-    let (manifest, manifest_sections) = if let Some(entry) = entries.next().await {
-        let mut entry = entry.context("read tar entry")?;
-        let path = entry.path().context("read tar entry path")?.to_string_lossy().into_owned();
-        validate_archive_path(&path)?;
-        if path == "manifest.json" {
-            let mut bytes = Vec::new();
-            entry.read_to_end(&mut bytes).await.context("read manifest.json")?;
-            let parsed: SnapshotManifest =
-                serde_json::from_slice(&bytes).context("parse manifest.json")?;
-            if parsed.schema_version < MIN_SUPPORTED_SNAPSHOT_SCHEMA_VERSION
-                || parsed.schema_version > SNAPSHOT_SCHEMA_VERSION
-            {
-                bail!(
-                    "snapshot schema_version {} is not supported by this build (supported {}..={})",
-                    parsed.schema_version,
-                    MIN_SUPPORTED_SNAPSHOT_SCHEMA_VERSION,
-                    SNAPSHOT_SCHEMA_VERSION
-                );
-            }
-            let manifest_sections = SnapshotManifestSections::from_manifest(&parsed)?;
-            report.include_kinds = parsed.include_kinds.clone();
-            (parsed, manifest_sections)
-        } else {
-            bail!("tar entry `{path}` arrived before manifest.json");
-        }
-    } else {
+async fn read_library_snapshot_manifest<R>(
+    entries: &mut SnapshotArchiveEntries<R>,
+) -> anyhow::Result<(SnapshotManifest, SnapshotManifestSections)>
+where
+    R: AsyncRead + Unpin,
+{
+    let Some(entry) = entries.next().await else {
         bail!("snapshot archive missing manifest.json");
     };
-
-    let mut stashed_storage: Option<StashedContentDirectory> = None;
-    let restore_result: anyhow::Result<SnapshotImportReport> = async {
-        // Stage 2 — from here until commit the selected library identity row is
-        // locked. Concurrent ingests/imports that reference the same library block on
-        // the FK parent row lock, so `overwrite=reject` cannot pass an empty-target
-        // check and then race with new content rows.
-        let pool = &state.persistence.postgres;
-        let mut tx = pool.begin().await.context("begin snapshot tx")?;
-        content_repository::acquire_content_library_storage_lock_in_tx(&mut tx, library_id)
-            .await
-            .context("acquire library storage lock before snapshot restore")?;
-        let locked_target = lock_catalog_library_for_restore(&mut tx, library_id).await?;
-    let target_workspace_id = locked_target.workspace_id;
-    let target_library_slug = Some(locked_target.slug);
-    let existing_workspace_id = Some(target_workspace_id);
-    let target_footprint = if manifest.include_kinds.contains(&IncludeKind::LibraryData)
-        && overwrite == OverwriteMode::Reject
-        && tx_library_has_restore_footprint(state, &mut tx, library_id).await?
-    {
-        TargetRestoreFootprint::Populated
-    } else {
-        TargetRestoreFootprint::Empty
-    };
-    let library_data_action =
-        plan_restore_library_data(&manifest.include_kinds, overwrite, target_footprint);
-    match library_data_action {
-        RestoreLibraryDataAction::Skip | RestoreLibraryDataAction::ImportIntoEmptyTarget => {}
-        RestoreLibraryDataAction::RejectPopulatedTarget => {
-            bail!(
-                "target library data conflict: library {library_id} already contains data — pass overwrite=replace to restore over it"
-            );
-        }
-        RestoreLibraryDataAction::ReplaceTarget => {
-            stashed_storage =
-                prepare_replace_library_footprint(state, library_id, existing_workspace_id).await?;
-        }
+    let mut entry = entry.context("read tar entry")?;
+    let path = entry.path().context("read tar entry path")?.to_string_lossy().into_owned();
+    validate_archive_path(&path)?;
+    if path != "manifest.json" {
+        bail!("tar entry `{path}` arrived before manifest.json");
     }
 
-    let import_result: anyhow::Result<SnapshotImportReport> = async {
-    // Lazy-ensure every per-dim vector shard the source archive carried so the
-    // row-insertion path lands on relations that already exist with matching
-    // ANN + persistent indexes.
-    ensure_manifest_vector_shards(state, &manifest)
-        .await
-        .context("ensure per-dim vector shards declared by snapshot manifest")?;
+    let mut bytes = Vec::new();
+    entry.read_to_end(&mut bytes).await.context("read manifest.json")?;
+    let manifest: SnapshotManifest =
+        serde_json::from_slice(&bytes).context("parse manifest.json")?;
+    validate_snapshot_schema_version(manifest.schema_version, "snapshot")?;
+    let manifest_sections = SnapshotManifestSections::from_manifest(&manifest)?;
+    Ok((manifest, manifest_sections))
+}
 
-    // Stream remaining entries and flush in batches. We keep
-    // a single Postgres transaction alive for the whole restore so FKs
-    // are satisfied all at once at commit time.
+fn validate_snapshot_schema_version(schema_version: u32, archive_kind: &str) -> anyhow::Result<()> {
+    if !(MIN_SUPPORTED_SNAPSHOT_SCHEMA_VERSION..=SNAPSHOT_SCHEMA_VERSION).contains(&schema_version)
+    {
+        bail!(
+            "{archive_kind} schema_version {schema_version} is not supported by this build (supported {}..={})",
+            MIN_SUPPORTED_SNAPSHOT_SCHEMA_VERSION,
+            SNAPSHOT_SCHEMA_VERSION
+        );
+    }
+    Ok(())
+}
+
+struct LibraryRestoreTarget {
+    workspace_id: Uuid,
+    library_slug: String,
+    source_truth_version: i64,
+    action: RestoreLibraryDataAction,
+}
+
+async fn restore_library_archive_transaction<R>(
+    state: &AppState,
+    library_id: Uuid,
+    overwrite: OverwriteMode,
+    stats_mode: RestoreStatsMode,
+    entries: &mut SnapshotArchiveEntries<R>,
+    manifest: &SnapshotManifest,
+    manifest_sections: &SnapshotManifestSections,
+    report: &mut SnapshotImportReport,
+    stashed_storage: &mut Option<StashedContentDirectory>,
+) -> anyhow::Result<()>
+where
+    R: AsyncRead + Unpin,
+{
+    let pool = &state.persistence.postgres;
+    let mut tx = pool.begin().await.context("begin snapshot tx")?;
+    content_repository::acquire_content_library_storage_lock_in_tx(&mut tx, library_id)
+        .await
+        .context("acquire library storage lock before snapshot restore")?;
+    let target = prepare_library_restore_target(
+        state,
+        &mut tx,
+        library_id,
+        manifest,
+        overwrite,
+        stashed_storage,
+    )
+    .await?;
+    let row_counts = stream_library_snapshot_entries(
+        state,
+        entries,
+        manifest,
+        manifest_sections,
+        &mut tx,
+        library_id,
+        &target,
+        report,
+    )
+    .await?;
+    finalize_library_restore_transaction(
+        pool,
+        tx,
+        library_id,
+        target.source_truth_version,
+        stats_mode,
+        &row_counts,
+    )
+    .await?;
+    report.postgres_rows_by_table = row_counts.into_iter().collect();
+    Ok(())
+}
+
+async fn prepare_library_restore_target(
+    state: &AppState,
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    library_id: Uuid,
+    manifest: &SnapshotManifest,
+    overwrite: OverwriteMode,
+    stashed_storage: &mut Option<StashedContentDirectory>,
+) -> anyhow::Result<LibraryRestoreTarget> {
+    let LockedTargetLibrary { workspace_id, slug, source_truth_version } =
+        lock_catalog_library_for_restore(tx, library_id).await?;
+    let target_footprint = determine_target_restore_footprint(
+        state,
+        tx,
+        library_id,
+        &manifest.include_kinds,
+        overwrite,
+    )
+    .await?;
+    let action = plan_restore_library_data(&manifest.include_kinds, overwrite, target_footprint);
+    if action == RestoreLibraryDataAction::ReplaceTarget {
+        *stashed_storage =
+            prepare_replace_library_footprint(state, library_id, Some(workspace_id)).await?;
+    }
+    Ok(LibraryRestoreTarget { workspace_id, library_slug: slug, source_truth_version, action })
+}
+
+async fn determine_target_restore_footprint(
+    state: &AppState,
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    library_id: Uuid,
+    include_kinds: &[IncludeKind],
+    overwrite: OverwriteMode,
+) -> anyhow::Result<TargetRestoreFootprint> {
+    let should_check =
+        include_kinds.contains(&IncludeKind::LibraryData) && overwrite == OverwriteMode::Reject;
+    if should_check && tx_library_has_restore_footprint(state, tx, library_id).await? {
+        Ok(TargetRestoreFootprint::Populated)
+    } else {
+        Ok(TargetRestoreFootprint::Empty)
+    }
+}
+
+struct LibrarySnapshotRestoreState<'a, 'tx> {
+    state: &'a AppState,
+    manifest: &'a SnapshotManifest,
+    manifest_sections: &'a SnapshotManifestSections,
+    tx: &'a mut sqlx::Transaction<'tx, sqlx::Postgres>,
+    library_id: Uuid,
+    pg_batcher: &'a mut PgBatcher,
+    knowledge_dedup: &'a mut KnowledgeDocumentDedup,
+    row_scope: &'a mut SnapshotRowScope,
+    counts_pg: &'a mut BTreeMap<String, u64>,
+    report: &'a mut SnapshotImportReport,
+}
+
+async fn stream_library_snapshot_entries<R>(
+    state: &AppState,
+    entries: &mut SnapshotArchiveEntries<R>,
+    manifest: &SnapshotManifest,
+    manifest_sections: &SnapshotManifestSections,
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    library_id: Uuid,
+    target: &LibraryRestoreTarget,
+    report: &mut SnapshotImportReport,
+) -> anyhow::Result<BTreeMap<String, u64>>
+where
+    R: AsyncRead + Unpin,
+{
+    run_restore_preflight_before_side_effects(library_id, target.action, || async {
+        ensure_manifest_vector_shards(state, manifest_sections)
+            .await
+            .context("ensure per-dim vector shards declared by snapshot manifest")
+    })
+    .await?;
     sqlx::query("SET LOCAL session_replication_role = 'replica'")
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await
         .context("disable FK checks for snapshot import")?;
-    if library_data_action == RestoreLibraryDataAction::ReplaceTarget {
-        clear_library_postgres_footprint(&mut tx, library_id).await?;
-    }
+    reject_or_clear_target_restore_footprint(tx, library_id, target.action).await?;
 
+    let mut counts_pg = BTreeMap::new();
     let mut pg_batcher = PgBatcher::new();
     let mut knowledge_dedup = KnowledgeDocumentDedup::default();
     let mut row_scope = SnapshotRowScope::new(
         manifest.library_id,
         library_id,
-        target_workspace_id,
-        target_library_slug,
+        target.workspace_id,
+        Some(target.library_slug.clone()),
     );
-    // Pre-0004 archives carry `ai_model_preset` as a sibling section (bounded
-    // by one deployment/workspace's preset count). Buffered here and merged
-    // into `ai_binding` rows as they stream (see `merge_legacy_binding_row`).
-    let mut legacy_model_presets: HashMap<Uuid, LegacyModelPreset> = HashMap::new();
-
     while let Some(entry) = entries.next().await {
         let mut entry = entry.context("read tar entry")?;
-        let path = entry.path().context("read tar entry path")?.to_string_lossy().into_owned();
-        validate_archive_path(&path)?;
+        let mut restore_state = LibrarySnapshotRestoreState {
+            state,
+            manifest,
+            manifest_sections,
+            tx,
+            library_id,
+            pg_batcher: &mut pg_batcher,
+            knowledge_dedup: &mut knowledge_dedup,
+            row_scope: &mut row_scope,
+            counts_pg: &mut counts_pg,
+            report,
+        };
+        restore_library_snapshot_entry(&mut entry, &mut restore_state).await?;
+    }
+    finalize_library_snapshot_entries(&mut pg_batcher, &mut knowledge_dedup, &mut counts_pg, tx)
+        .await?;
+    Ok(counts_pg)
+}
 
-        if path == "summary.json" {
-            let mut bytes = Vec::new();
-            entry.read_to_end(&mut bytes).await.context("read summary.json")?;
-            if let Ok(parsed) = serde_json::from_slice::<SnapshotSummary>(&bytes) {
-                tracing::info!(
-                    %library_id,
-                    declared_blob_count = parsed.blob_count,
-                    declared_missing = parsed.missing_blob_keys.len(),
-                    "snapshot summary read",
-                );
-            }
-            continue;
-        }
+async fn run_restore_preflight_before_side_effects<F, Fut>(
+    library_id: Uuid,
+    action: RestoreLibraryDataAction,
+    side_effect: F,
+) -> anyhow::Result<()>
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = anyhow::Result<()>>,
+{
+    if action == RestoreLibraryDataAction::RejectPopulatedTarget {
+        return restore_target_conflict(library_id);
+    }
+    side_effect().await
+}
 
-        if path == "EXPORT_FAILED.json" {
-            let mut bytes = Vec::new();
-            entry.read_to_end(&mut bytes).await.context("read EXPORT_FAILED.json")?;
-            let message = serde_json::from_slice::<serde_json::Value>(&bytes)
-                .ok()
-                .and_then(|value| {
-                    value.get("error").and_then(serde_json::Value::as_str).map(str::to_string)
-                })
-                .unwrap_or_else(|| "snapshot archive contains EXPORT_FAILED.json".to_string());
-            bail!("snapshot archive is marked as failed export: {message}");
-        }
+fn restore_target_conflict(library_id: Uuid) -> anyhow::Result<()> {
+    bail!(
+        "target library data conflict: library {library_id} already contains data — pass overwrite=replace to restore over it"
+    )
+}
 
-        if path == "manifest.json" {
-            bail!("tar archive contains a second manifest.json");
-        }
-
-        if let Some(rest) = path.strip_prefix("postgres/") {
-            let (table_ref, _file) = split_section_path(rest)
-                .with_context(|| format!("malformed postgres path `{path}`"))?;
-            let table = manifest_sections.require_postgres_table(table_ref)?;
-
-            if table == "ai_model_preset" {
-                // Pre-0004 archive: buffer preset rows for the
-                // `ai_binding_assignment` section that follows. Never reaches
-                // the batcher — `ai_model_preset` has no storage table.
-                read_ndjson_entry_and(&mut entry, &mut |mut row| {
-                    row_scope.normalize_postgres_row(table, &mut row)?;
-                    let (id, preset) = LegacyModelPreset::from_row(&row)?;
-                    legacy_model_presets.insert(id, preset);
-                    Ok(())
-                })
-                .await
-                .with_context(|| format!("parse ndjson `{path}`"))?;
-                continue;
-            }
-
-            let storage_table = canonical_ai_config_storage_table(table);
-            pg_batcher.on_new_section(storage_table, &mut tx).await?;
-            read_ndjson_entry_and(&mut entry, &mut |mut row| {
-                row_scope.normalize_postgres_row(storage_table, &mut row)?;
-                if table == "ai_binding_assignment" {
-                    merge_legacy_binding_row(&mut row, &legacy_model_presets)?;
-                }
-                let mut kept = true;
-                if is_chunk_vector_relation_name(storage_table) {
-                    route_pg_vector_row_through_dedup(
-                        &mut knowledge_dedup,
-                        &mut pg_batcher,
-                        storage_table,
-                        row,
-                        &mut kept,
-                    )?;
-                } else {
-                    route_pg_row_through_dedup(
-                        &mut knowledge_dedup,
-                        &mut pg_batcher,
-                        storage_table,
-                        row,
-                        &mut kept,
-                    )?;
-                }
-                if kept {
-                    *counts_pg.entry(storage_table.to_string()).or_default() += 1;
-                }
-                Ok(())
-            })
-            .await
-            .with_context(|| format!("parse ndjson `{path}`"))?;
-            pg_batcher.maybe_flush(&mut tx).await?;
-        } else if let Some(blob_suffix) = path.strip_prefix("blobs/") {
-            if !manifest.has_blobs {
-                bail!("snapshot entry references undeclared blob payload");
-            }
-            // Blobs are written as they arrive — they can be much larger
-            // than a row so we never buffer them in a batcher.
-            let source_storage_key = blob_suffix.to_string();
-            let storage_key = row_scope.normalize_blob_key(&source_storage_key)?;
-            let mut bytes = Vec::new();
-            entry.read_to_end(&mut bytes).await.context("read blob entry")?;
-            state
-                .content_storage
-                .write_revision_source_raw(&storage_key, &bytes)
-                .await
-                .with_context(|| format!("write blob {storage_key}"))?;
-            report.blobs_restored += 1;
-        } else {
-            bail!("unknown tar entry `{path}`");
+async fn reject_or_clear_target_restore_footprint(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    library_id: Uuid,
+    action: RestoreLibraryDataAction,
+) -> anyhow::Result<()> {
+    match action {
+        RestoreLibraryDataAction::Skip | RestoreLibraryDataAction::ImportIntoEmptyTarget => Ok(()),
+        RestoreLibraryDataAction::RejectPopulatedTarget => restore_target_conflict(library_id),
+        RestoreLibraryDataAction::ReplaceTarget => {
+            clear_library_postgres_footprint(tx, library_id).await
         }
     }
+}
 
-    // Stage 4 — final flush + commit. Resolve the document dedup (covers
-    // archives that carry `knowledge_document` rows but no descendants, so
-    // the lazy finalize on the first descendant never fired), then drain
-    // every batcher and commit the Postgres transaction.
-    knowledge_dedup.finalize(&mut pg_batcher);
-    // Record the kept `knowledge_document` count so the import report reflects
-    // what was committed after the keep-rule dropped stale duplicates.
+async fn restore_library_snapshot_entry<R>(
+    entry: &mut SnapshotArchiveEntry<R>,
+    restore: &mut LibrarySnapshotRestoreState<'_, '_>,
+) -> anyhow::Result<()>
+where
+    R: AsyncRead + Unpin,
+{
+    let path = entry.path().context("read tar entry path")?.to_string_lossy().into_owned();
+    validate_archive_path(&path)?;
+    match path.as_str() {
+        "summary.json" => log_snapshot_summary(entry, restore.library_id).await,
+        "EXPORT_FAILED.json" => bail!(
+            "snapshot archive is marked as failed export: {}",
+            read_snapshot_export_failure(entry).await?
+        ),
+        "manifest.json" => bail!("tar archive contains a second manifest.json"),
+        _ => {
+            if let Some(rest) = path.strip_prefix("postgres/") {
+                restore_snapshot_postgres_entry(entry, rest, &path, restore).await
+            } else if let Some(blob_suffix) = path.strip_prefix("blobs/") {
+                restore_snapshot_blob_entry(entry, blob_suffix, restore).await
+            } else {
+                bail!("unknown tar entry `{path}`")
+            }
+        }
+    }
+}
+
+async fn log_snapshot_summary<R>(
+    entry: &mut SnapshotArchiveEntry<R>,
+    library_id: Uuid,
+) -> anyhow::Result<()>
+where
+    R: AsyncRead + Unpin,
+{
+    let mut bytes = Vec::new();
+    entry.read_to_end(&mut bytes).await.context("read summary.json")?;
+    if let Ok(parsed) = serde_json::from_slice::<SnapshotSummary>(&bytes) {
+        tracing::info!(
+            %library_id,
+            declared_blob_count = parsed.blob_count,
+            declared_missing = parsed.missing_blob_keys.len(),
+            "snapshot summary read",
+        );
+    }
+    Ok(())
+}
+
+async fn read_snapshot_export_failure<R>(
+    entry: &mut SnapshotArchiveEntry<R>,
+) -> anyhow::Result<String>
+where
+    R: AsyncRead + Unpin,
+{
+    let mut bytes = Vec::new();
+    entry.read_to_end(&mut bytes).await.context("read EXPORT_FAILED.json")?;
+    Ok(serde_json::from_slice::<serde_json::Value>(&bytes)
+        .ok()
+        .and_then(|value| {
+            value.get("error").and_then(serde_json::Value::as_str).map(str::to_string)
+        })
+        .unwrap_or_else(|| "snapshot archive contains EXPORT_FAILED.json".to_string()))
+}
+
+async fn restore_snapshot_postgres_entry<R>(
+    entry: &mut SnapshotArchiveEntry<R>,
+    rest: &str,
+    path: &str,
+    restore: &mut LibrarySnapshotRestoreState<'_, '_>,
+) -> anyhow::Result<()>
+where
+    R: AsyncRead + Unpin,
+{
+    let (table_ref, _file) =
+        split_section_path(rest).with_context(|| format!("malformed postgres path `{path}`"))?;
+    let table = restore.manifest_sections.require_postgres_table(table_ref)?;
+    restore.pg_batcher.on_new_section(table, restore.tx).await?;
+    read_ndjson_entry_and(entry, &mut |mut row| {
+        restore.row_scope.normalize_postgres_row(table, &mut row)?;
+        let mut kept = true;
+        route_snapshot_postgres_row(
+            restore.knowledge_dedup,
+            restore.pg_batcher,
+            table,
+            row,
+            &mut kept,
+        )?;
+        if kept {
+            *restore.counts_pg.entry(table.to_string()).or_default() += 1;
+        }
+        Ok(())
+    })
+    .await
+    .with_context(|| format!("parse ndjson `{path}`"))?;
+    restore.pg_batcher.maybe_flush(restore.tx).await
+}
+
+fn route_snapshot_postgres_row(
+    knowledge_dedup: &mut KnowledgeDocumentDedup,
+    pg_batcher: &mut PgBatcher,
+    table: &str,
+    row: serde_json::Value,
+    kept: &mut bool,
+) -> anyhow::Result<()> {
+    if is_chunk_vector_relation_name(table) {
+        route_pg_vector_row_through_dedup(knowledge_dedup, pg_batcher, table, row, kept)
+    } else {
+        route_pg_row_through_dedup(knowledge_dedup, pg_batcher, table, row, kept)
+    }
+}
+
+async fn restore_snapshot_blob_entry<R>(
+    entry: &mut SnapshotArchiveEntry<R>,
+    blob_suffix: &str,
+    restore: &mut LibrarySnapshotRestoreState<'_, '_>,
+) -> anyhow::Result<()>
+where
+    R: AsyncRead + Unpin,
+{
+    if !restore.manifest.has_blobs {
+        bail!("snapshot entry references undeclared blob payload");
+    }
+    let storage_key = restore.row_scope.normalize_blob_key(blob_suffix)?;
+    let mut bytes = Vec::new();
+    entry.read_to_end(&mut bytes).await.context("read blob entry")?;
+    restore
+        .state
+        .content_storage
+        .write_revision_source_raw(&storage_key, &bytes)
+        .await
+        .with_context(|| format!("write blob {storage_key}"))?;
+    restore.report.blobs_restored += 1;
+    Ok(())
+}
+
+async fn finalize_library_snapshot_entries(
+    pg_batcher: &mut PgBatcher,
+    knowledge_dedup: &mut KnowledgeDocumentDedup,
+    counts_pg: &mut BTreeMap<String, u64>,
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+) -> anyhow::Result<()> {
+    knowledge_dedup.finalize(pg_batcher);
     if knowledge_dedup.saw_document_rows() {
         *counts_pg.entry("knowledge_document".to_string()).or_default() +=
             knowledge_dedup.kept_document_count();
     }
-    pg_batcher.flush(&mut tx).await?;
+    pg_batcher.flush(tx).await
+}
+
+async fn finalize_library_restore_transaction(
+    pool: &PgPool,
+    mut tx: sqlx::Transaction<'_, sqlx::Postgres>,
+    library_id: Uuid,
+    locked_source_truth_version: i64,
+    stats_mode: RestoreStatsMode,
+    counts_pg: &BTreeMap<String, u64>,
+) -> anyhow::Result<()> {
+    advance_restored_library_source_truth_version(&mut tx, library_id, locked_source_truth_version)
+        .await?;
     tx.commit().await.context("commit snapshot tx")?;
-    // R1: in a mass/workspace import the shared snapshot tables grow with every
-    // library, so a per-library ANALYZE re-scans the whole table each time
-    // (O(n²)). Defer to a single end-of-import ANALYZE run by the workspace
-    // driver. The single-library path still ANALYZEs here so the planner has
-    // fresh stats immediately.
-    if stats_mode == RestoreStatsMode::PerLibrary {
-        if let Err(error) = analyze_imported_postgres_tables(pool, &counts_pg).await {
-            tracing::warn!(
-                %library_id,
-                error = %error,
-                "snapshot import postgres stats refresh failed",
-            );
-        }
+    if stats_mode == RestoreStatsMode::PerLibrary
+        && let Err(error) = analyze_imported_postgres_tables(pool, counts_pg).await
+    {
+        tracing::warn!(
+            %library_id,
+            error = %error,
+            "snapshot import postgres stats refresh failed",
+        );
     }
+    Ok(())
+}
 
-    report.postgres_rows_by_table = counts_pg.into_iter().collect();
-    Ok(report)
-    }
-    .await;
-
-    match import_result {
-        Ok(report) => {
-            if let Some(stashed) = stashed_storage.as_ref()
-                && let Err(error) = state.content_storage.purge_stashed_directory(stashed).await
-            {
+async fn restore_stashed_storage_after_restore(
+    state: &AppState,
+    library_id: Uuid,
+    stashed_storage: Option<&StashedContentDirectory>,
+    restore_result: &anyhow::Result<()>,
+) {
+    let Some(stashed) = stashed_storage else {
+        return;
+    };
+    match restore_result {
+        Ok(()) => {
+            if let Err(error) = state.content_storage.purge_stashed_directory(stashed).await {
                 tracing::warn!(
                     %library_id,
                     error = %error,
                     "snapshot restore succeeded but failed to purge stashed blob directory",
                 );
             }
-            Ok(report)
         }
         Err(error) => {
-            if let Some(stashed) = stashed_storage.as_ref()
-                && let Err(restore_error) = state
-                    .content_storage
-                    .restore_stashed_directory_replacing_current(stashed)
-                    .await
+            if let Err(restore_error) =
+                state.content_storage.restore_stashed_directory_replacing_current(stashed).await
             {
                 tracing::error!(
                     %library_id,
@@ -2080,13 +2340,8 @@ where
                     "snapshot restore failed and blob stash rollback also failed",
                 );
             }
-            Err(error)
         }
     }
-    }
-    .await;
-
-    restore_result
 }
 
 async fn analyze_imported_postgres_tables(
@@ -2180,14 +2435,14 @@ fn optional_i64_json(row: &serde_json::Value, field: &str) -> anyhow::Result<Opt
 
 /// Buffers Postgres rows per-table and flushes them as a single
 /// `jsonb_populate_recordset` statement. Each table keeps its own
-/// pending vec so different PostgreSQL sections cannot be accidentally inserted
+/// pending vec so different `PostgreSQL` sections cannot be accidentally inserted
 /// through the most recent table's column list.
 struct PgBatcher {
     pending: BTreeMap<String, Vec<serde_json::Value>>,
 }
 
 impl PgBatcher {
-    fn new() -> Self {
+    const fn new() -> Self {
         Self { pending: BTreeMap::new() }
     }
 
@@ -2323,7 +2578,7 @@ struct KnowledgeDocumentDedup {
     /// Once finalized, the winning `document_id` per external key.
     kept_document_ids: HashSet<Uuid>,
     /// `chunk_id`s belonging to kept documents — the cascade filter for
-    /// chunk-derived tables (vectors, candidates, mentions, bundle_chunk).
+    /// chunk-derived tables (vectors, candidates, mentions, `bundle_chunk`).
     kept_chunk_ids: HashSet<Uuid>,
     /// `true` once at least one `knowledge_document` row has been buffered.
     saw_document_rows: bool,
@@ -2359,7 +2614,7 @@ impl KnowledgeDocumentDedup {
     }
 
     /// Returns `true` if any `knowledge_document` rows have been buffered.
-    fn saw_document_rows(&self) -> bool {
+    const fn saw_document_rows(&self) -> bool {
         self.saw_document_rows
     }
 
@@ -2496,7 +2751,7 @@ impl KnowledgeDocumentDedup {
     }
 
     /// `true` once the document plane has been resolved.
-    fn is_finalized(&self) -> bool {
+    const fn is_finalized(&self) -> bool {
         self.finalized
     }
 
@@ -2521,10 +2776,10 @@ impl KnowledgeDocumentDedup {
                 return;
             };
             if self.kept_document_ids.contains(&document_id) {
-                if table == "knowledge_chunk" {
-                    if let Ok(chunk_id) = required_uuid_field(table, &row, "chunk_id") {
-                        self.kept_chunk_ids.insert(chunk_id);
-                    }
+                if table == "knowledge_chunk"
+                    && let Ok(chunk_id) = required_uuid_field(table, &row, "chunk_id")
+                {
+                    self.kept_chunk_ids.insert(chunk_id);
                 }
                 batcher.push(table, row);
             }
@@ -2825,14 +3080,15 @@ async fn clear_pg_vector_relations_for_library(
 struct LockedTargetLibrary {
     workspace_id: Uuid,
     slug: String,
+    source_truth_version: i64,
 }
 
 async fn lock_catalog_library_for_restore(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     library_id: Uuid,
 ) -> anyhow::Result<LockedTargetLibrary> {
-    let locked: Option<(Uuid, String)> = sqlx::query_as(
-        "SELECT workspace_id, slug
+    let locked: Option<(Uuid, String, i64)> = sqlx::query_as(
+        "SELECT workspace_id, slug, coalesce(source_truth_version, 1)
          FROM catalog_library
          WHERE id = $1
          FOR UPDATE",
@@ -2841,12 +3097,48 @@ async fn lock_catalog_library_for_restore(
     .fetch_optional(&mut **tx)
     .await
     .context("lock catalog_library before snapshot restore")?;
-    let Some((workspace_id, slug)) = locked else {
+    let Some((workspace_id, slug, source_truth_version)) = locked else {
         bail!(
             "target library {library_id} does not exist; create/select a library before restoring a snapshot"
         );
     };
-    Ok(LockedTargetLibrary { workspace_id, slug })
+    Ok(LockedTargetLibrary { workspace_id, slug, source_truth_version })
+}
+
+fn minimum_source_truth_version_after_restore(locked_target_version: i64) -> anyhow::Result<i64> {
+    locked_target_version.max(0).checked_add(1).ok_or_else(|| {
+        anyhow!("target library source truth version cannot advance beyond {locked_target_version}")
+    })
+}
+
+const fn advance_restored_library_source_truth_version_sql() -> &'static str {
+    "with advanced_library as materialized (
+        update catalog_library
+        set source_truth_version = greatest(
+            coalesce(source_truth_version, 0) + 1,
+            $2,
+            (extract(epoch from clock_timestamp()) * 1000000)::bigint
+        )
+        where id = $1
+        returning source_truth_version
+     )
+     select source_truth_version
+     from advanced_library
+     where source_truth_version >= $2"
+}
+
+async fn advance_restored_library_source_truth_version(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    library_id: Uuid,
+    locked_target_version: i64,
+) -> anyhow::Result<i64> {
+    let minimum_version = minimum_source_truth_version_after_restore(locked_target_version)?;
+    sqlx::query_scalar::<_, i64>(advance_restored_library_source_truth_version_sql())
+        .bind(library_id)
+        .bind(minimum_version)
+        .fetch_one(&mut **tx)
+        .await
+        .context("advance library source truth after snapshot restore")
 }
 
 async fn tx_library_has_restore_footprint(
@@ -2907,7 +3199,8 @@ fn postgres_restore_footprint_clause(table: &str) -> anyhow::Result<Option<Strin
     Ok(Some(clause))
 }
 
-/// Lazy-ensure every per-dim vector shard declared by a snapshot manifest
+/// Lazy-ensure every per-dim vector shard derived from the snapshot's declared
+/// Postgres sections,
 /// so the import path can stream rows back in without first running a
 /// fresh ingest to materialize the collections. ANN + persistent index
 /// parameters come from the canonical search-store config the target
@@ -2916,41 +3209,31 @@ fn postgres_restore_footprint_clause(table: &str) -> anyhow::Result<Option<Strin
 /// on first ingest of an unseen dim.
 async fn ensure_manifest_vector_shards(
     state: &AppState,
-    manifest: &SnapshotManifest,
+    manifest_sections: &SnapshotManifestSections,
 ) -> anyhow::Result<()> {
     let search_store = &state.search_store;
-    let mut ensured = HashSet::new();
-    for shard in &manifest.vector_shards {
-        let relation_name = canonical_per_dim_vector_relation_name(&shard.name).ok_or_else(|| {
-            anyhow!(
-                "snapshot manifest vector_shards entry `{}` is not a canonical per-dim shard name",
-                shard.name
-            )
-        })?;
-        if !ensured.insert(relation_name.clone()) {
-            continue;
-        }
-        if is_per_dim_chunk_vector_collection_name(&shard.name) {
-            search_store.ensure_chunk_vector_shard(shard.dim).await.with_context(|| {
+    for (relation_name, dim) in &manifest_sections.vector_shards {
+        if is_per_dim_chunk_vector_collection_name(relation_name) {
+            search_store.ensure_chunk_vector_shard(*dim).await.with_context(|| {
                 format!("ensure per-dim chunk vector shard {relation_name} for restore")
             })?;
         } else {
-            search_store.ensure_entity_vector_shard(shard.dim).await.with_context(|| {
+            search_store.ensure_entity_vector_shard(*dim).await.with_context(|| {
                 format!("ensure per-dim entity vector shard {relation_name} for restore")
             })?;
         }
     }
     Ok(())
 }
-/// Recursively strips characters that PostgreSQL `text` and `jsonb` cannot
+/// Recursively strips characters that `PostgreSQL` `text` and `jsonb` cannot
 /// store from every `String` node in `value`.
 ///
-/// PostgreSQL rejects the following when they appear inside a JSONB literal:
+/// `PostgreSQL` rejects the following when they appear inside a JSONB literal:
 ///
 /// - U+0000 (null byte) — forbidden in `text`/`jsonb` by the SQL standard.
 /// - Lone surrogate code points (U+D800–U+DFFF) — not valid Unicode scalar
 ///   values; `serde_json` can round-trip them as `\uD800`-style escapes but
-///   PostgreSQL's JSON parser treats them as an "unsupported Unicode escape
+///   `PostgreSQL`'s JSON parser treats them as an "unsupported Unicode escape
 ///   sequence" and aborts the statement.
 ///
 /// All other Unicode scalar values (including multi-byte characters) are left
@@ -3256,7 +3539,7 @@ async fn update_catalog_library_rows_from_snapshot(
     Ok(())
 }
 
-fn catalog_library_snapshot_update_sql() -> &'static str {
+const fn catalog_library_snapshot_update_sql() -> &'static str {
     "UPDATE catalog_library AS target
          SET workspace_id = row.workspace_id,
              slug = row.slug,
@@ -3310,7 +3593,9 @@ fn catalog_library_snapshot_update_sql() -> &'static str {
 /// create + insert inside a SAVEPOINT (`tx.begin()`), so on a retryable
 /// contention we roll back to the savepoint (leaving the outer transaction and
 /// its tx-scoped `session_replication_role = 'replica'` intact) and replay the
-/// same in-memory rows. `ON CONFLICT DO NOTHING` makes replay idempotent.
+/// same in-memory rows. `ON CONFLICT (key) DO NOTHING` makes only exact
+/// physical-key replay idempotent; a different key for the same logical vector
+/// still reaches the logical unique index and fails closed.
 async fn insert_pg_vector_rows_bulk(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     relation_name: &str,
@@ -3394,7 +3679,7 @@ async fn insert_pg_vector_rows_bulk_once(
                     embedding_model_key, vector_kind, dimensions, embedding::{cast_type},
                     freshness_generation, created_at, occurred_at, occurred_until
                 FROM rows
-                ON CONFLICT (key) DO NOTHING
+                {PG_VECTOR_RESTORE_KEY_REPLAY_CONFLICT}
                 RETURNING library_id, dimensions, vector_kind, embedding_model_key
              ), lanes AS MATERIALIZED (
                 SELECT DISTINCT library_id, dimensions, vector_kind, embedding_model_key
@@ -3442,7 +3727,7 @@ async fn insert_pg_vector_rows_bulk_once(
                     embedding_model_key, vector_kind, dimensions, embedding::{cast_type},
                     freshness_generation, created_at
                 FROM rows
-                ON CONFLICT (key) DO NOTHING
+                {PG_VECTOR_RESTORE_KEY_REPLAY_CONFLICT}
                 RETURNING library_id, dimensions, vector_kind, embedding_model_key
              ), lanes AS MATERIALIZED (
                 SELECT DISTINCT library_id, dimensions, vector_kind, embedding_model_key
@@ -3560,6 +3845,13 @@ async fn ensure_pg_vector_relation_indexes(
     dim: i32,
 ) -> anyhow::Result<()> {
     let relation = quote_pg_identifier(relation_name)?;
+    let logical_identity_sql =
+        pg_vector_logical_identity_index_sql(relation_name, id_column, extra_column)?;
+    sqlx::query(sqlx::AssertSqlSafe(logical_identity_sql))
+        .execute(&mut **tx)
+        .await
+        .with_context(|| format!("create logical identity index on {relation_name}"))?;
+
     let lane_idx = quote_pg_identifier(&format!("{relation_name}_lane_idx"))?;
     sqlx::query(sqlx::AssertSqlSafe(format!(
         "CREATE INDEX IF NOT EXISTS {lane_idx}
@@ -3590,6 +3882,29 @@ async fn ensure_pg_vector_relation_indexes(
     Ok(())
 }
 
+fn pg_vector_logical_identity_index_sql(
+    relation_name: &str,
+    id_column: &str,
+    extra_column: Option<&str>,
+) -> anyhow::Result<String> {
+    let relation = quote_pg_identifier(relation_name)?;
+    let logical_key_idx =
+        quote_pg_identifier(&format!("{relation_name}{PG_VECTOR_LOGICAL_KEY_INDEX_SUFFIX}"))?;
+    let id_column = quote_pg_identifier(id_column)?;
+    let logical_identity_columns = match extra_column {
+        Some(extra_column) => format!(
+            "library_id, {id_column}, {}, embedding_model_key, vector_kind, freshness_generation",
+            quote_pg_identifier(extra_column)?,
+        ),
+        None => format!(
+            "library_id, {id_column}, embedding_model_key, vector_kind, freshness_generation"
+        ),
+    };
+    Ok(format!(
+        "create unique index if not exists {logical_key_idx} on {relation} ({logical_identity_columns})"
+    ))
+}
+
 async fn ensure_pg_vector_relation_hnsw_index(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     relation_name: &str,
@@ -3618,108 +3933,6 @@ async fn ensure_pg_vector_relation_hnsw_index(
     .await
     .with_context(|| format!("create HNSW index on {relation_name}"))?;
     Ok(())
-}
-
-#[derive(Debug, Clone, Copy)]
-enum PgVectorStorage {
-    Vector,
-    Halfvec,
-}
-
-impl PgVectorStorage {
-    fn for_dim(dim: u64) -> Self {
-        if dim > PGVECTOR_HNSW_VECTOR_MAX_DIM { Self::Halfvec } else { Self::Vector }
-    }
-
-    fn column_type(self, dim: i32) -> String {
-        match self {
-            Self::Vector => format!("vector({dim})"),
-            Self::Halfvec => format!("halfvec({dim})"),
-        }
-    }
-
-    fn cast_type(self) -> &'static str {
-        match self {
-            Self::Vector => "vector",
-            Self::Halfvec => "halfvec",
-        }
-    }
-
-    fn cosine_ops(self) -> &'static str {
-        match self {
-            Self::Vector => "vector_cosine_ops",
-            Self::Halfvec => "halfvec_cosine_ops",
-        }
-    }
-
-    fn bytes_per_component(self) -> u64 {
-        match self {
-            Self::Vector => 4,
-            Self::Halfvec => 2,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy)]
-struct PgHnswIndexParams {
-    m: u64,
-    ef_construction: u64,
-}
-
-fn pg_hnsw_index_params(
-    row_count: u64,
-    dim: i32,
-    storage: PgVectorStorage,
-) -> anyhow::Result<PgHnswIndexParams> {
-    let dim = u64::try_from(dim).context("vector dimension must be positive")?;
-    let configured_m = read_env_u64("IRONRAG_PG_HNSW_M");
-    let configured_ef_construction = read_env_u64("IRONRAG_PG_HNSW_EF_CONSTRUCTION");
-    let m = configured_m
-        .map(|m| m.clamp(PG_HNSW_MIN_M, PG_HNSW_LARGE_M))
-        .unwrap_or_else(|| memory_safe_hnsw_m(row_count, dim, storage));
-    let ef_construction = configured_ef_construction.unwrap_or(m.saturating_mul(4)).max(m);
-    Ok(PgHnswIndexParams { m, ef_construction })
-}
-
-fn memory_safe_hnsw_m(row_count: u64, dim: u64, storage: PgVectorStorage) -> u64 {
-    let target = if row_count >= 100_000 {
-        PG_HNSW_LARGE_M
-    } else if row_count >= 1_000 {
-        PG_HNSW_MID_M
-    } else {
-        PG_HNSW_MIN_M
-    };
-    let budget = pg_hnsw_build_budget_bytes();
-    [target, PG_HNSW_MID_M, PG_HNSW_MIN_M]
-        .into_iter()
-        .find(|&m| estimated_hnsw_build_bytes(row_count, dim, storage, m) <= budget)
-        .unwrap_or(PG_HNSW_MIN_M)
-}
-
-fn estimated_hnsw_build_bytes(row_count: u64, dim: u64, storage: PgVectorStorage, m: u64) -> u128 {
-    let rows = u128::from(row_count.max(1));
-    let vector_bytes = u128::from(dim) * u128::from(storage.bytes_per_component());
-    let graph_bytes = u128::from(m) * 16;
-    rows * (vector_bytes.saturating_mul(2) + graph_bytes)
-}
-
-fn pg_hnsw_build_budget_bytes() -> u128 {
-    u128::from(
-        read_env_u64("IRONRAG_PG_HNSW_BUILD_BUDGET_BYTES")
-            .or_else(|| read_env_u64("IRONRAG_VECTOR_INDEX_TRAINING_BUDGET_BYTES"))
-            .unwrap_or(PG_HNSW_DEFAULT_BUILD_BUDGET_BYTES),
-    )
-}
-
-fn read_env_u64(name: &str) -> Option<u64> {
-    std::env::var(name).ok().and_then(|value| {
-        let trimmed = value.trim();
-        if trimmed.is_empty() {
-            None
-        } else {
-            trimmed.parse::<u64>().ok().filter(|value| *value > 0)
-        }
-    })
 }
 
 fn checked_vector_dim_i32(dim: u64) -> anyhow::Result<i32> {
@@ -3806,7 +4019,7 @@ where
             error_chain = format!("{error:#}"),
             "workspace snapshot export failed with full chain",
         );
-        ContentServiceError::from_message(error.to_string())
+        ContentServiceError::from(error)
     })
 }
 
@@ -3855,14 +4068,14 @@ where
     let mut builder = Builder::new(writer);
     builder.mode(async_tar::HeaderMode::Deterministic);
 
-    let inner_result = export_workspace_archive_body(
+    let inner_result = Box::pin(export_workspace_archive_body(
         &state,
         workspace_id,
         &workspace_slug,
         &include,
         &libraries,
         &mut builder,
-    )
+    ))
     .await;
     finalize_workspace_archive_with_failure_sentinel(builder, workspace_id, inner_result).await
 }
@@ -3949,13 +4162,12 @@ where
     //    tar header carries the exact size. Delete the temp before the next
     //    library to bound scratch usage to a single library.
     let scratch_dir = std::env::var_os(SNAPSHOT_SCRATCH_DIR_ENV)
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(std::env::temp_dir);
+        .map_or_else(std::env::temp_dir, std::path::PathBuf::from);
 
     for library in libraries {
         let temp_path = scratch_dir.join(format!("ironrag-snapshot-{}.tar.zst", Uuid::now_v7()));
         let export_result =
-            export_one_library_to_temp(state, library.id, include, &temp_path).await;
+            Box::pin(export_one_library_to_temp(state, library.id, include, &temp_path)).await;
         let append_result = match &export_result {
             Ok(()) => append_library_archive_entry(builder, library.id, &temp_path)
                 .await
@@ -3963,15 +4175,15 @@ where
             Err(_) => Ok(()),
         };
         // Always clean the temp file before moving on, regardless of outcome.
-        if let Err(remove_err) = tokio::fs::remove_file(&temp_path).await {
-            if remove_err.kind() != std::io::ErrorKind::NotFound {
-                tracing::warn!(
-                    %workspace_id,
-                    library_id = %library.id,
-                    error = %remove_err,
-                    "workspace snapshot export failed to remove temp library archive",
-                );
-            }
+        if let Err(remove_err) = tokio::fs::remove_file(&temp_path).await
+            && remove_err.kind() != std::io::ErrorKind::NotFound
+        {
+            tracing::warn!(
+                %workspace_id,
+                library_id = %library.id,
+                error = %remove_err,
+                "workspace snapshot export failed to remove temp library archive",
+            );
         }
         export_result.with_context(|| format!("export library {} archive", library.id))?;
         append_result?;
@@ -3991,9 +4203,9 @@ async fn export_one_library_to_temp(
     let file = tokio::fs::File::create(temp_path)
         .await
         .with_context(|| format!("create temp library archive `{}`", temp_path.display()))?;
-    export_library_archive(state.clone(), library_id, include.to_vec(), file)
+    Box::pin(export_library_archive(state.clone(), library_id, include.to_vec(), file))
         .await
-        .map_err(|error| anyhow!("{error}"))?;
+        .map_err(anyhow::Error::new)?;
     Ok(())
 }
 
@@ -4049,7 +4261,7 @@ where
             error_chain = format!("{error:#}"),
             "workspace snapshot import failed with full chain",
         );
-        ContentServiceError::from_message(error.to_string())
+        ContentServiceError::from(error)
     })
 }
 
@@ -4068,36 +4280,7 @@ where
     let archive = Archive::new(BufReader::new(body));
     let mut entries = archive.entries().context("open workspace tar archive")?;
 
-    // Stage 1 — workspace-manifest.json must be the first entry.
-    let manifest = if let Some(entry) = entries.next().await {
-        let mut entry = entry.context("read workspace tar entry")?;
-        let path =
-            entry.path().context("read workspace tar entry path")?.to_string_lossy().into_owned();
-        validate_archive_path(&path)?;
-        if path == "workspace-manifest.json" {
-            let mut bytes = Vec::new();
-            tokio::io::AsyncReadExt::read_to_end(&mut entry, &mut bytes)
-                .await
-                .context("read workspace-manifest.json")?;
-            let parsed: WorkspaceSnapshotManifest =
-                serde_json::from_slice(&bytes).context("parse workspace-manifest.json")?;
-            if parsed.schema_version < MIN_SUPPORTED_SNAPSHOT_SCHEMA_VERSION
-                || parsed.schema_version > SNAPSHOT_SCHEMA_VERSION
-            {
-                bail!(
-                    "workspace snapshot schema_version {} is not supported by this build (supported {}..={})",
-                    parsed.schema_version,
-                    MIN_SUPPORTED_SNAPSHOT_SCHEMA_VERSION,
-                    SNAPSHOT_SCHEMA_VERSION
-                );
-            }
-            parsed
-        } else {
-            bail!("workspace tar entry `{path}` arrived before workspace-manifest.json");
-        }
-    } else {
-        bail!("workspace snapshot archive missing workspace-manifest.json");
-    };
+    let manifest = read_workspace_snapshot_manifest(&mut entries).await?;
 
     // Index manifest libraries by source id so we can resolve slug +
     // display_name from each `libraries/{id}.tar.zst` path.
@@ -4200,6 +4383,44 @@ where
     }
 
     Ok(report)
+}
+
+async fn read_workspace_snapshot_manifest<R>(
+    entries: &mut async_tar::Entries<R>,
+) -> anyhow::Result<WorkspaceSnapshotManifest>
+where
+    R: AsyncRead + Unpin,
+{
+    let Some(entry) = entries.next().await else {
+        bail!("workspace snapshot archive missing workspace-manifest.json");
+    };
+    let mut entry = entry.context("read workspace tar entry")?;
+    let path =
+        entry.path().context("read workspace tar entry path")?.to_string_lossy().into_owned();
+    validate_archive_path(&path)?;
+    if path != "workspace-manifest.json" {
+        bail!("workspace tar entry `{path}` arrived before workspace-manifest.json");
+    }
+    let mut bytes = Vec::new();
+    tokio::io::AsyncReadExt::read_to_end(&mut entry, &mut bytes)
+        .await
+        .context("read workspace-manifest.json")?;
+    let manifest: WorkspaceSnapshotManifest =
+        serde_json::from_slice(&bytes).context("parse workspace-manifest.json")?;
+    validate_workspace_snapshot_schema_version(manifest.schema_version)?;
+    Ok(manifest)
+}
+
+fn validate_workspace_snapshot_schema_version(schema_version: u32) -> anyhow::Result<()> {
+    if !(MIN_SUPPORTED_SNAPSHOT_SCHEMA_VERSION..=SNAPSHOT_SCHEMA_VERSION).contains(&schema_version)
+    {
+        bail!(
+            "workspace snapshot schema_version {schema_version} is not supported by this build (supported {}..={})",
+            MIN_SUPPORTED_SNAPSHOT_SCHEMA_VERSION,
+            SNAPSHOT_SCHEMA_VERSION
+        );
+    }
+    Ok(())
 }
 
 /// Parses `libraries/{uuid}.tar.zst` and returns the embedded library id.
@@ -4380,9 +4601,125 @@ mod tests {
     }
 
     #[test]
+    fn snapshot_manifest_v6_derives_vector_shards_from_postgres_tables() {
+        let mut manifest = manifest_with_sections(
+            vec![
+                "catalog_library",
+                "knowledge_chunk_vector_d1024",
+                "knowledge_entity_vector_d3072",
+            ],
+            false,
+        );
+        manifest.schema_version = MIN_SUPPORTED_SNAPSHOT_SCHEMA_VERSION;
+        let mut encoded = serde_json::to_value(&manifest).unwrap();
+        encoded.as_object_mut().unwrap().remove("vector_shards");
+        let manifest: SnapshotManifest = serde_json::from_value(encoded).unwrap();
+
+        let sections = SnapshotManifestSections::from_manifest(&manifest).unwrap();
+
+        assert_eq!(
+            sections.vector_shards,
+            BTreeMap::from([
+                ("knowledge_chunk_vector_d1024".to_string(), 1024),
+                ("knowledge_entity_vector_d3072".to_string(), 3072),
+            ])
+        );
+    }
+
+    #[test]
+    fn snapshot_manifest_v7_requires_exact_vector_shard_declarations() {
+        let missing =
+            manifest_with_sections(vec!["catalog_library", "knowledge_chunk_vector_d1024"], false);
+        let missing_error = SnapshotManifestSections::from_manifest(&missing).unwrap_err();
+        assert!(missing_error.to_string().contains("must exactly match"));
+
+        let mut extra = manifest_with_sections(vec!["catalog_library"], false);
+        extra.vector_shards =
+            vec![VectorShardEntry { name: "knowledge_chunk_vector_d1024".to_string(), dim: 1024 }];
+        let extra_error = SnapshotManifestSections::from_manifest(&extra).unwrap_err();
+        assert!(extra_error.to_string().contains("has no matching postgres table"));
+    }
+
+    #[test]
+    fn snapshot_manifest_rejects_vector_shard_dimension_or_identity_mismatch() {
+        let mut wrong_dimension =
+            manifest_with_sections(vec!["catalog_library", "knowledge_chunk_vector_d1024"], false);
+        wrong_dimension.vector_shards =
+            vec![VectorShardEntry { name: "knowledge_chunk_vector_d1024".to_string(), dim: 3072 }];
+        let wrong_dimension_error =
+            SnapshotManifestSections::from_manifest(&wrong_dimension).unwrap_err();
+        assert!(wrong_dimension_error.to_string().contains("declares dimension 3072"));
+
+        let mut duplicate =
+            manifest_with_sections(vec!["catalog_library", "knowledge_chunk_vector_d1024"], false);
+        duplicate.vector_shards = vec![
+            VectorShardEntry { name: "knowledge_chunk_vector_d1024".to_string(), dim: 1024 },
+            VectorShardEntry { name: "knowledge_chunk_vector_d1024".to_string(), dim: 1024 },
+        ];
+        let duplicate_error = SnapshotManifestSections::from_manifest(&duplicate).unwrap_err();
+        assert!(duplicate_error.to_string().contains("more than once"));
+
+        assert!(!is_canonical_per_dim_vector_collection_name("knowledge_chunk_vector_d01024"));
+
+        let mut zero_dimension =
+            manifest_with_sections(vec!["catalog_library", "knowledge_chunk_vector_d0"], false);
+        zero_dimension.vector_shards =
+            vec![VectorShardEntry { name: "knowledge_chunk_vector_d0".to_string(), dim: 0 }];
+        let zero_dimension_error =
+            SnapshotManifestSections::from_manifest(&zero_dimension).unwrap_err();
+        assert!(zero_dimension_error.to_string().contains("invalid dimension"));
+    }
+
+    #[test]
+    fn raw_restore_logical_indexes_match_the_runtime_identity_contract() {
+        assert_eq!(PG_VECTOR_RESTORE_KEY_REPLAY_CONFLICT, "ON CONFLICT (key) DO NOTHING");
+
+        let chunk_sql = pg_vector_logical_identity_index_sql(
+            "knowledge_chunk_vector_d1024",
+            "chunk_id",
+            Some("revision_id"),
+        )
+        .unwrap();
+        assert_eq!(
+            chunk_sql,
+            "create unique index if not exists \"knowledge_chunk_vector_d1024_logical_key\" on \"knowledge_chunk_vector_d1024\" (library_id, \"chunk_id\", \"revision_id\", embedding_model_key, vector_kind, freshness_generation)"
+        );
+
+        let entity_sql = pg_vector_logical_identity_index_sql(
+            "knowledge_entity_vector_d3072",
+            "entity_id",
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            entity_sql,
+            "create unique index if not exists \"knowledge_entity_vector_d3072_logical_key\" on \"knowledge_entity_vector_d3072\" (library_id, \"entity_id\", embedding_model_key, vector_kind, freshness_generation)"
+        );
+    }
+
+    #[test]
+    fn logical_vector_duplicates_are_not_retryable_restore_contention() {
+        assert!(!pg_restore_sqlstate_is_retryable(
+            "23505",
+            Some("knowledge_chunk_vector_d1024_logical_key"),
+        ));
+        assert!(pg_restore_sqlstate_is_retryable("23505", Some("pg_class_relname_nsp_index")));
+        assert!(pg_restore_sqlstate_is_retryable(PG_SQLSTATE_DEADLOCK_DETECTED, None));
+    }
+
+    #[test]
     fn snapshot_manifest_sections_accept_declared_canonical_names() {
         let manifest = manifest_with_sections(
-            vec!["catalog_library", "content_document", "runtime_graph_node"],
+            vec![
+                "catalog_library",
+                "content_document",
+                "runtime_graph_node",
+                "ai_provider_catalog",
+                "ai_model_catalog",
+                "ai_price_catalog",
+                "ai_account",
+                "ai_binding",
+            ],
             true,
         );
 
@@ -4397,6 +4734,9 @@ mod tests {
             sections.require_postgres_table("runtime_graph_node").unwrap(),
             "runtime_graph_node"
         );
+        for table in POSTGRES_AI_CONFIG_TABLES {
+            assert_eq!(sections.require_postgres_table(table).unwrap(), *table);
+        }
     }
 
     #[test]
@@ -4408,6 +4748,17 @@ mod tests {
         let sections = SnapshotManifestSections::from_manifest(&manifest).unwrap();
         assert!(sections.require_postgres_table("content_document").is_err());
         assert!(sections.require_postgres_table("ai_provider_credential").is_err());
+    }
+
+    #[test]
+    fn snapshot_manifest_sections_reject_legacy_ai_config_table_names() {
+        for table in ["ai_provider_credential", "ai_model_preset", "ai_binding_assignment"] {
+            let manifest = manifest_with_sections(vec!["catalog_library", table], false);
+            assert!(
+                SnapshotManifestSections::from_manifest(&manifest).is_err(),
+                "legacy snapshot table `{table}` must be rejected"
+            );
+        }
     }
 
     #[test]
@@ -4470,6 +4821,56 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn reject_populated_target_has_no_pre_restore_side_effect() {
+        let side_effect_started = std::cell::Cell::new(false);
+
+        let result = run_restore_preflight_before_side_effects(
+            Uuid::now_v7(),
+            RestoreLibraryDataAction::RejectPopulatedTarget,
+            || async {
+                side_effect_started.set(true);
+                Ok(())
+            },
+        )
+        .await;
+
+        assert!(result.is_err());
+        assert!(!side_effect_started.get());
+    }
+
+    #[test]
+    fn restore_stream_checks_conflict_before_every_side_effect_stage() {
+        let source = include_str!("snapshot.rs");
+        let function_start = source
+            .find("async fn stream_library_snapshot_entries<R>")
+            .expect("restore stream function must exist");
+        let function_source = &source[function_start..];
+        let function_end = function_source
+            .find("\nasync fn run_restore_preflight_before_side_effects")
+            .expect("restore preflight helper must follow stream function");
+        let function_source = &function_source[..function_end];
+        let preflight = function_source
+            .find("run_restore_preflight_before_side_effects")
+            .expect("restore stream must run its conflict preflight");
+
+        for side_effect in [
+            "ensure_manifest_vector_shards",
+            "SET LOCAL session_replication_role",
+            "reject_or_clear_target_restore_footprint",
+            "while let Some(entry) = entries.next().await",
+            "finalize_library_snapshot_entries",
+        ] {
+            let position = function_source
+                .find(side_effect)
+                .unwrap_or_else(|| panic!("restore side-effect stage `{side_effect}` must exist"));
+            assert!(
+                preflight < position,
+                "restore conflict preflight must precede `{side_effect}`"
+            );
+        }
+    }
+
     #[test]
     fn restore_footprint_clauses_follow_canonical_snapshot_tables() {
         let content_document = postgres_restore_footprint_clause("content_document")
@@ -4502,6 +4903,26 @@ mod tests {
         ));
         assert!(sql.contains("retrieval_config jsonb"));
         assert!(sql.contains("FROM jsonb_to_recordset($1)"));
+    }
+
+    #[test]
+    fn restore_source_truth_floor_rejects_lower_or_same_imported_epoch() {
+        let locked_target_version = 41;
+        let minimum_committed_version =
+            minimum_source_truth_version_after_restore(locked_target_version)
+                .expect("ordinary source version has a successor");
+
+        for imported_version in [1, locked_target_version] {
+            assert!(
+                minimum_committed_version > imported_version,
+                "a lower or equal archive epoch must not become the committed target epoch",
+            );
+        }
+
+        let sql = advance_restored_library_source_truth_version_sql();
+        assert!(sql.contains("coalesce(source_truth_version, 0) + 1"));
+        assert!(sql.contains("greatest"));
+        assert!(sql.contains("source_truth_version >= $2"));
     }
 
     #[test]
@@ -4607,9 +5028,9 @@ mod tests {
             provider_id
         );
 
-        // Workspace-scoped credential: workspace_id remapped, library_id stays
+        // Workspace-scoped account: workspace_id remapped, library_id stays
         // null, principal author reference dropped.
-        let mut credential = serde_json::json!({
+        let mut account = serde_json::json!({
             "id": Uuid::now_v7(),
             "workspace_id": source_workspace_id,
             "library_id": serde_json::Value::Null,
@@ -4617,160 +5038,43 @@ mod tests {
             "api_key": serde_json::Value::Null,
             "created_by_principal_id": Uuid::now_v7(),
         });
-        scope.normalize_postgres_row("ai_provider_credential", &mut credential).unwrap();
+        scope.normalize_postgres_row("ai_account", &mut account).unwrap();
         assert_eq!(
-            required_uuid_field("ai_provider_credential", &credential, "workspace_id").unwrap(),
+            required_uuid_field("ai_account", &account, "workspace_id").unwrap(),
             target_workspace_id
         );
-        assert!(credential.get("library_id").unwrap().is_null());
-        assert!(credential.get("created_by_principal_id").unwrap().is_null());
+        assert!(account.get("library_id").unwrap().is_null());
+        assert!(account.get("created_by_principal_id").unwrap().is_null());
 
-        // Library-scoped preset: both scope ids remapped.
-        let mut preset = serde_json::json!({
+        // Library-scoped binding: both scope ids remapped and principal author
+        // references dropped.
+        let mut binding = serde_json::json!({
             "id": Uuid::now_v7(),
             "workspace_id": source_workspace_id,
             "library_id": source_library_id,
             "scope_kind": "library",
-            "created_by_principal_id": Uuid::now_v7(),
+            "updated_by_principal_id": Uuid::now_v7(),
         });
-        scope.normalize_postgres_row("ai_model_preset", &mut preset).unwrap();
+        scope.normalize_postgres_row("ai_binding", &mut binding).unwrap();
         assert_eq!(
-            required_uuid_field("ai_model_preset", &preset, "workspace_id").unwrap(),
+            required_uuid_field("ai_binding", &binding, "workspace_id").unwrap(),
             target_workspace_id
         );
         assert_eq!(
-            required_uuid_field("ai_model_preset", &preset, "library_id").unwrap(),
+            required_uuid_field("ai_binding", &binding, "library_id").unwrap(),
             target_library_id
         );
-        assert!(preset.get("created_by_principal_id").unwrap().is_null());
+        assert!(binding.get("updated_by_principal_id").unwrap().is_null());
 
-        // A library-scoped row referencing a different library is rejected.
+        // A canonical library-scoped binding referencing a different library is
+        // rejected.
         let mut foreign = serde_json::json!({
             "id": Uuid::now_v7(),
             "workspace_id": source_workspace_id,
             "library_id": Uuid::now_v7(),
             "scope_kind": "library",
         });
-        assert!(scope.normalize_postgres_row("ai_binding_assignment", &mut foreign).is_err());
-
-        // The canonical (post-0004) names go through the same normalizer.
-        let mut account = serde_json::json!({
-            "id": Uuid::now_v7(),
-            "workspace_id": source_workspace_id,
-            "library_id": serde_json::Value::Null,
-            "scope_kind": "workspace",
-        });
-        scope.normalize_postgres_row("ai_account", &mut account).unwrap();
-        assert_eq!(
-            required_uuid_field("ai_account", &account, "workspace_id").unwrap(),
-            target_workspace_id
-        );
-        let mut binding = serde_json::json!({
-            "id": Uuid::now_v7(),
-            "workspace_id": source_workspace_id,
-            "library_id": source_library_id,
-            "scope_kind": "library",
-        });
-        scope.normalize_postgres_row("ai_binding", &mut binding).unwrap();
-        assert_eq!(
-            required_uuid_field("ai_binding", &binding, "library_id").unwrap(),
-            target_library_id
-        );
-    }
-
-    /// Pre-0004 archives declare the old table names in `manifest.json`; a
-    /// restore must still recognize them as known snapshot tables (import
-    /// backward compatibility, migration 0004).
-    #[test]
-    fn legacy_ai_config_table_names_are_recognized_for_import() {
-        let manifest = manifest_with_sections(
-            vec![
-                "catalog_library",
-                "ai_provider_credential",
-                "ai_model_preset",
-                "ai_binding_assignment",
-            ],
-            false,
-        );
-        let sections = SnapshotManifestSections::from_manifest(&manifest).unwrap();
-        assert_eq!(
-            sections.require_postgres_table("ai_provider_credential").unwrap(),
-            "ai_provider_credential"
-        );
-        assert_eq!(sections.require_postgres_table("ai_model_preset").unwrap(), "ai_model_preset");
-        assert_eq!(
-            sections.require_postgres_table("ai_binding_assignment").unwrap(),
-            "ai_binding_assignment"
-        );
-    }
-
-    #[test]
-    fn canonical_ai_config_storage_table_renames_legacy_names_only() {
-        assert_eq!(canonical_ai_config_storage_table("ai_provider_credential"), "ai_account");
-        assert_eq!(canonical_ai_config_storage_table("ai_binding_assignment"), "ai_binding");
-        assert_eq!(canonical_ai_config_storage_table("ai_account"), "ai_account");
-        assert_eq!(canonical_ai_config_storage_table("ai_binding"), "ai_binding");
-        assert_eq!(canonical_ai_config_storage_table("ai_provider_catalog"), "ai_provider_catalog");
-    }
-
-    /// Core of the old-format import path: a pre-0004
-    /// `ai_binding_assignment` row plus its referenced `ai_model_preset`
-    /// row must merge into the exact shape a canonical `ai_binding` row
-    /// carries — `provider_credential_id` renamed to `account_id`,
-    /// `model_preset_id` replaced by the preset's inline fields.
-    #[test]
-    fn merge_legacy_binding_row_splices_preset_fields_and_renames_columns() {
-        let account_id = Uuid::now_v7();
-        let preset_id = Uuid::now_v7();
-        let model_catalog_id = Uuid::now_v7();
-
-        let mut presets = HashMap::new();
-        let preset_row = serde_json::json!({
-            "id": preset_id,
-            "model_catalog_id": model_catalog_id,
-            "system_prompt": "be terse",
-            "temperature": 0.2,
-            "top_p": 0.9,
-            "max_output_tokens_override": 4096,
-            "extra_parameters_json": {"seed": 7},
-        });
-        let (parsed_id, preset) = LegacyModelPreset::from_row(&preset_row).unwrap();
-        assert_eq!(parsed_id, preset_id);
-        presets.insert(parsed_id, preset);
-
-        let mut binding = serde_json::json!({
-            "id": Uuid::now_v7(),
-            "binding_purpose": "query_answer",
-            "provider_credential_id": account_id,
-            "model_preset_id": preset_id,
-            "binding_state": "active",
-            "scope_kind": "instance",
-        });
-        merge_legacy_binding_row(&mut binding, &presets).unwrap();
-
-        assert!(binding.get("provider_credential_id").is_none());
-        assert!(binding.get("model_preset_id").is_none());
-        assert_eq!(binding["account_id"], serde_json::json!(account_id));
-        assert_eq!(binding["model_catalog_id"], serde_json::json!(model_catalog_id));
-        assert_eq!(binding["system_prompt"], serde_json::json!("be terse"));
-        assert_eq!(binding["temperature"], serde_json::json!(0.2));
-        assert_eq!(binding["top_p"], serde_json::json!(0.9));
-        assert_eq!(binding["max_output_tokens_override"], serde_json::json!(4096));
-        assert_eq!(binding["extra_parameters_json"], serde_json::json!({"seed": 7}));
-    }
-
-    /// A binding whose `model_preset_id` was not seen in the archive's
-    /// `ai_model_preset` section (corrupt or truncated archive) must fail
-    /// loudly rather than silently drop the binding's parameters.
-    #[test]
-    fn merge_legacy_binding_row_rejects_dangling_preset_reference() {
-        let presets: HashMap<Uuid, LegacyModelPreset> = HashMap::new();
-        let mut binding = serde_json::json!({
-            "id": Uuid::now_v7(),
-            "provider_credential_id": Uuid::now_v7(),
-            "model_preset_id": Uuid::now_v7(),
-        });
-        assert!(merge_legacy_binding_row(&mut binding, &presets).is_err());
+        assert!(scope.normalize_postgres_row("ai_binding", &mut foreign).is_err());
     }
 
     #[test]
@@ -5314,7 +5618,7 @@ mod tests {
         let names: Vec<&str> = entries.iter().map(|(p, _)| p.as_str()).collect();
         assert!(names.contains(&"manifest.json"), "expected manifest.json, got {names:?}");
         assert!(
-            !names.iter().any(|p| *p == "EXPORT_FAILED.json"),
+            !names.contains(&"EXPORT_FAILED.json"),
             "happy path must not write EXPORT_FAILED.json, got {names:?}",
         );
     }
@@ -5407,7 +5711,7 @@ mod tests {
         for part in 1..=4u32 {
             let expected = format!("postgres/knowledge_chunk_vector_d3/part-{part:06}.ndjson");
             assert!(
-                names.iter().any(|p| *p == expected.as_str()),
+                names.contains(&expected.as_str()),
                 "expected {expected} to survive in the finalized archive, got {names:?}",
             );
         }
@@ -5416,7 +5720,7 @@ mod tests {
         // `Builder::into_inner`). The v2 contract is that the archive is
         // never a silent truncation — pick whichever finalize path the
         // runtime achieved and assert one of the two holds.
-        let has_sentinel = names.iter().any(|p| *p == "EXPORT_FAILED.json");
+        let has_sentinel = names.contains(&"EXPORT_FAILED.json");
         let well_terminated = !entries.is_empty();
         assert!(
             has_sentinel || well_terminated,

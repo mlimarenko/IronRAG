@@ -1,4 +1,5 @@
 use super::*;
+use crate::infra::repositories;
 
 #[test]
 fn build_lexical_queries_keeps_broader_unique_query_set() {
@@ -100,7 +101,7 @@ fn build_lexical_queries_uses_query_ir_focus_spans_before_broad_keywords() {
         act: QueryAct::ConfigureHow,
         scope: QueryScope::SingleDocument,
         language: QueryLanguage::Auto,
-        target_types: vec!["protocol".to_string()],
+        target_types: vec![crate::domains::query_ir::QueryTargetKind::Protocol],
         target_entities: vec![
             EntityMention {
                 label: "scan folder through RareProtocol".to_string(),
@@ -203,7 +204,7 @@ fn build_graph_evidence_text_queries_prioritize_focused_queries_before_raw_quest
         act: QueryAct::ConfigureHow,
         scope: QueryScope::SingleDocument,
         language: QueryLanguage::Auto,
-        target_types: vec!["config_key".to_string()],
+        target_types: vec![crate::domains::query_ir::QueryTargetKind::ConfigKey],
         target_entities: vec![EntityMention {
             label: "Alpha endpoint 9407".to_string(),
             role: EntityRole::Subject,
@@ -269,16 +270,70 @@ fn graph_evidence_db_text_queries_keep_bounded_focused_probe_set() {
         "Zeta broad fallback".to_string(),
     ];
 
-    let db_queries = graph_evidence_db_text_queries(&queries);
+    let db_queries = graph_evidence_db_text_queries(&queries, None);
 
     assert_eq!(
         db_queries,
         vec![
-            "Alpha endpoint 9407".to_string(),
-            "Beta source field".to_string(),
-            "Gamma retry marker".to_string(),
-            "Delta queue state".to_string(),
-            "Epsilon config path".to_string(),
+            repositories::RuntimeGraphEvidenceSearchQuery::Lexical(
+                "Alpha endpoint 9407".to_string(),
+            ),
+            repositories::RuntimeGraphEvidenceSearchQuery::Lexical("Beta source field".to_string(),),
+            repositories::RuntimeGraphEvidenceSearchQuery::Lexical(
+                "Gamma retry marker".to_string(),
+            ),
+            repositories::RuntimeGraphEvidenceSearchQuery::Lexical("Delta queue state".to_string(),),
+            repositories::RuntimeGraphEvidenceSearchQuery::Lexical(
+                "Epsilon config path".to_string(),
+            ),
+        ]
+    );
+}
+
+#[test]
+fn graph_evidence_db_text_queries_keep_raw_titlecase_question_lexical() {
+    let raw_question = "Alpha Module".to_string();
+    let typed_focus = "caseless target".to_string();
+    let typed_entity = "mIxEd entity".to_string();
+    let typed_document = "document focus".to_string();
+    let queries = vec![
+        raw_question.clone(),
+        typed_focus.clone(),
+        typed_entity.clone(),
+        typed_document.clone(),
+    ];
+    let query_ir = QueryIR {
+        act: QueryAct::RetrieveValue,
+        scope: QueryScope::SingleDocument,
+        language: QueryLanguage::Auto,
+        target_types: vec![crate::domains::query_ir::QueryTargetKind::Concept],
+        target_entities: vec![EntityMention {
+            label: typed_entity.clone(),
+            role: EntityRole::Subject,
+        }],
+        literal_constraints: vec![LiteralSpan {
+            text: typed_focus.clone(),
+            kind: LiteralKind::Other,
+        }],
+        temporal_constraints: Vec::new(),
+        comparison: None,
+        document_focus: Some(DocumentHint { hint: typed_document.clone() }),
+        conversation_refs: Vec::new(),
+        needs_clarification: None,
+        source_slice: None,
+        retrieval_query: None,
+        confidence: 1.0,
+    };
+
+    let db_queries = graph_evidence_db_text_queries(&queries, Some(&query_ir));
+
+    assert_eq!(
+        db_queries,
+        vec![
+            repositories::RuntimeGraphEvidenceSearchQuery::Lexical(raw_question),
+            repositories::RuntimeGraphEvidenceSearchQuery::LiteralOrFormal(typed_focus),
+            repositories::RuntimeGraphEvidenceSearchQuery::LiteralOrFormal(typed_entity),
+            repositories::RuntimeGraphEvidenceSearchQuery::LiteralOrFormal(typed_document),
         ]
     );
 }
@@ -289,7 +344,7 @@ fn query_ir_focus_queries_start_with_adjacent_typed_compounds() {
         act: QueryAct::RetrieveValue,
         scope: QueryScope::SingleDocument,
         language: QueryLanguage::Auto,
-        target_types: vec!["endpoint".to_string()],
+        target_types: vec![crate::domains::query_ir::QueryTargetKind::Endpoint],
         target_entities: vec![EntityMention {
             label: "Beta Display".to_string(),
             role: EntityRole::Object,
@@ -321,7 +376,7 @@ fn query_ir_focus_queries_do_not_compound_primary_entities_with_modifiers() {
         act: QueryAct::Enumerate,
         scope: QueryScope::SingleDocument,
         language: QueryLanguage::Auto,
-        target_types: vec!["concept".to_string()],
+        target_types: vec![crate::domains::query_ir::QueryTargetKind::Concept],
         target_entities: vec![
             EntityMention { label: "checkout connectors".to_string(), role: EntityRole::Object },
             EntityMention {
@@ -367,7 +422,10 @@ fn query_ir_focus_queries_anchor_focused_compare_facets_to_document_focus() {
         act: QueryAct::Compare,
         scope: QueryScope::SingleDocument,
         language: QueryLanguage::Auto,
-        target_types: vec!["document".to_string(), "concept".to_string()],
+        target_types: vec![
+            crate::domains::query_ir::QueryTargetKind::Document,
+            crate::domains::query_ir::QueryTargetKind::Concept,
+        ],
         target_entities: vec![
             EntityMention { label: "module options".to_string(), role: EntityRole::Subject },
             EntityMention { label: "operation rules".to_string(), role: EntityRole::Subject },
@@ -419,7 +477,7 @@ fn graph_evidence_db_probes_keep_primary_object_before_modifier_tail() {
         act: QueryAct::Enumerate,
         scope: QueryScope::SingleDocument,
         language: QueryLanguage::Auto,
-        target_types: vec!["concept".to_string()],
+        target_types: vec![crate::domains::query_ir::QueryTargetKind::Concept],
         target_entities: vec![
             EntityMention { label: "checkout connectors".to_string(), role: EntityRole::Object },
             EntityMention {
@@ -447,19 +505,19 @@ fn graph_evidence_db_probes_keep_primary_object_before_modifier_tail() {
         &focus_queries,
         Some(&query_ir),
     );
-    let db_queries = graph_evidence_db_text_queries(&text_queries);
+    let db_queries = graph_evidence_db_text_queries(&text_queries, Some(&query_ir));
 
     assert!(
-        db_queries.iter().any(|query| query == "custom gateway extension"),
+        db_queries.iter().any(|query| query.text() == "custom gateway extension"),
         "primary object must survive bounded graph-evidence DB probes: {db_queries:?}"
     );
     assert!(
-        db_queries.iter().any(|query| query == "checkout connectors"),
+        db_queries.iter().any(|query| query.text() == "checkout connectors"),
         "standalone primary object probe must survive modifier-heavy IR: {db_queries:?}"
     );
     assert!(
-        db_queries.iter().position(|query| query == "lead capture forms")
-            > db_queries.iter().position(|query| query == "checkout connectors"),
+        db_queries.iter().position(|query| query.text() == "lead capture forms")
+            > db_queries.iter().position(|query| query.text() == "checkout connectors"),
         "modifier probe must not outrank primary object probe: {db_queries:?}"
     );
 }
@@ -470,7 +528,7 @@ fn query_ir_focus_queries_order_compounds_by_structural_specificity() {
         act: QueryAct::RetrieveValue,
         scope: QueryScope::SingleDocument,
         language: QueryLanguage::Auto,
-        target_types: vec!["endpoint".to_string()],
+        target_types: vec![crate::domains::query_ir::QueryTargetKind::Endpoint],
         target_entities: Vec::new(),
         literal_constraints: vec![
             LiteralSpan { text: "Alpha".to_string(), kind: LiteralKind::Other },
@@ -505,7 +563,7 @@ fn query_ir_focus_queries_include_iso_temporal_prefixes() {
         act: QueryAct::Enumerate,
         scope: QueryScope::SingleDocument,
         language: QueryLanguage::Auto,
-        target_types: vec!["record".to_string()],
+        target_types: vec![crate::domains::query_ir::QueryTargetKind::Record],
         target_entities: vec![],
         literal_constraints: vec![],
         temporal_constraints: vec![TemporalConstraint {
@@ -533,7 +591,7 @@ fn query_ir_focus_queries_prefer_day_prefix_for_single_day_ranges() {
         act: QueryAct::Enumerate,
         scope: QueryScope::SingleDocument,
         language: QueryLanguage::Auto,
-        target_types: vec!["record".to_string()],
+        target_types: vec![crate::domains::query_ir::QueryTargetKind::Record],
         target_entities: vec![],
         literal_constraints: vec![],
         temporal_constraints: vec![TemporalConstraint {
@@ -617,6 +675,7 @@ fn apply_rerank_outcome_reorders_bundle_before_final_truncation() {
                 status: crate::domains::query::RerankStatus::Applied,
                 candidate_count: 4,
                 reordered_count: Some(4),
+                semantic_rerank: None,
             },
         },
     );

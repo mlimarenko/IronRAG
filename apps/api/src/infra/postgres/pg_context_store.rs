@@ -350,13 +350,18 @@ impl ContextStore for PgContextStore {
         query_execution_id: Uuid,
     ) -> anyhow::Result<Option<KnowledgeContextBundleRow>> {
         let row = sqlx::query_as::<_, PgBundleRow>(
-            "select bundle_id, workspace_id, library_id, query_execution_id,
-                bundle_state, bundle_strategy, requested_mode, resolved_mode, selected_fact_ids,
-                verification_state, verification_warnings, freshness_snapshot, candidate_summary,
-                assembly_diagnostics, created_at, updated_at
-             from knowledge_context_bundle
-             where query_execution_id = $1
-             limit 1",
+            "select b.bundle_id, b.workspace_id, b.library_id, b.query_execution_id,
+                b.bundle_state, b.bundle_strategy, b.requested_mode, b.resolved_mode,
+                b.selected_fact_ids, b.verification_state, b.verification_warnings,
+                b.freshness_snapshot, b.candidate_summary, b.assembly_diagnostics,
+                b.created_at, b.updated_at
+             from query_execution execution
+             join knowledge_context_bundle b
+               on b.bundle_id = execution.context_bundle_id
+              and b.query_execution_id = execution.id
+              and b.workspace_id = execution.workspace_id
+              and b.library_id = execution.library_id
+             where execution.id = $1",
         )
         .bind(query_execution_id)
         .fetch_optional(&self.pool)
@@ -588,6 +593,7 @@ impl ContextStore for PgContextStore {
                 join knowledge_chunk target
                   on target.chunk_id = d.chunk_id
                  and target.library_id = $2
+                 and target.raptor_level is null
                 on conflict (bundle_id, chunk_id) do update
                 set library_id = excluded.library_id,
                     rank = excluded.rank,
@@ -979,7 +985,12 @@ impl ContextStore for PgContextStore {
                 coalesce(entity_refs.items, '[]'::jsonb) as entity_references,
                 coalesce(relation_refs.items, '[]'::jsonb) as relation_references,
                 coalesce(evidence_refs.items, '[]'::jsonb) as evidence_references
-             from knowledge_context_bundle b
+             from query_execution execution
+             join knowledge_context_bundle b
+               on b.bundle_id = execution.context_bundle_id
+              and b.query_execution_id = execution.id
+              and b.workspace_id = execution.workspace_id
+              and b.library_id = execution.library_id
              left join lateral (
                 select jsonb_agg(
                     jsonb_build_object(
@@ -1040,8 +1051,7 @@ impl ContextStore for PgContextStore {
                 from knowledge_bundle_evidence edge
                 where edge.bundle_id = b.bundle_id
              ) evidence_refs on true
-             where b.query_execution_id = $1
-             limit 1",
+             where execution.id = $1",
         )
         .bind(query_execution_id)
         .fetch_optional(&self.pool)

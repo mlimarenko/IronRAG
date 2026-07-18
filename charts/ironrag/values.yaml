@@ -19,17 +19,21 @@ resourcePresets:
     requests:
       cpu: 200m
       memory: 64Mi
+      ephemeral-storage: 128Mi
     limits:
       cpu: "1"
       memory: 256Mi
+      ephemeral-storage: 512Mi
   # Redis cache. Mirrors x-ironrag-resources-cache.
   cache: &ironrag-resources-cache
     requests:
       cpu: 200m
       memory: 128Mi
+      ephemeral-storage: 128Mi
     limits:
       cpu: "1"
       memory: 768Mi
+      ephemeral-storage: 512Mi
   # Postgres relational + pgvector knowledge plane and the one-shot startup
   # migrator share this tier. Mirrors x-ironrag-resources-db.
   # ephemeral-storage covers migration scratch and the migrator's /tmp.
@@ -76,19 +80,67 @@ serviceAccount:
   name: ""
 
 runtimeSecret:
+  # When set, this Secret replaces every inline value rendered by
+  # templates/runtime-secret.yaml, including IRONRAG_CREDENTIAL_MASTER_KEY and
+  # all provider credentials. Keep the corresponding app.* values empty.
   existingSecret: ""
+  # Required when existingSecret is set because Helm cannot checksum a Secret
+  # it does not render. Change this nonce on every external Secret update to
+  # roll API, worker, and startup pods.
+  restartNonce: ""
 
 app:
   environment: production
+  # Canonical browser origin admitted by UI CORS and MCP Streamable HTTP.
   frontendOrigin: https://ironrag.example.com
+  # Optional canonical public API origin advertised by OpenAPI and admitted by MCP.
+  openapiPublicOrigin: ""
   logFilter: info
-  # Deployment-wide app connection budget. Runtime divides it across
-  # worker.replicaCount plus api.replicaCount and one API rollout surge slot
-  # before opening SQLx pools.
+  # Deployment-wide app connection budget. Runtime divides it across the HPA
+  # maxima when autoscaling is enabled, otherwise across worker.replicaCount
+  # plus api.replicaCount and one API rollout surge slot, before opening SQLx
+  # pools.
   databaseMaxConnections: 20
   knowledgePlaneBackend: postgres
   queryAnswerSourceLinksEnabled: false
+  providerConcurrency:
+    maxOutbound: 16
+    queryReserved: 4
+    acquireTimeoutMs: 30000
+    registryMaxEntries: 64
+    registryIdleTtlSeconds: 900
+  pgHnsw:
+    efSearch: 400
+    maxScanTuples: 50000
+    scanMemMultiplier: 2
+    exactFallbackMaxRows: 10000
+  queryRerank:
+    enabled: true
+    candidateLimit: 24
+    semantic:
+      # Provider-backed reranking is off by default. Roll out through shadow
+      # before active; active remains bounded and falls back locally.
+      mode: "off"
+      timeoutMs: 1500
+      candidateLimit: 16
+      candidateTextChars: 1200
+      totalTextChars: 18000
   uiDefaultLocale: ru
+  # Dedicated at-rest credential key. Prefer supplying this key through
+  # runtimeSecret.existingSecret in production. When set here it must be
+  # canonical standard-base64 for exactly 32 random bytes and is required when
+  # any app.providerSecrets value below is set inline.
+  credentialMasterKey: ""
+  # Authenticated ID written into new v3 envelopes. Keep empty to use the
+  # backwards-compatible `default` ID for the inline master key.
+  credentialMasterKeyId: ""
+  # Temporary read/rewrap keyring during rotation. Prefer existingSecret;
+  # entries are sorted `id=base64,id=base64` and removed after migration.
+  credentialPreviousMasterKeys: ""
+  # Defaults closed so the first mixed-version upgrade can deploy the
+  # dual-reader everywhere before any v3 envelopes are written. Enable only in
+  # a subsequent, verified rollout. Fresh install.sh deployments set it true.
+  credentialEncryptionWriteEnabled: false
   bootstrapToken: bootstrap-local
   bootstrapAdmin:
     login: ""
@@ -99,39 +151,110 @@ app:
     extractGraphModelName: gpt-5.4-nano
     embedChunkProviderKind: openai
     embedChunkModelName: text-embedding-3-large
+    queryCompileProviderKind: openai
+    queryCompileModelName: gpt-5.4-nano
     queryAnswerProviderKind: openai
     queryAnswerModelName: gpt-5.4-mini
-    visionProviderKind: openai
-    visionModelName: gpt-5.4-mini
-  providerSecrets:
-    openaiApiKey: ""
-    deepseekApiKey: ""
-    qwenApiKey: ""
-    gptunnelApiKey: ""
-    openrouterApiKey: ""
-    routeraiApiKey: ""
-    minimaxApiKey: ""
+    agentProviderKind: openai
+    agentModelName: gpt-5.4-mini
+    extractTextProviderKind: openai
+    extractTextModelName: gpt-5.4-mini
+  # Optional inline provider credentials keyed by the exact catalog provider
+  # kind. Prefer existingSecret in production; this map is primarily for
+  # small, self-contained installs. Values are preserved exactly; the generic
+  # map is bounded by the chart schema and backend startup validation.
+  # providerSecrets:
+  #   provider-alpha: "secret-value"
+  providerSecrets: {}
   runtimePolicy:
     rejectTaskKinds: ""
     rejectTargetKinds: ""
 observability:
-  enabled: true
-  # Empty endpoint/protocol defer to the compiled-in diagnostics defaults
-  # (apps/api/observability.toml). Set them to override the shipped sink, or
-  # set enabled=false to disable diagnostics export entirely.
+  # OTLP export is opt-in and requires both enabled=true and an explicit
+  # operator-controlled endpoint. The default installation keeps local logs.
+  enabled: false
   otlpEndpoint: ""
+  # Empty uses the backend's gRPC default. Set http/protobuf or http/json when
+  # the endpoint is an OTLP/HTTP collector.
   otlpProtocol: ""
   resourceAttributes: service.namespace=ironrag
   tracesExporter: otlp
   metricsExporter: otlp
-  # Logs are the only content-bearing signal (query text, document chunk
-  # previews); off by default so the shipped telemetry is performance-only.
-  # Set to otlp to ship logs to your own collector.
+  # Logs may contain query text or document chunk previews and therefore
+  # require an additional signal-specific opt-in.
   logsExporter: none
   metricsTemporality: cumulative
-  # Stable per-deployment telemetry id. Empty -> auto-derived from the Postgres
-  # cluster identity. Set only to override or when releases share one database.
+  # When OTLP export is enabled, an empty value derives an id from the Postgres
+  # cluster identity. It is not resolved while export remains disabled.
   deploymentId: ""
+
+# Optional ingress isolation. When enabled, release pods accept traffic from
+# this release only; a separate policy keeps the web container port reachable
+# by ingress controllers and external service traffic. Egress is deliberately
+# not restricted because API/worker pods may call operator-selected model,
+# storage, database and Kubernetes endpoints outside the release. Requires a
+# CNI implementation that enforces networking.k8s.io/v1 NetworkPolicy.
+networkPolicy:
+  enabled: false
+  allowExternalWeb: true
+  # Component-scoped ingress rules. Always include ports when opening a role to
+  # another namespace so the resulting policy grants only the intended socket.
+  extraIngress:
+    api: []
+    worker: []
+    web: []
+    postgres: []
+    redis: []
+    s4core: []
+
+# Voluntary-disruption protection for stateless application roles. Disabled by
+# default so single-node development clusters remain drainable. Set exactly one
+# of minAvailable/maxUnavailable on every enabled component.
+podDisruptionBudget:
+  enabled: false
+  api:
+    enabled: true
+    minAvailable: ""
+    maxUnavailable: 1
+  worker:
+    enabled: true
+    minAvailable: ""
+    maxUnavailable: 1
+  web:
+    enabled: true
+    minAvailable: ""
+    maxUnavailable: 1
+
+# CPU-based autoscaling for stateless roles. Resource requests are present on
+# all three deployments, so utilization targets have a stable denominator.
+# Disabled by default to preserve current replica counts in dev/single-node
+# installations. Raise app.databaseMaxConnections for the selected API/worker
+# maxima (the defaults below require 84). `behavior` accepts the native
+# autoscaling/v2 policy object. CPU scaling requires a metrics.k8s.io provider
+# such as metrics-server.
+autoscaling:
+  enabled: false
+  api:
+    enabled: true
+    minReplicas: 2
+    maxReplicas: 10
+    targetCPUUtilizationPercentage: 70
+    targetMemoryUtilizationPercentage: ""
+    behavior: {}
+  worker:
+    enabled: true
+    minReplicas: 2
+    maxReplicas: 10
+    targetCPUUtilizationPercentage: 70
+    targetMemoryUtilizationPercentage: ""
+    behavior: {}
+  web:
+    enabled: true
+    minReplicas: 2
+    maxReplicas: 10
+    targetCPUUtilizationPercentage: 70
+    targetMemoryUtilizationPercentage: ""
+    behavior: {}
 
 startup:
   mode: startup_job
@@ -146,6 +269,7 @@ startup:
     timeoutSeconds: 900
 
 security:
+  # Runtime images define fixed non-root users; keep this value in lockstep.
   runAsUser: 1000
 
 api:
@@ -226,12 +350,9 @@ storage:
     forcePathStyle: true
     image:
       repository: s4core/s4core
-      # For production deployments, prefer pinning via digest below.
-      # `tag` is used only when `digest` is empty.
+      # Default deployment is pinned to the current amd64 image digest.
       tag: latest
-      # Set to a sha256 digest like "sha256:abc..." for reproducible deploys.
-      # Example: digest: "sha256:e68547d747f34e4d23a2c28da35ffdc70e747b7f5b256cd6c44807dffe619e6e"
-      digest: ""
+      digest: "sha256:517a4d51c64f3c2a50d4d6f522093f9948a1bf7f196ce36d0d17e3b65b7c2395"
       pullPolicy: IfNotPresent
     persistence:
       size: 20Gi

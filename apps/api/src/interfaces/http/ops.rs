@@ -6,7 +6,6 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::services::ingest::service::QUEUE_STALE_LEASE_SECONDS;
 use crate::{
     app::state::AppState,
     domains::{
@@ -24,14 +23,21 @@ use crate::{
             POLICY_LIBRARY_WRITE, POLICY_USAGE_READ, authorize_library_permission,
             load_async_operation_and_authorize, load_library_and_authorize,
         },
+        // `list_ingest_queue` + its query/response types moved to the
+        // ingest domain (GET /v1/ingest/queue, was GET /v1/ops/ingest-queue)
+        // — see the module-level comment in ingestion.rs. Imported back here
+        // because the queue *mutation* handlers below (still `ops`-scoped
+        // pending a future domain pass) return the refreshed queue by
+        // calling straight back into it.
+        ingestion::{IngestQueueQuery, IngestQueueResponse, list_ingest_queue},
         router_support::ApiError,
     },
 };
 use ironrag_contracts::{
     diagnostics::{MessageLevel, OperatorWarning},
     documents::{
-        DashboardAttentionItem, DashboardMetric, DashboardSurface, DocumentSummary,
-        DocumentsOverview, WebIngestRunState, WebIngestRunSummary, WebRunCounts,
+        DashboardAttentionItem, DashboardSurface, DocumentSummary, WebIngestRunState,
+        WebIngestRunSummary, WebRunCounts,
     },
     graph::{
         GraphConvergenceStatus, GraphGenerationSummary, GraphReadinessSummary, GraphStatus,
@@ -82,61 +88,6 @@ pub struct OpsLibraryStateResponse {
     pub state: OpsLibraryStateSummaryResponse,
     pub knowledge_generations: Vec<KnowledgeGenerationResponse>,
     pub warnings: Vec<OpsLibraryWarningResponse>,
-}
-
-#[derive(Debug, Deserialize, utoipa::IntoParams)]
-#[serde(rename_all = "camelCase")]
-#[into_params(parameter_in = Query)]
-pub struct IngestQueueQuery {
-    pub workspace_id: Option<Uuid>,
-    pub library_id: Option<Uuid>,
-}
-
-#[derive(Debug, Serialize, utoipa::ToSchema)]
-#[serde(rename_all = "camelCase")]
-pub struct IngestQueueSummaryResponse {
-    pub running: i64,
-    pub queued: i64,
-    pub paused: i64,
-    pub total: i64,
-}
-
-#[derive(Debug, Serialize, utoipa::ToSchema)]
-#[serde(rename_all = "camelCase")]
-pub struct IngestQueueItemResponse {
-    pub job_id: Uuid,
-    pub workspace_id: Uuid,
-    pub workspace_name: String,
-    pub library_id: Uuid,
-    pub library_name: String,
-    pub document_id: Option<Uuid>,
-    pub document_name: String,
-    pub job_kind: String,
-    pub queue_state: String,
-    pub queue_position: Option<i64>,
-    pub queued_at: chrono::DateTime<chrono::Utc>,
-    pub available_at: chrono::DateTime<chrono::Utc>,
-    pub attempt_id: Option<Uuid>,
-    pub attempt_state: Option<String>,
-    pub started_at: Option<chrono::DateTime<chrono::Utc>>,
-    pub heartbeat_at: Option<chrono::DateTime<chrono::Utc>>,
-    pub current_stage: Option<String>,
-    pub progress_percent: Option<i32>,
-    pub attempt_number: Option<i32>,
-    pub failure_code: Option<String>,
-    pub failure_message: Option<String>,
-    pub can_retry_requeue: bool,
-    pub can_pause: bool,
-    pub can_resume: bool,
-    pub can_cancel: bool,
-    pub has_stale_queue_lease: bool,
-}
-
-#[derive(Debug, Serialize, utoipa::ToSchema)]
-#[serde(rename_all = "camelCase")]
-pub struct IngestQueueResponse {
-    pub summary: IngestQueueSummaryResponse,
-    pub items: Vec<IngestQueueItemResponse>,
 }
 
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
@@ -199,7 +150,6 @@ pub fn router() -> Router<AppState> {
         .route("/ops/operations/{operation_id}", get(get_async_operation))
         .route("/ops/libraries/{library_id}", get(get_library_state))
         .route("/ops/libraries/{library_id}/dashboard", get(get_library_dashboard))
-        .route("/ops/ingest-queue", get(list_ingest_queue))
         .route("/ops/ingest-queue/bulk", post(bulk_ingest_queue_action))
         .route("/ops/ingest-queue/jobs/{job_id}/move", post(move_ingest_queue_job))
         .route("/ops/ingest-queue/jobs/{job_id}/retry", post(retry_ingest_queue_job))
@@ -321,70 +271,6 @@ pub async fn get_library_state(
             .map(map_knowledge_generation)
             .collect(),
         warnings: snapshot_with_warnings.warnings.iter().map(map_ops_warning).collect(),
-    }))
-}
-
-#[utoipa::path(
-    get,
-    path = "/v1/ops/ingest-queue",
-    tag = "ops",
-    operation_id = "listIngestQueue",
-    params(IngestQueueQuery),
-    responses(
-        (status = 200, description = "Active ingest queue visible to the caller", body = IngestQueueResponse),
-        (status = 401, description = "Caller is not authenticated"),
-        (status = 403, description = "Caller is not authorized to read operations"),
-    ),
-)]
-#[tracing::instrument(
-    level = "info",
-    name = "http.list_ingest_queue",
-    skip_all,
-    fields(workspace_id = ?query.workspace_id, library_id = ?query.library_id, item_count)
-)]
-pub async fn list_ingest_queue(
-    auth: AuthContext,
-    State(state): State<AppState>,
-    Query(query): Query<IngestQueueQuery>,
-) -> Result<Json<IngestQueueResponse>, ApiError> {
-    auth.require_any_scope(POLICY_USAGE_READ)?;
-    if let Some(library_id) = query.library_id {
-        let _ = load_library_and_authorize(&auth, &state, library_id, POLICY_USAGE_READ).await?;
-    }
-
-    let rows = ingest_repository::list_active_ingest_queue(
-        &state.persistence.postgres,
-        query.workspace_id,
-        query.library_id,
-    )
-    .await
-    .map_err(|error| ApiError::internal_with_log(error, "internal"))?;
-
-    let mut running = 0_i64;
-    let mut queued = 0_i64;
-    let mut paused = 0_i64;
-    let mut items = Vec::with_capacity(rows.len());
-    for row in rows {
-        if !auth.has_library_permission(row.workspace_id, row.library_id, POLICY_USAGE_READ) {
-            continue;
-        }
-        match row.queue_state.as_str() {
-            "leased" => running += 1,
-            "queued" => queued += 1,
-            "paused" => paused += 1,
-            _ => {}
-        }
-        items.push(map_ingest_queue_item(row));
-    }
-    tracing::Span::current().record("item_count", items.len());
-    Ok(Json(IngestQueueResponse {
-        summary: IngestQueueSummaryResponse {
-            running,
-            queued,
-            paused,
-            total: running + queued + paused,
-        },
-        items,
     }))
 }
 
@@ -560,8 +446,8 @@ async fn apply_bulk_queue_action(
     };
 
     match action_result {
-        Ok(_) => bulk_result(job_id, IngestQueueBulkResultStatus::Applied, None, None),
-        Err(ApiError::BadRequest(message)) | Err(ApiError::Conflict(message)) => bulk_result(
+        Ok(()) => bulk_result(job_id, IngestQueueBulkResultStatus::Applied, None, None),
+        Err(ApiError::BadRequest(message) | ApiError::Conflict(message)) => bulk_result(
             job_id,
             IngestQueueBulkResultStatus::Skipped,
             Some(ineligible_reason_code(action, job.queue_state.as_str())),
@@ -710,7 +596,7 @@ pub async fn cancel_ingest_queue_job(
     operation_id = "getLibraryDashboard",
     params(("libraryId" = uuid::Uuid, Path, description = "Library identifier")),
     responses(
-        (status = 200, description = "Library dashboard surface (overview, attention items, recent documents, graph, web run summaries)", body = DashboardSurface),
+        (status = 200, description = "Library dashboard surface (canonical document metrics, attention items, recent documents, graph, web run summaries)", body = DashboardSurface),
         (status = 401, description = "Caller is not authenticated"),
         (status = 403, description = "Caller is not authorized for the library"),
         (status = 404, description = "Library not found"),
@@ -733,7 +619,7 @@ pub async fn get_library_dashboard(
 
     // Canonical bounded fetch — no more `list_documents` enumeration.
     // Top 6 recent entries for the "Recent documents" strip + the
-    // aggregate status counts for the overview tiles. The old path
+    // aggregate status counts for the dashboard tiles. The old path
     // spent ~7.5 s on a 5k-doc library because it enumerated every
     // document through the 6-call prefetch pipeline for stats that
     // are a single `COUNT(*) FILTER (...)` away.
@@ -773,11 +659,6 @@ pub async fn get_library_dashboard(
 
     let recent_documents: Vec<DocumentSummary> =
         recent_page.items.into_iter().map(map_list_entry_to_dashboard_summary).collect();
-    // `overview` is derived from the canonical `document_metrics` row
-    // to keep the two fields on `DashboardSurface` consistent by
-    // construction. Existing UI consumers that read `overview.*` see
-    // the same numbers as new consumers that read `documentMetrics`.
-    let overview = build_documents_overview_from_metrics(&document_metrics);
     let warnings = map_operator_warnings(&ops_warnings, &ops_snapshot.state);
     let graph = map_graph_surface(&knowledge_summary, &ops_snapshot.state, warnings.first());
     let attention = build_attention_items_bounded(
@@ -786,13 +667,10 @@ pub async fn get_library_dashboard(
         &graph,
         &recent_documents,
     );
-    let metrics = build_dashboard_metrics(&overview, &ops_snapshot.state, &graph, attention.len());
     span.record("elapsed_ms", started_at.elapsed().as_millis() as u64);
 
     Ok(Json(DashboardSurface {
-        overview,
         document_metrics,
-        metrics,
         recent_documents,
         recent_web_runs: recent_web_runs.into_iter().map(map_web_run_summary).collect(),
         graph,
@@ -826,23 +704,6 @@ fn map_list_entry_to_dashboard_summary(
         prepared_segment_count: None,
         technical_fact_count: None,
         source_format: None,
-    }
-}
-
-/// Canonical path: derive the retained `DocumentsOverview` shape from
-/// a freshly-computed `LibraryDocumentMetrics`. Used by the dashboard
-/// handler so both fields on `DashboardSurface` are built from the
-/// same numbers. The previous `_from_counts` sibling was removed —
-/// everything now consolidates on `LibraryDocumentMetrics`.
-fn build_documents_overview_from_metrics(
-    metrics: &ironrag_contracts::documents::LibraryDocumentMetrics,
-) -> DocumentsOverview {
-    DocumentsOverview {
-        total_documents: saturating_i32(metrics.total.max(0) as usize),
-        ready_documents: saturating_i32(metrics.ready.max(0) as usize),
-        processing_documents: saturating_i32((metrics.processing + metrics.queued).max(0) as usize),
-        failed_documents: saturating_i32(metrics.failed.max(0) as usize),
-        graph_sparse_documents: saturating_i32(metrics.graph_sparse.max(0) as usize),
     }
 }
 
@@ -941,57 +802,6 @@ fn map_ops_warning(warning: &OpsLibraryWarning) -> OpsLibraryWarningResponse {
         created_at: warning.created_at,
         resolved_at: warning.resolved_at,
     }
-}
-
-fn build_dashboard_metrics(
-    overview: &DocumentsOverview,
-    _ops_state: &OpsLibraryState,
-    graph: &GraphSurface,
-    attention_count: usize,
-) -> Vec<DashboardMetric> {
-    // Canonical `in_flight`: `processing + queued` at the document
-    // level — exactly what `overview.processingDocuments` is, because
-    // that field is built from `LibraryDocumentMetrics` via
-    // `build_documents_overview_from_metrics`. Do NOT re-derive from
-    // `ops_state.queue_depth + running_attempts` here: those come
-    // from `ingest_job` / `ingest_attempt` rows and can legitimately
-    // disagree with the document-level bucketing: one document can have
-    // multiple jobs/attempts during retries, and a queued job can
-    // represent a document still counted as `processing` because a
-    // mutation is `running`.
-    let in_flight = i64::from(overview.processing_documents);
-    let attention = i64::try_from(attention_count).unwrap_or(i64::MAX);
-
-    vec![
-        DashboardMetric {
-            key: "documents".to_string(),
-            label: "Documents".to_string(),
-            value: overview.total_documents.to_string(),
-            level: MessageLevel::Info,
-        },
-        DashboardMetric {
-            key: "graph_ready".to_string(),
-            label: "Graph-ready".to_string(),
-            value: graph.graph_ready_document_count.to_string(),
-            level: if graph.graph_sparse_document_count > 0 {
-                MessageLevel::Warning
-            } else {
-                MessageLevel::Info
-            },
-        },
-        DashboardMetric {
-            key: "in_flight".to_string(),
-            label: "In flight".to_string(),
-            value: in_flight.to_string(),
-            level: if in_flight > 0 { MessageLevel::Warning } else { MessageLevel::Info },
-        },
-        DashboardMetric {
-            key: "attention".to_string(),
-            label: "Attention".to_string(),
-            value: attention.to_string(),
-            level: if attention > 0 { MessageLevel::Error } else { MessageLevel::Info },
-        },
-    ]
 }
 
 fn map_attention_item(warning: &OpsLibraryWarning) -> DashboardAttentionItem {
@@ -1203,51 +1013,6 @@ fn map_contract_web_pattern(
     }
 }
 
-fn map_ingest_queue_item(row: ingest_repository::IngestQueueItemRow) -> IngestQueueItemResponse {
-    let has_active_attempt =
-        row.attempt_state.as_deref().is_some_and(|state| state == "leased" || state == "running");
-    let cutoff = chrono::Utc::now() - chrono::Duration::seconds(QUEUE_STALE_LEASE_SECONDS);
-    let lease_started_at = row.queue_leased_at.unwrap_or(row.queued_at);
-    let has_stale_queue_lease =
-        row.queue_state == "leased" && lease_started_at < cutoff && !has_active_attempt;
-    let can_retry_requeue = match row.queue_state.as_str() {
-        "queued" | "paused" => true,
-        "leased" => has_stale_queue_lease,
-        _ => false,
-    };
-    let can_pause = row.queue_state == "queued" || row.queue_state == "leased";
-    let can_resume = row.queue_state == "paused" && !has_active_attempt;
-    let can_cancel = matches!(row.queue_state.as_str(), "queued" | "leased" | "paused");
-    IngestQueueItemResponse {
-        job_id: row.job_id,
-        workspace_id: row.workspace_id,
-        workspace_name: row.workspace_name,
-        library_id: row.library_id,
-        library_name: row.library_name,
-        document_id: row.knowledge_document_id,
-        document_name: row.document_name.unwrap_or_else(|| row.job_kind.clone()),
-        job_kind: row.job_kind,
-        queue_state: row.queue_state,
-        queue_position: row.queue_position,
-        queued_at: row.queued_at,
-        available_at: row.available_at,
-        attempt_id: row.attempt_id,
-        attempt_state: row.attempt_state,
-        started_at: row.started_at,
-        heartbeat_at: row.heartbeat_at,
-        current_stage: row.current_stage,
-        progress_percent: row.progress_percent,
-        attempt_number: row.attempt_number,
-        failure_code: row.failure_code,
-        failure_message: row.failure_message,
-        can_retry_requeue,
-        can_pause,
-        can_resume,
-        can_cancel,
-        has_stale_queue_lease,
-    }
-}
-
 const fn map_move_direction(
     direction: IngestQueueMoveDirection,
 ) -> ingest_repository::QueueMoveDirection {
@@ -1299,10 +1064,6 @@ const fn attention_priority(level: MessageLevel) -> u8 {
         MessageLevel::Warning => 2,
         MessageLevel::Info => 1,
     }
-}
-
-fn saturating_i32(value: usize) -> i32 {
-    i32::try_from(value).unwrap_or(i32::MAX)
 }
 
 fn saturating_i32_from_i64(value: i64) -> i32 {

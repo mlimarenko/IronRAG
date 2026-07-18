@@ -1,16 +1,19 @@
+use std::collections::BTreeSet;
+
 use uuid::Uuid;
 
 use crate::{
     app::state::AppState,
     domains::{
-        ai::AiBindingPurpose, catalog::CatalogLibraryIngestionReadiness,
+        ai::AiBindingPurpose,
+        catalog::{CatalogLibraryIngestionReadiness, CatalogLifecycleState},
         recognition::LibraryRecognitionPolicy,
     },
     infra::repositories::catalog_repository::{self, CatalogLibraryRow, CatalogWorkspaceRow},
     interfaces::http::{
         auth::AuthContext,
         authorization::{
-            POLICY_LIBRARY_WRITE, POLICY_MCP_MEMORY_READ, POLICY_WORKSPACE_ADMIN,
+            POLICY_LIBRARY_WRITE, POLICY_MCP_MEMORY_READ, POLICY_QUERY_RUN, POLICY_WORKSPACE_ADMIN,
             authorize_library_discovery, authorize_library_permission,
             authorize_workspace_discovery, authorize_workspace_permission,
         },
@@ -18,13 +21,23 @@ use crate::{
     },
     mcp_types::{
         McpCreateLibraryRequest, McpCreateWorkspaceRequest, McpLibraryDescriptor,
-        McpLibraryIngestionReadiness, McpWorkspaceDescriptor,
+        McpLibraryIngestionReadiness, McpUpdateLibraryRequest, McpUpdateWorkspaceRequest,
+        McpWorkspaceDescriptor,
     },
 };
 
 use super::types::VisibleLibraryContext;
 
 const LIBRARY_REF_SEPARATOR: char = '/';
+const AMBIGUOUS_QUERY_LIBRARY_MESSAGE: &str =
+    "library could not be inferred; provide an authorized library ref";
+
+#[derive(Debug, Default, PartialEq, Eq)]
+struct QueryAuthorizedLibraryScope {
+    all_libraries: bool,
+    workspace_ids: Vec<Uuid>,
+    library_ids: Vec<Uuid>,
+}
 
 #[must_use]
 pub(crate) fn workspace_catalog_ref(workspace_slug: &str) -> String {
@@ -121,7 +134,85 @@ pub(crate) async fn load_library_by_catalog_ref(
     Ok(library)
 }
 
-pub async fn visible_workspaces(
+pub(crate) async fn load_sole_query_authorized_library(
+    auth: &AuthContext,
+    state: &AppState,
+) -> Result<CatalogLibraryRow, ApiError> {
+    let scope = query_authorized_library_scope(auth);
+    let candidate_ids = catalog_repository::list_query_authorized_library_candidates(
+        &state.persistence.postgres,
+        scope.all_libraries,
+        &scope.workspace_ids,
+        &scope.library_ids,
+    )
+    .await
+    .map_err(|error| ApiError::internal_with_log(error, "internal"))?;
+    let library_id = select_sole_query_authorized_library_id(candidate_ids)?;
+    let library = catalog_repository::get_library_by_id(&state.persistence.postgres, library_id)
+        .await
+        .map_err(|error| ApiError::internal_with_log(error, "internal"))?
+        .ok_or_else(ambiguous_query_library_error)?;
+
+    // Defend against a lifecycle or authorization change between the bounded
+    // candidate lookup and the targeted row load. Both cases intentionally
+    // collapse to the same non-enumerating inference error.
+    if library.lifecycle_state != "active"
+        || !auth.has_library_permission(library.workspace_id, library.id, POLICY_QUERY_RUN)
+    {
+        return Err(ambiguous_query_library_error());
+    }
+    Ok(library)
+}
+
+fn query_authorized_library_scope(auth: &AuthContext) -> QueryAuthorizedLibraryScope {
+    if auth.is_system_admin {
+        return QueryAuthorizedLibraryScope { all_libraries: true, ..Default::default() };
+    }
+
+    let mut all_libraries = false;
+    let mut workspace_ids = BTreeSet::new();
+    let mut library_ids = BTreeSet::new();
+    for grant in &auth.grants {
+        if !POLICY_QUERY_RUN.contains(&grant.permission_kind.as_str()) {
+            continue;
+        }
+        match grant.resource_kind.as_str() {
+            "system" => all_libraries = true,
+            "workspace" => {
+                if let Some(workspace_id) = grant.workspace_id {
+                    workspace_ids.insert(workspace_id);
+                }
+            }
+            "library" => {
+                if let Some(library_id) = grant.library_id {
+                    library_ids.insert(library_id);
+                }
+            }
+            _ => {}
+        }
+    }
+    if all_libraries {
+        return QueryAuthorizedLibraryScope { all_libraries: true, ..Default::default() };
+    }
+    QueryAuthorizedLibraryScope {
+        all_libraries: false,
+        workspace_ids: workspace_ids.into_iter().collect(),
+        library_ids: library_ids.into_iter().collect(),
+    }
+}
+
+fn select_sole_query_authorized_library_id(candidate_ids: Vec<Uuid>) -> Result<Uuid, ApiError> {
+    let [library_id] = candidate_ids.as_slice() else {
+        return Err(ambiguous_query_library_error());
+    };
+    Ok(*library_id)
+}
+
+fn ambiguous_query_library_error() -> ApiError {
+    ApiError::invalid_mcp_tool_call(AMBIGUOUS_QUERY_LIBRARY_MESSAGE)
+}
+
+pub(crate) async fn visible_workspaces(
     auth: &AuthContext,
     state: &AppState,
 ) -> Result<Vec<McpWorkspaceDescriptor>, ApiError> {
@@ -164,7 +255,7 @@ pub async fn visible_workspaces(
     Ok(items)
 }
 
-pub async fn visible_libraries(
+pub(crate) async fn visible_libraries(
     auth: &AuthContext,
     state: &AppState,
     workspace_filter: Option<&str>,
@@ -180,7 +271,7 @@ pub async fn visible_libraries(
 /// fetch. Both lists are derived from the same underlying queries
 /// `load_visible_workspace_rows` and `load_visible_library_contexts`,
 /// which are run in parallel via `tokio::try_join!`.
-pub async fn visible_catalog(
+pub(crate) async fn visible_catalog(
     auth: &AuthContext,
     state: &AppState,
 ) -> Result<(Vec<McpWorkspaceDescriptor>, Vec<McpLibraryDescriptor>), ApiError> {
@@ -219,7 +310,7 @@ pub async fn visible_catalog(
     Ok((workspaces, library_descriptors))
 }
 
-pub async fn create_workspace(
+pub(crate) async fn create_workspace(
     auth: &AuthContext,
     state: &AppState,
     request: McpCreateWorkspaceRequest,
@@ -265,7 +356,7 @@ pub async fn create_workspace(
     })
 }
 
-pub async fn create_library(
+pub(crate) async fn create_library(
     auth: &AuthContext,
     state: &AppState,
     request: McpCreateLibraryRequest,
@@ -308,6 +399,146 @@ pub async fn create_library(
         .await
         .map_err(|error| ApiError::internal_with_log(error, "internal"))?
         .ok_or_else(|| ApiError::resource_not_found("library", library.id))?;
+    let recognition_policy = parse_library_recognition_policy(&row)?;
+    let readiness = state
+        .canonical_services
+        .catalog
+        .get_library_ingestion_readiness(state, row.id, &recognition_policy)
+        .await?;
+    let context = describe_library(auth, state, row, &workspace.slug, readiness).await?;
+    Ok(context.descriptor)
+}
+
+/// Parses a lifecycle-state value the tool caller is *requesting to set*.
+/// `"disabled"` is intentionally rejected here even though it is a valid
+/// stored value (see [`parse_current_lifecycle_state`]) — the write path
+/// (`catalog_service::update_workspace`/`update_library`) rejects it the
+/// same way the REST PATCH does, so failing fast here gives a clearer
+/// tool-call error than surfacing the service-layer rejection.
+fn parse_requested_lifecycle_state(value: &str) -> Result<CatalogLifecycleState, ApiError> {
+    match value {
+        "active" => Ok(CatalogLifecycleState::Active),
+        "archived" => Ok(CatalogLifecycleState::Archived),
+        other => Err(ApiError::invalid_mcp_tool_call(format!(
+            "lifecycleState must be \"active\" or \"archived\", got \"{other}\""
+        ))),
+    }
+}
+
+/// Parses the *currently stored* lifecycle-state string so an update that
+/// omits `lifecycleState` can round-trip it unchanged (load-current ->
+/// merge -> write). Unlike [`parse_requested_lifecycle_state`], accepts
+/// `"disabled"` — that is the one state a fresh write can never set
+/// (`CatalogLifecycleError::DisabledVocabulary`), but a workspace/library
+/// already carrying it must still be loadable and re-saveable without an
+/// unrelated field change forcing an unintended lifecycle transition.
+fn parse_current_lifecycle_state(value: &str) -> Result<CatalogLifecycleState, ApiError> {
+    match value {
+        "active" => Ok(CatalogLifecycleState::Active),
+        "disabled" => Ok(CatalogLifecycleState::Disabled),
+        "archived" => Ok(CatalogLifecycleState::Archived),
+        other => Err(ApiError::internal_with_log(
+            format!("unknown catalog lifecycle state: {other}"),
+            "internal",
+        )),
+    }
+}
+
+/// Updates a workspace's display name and/or lifecycle state.
+/// Load-current -> merge -> write: any field the caller omits keeps its
+/// current value, so renaming a workspace never silently resets its
+/// lifecycle (see [`McpUpdateWorkspaceRequest`]).
+pub(crate) async fn update_workspace(
+    auth: &AuthContext,
+    state: &AppState,
+    request: McpUpdateWorkspaceRequest,
+) -> Result<McpWorkspaceDescriptor, ApiError> {
+    if !auth.is_system_admin {
+        return Err(ApiError::Unauthorized);
+    }
+    let current = load_workspace_row_by_catalog_ref(state, &request.workspace).await?;
+    let display_name = request
+        .title
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map_or_else(|| current.display_name.clone(), ToString::to_string);
+    let lifecycle_state = match request.lifecycle_state.as_deref() {
+        Some(value) => parse_requested_lifecycle_state(value)?,
+        None => parse_current_lifecycle_state(&current.lifecycle_state)?,
+    };
+
+    state
+        .canonical_services
+        .catalog
+        .update_workspace(
+            state,
+            crate::services::catalog_service::UpdateWorkspaceCommand {
+                workspace_id: current.id,
+                slug: Some(current.slug.clone()),
+                display_name,
+                lifecycle_state,
+            },
+        )
+        .await?;
+
+    let workspaces = visible_workspaces(auth, state).await?;
+    workspaces
+        .into_iter()
+        .find(|workspace| workspace.workspace_id == current.id)
+        .ok_or_else(|| ApiError::resource_not_found("workspace", current.id))
+}
+
+/// Updates a library's display name, description, and/or lifecycle state.
+/// Load-current -> merge -> write, same as [`update_workspace`]. Knobs not
+/// exposed on [`McpUpdateLibraryRequest`] (extraction prompt,
+/// `includeDocumentHintInMcpAnswers`) are always carried forward unchanged.
+pub(crate) async fn update_library(
+    auth: &AuthContext,
+    state: &AppState,
+    request: McpUpdateLibraryRequest,
+) -> Result<McpLibraryDescriptor, ApiError> {
+    let current =
+        load_library_by_catalog_ref(auth, state, &request.library, POLICY_WORKSPACE_ADMIN).await?;
+    let workspace =
+        catalog_repository::get_workspace_by_id(&state.persistence.postgres, current.workspace_id)
+            .await
+            .map_err(|error| ApiError::internal_with_log(error, "internal"))?
+            .ok_or_else(|| ApiError::resource_not_found("workspace", current.workspace_id))?;
+
+    let display_name = request
+        .title
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map_or_else(|| current.display_name.clone(), ToString::to_string);
+    let description = request.description.clone().or_else(|| current.description.clone());
+    let lifecycle_state = match request.lifecycle_state.as_deref() {
+        Some(value) => parse_requested_lifecycle_state(value)?,
+        None => parse_current_lifecycle_state(&current.lifecycle_state)?,
+    };
+
+    state
+        .canonical_services
+        .catalog
+        .update_library(
+            state,
+            crate::services::catalog_service::UpdateLibraryCommand {
+                library_id: current.id,
+                slug: Some(current.slug.clone()),
+                display_name,
+                description,
+                extraction_prompt: current.extraction_prompt.clone(),
+                lifecycle_state,
+                include_document_hint_in_mcp_answers: current.include_document_hint_in_mcp_answers,
+            },
+        )
+        .await?;
+
+    let row = catalog_repository::get_library_by_id(&state.persistence.postgres, current.id)
+        .await
+        .map_err(|error| ApiError::internal_with_log(error, "internal"))?
+        .ok_or_else(|| ApiError::resource_not_found("library", current.id))?;
     let recognition_policy = parse_library_recognition_policy(&row)?;
     let readiness = state
         .canonical_services
@@ -378,15 +609,15 @@ pub(crate) async fn describe_libraries(
 
     let mut items = Vec::with_capacity(libraries.len());
     for library in libraries {
-        let readiness = readiness_by_library.get(&library.id).cloned().unwrap_or(
+        let readiness = readiness_by_library.get(&library.id).cloned().unwrap_or_else(|| {
             CatalogLibraryIngestionReadiness {
                 ready: false,
                 missing_binding_purposes: vec![
                     AiBindingPurpose::ExtractGraph,
                     AiBindingPurpose::EmbedChunk,
                 ],
-            },
-        );
+            }
+        });
         let workspace_slug = workspace_slug_by_id
             .get(&library.workspace_id)
             .cloned()
@@ -490,4 +721,152 @@ fn readiness_count(
         .copied()
         .and_then(|count| usize::try_from(count).ok())
         .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeSet;
+
+    use super::*;
+    use crate::{
+        domains::iam::PrincipalKind,
+        interfaces::http::{
+            auth::{AuthGrant, AuthTokenKind},
+            authorization::{
+                PERMISSION_IAM_ADMIN, PERMISSION_LIBRARY_READ, PERMISSION_LIBRARY_WRITE,
+                PERMISSION_QUERY_RUN,
+            },
+        },
+    };
+
+    fn grant(
+        id: u128,
+        resource_kind: &str,
+        workspace_id: Option<Uuid>,
+        library_id: Option<Uuid>,
+        permission: &str,
+    ) -> AuthGrant {
+        AuthGrant {
+            id: Uuid::from_u128(id),
+            resource_kind: resource_kind.to_string(),
+            resource_id: library_id.or(workspace_id).unwrap_or_else(Uuid::nil),
+            permission_kind: permission.to_string(),
+            workspace_id,
+            library_id,
+            document_id: None,
+        }
+    }
+
+    fn auth_with_grants(grants: Vec<AuthGrant>) -> AuthContext {
+        AuthContext {
+            token_id: Uuid::from_u128(1),
+            principal_id: Uuid::from_u128(2),
+            parent_principal_id: None,
+            workspace_id: None,
+            token_kind: AuthTokenKind::Principal(PrincipalKind::ApiToken),
+            scopes: Vec::new(),
+            grants,
+            workspace_memberships: Vec::new(),
+            visible_workspace_ids: BTreeSet::new(),
+            is_system_admin: false,
+            system_role: None,
+        }
+    }
+
+    #[test]
+    fn query_authorized_scope_matches_has_library_permission_resource_semantics() {
+        let first_workspace = Uuid::from_u128(10);
+        let second_workspace = Uuid::from_u128(20);
+        let library_id = Uuid::from_u128(11);
+        let ignored_library_id = Uuid::from_u128(12);
+        let auth = auth_with_grants(vec![
+            grant(100, "library", Some(first_workspace), Some(library_id), PERMISSION_QUERY_RUN),
+            grant(101, "workspace", Some(second_workspace), None, PERMISSION_LIBRARY_WRITE),
+            grant(
+                102,
+                "library",
+                Some(first_workspace),
+                Some(ignored_library_id),
+                PERMISSION_LIBRARY_READ,
+            ),
+        ]);
+
+        let scope = query_authorized_library_scope(&auth);
+
+        assert!(!scope.all_libraries);
+        assert_eq!(scope.workspace_ids, vec![second_workspace]);
+        assert_eq!(scope.library_ids, vec![library_id]);
+    }
+
+    #[test]
+    fn system_authority_collapses_candidate_scope_to_all_active_libraries() {
+        let workspace_id = Uuid::from_u128(20);
+        let library_id = Uuid::from_u128(21);
+        let mut system_admin = auth_with_grants(vec![grant(
+            110,
+            "library",
+            Some(workspace_id),
+            Some(library_id),
+            PERMISSION_QUERY_RUN,
+        )]);
+        system_admin.is_system_admin = true;
+        assert_eq!(
+            query_authorized_library_scope(&system_admin),
+            QueryAuthorizedLibraryScope {
+                all_libraries: true,
+                workspace_ids: Vec::new(),
+                library_ids: Vec::new(),
+            }
+        );
+
+        let system_grant =
+            auth_with_grants(vec![grant(111, "system", None, None, PERMISSION_IAM_ADMIN)]);
+        assert!(query_authorized_library_scope(&system_grant).all_libraries);
+    }
+
+    #[test]
+    fn query_authorized_scope_deduplicates_ids_and_ignores_malformed_grants() {
+        let workspace_id = Uuid::from_u128(30);
+        let library_id = Uuid::from_u128(31);
+        let auth = auth_with_grants(vec![
+            grant(120, "workspace", Some(workspace_id), None, PERMISSION_QUERY_RUN),
+            grant(121, "workspace", Some(workspace_id), None, PERMISSION_QUERY_RUN),
+            grant(122, "library", None, Some(library_id), PERMISSION_QUERY_RUN),
+            grant(123, "library", None, None, PERMISSION_QUERY_RUN),
+            grant(124, "workspace", None, None, PERMISSION_QUERY_RUN),
+        ]);
+
+        let scope = query_authorized_library_scope(&auth);
+
+        assert_eq!(scope.workspace_ids, vec![workspace_id]);
+        assert_eq!(scope.library_ids, vec![library_id]);
+    }
+
+    #[test]
+    fn zero_and_multiple_query_authorized_candidates_fail_with_same_non_leaking_error() {
+        let first_id = Uuid::from_u128(41);
+        let second_id = Uuid::from_u128(42);
+
+        let zero_error = select_sole_query_authorized_library_id(Vec::new())
+            .expect_err("zero query-authorized libraries must fail")
+            .to_string();
+        let multiple_error = select_sole_query_authorized_library_id(vec![first_id, second_id])
+            .expect_err("multiple query-authorized libraries must fail")
+            .to_string();
+
+        assert_eq!(zero_error, multiple_error);
+        assert!(!zero_error.contains(&first_id.to_string()));
+        assert!(!zero_error.contains(&second_id.to_string()));
+    }
+
+    #[test]
+    fn one_query_authorized_candidate_is_selected() {
+        let library_id = Uuid::from_u128(51);
+
+        assert_eq!(
+            select_sole_query_authorized_library_id(vec![library_id])
+                .expect("select sole query-authorized library"),
+            library_id
+        );
+    }
 }

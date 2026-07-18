@@ -1,19 +1,19 @@
-#![allow(clippy::unwrap_used, clippy::expect_used)]
-
 use anyhow::Context;
 use chrono::Utc;
+use sha2::{Digest, Sha256};
 use sqlx::{PgPool, postgres::PgPoolOptions};
 use uuid::Uuid;
 
 use ironrag_backend::{
     app::config::Settings,
     infra::repositories::{
-        content_repository,
+        catalog_repository, content_repository,
         content_repository::{
             NewContentChunk, NewContentDocument, NewContentDocumentHead, NewContentMutation,
             NewContentMutationItem, NewContentRevision,
         },
-        iam_repository,
+        iam_repository, ingest_repository,
+        ingest_repository::{NewIngestAttempt, NewIngestJob},
     },
 };
 
@@ -292,6 +292,8 @@ async fn content_repository_persists_logical_document_revision_head_and_chunks()
         assert_eq!(deleted, 2);
         assert!(remaining_chunks.is_empty());
 
+        let source_truth_before_delete =
+            catalog_repository::get_library_source_truth_version(&pool, fixture.library_id).await?;
         let deleted_document = content_repository::update_document_state(
             &pool,
             document.id,
@@ -303,11 +305,846 @@ async fn content_repository_persists_logical_document_revision_head_and_chunks()
         .context("missing updated document state")?;
         assert_eq!(deleted_document.document_state, "deleted");
         assert!(deleted_document.deleted_at.is_some());
+        let source_truth_after_delete =
+            catalog_repository::get_library_source_truth_version(&pool, fixture.library_id).await?;
+        assert!(
+            source_truth_after_delete > source_truth_before_delete,
+            "a direct readable-document state change must invalidate answer cache identities",
+        );
 
         Ok(())
     }
     .await;
 
+    fixture.cleanup(&pool).await?;
+    result
+}
+
+#[tokio::test]
+#[ignore = "requires local postgres service"]
+async fn readable_fingerprint_fails_closed_when_revision_or_chunk_projection_diverges()
+-> anyhow::Result<()> {
+    let settings =
+        Settings::from_env().context("failed to load settings for content repository test")?;
+    let pool = connect_postgres(&settings).await?;
+    let fixture = ContentRepositoryFixture::create(&pool).await?;
+
+    let result = async {
+        let document = content_repository::create_document(
+            &pool,
+            &NewContentDocument {
+                workspace_id: fixture.workspace_id,
+                library_id: fixture.library_id,
+                external_key: "projection-parity-document",
+                document_state: "active",
+                created_by_principal_id: Some(fixture.principal_id),
+                parent_external_key: None,
+                parent_document_id: None,
+                document_role: "primary",
+            },
+        )
+        .await?;
+        let revision = content_repository::create_revision(
+            &pool,
+            &NewContentRevision {
+                document_id: document.id,
+                workspace_id: fixture.workspace_id,
+                library_id: fixture.library_id,
+                revision_number: 1,
+                parent_revision_id: None,
+                content_source_kind: "upload",
+                checksum: "sha256:projection-parity-revision",
+                mime_type: "text/plain",
+                byte_size: 31,
+                title: Some("Projection parity"),
+                language_code: Some("en"),
+                source_uri: Some("file:///projection-parity.txt"),
+                document_hint: Some("Neutral projection hint"),
+                storage_key: Some("projection/parity/source"),
+                created_by_principal_id: Some(fixture.principal_id),
+            },
+        )
+        .await?;
+        let normalized_text = "A durable projection remains coherent.";
+        let chunk_checksum = hex::encode(Sha256::digest(normalized_text.as_bytes()));
+        let chunk = content_repository::create_chunk(
+            &pool,
+            &NewContentChunk {
+                revision_id: revision.id,
+                chunk_index: 0,
+                start_offset: 0,
+                end_offset: i32::try_from(normalized_text.len())?,
+                token_count: Some(5),
+                normalized_text,
+                text_checksum: &chunk_checksum,
+                occurred_at: None,
+                occurred_until: None,
+            },
+        )
+        .await?;
+
+        sqlx::query(
+            "insert into knowledge_document (
+                document_id, workspace_id, library_id, external_key, file_name, title,
+                document_state, active_revision_id, readable_revision_id, latest_revision_no,
+                parent_document_id, document_role,
+                created_at, updated_at, deleted_at
+             ) values (
+                $1, $2, $3, $4, $5, $6, 'active', $7, $7, 1, null, 'primary',
+                now(), now(), null
+             )",
+        )
+        .bind(document.id)
+        .bind(fixture.workspace_id)
+        .bind(fixture.library_id)
+        .bind(&document.external_key)
+        .bind("projection-parity.txt")
+        .bind(&revision.title)
+        .bind(revision.id)
+        .execute(&pool)
+        .await?;
+        sqlx::query(
+            "insert into knowledge_revision (
+                revision_id, workspace_id, library_id, document_id, revision_number,
+                revision_state, revision_kind, storage_ref, source_uri, document_hint,
+                mime_type, checksum, title, byte_size, normalized_text, text_checksum,
+                image_checksum, text_state, vector_state, graph_state, text_readable_at,
+                vector_ready_at, graph_ready_at, superseded_by_revision_id, created_at
+             ) values (
+                $1, $2, $3, $4, 1, 'ready', 'upload', $5, $6, $7, $8, $9, $10, $11,
+                $12, $13, null, 'ready', 'ready', 'ready', now(), now(), now(), null, now()
+             )",
+        )
+        .bind(revision.id)
+        .bind(fixture.workspace_id)
+        .bind(fixture.library_id)
+        .bind(document.id)
+        .bind(&revision.storage_key)
+        .bind(&revision.source_uri)
+        .bind(&revision.document_hint)
+        .bind(&revision.mime_type)
+        .bind(&revision.checksum)
+        .bind(&revision.title)
+        .bind(revision.byte_size)
+        .bind(normalized_text)
+        .bind(&chunk_checksum)
+        .execute(&pool)
+        .await?;
+        sqlx::query(
+            "insert into knowledge_chunk (
+                chunk_id, workspace_id, library_id, document_id, revision_id, chunk_index,
+                chunk_kind, content_text, normalized_text, span_start, span_end, token_count,
+                support_block_ids, section_path, heading_trail, literal_digest, chunk_state,
+                text_generation, vector_generation, quality_score, window_text, raptor_level,
+                occurred_at, occurred_until
+             ) values (
+                $1, $2, $3, $4, $5, 0, 'paragraph', $6, $6, 0, $7, 5,
+                '{}', '{}', '{}', $8, 'ready', 1, 1, 1.0, null, null, null, null
+             )",
+        )
+        .bind(chunk.id)
+        .bind(fixture.workspace_id)
+        .bind(fixture.library_id)
+        .bind(document.id)
+        .bind(revision.id)
+        .bind(normalized_text)
+        .bind(i32::try_from(normalized_text.len())?)
+        .bind(format!("sha256:{chunk_checksum}"))
+        .execute(&pool)
+        .await?;
+        content_repository::upsert_document_head(
+            &pool,
+            &NewContentDocumentHead {
+                document_id: document.id,
+                active_revision_id: Some(revision.id),
+                readable_revision_id: Some(revision.id),
+                latest_mutation_id: None,
+                latest_successful_attempt_id: None,
+            },
+        )
+        .await?;
+
+        let baseline =
+            content_repository::get_library_readable_content_fingerprint(&pool, fixture.library_id)
+                .await?;
+        assert!(baseline.projection_is_current);
+
+        // The durable generation is the invalidation contract. Without a
+        // generation transition, a process hit must not repeat the O(chunks)
+        // parity scan on every query.
+        sqlx::query(
+            "update knowledge_revision set title = 'Diverged title' where revision_id = $1",
+        )
+        .bind(revision.id)
+        .execute(&pool)
+        .await?;
+        let generation_hit =
+            content_repository::get_library_readable_content_fingerprint(&pool, fixture.library_id)
+                .await?;
+        assert_eq!(generation_hit, baseline);
+
+        catalog_repository::touch_library_source_truth_version(&pool, fixture.library_id).await?;
+        let revision_divergence =
+            content_repository::get_library_readable_content_fingerprint(&pool, fixture.library_id)
+                .await?;
+        assert!(!revision_divergence.projection_is_current);
+
+        sqlx::query("update knowledge_revision set title = $2 where revision_id = $1")
+            .bind(revision.id)
+            .bind(&revision.title)
+            .execute(&pool)
+            .await?;
+        catalog_repository::touch_library_source_truth_version(&pool, fixture.library_id).await?;
+        assert!(
+            content_repository::get_library_readable_content_fingerprint(
+                &pool,
+                fixture.library_id,
+            )
+            .await?
+            .projection_is_current
+        );
+
+        sqlx::query(
+            "update knowledge_chunk
+             set normalized_text = 'Projection text diverged.'
+             where chunk_id = $1",
+        )
+        .bind(chunk.id)
+        .execute(&pool)
+        .await?;
+        catalog_repository::touch_library_source_truth_version(&pool, fixture.library_id).await?;
+        let chunk_divergence =
+            content_repository::get_library_readable_content_fingerprint(&pool, fixture.library_id)
+                .await?;
+        assert!(!chunk_divergence.projection_is_current);
+
+        sqlx::query("update knowledge_chunk set normalized_text = $2 where chunk_id = $1")
+            .bind(chunk.id)
+            .bind(normalized_text)
+            .execute(&pool)
+            .await?;
+        catalog_repository::touch_library_source_truth_version(&pool, fixture.library_id).await?;
+        let converged =
+            content_repository::get_library_readable_content_fingerprint(&pool, fixture.library_id)
+                .await?;
+        assert!(converged.projection_is_current);
+
+        let displaced_chunk_id = Uuid::now_v7();
+        sqlx::query("update knowledge_chunk set chunk_id = $2 where chunk_id = $1")
+            .bind(chunk.id)
+            .bind(displaced_chunk_id)
+            .execute(&pool)
+            .await?;
+        catalog_repository::touch_library_source_truth_version(&pool, fixture.library_id).await?;
+        assert!(
+            !content_repository::get_library_readable_content_fingerprint(
+                &pool,
+                fixture.library_id,
+            )
+            .await?
+            .projection_is_current,
+            "canonical and projected chunk identities must match exactly",
+        );
+        sqlx::query("update knowledge_chunk set chunk_id = $2 where chunk_id = $1")
+            .bind(displaced_chunk_id)
+            .bind(chunk.id)
+            .execute(&pool)
+            .await?;
+        catalog_repository::touch_library_source_truth_version(&pool, fixture.library_id).await?;
+
+        sqlx::query("update content_chunk set text_checksum = 'invalid' where id = $1")
+            .bind(chunk.id)
+            .execute(&pool)
+            .await?;
+        catalog_repository::touch_library_source_truth_version(&pool, fixture.library_id).await?;
+        assert!(
+            !content_repository::get_library_readable_content_fingerprint(
+                &pool,
+                fixture.library_id,
+            )
+            .await?
+            .projection_is_current,
+            "canonical chunk checksums must authenticate projected normalized text",
+        );
+        sqlx::query("update content_chunk set text_checksum = $2 where id = $1")
+            .bind(chunk.id)
+            .bind(&chunk_checksum)
+            .execute(&pool)
+            .await?;
+        catalog_repository::touch_library_source_truth_version(&pool, fixture.library_id).await?;
+        let checksum_repaired =
+            content_repository::get_library_readable_content_fingerprint(&pool, fixture.library_id)
+                .await?;
+        assert!(checksum_repaired.projection_is_current);
+
+        sqlx::query("update knowledge_chunk set content_text = $2 where chunk_id = $1")
+            .bind(chunk.id)
+            .bind("Answer-visible formatting changed.")
+            .execute(&pool)
+            .await?;
+        catalog_repository::touch_library_source_truth_version(&pool, fixture.library_id).await?;
+        let answer_visible_projection_change =
+            content_repository::get_library_readable_content_fingerprint(&pool, fixture.library_id)
+                .await?;
+        assert!(answer_visible_projection_change.projection_is_current);
+        assert_ne!(
+            answer_visible_projection_change.value, checksum_repaired.value,
+            "projection-only answer fields must participate in the cache identity",
+        );
+
+        Ok(())
+    }
+    .await;
+
+    fixture.cleanup(&pool).await?;
+    result
+}
+
+#[tokio::test]
+#[ignore = "requires local postgres service"]
+async fn document_head_rejects_foreign_parentage_and_only_bumps_for_readable_transitions()
+-> anyhow::Result<()> {
+    let settings =
+        Settings::from_env().context("failed to load settings for content repository test")?;
+    let pool = connect_postgres(&settings).await?;
+    let fixture = ContentRepositoryFixture::create(&pool).await?;
+    let foreign_fixture = ContentRepositoryFixture::create(&pool).await?;
+
+    let result = async {
+        let document = content_repository::create_document(
+            &pool,
+            &NewContentDocument {
+                workspace_id: fixture.workspace_id,
+                library_id: fixture.library_id,
+                external_key: "head-parentage-target",
+                document_state: "active",
+                created_by_principal_id: Some(fixture.principal_id),
+                parent_external_key: None,
+                parent_document_id: None,
+                document_role: "primary",
+            },
+        )
+        .await?;
+        let sibling = content_repository::create_document(
+            &pool,
+            &NewContentDocument {
+                workspace_id: fixture.workspace_id,
+                library_id: fixture.library_id,
+                external_key: "head-parentage-sibling",
+                document_state: "active",
+                created_by_principal_id: Some(fixture.principal_id),
+                parent_external_key: None,
+                parent_document_id: None,
+                document_role: "primary",
+            },
+        )
+        .await?;
+        let foreign_document = content_repository::create_document(
+            &pool,
+            &NewContentDocument {
+                workspace_id: foreign_fixture.workspace_id,
+                library_id: foreign_fixture.library_id,
+                external_key: "head-parentage-foreign",
+                document_state: "active",
+                created_by_principal_id: Some(foreign_fixture.principal_id),
+                parent_external_key: None,
+                parent_document_id: None,
+                document_role: "primary",
+            },
+        )
+        .await?;
+
+        let revision_for =
+            |document_id, workspace_id, library_id, checksum: &'static str| NewContentRevision {
+                document_id,
+                workspace_id,
+                library_id,
+                revision_number: 1,
+                parent_revision_id: None,
+                content_source_kind: "upload",
+                checksum,
+                mime_type: "text/plain",
+                byte_size: 1,
+                title: None,
+                language_code: None,
+                source_uri: None,
+                document_hint: None,
+                storage_key: None,
+                created_by_principal_id: None,
+            };
+        let readable_revision = content_repository::create_revision(
+            &pool,
+            &revision_for(
+                document.id,
+                fixture.workspace_id,
+                fixture.library_id,
+                "sha256:head-target",
+            ),
+        )
+        .await?;
+        let sibling_revision = content_repository::create_revision(
+            &pool,
+            &revision_for(
+                sibling.id,
+                fixture.workspace_id,
+                fixture.library_id,
+                "sha256:head-sibling",
+            ),
+        )
+        .await?;
+        let foreign_revision = content_repository::create_revision(
+            &pool,
+            &revision_for(
+                foreign_document.id,
+                foreign_fixture.workspace_id,
+                foreign_fixture.library_id,
+                "sha256:head-foreign",
+            ),
+        )
+        .await?;
+
+        let initial_generation =
+            catalog_repository::get_library_source_truth_version(&pool, fixture.library_id).await?;
+        content_repository::upsert_document_head(
+            &pool,
+            &NewContentDocumentHead {
+                document_id: document.id,
+                active_revision_id: None,
+                readable_revision_id: None,
+                latest_mutation_id: None,
+                latest_successful_attempt_id: None,
+            },
+        )
+        .await?;
+        assert_eq!(
+            catalog_repository::get_library_source_truth_version(&pool, fixture.library_id).await?,
+            initial_generation,
+            "creating an empty shell head is not answer-visible",
+        );
+
+        content_repository::upsert_document_head(
+            &pool,
+            &NewContentDocumentHead {
+                document_id: document.id,
+                active_revision_id: Some(readable_revision.id),
+                readable_revision_id: None,
+                latest_mutation_id: None,
+                latest_successful_attempt_id: None,
+            },
+        )
+        .await?;
+        assert_eq!(
+            catalog_repository::get_library_source_truth_version(&pool, fixture.library_id).await?,
+            initial_generation,
+            "an unreadable active work-in-progress revision is not answer-visible",
+        );
+
+        content_repository::upsert_document_head(
+            &pool,
+            &NewContentDocumentHead {
+                document_id: document.id,
+                active_revision_id: Some(readable_revision.id),
+                readable_revision_id: Some(readable_revision.id),
+                latest_mutation_id: None,
+                latest_successful_attempt_id: None,
+            },
+        )
+        .await?;
+        let readable_generation =
+            catalog_repository::get_library_source_truth_version(&pool, fixture.library_id).await?;
+        assert!(readable_generation > initial_generation);
+
+        let mutation = content_repository::create_mutation(
+            &pool,
+            &NewContentMutation {
+                workspace_id: fixture.workspace_id,
+                library_id: fixture.library_id,
+                operation_kind: "replace",
+                requested_by_principal_id: Some(fixture.principal_id),
+                request_surface: "rest",
+                idempotency_key: None,
+                source_identity: None,
+                mutation_state: "accepted",
+                failure_code: None,
+                conflict_code: None,
+            },
+        )
+        .await?;
+        let primary_mutation_item = content_repository::create_mutation_item(
+            &pool,
+            &NewContentMutationItem {
+                mutation_id: mutation.id,
+                document_id: Some(document.id),
+                base_revision_id: Some(readable_revision.id),
+                result_revision_id: Some(readable_revision.id),
+                item_state: "pending",
+                message: None,
+            },
+        )
+        .await?;
+        let sibling_mutation_item = content_repository::create_mutation_item(
+            &pool,
+            &NewContentMutationItem {
+                mutation_id: mutation.id,
+                document_id: Some(sibling.id),
+                base_revision_id: Some(sibling_revision.id),
+                result_revision_id: Some(sibling_revision.id),
+                item_state: "pending",
+                message: None,
+            },
+        )
+        .await?;
+        let job = ingest_repository::create_ingest_job(
+            &pool,
+            &NewIngestJob {
+                workspace_id: fixture.workspace_id,
+                library_id: fixture.library_id,
+                mutation_id: Some(mutation.id),
+                mutation_item_id: Some(primary_mutation_item.id),
+                connector_id: None,
+                async_operation_id: None,
+                knowledge_document_id: Some(document.id),
+                knowledge_revision_id: Some(readable_revision.id),
+                job_kind: "content_mutation".to_string(),
+                queue_state: "leased".to_string(),
+                priority: 100,
+                dedupe_key: None,
+                queued_at: None,
+                available_at: None,
+                completed_at: None,
+            },
+        )
+        .await?;
+        let attempt = ingest_repository::create_ingest_attempt(
+            &pool,
+            &NewIngestAttempt {
+                job_id: job.id,
+                attempt_number: 1,
+                worker_principal_id: None,
+                lease_token: None,
+                knowledge_generation_id: None,
+                attempt_state: "running".to_string(),
+                current_stage: Some("finalizing".to_string()),
+                started_at: None,
+                heartbeat_at: None,
+                finished_at: None,
+                failure_class: None,
+                failure_code: None,
+                failure_message: None,
+                progress_percent: 90,
+                retryable: false,
+            },
+        )
+        .await?;
+        content_repository::upsert_document_head(
+            &pool,
+            &NewContentDocumentHead {
+                document_id: document.id,
+                active_revision_id: Some(readable_revision.id),
+                readable_revision_id: Some(readable_revision.id),
+                latest_mutation_id: Some(mutation.id),
+                latest_successful_attempt_id: Some(attempt.id),
+            },
+        )
+        .await?;
+        assert_eq!(
+            catalog_repository::get_library_source_truth_version(&pool, fixture.library_id).await?,
+            readable_generation,
+            "operational head ids and no-op pointers must not churn answer generations",
+        );
+
+        let aggregate_sibling_job = ingest_repository::create_ingest_job(
+            &pool,
+            &NewIngestJob {
+                workspace_id: fixture.workspace_id,
+                library_id: fixture.library_id,
+                mutation_id: Some(mutation.id),
+                mutation_item_id: Some(sibling_mutation_item.id),
+                connector_id: None,
+                async_operation_id: None,
+                knowledge_document_id: Some(sibling.id),
+                knowledge_revision_id: Some(sibling_revision.id),
+                job_kind: "content_mutation".to_string(),
+                queue_state: "leased".to_string(),
+                priority: 100,
+                dedupe_key: None,
+                queued_at: None,
+                available_at: None,
+                completed_at: None,
+            },
+        )
+        .await?;
+        let aggregate_sibling_attempt = ingest_repository::create_ingest_attempt(
+            &pool,
+            &NewIngestAttempt {
+                job_id: aggregate_sibling_job.id,
+                attempt_number: 1,
+                worker_principal_id: None,
+                lease_token: None,
+                knowledge_generation_id: None,
+                attempt_state: "running".to_string(),
+                current_stage: Some("finalizing".to_string()),
+                started_at: None,
+                heartbeat_at: None,
+                finished_at: None,
+                failure_class: None,
+                failure_code: None,
+                failure_message: None,
+                progress_percent: 90,
+                retryable: false,
+            },
+        )
+        .await?;
+        assert!(
+            content_repository::upsert_document_head(
+                &pool,
+                &NewContentDocumentHead {
+                    document_id: document.id,
+                    active_revision_id: Some(readable_revision.id),
+                    readable_revision_id: Some(readable_revision.id),
+                    latest_mutation_id: Some(mutation.id),
+                    latest_successful_attempt_id: Some(aggregate_sibling_attempt.id),
+                },
+            )
+            .await
+            .is_err(),
+            "an aggregate mutation must not make another document's attempt transferable",
+        );
+
+        for invalid_revision in [sibling_revision.id, foreign_revision.id] {
+            let invalid = content_repository::upsert_document_head(
+                &pool,
+                &NewContentDocumentHead {
+                    document_id: document.id,
+                    active_revision_id: Some(invalid_revision),
+                    readable_revision_id: Some(invalid_revision),
+                    latest_mutation_id: Some(mutation.id),
+                    latest_successful_attempt_id: Some(attempt.id),
+                },
+            )
+            .await;
+            assert!(invalid.is_err(), "foreign revision parentage must be rejected");
+        }
+
+        let sibling_mutation = content_repository::create_mutation(
+            &pool,
+            &NewContentMutation {
+                workspace_id: fixture.workspace_id,
+                library_id: fixture.library_id,
+                operation_kind: "replace",
+                requested_by_principal_id: Some(fixture.principal_id),
+                request_surface: "rest",
+                idempotency_key: None,
+                source_identity: None,
+                mutation_state: "accepted",
+                failure_code: None,
+                conflict_code: None,
+            },
+        )
+        .await?;
+        let standalone_sibling_item = content_repository::create_mutation_item(
+            &pool,
+            &NewContentMutationItem {
+                mutation_id: sibling_mutation.id,
+                document_id: Some(sibling.id),
+                base_revision_id: Some(sibling_revision.id),
+                result_revision_id: Some(sibling_revision.id),
+                item_state: "pending",
+                message: None,
+            },
+        )
+        .await?;
+        assert!(
+            content_repository::upsert_document_head(
+                &pool,
+                &NewContentDocumentHead {
+                    document_id: document.id,
+                    active_revision_id: Some(readable_revision.id),
+                    readable_revision_id: Some(readable_revision.id),
+                    latest_mutation_id: Some(sibling_mutation.id),
+                    latest_successful_attempt_id: Some(attempt.id),
+                },
+            )
+            .await
+            .is_err(),
+            "a same-library mutation anchored to another document must be rejected",
+        );
+
+        let foreign_mutation = content_repository::create_mutation(
+            &pool,
+            &NewContentMutation {
+                workspace_id: foreign_fixture.workspace_id,
+                library_id: foreign_fixture.library_id,
+                operation_kind: "replace",
+                requested_by_principal_id: Some(foreign_fixture.principal_id),
+                request_surface: "rest",
+                idempotency_key: None,
+                source_identity: None,
+                mutation_state: "accepted",
+                failure_code: None,
+                conflict_code: None,
+            },
+        )
+        .await?;
+        let foreign_mutation_item = content_repository::create_mutation_item(
+            &pool,
+            &NewContentMutationItem {
+                mutation_id: foreign_mutation.id,
+                document_id: Some(foreign_document.id),
+                base_revision_id: Some(foreign_revision.id),
+                result_revision_id: Some(foreign_revision.id),
+                item_state: "pending",
+                message: None,
+            },
+        )
+        .await?;
+        assert!(
+            content_repository::upsert_document_head(
+                &pool,
+                &NewContentDocumentHead {
+                    document_id: document.id,
+                    active_revision_id: Some(readable_revision.id),
+                    readable_revision_id: Some(readable_revision.id),
+                    latest_mutation_id: Some(foreign_mutation.id),
+                    latest_successful_attempt_id: Some(attempt.id),
+                },
+            )
+            .await
+            .is_err(),
+            "a cross-tenant mutation must be rejected",
+        );
+
+        let sibling_job = ingest_repository::create_ingest_job(
+            &pool,
+            &NewIngestJob {
+                workspace_id: fixture.workspace_id,
+                library_id: fixture.library_id,
+                mutation_id: Some(sibling_mutation.id),
+                mutation_item_id: Some(standalone_sibling_item.id),
+                connector_id: None,
+                async_operation_id: None,
+                knowledge_document_id: Some(sibling.id),
+                knowledge_revision_id: Some(sibling_revision.id),
+                job_kind: "content_mutation".to_string(),
+                queue_state: "leased".to_string(),
+                priority: 100,
+                dedupe_key: None,
+                queued_at: None,
+                available_at: None,
+                completed_at: None,
+            },
+        )
+        .await?;
+        let sibling_attempt = ingest_repository::create_ingest_attempt(
+            &pool,
+            &NewIngestAttempt {
+                job_id: sibling_job.id,
+                attempt_number: 1,
+                worker_principal_id: None,
+                lease_token: None,
+                knowledge_generation_id: None,
+                attempt_state: "running".to_string(),
+                current_stage: Some("finalizing".to_string()),
+                started_at: None,
+                heartbeat_at: None,
+                finished_at: None,
+                failure_class: None,
+                failure_code: None,
+                failure_message: None,
+                progress_percent: 90,
+                retryable: false,
+            },
+        )
+        .await?;
+        let foreign_job = ingest_repository::create_ingest_job(
+            &pool,
+            &NewIngestJob {
+                workspace_id: foreign_fixture.workspace_id,
+                library_id: foreign_fixture.library_id,
+                mutation_id: Some(foreign_mutation.id),
+                mutation_item_id: Some(foreign_mutation_item.id),
+                connector_id: None,
+                async_operation_id: None,
+                knowledge_document_id: Some(foreign_document.id),
+                knowledge_revision_id: Some(foreign_revision.id),
+                job_kind: "content_mutation".to_string(),
+                queue_state: "leased".to_string(),
+                priority: 100,
+                dedupe_key: None,
+                queued_at: None,
+                available_at: None,
+                completed_at: None,
+            },
+        )
+        .await?;
+        let foreign_attempt = ingest_repository::create_ingest_attempt(
+            &pool,
+            &NewIngestAttempt {
+                job_id: foreign_job.id,
+                attempt_number: 1,
+                worker_principal_id: None,
+                lease_token: None,
+                knowledge_generation_id: None,
+                attempt_state: "running".to_string(),
+                current_stage: Some("finalizing".to_string()),
+                started_at: None,
+                heartbeat_at: None,
+                finished_at: None,
+                failure_class: None,
+                failure_code: None,
+                failure_message: None,
+                progress_percent: 90,
+                retryable: false,
+            },
+        )
+        .await?;
+        assert!(
+            content_repository::upsert_document_head(
+                &pool,
+                &NewContentDocumentHead {
+                    document_id: document.id,
+                    active_revision_id: Some(readable_revision.id),
+                    readable_revision_id: Some(readable_revision.id),
+                    latest_mutation_id: Some(mutation.id),
+                    latest_successful_attempt_id: Some(sibling_attempt.id),
+                },
+            )
+            .await
+            .is_err(),
+            "an attempt owned by another document must be rejected",
+        );
+        assert!(
+            content_repository::upsert_document_head(
+                &pool,
+                &NewContentDocumentHead {
+                    document_id: document.id,
+                    active_revision_id: Some(readable_revision.id),
+                    readable_revision_id: Some(readable_revision.id),
+                    latest_mutation_id: Some(mutation.id),
+                    latest_successful_attempt_id: Some(foreign_attempt.id),
+                },
+            )
+            .await
+            .is_err(),
+            "a cross-tenant attempt must be rejected",
+        );
+
+        let stable_head = content_repository::get_document_head(&pool, document.id)
+            .await?
+            .context("target head missing")?;
+        assert_eq!(stable_head.readable_revision_id, Some(readable_revision.id));
+        assert_eq!(stable_head.latest_mutation_id, Some(mutation.id));
+        assert_eq!(stable_head.latest_successful_attempt_id, Some(attempt.id));
+        assert_eq!(
+            catalog_repository::get_library_source_truth_version(&pool, fixture.library_id).await?,
+            readable_generation,
+        );
+
+        Ok(())
+    }
+    .await;
+
+    foreign_fixture.cleanup(&pool).await?;
     fixture.cleanup(&pool).await?;
     result
 }

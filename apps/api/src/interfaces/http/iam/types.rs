@@ -1,6 +1,20 @@
 use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use uuid::Uuid;
+use zeroize::Zeroize as _;
+
+/// Deserializes a field as `Option<Option<T>>`, distinguishing "field
+/// omitted" (outer `None`, leave the column untouched) from "field present
+/// but `null`" (`Some(None)`, clear the column) from "field present with a
+/// value" (`Some(Some(value))`). Pair with `#[serde(default)]` so an omitted
+/// field defaults to outer `None` instead of erroring.
+fn deserialize_double_option<'de, D, T>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Deserialize::deserialize(deserializer).map(Some)
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
@@ -88,13 +102,6 @@ pub struct ListTokensQuery {
     pub workspace_id: Option<Uuid>,
 }
 
-#[derive(Debug, Deserialize, utoipa::ToSchema, utoipa::IntoParams)]
-#[serde(rename_all = "camelCase")]
-#[into_params(parameter_in = Query)]
-pub struct ListGrantsQuery {
-    pub principal_id: Option<Uuid>,
-}
-
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct MintTokenRequest {
@@ -107,14 +114,22 @@ pub struct MintTokenRequest {
     pub permission_kinds: Vec<IamPermissionKind>,
 }
 
+/// Partial update for `PATCH /iam/tokens/{tokenId}`. Only `label` and
+/// `expiresAt` are mutable post-mint — the permission scope
+/// (`permissionKinds`/`libraryIds`) is immutable once a token is minted, so
+/// that the audit invariant "this plaintext was created with exactly these
+/// permissions" always holds; changing scope means minting a new token and
+/// deleting the old one, not patching this one.
+///
+/// `expiresAt` distinguishes three states: omitted (leave untouched),
+/// `null` (clear the expiry, making the token non-expiring), and a
+/// timestamp (set the expiry).
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
-pub struct CreateGrantRequest {
-    pub principal_id: Uuid,
-    pub resource_kind: IamGrantResourceKind,
-    pub resource_id: Uuid,
-    pub permission_kind: IamPermissionKind,
-    pub expires_at: Option<DateTime<Utc>>,
+pub struct PatchTokenRequest {
+    pub label: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_double_option")]
+    pub expires_at: Option<Option<DateTime<Utc>>>,
 }
 
 #[derive(Debug, Serialize, utoipa::ToSchema)]
@@ -148,7 +163,7 @@ pub struct UserResponse {
     pub external_subject: Option<String>,
 }
 
-#[derive(Debug, Deserialize, utoipa::ToSchema)]
+#[derive(Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct CreateUserRequest {
     pub login: String,
@@ -156,6 +171,25 @@ pub struct CreateUserRequest {
     pub display_name: String,
     pub password: String,
     pub role: SystemRole,
+}
+
+impl std::fmt::Debug for CreateUserRequest {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("CreateUserRequest")
+            .field("login", &self.login)
+            .field("email", &self.email)
+            .field("display_name", &self.display_name)
+            .field("password", &"<redacted>")
+            .field("role", &self.role)
+            .finish()
+    }
+}
+
+impl Drop for CreateUserRequest {
+    fn drop(&mut self) {
+        self.password.zeroize();
+    }
 }
 
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
@@ -237,11 +271,27 @@ pub struct TokenResponse {
     pub grants: Vec<TokenGrantSummaryResponse>,
 }
 
-#[derive(Debug, Serialize, utoipa::ToSchema)]
+#[derive(Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct MintTokenResponse {
     pub token: String,
     pub api_token: TokenResponse,
+}
+
+impl std::fmt::Debug for MintTokenResponse {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("MintTokenResponse")
+            .field("token", &"<redacted>")
+            .field("api_token", &self.api_token)
+            .finish()
+    }
+}
+
+impl Drop for MintTokenResponse {
+    fn drop(&mut self) {
+        self.token.zeroize();
+    }
 }
 
 #[derive(Debug, Serialize, utoipa::ToSchema)]
@@ -261,7 +311,7 @@ pub struct GrantResponse {
 /// tier that access was granted at. Returned by `GET /iam/users/{id}/access`.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
-pub struct UserWorkspaceAccessResponse {
+pub(super) struct UserWorkspaceAccessResponse {
     pub grant_id: Uuid,
     pub workspace_id: Uuid,
     pub display_name: String,
@@ -272,7 +322,7 @@ pub struct UserWorkspaceAccessResponse {
 /// permission tier. Returned by `GET /iam/users/{id}/access`.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
-pub struct UserLibraryAccessResponse {
+pub(super) struct UserLibraryAccessResponse {
     pub grant_id: Uuid,
     pub library_id: Uuid,
     pub workspace_id: Uuid,
@@ -284,7 +334,7 @@ pub struct UserLibraryAccessResponse {
 /// the admin can manage from the Users access editor.
 #[derive(Debug, Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
-pub struct UserAccessResponse {
+pub(super) struct UserAccessResponse {
     pub principal_id: Uuid,
     pub workspaces: Vec<UserWorkspaceAccessResponse>,
     pub libraries: Vec<UserLibraryAccessResponse>,
@@ -330,7 +380,7 @@ pub struct MeResponse {
     pub effective_grants: Vec<GrantResponse>,
 }
 
-#[derive(Debug, Deserialize, utoipa::ToSchema)]
+#[derive(Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct LoginSessionRequest {
     pub login: String,
@@ -338,7 +388,24 @@ pub struct LoginSessionRequest {
     pub remember_me: Option<bool>,
 }
 
-#[derive(Debug, Deserialize, utoipa::ToSchema)]
+impl std::fmt::Debug for LoginSessionRequest {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("LoginSessionRequest")
+            .field("login", &self.login)
+            .field("password", &"<redacted>")
+            .field("remember_me", &self.remember_me)
+            .finish()
+    }
+}
+
+impl Drop for LoginSessionRequest {
+    fn drop(&mut self) {
+        self.password.zeroize();
+    }
+}
+
+#[derive(Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct BootstrapSetupRequest {
     pub login: String,
@@ -347,12 +414,49 @@ pub struct BootstrapSetupRequest {
     pub ai_setup: Option<BootstrapSetupAiRequest>,
 }
 
-#[derive(Debug, Deserialize, utoipa::ToSchema)]
+impl std::fmt::Debug for BootstrapSetupRequest {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("BootstrapSetupRequest")
+            .field("login", &self.login)
+            .field("display_name", &self.display_name)
+            .field("password", &"<redacted>")
+            .field("ai_setup", &self.ai_setup)
+            .finish()
+    }
+}
+
+impl Drop for BootstrapSetupRequest {
+    fn drop(&mut self) {
+        self.password.zeroize();
+    }
+}
+
+#[derive(Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct BootstrapSetupAiRequest {
     pub provider_kind: String,
     pub api_key: Option<String>,
     pub base_url: Option<String>,
+}
+
+impl Drop for BootstrapSetupAiRequest {
+    fn drop(&mut self) {
+        if let Some(api_key) = self.api_key.as_mut() {
+            api_key.zeroize();
+        }
+    }
+}
+
+impl std::fmt::Debug for BootstrapSetupAiRequest {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("BootstrapSetupAiRequest")
+            .field("provider_kind", &self.provider_kind)
+            .field("api_key", &self.api_key.as_ref().map(|_| "<redacted>"))
+            .field("base_url", &self.base_url.as_ref().map(|_| "<redacted>"))
+            .finish()
+    }
 }
 
 #[derive(Debug, Serialize, utoipa::ToSchema)]
@@ -370,4 +474,50 @@ pub struct SessionResponse {
     pub session_id: Uuid,
     pub expires_at: DateTime<Utc>,
     pub user: SessionUserResponse,
+}
+
+#[cfg(test)]
+mod secret_debug_tests {
+    use super::{
+        BootstrapSetupAiRequest, BootstrapSetupRequest, CreateUserRequest, LoginSessionRequest,
+        SystemRole,
+    };
+
+    #[test]
+    fn credential_requests_never_expose_password_key_or_url_secrets_in_debug() {
+        let create_user = CreateUserRequest {
+            login: "owner".into(),
+            email: "owner@example.com".into(),
+            display_name: "Owner".into(),
+            password: "create-user-password-regression".into(),
+            role: SystemRole::Admin,
+        };
+        let login = LoginSessionRequest {
+            login: "owner".into(),
+            password: "login-password-regression".into(),
+            remember_me: Some(true),
+        };
+        let bootstrap = BootstrapSetupRequest {
+            login: "owner".into(),
+            display_name: None,
+            password: "bootstrap-password-regression".into(),
+            ai_setup: Some(BootstrapSetupAiRequest {
+                provider_kind: "synthetic".into(),
+                api_key: Some("provider-key-regression".into()),
+                base_url: Some("https://user:url-secret@host.example/?token=query-secret".into()),
+            }),
+        };
+
+        let debug = format!("{create_user:?} {login:?} {bootstrap:?}");
+        for secret in [
+            "create-user-password-regression",
+            "login-password-regression",
+            "bootstrap-password-regression",
+            "provider-key-regression",
+            "url-secret",
+            "query-secret",
+        ] {
+            assert!(!debug.contains(secret), "Debug exposed {secret}");
+        }
+    }
 }

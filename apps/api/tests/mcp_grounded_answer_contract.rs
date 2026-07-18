@@ -1,13 +1,12 @@
-#![allow(clippy::expect_used, clippy::panic)]
-
 use chrono::{DateTime, TimeZone, Utc};
 use ironrag_backend::interfaces::http::mcp::grounded_answer_contract_payload;
 use ironrag_contracts::assistant::{
-    AssistantChunkReference, AssistantClarification, AssistantContentSourceAccess,
-    AssistantEntityReference, AssistantExecution, AssistantExecutionDetail, AssistantPolicySummary,
-    AssistantPreparedSegmentReference, AssistantRelationReference, AssistantRuntimeStageSummary,
-    AssistantRuntimeSummary, AssistantTechnicalFactReference, AssistantTurn, AssistantTurnRole,
-    AssistantVerificationState, AssistantVerificationWarning,
+    AssistantAnswerDisposition, AssistantChunkReference, AssistantClarification,
+    AssistantContentSourceAccess, AssistantEntityReference, AssistantExecution,
+    AssistantExecutionDetail, AssistantPolicySummary, AssistantPreparedSegmentReference,
+    AssistantRelationReference, AssistantRuntimeStageSummary, AssistantRuntimeSummary,
+    AssistantTechnicalFactReference, AssistantTurn, AssistantTurnRole, AssistantVerificationState,
+    AssistantVerificationWarning,
 };
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -50,6 +49,7 @@ struct Scenario {
     input: GroundedAnswerInput,
     evidence: EvidenceCounts,
     verification_state: AssistantVerificationState,
+    answer_disposition: AssistantAnswerDisposition,
     warnings: Vec<WarningSpec>,
     runtime_stages: &'static [&'static str],
 }
@@ -106,6 +106,7 @@ fn scenarios() -> Vec<Scenario> {
                 relations: 0,
             },
             verification_state: AssistantVerificationState::Verified,
+            answer_disposition: AssistantAnswerDisposition::FactualReady,
             warnings: Vec::new(),
             runtime_stages: FULL_RUNTIME_STAGES,
         },
@@ -136,6 +137,7 @@ fn scenarios() -> Vec<Scenario> {
                 relations: 0,
             },
             verification_state: AssistantVerificationState::Verified,
+            answer_disposition: AssistantAnswerDisposition::FactualReady,
             warnings: Vec::new(),
             runtime_stages: VERIFY_RUNTIME_STAGES,
         },
@@ -157,6 +159,7 @@ fn scenarios() -> Vec<Scenario> {
                 relations: 0,
             },
             verification_state: AssistantVerificationState::InsufficientEvidence,
+            answer_disposition: AssistantAnswerDisposition::NonTerminal,
             warnings: vec![WarningSpec {
                 code: "insufficient_evidence",
                 related_segment: false,
@@ -182,6 +185,7 @@ fn scenarios() -> Vec<Scenario> {
                 relations: 0,
             },
             verification_state: AssistantVerificationState::Conflicting,
+            answer_disposition: AssistantAnswerDisposition::NonTerminal,
             warnings: vec![WarningSpec {
                 code: "conflicting_evidence",
                 related_segment: true,
@@ -207,6 +211,7 @@ fn scenarios() -> Vec<Scenario> {
                 relations: 1,
             },
             verification_state: AssistantVerificationState::Verified,
+            answer_disposition: AssistantAnswerDisposition::FactualReady,
             warnings: Vec::new(),
             runtime_stages: FULL_RUNTIME_STAGES,
         },
@@ -228,6 +233,7 @@ fn scenarios() -> Vec<Scenario> {
                 relations: 0,
             },
             verification_state: AssistantVerificationState::PartiallySupported,
+            answer_disposition: AssistantAnswerDisposition::NonTerminal,
             warnings: vec![WarningSpec {
                 code: "unsupported_literal",
                 related_segment: false,
@@ -336,6 +342,7 @@ fn execution_detail_for(scenario: &Scenario, answer_text: &str) -> AssistantExec
             execution_id,
             scenario.evidence.relations,
         ),
+        reference_summary: None,
         verification_state: scenario.verification_state,
         verification_warnings: scenario
             .warnings
@@ -349,6 +356,7 @@ fn execution_detail_for(scenario: &Scenario, answer_text: &str) -> AssistantExec
                 related_fact_id: warning.related_fact.then(|| deterministic_id(scenario.seed, 300)),
             })
             .collect(),
+        answer_disposition: scenario.answer_disposition,
         // Scenarios represent unambiguous answers; clarification is default.
         clarification: AssistantClarification::default(),
     }
@@ -449,6 +457,10 @@ fn relation_references(
         .collect()
 }
 
+#[allow(
+    clippy::expect_used,
+    reason = "snapshot construction must fail at the exact missing required response field"
+)]
 fn response_shape(scenario: &Scenario, response: &Value) -> Value {
     let structured = response.get("structuredContent").expect("structuredContent");
     let detail = structured.get("executionDetail").expect("executionDetail");
@@ -480,7 +492,13 @@ fn response_shape(scenario: &Scenario, response: &Value) -> Value {
             "workspaceId": structured.get("workspaceId") == detail.pointer("/execution/workspaceId"),
             "lifecycleState": structured.get("lifecycleState") == detail.pointer("/execution/lifecycleState"),
             "finalAnswerReady": structured.get("finalAnswerReady")
-                == Some(&json!(matches!(scenario.verification_state, AssistantVerificationState::Verified))),
+                == Some(&json!(matches!(scenario.answer_disposition, AssistantAnswerDisposition::FactualReady))),
+        },
+        "answerDisposition": {
+            "executionDetail": detail.get("answerDisposition"),
+            "readiness": structured.pointer("/readiness/answerDisposition"),
+            "matches": detail.get("answerDisposition")
+                == structured.pointer("/readiness/answerDisposition"),
         },
         "executionDetailKeys": object_keys(detail),
         // Prove the new typed candidate surface is present and correct for
@@ -551,10 +569,18 @@ fn runtime_stage_shape(stage: &Value) -> Value {
     })
 }
 
+#[allow(
+    clippy::expect_used,
+    reason = "snapshot construction must fail when a required citation array is absent"
+)]
 fn array_count(value: &Value, key: &str) -> usize {
     value.get(key).and_then(Value::as_array).expect("array field").len()
 }
 
+#[allow(
+    clippy::expect_used,
+    reason = "snapshot construction accepts only the required JSON object shape"
+)]
 fn object_keys(value: &Value) -> Vec<String> {
     let mut keys = value
         .as_object()
@@ -570,10 +596,18 @@ fn deterministic_id(seed: u128, offset: u128) -> Uuid {
     Uuid::from_u128((seed << 64) + offset)
 }
 
+#[allow(
+    clippy::expect_used,
+    reason = "fixture cardinalities are deliberately bounded below usize-to-u128 overflow"
+)]
 fn offset(base: u128, index: usize) -> u128 {
     base + u128::try_from(index).expect("fixture index fits u128")
 }
 
+#[allow(
+    clippy::expect_used,
+    reason = "fixture cardinalities are deliberately bounded below i32 rank overflow"
+)]
 fn rank(index: usize) -> i32 {
     i32::try_from(index + 1).expect("fixture rank fits i32")
 }
@@ -582,6 +616,10 @@ fn score(index: usize) -> f64 {
     1.0 - (index as f64 * 0.05)
 }
 
+#[allow(
+    clippy::expect_used,
+    reason = "the compile-time fixture timestamp is fixed and intentionally invariant"
+)]
 fn fixed_time() -> DateTime<Utc> {
     Utc.with_ymd_and_hms(2026, 1, 2, 3, 4, 5).single().expect("fixed timestamp is valid")
 }

@@ -1,7 +1,10 @@
 use axum::http::HeaderMap;
 use cookie::{Cookie, SameSite};
 
-pub fn session_cookie_secure_for_request(configured_secure: bool, headers: &HeaderMap) -> bool {
+pub(super) fn session_cookie_secure_for_request(
+    configured_secure: bool,
+    headers: &HeaderMap,
+) -> bool {
     configured_secure
         || comma_header_contains(headers, "x-forwarded-proto", "https")
         || comma_header_contains(headers, "x-forwarded-scheme", "https")
@@ -9,7 +12,7 @@ pub fn session_cookie_secure_for_request(configured_secure: bool, headers: &Head
         || forwarded_header_has_https_proto(headers)
 }
 
-pub fn build_session_cookie(
+pub(super) fn build_session_cookie(
     cookie_name: &str,
     value: &str,
     max_age_hours: u64,
@@ -25,7 +28,7 @@ pub fn build_session_cookie(
         .to_string()
 }
 
-pub fn build_cleared_session_cookie(cookie_name: &str, secure: bool) -> String {
+pub(super) fn build_cleared_session_cookie(cookie_name: &str, secure: bool) -> String {
     Cookie::build((cookie_name, String::new()))
         .path("/")
         .http_only(true)

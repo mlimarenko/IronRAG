@@ -3,12 +3,9 @@ use uuid::Uuid;
 
 use crate::{
     agent_runtime::task::{RuntimeTask, RuntimeTaskSpec, StructuredRuntimeTask},
-    domains::{
-        agent_runtime::{
-            RuntimeOutputMode, RuntimeRecoveryPolicy, RuntimeStageKind, RuntimeSurfaceKind,
-            RuntimeTaskKind,
-        },
-        ai::AiBindingPurpose,
+    domains::agent_runtime::{
+        RuntimeOutputMode, RuntimeRecoveryPolicy, RuntimeStageKind, RuntimeSurfaceKind,
+        RuntimeTaskKind,
     },
     services::graph::extract::{
         GraphExtractionCandidateSet, GraphExtractionTaskFailure, GraphExtractionTechnicalFact,
@@ -43,7 +40,7 @@ impl RuntimeTask for GraphExtractTask {
         RuntimeTaskSpec {
             task_kind: RuntimeTaskKind::GraphExtract,
             surface_kind: RuntimeSurfaceKind::Worker,
-            binding_purpose: AiBindingPurpose::for_runtime_task_kind(RuntimeTaskKind::GraphExtract),
+            binding_purpose: RuntimeTaskKind::GraphExtract.binding_purpose(),
             machine_consumed: true,
             max_turns: 2,
             max_parallel_actions: 1,

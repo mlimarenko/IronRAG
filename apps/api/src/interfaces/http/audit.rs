@@ -47,9 +47,43 @@ pub struct AuditEventsQuery {
     pub result_kind: Option<String>,
     pub search: Option<String>,
     pub limit: Option<u32>,
-    pub offset: Option<u32>,
+    /// Opaque keyset continuation token from a previous page's
+    /// `nextCursor`. Absent starts from the newest event.
+    pub cursor: Option<String>,
     pub internal: Option<bool>,
     pub include_assistant: Option<bool>,
+}
+
+// ============================================================================
+// Opaque cursor for /v1/audit/events keyset pagination.
+//
+// The cursor is base64(json({"t": "<rfc3339 created_at>", "i": "<uuid>"})),
+// mirroring the content document list cursor
+// (interfaces/http/content/types.rs). Opaque to clients; any decode failure
+// is a `BadRequest` rather than silently restarting from the top.
+// ============================================================================
+
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+struct AuditEventListCursor {
+    #[serde(rename = "t")]
+    created_at: chrono::DateTime<chrono::Utc>,
+    #[serde(rename = "i")]
+    id: Uuid,
+}
+
+fn encode_audit_event_cursor(cursor: &AuditEventListCursor) -> String {
+    use base64::Engine;
+    let json = serde_json::to_vec(cursor).unwrap_or_default();
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(json)
+}
+
+fn decode_audit_event_cursor(token: &str) -> Result<AuditEventListCursor, ApiError> {
+    use base64::Engine;
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(token)
+        .map_err(|_| ApiError::BadRequest("invalid cursor encoding".to_string()))?;
+    serde_json::from_slice(&bytes)
+        .map_err(|_| ApiError::BadRequest("invalid cursor payload".to_string()))
 }
 
 #[derive(Debug, Serialize, utoipa::ToSchema)]
@@ -129,9 +163,9 @@ pub struct AuditEventResponse {
 #[serde(rename_all = "camelCase")]
 pub struct AuditEventPageResponse {
     pub items: Vec<AuditEventResponse>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<String>,
     pub total: i64,
-    pub limit: i64,
-    pub offset: i64,
 }
 
 pub fn router() -> Router<AppState> {
@@ -199,6 +233,13 @@ pub async fn list_audit_events(
         runtime_execution_id: query.runtime_execution_id,
         async_operation_id: query.async_operation_id,
     };
+    let cursor = match query.cursor.as_deref() {
+        Some(token) => {
+            let AuditEventListCursor { created_at, id } = decode_audit_event_cursor(token)?;
+            Some((created_at, id))
+        }
+        None => None,
+    };
     let list_query = ListAuditEventsQuery {
         actor_principal_id: query.actor_principal_id,
         workspace_id: workspace_filter,
@@ -208,14 +249,15 @@ pub async fn list_audit_events(
         result_kind: query.result_kind.filter(|value| !value.trim().is_empty()),
         search: query.search.filter(|value| !value.trim().is_empty()),
         limit: i64::from(query.limit.unwrap_or(DEFAULT_AUDIT_LIMIT).clamp(1, MAX_AUDIT_LIMIT)),
-        offset: i64::from(query.offset.unwrap_or_default()),
+        cursor,
     };
 
     let mut response_items = Vec::new();
-    let total = if internal {
+    let (total, next_cursor) = if internal {
         let events =
             state.canonical_services.audit.list_internal_events(&state, &list_query).await?;
         let total = events.total;
+        let next_cursor = events.next_cursor;
         push_internal_response_items(
             &state,
             &auth,
@@ -225,11 +267,12 @@ pub async fn list_audit_events(
             events,
         )
         .await?;
-        total
+        (total, next_cursor)
     } else {
         let events =
             state.canonical_services.audit.list_redacted_events(&state, &list_query).await?;
         let total = events.total;
+        let next_cursor = events.next_cursor;
         push_redacted_response_items(
             &state,
             &auth,
@@ -239,7 +282,7 @@ pub async fn list_audit_events(
             events,
         )
         .await?;
-        total
+        (total, next_cursor)
     };
 
     attach_actor_principals(&state, &mut response_items).await?;
@@ -248,12 +291,10 @@ pub async fn list_audit_events(
         attach_assistant_call_summaries(&state, &auth, &mut response_items).await?;
     }
     span.record("item_count", response_items.len());
-    Ok(Json(AuditEventPageResponse {
-        items: response_items,
-        total,
-        limit: list_query.limit,
-        offset: list_query.offset,
-    }))
+    let next_cursor = next_cursor.map(|(created_at, id)| {
+        encode_audit_event_cursor(&AuditEventListCursor { created_at, id })
+    });
+    Ok(Json(AuditEventPageResponse { items: response_items, next_cursor, total }))
 }
 
 async fn push_internal_response_items(

@@ -1,59 +1,73 @@
-import { useMemo, useState } from 'react';
-import { useQuery } from '@tanstack/react-query';
-import type { TFunction } from 'i18next';
-import { AlertTriangle, Boxes, Building2, CheckCircle2, Search, Server, XCircle } from 'lucide-react';
-import { useTranslation } from 'react-i18next';
-import { adminApi, queries } from '@/shared/api';
-import { DataState } from '@/shared/components/DataState';
-import { FilterSelect } from '@/shared/components/FilterSelect';
-import { PageHeader } from '@/shared/components/layout/PageHeader';
-import { PageShell } from '@/shared/components/layout/PageShell';
-import { WorkbenchEmptyState } from '@/shared/components/layout/WorkbenchEmptyState';
-import { StatusBadge, type StatusTone } from '@/shared/components/StatusBadge';
-import { TablePaginationFooter } from '@/shared/components/TablePaginationFooter';
-import { Input } from '@/shared/components/ui/input';
-import { SelectItem } from '@/shared/components/ui/select';
-import { mapAuditPage } from '@/features/admin/model/adminAdapter';
-import { errorMessage } from '@/shared/lib/errorMessage';
+import { useMemo, useState } from 'react'
+import { useQuery } from '@tanstack/react-query'
+import type { TFunction } from 'i18next'
+import {
+  AlertTriangle,
+  Boxes,
+  Building2,
+  CheckCircle2,
+  Search,
+  Server,
+  XCircle,
+} from 'lucide-react'
+import { useTranslation } from 'react-i18next'
+import { adminApi, queries } from '@/shared/api'
+import { DataState } from '@/shared/components/DataState'
+import { FilterSelect } from '@/shared/components/FilterSelect'
+import { PageHeader } from '@/shared/components/layout/PageHeader'
+import { PageShell } from '@/shared/components/layout/PageShell'
+import { WorkbenchEmptyState } from '@/shared/components/layout/WorkbenchEmptyState'
+import { StatusBadge, type StatusTone } from '@/shared/components/StatusBadge'
+import { TablePaginationFooter } from '@/shared/components/TablePaginationFooter'
+import { Input } from '@/shared/components/ui/input'
+import { SelectItem } from '@/shared/components/ui/select'
+import { mapAuditPage } from '@/features/admin/model/adminAdapter'
+import { errorMessage } from '@/shared/lib/errorMessage'
 import {
   isStorageRecord,
   parseNumberOption,
   parseStringOption,
   useTableState,
-} from '@/shared/hooks/useTableState';
-import type { AuditEvent, AuditEventPage } from '@/shared/types';
-import type { ListAuditEventsData } from '@/shared/api/generated';
+} from '@/shared/hooks/useTableState'
+import type { AuditEvent, AuditEventPage } from '@/shared/types'
+import type { ListAuditEventsData } from '@/shared/api/generated'
 
-const AUDIT_PAGE_SIZE_OPTIONS = [50, 100, 250, 1000] as const;
-const AUDIT_SURFACE_OPTIONS = ['all', 'rest', 'mcp', 'worker', 'bootstrap'] as const;
-const AUDIT_RESULT_OPTIONS = ['all', 'succeeded', 'rejected', 'failed'] as const;
+const AUDIT_PAGE_SIZE_OPTIONS = [50, 100, 250, 1000] as const
+const AUDIT_SURFACE_OPTIONS = ['all', 'rest', 'mcp', 'worker', 'bootstrap'] as const
+const AUDIT_RESULT_OPTIONS = ['all', 'succeeded', 'rejected', 'failed'] as const
 
-type AuditResultFilter = (typeof AUDIT_RESULT_OPTIONS)[number];
-type AuditSurfaceFilter = (typeof AUDIT_SURFACE_OPTIONS)[number];
-type AuditPageSize = (typeof AUDIT_PAGE_SIZE_OPTIONS)[number];
+type AuditResultFilter = (typeof AUDIT_RESULT_OPTIONS)[number]
+type AuditSurfaceFilter = (typeof AUDIT_SURFACE_OPTIONS)[number]
+type AuditPageSize = (typeof AUDIT_PAGE_SIZE_OPTIONS)[number]
 
 type AuditTableState = {
-  pageSize: AuditPageSize;
-  resultFilter: AuditResultFilter;
-  surfaceFilter: AuditSurfaceFilter;
-};
+  pageSize: AuditPageSize
+  resultFilter: AuditResultFilter
+  surfaceFilter: AuditSurfaceFilter
+}
 
 const DEFAULT_AUDIT_TABLE_STATE: AuditTableState = {
   pageSize: AUDIT_PAGE_SIZE_OPTIONS[0],
   resultFilter: 'all',
   surfaceFilter: 'all',
-};
+}
 
 function getAuditResultTone(resultKind: AuditEvent['resultKind']): StatusTone {
-  if (resultKind === 'failed') return 'failed';
-  if (resultKind === 'rejected') return 'warning';
-  return 'ready';
+  if (resultKind === 'failed') return 'failed'
+  if (resultKind === 'rejected') return 'warning'
+  return 'ready'
+}
+
+function getAuditResultClassName(resultKind: AuditEvent['resultKind']): string {
+  if (resultKind === 'failed') return 'text-status-failed'
+  if (resultKind === 'rejected') return 'text-status-warning'
+  return 'text-status-ready'
 }
 
 function getAuditResultIcon(resultKind: AuditEvent['resultKind']) {
-  if (resultKind === 'failed') return XCircle;
-  if (resultKind === 'rejected') return AlertTriangle;
-  return CheckCircle2;
+  if (resultKind === 'failed') return XCircle
+  if (resultKind === 'rejected') return AlertTriangle
+  return CheckCircle2
 }
 
 function humanizeAuditSurface(surfaceKind: string, t: TFunction): string {
@@ -62,47 +76,45 @@ function humanizeAuditSurface(surfaceKind: string, t: TFunction): string {
     case 'worker':
     case 'bootstrap':
     case 'rest':
-      return t(`admin.auditSurfaceLabels.${surfaceKind}`);
+      return t(`admin.auditSurfaceLabels.${surfaceKind}`)
     default:
-      return surfaceKind;
+      return surfaceKind
   }
 }
 
 function humanizeAuditResult(resultKind: AuditEvent['resultKind'], t: TFunction): string {
-  return t(`admin.auditResultLabels.${resultKind}`);
+  return t(`admin.auditResultLabels.${resultKind}`)
 }
 
 function formatAuditAssistantModels(event: AuditEvent, t: TFunction): string {
-  const assistantCall = event.assistantCall;
+  const assistantCall = event.assistantCall
   if (!assistantCall || assistantCall.models.length === 0) {
-    return t('admin.auditAssistantNoModel');
+    return t('admin.auditAssistantNoModel')
   }
-  return assistantCall.models
-    .map((model) => `${model.providerKind}:${model.modelName}`)
-    .join(', ');
+  return assistantCall.models.map((model) => `${model.providerKind}:${model.modelName}`).join(', ')
 }
 
 function formatAuditAssistantCost(event: AuditEvent, t: TFunction): string {
-  const assistantCall = event.assistantCall;
-  if (!assistantCall || assistantCall.totalCost == null) {
-    return t('admin.auditAssistantCostUnavailable');
+  const assistantCall = event.assistantCall
+  if (assistantCall?.totalCost == null) {
+    return t('admin.auditAssistantCostUnavailable')
   }
-  return `$${Number(assistantCall.totalCost).toFixed(4)}`;
+  return `$${Number(assistantCall.totalCost).toFixed(4)}`
 }
 
 export default function AdminAuditPage() {
-  const { t } = useTranslation();
+  const { t } = useTranslation()
 
-  const [auditSearch, setAuditSearch] = useState('');
-  const [auditPage, setAuditPage] = useState(1);
-  const [selectedWorkspaceId, setSelectedWorkspaceId] = useState('all');
-  const [selectedLibraryId, setSelectedLibraryId] = useState('all');
+  const [auditSearch, setAuditSearch] = useState('')
+  const [auditPage, setAuditPage] = useState(1)
+  const [selectedWorkspaceId, setSelectedWorkspaceId] = useState('all')
+  const [selectedLibraryId, setSelectedLibraryId] = useState('all')
 
   const [auditTableState, setAuditTableState] = useTableState<AuditTableState>({
     tableId: 'admin.audit',
     defaultValue: DEFAULT_AUDIT_TABLE_STATE,
     parse: (raw) => {
-      const record = isStorageRecord(raw) ? raw : {};
+      const record = isStorageRecord(raw) ? raw : {}
       return {
         pageSize: parseNumberOption(
           record.pageSize,
@@ -119,89 +131,87 @@ export default function AdminAuditPage() {
           AUDIT_SURFACE_OPTIONS,
           DEFAULT_AUDIT_TABLE_STATE.surfaceFilter,
         ),
-      };
+      }
     },
-  });
+  })
 
   const {
     pageSize: auditPageSize,
     resultFilter: auditResultFilter,
     surfaceFilter: auditSurfaceFilter,
-  } = auditTableState;
+  } = auditTableState
 
   const workspacesQuery = useQuery({
     ...queries.listCatalogWorkspacesOptions(),
-  });
-  const workspaces = workspacesQuery.data ?? [];
+  })
+  const workspaces = workspacesQuery.data ?? []
 
-  const wsActive = selectedWorkspaceId !== 'all';
-  const libActive = selectedLibraryId !== 'all';
+  const wsActive = selectedWorkspaceId !== 'all'
+  const libActive = selectedLibraryId !== 'all'
 
   const librariesQuery = useQuery({
     ...queries.listCatalogLibrariesOptions({
       path: { workspaceId: selectedWorkspaceId },
     }),
     enabled: wsActive,
-  });
-  const libraries = librariesQuery.data ?? [];
-  const librariesCount = libraries.length;
+  })
+  const libraries = librariesQuery.data ?? []
+  const librariesCount = libraries.length
 
+  const auditScopeQuery: Partial<NonNullable<ListAuditEventsData['query']>> = {}
+  if (libActive) {
+    auditScopeQuery.libraryId = selectedLibraryId
+  } else if (wsActive) {
+    auditScopeQuery.workspaceId = selectedWorkspaceId
+  }
   const auditQueryParams: NonNullable<ListAuditEventsData['query']> = {
-    ...(libActive ? {} : wsActive ? { workspaceId: selectedWorkspaceId } : {}),
-    ...(libActive ? { libraryId: selectedLibraryId } : {}),
+    ...auditScopeQuery,
     ...(auditSearch ? { search: auditSearch } : {}),
     ...(auditSurfaceFilter === 'all' ? {} : { surfaceKind: auditSurfaceFilter }),
     ...(auditResultFilter === 'all' ? {} : { resultKind: auditResultFilter }),
     limit: auditPageSize,
     offset: (auditPage - 1) * auditPageSize,
     includeAssistant: true,
-  };
+  }
 
   const auditQueryOptions = queries.listAuditEventsOptions({
     query: auditQueryParams,
-  });
+  })
 
   const auditQuery = useQuery({
     ...auditQueryOptions,
     queryFn: async () => {
-      const firstPage = await adminApi.listAuditEvents(auditQueryParams);
-      const mappedFirstPage = mapAuditPage(firstPage);
-      const totalPages = Math.max(1, Math.ceil(mappedFirstPage.total / auditPageSize));
+      const firstPage = await adminApi.listAuditEvents(auditQueryParams)
+      const mappedFirstPage = mapAuditPage(firstPage)
+      const totalPages = Math.max(1, Math.ceil(mappedFirstPage.total / auditPageSize))
       if (mappedFirstPage.total > 0 && auditPage > totalPages) {
         return adminApi.listAuditEvents({
           ...auditQueryParams,
           offset: (totalPages - 1) * auditPageSize,
-        });
+        })
       }
-      return firstPage;
+      return firstPage
     },
     enabled: true,
-  });
+  })
 
   const audit = useMemo<AuditEventPage>(() => {
     if (!auditQuery.data) {
-      return { items: [], total: 0, limit: auditPageSize, offset: 0 };
+      return { items: [], total: 0, limit: auditPageSize, offset: 0 }
     }
-    return mapAuditPage(auditQuery.data);
-  }, [auditQuery.data, auditPageSize]);
+    return mapAuditPage(auditQuery.data)
+  }, [auditQuery.data, auditPageSize])
 
-  const auditLoading = auditQuery.isLoading;
+  const auditLoading = auditQuery.isLoading
 
-  const auditTotalPages = Math.max(1, Math.ceil(audit.total / auditPageSize));
-  const visibleAuditPage =
-    audit.total === 0 ? 1 : Math.floor(audit.offset / auditPageSize) + 1;
-  const auditFrom = audit.total === 0 ? 0 : audit.offset + 1;
-  const auditTo =
-    audit.total === 0 ? 0 : Math.min(audit.total, auditFrom + audit.items.length - 1);
+  const auditTotalPages = Math.max(1, Math.ceil(audit.total / auditPageSize))
+  const visibleAuditPage = audit.total === 0 ? 1 : Math.floor(audit.offset / auditPageSize) + 1
+  const auditFrom = audit.total === 0 ? 0 : audit.offset + 1
+  const auditTo = audit.total === 0 ? 0 : Math.min(audit.total, auditFrom + audit.items.length - 1)
 
   return (
     <PageShell
-      header={
-        <PageHeader
-          title={t('admin.nav.audit')}
-          description={t('admin.nav.auditDesc')}
-        />
-      }
+      header={<PageHeader title={t('admin.nav.audit')} description={t('admin.nav.auditDesc')} />}
       bodyClassName="flex flex-col overflow-hidden"
     >
       <div className="flex min-h-0 flex-1 flex-col overflow-hidden animate-fade-in">
@@ -214,17 +224,17 @@ export default function AdminAuditPage() {
               placeholder={t('admin.auditSearchPlaceholder')}
               value={auditSearch}
               onChange={(e) => {
-                setAuditSearch(e.target.value);
-                setAuditPage(1);
+                setAuditSearch(e.target.value)
+                setAuditPage(1)
               }}
             />
           </div>
           <FilterSelect
             value={selectedWorkspaceId}
             onValueChange={(v) => {
-              setSelectedWorkspaceId(v);
-              setSelectedLibraryId('all');
-              setAuditPage(1);
+              setSelectedWorkspaceId(v)
+              setSelectedLibraryId('all')
+              setAuditPage(1)
             }}
             icon={<Building2 />}
             className="w-[180px]"
@@ -241,8 +251,8 @@ export default function AdminAuditPage() {
           <FilterSelect
             value={selectedLibraryId}
             onValueChange={(v) => {
-              setSelectedLibraryId(v);
-              setAuditPage(1);
+              setSelectedLibraryId(v)
+              setAuditPage(1)
             }}
             disabled={!wsActive}
             icon={<Boxes />}
@@ -263,8 +273,8 @@ export default function AdminAuditPage() {
               setAuditTableState((prev) => ({
                 ...prev,
                 resultFilter: v as AuditResultFilter,
-              }));
-              setAuditPage(1);
+              }))
+              setAuditPage(1)
             }}
             icon={<CheckCircle2 />}
             className="w-[180px]"
@@ -281,8 +291,8 @@ export default function AdminAuditPage() {
               setAuditTableState((prev) => ({
                 ...prev,
                 surfaceFilter: v as AuditSurfaceFilter,
-              }));
-              setAuditPage(1);
+              }))
+              setAuditPage(1)
             }}
             icon={<Server />}
             className="w-[180px]"
@@ -313,33 +323,24 @@ export default function AdminAuditPage() {
                 <div className="flex-1 min-h-0 overflow-auto">
                   <div className="space-y-3 p-3 xl:hidden">
                     {auditData.items.map((evt) => {
-                      const ResultIcon = getAuditResultIcon(evt.resultKind);
+                      const ResultIcon = getAuditResultIcon(evt.resultKind)
                       const assistantModels = evt.assistantCall
                         ? formatAuditAssistantModels(evt, t)
-                        : '';
+                        : ''
                       const assistantCost = evt.assistantCall
                         ? formatAuditAssistantCost(evt, t)
-                        : '';
+                        : ''
                       return (
                         <article key={evt.id} className="workbench-surface p-4">
                           <div className="flex items-start justify-between gap-3">
                             <div className="flex min-w-0 items-start gap-2">
                               <div
-                                className={`mt-0.5 shrink-0 ${
-                                  evt.resultKind === 'failed'
-                                    ? 'text-status-failed'
-                                    : evt.resultKind === 'rejected'
-                                      ? 'text-status-warning'
-                                      : 'text-status-ready'
-                                }`}
+                                className={`mt-0.5 shrink-0 ${getAuditResultClassName(evt.resultKind)}`}
                               >
                                 <ResultIcon className="h-3.5 w-3.5" />
                               </div>
                               <div className="min-w-0">
-                                <div
-                                  className="truncate text-sm font-semibold"
-                                  title={evt.message}
-                                >
+                                <div className="truncate text-sm font-semibold" title={evt.message}>
                                   {evt.message.split(' | ')[0]}
                                 </div>
                                 <div className="mt-1 text-xs text-muted-foreground">
@@ -347,7 +348,10 @@ export default function AdminAuditPage() {
                                 </div>
                               </div>
                             </div>
-                            <StatusBadge tone={getAuditResultTone(evt.resultKind)} className="shrink-0">
+                            <StatusBadge
+                              tone={getAuditResultTone(evt.resultKind)}
+                              className="shrink-0"
+                            >
                               {humanizeAuditResult(evt.resultKind, t)}
                             </StatusBadge>
                           </div>
@@ -374,7 +378,7 @@ export default function AdminAuditPage() {
                             )}
                           </div>
                         </article>
-                      );
+                      )
                     })}
                   </div>
                   <table className="hidden w-full min-w-[1100px] table-fixed text-sm xl:table">
@@ -395,35 +399,25 @@ export default function AdminAuditPage() {
                         <th className="px-4 py-3 section-label">{t('admin.auditSurface')}</th>
                         <th className="px-4 py-3 section-label">{t('admin.auditTime')}</th>
                         <th className="px-4 py-3 section-label">{t('admin.auditDetails')}</th>
-                        <th className="px-4 py-3 section-label">
-                          {t('admin.auditResult')}
-                        </th>
+                        <th className="px-4 py-3 section-label">{t('admin.auditResult')}</th>
                       </tr>
                     </thead>
                     <tbody>
                       {auditData.items.map((evt) => {
-                        const ResultIcon = getAuditResultIcon(evt.resultKind);
+                        const ResultIcon = getAuditResultIcon(evt.resultKind)
                         const assistantModels = evt.assistantCall
                           ? formatAuditAssistantModels(evt, t)
-                          : '';
+                          : ''
                         const assistantCost = evt.assistantCall
                           ? formatAuditAssistantCost(evt, t)
-                          : '';
+                          : ''
                         return (
                           <tr
                             key={evt.id}
                             className="border-b border-border/50 hover:bg-accent/30 transition-colors"
                           >
                             <td className="px-4 py-3">
-                              <div
-                                className={
-                                  evt.resultKind === 'failed'
-                                    ? 'text-status-failed'
-                                    : evt.resultKind === 'rejected'
-                                      ? 'text-status-warning'
-                                      : 'text-status-ready'
-                                }
-                              >
+                              <div className={getAuditResultClassName(evt.resultKind)}>
                                 <ResultIcon className="h-3.5 w-3.5" />
                               </div>
                             </td>
@@ -455,10 +449,7 @@ export default function AdminAuditPage() {
                                   })}
                                 </div>
                               ) : (
-                                <div
-                                  className="truncate"
-                                  title={evt.subjectSummary ?? undefined}
-                                >
+                                <div className="truncate" title={evt.subjectSummary ?? undefined}>
                                   {evt.subjectSummary || '—'}
                                 </div>
                               )}
@@ -469,7 +460,7 @@ export default function AdminAuditPage() {
                               </StatusBadge>
                             </td>
                           </tr>
-                        );
+                        )
                       })}
                     </tbody>
                   </table>
@@ -481,9 +472,7 @@ export default function AdminAuditPage() {
                   canGoNext={visibleAuditPage < auditTotalPages}
                   currentPageNumber={visibleAuditPage}
                   goToPreviousPage={() => setAuditPage(Math.max(1, visibleAuditPage - 1))}
-                  goToNextPage={() =>
-                    setAuditPage(Math.min(auditTotalPages, visibleAuditPage + 1))
-                  }
+                  goToNextPage={() => setAuditPage(Math.min(auditTotalPages, visibleAuditPage + 1))}
                   goToPage={(target) => setAuditPage(target)}
                   pageSize={auditPageSize}
                   pageSizeLabel={t('documents.pageSize')}
@@ -491,8 +480,8 @@ export default function AdminAuditPage() {
                   previousLabel={t('admin.previous')}
                   nextLabel={t('admin.next')}
                   onPageSizeChange={(size) => {
-                    setAuditTableState((prev) => ({ ...prev, pageSize: size }));
-                    setAuditPage(1);
+                    setAuditTableState((prev) => ({ ...prev, pageSize: size }))
+                    setAuditPage(1)
                   }}
                   summary={t('admin.auditSummary', {
                     from: auditFrom,
@@ -507,5 +496,5 @@ export default function AdminAuditPage() {
         </div>
       </div>
     </PageShell>
-  );
+  )
 }

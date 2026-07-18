@@ -16,11 +16,15 @@ const HEADER_NAME: &str = "X-Ironrag-Signature";
 /// # Errors
 /// Returns an error string if `unix_ts` cannot be formatted or HMAC key is
 /// invalid (should never happen in practice).
+#[must_use]
 pub fn sign(secret: &[u8], unix_ts: u64, body: &[u8]) -> String {
     let msg = build_signed_input(unix_ts, body);
     // new_from_slice only fails when the slice length exceeds the max key size,
     // which cannot happen for HMAC (accepts any length).
-    #[allow(clippy::expect_used)]
+    #[allow(
+        clippy::expect_used,
+        reason = "HMAC accepts keys of every byte length, so construction is infallible"
+    )]
     let mut mac = HmacSha256::new_from_slice(secret).expect("HMAC accepts keys of any length");
     mac.update(&msg);
     let result = mac.finalize().into_bytes();
@@ -48,7 +52,7 @@ pub fn verify(
         .unwrap_or_default()
         .as_secs();
 
-    let age = now.saturating_sub(ts);
+    let age = now.abs_diff(ts);
     if age > replay_window_seconds {
         return Err("signature timestamp outside replay window");
     }
@@ -99,7 +103,7 @@ fn build_signed_input(unix_ts: u64, body: &[u8]) -> Vec<u8> {
 
 /// Name of the HTTP header carrying the webhook signature.
 #[must_use]
-pub fn header_name() -> &'static str {
+pub const fn header_name() -> &'static str {
     HEADER_NAME
 }
 
@@ -142,6 +146,18 @@ mod tests {
         let header = sign(SECRET, ts, BODY);
         let result = verify(SECRET, &header, BODY, 0);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn future_timestamp_outside_replay_window_is_rejected() {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock should be after epoch")
+            .as_secs();
+        let future = now + 600;
+        let header = sign(SECRET, future, BODY);
+
+        assert!(verify(SECRET, &header, BODY, 300).is_err());
     }
 
     #[test]

@@ -19,18 +19,6 @@
 /// without turning the prompt into an unbounded dump.
 pub(crate) const CLARIFY_MAX_VARIANTS: usize = 8;
 
-/// Minimum number of distinct retrieved documents below which the
-/// clarify branch cannot fire — with one or two documents there is
-/// no meaningful "pick a variant" choice to offer.
-pub(crate) const CLARIFY_MIN_DISTINCT_DOCUMENTS: usize = 3;
-
-/// Score-dominance ratio used to declare that the top retrieved
-/// document clearly dominates the rest. When
-/// `top1_score / top2_score >= CLARIFY_DOMINANCE_RATIO` the evidence
-/// has one clear cluster and the runtime should answer directly
-/// rather than clarify.
-pub(crate) const CLARIFY_DOMINANCE_RATIO: f32 = 1.35;
-
 /// Absolute floor below which a single-shot answer is always treated
 /// as "model declined" and the question is escalated. Deliberately
 /// small: a genuine one-line answer is useful, but a two-word shrug
@@ -95,18 +83,6 @@ pub(crate) const DOCUMENT_IDENTITY_DOMINANCE_RATIO: f32 = 1_000.0;
 /// small-but-sufficient focused document, so the fallback costs at most one
 /// extra retrieval and stays inside the 30s tool-call SLO.
 pub(crate) const FOCUS_BROADEN_MIN_CHUNKS: usize = 2;
-
-/// Minimum number of distinct source documents an entity must appear in
-/// (via `runtime_graph_evidence`) before it qualifies as a cross-document
-/// subject in the release-clarify probe. A single-doc entity is too
-/// narrow to be a product variant worth offering as a clarification choice.
-pub(crate) const RELEASE_CLARIFY_ENTITY_MIN_DOC_SPAN: usize = 2;
-
-/// Minimum number of qualifying entities required to fire the
-/// release-lane clarify-with-fallback. Fewer than this and the evidence
-/// does not span multiple distinct subjects, so a flat list is more
-/// useful than a clarifying question.
-pub(crate) const RELEASE_CLARIFY_MIN_ENTITIES: usize = 2;
 
 /// Sense-dominance ratio for the exact-label-term (short-identifier) graph
 /// matching path. When a short identifier-shaped mention (e.g. an all-uppercase

@@ -129,7 +129,7 @@ fn select_ranked_subgraph(
     RankedSubgraph { entities: entity_rows, relations: relation_rows, relation_limit }
 }
 
-pub async fn get_graph_topology(
+pub(crate) async fn get_graph_topology(
     state: &AppState,
     library_id: Uuid,
     limit: Option<usize>,
@@ -278,7 +278,7 @@ pub async fn get_graph_topology(
     }))
 }
 
-pub async fn search_entities(
+pub(crate) async fn search_entities(
     state: &AppState,
     library_id: Uuid,
     query: &str,
@@ -323,7 +323,7 @@ pub async fn search_entities(
         .collect())
 }
 
-pub async fn list_relations(
+pub(crate) async fn list_relations(
     state: &AppState,
     library_id: Uuid,
     limit: usize,
@@ -387,7 +387,7 @@ pub async fn list_relations(
         .collect())
 }
 
-pub async fn get_communities(
+pub(crate) async fn get_communities(
     state: &AppState,
     library_id: Uuid,
     limit: usize,

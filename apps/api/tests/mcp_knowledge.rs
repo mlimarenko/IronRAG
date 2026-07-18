@@ -1,18 +1,13 @@
-#![allow(clippy::unwrap_used, clippy::expect_used)]
+#[path = "support/mcp_tool_call_support.rs"]
+mod mcp_tool_call_support;
 
 use anyhow::{Context, Result};
-use axum::{
-    Router,
-    body::Body,
-    http::{Request, StatusCode, header},
-};
+use axum::Router;
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use chrono::Utc;
-use http_body_util::BodyExt;
 use serde_json::{Value, json};
 use sqlx::{PgPool, postgres::PgPoolOptions};
 use tokio::time::{Duration, sleep};
-use tower::ServiceExt;
 use uuid::Uuid;
 
 use ironrag_backend::{
@@ -214,31 +209,15 @@ impl McpKnowledgeFixture {
     }
 
     async fn mcp_call(&self, token: &str, method: &str, params: Value) -> Result<Value> {
-        let response = self
-            .app()
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/v1/mcp")
-                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
-                    .header(header::CONTENT_TYPE, "application/json")
-                    .body(Body::from(
-                        json!({
-                            "jsonrpc": "2.0",
-                            "id": format!("mcp-knowledge-{}", method.replace('/', "-")),
-                            "method": method,
-                            "params": params,
-                        })
-                        .to_string(),
-                    ))
-                    .expect("build mcp knowledge request"),
-            )
-            .await
-            .with_context(|| format!("MCP method {method} failed"))?;
-        if response.status() != StatusCode::OK && response.status() != StatusCode::ACCEPTED {
-            anyhow::bail!("unexpected status {} for MCP method {method}", response.status());
-        }
-        response_json(response).await
+        mcp_tool_call_support::call_rpc(
+            self.app(),
+            "/v1/mcp",
+            token,
+            &format!("mcp-knowledge-{}", method.replace('/', "-")),
+            method,
+            params,
+        )
+        .await
     }
 
     async fn tools_list(&self, token: &str) -> Result<Vec<String>> {
@@ -416,86 +395,96 @@ impl McpKnowledgeFixture {
 
         repositories::create_runtime_graph_evidence(
             &self.state.persistence.postgres,
-            self.library_id,
-            "node",
-            top_entity.id,
-            Some(visible_document.document_id),
-            None,
-            None,
-            None,
-            Some("visible.md"),
-            None,
-            "Visible evidence for Orion.",
-            Some(0.95),
-            "visible-node",
+            repositories::CreateRuntimeGraphEvidenceInput {
+                library_id: self.library_id,
+                target_kind: "node",
+                target_id: top_entity.id,
+                document_id: Some(visible_document.document_id),
+                revision_id: None,
+                activated_by_attempt_id: None,
+                chunk_id: None,
+                source_file_name: Some("visible.md"),
+                page_ref: None,
+                evidence_text: "Visible evidence for Orion.",
+                confidence_score: Some(0.95),
+                evidence_context_key: "visible-node",
+            },
         )
         .await
         .context("failed to create visible node evidence")?;
         repositories::create_runtime_graph_evidence(
             &self.state.persistence.postgres,
-            self.library_id,
-            "edge",
-            top_relation.id,
-            Some(visible_document.document_id),
-            None,
-            None,
-            None,
-            Some("visible.md"),
-            None,
-            "Visible evidence for Orion -> Atlas.",
-            Some(0.9),
-            "visible-edge",
+            repositories::CreateRuntimeGraphEvidenceInput {
+                library_id: self.library_id,
+                target_kind: "edge",
+                target_id: top_relation.id,
+                document_id: Some(visible_document.document_id),
+                revision_id: None,
+                activated_by_attempt_id: None,
+                chunk_id: None,
+                source_file_name: Some("visible.md"),
+                page_ref: None,
+                evidence_text: "Visible evidence for Orion -> Atlas.",
+                confidence_score: Some(0.9),
+                evidence_context_key: "visible-edge",
+            },
         )
         .await
         .context("failed to create visible edge evidence")?;
         repositories::create_runtime_graph_evidence(
             &self.state.persistence.postgres,
-            self.library_id,
-            "node",
-            second_entity.id,
-            Some(secondary_visible_document.document_id),
-            None,
-            None,
-            None,
-            Some("visible-secondary.md"),
-            None,
-            "Secondary visible evidence for Atlas.",
-            Some(0.7),
-            "visible-secondary-node",
+            repositories::CreateRuntimeGraphEvidenceInput {
+                library_id: self.library_id,
+                target_kind: "node",
+                target_id: second_entity.id,
+                document_id: Some(secondary_visible_document.document_id),
+                revision_id: None,
+                activated_by_attempt_id: None,
+                chunk_id: None,
+                source_file_name: Some("visible-secondary.md"),
+                page_ref: None,
+                evidence_text: "Secondary visible evidence for Atlas.",
+                confidence_score: Some(0.7),
+                evidence_context_key: "visible-secondary-node",
+            },
         )
         .await
         .context("failed to create secondary visible node evidence")?;
         repositories::create_runtime_graph_evidence(
             &self.state.persistence.postgres,
-            self.library_id,
-            "node",
-            hidden_entity.id,
-            Some(hidden_document.document_id),
-            None,
-            None,
-            None,
-            Some("hidden.md"),
-            None,
-            "Hidden evidence for Noise.",
-            Some(0.2),
-            "hidden-node",
+            repositories::CreateRuntimeGraphEvidenceInput {
+                library_id: self.library_id,
+                target_kind: "node",
+                target_id: hidden_entity.id,
+                document_id: Some(hidden_document.document_id),
+                revision_id: None,
+                activated_by_attempt_id: None,
+                chunk_id: None,
+                source_file_name: Some("hidden.md"),
+                page_ref: None,
+                evidence_text: "Hidden evidence for Noise.",
+                confidence_score: Some(0.2),
+                evidence_context_key: "hidden-node",
+            },
         )
         .await
         .context("failed to create hidden node evidence")?;
         repositories::create_runtime_graph_evidence(
             &self.state.persistence.postgres,
-            self.library_id,
-            "edge",
-            hidden_relation.id,
-            Some(hidden_document.document_id),
-            None,
-            None,
-            None,
-            Some("hidden.md"),
-            None,
-            "Hidden evidence for Orion -> Noise.",
-            Some(0.1),
-            "hidden-edge",
+            repositories::CreateRuntimeGraphEvidenceInput {
+                library_id: self.library_id,
+                target_kind: "edge",
+                target_id: hidden_relation.id,
+                document_id: Some(hidden_document.document_id),
+                revision_id: None,
+                activated_by_attempt_id: None,
+                chunk_id: None,
+                source_file_name: Some("hidden.md"),
+                page_ref: None,
+                evidence_text: "Hidden evidence for Orion -> Noise.",
+                confidence_score: Some(0.1),
+                evidence_context_key: "hidden-edge",
+            },
         )
         .await
         .context("failed to create hidden edge evidence")?;
@@ -505,10 +494,12 @@ impl McpKnowledgeFixture {
             self.library_id,
             "ready",
             projection_version,
+            Uuid::now_v7(),
             4,
             3,
             Some(100.0),
             None,
+            true,
         )
         .await
         .context("failed to upsert runtime graph snapshot")?;
@@ -537,12 +528,6 @@ fn tool_names(value: &Value) -> Result<Vec<String>> {
                 .context("tool descriptor must contain a string name")
         })
         .collect()
-}
-
-async fn response_json(response: axum::response::Response) -> Result<Value> {
-    let bytes =
-        response.into_body().collect().await.context("failed to collect response body")?.to_bytes();
-    serde_json::from_slice(&bytes).context("failed to decode response json")
 }
 
 fn replace_database_name(database_url: &str, new_database: &str) -> Result<String> {
@@ -606,36 +591,36 @@ async fn mcp_tool_visibility_tracks_grants_without_legacy_fallbacks() -> Result<
         assert!(read_tools.contains(&"read_document".to_string()));
         assert!(read_tools.contains(&"get_runtime_execution".to_string()));
         assert!(read_tools.contains(&"get_runtime_execution_trace".to_string()));
-        assert!(read_tools.contains(&"get_web_ingest_run".to_string()));
-        assert!(read_tools.contains(&"list_web_ingest_run_pages".to_string()));
+        assert!(read_tools.contains(&"get_web_run".to_string()));
+        assert!(read_tools.contains(&"list_web_run_pages".to_string()));
         assert!(read_tools.contains(&"search_entities".to_string()));
         assert!(read_tools.contains(&"get_graph_topology".to_string()));
         assert!(read_tools.contains(&"list_relations".to_string()));
         assert!(read_tools.contains(&"get_communities".to_string()));
         assert!(!read_tools.contains(&"create_workspace".to_string()));
         assert!(!read_tools.contains(&"create_library".to_string()));
-        assert!(!read_tools.contains(&"upload_documents".to_string()));
-        assert!(!read_tools.contains(&"update_document".to_string()));
+        assert!(!read_tools.contains(&"create_documents".to_string()));
+        assert!(!read_tools.contains(&"create_document_revision".to_string()));
         assert!(!read_tools.contains(&"delete_document".to_string()));
-        assert!(!read_tools.contains(&"get_mutation_status".to_string()));
-        assert!(!read_tools.contains(&"submit_web_ingest_run".to_string()));
-        assert!(!read_tools.contains(&"cancel_web_ingest_run".to_string()));
+        assert!(!read_tools.contains(&"get_operation".to_string()));
+        assert!(!read_tools.contains(&"submit_web_run".to_string()));
+        assert!(!read_tools.contains(&"cancel_web_run".to_string()));
 
         let write_tools = fixture.tools_list(&write_token).await?;
         assert!(write_tools.contains(&"list_workspaces".to_string()));
         assert!(write_tools.contains(&"list_libraries".to_string()));
         assert!(write_tools.contains(&"search_documents".to_string()));
         assert!(write_tools.contains(&"read_document".to_string()));
-        assert!(write_tools.contains(&"upload_documents".to_string()));
-        assert!(write_tools.contains(&"update_document".to_string()));
+        assert!(write_tools.contains(&"create_documents".to_string()));
+        assert!(write_tools.contains(&"create_document_revision".to_string()));
         assert!(write_tools.contains(&"delete_document".to_string()));
-        assert!(write_tools.contains(&"get_mutation_status".to_string()));
+        assert!(write_tools.contains(&"get_operation".to_string()));
         assert!(write_tools.contains(&"get_runtime_execution".to_string()));
         assert!(write_tools.contains(&"get_runtime_execution_trace".to_string()));
-        assert!(write_tools.contains(&"submit_web_ingest_run".to_string()));
-        assert!(write_tools.contains(&"get_web_ingest_run".to_string()));
-        assert!(write_tools.contains(&"list_web_ingest_run_pages".to_string()));
-        assert!(write_tools.contains(&"cancel_web_ingest_run".to_string()));
+        assert!(write_tools.contains(&"submit_web_run".to_string()));
+        assert!(write_tools.contains(&"get_web_run".to_string()));
+        assert!(write_tools.contains(&"list_web_run_pages".to_string()));
+        assert!(write_tools.contains(&"cancel_web_run".to_string()));
         assert!(write_tools.contains(&"search_entities".to_string()));
         assert!(write_tools.contains(&"get_graph_topology".to_string()));
         assert!(write_tools.contains(&"list_relations".to_string()));
@@ -808,7 +793,7 @@ async fn upload_status_and_grounded_search_read_share_canonical_knowledge_truth(
                 &token,
                 "tools/call",
                 json!({
-                    "name": "upload_documents",
+                    "name": "create_documents",
                     "arguments": {
                         "library": fixture.library_ref.clone(),
                         "documents": [{
@@ -831,27 +816,31 @@ async fn upload_status_and_grounded_search_read_share_canonical_knowledge_truth(
         let receipt_document_id: Uuid =
             serde_json::from_value(receipt["documentId"].clone()).context("missing document id")?;
         assert!(receipt.get("runtimeTrackingId").is_none());
-        let receipt_id: Uuid =
-            serde_json::from_value(receipt["receiptId"].clone()).context("missing receipt id")?;
+        // `operationId` is the canonical async-operation id (renamed from
+        // `receiptId` — plan §6.3/§6.4 convergence), pollable through
+        // `get_operation`, the same canonical store `GET
+        // /v1/ops/operations/{operationId}` reads.
+        let operation_id: Uuid =
+            serde_json::from_value(receipt["operationId"].clone()).context("missing operation id")?;
 
         let status = fixture
             .mcp_call(
                 &token,
                 "tools/call",
                 json!({
-                    "name": "get_mutation_status",
+                    "name": "get_operation",
                     "arguments": {
-                        "receiptId": receipt_id,
+                        "operationId": operation_id,
                     },
                 }),
             )
             .await?;
         assert_eq!(status["result"]["isError"], json!(false));
-        assert_eq!(status["result"]["structuredContent"]["receiptId"], json!(receipt_id));
-        assert_eq!(
-            status["result"]["structuredContent"]["documentId"],
-            json!(receipt_document_id)
-        );
+        // `get_operation` reads the canonical `OpsAsyncOperation` row
+        // (flattened), not a content-mutation-specific receipt, so it no
+        // longer carries a `documentId` field — only the mutation receipt
+        // itself (`receipt`, above) does.
+        assert_eq!(status["result"]["structuredContent"]["id"], json!(operation_id));
         assert!(matches!(
             status["result"]["structuredContent"]["status"].as_str(),
             Some("accepted" | "processing" | "ready")

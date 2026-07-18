@@ -1,10 +1,6 @@
 use chrono::Utc;
-use uuid::Uuid;
 
-use crate::{
-    app::state::AppState, domains::ingest::IngestStageEvent,
-    infra::knowledge_rows::KnowledgeRevisionRow,
-};
+use crate::{domains::ingest::IngestStageEvent, infra::knowledge_rows::KnowledgeRevisionRow};
 
 use super::FailedRevisionReadiness;
 
@@ -40,7 +36,7 @@ fn has_completed_stage(stage_events: &[IngestStageEvent], stage_name: &str) -> b
         .any(|event| event.stage_name == stage_name && event.stage_state == "completed")
 }
 
-pub(crate) fn graph_extract_success_message(graph_ready: bool) -> &'static str {
+pub(crate) const fn graph_extract_success_message(graph_ready: bool) -> &'static str {
     if graph_ready {
         "graph candidates extracted and reconciled"
     } else {
@@ -48,7 +44,7 @@ pub(crate) fn graph_extract_success_message(graph_ready: bool) -> &'static str {
     }
 }
 
-pub(crate) fn graph_state_after_successful_extract(graph_ready: bool) -> &'static str {
+pub(crate) const fn graph_state_after_successful_extract(graph_ready: bool) -> &'static str {
     if graph_ready { "ready" } else { "processing" }
 }
 
@@ -61,84 +57,9 @@ pub(crate) fn graph_state_after_successful_extract(graph_ready: bool) -> &'stati
 /// Kept distinct from "processing" (reconcile pending after a *successful*
 /// extract) so operators and the document listing can tell a degraded
 /// graph apart from an in-flight one. Treated as not-graph-ready by every
-/// consumer (which match only "ready"/"graph_ready"), so introducing it is
+/// consumer (which match only "`ready"/"graph_ready`"), so introducing it is
 /// purely additive and needs no schema migration.
 pub(crate) const GRAPH_STATE_DEGRADED: &str = "graph_degraded";
-
-/// Mark a revision's vector + graph lanes failed after an embed/graph stage
-/// error.
-///
-/// `delete_vectors` controls whether the chunk vectors already persisted for
-/// this revision are wiped. On a TERMINAL failure they must be removed so a
-/// half-embedded revision cannot linger. On a TRANSIENT/retryable embed failure
-/// the caller passes `false` so the persisted batches survive for the next
-/// attempt to resume from (see
-/// [`QueryServiceError::preserves_partial_vectors`]); the revision still flips
-/// to `vector_state = failed` until a later attempt completes the remainder and
-/// the count-gated readiness promotes it back to ready.
-pub(crate) async fn fail_revision_vector_graph_readiness(
-    state: &AppState,
-    revision_id: Uuid,
-    reason: &str,
-    delete_vectors: bool,
-) -> anyhow::Result<u64> {
-    let revision = state
-        .document_store
-        .get_revision(revision_id)
-        .await
-        .map_err(|error| {
-            anyhow::anyhow!("failed to load failed revision {revision_id}: {error:#}")
-        })?
-        .ok_or_else(|| anyhow::anyhow!("knowledge revision {revision_id} not found"))?;
-    let now = Utc::now();
-    let updated = state
-        .document_store
-        .update_revision_readiness(
-            revision_id,
-            "text_readable",
-            "failed",
-            "failed",
-            revision.text_readable_at.or(Some(now)),
-            None,
-            None,
-            revision.superseded_by_revision_id,
-        )
-        .await
-        .map_err(|error| {
-            anyhow::anyhow!("failed to mark revision {revision_id} vector/graph failed: {error:#}")
-        })?;
-    if updated.is_none() {
-        return Err(anyhow::anyhow!(
-            "knowledge revision {revision_id} disappeared during failed readiness update"
-        ));
-    }
-
-    if !delete_vectors {
-        tracing::info!(
-            revision_id = %revision_id,
-            reason,
-            "marked revision vector/graph failed but preserved persisted chunk vectors for retry",
-        );
-        return Ok(0);
-    }
-
-    let deleted = state.search_store.delete_chunk_vectors_by_revision(revision_id).await.map_err(
-        |error| {
-            anyhow::anyhow!(
-                "failed to remove chunk vectors for failed revision {revision_id}: {error:#}"
-            )
-        },
-    )?;
-    if deleted > 0 {
-        tracing::warn!(
-            revision_id = %revision_id,
-            deleted,
-            reason,
-            "removed chunk vectors after marking revision vector/graph failed",
-        );
-    }
-    Ok(deleted)
-}
 
 #[cfg(test)]
 mod tests {

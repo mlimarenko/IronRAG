@@ -1,6 +1,6 @@
-import type { ReactNode } from "react";
+import type { ReactNode } from 'react'
 
-import { cn } from "@/shared/lib/utils";
+import { cn } from '@/shared/lib/utils'
 
 /**
  * The canonical status tones. Each maps 1:1 to a `.status-{tone}` utility in
@@ -10,13 +10,7 @@ import { cn } from "@/shared/lib/utils";
  * inline `status-badge ${cond ? 'status-ready' : 'status-failed'}` ternary.
  */
 export type StatusTone =
-  | "ready"
-  | "processing"
-  | "warning"
-  | "failed"
-  | "sparse"
-  | "queued"
-  | "stalled";
+  'ready' | 'processing' | 'warning' | 'failed' | 'sparse' | 'queued' | 'stalled'
 
 /**
  * Canonical status pill. Renders `.status-badge .status-{tone}` so every
@@ -24,26 +18,28 @@ export type StatusTone =
  * given status identically. Pass a translated label as children — the badge
  * carries no copy of its own.
  */
+type StatusBadgeProps = Readonly<{
+  tone: StatusTone
+  children: ReactNode
+  className?: string | undefined
+  title?: string | undefined
+  'aria-label'?: string | undefined
+}>
+
 export function StatusBadge({
   tone,
   children,
   className,
   title,
-  "aria-label": ariaLabel,
-}: {
-  tone: StatusTone;
-  children: ReactNode;
-  className?: string | undefined;
-  title?: string | undefined;
-  "aria-label"?: string | undefined;
-}) {
+  'aria-label': ariaLabel,
+}: StatusBadgeProps) {
   return (
     <span
-      className={cn("status-badge", `status-${tone}`, className)}
+      className={cn('status-badge', `status-${tone}`, className)}
       title={title}
       aria-label={ariaLabel}
     >
       {children}
     </span>
-  );
+  )
 }

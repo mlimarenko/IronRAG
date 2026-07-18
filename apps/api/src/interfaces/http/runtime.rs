@@ -7,6 +7,7 @@ use serde::Serialize;
 use uuid::Uuid;
 
 use crate::{
+    agent_runtime::response::public_runtime_failure_summary,
     agent_runtime::trace::{RuntimeExecutionTraceView, build_policy_summary, policy_summary},
     app::state::AppState,
     domains::agent_runtime::{
@@ -110,6 +111,8 @@ pub struct RuntimeExecutionTraceResponse {
     path = "/v1/runtime/executions/{executionId}",
     tag = "runtime",
     operation_id = "getRuntimeExecution",
+    summary = "Inspect one runtime execution.",
+    description = "Loads the agent/tool-level runtime execution snapshot: owner, task/surface kind, lifecycle state, active stage, turn budget/count, failure code, and a redaction-safe policy summary. Distinct from a query execution — a runtime execution can be owned by a query turn, a graph-extraction attempt, or another agentic task, and is referenced independently via `runtimeExecutionId` in the audit filter set. The MCP tool `get_runtime_execution` is a thin wrapper over this same read.",
     params(("executionId" = uuid::Uuid, Path, description = "Runtime execution identifier")),
     responses(
         (status = 200, description = "Runtime execution snapshot", body = RuntimeExecutionResponse),
@@ -154,6 +157,8 @@ pub async fn get_runtime_execution(
     path = "/v1/runtime/executions/{executionId}/trace",
     tag = "runtime",
     operation_id = "getRuntimeExecutionTrace",
+    summary = "Inspect the full stage/action/policy trace of one runtime execution.",
+    description = "Returns the complete `stages[]`/`actions[]`/`policy_decisions[]` trace recorded for one runtime execution, in addition to the execution snapshot itself. Use this for deep debugging of an agentic run: per-stage timing and outcome, per-action tool calls and usage, and every policy decision with its reason code. Traces are unbounded — long agentic executions can produce large stage/action counts; a size limit or pagination may be added at a later stage. The MCP tool `get_runtime_execution_trace` is a thin wrapper over this same read.",
     params(("executionId" = uuid::Uuid, Path, description = "Runtime execution identifier")),
     responses(
         (status = 200, description = "Runtime execution trace with stages, actions, and policy decisions", body = RuntimeExecutionTraceResponse),
@@ -198,6 +203,8 @@ fn map_runtime_execution_response(
     execution: RuntimeExecution,
     policy_summary: RuntimePolicySummary,
 ) -> RuntimeExecutionResponse {
+    let failure_summary =
+        public_runtime_failure_summary(execution.failure_code.as_deref(), &policy_summary);
     RuntimeExecutionResponse {
         execution_id: execution.id,
         owner_kind: execution.owner_kind,
@@ -212,7 +219,7 @@ fn map_runtime_execution_response(
         turn_count: execution.turn_count,
         parallel_action_limit: execution.parallel_action_limit,
         failure_code: execution.failure_code,
-        failure_summary: execution.failure_summary_redacted,
+        failure_summary,
         policy_summary,
         accepted_at: execution.accepted_at,
         completed_at: execution.completed_at,
@@ -276,5 +283,47 @@ fn map_runtime_trace_response(trace: RuntimeExecutionTraceView) -> RuntimeExecut
             .into_iter()
             .map(map_runtime_policy_decision_response)
             .collect(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use chrono::Utc;
+    use uuid::Uuid;
+
+    use super::map_runtime_execution_response;
+    use crate::domains::agent_runtime::{
+        RuntimeExecution, RuntimeExecutionOwnerKind, RuntimeLifecycleState, RuntimePolicySummary,
+        RuntimeSurfaceKind, RuntimeTaskKind,
+    };
+
+    #[test]
+    fn public_runtime_view_ignores_legacy_persisted_graph_diagnostic() {
+        let private_diagnostic = "http-runtime-view-sentinel-secret";
+        let now = Utc::now();
+        let execution = RuntimeExecution {
+            id: Uuid::now_v7(),
+            owner_kind: RuntimeExecutionOwnerKind::GraphExtractionAttempt,
+            owner_id: Uuid::now_v7(),
+            task_kind: RuntimeTaskKind::GraphExtract,
+            surface_kind: RuntimeSurfaceKind::Worker,
+            contract_name: "graph_extract".to_string(),
+            contract_version: "1".to_string(),
+            lifecycle_state: RuntimeLifecycleState::Failed,
+            active_stage: None,
+            turn_budget: 2,
+            turn_count: 1,
+            parallel_action_limit: 1,
+            failure_code: Some("graph_extract_failed".to_string()),
+            failure_summary_redacted: Some(private_diagnostic.to_string()),
+            accepted_at: now,
+            completed_at: Some(now),
+        };
+
+        let response = map_runtime_execution_response(execution, RuntimePolicySummary::default());
+        let exposed_json = serde_json::to_string(&response).expect("serialize runtime response");
+
+        assert_eq!(response.failure_summary.as_deref(), Some("graph_extract_failed"));
+        assert!(!exposed_json.contains(private_diagnostic));
     }
 }

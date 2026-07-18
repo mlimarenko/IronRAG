@@ -6,7 +6,7 @@ use crate::domains::query_ir::QueryIR;
 use crate::shared::extraction::technical_facts::TechnicalFactKind;
 
 use super::concise_document_subject_label;
-use super::fact_lookup::{best_matching_fact, build_document_labels};
+use super::fact_lookup::build_document_labels;
 use super::question_intent::{
     QuestionIntent, classify_question_or_ir_intents, has_question_intent,
 };
@@ -16,15 +16,6 @@ use super::technical_literals::{
 };
 use super::types::RuntimeMatchedChunk;
 use super::{CanonicalAnswerEvidence, technical_answer::document_focus_preference};
-
-#[cfg(test)]
-use super::retrieve::{focused_excerpt_for, score_value};
-#[cfg(test)]
-use super::technical_literal_extractors::extract_protocol_literals;
-#[cfg(test)]
-use super::technical_literals::{
-    document_local_focus_keywords, extract_url_literals, trim_literal_token,
-};
 
 fn fact_kind_matches(
     fact: &crate::infra::knowledge_rows::KnowledgeTechnicalFactRow,
@@ -123,40 +114,17 @@ fn collect_document_fact_values(
         .collect()
 }
 
-fn protocol_specificity_rank(protocol: &str) -> usize {
-    match protocol.to_ascii_lowercase().as_str() {
-        "graphql" | "soap" | "rest" | "grpc" | "websocket" | "ws" | "wss" => 2,
-        "http" | "https" | "tcp" | "udp" => 1,
-        _ => 0,
-    }
-}
-
-fn best_document_protocol(
+fn unique_document_protocol(
     evidence: &CanonicalAnswerEvidence,
-    document_labels: &HashMap<Uuid, String>,
     document_id: Uuid,
-    segment_keywords: &[String],
 ) -> Option<String> {
-    let document_label = document_labels.get(&document_id).map(String::as_str).unwrap_or_default();
-    best_matching_fact(
-        evidence,
-        document_labels,
-        TechnicalFactKind::Protocol,
-        |fact| fact.document_id == document_id,
-        |fact, _| {
-            let lowered_value = fact.display_value.to_ascii_lowercase();
-            let lowered_label = document_label.to_ascii_lowercase();
-            protocol_specificity_rank(&fact.display_value) * 100
-                + segment_keywords
-                    .iter()
-                    .map(|keyword| {
-                        usize::from(lowered_label.contains(keyword)) * 20
-                            + usize::from(lowered_value.contains(keyword)) * 8
-                    })
-                    .sum::<usize>()
-        },
-    )
-    .map(|matched| matched.fact.display_value.to_ascii_uppercase())
+    let protocols =
+        collect_document_fact_values(evidence, document_id, TechnicalFactKind::Protocol);
+    // Multiple protocols can describe different layers of the same interface
+    // (for example, an application protocol over a transport protocol).  Their
+    // names do not encode a domain-neutral precedence rule.  Yield to grounded
+    // synthesis instead of maintaining a handwritten protocol ranking.
+    (protocols.len() == 1).then(|| protocols[0].to_ascii_uppercase())
 }
 
 fn port_fact_score(
@@ -218,27 +186,24 @@ pub(super) fn build_port_and_protocol_answer_from_facts(
             document_labels.get(&document_id).map(String::as_str).unwrap_or_default();
         let subject = concise_document_subject_label(document_label);
 
-        if port_line.is_none() {
-            if let Some(port) =
+        if port_line.is_none()
+            && let Some(port) =
                 collect_document_fact_values(evidence, document_id, TechnicalFactKind::Port)
                     .into_iter()
                     .next()
-            {
-                port_line = Some(format!("{subject}: port `{port}`"));
-                port_document_id = Some(document_id);
-            }
+        {
+            port_line = Some(format!("{subject}: port `{port}`"));
+            port_document_id = Some(document_id);
         }
 
-        if protocol_line.is_none() || Some(document_id) == port_document_id {
-            if let Some(protocol) =
-                best_document_protocol(evidence, &document_labels, document_id, &segment_keywords)
-            {
-                let line = format!("{subject}: protocol `{protocol}`");
-                if Some(document_id) == port_document_id {
-                    fallback_protocol_line.get_or_insert(line);
-                } else {
-                    protocol_line = Some(line);
-                }
+        if (protocol_line.is_none() || Some(document_id) == port_document_id)
+            && let Some(protocol) = unique_document_protocol(evidence, document_id)
+        {
+            let line = format!("{subject}: protocol `{protocol}`");
+            if Some(document_id) == port_document_id {
+                fallback_protocol_line.get_or_insert(line);
+            } else {
+                protocol_line = Some(line);
             }
         }
     }
@@ -303,354 +268,6 @@ pub(super) fn build_port_answer_from_facts(
         });
 
         let subject = concise_document_subject_label(document_label);
-        if ports.is_empty() {
-            continue;
-        }
-        if ports.len() == 1 {
-            return Some(format!("{subject}: port `{}`.", ports[0]));
-        }
-
-        let rendered_ports =
-            ports.iter().map(|port| format!("`{port}`")).collect::<Vec<_>>().join(", ");
-        return Some(format!("{subject}: ports {rendered_ports}."));
-    }
-
-    None
-}
-
-#[cfg(test)]
-pub(super) fn extract_port_literals(text: &str, limit: usize) -> Vec<String> {
-    let mut values = Vec::<String>::new();
-    let mut seen = HashSet::<String>::new();
-
-    for url in extract_url_literals(text, limit) {
-        let Some((_, remainder)) = url.split_once("://") else {
-            continue;
-        };
-        let authority = remainder.split('/').next().unwrap_or_default();
-        let Some((_, port)) = authority.rsplit_once(':') else {
-            continue;
-        };
-        let port = port.trim();
-        if (2..=5).contains(&port.len())
-            && port.chars().all(|character| character.is_ascii_digit())
-            && seen.insert(port.to_string())
-        {
-            values.push(port.to_string());
-            if values.len() >= limit {
-                return values;
-            }
-        }
-    }
-
-    let cleaned = text.replace('\n', " ");
-    for separator in [":", "="] {
-        for keyword in ["port", "tcp_port", "udp_port"] {
-            let pattern = format!("{keyword}{separator}");
-            for fragment in cleaned.match_indices(&pattern) {
-                let value_start = fragment.0 + pattern.len();
-                let suffix = cleaned[value_start..].trim_start();
-                let digits = suffix
-                    .chars()
-                    .take_while(|character| character.is_ascii_digit())
-                    .collect::<String>();
-                if (2..=5).contains(&digits.len()) && seen.insert(digits.clone()) {
-                    values.push(digits);
-                    if values.len() >= limit {
-                        return values;
-                    }
-                }
-            }
-        }
-    }
-
-    let tokens = cleaned.split_whitespace().collect::<Vec<_>>();
-    for window in tokens.windows(2) {
-        let keyword = trim_literal_token(window[0]).trim_matches(':');
-        let value = trim_literal_token(window[1]).trim_matches(':');
-        if ["port", "tcp_port", "udp_port"]
-            .iter()
-            .any(|candidate| keyword.eq_ignore_ascii_case(candidate))
-            && (2..=5).contains(&value.len())
-            && value.chars().all(|character| character.is_ascii_digit())
-            && seen.insert(value.to_string())
-        {
-            values.push(value.to_string());
-            if values.len() >= limit {
-                return values;
-            }
-        }
-    }
-
-    values
-}
-
-#[cfg(test)]
-pub(super) fn build_port_and_protocol_answer(
-    question: &str,
-    query_ir: &QueryIR,
-    chunks: &[RuntimeMatchedChunk],
-) -> Option<String> {
-    let intents = classify_question_or_ir_intents(question, query_ir);
-    if !has_question_intent(&intents, QuestionIntent::Port)
-        || !has_question_intent(&intents, QuestionIntent::Protocol)
-        || chunks.is_empty()
-    {
-        return None;
-    }
-
-    let question_keywords = technical_literal_focus_keywords(question, Some(query_ir));
-    let focus_segments = technical_literal_focus_keyword_segments(question, Some(query_ir))
-        .into_iter()
-        .filter(|keywords| !keywords.is_empty())
-        .collect::<Vec<_>>();
-    if focus_segments.len() < 2 {
-        return None;
-    }
-
-    let mut ordered_document_ids = Vec::<Uuid>::new();
-    let mut per_document_chunks = HashMap::<Uuid, Vec<&RuntimeMatchedChunk>>::new();
-    for chunk in chunks {
-        if !per_document_chunks.contains_key(&chunk.document_id) {
-            ordered_document_ids.push(chunk.document_id);
-        }
-        per_document_chunks.entry(chunk.document_id).or_default().push(chunk);
-    }
-
-    let select_segment_document = |segment_keywords: &[String]| -> Option<Uuid> {
-        ordered_document_ids
-            .iter()
-            .filter_map(|document_id| {
-                let document_chunks = per_document_chunks.get(document_id)?;
-                let best_chunk_score = document_chunks
-                    .iter()
-                    .map(|chunk| {
-                        technical_chunk_selection_score(
-                            &format!("{} {}", chunk.excerpt, chunk.source_text),
-                            segment_keywords,
-                            false,
-                        )
-                    })
-                    .max()
-                    .unwrap_or_default();
-                (best_chunk_score > 0).then_some((best_chunk_score, *document_id))
-            })
-            .max_by(|left, right| {
-                left.0.cmp(&right.0).then_with(|| {
-                    let left_index = ordered_document_ids
-                        .iter()
-                        .position(|document_id| document_id == &left.1)
-                        .unwrap_or(usize::MAX);
-                    let right_index = ordered_document_ids
-                        .iter()
-                        .position(|document_id| document_id == &right.1)
-                        .unwrap_or(usize::MAX);
-                    right_index.cmp(&left_index)
-                })
-            })
-            .map(|(_, document_id)| document_id)
-    };
-
-    let mut port_line = None;
-    let mut port_document_id = None;
-    let mut protocol_line = None;
-    let mut fallback_protocol_line = None;
-
-    for segment_keywords in focus_segments {
-        let Some(document_id) = select_segment_document(&segment_keywords) else {
-            continue;
-        };
-        let Some(document_chunks) = per_document_chunks.get(&document_id) else {
-            continue;
-        };
-        let local_keywords = document_local_focus_keywords(
-            question,
-            Some(query_ir),
-            document_chunks,
-            &question_keywords,
-        );
-        let mut ranked_chunks = document_chunks.clone();
-        ranked_chunks.sort_by(|left, right| {
-            let left_match = technical_chunk_selection_score(
-                &format!("{} {}", left.excerpt, left.source_text),
-                &local_keywords,
-                false,
-            );
-            let right_match = technical_chunk_selection_score(
-                &format!("{} {}", right.excerpt, right.source_text),
-                &local_keywords,
-                false,
-            );
-            right_match
-                .cmp(&left_match)
-                .then_with(|| score_value(right.score).total_cmp(&score_value(left.score)))
-        });
-
-        let subject = concise_document_subject_label(&document_chunks[0].document_label);
-        let mut ports = Vec::<String>::new();
-        let mut protocols = Vec::<String>::new();
-        let mut seen_ports = HashSet::<String>::new();
-        let mut seen_protocols = HashSet::<String>::new();
-        for chunk in ranked_chunks.iter().take(4) {
-            let focused = focused_excerpt_for(&chunk.source_text, &local_keywords, 900);
-            let literal_source = if focused.trim().is_empty() {
-                chunk.source_text.as_str()
-            } else {
-                focused.as_str()
-            };
-            for port in extract_port_literals(literal_source, 2) {
-                if seen_ports.insert(port.clone()) {
-                    ports.push(port);
-                }
-            }
-            for protocol in extract_protocol_literals(literal_source, 2) {
-                if seen_protocols.insert(protocol.clone()) {
-                    protocols.push(protocol);
-                }
-            }
-        }
-
-        if port_line.is_none() && !ports.is_empty() {
-            port_line = Some(format!("{subject}: port `{}`", ports[0]));
-            port_document_id = Some(document_id);
-        }
-        if (protocol_line.is_none() || Some(document_id) == port_document_id)
-            && !protocols.is_empty()
-        {
-            let line = format!("{subject}: protocol `{}`", protocols[0]);
-            if Some(document_id) == port_document_id {
-                fallback_protocol_line.get_or_insert(line);
-            } else {
-                protocol_line = Some(line);
-            }
-        }
-    }
-
-    if protocol_line.is_none() {
-        protocol_line = fallback_protocol_line;
-    }
-
-    match (port_line, protocol_line) {
-        (Some(port), Some(protocol)) => Some(format!("{port}. {protocol}.")),
-        _ => None,
-    }
-}
-
-#[cfg(test)]
-pub(super) fn build_port_answer(
-    question: &str,
-    query_ir: &QueryIR,
-    chunks: &[RuntimeMatchedChunk],
-) -> Option<String> {
-    let intents = classify_question_or_ir_intents(question, query_ir);
-    if !has_question_intent(&intents, QuestionIntent::Port)
-        || has_question_intent(&intents, QuestionIntent::Protocol)
-        || technical_literal_focus_keyword_segments(question, Some(query_ir)).len() > 1
-        || chunks.is_empty()
-    {
-        return None;
-    }
-
-    let question_keywords = technical_literal_focus_keywords(question, Some(query_ir));
-    let focus_segments = technical_literal_focus_keyword_segments(question, Some(query_ir));
-    let mut ordered_document_ids = Vec::<Uuid>::new();
-    let mut per_document_chunks = HashMap::<Uuid, Vec<&RuntimeMatchedChunk>>::new();
-    for chunk in chunks {
-        if !per_document_chunks.contains_key(&chunk.document_id) {
-            ordered_document_ids.push(chunk.document_id);
-        }
-        per_document_chunks.entry(chunk.document_id).or_default().push(chunk);
-    }
-
-    let scoped_document_ids = if focus_segments.is_empty() {
-        ordered_document_ids.clone()
-    } else {
-        let mut selected = Vec::new();
-        let mut seen = HashSet::new();
-        for segment_keywords in &focus_segments {
-            let best_document = ordered_document_ids
-                .iter()
-                .filter_map(|document_id| {
-                    let document_chunks = per_document_chunks.get(document_id)?;
-                    let best_chunk_score = document_chunks
-                        .iter()
-                        .map(|chunk| {
-                            technical_chunk_selection_score(
-                                &format!("{} {}", chunk.excerpt, chunk.source_text),
-                                segment_keywords,
-                                false,
-                            )
-                        })
-                        .max()
-                        .unwrap_or_default();
-                    (best_chunk_score > 0).then_some((best_chunk_score, *document_id))
-                })
-                .max_by(|left, right| {
-                    left.0.cmp(&right.0).then_with(|| {
-                        let left_index = ordered_document_ids
-                            .iter()
-                            .position(|document_id| document_id == &left.1)
-                            .unwrap_or(usize::MAX);
-                        let right_index = ordered_document_ids
-                            .iter()
-                            .position(|document_id| document_id == &right.1)
-                            .unwrap_or(usize::MAX);
-                        right_index.cmp(&left_index)
-                    })
-                });
-            if let Some((_, document_id)) = best_document
-                && seen.insert(document_id)
-            {
-                selected.push(document_id);
-            }
-        }
-        if selected.is_empty() { ordered_document_ids.clone() } else { selected }
-    };
-
-    for document_id in scoped_document_ids {
-        let Some(document_chunks) = per_document_chunks.get(&document_id) else {
-            continue;
-        };
-        let local_keywords = document_local_focus_keywords(
-            question,
-            Some(query_ir),
-            document_chunks,
-            &question_keywords,
-        );
-        let mut ranked_chunks = document_chunks.clone();
-        ranked_chunks.sort_by(|left, right| {
-            let left_match = technical_chunk_selection_score(
-                &format!("{} {}", left.excerpt, left.source_text),
-                &local_keywords,
-                false,
-            );
-            let right_match = technical_chunk_selection_score(
-                &format!("{} {}", right.excerpt, right.source_text),
-                &local_keywords,
-                false,
-            );
-            right_match
-                .cmp(&left_match)
-                .then_with(|| score_value(right.score).total_cmp(&score_value(left.score)))
-        });
-
-        let mut ports = Vec::<String>::new();
-        let mut seen = HashSet::<String>::new();
-        for chunk in ranked_chunks.iter().take(4) {
-            let focused = focused_excerpt_for(&chunk.source_text, &local_keywords, 900);
-            let literal_source = if focused.trim().is_empty() {
-                chunk.source_text.as_str()
-            } else {
-                focused.as_str()
-            };
-            for port in extract_port_literals(literal_source, 4) {
-                if seen.insert(port.clone()) {
-                    ports.push(port);
-                }
-            }
-        }
-
-        let subject = concise_document_subject_label(&document_chunks[0].document_label);
         if ports.is_empty() {
             continue;
         }

@@ -1,16 +1,16 @@
-import type { Meta, StoryObj } from "@storybook/react";
+import type { Meta, StoryObj } from '@storybook/react'
 
-import { DataState } from "./DataState";
+import { DataState } from './DataState'
 
 type ExampleDocument = {
-  id: string;
-  title: string;
-};
+  id: string
+  title: string
+}
 
 const documents: ExampleDocument[] = [
-  { id: "doc-1", title: "Architecture Notes" },
-  { id: "doc-2", title: "Release Checklist" },
-];
+  { id: 'doc-1', title: 'Architecture Notes' },
+  { id: 'doc-2', title: 'Release Checklist' },
+]
 
 const renderDocuments = (items: ExampleDocument[]) => (
   <div className="w-80 rounded-lg border bg-card p-4">
@@ -23,19 +23,19 @@ const renderDocuments = (items: ExampleDocument[]) => (
       ))}
     </div>
   </div>
-);
+)
 
 const meta = {
-  title: "Shared/DataState",
+  title: 'Shared/DataState',
   component: DataState<ExampleDocument[]>,
   args: {
     query: { isLoading: false, error: null, data: documents },
     children: renderDocuments,
   },
-} satisfies Meta<typeof DataState<ExampleDocument[]>>;
+} satisfies Meta<typeof DataState<ExampleDocument[]>>
 
-export default meta;
-type Story = StoryObj<typeof meta>;
+export default meta
+type Story = StoryObj<typeof meta>
 
 export const Loading: Story = {
   render: () => (
@@ -43,17 +43,21 @@ export const Loading: Story = {
       {renderDocuments}
     </DataState>
   ),
-};
+}
 
-export const Error: Story = {
+export const FailureState: Story = {
   render: () => (
     <DataState
-      query={{ isLoading: false, error: new globalThis.Error("Request timed out"), data: undefined }}
+      query={{
+        isLoading: false,
+        error: new globalThis.Error('Request timed out'),
+        data: undefined,
+      }}
     >
       {renderDocuments}
     </DataState>
   ),
-};
+}
 
 export const Empty: Story = {
   render: () => (
@@ -68,7 +72,7 @@ export const Empty: Story = {
       {renderDocuments}
     </DataState>
   ),
-};
+}
 
 export const Content: Story = {
   render: () => (
@@ -76,4 +80,4 @@ export const Content: Story = {
       {renderDocuments}
     </DataState>
   ),
-};
+}

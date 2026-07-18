@@ -1,146 +1,6 @@
 use super::*;
 
 #[test]
-fn build_port_answer_skips_override_when_focused_document_has_no_grounded_port() {
-    let control_document_id = Uuid::now_v7();
-    let telegram_document_id = Uuid::now_v7();
-
-    let answer = build_port_answer(
-        "What port does the Acme Sample Console use?",
-        &query_ir_with_literals_and_target_types(["Acme Sample Console"], ["port"]),
-        &[
-            RuntimeMatchedChunk {
-                chunk_id: Uuid::now_v7(),
-                revision_id: Uuid::now_v7(),
-                chunk_index: 0,
-                chunk_kind: None,
-                document_id: control_document_id,
-                document_label: "Acme Sample Console - Example".to_string(),
-                excerpt:
-                    "Acme Sample Console is configuration management software for managed objects."
-                        .to_string(),
-                score_kind: crate::services::query::execution::RuntimeChunkScoreKind::Relevance,
-                score: Some(0.95),
-                source_text: repair_technical_layout_noise(
-                    "Acme Sample Console\nDescription\nAcme Sample Console is configuration management software for managed objects.",
-                ),
-            },
-            RuntimeMatchedChunk {
-                chunk_id: Uuid::now_v7(),
-                revision_id: Uuid::now_v7(),
-                chunk_index: 0,
-                chunk_kind: None,
-                document_id: telegram_document_id,
-                document_label: "Acme Telegram Bot - Example".to_string(),
-                excerpt: "Integration uses localhost:2026.".to_string(),
-                score_kind: crate::services::query::execution::RuntimeChunkScoreKind::Relevance,
-                score: Some(0.91),
-                source_text: repair_technical_layout_noise(
-                    "Acme Telegram Bot\nSettings\nport: 2026\nlocalhost:2026",
-                ),
-            },
-        ],
-    );
-
-    assert!(answer.is_none());
-}
-
-#[test]
-fn build_port_answer_skips_port_plus_protocol_questions() {
-    let rewards_document_id = Uuid::now_v7();
-    let profile_document_id = Uuid::now_v7();
-
-    let answer = build_port_answer(
-        "What is the default port for the Rewards Accounts REST API, and which protocol does the Customer Profile API use?",
-        &query_ir_with_literals_and_target_types(
-            ["Rewards Accounts REST API", "Customer Profile API"],
-            ["port", "protocol"],
-        ),
-        &[
-            RuntimeMatchedChunk {
-                chunk_id: Uuid::now_v7(),
-                revision_id: Uuid::now_v7(),
-                chunk_index: 0,
-                chunk_kind: None,
-                document_id: rewards_document_id,
-                document_label: "rewards_accounts_rest_reference.md".to_string(),
-                excerpt: "Default port: 8081".to_string(),
-                score_kind: crate::services::query::execution::RuntimeChunkScoreKind::Relevance,
-                score: Some(0.99),
-                source_text: repair_technical_layout_noise(
-                    "Rewards Accounts REST API Reference\nDefault port: 8081\nProtocol: REST over HTTP",
-                ),
-            },
-            RuntimeMatchedChunk {
-                chunk_id: Uuid::now_v7(),
-                revision_id: Uuid::now_v7(),
-                chunk_index: 0,
-                chunk_kind: None,
-                document_id: profile_document_id,
-                document_label: "customer_profile_soap_reference.md".to_string(),
-                excerpt: "Protocol: SOAP over HTTP".to_string(),
-                score_kind: crate::services::query::execution::RuntimeChunkScoreKind::Relevance,
-                score: Some(0.98),
-                source_text: repair_technical_layout_noise(
-                    "Customer Profile SOAP API Reference\nProtocol: SOAP over HTTP",
-                ),
-            },
-        ],
-    );
-
-    assert!(answer.is_none());
-}
-
-#[test]
-fn build_port_and_protocol_answer_handles_english_multi_document_question() {
-    let rewards_document_id = Uuid::now_v7();
-    let profile_document_id = Uuid::now_v7();
-
-    let answer = build_port_and_protocol_answer(
-            "What is the default port for the Rewards Accounts REST API, and which protocol does the Customer Profile API use?",
-            &query_ir_with_scope_literals_and_target_types(
-                QueryScope::MultiDocument,
-                ["Rewards Accounts REST API", "Customer Profile API"],
-                ["port", "protocol"],
-            ),
-            &[
-                RuntimeMatchedChunk {
-                    chunk_id: Uuid::now_v7(),
-                    revision_id: Uuid::now_v7(),
-                    chunk_index: 0,
-                    chunk_kind: None,
-                    document_id: rewards_document_id,
-                    document_label: "rewards_accounts_rest_reference.md".to_string(),
-                    excerpt: "Default port: 8081".to_string(),
-                    score_kind: crate::services::query::execution::RuntimeChunkScoreKind::Relevance,
-                    score: Some(0.99),
-                    source_text: repair_technical_layout_noise(
-                        "Rewards Accounts REST API Reference\nDefault port: 8081\nBase REST URL: http://demo.local:8081/rewards-api/rest",
-                    ),
-                },
-                RuntimeMatchedChunk {
-                    chunk_id: Uuid::now_v7(),
-                    revision_id: Uuid::now_v7(),
-                    chunk_index: 0,
-                    chunk_kind: None,
-                    document_id: profile_document_id,
-                    document_label: "customer_profile_soap_reference.md".to_string(),
-                    excerpt: "Protocol: SOAP over HTTP".to_string(),
-                    score_kind: crate::services::query::execution::RuntimeChunkScoreKind::Relevance,
-                    score: Some(0.98),
-                    source_text: repair_technical_layout_noise(
-                        "Customer Profile SOAP API Reference\nProtocol: SOAP over HTTP\nWSDL URL: http://demo.local:8080/customer-profile/ws/customer-profile.wsdl",
-                    ),
-                },
-            ],
-        )
-        .unwrap_or_default();
-
-    assert!(answer.contains("8081"), "{answer}");
-    assert!(answer.contains("SOAP"), "{answer}");
-}
-
-#[test]
 fn build_multi_document_endpoint_answer_handles_english_checkout_rewards_question() {
     let checkout_document_id = Uuid::now_v7();
     let rewards_document_id = Uuid::now_v7();
@@ -994,18 +854,6 @@ fn build_deterministic_grounded_answer_uses_port_and_protocol_facts() {
                 },
                 KnowledgeTechnicalFactRow {
                     fact_kind: "protocol".to_string(),
-                    canonical_value_text: "http".to_string(),
-                    canonical_value_exact: "http".to_string(),
-                    canonical_value_json: json!("http"),
-                    display_value: "http".to_string(),
-                    ..sample_technical_fact_row(
-                        Uuid::now_v7(),
-                        profile_document_id,
-                        profile_revision_id,
-                    )
-                },
-                KnowledgeTechnicalFactRow {
-                    fact_kind: "protocol".to_string(),
                     canonical_value_text: "soap".to_string(),
                     canonical_value_exact: "soap".to_string(),
                     canonical_value_json: json!("soap"),
@@ -1049,6 +897,69 @@ fn build_deterministic_grounded_answer_uses_port_and_protocol_facts() {
 
     assert!(answer.contains("`8081`"), "{answer}");
     assert!(answer.contains("`SOAP`"), "{answer}");
+}
+
+#[test]
+fn build_deterministic_grounded_answer_abstains_from_ranking_ambiguous_protocol_facts() {
+    let port_document_id = Uuid::now_v7();
+    let protocol_document_id = Uuid::now_v7();
+    let port_revision_id = Uuid::now_v7();
+    let protocol_revision_id = Uuid::now_v7();
+    let fact = |kind: &str, value: &str, document_id, revision_id| KnowledgeTechnicalFactRow {
+        fact_kind: kind.to_string(),
+        canonical_value_text: value.to_string(),
+        canonical_value_exact: value.to_string(),
+        canonical_value_json: json!(value),
+        display_value: value.to_string(),
+        ..sample_technical_fact_row(Uuid::now_v7(), document_id, revision_id)
+    };
+
+    let answer = build_deterministic_grounded_answer(
+        "Return the port of Service Alpha and the protocol of Service Beta.",
+        &query_ir_with_scope_literals_and_target_types(
+            QueryScope::MultiDocument,
+            ["Service Alpha", "Service Beta"],
+            ["port", "protocol"],
+        ),
+        &CanonicalAnswerEvidence {
+            bundle: None,
+            chunk_rows: Vec::new(),
+            structured_blocks: Vec::new(),
+            technical_facts: vec![
+                fact("port", "8081", port_document_id, port_revision_id),
+                fact("protocol", "http", protocol_document_id, protocol_revision_id),
+                fact("protocol", "soap", protocol_document_id, protocol_revision_id),
+            ],
+        },
+        &[
+            RuntimeMatchedChunk {
+                chunk_id: Uuid::now_v7(),
+                revision_id: port_revision_id,
+                chunk_index: 0,
+                chunk_kind: None,
+                document_id: port_document_id,
+                document_label: "Service Alpha reference".to_string(),
+                excerpt: "Service Alpha reference".to_string(),
+                score_kind: crate::services::query::execution::RuntimeChunkScoreKind::Relevance,
+                score: Some(0.99),
+                source_text: "Service Alpha reference".to_string(),
+            },
+            RuntimeMatchedChunk {
+                chunk_id: Uuid::now_v7(),
+                revision_id: protocol_revision_id,
+                chunk_index: 0,
+                chunk_kind: None,
+                document_id: protocol_document_id,
+                document_label: "Service Beta reference".to_string(),
+                excerpt: "Service Beta reference".to_string(),
+                score_kind: crate::services::query::execution::RuntimeChunkScoreKind::Relevance,
+                score: Some(0.98),
+                source_text: "Service Beta reference".to_string(),
+            },
+        ],
+    );
+
+    assert!(answer.is_none(), "ambiguous protocol facts must reach grounded synthesis");
 }
 
 #[test]

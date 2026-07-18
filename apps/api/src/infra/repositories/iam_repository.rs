@@ -27,7 +27,7 @@ impl SystemRole {
 
     /// Parses the canonical wire string into a [`SystemRole`].
     #[must_use]
-    pub fn from_str(value: &str) -> Option<Self> {
+    pub fn parse_wire(value: &str) -> Option<Self> {
         match value {
             "viewer" => Some(Self::Viewer),
             "operator" => Some(Self::Operator),
@@ -58,7 +58,7 @@ pub struct IamPrincipalProfileRow {
     pub role: Option<String>,
 }
 
-#[derive(Debug, Clone, FromRow)]
+#[derive(Clone, FromRow)]
 pub struct IamUserRow {
     pub principal_id: Uuid,
     pub login: String,
@@ -71,17 +71,33 @@ pub struct IamUserRow {
     pub role: String,
 }
 
+impl std::fmt::Debug for IamUserRow {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("IamUserRow")
+            .field("principal_id", &self.principal_id)
+            .field("login", &self.login)
+            .field("email", &self.email)
+            .field("display_name", &self.display_name)
+            .field("password_hash", &"<redacted>")
+            .field("auth_provider_kind", &self.auth_provider_kind)
+            .field("external_subject", &self.external_subject)
+            .field("role", &self.role)
+            .finish()
+    }
+}
+
 impl IamUserRow {
     /// Parses the stored role string into a [`SystemRole`], defaulting to
     /// the least-privileged `viewer` if the column ever holds an unknown value
     /// (fail-closed).
     #[must_use]
     pub fn system_role(&self) -> SystemRole {
-        SystemRole::from_str(&self.role).unwrap_or(SystemRole::Viewer)
+        SystemRole::parse_wire(&self.role).unwrap_or(SystemRole::Viewer)
     }
 }
 
-#[derive(Debug, Clone, FromRow)]
+#[derive(Clone, FromRow)]
 pub struct IamSessionRow {
     pub id: Uuid,
     pub principal_id: Uuid,
@@ -90,6 +106,21 @@ pub struct IamSessionRow {
     pub expires_at: DateTime<Utc>,
     pub revoked_at: Option<DateTime<Utc>>,
     pub last_seen_at: DateTime<Utc>,
+}
+
+impl std::fmt::Debug for IamSessionRow {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("IamSessionRow")
+            .field("id", &self.id)
+            .field("principal_id", &self.principal_id)
+            .field("session_secret_hash", &"<redacted>")
+            .field("issued_at", &self.issued_at)
+            .field("expires_at", &self.expires_at)
+            .field("revoked_at", &self.revoked_at)
+            .field("last_seen_at", &self.last_seen_at)
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, FromRow)]
@@ -105,13 +136,26 @@ pub struct IamApiTokenRow {
     pub last_used_at: Option<DateTime<Utc>>,
 }
 
-#[derive(Debug, Clone, FromRow)]
+#[derive(Clone, FromRow)]
 pub struct IamApiTokenSecretRow {
     pub token_principal_id: Uuid,
     pub secret_version: i32,
     pub secret_hash: String,
     pub issued_at: DateTime<Utc>,
     pub revoked_at: Option<DateTime<Utc>>,
+}
+
+impl std::fmt::Debug for IamApiTokenSecretRow {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("IamApiTokenSecretRow")
+            .field("token_principal_id", &self.token_principal_id)
+            .field("secret_version", &self.secret_version)
+            .field("secret_hash", &"<redacted>")
+            .field("issued_at", &self.issued_at)
+            .field("revoked_at", &self.revoked_at)
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, FromRow)]
@@ -427,7 +471,7 @@ pub async fn count_active_user_principals(postgres: &PgPool) -> Result<i64, sqlx
     .await
 }
 
-/// Lists every user principal (login/email/display_name/role/auth provider),
+/// Lists every user principal (`login/email/display_name/role/auth` provider),
 /// ordered by login for a stable admin surface.
 pub async fn list_users(postgres: &PgPool) -> Result<Vec<IamUserRow>, sqlx::Error> {
     sqlx::query_as::<_, IamUserRow>(
@@ -555,6 +599,103 @@ pub async fn set_user_role(
     )
     .bind(principal_id)
     .bind(role.as_str())
+    .fetch_optional(postgres)
+    .await
+}
+
+/// Deletes a user: the `iam_user` row and the user's grants are hard-deleted,
+/// active sessions are revoked, and the paired `iam_principal` row is
+/// soft-disabled (mirrors [`delete_revoked_api_token`]'s shape for the token
+/// principal case — the principal row stays resolvable by id for historical
+/// `actor_principal_id`/`created_by_principal_id` references, which use
+/// `ON DELETE SET NULL`, not a hard delete of `iam_principal` itself).
+///
+/// Returns `None` when no `iam_user` row exists for that principal.
+pub async fn delete_user(
+    postgres: &PgPool,
+    principal_id: Uuid,
+) -> Result<Option<IamUserRow>, sqlx::Error> {
+    let mut transaction = postgres.begin().await?;
+    let deleted_user = sqlx::query_as::<_, IamUserRow>(
+        "delete from iam_user
+         where principal_id = $1
+         returning
+            principal_id,
+            login,
+            email,
+            display_name,
+            password_hash,
+            auth_provider_kind,
+            external_subject,
+            role::text as role",
+    )
+    .bind(principal_id)
+    .fetch_optional(&mut *transaction)
+    .await?;
+
+    if deleted_user.is_some() {
+        sqlx::query("delete from iam_grant where principal_id = $1")
+            .bind(principal_id)
+            .execute(&mut *transaction)
+            .await?;
+        sqlx::query(
+            "update iam_session
+             set revoked_at = coalesce(revoked_at, now())
+             where principal_id = $1",
+        )
+        .bind(principal_id)
+        .execute(&mut *transaction)
+        .await?;
+        sqlx::query(
+            "update iam_principal
+             set status = 'disabled',
+                 disabled_at = coalesce(disabled_at, now())
+             where id = $1
+               and principal_kind = 'user'",
+        )
+        .bind(principal_id)
+        .execute(&mut *transaction)
+        .await?;
+    }
+
+    transaction.commit().await?;
+    Ok(deleted_user)
+}
+
+/// Partially updates an API token's mutable fields. `label` is left
+/// untouched when `None`; `expires_at` is left untouched when `None` (the
+/// PATCH body omitted the field) and set — including to `NULL`, clearing the
+/// expiry — when `Some(_)`. The permission scope has no column here and is
+/// intentionally not updatable through this function; see
+/// `PatchTokenRequest`'s doc comment for why.
+pub async fn update_api_token(
+    postgres: &PgPool,
+    principal_id: Uuid,
+    label: Option<&str>,
+    expires_at: Option<Option<DateTime<Utc>>>,
+) -> Result<Option<IamApiTokenRow>, sqlx::Error> {
+    let has_expires_at = expires_at.is_some();
+    let expires_at_value = expires_at.flatten();
+    sqlx::query_as::<_, IamApiTokenRow>(
+        "update iam_api_token
+         set label = coalesce($2, label),
+             expires_at = case when $3 then $4 else expires_at end
+         where principal_id = $1
+         returning
+            principal_id,
+            workspace_id,
+            label,
+            token_prefix,
+            status::text as status,
+            expires_at,
+            revoked_at,
+            issued_by_principal_id,
+            last_used_at",
+    )
+    .bind(principal_id)
+    .bind(label)
+    .bind(has_expires_at)
+    .bind(expires_at_value)
     .fetch_optional(postgres)
     .await
 }

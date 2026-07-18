@@ -1,10 +1,10 @@
-import { Admin, Ai, Audit, Catalog, Iam, Ops } from "./generated";
-import { unwrap } from "./runtime";
+import { Admin, Ai, Audit, Catalog, Iam, Ops } from './generated'
+import { unwrap } from './runtime'
 import {
   resolveProviderBaseUrlPolicy,
   resolveProviderCredentialPolicy,
   resolveProviderModelDiscovery,
-} from "@/shared/lib/ai-provider";
+} from '@/shared/lib/ai-provider'
 import type {
   CreateAccountRequest,
   UpdateAccountRequest,
@@ -16,7 +16,7 @@ import type {
   UpdateModelRequest,
   CreatePriceOverrideRequest,
   UpdatePriceOverrideRequest,
-} from "@/shared/types/api-requests";
+} from '@/shared/types/api-requests'
 import type {
   AdminSurface as AdminSurfaceResponse,
   AiAccountResponse,
@@ -54,68 +54,58 @@ import type {
   TokenResponse,
   AuditEventPageResponse,
   CreateUserRequest as GeneratedCreateUserRequest,
-  SetUserRoleRequest as GeneratedSetUserRoleRequest,
   SetUserAccessRequest as GeneratedSetUserAccessRequest,
   SystemRole,
   UserAccessResponse,
   UserResponse,
-  WebIngestPattern,
-  WebIngestUrlFilter,
-} from "./generated";
+} from './generated'
 
-type ListAuditEventsParams = NonNullable<ListAuditEventsData["query"]>;
-type ListIngestQueueParams = NonNullable<ListIngestQueueData["query"]>;
+type ListAuditEventsParams = NonNullable<ListAuditEventsData['query']>
+type ListIngestQueueParams = NonNullable<ListIngestQueueData['query']>
 
-type AiScopeParams = NonNullable<ListAiAccountsData["query"]>;
+type AiScopeParams = NonNullable<ListAiAccountsData['query']>
 
-export type ListModelsParams = NonNullable<ListAiModelsData["query"]>;
-type ListPricesParams = NonNullable<ListAiPricesData["query"]>;
+export type ListModelsParams = NonNullable<ListAiModelsData['query']>
+type ListPricesParams = NonNullable<ListAiPricesData['query']>
+export type { WebIngestPattern, WebIngestUrlFilter } from './generated'
 export type {
   CatalogLibraryResponse,
   CatalogWorkspaceResponse,
   IngestQueueMoveDirection,
   IngestQueueBulkAction,
   IngestQueueResponse,
-  WebIngestPattern,
-  WebIngestUrlFilter,
-};
+}
 
-type RecognitionPolicy = UpdateLibraryRecognitionPolicyRequest;
-type WebIngestPolicy = UpdateLibraryWebIngestPolicyRequest;
+type RecognitionPolicy = UpdateLibraryRecognitionPolicyRequest
+type WebIngestPolicy = UpdateLibraryWebIngestPolicyRequest
 type UpdateLibraryMcpSettingsRequest = {
-  includeDocumentHintInMcpAnswers: boolean;
-};
+  includeDocumentHintInMcpAnswers: boolean
+}
 
 function toGeneratedRequest<T extends object>(value: object): T {
-  const body: Record<string, unknown> = {};
+  const body: Record<string, unknown> = {}
   for (const [key, fieldValue] of Object.entries(value)) {
     if (fieldValue !== undefined) {
-      body[key] = fieldValue;
+      body[key] = fieldValue
     }
   }
-  return body as T;
+  return body as T
 }
 
 const MODEL_AVAILABILITY_STATE: Record<ModelAvailabilityState, true> = {
   available: true,
   unavailable: true,
   unknown: true,
-};
+}
 
-const PROVIDER_CAPABILITY_STATES = new Set([
-  "supported",
-  "unsupported",
-  "unknown",
-]);
+const PROVIDER_CAPABILITY_STATES = new Set(['supported', 'unsupported', 'unknown'])
 
-function isModelAvailabilityState(
-  value: unknown,
-): value is ModelAvailabilityState {
-  return typeof value === "string" && value in MODEL_AVAILABILITY_STATE;
+function isModelAvailabilityState(value: unknown): value is ModelAvailabilityState {
+  return typeof value === 'string' && value in MODEL_AVAILABILITY_STATE
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
-  return Boolean(value && typeof value === "object" && !Array.isArray(value));
+  return Boolean(value && typeof value === 'object' && !Array.isArray(value))
 }
 
 function assertStringEnumField(
@@ -124,13 +114,8 @@ function assertStringEnumField(
   policyName: string,
   allowedValues: Set<string>,
 ) {
-  if (
-    typeof value[fieldName] !== "string" ||
-    !allowedValues.has(value[fieldName])
-  ) {
-    throw new Error(
-      `Provider catalog entry ${policyName}.${fieldName} is not canonical`,
-    );
+  if (typeof value[fieldName] !== 'string' || !allowedValues.has(value[fieldName])) {
+    throw new Error(`Provider catalog entry ${policyName}.${fieldName} is not canonical`)
   }
 }
 
@@ -139,112 +124,97 @@ function assertRecordField(
   fieldName: string,
   providerId: string,
 ): Record<string, unknown> {
-  const field = value[fieldName];
+  const field = value[fieldName]
   if (!isRecord(field)) {
-    throw new Error(
-      `Provider catalog entry ${providerId}.${fieldName} must be an object`,
-    );
+    throw new Error(`Provider catalog entry ${providerId}.${fieldName} must be an object`)
   }
-  return field;
+  return field
 }
 
-export function parseModelCatalogResponse(
-  payload: unknown,
-): ModelCatalogEntryResponse[] {
+export function parseModelCatalogResponse(payload: unknown): ModelCatalogEntryResponse[] {
   if (!Array.isArray(payload)) {
-    throw new Error("Model catalog response must be an array");
+    throw new TypeError('Model catalog response must be an array')
   }
 
   for (const entry of payload) {
-    if (!entry || typeof entry !== "object") {
-      throw new Error("Model catalog entry must be an object");
+    if (!entry || typeof entry !== 'object') {
+      throw new TypeError('Model catalog entry must be an object')
     }
 
-    const model = entry as Partial<ModelCatalogEntryResponse>;
-    const id = typeof model.id === "string" ? model.id : "<unknown>";
+    const model = entry as Partial<ModelCatalogEntryResponse>
+    const id = typeof model.id === 'string' ? model.id : '<unknown>'
     if (!isModelAvailabilityState(model.availabilityState)) {
-      throw new Error(
-        `Model catalog entry ${id} has invalid availabilityState`,
-      );
+      throw new Error(`Model catalog entry ${id} has invalid availabilityState`)
     }
     if (!Array.isArray(model.availableAccountIds)) {
-      throw new Error(
-        `Model catalog entry ${id} has invalid availableAccountIds`,
-      );
+      throw new TypeError(`Model catalog entry ${id} has invalid availableAccountIds`)
     }
   }
 
-  return payload as ModelCatalogEntryResponse[];
+  return payload as ModelCatalogEntryResponse[]
 }
 
-export function parseProviderCatalogResponse(
-  payload: unknown,
-): ProviderCatalogEntryResponse[] {
+export function parseProviderCatalogResponse(payload: unknown): ProviderCatalogEntryResponse[] {
   if (!Array.isArray(payload)) {
-    throw new Error("Provider catalog response must be an array");
+    throw new TypeError('Provider catalog response must be an array')
   }
 
   for (const entry of payload) {
     if (!isRecord(entry)) {
-      throw new Error("Provider catalog entry must be an object");
+      throw new TypeError('Provider catalog entry must be an object')
     }
 
-    const id = typeof entry.id === "string" ? entry.id : "<unknown>";
+    const id = typeof entry.id === 'string' ? entry.id : '<unknown>'
     resolveProviderCredentialPolicy({
       credentialPolicy: entry.credentialPolicy,
-    });
-    resolveProviderBaseUrlPolicy({ baseUrlPolicy: entry.baseUrlPolicy });
-    resolveProviderModelDiscovery({ modelDiscovery: entry.modelDiscovery });
+    })
+    resolveProviderBaseUrlPolicy({ baseUrlPolicy: entry.baseUrlPolicy })
+    resolveProviderModelDiscovery({ modelDiscovery: entry.modelDiscovery })
 
-    const capabilities = assertRecordField(entry, "capabilities", id);
+    const capabilities = assertRecordField(entry, 'capabilities', id)
     for (const capabilityName of [
-      "chat",
-      "embeddings",
-      "modelDiscovery",
-      "streaming",
-      "tools",
-      "vision",
+      'chat',
+      'embeddings',
+      'modelDiscovery',
+      'streaming',
+      'tools',
+      'vision',
     ]) {
       assertStringEnumField(
         capabilities,
         capabilityName,
-        "capabilities",
+        'capabilities',
         PROVIDER_CAPABILITY_STATES,
-      );
+      )
     }
   }
 
-  return payload as ProviderCatalogEntryResponse[];
+  return payload as ProviderCatalogEntryResponse[]
 }
 
-export const ADMIN_MODEL_CATALOG_QUERY_KEY = ["admin", "ai", "models"] as const;
+export const ADMIN_MODEL_CATALOG_QUERY_KEY = ['admin', 'ai', 'models'] as const
 
 export function adminModelCatalogQueryKey(params: ListModelsParams = {}) {
-  return [...ADMIN_MODEL_CATALOG_QUERY_KEY, params] as const;
+  return [...ADMIN_MODEL_CATALOG_QUERY_KEY, params] as const
 }
 
 export function adminModelCatalogOptions(params: ListModelsParams = {}) {
   return {
     queryKey: adminModelCatalogQueryKey(params),
     queryFn: () => adminApi.listModels(params),
-  };
+  }
 }
 
-export type MintTokenRequest = GeneratedMintTokenRequest;
-export type CreateUserRequest = GeneratedCreateUserRequest;
-export type SetUserRoleRequest = GeneratedSetUserRoleRequest;
-export type SetUserAccessRequest = GeneratedSetUserAccessRequest;
-export type { SystemRole, UserAccessResponse, UserResponse };
+export type MintTokenRequest = GeneratedMintTokenRequest
+export type CreateUserRequest = GeneratedCreateUserRequest
+export type SetUserAccessRequest = GeneratedSetUserAccessRequest
+export type { SystemRole, UserAccessResponse, UserResponse }
 
 export const adminApi = {
-  listTokens: () =>
-    Iam.listIamTokens({}).then((result) => unwrap<TokenResponse[]>(result)),
-  listUsers: () =>
-    Iam.listIamUsers({}).then((result) => unwrap<UserResponse[]>(result)),
+  listTokens: () => Iam.listIamTokens({}).then((result) => unwrap<TokenResponse[]>(result)),
+  listUsers: () => Iam.listIamUsers({}).then((result) => unwrap<UserResponse[]>(result)),
   createUser: (request: CreateUserRequest) =>
-    Iam.createIamUser({ body: request }).then((result) =>
-      unwrap<UserResponse>(result),
-    ),
+    Iam.createIamUser({ body: request }).then((result) => unwrap<UserResponse>(result)),
   setUserRole: (principalId: string, role: SystemRole) =>
     Iam.setIamUserRole({
       path: { principalId },
@@ -255,30 +225,22 @@ export const adminApi = {
       unwrap<UserAccessResponse>(result),
     ),
   setUserAccess: (principalId: string, request: SetUserAccessRequest) =>
-    Iam.setIamUserAccess({ path: { principalId }, body: request }).then(
-      (result) => unwrap<UserAccessResponse>(result),
+    Iam.setIamUserAccess({ path: { principalId }, body: request }).then((result) =>
+      unwrap<UserAccessResponse>(result),
     ),
   mintToken: (request: MintTokenRequest) =>
-    Iam.mintIamToken({ body: request }).then((result) =>
-      unwrap<MintTokenResponse>(result),
-    ),
+    Iam.mintIamToken({ body: request }).then((result) => unwrap<MintTokenResponse>(result)),
   revokeToken: (principalId: string) =>
-    Iam.revokeIamToken({ path: { tokenPrincipalId: principalId } }).then(
-      (result) => {
-        unwrap(result);
-      },
-    ),
+    Iam.revokeIamToken({ path: { tokenPrincipalId: principalId } }).then((result) => {
+      unwrap(result)
+    }),
   deleteToken: (principalId: string) =>
-    Iam.deleteIamToken({ path: { tokenPrincipalId: principalId } }).then(
-      (result) => {
-        unwrap(result);
-      },
-    ),
+    Iam.deleteIamToken({ path: { tokenPrincipalId: principalId } }).then((result) => {
+      unwrap(result)
+    }),
 
   listProviders: () =>
-    Ai.listAiProviders().then((result) =>
-      parseProviderCatalogResponse(unwrap(result)),
-    ),
+    Ai.listAiProviders().then((result) => parseProviderCatalogResponse(unwrap(result))),
   createProvider: (data: CreateProviderRequest) =>
     Ai.createAiProvider({
       body: toGeneratedRequest<GeneratedCreateProviderRequest>(data),
@@ -290,12 +252,10 @@ export const adminApi = {
     }).then((result) => unwrap<ProviderCatalogEntryResponse>(result)),
   deleteProvider: (providerId: string) =>
     Ai.deleteAiProvider({ path: { providerId } }).then((result) => {
-      unwrap(result);
+      unwrap(result)
     }),
   listModels: (params: ListModelsParams = {}) =>
-    Ai.listAiModels({ query: params }).then((result) =>
-      parseModelCatalogResponse(unwrap(result)),
-    ),
+    Ai.listAiModels({ query: params }).then((result) => parseModelCatalogResponse(unwrap(result))),
   createModel: (data: CreateModelRequest) =>
     Ai.createAiModel({
       body: toGeneratedRequest<GeneratedCreateModelRequest>(data),
@@ -307,12 +267,10 @@ export const adminApi = {
     }).then((result) => unwrap<ModelCatalogEntryResponse>(result)),
   deleteModel: (modelId: string) =>
     Ai.deleteAiModel({ path: { modelId } }).then((result) => {
-      unwrap(result);
+      unwrap(result)
     }),
   listAccounts: (params: AiScopeParams = {}) =>
-    Ai.listAiAccounts({ query: params }).then((result) =>
-      unwrap<AiAccountResponse[]>(result),
-    ),
+    Ai.listAiAccounts({ query: params }).then((result) => unwrap<AiAccountResponse[]>(result)),
   createAccount: (data: CreateAccountRequest) =>
     Ai.createAiAccount({
       body: toGeneratedRequest<GeneratedCreateAccountRequest>(data),
@@ -324,11 +282,9 @@ export const adminApi = {
     }).then((result) => unwrap<AiAccountResponse>(result)),
   deleteAccount: (accountId: string) =>
     Ai.deleteAiAccount({ path: { accountId } }).then((result) => {
-      unwrap(result);
+      unwrap(result)
     }),
-  listBindings: (
-    params: Required<Pick<AiScopeParams, "scopeKind">> & AiScopeParams,
-  ) =>
+  listBindings: (params: Required<Pick<AiScopeParams, 'scopeKind'>> & AiScopeParams) =>
     Ai.listAiLibraryBindings({ query: params }).then((result) =>
       unwrap<AiBindingResponse[]>(result),
     ),
@@ -343,7 +299,7 @@ export const adminApi = {
     }).then((result) => unwrap<AiBindingResponse>(result)),
   deleteBinding: (bindingId: string) =>
     Ai.deleteAiLibraryBinding({ path: { bindingId } }).then((result) => {
-      unwrap(result);
+      unwrap(result)
     }),
   validateBinding: (bindingId: string) =>
     Ai.validateAiLibraryBinding({ path: { bindingId } }).then((result) =>
@@ -364,25 +320,21 @@ export const adminApi = {
     }).then((result) => unwrap<PriceCatalogEntryResponse>(result)),
   deletePriceOverride: (priceId: string) =>
     Ai.deleteAiPriceOverride({ path: { priceId } }).then((result) => {
-      unwrap(result);
+      unwrap(result)
     }),
 
   getAdminSurface: () =>
-    Admin.getAdminSurface().then((result) =>
-      unwrap<AdminSurfaceResponse>(result),
-    ),
+    Admin.getAdminSurface().then((result) => unwrap<AdminSurfaceResponse>(result)),
 
   listAuditEvents: (params: ListAuditEventsParams = {}) =>
     Audit.listAuditEvents({ query: params }).then((result) =>
       unwrap<AuditEventPageResponse>(result),
     ),
   listIngestQueue: (params: ListIngestQueueParams = {}) =>
-    Ops.listIngestQueue({ query: params }).then((result) =>
-      unwrap<IngestQueueResponse>(result),
-    ),
+    Ops.listIngestQueue({ query: params }).then((result) => unwrap<IngestQueueResponse>(result)),
   moveIngestQueueJob: (jobId: string, direction: IngestQueueMoveDirection) =>
-    Ops.moveIngestQueueJob({ path: { jobId }, body: { direction } }).then(
-      (result) => unwrap<IngestQueueResponse>(result),
+    Ops.moveIngestQueueJob({ path: { jobId }, body: { direction } }).then((result) =>
+      unwrap<IngestQueueResponse>(result),
     ),
   retryIngestQueueJob: (jobId: string) =>
     Ops.retryIngestQueueJob({ path: { jobId } }).then((result) =>
@@ -406,9 +358,7 @@ export const adminApi = {
     ),
 
   listWorkspaces: () =>
-    Catalog.listCatalogWorkspaces().then((result) =>
-      unwrap<CatalogWorkspaceResponse[]>(result),
-    ),
+    Catalog.listCatalogWorkspaces().then((result) => unwrap<CatalogWorkspaceResponse[]>(result)),
   listLibraries: (workspaceId: string) =>
     Catalog.listCatalogLibraries({ path: { workspaceId } }).then((result) =>
       unwrap<CatalogLibraryResponse[]>(result),
@@ -427,13 +377,10 @@ export const adminApi = {
       path: { libraryId },
       body: policy,
     }).then((result) => unwrap<CatalogLibraryResponse>(result)),
-  updateLibraryMcpSettings: async (
-    libraryId: string,
-    body: UpdateLibraryMcpSettingsRequest,
-  ) => {
+  updateLibraryMcpSettings: async (libraryId: string, body: UpdateLibraryMcpSettingsRequest) => {
     const existing = unwrap<CatalogLibraryResponse>(
       await Catalog.getCatalogLibrary({ path: { libraryId } }),
-    );
+    )
     return Catalog.updateCatalogLibrary({
       path: { libraryId },
       body: {
@@ -444,15 +391,15 @@ export const adminApi = {
         lifecycleState: existing.lifecycleState,
         includeDocumentHintInMcpAnswers: body.includeDocumentHintInMcpAnswers,
       },
-    }).then((result) => unwrap<CatalogLibraryResponse>(result));
+    }).then((result) => unwrap<CatalogLibraryResponse>(result))
   },
   createWorkspace: (name: string) =>
-    Catalog.createCatalogWorkspace({ body: { displayName: name } }).then(
-      (result) => unwrap<CatalogWorkspaceResponse>(result),
+    Catalog.createCatalogWorkspace({ body: { displayName: name } }).then((result) =>
+      unwrap<CatalogWorkspaceResponse>(result),
     ),
   createLibrary: (workspaceId: string, name: string) =>
     Catalog.createCatalogLibrary({
       path: { workspaceId },
       body: { displayName: name },
     }).then((result) => unwrap<CatalogLibraryResponse>(result)),
-};
+}

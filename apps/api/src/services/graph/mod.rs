@@ -11,7 +11,6 @@ pub(super) mod merge;
 pub(super) mod projection;
 pub(crate) mod projection_guard;
 pub(crate) mod quality_guard;
-pub mod raptor;
 pub(super) mod rebuild;
 pub(crate) mod reconciliation_scope;
 pub mod service;

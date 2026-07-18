@@ -1,5 +1,5 @@
-import { memo, useMemo, useRef, useState, type KeyboardEvent } from 'react';
-import type { TFunction } from 'i18next';
+import { memo, useMemo, useRef, useState, type KeyboardEvent } from 'react'
+import type { TFunction } from 'i18next'
 import {
   ChevronLeft,
   ChevronRight,
@@ -9,57 +9,68 @@ import {
   Plus,
   Search,
   Trash2,
-} from 'lucide-react';
-import { Button } from '@/shared/components/ui/button';
-import { Input } from '@/shared/components/ui/input';
+} from 'lucide-react'
+import { Button } from '@/shared/components/ui/button'
+import { Input } from '@/shared/components/ui/input'
 import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
   DropdownMenuTrigger,
-} from '@/shared/components/ui/dropdown-menu';
-import { WorkbenchEmptyState } from '@/shared/components/layout/WorkbenchEmptyState';
-import { cn } from '@/shared/lib/utils';
-import type { AssistantSession } from '@/shared/types';
+} from '@/shared/components/ui/dropdown-menu'
+import { WorkbenchEmptyState } from '@/shared/components/layout/WorkbenchEmptyState'
+import { cn } from '@/shared/lib/utils'
+import type { AssistantSession } from '@/shared/types'
 
-type SessionRailProps = {
-  id?: string;
-  className?: string;
-  t: TFunction;
-  locale: string;
-  sessions: AssistantSession[];
-  activeSession: string | null;
-  collapsed: boolean;
-  disabled?: boolean;
-  loading?: boolean;
-  sessionSearch: string;
-  onCollapsedChange: (collapsed: boolean) => void;
-  onSessionSearchChange: (value: string) => void;
-  onNewSession: () => void;
-  onSelectSession: (id: string) => void;
-  onRenameSession: (id: string, title: string) => void;
-  onDeleteSession: (id: string) => void;
-};
+type SessionRailProps = Readonly<{
+  id?: string
+  className?: string
+  t: TFunction
+  locale: string
+  sessions: AssistantSession[]
+  activeSession: string | null
+  collapsed: boolean
+  disabled?: boolean
+  loading?: boolean
+  sessionSearch: string
+  onCollapsedChange: (collapsed: boolean) => void
+  onSessionSearchChange: (value: string) => void
+  onNewSession: () => void
+  onSelectSession: (id: string) => void
+  onRenameSession: (id: string, title: string) => void
+  onDeleteSession: (id: string) => void
+}>
 
-type DateBucketId = 'Today' | 'Yesterday' | 'Earlier';
+type DateBucketId = 'Today' | 'Yesterday' | 'Earlier'
 
 type SessionGroup = {
-  id: DateBucketId;
-  sessions: AssistantSession[];
-};
+  id: DateBucketId
+  sessions: AssistantSession[]
+}
 
 function startOfDay(date: Date): number {
-  return new Date(date.getFullYear(), date.getMonth(), date.getDate()).getTime();
+  return new Date(date.getFullYear(), date.getMonth(), date.getDate()).getTime()
 }
 
 /** Buckets a timestamp into Today / Yesterday / Earlier relative to `now`. */
 function bucketFor(updatedAt: string, todayStart: number, dayMs: number): DateBucketId {
-  const ts = Date.parse(updatedAt);
-  if (!Number.isFinite(ts)) return 'Earlier';
-  if (ts >= todayStart) return 'Today';
-  if (ts >= todayStart - dayMs) return 'Yesterday';
-  return 'Earlier';
+  const ts = Date.parse(updatedAt)
+  if (!Number.isFinite(ts)) return 'Earlier'
+  if (ts >= todayStart) return 'Today'
+  if (ts >= todayStart - dayMs) return 'Yesterday'
+  return 'Earlier'
 }
+
+type SessionRowProps = Readonly<{
+  t: TFunction
+  session: AssistantSession
+  active: boolean
+  disabled: boolean
+  dateLabel: string
+  onSelect: () => void
+  onRename: (title: string) => void
+  onDelete: () => void
+}>
 
 function SessionRow({
   t,
@@ -70,37 +81,28 @@ function SessionRow({
   onSelect,
   onRename,
   onDelete,
-}: {
-  t: TFunction;
-  session: AssistantSession;
-  active: boolean;
-  disabled: boolean;
-  dateLabel: string;
-  onSelect: () => void;
-  onRename: (title: string) => void;
-  onDelete: () => void;
-}) {
-  const [editing, setEditing] = useState(false);
-  const [draft, setDraft] = useState(session.title || '');
-  const inputRef = useRef<HTMLInputElement>(null);
-  const title = session.title || t('assistant.untitledSession');
+}: SessionRowProps) {
+  const [editing, setEditing] = useState(false)
+  const [draft, setDraft] = useState(session.title || '')
+  const inputRef = useRef<HTMLInputElement>(null)
+  const title = session.title || t('assistant.untitledSession')
 
   const commit = () => {
-    setEditing(false);
-    const next = draft.trim();
-    if (next && next !== title) onRename(next);
-  };
+    setEditing(false)
+    const next = draft.trim()
+    if (next && next !== title) onRename(next)
+  }
 
   const handleEditKeyDown = (event: KeyboardEvent<HTMLInputElement>) => {
     if (event.key === 'Enter') {
-      event.preventDefault();
-      commit();
+      event.preventDefault()
+      commit()
     } else if (event.key === 'Escape') {
-      event.preventDefault();
-      setEditing(false);
-      setDraft(session.title || '');
+      event.preventDefault()
+      setEditing(false)
+      setDraft(session.title || '')
     }
-  };
+  }
 
   if (editing) {
     return (
@@ -108,6 +110,7 @@ function SessionRow({
         <Input
           ref={inputRef}
           autoFocus
+          maxLength={72}
           value={draft}
           onChange={(e) => setDraft(e.target.value)}
           onKeyDown={handleEditKeyDown}
@@ -116,7 +119,7 @@ function SessionRow({
           className="h-8 text-sm"
         />
       </div>
-    );
+    )
   }
 
   return (
@@ -161,25 +164,91 @@ function SessionRow({
         <DropdownMenuContent align="end" className="w-40">
           <DropdownMenuItem
             onSelect={() => {
-              setDraft(session.title || '');
-              setEditing(true);
-              requestAnimationFrame(() => inputRef.current?.focus());
+              setDraft(session.title || '')
+              setEditing(true)
+              requestAnimationFrame(() => inputRef.current?.focus())
             }}
           >
             <Pencil className="mr-2 h-3.5 w-3.5" />
             {t('assistant.renameSession')}
           </DropdownMenuItem>
-          <DropdownMenuItem
-            onSelect={onDelete}
-            className="text-destructive focus:text-destructive"
-          >
+          <DropdownMenuItem onSelect={onDelete} className="text-destructive focus:text-destructive">
             <Trash2 className="mr-2 h-3.5 w-3.5" />
             {t('assistant.deleteSession')}
           </DropdownMenuItem>
         </DropdownMenuContent>
       </DropdownMenu>
     </div>
-  );
+  )
+}
+
+function SessionListContent({
+  loading,
+  sessions,
+  filteredSessions,
+  emptyState,
+  groups,
+  t,
+  activeSession,
+  disabled,
+  dateFormatter,
+  onSelectSession,
+  onRenameSession,
+  onDeleteSession,
+}: Readonly<{
+  loading: boolean
+  sessions: AssistantSession[]
+  filteredSessions: AssistantSession[]
+  emptyState: { title: string; description: string }
+  groups: SessionGroup[]
+  t: TFunction
+  activeSession: string | null
+  disabled: boolean
+  dateFormatter: Intl.DateTimeFormat
+  onSelectSession: (id: string) => void
+  onRenameSession: (id: string, title: string) => void
+  onDeleteSession: (id: string) => void
+}>) {
+  if (loading && sessions.length === 0) {
+    return (
+      <div className="space-y-1.5 px-1">
+        {[0, 1, 2, 3].map((i) => (
+          <div
+            key={i}
+            className="h-12 animate-pulse rounded-xl bg-muted/60"
+            style={{ animationDelay: `${i * 80}ms` }}
+          />
+        ))}
+      </div>
+    )
+  }
+  if (filteredSessions.length === 0) {
+    return <WorkbenchEmptyState title={emptyState.title} description={emptyState.description} />
+  }
+  return (
+    <div className="space-y-3">
+      {groups.map((group) => (
+        <div key={group.id} className="space-y-0.5">
+          <div className="px-2 pb-1 pt-1 section-label font-bold text-muted-foreground/70">
+            {t(`assistant.group${group.id}`)}
+          </div>
+          {group.sessions.map((session) => (
+            <SessionRow
+              key={session.id}
+              t={t}
+              session={session}
+              active={activeSession === session.id}
+              disabled={disabled}
+              dateLabel={dateFormatter.format(new Date(session.updatedAt))}
+              onSelect={() => onSelectSession(session.id)}
+              onRename={(title) => onRenameSession(session.id, title)}
+              onDelete={() => onDeleteSession(session.id)}
+            />
+          ))}
+        </div>
+      ))}
+    </div>
+  )
 }
 
 function SessionRailImpl({
@@ -201,35 +270,45 @@ function SessionRailImpl({
   onDeleteSession,
 }: SessionRailProps) {
   const filteredSessions = useMemo(() => {
-    if (!sessionSearch.trim()) return sessions;
-    const q = sessionSearch.toLowerCase();
+    if (!sessionSearch.trim()) return sessions
+    const q = sessionSearch.toLowerCase()
     return sessions.filter((s) =>
       (s.title || t('assistant.untitledSession')).toLowerCase().includes(q),
-    );
-  }, [sessions, sessionSearch, t]);
+    )
+  }, [sessions, sessionSearch, t])
 
   const dateFormatter = useMemo(
     () => new Intl.DateTimeFormat(locale, { month: 'short', day: 'numeric' }),
     [locale],
-  );
+  )
 
   // Group the filtered list into Today / Yesterday / Earlier buckets. Sessions
   // arrive newest-first from the API, so each bucket preserves that order.
   const groups = useMemo<SessionGroup[]>(() => {
-    const dayMs = 86_400_000;
-    const todayStart = startOfDay(new Date());
+    const dayMs = 86_400_000
+    const todayStart = startOfDay(new Date())
     const buckets: Record<DateBucketId, AssistantSession[]> = {
       Today: [],
       Yesterday: [],
       Earlier: [],
-    };
+    }
     for (const session of filteredSessions) {
-      buckets[bucketFor(session.updatedAt, todayStart, dayMs)].push(session);
+      buckets[bucketFor(session.updatedAt, todayStart, dayMs)].push(session)
     }
     return (['Today', 'Yesterday', 'Earlier'] as const)
       .map((id) => ({ id, sessions: buckets[id] }))
-      .filter((g) => g.sessions.length > 0);
-  }, [filteredSessions]);
+      .filter((g) => g.sessions.length > 0)
+  }, [filteredSessions])
+
+  const emptyState = sessionSearch.trim()
+    ? {
+        title: t('assistant.noSessionsMatch'),
+        description: t('assistant.noSessionsMatchDesc'),
+      }
+    : {
+        title: t('assistant.noSessions'),
+        description: t('assistant.noSessionsDesc'),
+      }
 
   return (
     <div
@@ -285,57 +364,24 @@ function SessionRailImpl({
         </div>
 
         <div className="px-2 pb-3">
-          {loading && sessions.length === 0 ? (
-            <div className="space-y-1.5 px-1">
-              {[0, 1, 2, 3].map((i) => (
-                <div
-                  key={i}
-                  className="h-12 animate-pulse rounded-xl bg-muted/60"
-                  style={{ animationDelay: `${i * 80}ms` }}
-                />
-              ))}
-            </div>
-          ) : filteredSessions.length === 0 ? (
-            <WorkbenchEmptyState
-              title={
-                sessionSearch.trim()
-                  ? t('assistant.noSessionsMatch')
-                  : t('assistant.noSessions')
-              }
-              description={
-                sessionSearch.trim()
-                  ? t('assistant.noSessionsMatchDesc')
-                  : t('assistant.noSessionsDesc')
-              }
-            />
-          ) : (
-            <div className="space-y-3">
-              {groups.map((group) => (
-                <div key={group.id} className="space-y-0.5">
-                  <div className="px-2 pb-1 pt-1 section-label font-bold text-muted-foreground/70">
-                    {t(`assistant.group${group.id}`)}
-                  </div>
-                  {group.sessions.map((session) => (
-                    <SessionRow
-                      key={session.id}
-                      t={t}
-                      session={session}
-                      active={activeSession === session.id}
-                      disabled={disabled}
-                      dateLabel={dateFormatter.format(new Date(session.updatedAt))}
-                      onSelect={() => onSelectSession(session.id)}
-                      onRename={(title) => onRenameSession(session.id, title)}
-                      onDelete={() => onDeleteSession(session.id)}
-                    />
-                  ))}
-                </div>
-              ))}
-            </div>
-          )}
+          <SessionListContent
+            loading={loading}
+            sessions={sessions}
+            filteredSessions={filteredSessions}
+            emptyState={emptyState}
+            groups={groups}
+            t={t}
+            activeSession={activeSession}
+            disabled={disabled}
+            dateFormatter={dateFormatter}
+            onSelectSession={onSelectSession}
+            onRenameSession={onRenameSession}
+            onDeleteSession={onDeleteSession}
+          />
         </div>
       </div>
     </div>
-  );
+  )
 }
 
-export const SessionRail = memo(SessionRailImpl);
+export const SessionRail = memo(SessionRailImpl)

@@ -14,6 +14,7 @@ use super::{
 /// no-payload variant of [`detect_upload_file_kind`], used by callers that
 /// only hold persisted document/revision metadata (admission resolution,
 /// document-parentage backfill) and never see the original bytes.
+#[must_use]
 pub fn detect_declared_upload_file_kind(
     file_name: Option<&str>,
     mime_type: Option<&str>,
@@ -117,6 +118,7 @@ fn declares_unsupported_mime_type(mime_type: Option<&str>) -> bool {
     false
 }
 
+#[must_use]
 pub fn detect_upload_file_kind(
     file_name: Option<&str>,
     mime_type: Option<&str>,

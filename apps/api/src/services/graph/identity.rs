@@ -5,128 +5,13 @@ use unicode_normalization::UnicodeNormalization;
 
 use crate::domains::runtime_graph::RuntimeNodeType;
 
-const CANONICAL_RELATION_TYPES: &[&str] = &[
-    "accepts_from",
-    "accepts_receipts_from",
-    "aliases",
-    "applies_to",
-    "assists",
-    "attached_to",
-    "authenticates",
-    "authorizes",
-    "awards",
-    "belongs_to",
-    "builds_on",
-    "calls",
-    "can_be",
-    "complies_with",
-    "composed_of",
-    "configures",
-    "connects_to",
-    "consists_of",
-    "consumes",
-    "contains",
-    "created_by",
-    "defined_by",
-    "defines",
-    "delegates_to",
-    "deployed_on",
-    "depends_on",
-    "deprecated_by",
-    "described_in",
-    "describes",
-    "developed_by",
-    "documents",
-    "emits",
-    "enables",
-    "exchanges_data_with",
-    "extends",
-    "followed_by",
-    "has_mode",
-    "has_property",
-    "hosted_by",
-    "implements",
-    "imports",
-    "includes",
-    "inherits_from",
-    "instance_of",
-    "integrates_with",
-    "intended_for",
-    "invokes",
-    "is_a",
-    "located_in",
-    "logs",
-    "maintained_by",
-    "manages",
-    "may_include",
-    "mentions",
-    "mentions_in",
-    "migrated_to",
-    "monitored_by",
-    "monitors",
-    "notifies",
-    "offered_by",
-    "operates_in",
-    "overrides",
-    "owned_by",
-    "part_of",
-    "preceded_by",
-    "produces",
-    "provides",
-    "proxies",
-    "receives",
-    "records",
-    "replaces",
-    "requires",
-    "returns",
-    "routes_to",
-    "runs_on",
-    "scales_to",
-    "serializes",
-    "services",
-    "selects",
-    "stores",
-    "supports",
-    "tested_by",
-    "transforms",
-    "updates",
-    "used_by",
-    "used_for",
-    "uses",
-    "validates",
-    "version_of",
-    "wraps",
-];
-
-/// Slugs from [`normalize_graph_identity_component`] for relation text that should not be stored
-/// or shown: placeholders, generic “related” wording, etc. Used at extraction and in graph
-/// quality filtering (including non-canonical raw strings that never map into the catalog).
-pub const NOISE_RELATION_TYPES: &[&str] = &[
-    "connected",
-    "connected_to",
-    "connection",
-    "linked",
-    "linked_to",
-    "n_a",
-    "na",
-    "none",
-    "null",
-    "related",
-    "related_to",
-    "relation",
-    "relationship",
-    "tbd",
-    "unknown",
-    "unspecified",
-];
+/// Formal relation identifier limits. Meaning is selected by the configured
+/// extraction model and is never inferred from a handwritten catalog.
+pub(crate) const RELATION_TYPE_MAX_LENGTH: usize = 64;
+pub(crate) const RELATION_TYPE_JSON_SCHEMA_PATTERN: &str = r"^[a-z][a-z0-9]*(_[a-z0-9]+)*$";
 
 #[must_use]
-pub fn is_noise_relation_type(normalized_slug: &str) -> bool {
-    NOISE_RELATION_TYPES.contains(&normalized_slug)
-}
-
-#[must_use]
-pub fn is_structural_literal_label(label: &str) -> bool {
+pub(crate) fn is_structural_literal_label(label: &str) -> bool {
     matches!(
         serde_json::from_str::<serde_json::Value>(label.trim()),
         Ok(serde_json::Value::Bool(_) | serde_json::Value::Null)
@@ -134,17 +19,17 @@ pub fn is_structural_literal_label(label: &str) -> bool {
 }
 
 #[derive(Debug, Clone, Default)]
-pub struct GraphLabelNodeTypeIndex {
+pub(crate) struct GraphLabelNodeTypeIndex {
     node_types_by_identity: BTreeMap<String, RuntimeNodeType>,
 }
 
 impl GraphLabelNodeTypeIndex {
     #[must_use]
-    pub const fn new() -> Self {
+    pub(crate) const fn new() -> Self {
         Self { node_types_by_identity: BTreeMap::new() }
     }
 
-    pub fn insert(&mut self, label: &str, node_type: RuntimeNodeType) {
+    pub(crate) fn insert(&mut self, label: &str, node_type: RuntimeNodeType) {
         let identity = normalize_graph_identity_component(label);
         if identity.is_empty() {
             return;
@@ -157,59 +42,73 @@ impl GraphLabelNodeTypeIndex {
         }
     }
 
-    pub fn insert_aliases(&mut self, label: &str, aliases: &[String], node_type: RuntimeNodeType) {
-        self.insert(label, node_type.clone());
+    pub(crate) fn insert_aliases(
+        &mut self,
+        label: &str,
+        aliases: &[String],
+        node_type: RuntimeNodeType,
+    ) {
+        self.insert(label, node_type);
         for alias in aliases {
-            self.insert(alias, node_type.clone());
+            self.insert(alias, node_type);
         }
     }
 
     #[must_use]
-    pub fn canonical_node_type_for_label(&self, label: &str) -> RuntimeNodeType {
+    pub(crate) fn canonical_node_type_for_label(&self, label: &str) -> RuntimeNodeType {
         let identity = normalize_graph_identity_component(label);
-        self.node_types_by_identity.get(&identity).cloned().unwrap_or(RuntimeNodeType::Entity)
+        self.node_types_by_identity.get(&identity).copied().unwrap_or(RuntimeNodeType::Entity)
     }
 
     #[must_use]
-    pub fn canonical_node_key_for_label(&self, label: &str) -> String {
+    pub(crate) fn canonical_node_key_for_label(&self, label: &str) -> String {
         canonical_node_key(self.canonical_node_type_for_label(label), label)
     }
 }
 
 #[must_use]
-pub fn canonical_node_key(node_type: RuntimeNodeType, label: &str) -> String {
-    format!("{}:{}", node_type_slug(node_type), normalize_graph_identity_component(label))
+pub(crate) fn canonical_node_key(node_type: RuntimeNodeType, label: &str) -> String {
+    format!("{}:{}", runtime_node_type_slug(&node_type), normalize_graph_identity_component(label))
 }
 
 #[must_use]
-pub fn canonical_edge_key(from_node_key: &str, relation_type: &str, to_node_key: &str) -> String {
+pub(crate) fn canonical_edge_key(
+    from_node_key: &str,
+    relation_type: &str,
+    to_node_key: &str,
+) -> String {
     format!("{from_node_key}--{}--{to_node_key}", normalize_relation_type(relation_type))
 }
 
 #[must_use]
-pub fn normalize_relation_type(relation_type: &str) -> String {
+pub(crate) fn normalize_relation_type(relation_type: &str) -> String {
     let candidate = relation_type.trim();
-    if candidate.bytes().all(|byte| matches!(byte, b'a'..=b'z' | b'0'..=b'9' | b'_'))
-        && is_canonical_relation_type(candidate)
+    if is_valid_relation_type(candidate) { candidate.to_string() } else { String::new() }
+}
+
+#[must_use]
+pub(crate) fn is_valid_relation_type(relation_type: &str) -> bool {
+    let bytes = relation_type.as_bytes();
+    if bytes.is_empty() || bytes.len() > RELATION_TYPE_MAX_LENGTH || !bytes[0].is_ascii_lowercase()
     {
-        candidate.to_string()
-    } else {
-        String::new()
+        return false;
     }
+
+    let mut previous_was_underscore = false;
+    for &byte in bytes {
+        if byte.is_ascii_lowercase() || byte.is_ascii_digit() {
+            previous_was_underscore = false;
+        } else if byte == b'_' && !previous_was_underscore {
+            previous_was_underscore = true;
+        } else {
+            return false;
+        }
+    }
+    !previous_was_underscore
 }
 
 #[must_use]
-pub const fn canonical_relation_type_catalog() -> &'static [&'static str] {
-    CANONICAL_RELATION_TYPES
-}
-
-#[must_use]
-pub fn is_canonical_relation_type(relation_type: &str) -> bool {
-    CANONICAL_RELATION_TYPES.contains(&relation_type)
-}
-
-#[must_use]
-pub fn runtime_node_type_slug(node_type: &RuntimeNodeType) -> &'static str {
+pub(crate) const fn runtime_node_type_slug(node_type: &RuntimeNodeType) -> &'static str {
     match node_type {
         RuntimeNodeType::Document => "document",
         RuntimeNodeType::Person => "person",
@@ -226,7 +125,7 @@ pub fn runtime_node_type_slug(node_type: &RuntimeNodeType) -> &'static str {
 }
 
 #[must_use]
-pub fn runtime_node_type_from_key(canonical_node_key: &str) -> RuntimeNodeType {
+pub(crate) fn runtime_node_type_from_key(canonical_node_key: &str) -> RuntimeNodeType {
     canonical_node_key
         .split_once(':')
         .map(|(node_type, _)| node_type)
@@ -248,7 +147,7 @@ pub fn runtime_node_type_from_key(canonical_node_key: &str) -> RuntimeNodeType {
 }
 
 #[must_use]
-pub fn normalize_graph_identity_component(value: &str) -> String {
+pub(crate) fn normalize_graph_identity_component(value: &str) -> String {
     let trimmed = value.trim();
     if trimmed.is_empty() {
         return String::new();
@@ -275,23 +174,6 @@ pub fn normalize_graph_identity_component(value: &str) -> String {
     let fallback_seed = trimmed.nfkc().flat_map(char::to_lowercase).collect::<String>();
     let digest = Sha256::digest(fallback_seed.as_bytes());
     format!("u{}", hex::encode(&digest[..8]))
-}
-
-#[must_use]
-fn node_type_slug(node_type: RuntimeNodeType) -> &'static str {
-    match node_type {
-        RuntimeNodeType::Document => "document",
-        RuntimeNodeType::Person => "person",
-        RuntimeNodeType::Organization => "organization",
-        RuntimeNodeType::Location => "location",
-        RuntimeNodeType::Event => "event",
-        RuntimeNodeType::Artifact => "artifact",
-        RuntimeNodeType::Natural => "natural",
-        RuntimeNodeType::Process => "process",
-        RuntimeNodeType::Concept => "concept",
-        RuntimeNodeType::Attribute => "attribute",
-        RuntimeNodeType::Entity => "entity",
-    }
 }
 
 #[must_use]
@@ -332,10 +214,11 @@ mod tests {
     }
 
     #[test]
-    fn is_noise_relation_type_matches_uninformative_slugs() {
-        assert!(is_noise_relation_type("unknown"));
-        assert!(is_noise_relation_type("related_to"));
-        assert!(!is_noise_relation_type("uses"));
+    fn relation_type_validation_accepts_arbitrary_ascii_snake_case() {
+        assert!(is_valid_relation_type("opaque_predicate_7"));
+        assert!(is_valid_relation_type("unknown"));
+        assert!(is_valid_relation_type("a"));
+        assert_eq!(normalize_relation_type(" opaque_predicate_7 "), "opaque_predicate_7");
     }
 
     #[test]
@@ -350,8 +233,21 @@ mod tests {
     }
 
     #[test]
-    fn normalize_relation_type_rejects_unknown_predicates_after_unicode_normalization() {
-        assert!(normalize_relation_type("Συνδέεται με").is_empty());
+    fn relation_type_validation_rejects_invalid_shape_and_encoding() {
+        for invalid in [
+            "",
+            "_predicate",
+            "predicate_",
+            "predicate__7",
+            "Predicate",
+            "7_predicate",
+            "predicate-name",
+            "predicáte",
+            "predicate\nnext",
+        ] {
+            assert!(!is_valid_relation_type(invalid), "{invalid:?}");
+            assert!(normalize_relation_type(invalid).is_empty(), "{invalid:?}");
+        }
     }
 
     #[test]
@@ -395,38 +291,14 @@ mod tests {
     }
 
     #[test]
-    fn normalize_relation_type_accepts_only_canonical_catalog_members_after_text_normalization() {
-        assert!(normalize_relation_type("Mentions In").is_empty());
-        assert!(normalize_relation_type("used by").is_empty());
-        assert!(normalize_relation_type("is a").is_empty());
-        assert_eq!(normalize_relation_type("part_of"), "part_of");
-    }
+    fn relation_type_validation_enforces_the_length_bound() {
+        let at_limit = "a".repeat(RELATION_TYPE_MAX_LENGTH);
+        let over_limit = "a".repeat(RELATION_TYPE_MAX_LENGTH + 1);
 
-    #[test]
-    /// "contains" is now a canonical relation type, so it must be accepted.
-    fn normalize_relation_type_rejects_localized_and_paraphrased_predicates() {
-        assert!(normalize_relation_type("χρησιμοποιεί").is_empty());
-        assert!(normalize_relation_type("διαχειρίζεται").is_empty());
-        assert!(normalize_relation_type("ανταλλάσσει δεδομένα με").is_empty());
-        assert!(normalize_relation_type("desarrollado por").is_empty());
-        assert!(normalize_relation_type("destinado a").is_empty());
-        assert!(normalize_relation_type("περιέχει").is_empty());
-        assert_eq!(normalize_relation_type("contains"), "contains");
-        assert!(normalize_relation_type("contains section").is_empty());
-        assert!(normalize_relation_type("based on").is_empty());
-        assert!(normalize_relation_type("documented on").is_empty());
-    }
-
-    #[test]
-    fn canonical_relation_type_catalog_is_controlled_and_ascii_only() {
-        assert!(canonical_relation_type_catalog().contains(&"integrates_with"));
-        assert!(canonical_relation_type_catalog().contains(&"described_in"));
-        assert!(canonical_relation_type_catalog().contains(&"receives"));
-        assert!(canonical_relation_type_catalog().contains(&"records"));
-        assert!(canonical_relation_type_catalog().contains(&"selects"));
-        assert!(canonical_relation_type_catalog().iter().all(|predicate| {
-            predicate.bytes().all(|byte| matches!(byte, b'a'..=b'z' | b'0'..=b'9' | b'_'))
-        }));
+        assert!(is_valid_relation_type(&at_limit));
+        assert!(!is_valid_relation_type(&over_limit));
+        assert_eq!(normalize_relation_type(&at_limit), at_limit);
+        assert!(normalize_relation_type(&over_limit).is_empty());
     }
 
     #[test]

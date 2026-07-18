@@ -11,8 +11,10 @@
 //! streaming-response consumption, which are all genuinely in-flight against the
 //! provider — and released when the inner future resolves.
 //!
-//! When the provider has no configured cap (the default), the registry returns
+//! When the provider is explicitly configured without a cap, the registry returns
 //! an unlimited guard and this decorator is a transparent pass-through.
+
+use std::sync::Arc;
 
 use anyhow::Result;
 use async_trait::async_trait;
@@ -21,7 +23,9 @@ use crate::integrations::llm::{
     ChatRequest, ChatResponse, EmbeddingBatchRequest, EmbeddingBatchResponse, EmbeddingRequest,
     EmbeddingResponse, LlmGateway, ToolUseRequest, ToolUseResponse, VisionRequest, VisionResponse,
 };
-use crate::integrations::provider_budget::{self, ProviderIdentity};
+use crate::integrations::provider_budget::{
+    ProviderBudgetRegistry, ProviderIdentity, current_lane,
+};
 
 /// Builds the provider identity key for an outbound call. The base URL is the
 /// per-binding resolved endpoint already stored on the runtime binding, so the
@@ -35,21 +39,30 @@ fn provider_identity(provider_kind: &str, base_url_override: Option<&str>) -> Pr
 /// [`LlmGateway`] decorator enforcing the per-provider concurrency budget.
 pub struct ConcurrencyLimitedGateway<G: LlmGateway> {
     inner: G,
+    registry: Arc<ProviderBudgetRegistry>,
 }
 
 impl<G: LlmGateway> ConcurrencyLimitedGateway<G> {
     #[must_use]
-    pub fn new(inner: G) -> Self {
-        Self { inner }
+    pub const fn new(inner: G, registry: Arc<ProviderBudgetRegistry>) -> Self {
+        Self { inner, registry }
+    }
+
+    async fn acquire(
+        &self,
+        provider_kind: &str,
+        base_url_override: Option<&str>,
+    ) -> Result<crate::integrations::provider_budget::ProviderBudgetGuard> {
+        let identity = provider_identity(provider_kind, base_url_override);
+        self.registry.acquire(&identity, current_lane()).await.map_err(Into::into)
     }
 }
 
 #[async_trait]
 impl<G: LlmGateway> LlmGateway for ConcurrencyLimitedGateway<G> {
     async fn generate(&self, request: ChatRequest) -> Result<ChatResponse> {
-        let identity =
-            provider_identity(&request.provider_kind, request.base_url_override.as_deref());
-        let _permit = provider_budget::acquire(&identity).await;
+        let _permit =
+            self.acquire(&request.provider_kind, request.base_url_override.as_deref()).await?;
         self.inner.generate(request).await
     }
 
@@ -58,16 +71,14 @@ impl<G: LlmGateway> LlmGateway for ConcurrencyLimitedGateway<G> {
         request: ChatRequest,
         on_delta: &mut (dyn FnMut(String) + Send),
     ) -> Result<ChatResponse> {
-        let identity =
-            provider_identity(&request.provider_kind, request.base_url_override.as_deref());
-        let _permit = provider_budget::acquire(&identity).await;
+        let _permit =
+            self.acquire(&request.provider_kind, request.base_url_override.as_deref()).await?;
         self.inner.generate_stream(request, on_delta).await
     }
 
     async fn generate_with_tools(&self, request: ToolUseRequest) -> Result<ToolUseResponse> {
-        let identity =
-            provider_identity(&request.provider_kind, request.base_url_override.as_deref());
-        let _permit = provider_budget::acquire(&identity).await;
+        let _permit =
+            self.acquire(&request.provider_kind, request.base_url_override.as_deref()).await?;
         self.inner.generate_with_tools(request).await
     }
 
@@ -76,30 +87,26 @@ impl<G: LlmGateway> LlmGateway for ConcurrencyLimitedGateway<G> {
         request: ToolUseRequest,
         on_text_delta: &mut (dyn FnMut(String) + Send),
     ) -> Result<ToolUseResponse> {
-        let identity =
-            provider_identity(&request.provider_kind, request.base_url_override.as_deref());
-        let _permit = provider_budget::acquire(&identity).await;
+        let _permit =
+            self.acquire(&request.provider_kind, request.base_url_override.as_deref()).await?;
         self.inner.generate_with_tools_stream(request, on_text_delta).await
     }
 
     async fn embed(&self, request: EmbeddingRequest) -> Result<EmbeddingResponse> {
-        let identity =
-            provider_identity(&request.provider_kind, request.base_url_override.as_deref());
-        let _permit = provider_budget::acquire(&identity).await;
+        let _permit =
+            self.acquire(&request.provider_kind, request.base_url_override.as_deref()).await?;
         self.inner.embed(request).await
     }
 
     async fn embed_many(&self, request: EmbeddingBatchRequest) -> Result<EmbeddingBatchResponse> {
-        let identity =
-            provider_identity(&request.provider_kind, request.base_url_override.as_deref());
-        let _permit = provider_budget::acquire(&identity).await;
+        let _permit =
+            self.acquire(&request.provider_kind, request.base_url_override.as_deref()).await?;
         self.inner.embed_many(request).await
     }
 
     async fn vision_extract(&self, request: VisionRequest) -> Result<VisionResponse> {
-        let identity =
-            provider_identity(&request.provider_kind, request.base_url_override.as_deref());
-        let _permit = provider_budget::acquire(&identity).await;
+        let _permit =
+            self.acquire(&request.provider_kind, request.base_url_override.as_deref()).await?;
         self.inner.vision_extract(request).await
     }
 }
@@ -112,7 +119,8 @@ mod tests {
     use std::time::Duration;
 
     use crate::integrations::provider_budget::{
-        ProviderBudgetConfig, ProviderBudgetRegistry, ProviderLane, with_lane,
+        ProviderBudgetConfig, ProviderBudgetRegistry, ProviderBudgetRegistryOptions, ProviderLane,
+        with_lane,
     };
 
     /// Inner gateway fake that records peak concurrency for `embed_many` and
@@ -134,15 +142,15 @@ mod tests {
 
         async fn embed_many(
             &self,
-            request: EmbeddingBatchRequest,
+            mut request: EmbeddingBatchRequest,
         ) -> Result<EmbeddingBatchResponse> {
             let now = self.in_flight.fetch_add(1, Ordering::SeqCst) + 1;
             self.peak.fetch_max(now, Ordering::SeqCst);
             tokio::time::sleep(Duration::from_millis(20)).await;
             self.in_flight.fetch_sub(1, Ordering::SeqCst);
             Ok(EmbeddingBatchResponse {
-                provider_kind: request.provider_kind,
-                model_name: request.model_name,
+                provider_kind: std::mem::take(&mut request.provider_kind),
+                model_name: std::mem::take(&mut request.model_name),
                 dimensions: 0,
                 embeddings: Vec::new(),
                 usage_json: serde_json::json!({}),
@@ -178,20 +186,17 @@ mod tests {
         const TASKS: usize = 12;
         let in_flight = Arc::new(AtomicUsize::new(0));
         let peak = Arc::new(AtomicUsize::new(0));
-        let gateway = Arc::new(ConcurrencyLimitedGateway::new(CountingGateway {
-            in_flight: Arc::clone(&in_flight),
-            peak: Arc::clone(&peak),
-        }));
-        // A local (non-global) registry drives the decorator via the global
-        // acquire path, so the test installs it as the process registry. The
-        // global slot is shared across tests in this module, so this is the
-        // single install for the module and other tests must not depend on a
-        // different config.
-        let registry = Arc::new(ProviderBudgetRegistry::uniform(ProviderBudgetConfig {
-            max_outbound: CAP,
-            query_reserved: 0,
-        }));
-        provider_budget::install_global_registry(registry);
+        let registry = Arc::new(
+            ProviderBudgetRegistry::uniform(
+                ProviderBudgetConfig { max_outbound: CAP, query_reserved: 0 },
+                ProviderBudgetRegistryOptions::default(),
+            )
+            .unwrap(),
+        );
+        let gateway = Arc::new(ConcurrencyLimitedGateway::new(
+            CountingGateway { in_flight: Arc::clone(&in_flight), peak: Arc::clone(&peak) },
+            registry,
+        ));
 
         let mut handles = Vec::new();
         for _ in 0..TASKS {
@@ -213,5 +218,22 @@ mod tests {
             "decorator must cap embed_many concurrency at {CAP}, saw {}",
             peak.load(Ordering::SeqCst),
         );
+    }
+
+    #[tokio::test]
+    async fn gateways_use_their_injected_registry_without_global_cross_talk() {
+        let in_flight = Arc::new(AtomicUsize::new(0));
+        let peak = Arc::new(AtomicUsize::new(0));
+        let unlimited = Arc::new(
+            ProviderBudgetRegistry::uniform(
+                ProviderBudgetConfig::unlimited(),
+                ProviderBudgetRegistryOptions::default(),
+            )
+            .unwrap(),
+        );
+        let gateway =
+            ConcurrencyLimitedGateway::new(CountingGateway { in_flight, peak }, unlimited);
+
+        gateway.embed_many(embedding_batch("https://endpoint.example/v1")).await.unwrap();
     }
 }

@@ -1,0 +1,615 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "properties": {
+    "runtimeSecret": {
+      "$ref": "#/definitions/runtimeSecret"
+    },
+    "app": {
+      "$ref": "#/definitions/app"
+    },
+    "observability": {
+      "$ref": "#/definitions/observability"
+    },
+    "networkPolicy": {
+      "$ref": "#/definitions/networkPolicy"
+    },
+    "podDisruptionBudget": {
+      "$ref": "#/definitions/podDisruptionBudget"
+    },
+    "autoscaling": {
+      "$ref": "#/definitions/autoscaling"
+    }
+  },
+  "definitions": {
+    "runtimeSecret": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["existingSecret", "restartNonce"],
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "existingSecret": {
+                "minLength": 1
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "restartNonce": {
+                "minLength": 1
+              }
+            }
+          }
+        }
+      ],
+      "properties": {
+        "existingSecret": {
+          "description": "Name of an operator-managed runtime Secret; empty uses the inline chart Secret",
+          "type": "string"
+        },
+        "restartNonce": {
+          "description": "Operator-changed nonce that restarts workloads after an external runtime Secret update",
+          "type": "string",
+          "maxLength": 128
+        }
+      }
+    },
+    "app": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "frontendOrigin": {
+          "description": "Canonical browser origin admitted by UI CORS and MCP Streamable HTTP",
+          "type": "string",
+          "format": "uri"
+        },
+        "openapiPublicOrigin": {
+          "description": "Optional canonical public API origin advertised by OpenAPI and admitted by MCP",
+          "type": "string",
+          "oneOf": [
+            {
+              "const": ""
+            },
+            {
+              "format": "uri"
+            }
+          ]
+        },
+        "credentialMasterKey": {
+          "description": "Dedicated credential-encryption key: empty or canonical standard-base64 for exactly 32 bytes",
+          "type": "string",
+          "oneOf": [
+            {
+              "const": ""
+            },
+            {
+              "pattern": "^[A-Za-z0-9+/]{42}[AEIMQUYcgkosw048]=$"
+            }
+          ]
+        },
+        "credentialMasterKeyId": {
+          "description": "Validated ID authenticated in new v3 credential envelopes",
+          "type": "string",
+          "pattern": "^$|^[a-z0-9][a-z0-9._-]{0,31}$"
+        },
+        "credentialPreviousMasterKeys": {
+          "description": "Temporary sorted previous-key map used only for read and rewrap",
+          "type": "string",
+          "maxLength": 1024
+        },
+        "credentialEncryptionWriteEnabled": {
+          "description": "Staged rollout gate for writing encrypted credential envelopes",
+          "type": "boolean"
+        },
+        "queryRerank": {
+          "$ref": "#/definitions/queryRerank"
+        },
+        "providerConcurrency": {
+          "$ref": "#/definitions/providerConcurrency"
+        },
+        "pgHnsw": {
+          "$ref": "#/definitions/pgHnsw"
+        },
+        "providerSecrets": {
+          "description": "Inline provider credentials keyed by exact catalog provider kind",
+          "type": "object",
+          "maxProperties": 256,
+          "propertyNames": {
+            "pattern": "^\\S+$",
+            "maxLength": 128
+          },
+          "additionalProperties": {
+            "type": "string",
+            "maxLength": 65536
+          }
+        }
+      }
+    },
+    "providerConcurrency": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "maxOutbound",
+        "queryReserved",
+        "acquireTimeoutMs",
+        "registryMaxEntries",
+        "registryIdleTtlSeconds"
+      ],
+      "properties": {
+        "maxOutbound": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1024
+        },
+        "queryReserved": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1023
+        },
+        "acquireTimeoutMs": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 300000
+        },
+        "registryMaxEntries": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4096
+        },
+        "registryIdleTtlSeconds": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 86400
+        }
+      }
+    },
+    "pgHnsw": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "efSearch",
+        "maxScanTuples",
+        "scanMemMultiplier",
+        "exactFallbackMaxRows"
+      ],
+      "properties": {
+        "efSearch": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1000
+        },
+        "maxScanTuples": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1000000
+        },
+        "scanMemMultiplier": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 64
+        },
+        "exactFallbackMaxRows": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100000
+        }
+      }
+    },
+    "queryRerank": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["enabled", "candidateLimit", "semantic"],
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "candidateLimit": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "semantic": {
+          "$ref": "#/definitions/semanticRerank"
+        }
+      }
+    },
+    "semanticRerank": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "mode",
+        "timeoutMs",
+        "candidateLimit",
+        "candidateTextChars",
+        "totalTextChars"
+      ],
+      "properties": {
+        "mode": {
+          "type": "string",
+          "enum": ["off", "shadow", "active"]
+        },
+        "timeoutMs": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 3000
+        },
+        "candidateLimit": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 32
+        },
+        "candidateTextChars": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 2400
+        },
+        "totalTextChars": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 32000
+        }
+      }
+    },
+    "observability": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "enabled",
+        "otlpEndpoint",
+        "otlpProtocol",
+        "resourceAttributes",
+        "tracesExporter",
+        "metricsExporter",
+        "logsExporter",
+        "metricsTemporality",
+        "deploymentId"
+      ],
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "otlpEndpoint": {
+          "type": "string"
+        },
+        "otlpProtocol": {
+          "type": "string",
+          "enum": ["", "grpc", "http/protobuf", "http/json"]
+        },
+        "resourceAttributes": {
+          "type": "string"
+        },
+        "tracesExporter": {
+          "$ref": "#/definitions/otelExporter"
+        },
+        "metricsExporter": {
+          "$ref": "#/definitions/otelExporter"
+        },
+        "logsExporter": {
+          "$ref": "#/definitions/otelExporter"
+        },
+        "metricsTemporality": {
+          "type": "string",
+          "enum": ["cumulative", "delta", "lowmemory", "low_memory"]
+        },
+        "deploymentId": {
+          "type": "string"
+        }
+      }
+    },
+    "otelExporter": {
+      "type": "string",
+      "enum": ["otlp", "none"]
+    },
+    "networkPolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["enabled", "allowExternalWeb", "extraIngress"],
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "allowExternalWeb": {
+          "type": "boolean"
+        },
+        "extraIngress": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["api", "worker", "web", "postgres", "redis", "s4core"],
+          "properties": {
+            "api": {
+              "$ref": "#/definitions/networkPolicyIngressRules"
+            },
+            "worker": {
+              "$ref": "#/definitions/networkPolicyIngressRules"
+            },
+            "web": {
+              "$ref": "#/definitions/networkPolicyIngressRules"
+            },
+            "postgres": {
+              "$ref": "#/definitions/networkPolicyIngressRules"
+            },
+            "redis": {
+              "$ref": "#/definitions/networkPolicyIngressRules"
+            },
+            "s4core": {
+              "$ref": "#/definitions/networkPolicyIngressRules"
+            }
+          }
+        }
+      }
+    },
+    "networkPolicyIngressRules": {
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/networkPolicyIngressRule"
+      }
+    },
+    "networkPolicyIngressRule": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["ports"],
+      "properties": {
+        "from": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/definitions/networkPolicyPeer"
+          }
+        },
+        "ports": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/definitions/networkPolicyPort"
+          }
+        }
+      }
+    },
+    "networkPolicyPeer": {
+      "type": "object",
+      "additionalProperties": false,
+      "minProperties": 1,
+      "oneOf": [
+        {
+          "required": ["ipBlock"],
+          "not": {
+            "anyOf": [
+              {
+                "required": ["podSelector"]
+              },
+              {
+                "required": ["namespaceSelector"]
+              }
+            ]
+          }
+        },
+        {
+          "anyOf": [
+            {
+              "required": ["podSelector"]
+            },
+            {
+              "required": ["namespaceSelector"]
+            }
+          ],
+          "not": {
+            "required": ["ipBlock"]
+          }
+        }
+      ],
+      "properties": {
+        "podSelector": {
+          "$ref": "#/definitions/labelSelector"
+        },
+        "namespaceSelector": {
+          "$ref": "#/definitions/labelSelector"
+        },
+        "ipBlock": {
+          "$ref": "#/definitions/ipBlock"
+        }
+      }
+    },
+    "labelSelector": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "matchLabels": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "matchExpressions": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["key", "operator"],
+            "properties": {
+              "key": {
+                "type": "string",
+                "minLength": 1
+              },
+              "operator": {
+                "type": "string",
+                "enum": ["In", "NotIn", "Exists", "DoesNotExist"]
+              },
+              "values": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "ipBlock": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["cidr"],
+      "properties": {
+        "cidr": {
+          "type": "string",
+          "minLength": 1
+        },
+        "except": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    },
+    "networkPolicyPort": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["port"],
+      "properties": {
+        "protocol": {
+          "type": "string",
+          "enum": ["TCP", "UDP", "SCTP"]
+        },
+        "port": {
+          "oneOf": [
+            {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 65535
+            },
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 15,
+              "pattern": "^[a-z]([-a-z0-9]*[a-z0-9])?$"
+            }
+          ]
+        },
+        "endPort": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535
+        }
+      }
+    },
+    "podDisruptionBudget": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["enabled", "api", "worker", "web"],
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "api": {
+          "$ref": "#/definitions/podDisruptionBudgetComponent"
+        },
+        "worker": {
+          "$ref": "#/definitions/podDisruptionBudgetComponent"
+        },
+        "web": {
+          "$ref": "#/definitions/podDisruptionBudgetComponent"
+        }
+      }
+    },
+    "podDisruptionBudgetComponent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["enabled", "minAvailable", "maxUnavailable"],
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "minAvailable": {
+          "$ref": "#/definitions/nonNegativeIntOrPercentOrEmpty"
+        },
+        "maxUnavailable": {
+          "$ref": "#/definitions/nonNegativeIntOrPercentOrEmpty"
+        }
+      }
+    },
+    "nonNegativeIntOrPercentOrEmpty": {
+      "oneOf": [
+        {
+          "type": "integer",
+          "minimum": 0
+        },
+        {
+          "type": "string",
+          "const": ""
+        },
+        {
+          "type": "string",
+          "pattern": "^(0|[1-9][0-9]*|(0|[1-9]|[1-9][0-9]|100)%)$"
+        }
+      ]
+    },
+    "autoscaling": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["enabled", "api", "worker", "web"],
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "api": {
+          "$ref": "#/definitions/autoscalingComponent"
+        },
+        "worker": {
+          "$ref": "#/definitions/autoscalingComponent"
+        },
+        "web": {
+          "$ref": "#/definitions/autoscalingComponent"
+        }
+      }
+    },
+    "autoscalingComponent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "enabled",
+        "minReplicas",
+        "maxReplicas",
+        "targetCPUUtilizationPercentage",
+        "targetMemoryUtilizationPercentage",
+        "behavior"
+      ],
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "minReplicas": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "maxReplicas": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "targetCPUUtilizationPercentage": {
+          "$ref": "#/definitions/positiveIntegerOrEmpty"
+        },
+        "targetMemoryUtilizationPercentage": {
+          "$ref": "#/definitions/positiveIntegerOrEmpty"
+        },
+        "behavior": {
+          "type": "object"
+        }
+      }
+    },
+    "positiveIntegerOrEmpty": {
+      "oneOf": [
+        {
+          "type": "integer",
+          "minimum": 1
+        },
+        {
+          "type": "string",
+          "const": ""
+        }
+      ]
+    }
+  }
+}

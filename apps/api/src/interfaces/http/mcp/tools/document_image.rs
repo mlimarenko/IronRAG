@@ -37,13 +37,12 @@ use crate::{
         auth::AuthContext,
         authorization::{POLICY_MCP_MEMORY_READ, load_content_document_and_authorize},
         mcp::{
-            McpToolDescriptor, McpToolResult,
-            audit::{record_canonical_mcp_audit, record_error_audit, record_success_audit},
-            ok_tool_result, parse_tool_args, tool_error_result,
+            McpToolDescriptor, McpToolResult, audit::record_canonical_mcp_audit, ok_tool_result,
+            parse_tool_args, tool_error_result,
         },
         router_support::ApiError,
     },
-    mcp_types::{McpAuditActionKind, McpAuditScope},
+    mcp_types::McpLibraryDescriptor,
 };
 
 use super::ToolCallContext;
@@ -115,26 +114,12 @@ async fn view_document_image(context: ToolCallContext<'_>, arguments: &Value) ->
     let args = match parse_tool_args::<ViewDocumentImageArgs>(arguments.clone()) {
         Ok(args) => args,
         Err(error) => {
-            record_error_audit(
-                context.auth,
-                context.state,
-                context.request_id,
-                McpAuditActionKind::ViewDocumentImage,
-                McpAuditScope {
-                    workspace_id: context.auth.workspace_id,
-                    library_id: None,
-                    document_id: None,
-                },
-                &error,
-                json!({ "tool": VIEW_DOCUMENT_IMAGE_TOOL_NAME }),
-            )
-            .await;
             return tool_error_result(error);
         }
     };
 
     match view_document_image_inner(context, &args).await {
-        Ok((payload, scope)) => {
+        Ok(payload) => {
             record_canonical_mcp_audit(
                 context.state,
                 context.auth,
@@ -149,44 +134,16 @@ async fn view_document_image(context: ToolCallContext<'_>, arguments: &Value) ->
                 Vec::new(),
             )
             .await;
-            record_success_audit(
-                context.auth,
-                context.state,
-                context.request_id,
-                McpAuditActionKind::ViewDocumentImage,
-                scope,
-                json!({
-                    "tool": VIEW_DOCUMENT_IMAGE_TOOL_NAME,
-                    "documentId": args.document_id,
-                }),
-            )
-            .await;
             ok_tool_result("Document image fetched.", payload)
         }
-        Err(error) => {
-            record_error_audit(
-                context.auth,
-                context.state,
-                context.request_id,
-                McpAuditActionKind::ViewDocumentImage,
-                McpAuditScope {
-                    workspace_id: context.auth.workspace_id,
-                    library_id: None,
-                    document_id: Some(args.document_id),
-                },
-                &error,
-                json!({ "tool": VIEW_DOCUMENT_IMAGE_TOOL_NAME }),
-            )
-            .await;
-            tool_error_result(error)
-        }
+        Err(error) => tool_error_result(error),
     }
 }
 
 async fn view_document_image_inner(
     context: ToolCallContext<'_>,
     args: &ViewDocumentImageArgs,
-) -> Result<(Value, McpAuditScope), ApiError> {
+) -> Result<Value, ApiError> {
     let document = load_content_document_and_authorize(
         context.auth,
         context.state,
@@ -261,7 +218,7 @@ async fn view_document_image_inner(
 
     let encoded = BASE64_STANDARD.encode(&bytes);
     let image_url = format!("data:{mime_type};base64,{encoded}");
-    let source_text = if revision.title.as_deref().map(str::trim).unwrap_or("").is_empty() {
+    let source_text = if revision.title.as_deref().map_or("", str::trim).is_empty() {
         None
     } else {
         revision.title.clone()
@@ -280,14 +237,7 @@ async fn view_document_image_inner(
         "caption": source_text,
     });
 
-    Ok((
-        payload,
-        McpAuditScope {
-            workspace_id: Some(document.workspace_id),
-            library_id: Some(document.library_id),
-            document_id: Some(document.id),
-        },
-    ))
+    Ok(payload)
 }
 
 /// Whether the active Agent binding for `library_id` resolves to a
@@ -325,6 +275,17 @@ pub(crate) async fn any_agent_binding_supports_vision(
     else {
         return false;
     };
+    any_library_agent_binding_supports_vision(state, &libraries).await
+}
+
+/// Variant for callers that already loaded the authorization-scoped catalog.
+/// Avoids repeating the same workspace/library queries during capability
+/// preflight while preserving the exact visibility predicate used by
+/// `tools/list`.
+pub(crate) async fn any_library_agent_binding_supports_vision(
+    state: &AppState,
+    libraries: &[McpLibraryDescriptor],
+) -> bool {
     for library in libraries {
         if agent_binding_supports_vision(state, library.library_id).await.unwrap_or(false) {
             return true;

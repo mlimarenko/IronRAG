@@ -44,7 +44,7 @@ pub struct TurnSpan {
 /// hit further (typically fast, repetitive) spans are dropped.
 const MAX_SPANS_PER_TURN: usize = 1024;
 
-pub struct TurnSpanSink {
+pub(crate) struct TurnSpanSink {
     started: Instant,
     spans: Mutex<Vec<TurnSpan>>,
 }
@@ -64,17 +64,17 @@ impl TurnSpanSink {
     ) {
         let elapsed_ms = self.started.elapsed().as_millis().try_into().unwrap_or(u64::MAX);
         let started_offset_ms = elapsed_ms.saturating_sub(duration_ms);
-        if let Ok(mut spans) = self.spans.lock() {
-            if spans.len() < MAX_SPANS_PER_TURN {
-                spans.push(TurnSpan {
-                    name: name.into(),
-                    kind: kind.to_string(),
-                    duration_ms,
-                    started_offset_ms,
-                    detail,
-                    rows,
-                });
-            }
+        if let Ok(mut spans) = self.spans.lock()
+            && spans.len() < MAX_SPANS_PER_TURN
+        {
+            spans.push(TurnSpan {
+                name: name.into(),
+                kind: kind.to_string(),
+                duration_ms,
+                started_offset_ms,
+                detail,
+                rows,
+            });
         }
     }
 
@@ -89,7 +89,7 @@ tokio::task_local! {
 
 /// Record a span into the current execution's sink, if one is active.
 /// No-op when called outside a [`capture_turn_spans`] scope.
-pub fn record_span(
+pub(crate) fn record_span(
     name: impl Into<String>,
     kind: &str,
     duration_ms: u64,
@@ -101,7 +101,7 @@ pub fn record_span(
 
 /// Run `fut` with a fresh span sink scoped to the current execution and return
 /// its output plus the spans recorded during it.
-pub async fn capture_turn_spans<F, T>(fut: F) -> (T, Vec<TurnSpan>)
+pub(crate) async fn capture_turn_spans<F, T>(fut: F) -> (T, Vec<TurnSpan>)
 where
     F: std::future::Future<Output = T>,
 {
@@ -123,7 +123,7 @@ static SPAN_STORE: LazyLock<Mutex<HashMap<Uuid, Vec<TurnSpan>>>> =
 const MAX_STASHED_EXECUTIONS: usize = 256;
 
 /// Stash spans for `execution_id` so the snapshot writer can attach them later.
-pub fn stash_execution_spans(execution_id: Uuid, spans: Vec<TurnSpan>) {
+pub(crate) fn stash_execution_spans(execution_id: Uuid, spans: Vec<TurnSpan>) {
     if spans.is_empty() {
         return;
     }
@@ -136,7 +136,7 @@ pub fn stash_execution_spans(execution_id: Uuid, spans: Vec<TurnSpan>) {
 }
 
 /// Take (and remove) the stashed spans for `execution_id`. Empty if none.
-pub fn take_execution_spans(execution_id: Uuid) -> Vec<TurnSpan> {
+pub(crate) fn take_execution_spans(execution_id: Uuid) -> Vec<TurnSpan> {
     SPAN_STORE.lock().ok().and_then(|mut store| store.remove(&execution_id)).unwrap_or_default()
 }
 

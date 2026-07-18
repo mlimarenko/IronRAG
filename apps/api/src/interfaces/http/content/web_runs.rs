@@ -24,7 +24,7 @@ use crate::{
 pub struct ListWebIngestRunsQuery {
     pub library_id: Option<Uuid>,
     /// Upper bound on returned runs (newest first). Defaults to
-    /// [`DEFAULT_WEB_RUNS_LIMIT`], clamped to [1, [`MAX_WEB_RUNS_LIMIT`]].
+    /// `DEFAULT_WEB_RUNS_LIMIT`, clamped to `[1, MAX_WEB_RUNS_LIMIT]`.
     /// The endpoint is surface-only; once a user needs deeper history
     /// the canonical move is cursor pagination rather than raising the
     /// cap further.

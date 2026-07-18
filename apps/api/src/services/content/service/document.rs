@@ -13,15 +13,15 @@ use crate::{
     },
     domains::knowledge::{PreparedSegmentDetail, PreparedSegmentListItem, TypedTechnicalFact},
     domains::ops::{ASYNC_OP_STATUS_FAILED, MUTATION_KIND_DELETE},
+    domains::webhook::{WebhookEvent, document_deleted_event_id},
     infra::knowledge_rows::{KnowledgeDocumentRow, KnowledgeRevisionRow},
     infra::repositories::{
         self, catalog_repository,
         content_repository::{self, ContentDocumentListRow, DocumentListSortColumn},
-        ingest_repository,
+        ingest_repository, webhook_outbox_repository,
     },
     interfaces::http::router_support::ApiError,
     services::content::source_access::{derive_content_source_file_name, describe_content_source},
-    services::knowledge::service::PromoteKnowledgeDocumentCommand,
     services::ops::service::{DocumentKnowledgeSignals, classify_document_knowledge_signals},
 };
 
@@ -41,7 +41,7 @@ pub(crate) struct DeletedDocumentGraphCleanup {
 
 impl DeletedDocumentGraphCleanup {
     #[must_use]
-    pub fn from_targets(targets: Vec<repositories::RuntimeGraphEvidenceTargetRow>) -> Self {
+    pub(crate) fn from_targets(targets: Vec<repositories::RuntimeGraphEvidenceTargetRow>) -> Self {
         let mut node_ids = HashSet::new();
         let mut edge_ids = HashSet::new();
         for target in targets {
@@ -59,7 +59,7 @@ impl DeletedDocumentGraphCleanup {
     }
 
     #[must_use]
-    pub fn requires_graph_convergence(&self) -> bool {
+    pub(crate) const fn requires_graph_convergence(&self) -> bool {
         !self.node_ids.is_empty() || !self.edge_ids.is_empty()
     }
 }
@@ -197,7 +197,7 @@ impl ContentService {
     ///   2. Makes a single knowledge-store batch call (`list_documents_by_ids`)
     ///      to fetch the per-document `knowledge_document.file_name` fallback
     ///      and the effective `knowledge_revision` readiness states
-    ///      (text_state / graph_state / …) needed to derive the canonical
+    ///      (`text_state` / `graph_state` / …) needed to derive the canonical
     ///      readiness bucket.
     ///   3. Derives the canonical `status` and `readiness` enums
     ///      server-side so every client agrees on the same vocabulary.
@@ -250,6 +250,15 @@ impl ContentService {
         .await
         .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
 
+        if let Some(snapshot_row) = page.rows.first() {
+            crate::services::ops::billing::ensure_billing_rollup_readable(
+                "library",
+                library.id,
+                snapshot_row.billing_rollup_dirty,
+                snapshot_row.billing_rollup_terminal_error_code.as_deref(),
+            )?;
+        }
+
         // Fetch per-document knowledge rows (file_name) plus effective
         // revisions (readiness). For small pages (<=200) the payload is
         // trivial.
@@ -300,7 +309,7 @@ impl ContentService {
                         .and_then(|id| revisions_by_id.get(&id)),
                 )
             })
-            .collect();
+            .collect::<Result<Vec<_>, ApiError>>()?;
 
         let next_cursor = if page.has_more {
             items.last().map(|item| DocumentListCursorValue {
@@ -373,21 +382,25 @@ impl ContentService {
             head.as_ref().and_then(|row| row.readable_revision_id).ok_or_else(|| {
                 ApiError::unreadable_document("document has no readable revision".to_string())
             })?;
-        let updated_revision = content_repository::update_revision_document_hint(
+        let updated_revision = match content_repository::update_revision_document_hint(
             &state.persistence.postgres,
             revision_id,
             hint.as_deref(),
         )
         .await
         .map_err(|e| ApiError::internal_with_log(e, "internal"))?
-        .ok_or_else(|| ApiError::resource_not_found("revision", revision_id))?;
-
-        state
-            .document_store
-            .update_revision_document_hint(revision_id, updated_revision.document_hint.as_deref())
-            .await
-            .map_err(|e| ApiError::internal_with_log(e, "internal"))?
-            .ok_or_else(|| ApiError::resource_not_found("knowledge_revision", revision_id))?;
+        {
+            content_repository::UpdateRevisionDocumentHintOutcome::Updated(revision) => revision,
+            content_repository::UpdateRevisionDocumentHintOutcome::RevisionNotFound => {
+                return Err(ApiError::resource_not_found("revision", revision_id));
+            }
+            content_repository::UpdateRevisionDocumentHintOutcome::KnowledgeProjectionNotFound => {
+                return Err(ApiError::service_unavailable(
+                    "document projection is converging; retry the update shortly",
+                    "document_projection_converging",
+                ));
+            }
+        };
 
         let mut summary = self.get_document(state, document_id).await?;
         apply_document_hint_to_active_revision(
@@ -513,7 +526,7 @@ impl ContentService {
                     segment_id: block.block_id,
                     revision_id: block.revision_id,
                     ordinal: block.ordinal,
-                    block_kind: block.block_kind.clone(),
+                    block_kind: block.block_kind,
                     heading_trail: block.heading_trail.clone(),
                     section_path: block.section_path.clone(),
                     page_number: block.page_number,
@@ -652,13 +665,13 @@ impl ContentService {
             });
 
         let mut revisions_by_id = HashMap::new();
-        if let Some(revision) = active_revision_row.clone() {
+        if let Some(revision) = active_revision_row {
             revisions_by_id.insert(revision.revision_id, revision);
         }
         if let Some(revision) = readable_revision_row {
             revisions_by_id.entry(revision.revision_id).or_insert(revision);
         }
-        if let Some(revision) = effective_readiness_row.clone() {
+        if let Some(revision) = effective_readiness_row {
             revisions_by_id.entry(revision.revision_id).or_insert(revision);
         }
 
@@ -934,26 +947,61 @@ impl ContentService {
         latest_mutation_id: Option<Uuid>,
         refresh_graph_projection: bool,
     ) -> Result<ContentDocument, ApiError> {
-        let current_document =
-            content_repository::get_document_by_id(&state.persistence.postgres, document_id)
-                .await
-                .map_err(|e| ApiError::internal_with_log(e, "internal"))?
-                .ok_or_else(|| ApiError::resource_not_found("document", document_id))?;
-        let head = self.get_document_head(state, document_id).await?;
-        let readable_revision_id = head.as_ref().and_then(|row| row.readable_revision_id);
-        let resolved_latest_mutation_id =
-            latest_mutation_id.or_else(|| head.as_ref().and_then(|row| row.latest_mutation_id));
-        let latest_successful_attempt_id =
-            head.as_ref().and_then(|row| row.latest_successful_attempt_id);
-        let latest_revision_no = self.load_document_latest_revision_no(state, document_id).await?;
-        let deleted_at = current_document.deleted_at.or_else(|| Some(chrono::Utc::now()));
-
         let mut transaction = state
             .persistence
             .postgres
             .begin()
             .await
             .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
+        // Establish the same parent-before-child lock order used by catalog
+        // deletion. This initial read does not lock the document; the library
+        // parent-generation lock is therefore the first row lock held by this
+        // transaction and fences a concurrent library/workspace delete before
+        // we touch document, head, job, or outbox rows.
+        let document_scope =
+            content_repository::get_document_by_id_with_executor(&mut *transaction, document_id)
+                .await
+                .map_err(|e| ApiError::internal_with_log(e, "internal"))?
+                .ok_or_else(|| ApiError::resource_not_found("document", document_id))?;
+        let parent_locked = catalog_repository::lock_library_for_lifecycle_event_with_executor(
+            &mut *transaction,
+            document_scope.workspace_id,
+            document_scope.library_id,
+        )
+        .await
+        .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
+        if !parent_locked {
+            return Err(ApiError::resource_not_found("document", document_id));
+        }
+        let locked_document =
+            content_repository::lock_document_by_id_with_executor(&mut *transaction, document_id)
+                .await
+                .map_err(|e| ApiError::internal_with_log(e, "internal"))?
+                .ok_or_else(|| ApiError::resource_not_found("document", document_id))?;
+        if locked_document.workspace_id != document_scope.workspace_id
+            || locked_document.library_id != document_scope.library_id
+        {
+            return Err(ApiError::Conflict(
+                "document scope changed while acquiring the lifecycle lock".to_string(),
+            ));
+        }
+        let head = content_repository::get_document_head_for_update_with_executor(
+            &mut *transaction,
+            document_id,
+        )
+        .await
+        .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
+        let readable_revision_id = head.as_ref().and_then(|row| row.readable_revision_id);
+        let resolved_latest_mutation_id =
+            latest_mutation_id.or_else(|| head.as_ref().and_then(|row| row.latest_mutation_id));
+        let latest_successful_attempt_id =
+            head.as_ref().and_then(|row| row.latest_successful_attempt_id);
+        let transitioned_to_deleted = locked_document.document_state != "deleted";
+        let deleted_at = if transitioned_to_deleted {
+            Utc::now()
+        } else {
+            locked_document.deleted_at.unwrap_or_else(Utc::now)
+        };
         let _ = ingest_repository::cancel_jobs_for_document_with_executor(
             &mut *transaction,
             document_id,
@@ -964,13 +1012,13 @@ impl ContentService {
             &mut *transaction,
             document_id,
             "deleted",
-            deleted_at,
+            Some(deleted_at),
         )
         .await
         .map_err(|e| ApiError::internal_with_log(e, "internal"))?
         .ok_or_else(|| ApiError::resource_not_found("document", document_id))?;
-        let _ = content_repository::upsert_document_head_with_executor(
-            &mut *transaction,
+        let head_outcome = content_repository::upsert_document_head_without_generation_outcome(
+            &mut transaction,
             &content_repository::NewContentDocumentHead {
                 document_id,
                 active_revision_id: None,
@@ -981,20 +1029,62 @@ impl ContentService {
         )
         .await
         .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
-        transaction.commit().await.map_err(|e| ApiError::internal_with_log(e, "internal"))?;
-        self.promote_knowledge_document(
-            state,
-            PromoteKnowledgeDocumentCommand {
+        match head_outcome {
+            content_repository::ValidatedDocumentHeadWriteOutcome::Updated(_) => {}
+            content_repository::ValidatedDocumentHeadWriteOutcome::DocumentNotFound => {
+                return Err(ApiError::resource_not_found("document", document_id));
+            }
+            integrity
+            @ content_repository::ValidatedDocumentHeadWriteOutcome::ReferenceIntegrityViolation => {
+                return Err(ApiError::internal_with_log(
+                    integrity,
+                    "document delete head integrity failure",
+                ));
+            }
+        }
+        if transitioned_to_deleted {
+            let event = WebhookEvent {
+                event_type: "document.deleted".to_string(),
+                event_id: document_deleted_event_id(document_id, deleted_at),
+                occurred_at: deleted_at,
+                workspace_id: locked_document.workspace_id,
+                library_id: locked_document.library_id,
+                payload_json: serde_json::json!({
+                    "document_id": document_id,
+                    "library_id": locked_document.library_id,
+                }),
+            };
+            webhook_outbox_repository::enqueue_webhook_lifecycle_event_with_executor(
+                &mut *transaction,
+                &event,
+            )
+            .await
+            .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
+        }
+        let materialized =
+            content_repository::materialize_knowledge_document_from_canonical_head_with_transaction(
+                &mut transaction,
                 document_id,
-                document_state: document.document_state.clone(),
-                active_revision_id: None,
-                readable_revision_id,
-                latest_revision_no,
-                deleted_at: document.deleted_at,
-            },
-            "knowledge document sync failed after document delete committed; Postgres delete is committed and the knowledge projection may be stale until retry",
-        )
-        .await?;
+            )
+            .await
+            .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
+        if materialized.outcome
+            != content_repository::MaterializeKnowledgeDocumentOutcome::Materialized
+        {
+            return Err(ApiError::service_unavailable(
+                "document projection is converging; retry the delete shortly",
+                "document_projection_converging",
+            ));
+        }
+        if transitioned_to_deleted || materialized.changed {
+            catalog_repository::touch_library_source_truth_version_with_executor(
+                &mut *transaction,
+                document.library_id,
+            )
+            .await
+            .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
+        }
+        transaction.commit().await.map_err(|e| ApiError::internal_with_log(e, "internal"))?;
         if let Err(error) = self.converge_document_technical_facts(state, document_id, None).await {
             tracing::warn!(
                 %document_id,
@@ -1022,34 +1112,10 @@ impl ContentService {
             );
         }
 
-        // Fire-and-forget outbound webhook fanout for `document.deleted`.
-        // Only publish if this call performed the actual state transition from a
-        // non-deleted state — re-deleting an already-deleted document must not
-        // produce a spurious second event.
-        // Errors are logged at WARN level and do NOT fail the delete operation.
-        if current_document.document_state != "deleted" {
-            let event = crate::domains::webhook::WebhookEvent {
-                event_type: "document.deleted".to_string(),
-                event_id: format!("document.deleted:{}:{}", document_id, uuid::Uuid::now_v7()),
-                workspace_id: document.workspace_id,
-                library_id: Some(document.library_id),
-                payload_json: serde_json::json!({
-                    "document_id": document_id,
-                    "library_id": document.library_id,
-                }),
-            };
-            let pg = state.persistence.postgres.clone();
-            let errors =
-                crate::services::webhook::outbound::publish_webhook_event(&pg, &event).await;
-            for err in &errors {
-                tracing::warn!(
-                    %document_id,
-                    library_id = %document.library_id,
-                    error = %err,
-                    "outbound webhook publish error after delete_document_with_context"
-                );
-            }
-
+        // Only the transaction that observed the non-deleted row owns the
+        // parentage cascade. The same transaction already persisted the
+        // durable lifecycle event beside the state transition.
+        if transitioned_to_deleted {
             // Cascade the parentage lifecycle to this document's children. Only
             // runs on the real delete transition (guarded by the non-deleted
             // precondition above), so an idempotent re-delete never re-cascades.
@@ -1138,6 +1204,7 @@ impl ContentService {
                 DOCUMENT_ROLE_ATTACHMENT => {
                     if let Err(error) = content_repository::detach_document_parent(
                         &state.persistence.postgres,
+                        library_id,
                         child.id,
                     )
                     .await
@@ -1167,7 +1234,7 @@ impl ContentService {
     ///
     /// Selects the latest revision by `(revision_number desc, created_at
     /// desc)`. This covers both the healthy case (revision exists with a
-    /// storage_key) and the failed-mid-pipeline case (revision was
+    /// `storage_key`) and the failed-mid-pipeline case (revision was
     /// created before the crash, `content_document_head.active_revision_id`
     /// was never promoted). When the document has literally zero
     /// revisions in PG (orphan debris from an earlier crash that never
@@ -1760,100 +1827,9 @@ fn build_document_list_entry(
     row: &ContentDocumentListRow,
     knowledge_document: Option<&KnowledgeDocumentRow>,
     effective_revision: Option<&KnowledgeRevisionRow>,
-) -> ContentDocumentListEntry {
-    use crate::services::content::source_access::{
-        derive_content_source_file_name, describe_content_source,
-    };
-
-    let deleted = row.document_state == "deleted" || row.deleted_at.is_some();
-
-    let revision_hard_failed = effective_revision.is_some_and(|revision| {
-        matches!(revision.text_state.as_str(), "failed" | "unavailable")
-            || revision.vector_state == "failed"
-    });
-    let revision_text_ready = effective_revision
-        .is_some_and(|revision| revision_text_state_is_readable(&revision.text_state));
-    let revision_graph_ready = effective_revision
-        .is_some_and(|revision| matches!(revision.graph_state.as_str(), "ready" | "graph_ready"));
-    let graph_failed = effective_revision.is_some_and(|revision| revision.graph_state == "failed");
-
-    let mutation_failed =
-        row.mutation_state.as_deref().is_some_and(|state| matches!(state, "failed" | "conflicted"));
-    let mutation_canceled = row.mutation_state.as_deref().is_some_and(|state| state == "canceled");
-    let mutation_inflight =
-        row.mutation_state.as_deref().is_some_and(|state| matches!(state, "accepted" | "running"));
-    let job_failed = row.job_queue_state.as_deref().is_some_and(|state| state == "failed");
-    let job_canceled = row.job_queue_state.as_deref().is_some_and(|state| state == "canceled");
-    let job_inflight =
-        row.job_queue_state.as_deref().is_some_and(|state| matches!(state, "queued" | "leased"));
-
-    let classification = if deleted {
-        None
-    } else {
-        Some(classify_document_knowledge_signals(DocumentKnowledgeSignals {
-            processing_active: mutation_inflight || job_inflight,
-            hard_failure: revision_hard_failed || mutation_failed || job_failed,
-            canceled_terminal: mutation_canceled || job_canceled,
-            revision_text_ready,
-            revision_graph_ready,
-            preparation_ready: revision_graph_ready,
-            preparation_failed: false,
-            graph_failed,
-            observed_preparation_state: None,
-            block_count: None,
-            typed_fact_count: None,
-        }))
-    };
-    let readiness = classification
-        .as_ref()
-        .map(|state| state.readiness_kind)
-        .unwrap_or(DocumentReadiness::Processing);
-
-    // Status derivation MUST mirror `DERIVED_STATUS_CASE_SQL` in
-    // content_repository.rs — that CASE drives the status filter on the
-    // list SQL. If the orderings diverge the server filters on one
-    // classification and the row renders with another (observed as
-    // "filter=ready shows queued rows" when a re-ingest job queues
-    // against a still-readable head). Chain, SQL-aligned:
-    //   hard failed (mutation/revision/job) > leased → processing >
-    //   readable revision wins → ready > canceled > queued > inflight →
-    //   processing > zombie completed → failed > else queued.
-    let status_hard_failed =
-        mutation_failed || job_failed || (revision_hard_failed && !revision_text_ready);
-    let status = if status_hard_failed {
-        DocumentStatus::Failed
-    } else if row.job_queue_state.as_deref() == Some("leased") {
-        // list path does not carry activity_status; surface as `processing`
-        // and let the inspector refine the blocked/retrying/stalled split.
-        DocumentStatus::Processing
-    } else if matches!(
-        readiness,
-        DocumentReadiness::GraphReady
-            | DocumentReadiness::GraphSparse
-            | DocumentReadiness::Readable
-    ) {
-        DocumentStatus::Ready
-    } else if row.job_queue_state.as_deref() == Some("canceled")
-        || row.mutation_state.as_deref() == Some("canceled")
-    {
-        DocumentStatus::Canceled
-    } else if row.job_queue_state.as_deref() == Some("queued") {
-        DocumentStatus::Queued
-    } else if mutation_inflight || job_inflight {
-        DocumentStatus::Processing
-    } else if row.job_queue_state.as_deref() == Some("completed") {
-        // zombie completion — job terminal but readiness never went green
-        DocumentStatus::Failed
-    } else {
-        DocumentStatus::Queued
-    };
-
-    // Visible name: folder-backed uploads with a relative `external_key`
-    // intentionally surface that canonical path; older uploads and all
-    // non-file sources keep the existing filename/title-derived chain.
-    let file_name_from_knowledge =
-        knowledge_document.and_then(|doc| doc.file_name.clone()).filter(|name| !name.is_empty());
-
+) -> Result<ContentDocumentListEntry, ApiError> {
+    let (cost_total, cost_currency_code) = document_costs(row)?;
+    let (status, readiness) = document_status_and_readiness(row, effective_revision);
     let source_descriptor = effective_revision.map(|revision| {
         describe_content_source(
             revision.document_id,
@@ -1865,52 +1841,23 @@ fn build_document_list_entry(
             &row.external_key,
         )
     });
-
-    let fallback_file_name = effective_revision.map(|revision| {
-        derive_content_source_file_name(
-            revision.source_uri.as_deref(),
-            revision.title.as_deref(),
-            &row.external_key,
-        )
-    });
-
-    let file_name = resolve_document_display_name(
-        &row.external_key,
-        effective_revision.map(|revision| revision.revision_kind.as_str()),
-        file_name_from_knowledge,
-        source_descriptor.as_ref().map(|descriptor| descriptor.file_name.clone()),
-        fallback_file_name,
-        row.revision_title.clone(),
+    let file_name = document_display_name(
+        row,
+        knowledge_document,
+        effective_revision,
+        source_descriptor.as_ref(),
     );
-
-    // file_type: prefer the revision's real mime type.
     let file_type = row
         .revision_mime_type
         .clone()
         .or_else(|| effective_revision.map(|revision| revision.mime_type.clone()));
-
     let file_size =
         row.revision_byte_size.or_else(|| effective_revision.map(|revision| revision.byte_size));
+    let processing_finished_at = (status != DocumentStatus::Processing)
+        .then_some(row.job_completed_at.or(row.attempt_finished_at))
+        .flatten();
 
-    let stage = row.attempt_current_stage.clone();
-
-    // processing_started_at: the first claim (attempt started) is the only
-    // truthful anchor — mirrors the frontend "claimedAt" logic.
-    let processing_started_at = row.attempt_started_at;
-    let processing_finished_at = if status == DocumentStatus::Processing {
-        None
-    } else {
-        row.job_completed_at.or(row.attempt_finished_at)
-    };
-
-    let failure_code =
-        row.attempt_failure_code.clone().or_else(|| row.mutation_failure_code.clone());
-    let progress_percent = derive_document_list_progress_percent(
-        status,
-        row.attempt_progress_percent.unwrap_or_default(),
-    );
-
-    ContentDocumentListEntry {
+    Ok(ContentDocumentListEntry {
         id: row.id,
         library_id: row.library_id,
         workspace_id: row.workspace_id,
@@ -1922,11 +1869,17 @@ fn build_document_list_entry(
         external_key: row.external_key.clone(),
         status,
         readiness,
-        stage,
-        progress_percent,
-        processing_started_at,
+        stage: row.attempt_current_stage.clone(),
+        progress_percent: derive_document_list_progress_percent(
+            status,
+            row.attempt_progress_percent.unwrap_or_default(),
+        ),
+        processing_started_at: row.attempt_started_at,
         processing_finished_at,
-        failure_code,
+        failure_code: row
+            .attempt_failure_code
+            .clone()
+            .or_else(|| row.mutation_failure_code.clone()),
         failure_message: row.attempt_failure_message.clone(),
         retryable: row.attempt_retryable.unwrap_or(false),
         source_kind: row
@@ -1938,10 +1891,166 @@ fn build_document_list_entry(
             .clone()
             .or_else(|| effective_revision.and_then(|revision| revision.source_uri.clone())),
         document_hint: row.revision_document_hint.clone(),
-        source_access: source_descriptor.and_then(|d| d.access),
-        cost_total: row.cost_total,
-        cost_currency_code: row.cost_currency_code.clone(),
+        source_access: source_descriptor.and_then(|descriptor| descriptor.access),
+        cost_total,
+        cost_currency_code,
+    })
+}
+
+fn document_costs(
+    row: &ContentDocumentListRow,
+) -> Result<(rust_decimal::Decimal, String), ApiError> {
+    crate::services::ops::billing::ensure_billing_rollup_readable(
+        "library",
+        row.library_id,
+        row.billing_rollup_dirty,
+        row.billing_rollup_terminal_error_code.as_deref(),
+    )?;
+    match (&row.cost_total, &row.cost_currency_code) {
+        (Some(total), Some(currency_code)) => Ok((*total, currency_code.clone())),
+        _ => Err(ApiError::Conflict(format!(
+            "document {} has billing costs in multiple currencies; request per-currency charges",
+            row.id
+        ))),
     }
+}
+
+fn document_status_and_readiness(
+    row: &ContentDocumentListRow,
+    effective_revision: Option<&KnowledgeRevisionRow>,
+) -> (DocumentStatus, DocumentReadiness) {
+    let signals = document_knowledge_signals(row, effective_revision);
+    let readiness = document_readiness(row, signals);
+    (document_status(row, signals, readiness), readiness)
+}
+
+fn document_knowledge_signals(
+    row: &ContentDocumentListRow,
+    effective_revision: Option<&KnowledgeRevisionRow>,
+) -> DocumentKnowledgeSignals<'static> {
+    let revision_hard_failed = effective_revision.is_some_and(|revision| {
+        revision.text_state == "failed" || revision.vector_state == "failed"
+    });
+    let revision_text_ready = effective_revision
+        .is_some_and(|revision| revision_text_state_is_readable(&revision.text_state));
+    let revision_graph_ready =
+        effective_revision.is_some_and(|revision| revision.graph_state == "ready");
+    let graph_failed = effective_revision.is_some_and(|revision| revision.graph_state == "failed");
+    let mutation_failed =
+        row.mutation_state.as_deref().is_some_and(|state| matches!(state, "failed" | "conflicted"));
+    let job_failed = row.job_queue_state.as_deref() == Some("failed");
+
+    DocumentKnowledgeSignals {
+        processing_active: mutation_is_inflight(row) || job_is_inflight(row),
+        hard_failure: revision_hard_failed || mutation_failed || job_failed,
+        canceled_terminal: mutation_is_canceled(row) || job_is_canceled(row),
+        revision_text_ready,
+        revision_graph_ready,
+        preparation_ready: revision_graph_ready,
+        preparation_failed: false,
+        graph_failed,
+        observed_preparation_state: None,
+        block_count: None,
+        typed_fact_count: None,
+    }
+}
+
+fn document_readiness(
+    row: &ContentDocumentListRow,
+    signals: DocumentKnowledgeSignals<'_>,
+) -> DocumentReadiness {
+    if row.document_state != "deleted" && row.deleted_at.is_none() {
+        classify_document_knowledge_signals(signals).readiness_kind
+    } else {
+        DocumentReadiness::Processing
+    }
+}
+
+fn document_status(
+    row: &ContentDocumentListRow,
+    signals: DocumentKnowledgeSignals<'_>,
+    readiness: DocumentReadiness,
+) -> DocumentStatus {
+    let revision_hard_failed_without_text = signals.hard_failure
+        && !signals.revision_text_ready
+        && !mutation_has_failed(row)
+        && !job_has_failed(row);
+    if mutation_has_failed(row) || job_has_failed(row) || revision_hard_failed_without_text {
+        return DocumentStatus::Failed;
+    }
+    if row.job_queue_state.as_deref() == Some("leased") {
+        return DocumentStatus::Processing;
+    }
+    if matches!(
+        readiness,
+        DocumentReadiness::GraphReady
+            | DocumentReadiness::GraphSparse
+            | DocumentReadiness::Readable
+    ) {
+        return DocumentStatus::Ready;
+    }
+    if mutation_is_canceled(row) || job_is_canceled(row) {
+        return DocumentStatus::Canceled;
+    }
+    if row.job_queue_state.as_deref() == Some("queued") {
+        return DocumentStatus::Queued;
+    }
+    if signals.processing_active {
+        return DocumentStatus::Processing;
+    }
+    if row.job_queue_state.as_deref() == Some("completed") {
+        return DocumentStatus::Failed;
+    }
+    DocumentStatus::Queued
+}
+
+fn mutation_has_failed(row: &ContentDocumentListRow) -> bool {
+    row.mutation_state.as_deref().is_some_and(|state| matches!(state, "failed" | "conflicted"))
+}
+
+fn job_has_failed(row: &ContentDocumentListRow) -> bool {
+    row.job_queue_state.as_deref() == Some("failed")
+}
+
+fn mutation_is_canceled(row: &ContentDocumentListRow) -> bool {
+    row.mutation_state.as_deref() == Some("canceled")
+}
+
+fn job_is_canceled(row: &ContentDocumentListRow) -> bool {
+    row.job_queue_state.as_deref() == Some("canceled")
+}
+
+fn mutation_is_inflight(row: &ContentDocumentListRow) -> bool {
+    row.mutation_state.as_deref().is_some_and(|state| matches!(state, "accepted" | "running"))
+}
+
+fn job_is_inflight(row: &ContentDocumentListRow) -> bool {
+    row.job_queue_state.as_deref().is_some_and(|state| matches!(state, "queued" | "leased"))
+}
+
+fn document_display_name(
+    row: &ContentDocumentListRow,
+    knowledge_document: Option<&KnowledgeDocumentRow>,
+    effective_revision: Option<&KnowledgeRevisionRow>,
+    source_descriptor: Option<&crate::services::content::source_access::ContentSourceDescriptor>,
+) -> String {
+    let knowledge_file_name =
+        knowledge_document.and_then(|doc| doc.file_name.clone()).filter(|name| !name.is_empty());
+    let fallback_file_name = effective_revision.map(|revision| {
+        derive_content_source_file_name(
+            revision.source_uri.as_deref(),
+            revision.title.as_deref(),
+            &row.external_key,
+        )
+    });
+    resolve_document_display_name(
+        &row.external_key,
+        effective_revision.map(|revision| revision.revision_kind.as_str()),
+        knowledge_file_name,
+        source_descriptor.map(|descriptor| descriptor.file_name.clone()),
+        fallback_file_name,
+        row.revision_title.clone(),
+    )
 }
 
 fn revision_text_state_is_readable(state: &str) -> bool {
@@ -2019,8 +2128,10 @@ mod tests {
             attempt_heartbeat_at: None,
             attempt_failure_message: None,
             attempt_progress_percent: None,
-            cost_total: Decimal::ZERO,
-            cost_currency_code: "USD".to_string(),
+            cost_total: Some(Decimal::ZERO),
+            cost_currency_code: Some("USD".to_string()),
+            billing_rollup_dirty: false,
+            billing_rollup_terminal_error_code: None,
         }
     }
 
@@ -2118,20 +2229,47 @@ mod tests {
     #[test]
     fn list_entry_keeps_canceled_job_with_readable_revision_ready() {
         let row = list_row(Some("canceled"), None);
-        let revision = revision("readable", "pending", "pending");
+        let revision = revision("text_readable", "pending", "pending");
 
-        let entry = build_document_list_entry(&row, None, Some(&revision));
+        let entry = build_document_list_entry(&row, None, Some(&revision))
+            .expect("single-currency list row should map");
 
         assert_eq!(entry.status, DocumentStatus::Ready);
         assert_eq!(entry.readiness, DocumentReadiness::Readable);
     }
 
     #[test]
+    fn list_entry_rejects_mixed_currency_cost_sentinel() {
+        let mut row = list_row(None, None);
+        row.cost_total = None;
+        row.cost_currency_code = None;
+        let revision = revision("text_readable", "ready", "ready");
+
+        let error = build_document_list_entry(&row, None, Some(&revision))
+            .expect_err("mixed-currency totals must fail closed");
+
+        assert!(error.to_string().contains("multiple currencies"));
+    }
+
+    #[test]
+    fn list_entry_rejects_cost_from_dirty_scope_snapshot() {
+        let mut row = list_row(None, None);
+        row.billing_rollup_dirty = true;
+        let revision = revision("text_readable", "ready", "ready");
+
+        let error = build_document_list_entry(&row, None, Some(&revision))
+            .expect_err("a document list must not expose a stale scalar cost");
+
+        assert!(error.to_string().contains("being reconciled"));
+    }
+
+    #[test]
     fn list_entry_keeps_graph_failure_readable_for_search() {
         let row = list_row(None, None);
-        let revision = revision("readable", "ready", "failed");
+        let revision = revision("text_readable", "ready", "failed");
 
-        let entry = build_document_list_entry(&row, None, Some(&revision));
+        let entry = build_document_list_entry(&row, None, Some(&revision))
+            .expect("single-currency list row should map");
 
         assert_eq!(entry.status, DocumentStatus::Ready);
         assert_eq!(entry.readiness, DocumentReadiness::Readable);
@@ -2142,9 +2280,10 @@ mod tests {
         let mut row = list_row(Some("leased"), Some("running"));
         row.attempt_current_stage = Some("extract_graph".to_string());
         row.attempt_progress_percent = Some(76);
-        let revision = revision("readable", "ready", "ready");
+        let revision = revision("text_readable", "ready", "ready");
 
-        let entry = build_document_list_entry(&row, None, Some(&revision));
+        let entry = build_document_list_entry(&row, None, Some(&revision))
+            .expect("single-currency list row should map");
 
         assert_eq!(entry.status, DocumentStatus::Processing);
         assert_eq!(entry.progress_percent, Some(76));
@@ -2153,9 +2292,10 @@ mod tests {
     #[test]
     fn list_entry_marks_ready_documents_as_complete() {
         let row = list_row(None, None);
-        let revision = revision("readable", "ready", "ready");
+        let revision = revision("text_readable", "ready", "ready");
 
-        let entry = build_document_list_entry(&row, None, Some(&revision));
+        let entry = build_document_list_entry(&row, None, Some(&revision))
+            .expect("single-currency list row should map");
 
         assert_eq!(entry.status, DocumentStatus::Ready);
         assert_eq!(entry.progress_percent, Some(100));
@@ -2168,7 +2308,8 @@ mod tests {
         row.attempt_failure_message = Some("Parser failed on page 2".to_string());
         let revision = revision("pending", "pending", "pending");
 
-        let entry = build_document_list_entry(&row, None, Some(&revision));
+        let entry = build_document_list_entry(&row, None, Some(&revision))
+            .expect("single-currency list row should map");
 
         assert_eq!(entry.status, DocumentStatus::Failed);
         assert_eq!(entry.failure_code.as_deref(), Some("parser_failed"));

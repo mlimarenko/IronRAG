@@ -154,52 +154,53 @@ pub struct PreStructuringNormalization {
     pub structure_hints: ExtractionStructureHints,
 }
 
-#[must_use]
-pub fn normalize_for_structured_preparation(
-    content: &str,
-    structure_hints: Option<&ExtractionStructureHints>,
-) -> PreStructuringNormalization {
-    let source_hints = structure_hints
-        .cloned()
-        .unwrap_or_else(|| build_text_layout_from_content(content).structure_hints);
+fn normalize_line_text(mut line: ExtractionLineHint) -> ExtractionLineHint {
+    line.text =
+        if line.text.trim().is_empty() { String::new() } else { line.text.trim_end().to_string() };
+    line
+}
+
+fn merge_line_into_previous(previous: &mut ExtractionLineHint, current: ExtractionLineHint) {
+    previous.text.push_str(current.text.trim());
+    previous.source_ordinals.extend(current.source_ordinals);
+    previous.source_ordinals.sort_unstable();
+    previous.source_ordinals.dedup();
+    previous.signals.extend(current.signals);
+    previous.signals.sort_unstable_by_key(|signal| *signal as u8);
+    previous.signals.dedup();
+}
+
+fn repair_structured_lines(
+    source_hints: ExtractionStructureHints,
+) -> (Vec<ExtractionLineHint>, usize) {
     let mut repaired_lines = Vec::<ExtractionLineHint>::new();
     let mut joined_line_count = 0_usize;
 
     for line in source_hints.lines {
-        let mut current = line;
-        let trimmed_text = current.text.trim().to_string();
-        current.text = if trimmed_text.is_empty() {
-            String::new()
-        } else {
-            current.text.trim_end().to_string()
-        };
-
-        if trimmed_text.is_empty() {
+        let current = normalize_line_text(line);
+        if current.text.is_empty() {
             repaired_lines.push(current);
             continue;
         }
 
-        if let Some(previous) = repaired_lines.last_mut() {
-            let same_page = previous.page_number == current.page_number;
-            if same_page && should_join_without_separator(previous, &current) {
-                previous.text.push_str(current.text.trim());
-                previous.source_ordinals.extend(current.source_ordinals);
-                previous.source_ordinals.sort_unstable();
-                previous.source_ordinals.dedup();
-                previous.signals.extend(current.signals);
-                previous.signals.sort_unstable_by_key(|signal| *signal as u8);
-                previous.signals.dedup();
-                joined_line_count = joined_line_count.saturating_add(1);
-                continue;
-            }
+        let should_join = repaired_lines.last().is_some_and(|previous| {
+            previous.page_number == current.page_number
+                && should_join_without_separator(previous, &current)
+        });
+        if should_join && let Some(previous) = repaired_lines.last_mut() {
+            merge_line_into_previous(previous, current);
+            joined_line_count = joined_line_count.saturating_add(1);
+        } else {
+            repaired_lines.push(current);
         }
-
-        repaired_lines.push(current);
     }
+    (repaired_lines, joined_line_count)
+}
 
+fn render_normalized_lines(lines: &mut [ExtractionLineHint]) -> String {
     let mut normalized_text = String::new();
     let mut offset = 0_i32;
-    for (index, line) in repaired_lines.iter_mut().enumerate() {
+    for (index, line) in lines.iter_mut().enumerate() {
         if index > 0 {
             normalized_text.push('\n');
             offset = offset.saturating_add(1);
@@ -212,6 +213,19 @@ pub fn normalize_for_structured_preparation(
         line.start_offset = Some(start_offset);
         line.end_offset = Some(offset);
     }
+    normalized_text
+}
+
+#[must_use]
+pub fn normalize_for_structured_preparation(
+    content: &str,
+    structure_hints: Option<&ExtractionStructureHints>,
+) -> PreStructuringNormalization {
+    let source_hints = structure_hints
+        .cloned()
+        .unwrap_or_else(|| build_text_layout_from_content(content).structure_hints);
+    let (mut repaired_lines, joined_line_count) = repair_structured_lines(source_hints);
+    let normalized_text = render_normalized_lines(&mut repaired_lines);
 
     PreStructuringNormalization {
         normalized_text,
@@ -309,9 +323,10 @@ fn split_concatenated_path_like_token(token: &str) -> Option<(String, String)> {
 }
 
 fn path_segment_has_file_marker(token: &str) -> bool {
-    token.rsplit('/').next().is_some_and(|segment| {
-        segment.contains('.') && segment.chars().any(|ch| ch.is_alphanumeric())
-    })
+    token
+        .rsplit('/')
+        .next()
+        .is_some_and(|segment| segment.contains('.') && segment.chars().any(char::is_alphanumeric))
 }
 
 fn ascii_lower_alnum(token: &str) -> bool {

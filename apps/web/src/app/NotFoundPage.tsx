@@ -1,11 +1,11 @@
-import { useNavigate } from 'react-router-dom';
-import { useTranslation } from 'react-i18next';
-import { Button } from '@/shared/components/ui/button';
-import { Home } from 'lucide-react';
+import { useNavigate } from 'react-router-dom'
+import { useTranslation } from 'react-i18next'
+import { Button } from '@/shared/components/ui/button'
+import { Home } from 'lucide-react'
 
 export default function NotFoundPage() {
-  const { t } = useTranslation();
-  const navigate = useNavigate();
+  const { t } = useTranslation()
+  const navigate = useNavigate()
 
   return (
     <div className="min-h-screen flex items-center justify-center bg-background ambient-bg">
@@ -14,11 +14,13 @@ export default function NotFoundPage() {
           404
         </div>
         <h1 className="text-lg font-bold tracking-tight">{t('common.pageNotFoundTitle')}</h1>
-        <p className="text-sm text-muted-foreground mt-2 mb-6">{t('common.pageNotFoundDescription')}</p>
+        <p className="text-sm text-muted-foreground mt-2 mb-6">
+          {t('common.pageNotFoundDescription')}
+        </p>
         <Button variant="outline" onClick={() => navigate('/dashboard')}>
           <Home className="h-4 w-4 mr-2" /> {t('common.backToHome')}
         </Button>
       </div>
     </div>
-  );
+  )
 }

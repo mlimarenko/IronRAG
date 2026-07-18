@@ -21,7 +21,7 @@ use crate::{
             group_visible_references,
         },
         text_match::{
-            build_related_token_candidates, normalized_alnum_tokens,
+            RelatedTokenSelection, build_related_token_candidates, normalized_alnum_tokens,
             select_related_overlap_tokens_from_candidates, token_sequence_exact_or_contains,
         },
     },
@@ -31,15 +31,24 @@ use crate::{
     },
 };
 
+use super::command_shape::procedure_line_has_command_start;
 use super::retrieve::{
     command_dense_excerpt_for, excerpt_for, focused_excerpt_for, load_latest_library_generation,
     query_graph_status, score_value,
 };
-use super::source_context::structured_literal_excerpt_for;
+use super::source_excerpt::structured_literal_excerpt_for;
 use super::technical_literals::{
     select_document_balanced_chunks, technical_literal_focus_keywords,
 };
-use super::types::*;
+#[cfg(test)]
+use super::types::QueryExecutionReference;
+use super::types::{
+    QueryExecutionEnrichment, QueryGraphIndex, RetrievalBundle, RuntimeChunkScoreKind,
+    RuntimeMatchedChunk, RuntimeMatchedEntity, RuntimeMatchedRelationship,
+    RuntimeQueryLibraryContext, RuntimeQueryLibrarySummary, RuntimeQueryRecentDocument,
+    RuntimeQueryWarning, RuntimeRetrievedDocumentBrief, RuntimeStructuredQueryDiagnostics,
+    RuntimeStructuredQueryLibrarySummary, RuntimeStructuredQueryReferenceCounts,
+};
 
 const BOUNDED_SOURCE_UNIT_CONTEXT_CHARS: usize = 4_000;
 const BOUNDED_ORDINARY_CONTEXT_CHARS: usize = 1_200;
@@ -74,6 +83,51 @@ pub(crate) fn assemble_bounded_context(
     )
 }
 
+struct BoundedContextSections {
+    sections: Vec<String>,
+    used_chars: usize,
+    budget_chars: usize,
+    exceeded_budget: bool,
+}
+
+impl BoundedContextSections {
+    fn new(budget_chars: usize) -> Self {
+        Self { sections: Vec::new(), used_chars: 0, budget_chars, exceeded_budget: false }
+    }
+
+    fn push(&mut self, line: String) -> bool {
+        let projected = self.used_chars + "Context".len() + line.len() + 4;
+        if projected > self.budget_chars {
+            self.exceeded_budget = true;
+            self.push_initial_excerpt(&line);
+            return false;
+        }
+        self.used_chars = projected;
+        self.sections.push(line);
+        true
+    }
+
+    fn push_initial_excerpt(&mut self, line: &str) {
+        if !self.sections.is_empty() {
+            return;
+        }
+        let available = self.budget_chars.saturating_sub("Context\n".len() + 4);
+        if available > 0 {
+            self.sections.push(excerpt_for(line, available));
+        }
+    }
+
+    fn finish(self) -> String {
+        if self.sections.is_empty() {
+            String::new()
+        } else if self.exceeded_budget {
+            self.sections.join("\n")
+        } else {
+            format!("Context\n{}", self.sections.join("\n"))
+        }
+    }
+}
+
 fn assemble_bounded_context_from_chunks(
     entities: &[RuntimeMatchedEntity],
     relationships: &[RuntimeMatchedRelationship],
@@ -85,6 +139,32 @@ fn assemble_bounded_context_from_chunks(
     prefer_graph_first: bool,
     prefer_entity_nodes_before_evidence: bool,
 ) -> String {
+    let graph_lines = bounded_context_graph_lines(
+        entities,
+        relationships,
+        entity_match_lines,
+        graph_evidence_lines,
+        prefer_entity_nodes_before_evidence,
+    );
+    let document_lines = chunks
+        .iter()
+        .map(|chunk| bounded_context_document_block(chunk, ordinary_keywords))
+        .collect::<Vec<_>>();
+    interleave_bounded_context_lines(
+        &graph_lines,
+        &document_lines,
+        budget_chars,
+        prefer_graph_first,
+    )
+}
+
+fn bounded_context_graph_lines(
+    entities: &[RuntimeMatchedEntity],
+    relationships: &[RuntimeMatchedRelationship],
+    entity_match_lines: &[String],
+    graph_evidence_lines: &[String],
+    prefer_entity_nodes_before_evidence: bool,
+) -> Vec<String> {
     let entity_lines = entities.iter().map(graph_node_context_line).collect::<Vec<_>>();
     let mut graph_lines = entity_match_lines.to_vec();
     if prefer_entity_nodes_before_evidence {
@@ -95,75 +175,78 @@ fn assemble_bounded_context_from_chunks(
         graph_lines.extend(entity_lines);
     }
     graph_lines.extend(relationships.iter().map(RuntimeMatchedRelationship::context_line));
-    let document_lines = chunks
-        .iter()
-        .map(|chunk| bounded_context_document_block(chunk, ordinary_keywords))
-        .collect::<Vec<_>>();
+    graph_lines
+}
 
-    let mut sections = Vec::new();
-    let mut used = 0usize;
+fn interleave_bounded_context_lines(
+    graph_lines: &[String],
+    document_lines: &[String],
+    budget_chars: usize,
+    prefer_graph_first: bool,
+) -> String {
+    let mut output = BoundedContextSections::new(budget_chars);
     let mut graph_index = 0usize;
     let mut document_index = 0usize;
-    if prefer_graph_first {
-        while let Some(line) = graph_lines.get(graph_index) {
-            let projected = used + "Context".len() + line.len() + 4;
-            if projected > budget_chars {
-                if sections.is_empty() {
-                    let available = budget_chars.saturating_sub("Context\n".len() + 4);
-                    if available > 0 {
-                        sections.push(excerpt_for(line, available));
-                    }
-                }
-                return if sections.is_empty() { String::new() } else { sections.join("\n") };
-            }
-            used = projected;
-            sections.push(line.clone());
-            graph_index += 1;
-        }
+    if prefer_graph_first && !push_bounded_line_slice(&mut output, graph_lines, &mut graph_index) {
+        return output.finish();
     }
 
     let mut prefer_document = !document_lines.is_empty();
-
     while graph_index < graph_lines.len() || document_index < document_lines.len() {
-        let mut consumed = false;
-        for bucket in 0..2 {
-            let take_document = if prefer_document { bucket == 0 } else { bucket == 1 };
-            let next_line = if take_document {
-                document_lines.get(document_index).cloned().map(|line| {
-                    document_index += 1;
-                    line
-                })
-            } else {
-                graph_lines.get(graph_index).cloned().map(|line| {
-                    graph_index += 1;
-                    line
-                })
-            };
-
-            let Some(line) = next_line else {
-                continue;
-            };
-            let projected = used + "Context".len() + line.len() + 4;
-            if projected > budget_chars {
-                if sections.is_empty() {
-                    let available = budget_chars.saturating_sub("Context\n".len() + 4);
-                    if available > 0 {
-                        sections.push(excerpt_for(&line, available));
-                    }
-                }
-                return if sections.is_empty() { String::new() } else { sections.join("\n") };
-            }
-            used = projected;
-            sections.push(line);
-            consumed = true;
-        }
+        let consumed = push_bounded_context_pair(
+            &mut output,
+            graph_lines,
+            document_lines,
+            &mut graph_index,
+            &mut document_index,
+            prefer_document,
+        );
         if !consumed {
             break;
         }
         prefer_document = !prefer_document;
     }
+    output.finish()
+}
 
-    if sections.is_empty() { String::new() } else { format!("Context\n{}", sections.join("\n")) }
+fn push_bounded_line_slice(
+    output: &mut BoundedContextSections,
+    lines: &[String],
+    index: &mut usize,
+) -> bool {
+    while let Some(line) = lines.get(*index) {
+        *index += 1;
+        if !output.push(line.clone()) {
+            return false;
+        }
+    }
+    true
+}
+
+fn push_bounded_context_pair(
+    output: &mut BoundedContextSections,
+    graph_lines: &[String],
+    document_lines: &[String],
+    graph_index: &mut usize,
+    document_index: &mut usize,
+    prefer_document: bool,
+) -> bool {
+    let mut consumed = false;
+    for take_document in [prefer_document, !prefer_document] {
+        let next_line = if take_document {
+            document_lines.get(*document_index).cloned().inspect(|_| *document_index += 1)
+        } else {
+            graph_lines.get(*graph_index).cloned().inspect(|_| *graph_index += 1)
+        };
+        let Some(line) = next_line else {
+            continue;
+        };
+        consumed = true;
+        if !output.push(line) {
+            return false;
+        }
+    }
+    consumed
 }
 
 pub(crate) fn assemble_bounded_context_for_query(
@@ -302,6 +385,12 @@ fn graph_node_target_context_line(
     format!("[graph-node] target_match=explicit entity_hint: {tail}")
 }
 
+struct EntityMatchTarget {
+    label: String,
+    wildcard_prefixes: Vec<String>,
+    related_tokens: RelatedTokenSelection,
+}
+
 fn entity_match_context_lines(
     query_ir: &QueryIR,
     entities: &[RuntimeMatchedEntity],
@@ -309,73 +398,81 @@ fn entity_match_context_lines(
     if query_ir.target_entities.is_empty() || entities.is_empty() {
         return Vec::new();
     }
+    let target_sets = entity_match_targets(query_ir, entities);
+    if target_sets.is_empty() {
+        return Vec::new();
+    }
 
+    let mut seen_nodes = HashSet::<Uuid>::new();
+    entities
+        .iter()
+        .filter(|entity| seen_nodes.insert(entity.node_id))
+        .filter_map(|entity| {
+            let kind = entity_match_kind(entity, &target_sets)?;
+            Some(format!("[entity-match {kind}] {}", graph_node_context_tail(entity)))
+        })
+        .take(ENTITY_MATCH_CONTEXT_LINE_LIMIT)
+        .collect()
+}
+
+fn entity_match_targets(
+    query_ir: &QueryIR,
+    entities: &[RuntimeMatchedEntity],
+) -> Vec<EntityMatchTarget> {
     let target_labels = query_ir
         .target_entities
         .iter()
         .filter_map(|mention| {
             let label = mention.label.trim();
-            if label.is_empty() {
-                return None;
-            }
-            if normalized_alnum_tokens(label, 3).is_empty()
-                && literal_wildcard_prefixes(label, 2).is_empty()
-            {
-                return None;
-            }
-            Some(label.to_string())
+            let is_matchable = !label.is_empty()
+                && (!normalized_alnum_tokens(label, 3).is_empty()
+                    || !literal_wildcard_prefixes(label, 2).is_empty());
+            is_matchable.then(|| label.to_string())
         })
         .collect::<Vec<_>>();
-    if target_labels.is_empty() {
-        return Vec::new();
-    }
     let related_candidates =
         build_related_token_candidates(entities.iter().map(|entity| entity.label.as_str()), 3);
-    let target_sets = target_labels
+    target_labels
         .into_iter()
-        .map(|label| {
-            let wildcard_prefixes = literal_wildcard_prefixes(&label, 2);
-            let related_tokens =
-                select_related_overlap_tokens_from_candidates(&label, &related_candidates, 3);
-            (label, wildcard_prefixes, related_tokens)
+        .map(|label| EntityMatchTarget {
+            wildcard_prefixes: literal_wildcard_prefixes(&label, 2),
+            related_tokens: select_related_overlap_tokens_from_candidates(
+                &label,
+                &related_candidates,
+                3,
+            ),
+            label,
         })
-        .collect::<Vec<_>>();
+        .collect()
+}
 
-    let mut seen_nodes = HashSet::<Uuid>::new();
-    let mut lines = Vec::new();
-    for entity in entities {
-        if lines.len() >= ENTITY_MATCH_CONTEXT_LINE_LIMIT || !seen_nodes.insert(entity.node_id) {
-            continue;
-        }
-        let label = entity.label.trim();
-        if label.is_empty() {
-            continue;
-        }
-        let label_tokens = normalized_alnum_tokens(label, 3);
-        let label_prefix_text = normalized_prefix_match_text(label);
-        let mut best_kind: Option<&'static str> = None;
-        for (target_label, wildcard_prefixes, related_tokens) in &target_sets {
-            if !wildcard_prefixes.is_empty() {
-                if wildcard_prefixes.iter().any(|prefix| label_prefix_text.starts_with(prefix)) {
-                    best_kind = Some("prefix");
-                    break;
-                }
-                continue;
-            }
-            if token_sequence_exact_or_contains(label, target_label, 3) {
-                best_kind = Some("exact");
-                break;
-            }
-            if !related_tokens.is_empty() && related_tokens.matches_tokens(&label_tokens) {
-                best_kind.get_or_insert("token-overlap");
-            }
-        }
-        let Some(kind) = best_kind else {
-            continue;
-        };
-        lines.push(format!("[entity-match {kind}] {}", graph_node_context_tail(entity)));
+fn entity_match_kind(
+    entity: &RuntimeMatchedEntity,
+    targets: &[EntityMatchTarget],
+) -> Option<&'static str> {
+    let label = entity.label.trim();
+    if label.is_empty() {
+        return None;
     }
-    lines
+    let label_tokens = normalized_alnum_tokens(label, 3);
+    let label_prefix_text = normalized_prefix_match_text(label);
+    let mut best_kind = None;
+    for target in targets {
+        if !target.wildcard_prefixes.is_empty() {
+            if target.wildcard_prefixes.iter().any(|prefix| label_prefix_text.starts_with(prefix)) {
+                return Some("prefix");
+            }
+            continue;
+        }
+        if token_sequence_exact_or_contains(label, &target.label, 3) {
+            return Some("exact");
+        }
+        if !target.related_tokens.is_empty() && target.related_tokens.matches_tokens(&label_tokens)
+        {
+            best_kind = Some("token-overlap");
+        }
+    }
+    best_kind
 }
 
 fn graph_node_context_line(entity: &RuntimeMatchedEntity) -> String {
@@ -441,38 +538,54 @@ fn order_bounded_context_chunks<'a>(
     if chunks.is_empty() {
         return Vec::new();
     }
-    let pagination_requested = false;
     let selected = select_document_balanced_chunks(
         question,
         Some(query_ir),
         chunks,
         keywords,
-        pagination_requested,
+        false,
         chunks.len(),
         super::MAX_CHUNKS_PER_DOCUMENT,
     );
     let mut ordered = Vec::<&RuntimeMatchedChunk>::with_capacity(chunks.len());
     let mut seen = HashSet::<uuid::Uuid>::with_capacity(chunks.len());
 
-    for chunk in
-        chunks.iter().filter(|chunk| super::source_profile::is_source_profile_runtime_chunk(chunk))
-    {
-        if seen.insert(chunk.chunk_id) {
-            ordered.push(chunk);
-        }
-    }
+    extend_unseen_chunks(
+        &mut ordered,
+        &mut seen,
+        chunks.iter().filter(|chunk| super::source_profile::is_source_profile_runtime_chunk(chunk)),
+    );
     if super::retrieve::query_ir_requests_versioned_update_procedure_context(question, query_ir) {
-        for chunk in procedure_context_priority_chunks(question, query_ir, chunks) {
-            if seen.insert(chunk.chunk_id) {
-                ordered.push(chunk);
-            }
-        }
+        extend_unseen_chunks(
+            &mut ordered,
+            &mut seen,
+            procedure_context_priority_chunks(question, query_ir, chunks),
+        );
     }
-    for chunk in content_anchor_priority_chunks(question, query_ir, chunks) {
+    extend_unseen_chunks(
+        &mut ordered,
+        &mut seen,
+        content_anchor_priority_chunks(question, query_ir, chunks),
+    );
+    extend_unseen_chunks(&mut ordered, &mut seen, sorted_identity_chunks(chunks));
+    extend_unseen_chunks(&mut ordered, &mut seen, selected);
+    extend_unseen_chunks(&mut ordered, &mut seen, chunks.iter());
+    ordered
+}
+
+fn extend_unseen_chunks<'a>(
+    ordered: &mut Vec<&'a RuntimeMatchedChunk>,
+    seen: &mut HashSet<Uuid>,
+    chunks: impl IntoIterator<Item = &'a RuntimeMatchedChunk>,
+) {
+    for chunk in chunks {
         if seen.insert(chunk.chunk_id) {
             ordered.push(chunk);
         }
     }
+}
+
+fn sorted_identity_chunks(chunks: &[RuntimeMatchedChunk]) -> Vec<&RuntimeMatchedChunk> {
     let mut identity_chunks = chunks
         .iter()
         .filter(|chunk| {
@@ -489,22 +602,7 @@ fn order_bounded_context_chunks<'a>(
             .then_with(|| left.chunk_index.cmp(&right.chunk_index))
             .then_with(|| left.chunk_id.cmp(&right.chunk_id))
     });
-    for chunk in identity_chunks {
-        if seen.insert(chunk.chunk_id) {
-            ordered.push(chunk);
-        }
-    }
-    for chunk in selected {
-        if seen.insert(chunk.chunk_id) {
-            ordered.push(chunk);
-        }
-    }
-    for chunk in chunks {
-        if seen.insert(chunk.chunk_id) {
-            ordered.push(chunk);
-        }
-    }
-    ordered
+    identity_chunks
 }
 
 fn content_anchor_priority_chunks<'a>(
@@ -759,69 +857,11 @@ fn soft_context_common_prefix_len(left: &str, right: &str) -> usize {
 fn procedure_context_command_signal_score(text: &str) -> usize {
     let mut score = 0usize;
     for line in text.lines() {
-        if procedure_context_line_has_command_shape(line) {
+        if procedure_line_has_command_start(line) {
             score = score.saturating_add(1);
         }
     }
     score.min(8)
-}
-
-fn procedure_context_line_has_command_shape(line: &str) -> bool {
-    let mut tokens = line
-        .split_whitespace()
-        .map(|token| {
-            token
-                .trim_matches(|ch: char| {
-                    matches!(
-                        ch,
-                        '`' | '\'' | '"' | '(' | ')' | '[' | ']' | '{' | '}' | ';' | ',' | ':'
-                    )
-                })
-                .to_ascii_lowercase()
-        })
-        .filter(|token| !token.is_empty())
-        .collect::<Vec<_>>();
-    while tokens.first().is_some_and(|token| matches!(token.as_str(), "sudo" | "su")) {
-        tokens.remove(0);
-    }
-    let Some(head) = tokens.first() else {
-        return false;
-    };
-    if procedure_context_token_is_invocable_head(head) {
-        return true;
-    }
-    if !head.chars().all(|ch| ch.is_ascii_lowercase() || matches!(ch, '-' | '_' | '.')) {
-        return false;
-    }
-    tokens.iter().skip(1).take(6).any(|token| procedure_context_token_is_structural_argument(token))
-}
-
-fn procedure_context_token_is_invocable_head(token: &str) -> bool {
-    procedure_context_token_is_path_like(token)
-        || token.contains('-')
-        || token.contains('_')
-        || token.contains('.')
-        || token.chars().any(|ch| ch.is_ascii_digit())
-}
-
-fn procedure_context_token_is_structural_argument(token: &str) -> bool {
-    token.starts_with('-')
-        || token.contains('=')
-        || token.contains("://")
-        || procedure_context_token_is_path_like(token)
-        || token.contains('-')
-        || token.contains('_')
-        || token.contains('.')
-        || token.chars().any(|ch| ch.is_ascii_digit())
-}
-
-fn procedure_context_token_is_path_like(token: &str) -> bool {
-    (token.starts_with("./")
-        || token.starts_with("../")
-        || token.starts_with('/')
-        || token.contains('/'))
-        && !token.contains("://")
-        && token.chars().any(|ch| ch.is_alphanumeric())
 }
 
 fn bounded_context_document_block(
@@ -829,77 +869,79 @@ fn bounded_context_document_block(
     ordinary_keywords: &[String],
 ) -> String {
     if chunk.score_kind == RuntimeChunkScoreKind::GraphEvidence {
-        let source_text = chunk.source_text.trim();
-        let text = if source_text.is_empty() { chunk.excerpt.trim() } else { source_text };
-        let excerpt =
-            focused_excerpt_for(text, ordinary_keywords, BOUNDED_SOURCE_UNIT_CONTEXT_CHARS);
-        let excerpt = if excerpt.trim().is_empty() {
-            excerpt_for(text, BOUNDED_SOURCE_UNIT_CONTEXT_CHARS)
-        } else {
-            excerpt
-        };
-        return format!(
-            "[document graph_evidence document=\"{}\" ordinal={}]\n{}",
-            context_label(&chunk.document_label),
-            chunk.chunk_index,
-            excerpt
-        );
+        return graph_evidence_document_block(chunk, ordinary_keywords);
     }
     if is_structured_source_unit_context_chunk(chunk) {
-        let source_text = chunk.source_text.trim();
-        let text = if source_text.is_empty() { chunk.excerpt.trim() } else { source_text };
-        let excerpt = structured_literal_excerpt_for(
-            text,
-            ordinary_keywords,
-            BOUNDED_SOURCE_UNIT_CONTEXT_CHARS,
-        )
-        .unwrap_or_else(|| excerpt_for(text, BOUNDED_SOURCE_UNIT_CONTEXT_CHARS));
-        return format!(
-            "[document source_unit ordinal={} document=\"{}\"]\n{}",
-            chunk.chunk_index,
-            context_label(&chunk.document_label),
-            excerpt
-        );
+        return structured_document_block(chunk, ordinary_keywords, "source_unit");
     }
     if chunk.score_kind == RuntimeChunkScoreKind::SourceContext
         && !super::source_profile::is_source_profile_runtime_chunk(chunk)
     {
-        let source_text = chunk.source_text.trim();
-        let text = if source_text.is_empty() { chunk.excerpt.trim() } else { source_text };
-        let excerpt = structured_literal_excerpt_for(
-            text,
-            ordinary_keywords,
-            BOUNDED_SOURCE_UNIT_CONTEXT_CHARS,
-        )
-        .unwrap_or_else(|| excerpt_for(text, BOUNDED_SOURCE_UNIT_CONTEXT_CHARS));
-        return format!(
-            "[document source_context ordinal={} document=\"{}\"]\n{}",
-            chunk.chunk_index,
-            context_label(&chunk.document_label),
-            excerpt
-        );
+        return structured_document_block(chunk, ordinary_keywords, "source_context");
     }
-    if matches!(
-        chunk.score_kind,
-        RuntimeChunkScoreKind::DocumentIdentity | RuntimeChunkScoreKind::LatestVersion
-    ) {
-        let source_text = chunk.source_text.trim();
-        let text = if source_text.is_empty() { chunk.excerpt.trim() } else { source_text };
-        let block_kind = if chunk.score_kind == RuntimeChunkScoreKind::LatestVersion {
-            "latest_version"
-        } else {
-            "document_identity"
-        };
-        return format!(
-            "[document {} ordinal={} document=\"{}\"]\n{}",
-            block_kind,
-            chunk.chunk_index,
-            context_label(&chunk.document_label),
-            excerpt_for(text, BOUNDED_SOURCE_UNIT_CONTEXT_CHARS)
-        );
+    if let Some(block_kind) = identity_document_block_kind(chunk) {
+        return identity_document_block(chunk, block_kind);
     }
     let text = query_focused_chunk_context_text(chunk, ordinary_keywords);
     format!("[document] {}: {}", chunk.document_label, text.trim())
+}
+
+fn preferred_chunk_text(chunk: &RuntimeMatchedChunk) -> &str {
+    let source_text = chunk.source_text.trim();
+    if source_text.is_empty() { chunk.excerpt.trim() } else { source_text }
+}
+
+fn graph_evidence_document_block(
+    chunk: &RuntimeMatchedChunk,
+    ordinary_keywords: &[String],
+) -> String {
+    let text = preferred_chunk_text(chunk);
+    let focused = focused_excerpt_for(text, ordinary_keywords, BOUNDED_SOURCE_UNIT_CONTEXT_CHARS);
+    let excerpt = if focused.trim().is_empty() {
+        excerpt_for(text, BOUNDED_SOURCE_UNIT_CONTEXT_CHARS)
+    } else {
+        focused
+    };
+    format!(
+        "[document graph_evidence document=\"{}\" ordinal={}]\n{}",
+        context_label(&chunk.document_label),
+        chunk.chunk_index,
+        excerpt
+    )
+}
+
+fn structured_document_block(
+    chunk: &RuntimeMatchedChunk,
+    ordinary_keywords: &[String],
+    block_kind: &str,
+) -> String {
+    let text = preferred_chunk_text(chunk);
+    let excerpt =
+        structured_literal_excerpt_for(text, ordinary_keywords, BOUNDED_SOURCE_UNIT_CONTEXT_CHARS)
+            .unwrap_or_else(|| excerpt_for(text, BOUNDED_SOURCE_UNIT_CONTEXT_CHARS));
+    format!(
+        "[document {block_kind} ordinal={} document=\"{}\"]\n{}",
+        chunk.chunk_index,
+        context_label(&chunk.document_label),
+        excerpt
+    )
+}
+
+fn identity_document_block_kind(chunk: &RuntimeMatchedChunk) -> Option<&'static str> {
+    match chunk.score_kind {
+        RuntimeChunkScoreKind::LatestVersion => Some("latest_version"),
+        RuntimeChunkScoreKind::DocumentIdentity => Some("document_identity"),
+        _ => None,
+    }
+}
+
+fn identity_document_block(chunk: &RuntimeMatchedChunk, block_kind: &str) -> String {
+    format!(
+        "[document {block_kind} ordinal={} document=\"{}\"]\n{}",
+        chunk.chunk_index,
+        context_label(&chunk.document_label),
+        excerpt_for(preferred_chunk_text(chunk), BOUNDED_SOURCE_UNIT_CONTEXT_CHARS)
+    )
 }
 
 fn query_focused_chunk_context_text(
@@ -1410,8 +1452,6 @@ pub(crate) fn assemble_answer_context(
             "Library summary".to_string(),
             format!("- Documents in library: {}", summary.document_count),
             format!("- Graph-ready documents: {}", summary.graph_ready_count),
-            format!("- Documents still processing: {}", summary.processing_count),
-            format!("- Documents failed in pipeline: {}", summary.failed_count),
             format!(
                 "- Graph coverage status: {}",
                 query_graph_status_prompt_label(summary.graph_status)
@@ -1689,961 +1729,5 @@ pub(crate) fn group_visible_references_for_query(
 }
 
 #[cfg(test)]
-mod tests {
-    use chrono::Utc;
-
-    use crate::domains::query_ir::{
-        EntityMention, EntityRole, QueryAct, QueryLanguage, QueryScope, SourceSliceFilter,
-        SourceSliceSpec,
-    };
-    use crate::{
-        infra::repositories::RuntimeGraphQueryNodeRow,
-        services::knowledge::runtime_read::ActiveRuntimeGraphProjection,
-    };
-
-    use super::*;
-
-    fn source_slice_ir(direction: SourceSliceDirection, count: u16) -> QueryIR {
-        QueryIR {
-            act: QueryAct::Enumerate,
-            scope: QueryScope::SingleDocument,
-            language: QueryLanguage::Auto,
-            target_types: vec!["record".to_string()],
-            target_entities: Vec::new(),
-            literal_constraints: Vec::new(),
-            temporal_constraints: Vec::new(),
-            comparison: None,
-            document_focus: None,
-            conversation_refs: Vec::new(),
-            needs_clarification: None,
-            source_slice: Some(SourceSliceSpec {
-                direction,
-                count: Some(count),
-                filter: SourceSliceFilter::None,
-            }),
-            retrieval_query: None,
-            confidence: 0.9,
-        }
-    }
-
-    fn latest_version_slice_ir(count: u16) -> QueryIR {
-        let mut ir = source_slice_ir(SourceSliceDirection::Tail, count);
-        ir.scope = QueryScope::LibraryMeta;
-        ir.target_types = vec!["release".to_string(), "version".to_string()];
-        ir
-    }
-
-    fn general_ir() -> QueryIR {
-        QueryIR {
-            act: QueryAct::Enumerate,
-            scope: QueryScope::SingleDocument,
-            language: QueryLanguage::Auto,
-            target_types: vec!["record".to_string()],
-            target_entities: Vec::new(),
-            literal_constraints: Vec::new(),
-            temporal_constraints: Vec::new(),
-            comparison: None,
-            document_focus: None,
-            conversation_refs: Vec::new(),
-            needs_clarification: None,
-            source_slice: None,
-            retrieval_query: None,
-            confidence: 0.9,
-        }
-    }
-
-    fn entity_ir() -> QueryIR {
-        QueryIR {
-            act: QueryAct::Describe,
-            scope: QueryScope::SingleDocument,
-            language: QueryLanguage::Auto,
-            target_types: vec!["person".to_string()],
-            target_entities: vec![EntityMention {
-                label: "Project Omega".to_string(),
-                role: EntityRole::Subject,
-            }],
-            literal_constraints: Vec::new(),
-            temporal_constraints: Vec::new(),
-            comparison: None,
-            document_focus: None,
-            conversation_refs: Vec::new(),
-            needs_clarification: None,
-            source_slice: None,
-            retrieval_query: None,
-            confidence: 0.9,
-        }
-    }
-
-    fn inventory_entity_ir(target_label: &str) -> QueryIR {
-        QueryIR {
-            act: QueryAct::Enumerate,
-            scope: QueryScope::LibraryMeta,
-            language: QueryLanguage::Auto,
-            target_types: vec!["artifact".to_string()],
-            target_entities: vec![EntityMention {
-                label: target_label.to_string(),
-                role: EntityRole::Subject,
-            }],
-            literal_constraints: Vec::new(),
-            temporal_constraints: Vec::new(),
-            comparison: None,
-            document_focus: None,
-            conversation_refs: Vec::new(),
-            needs_clarification: None,
-            source_slice: None,
-            retrieval_query: None,
-            confidence: 0.9,
-        }
-    }
-
-    fn library_inventory_ir() -> QueryIR {
-        QueryIR {
-            act: QueryAct::Enumerate,
-            scope: QueryScope::LibraryMeta,
-            language: QueryLanguage::Auto,
-            target_types: Vec::new(),
-            target_entities: Vec::new(),
-            literal_constraints: Vec::new(),
-            temporal_constraints: Vec::new(),
-            comparison: None,
-            document_focus: None,
-            conversation_refs: Vec::new(),
-            needs_clarification: None,
-            source_slice: None,
-            retrieval_query: None,
-            confidence: 0.9,
-        }
-    }
-
-    fn source_slice_unit(ordinal: i32, source_text: &str) -> RuntimeMatchedChunk {
-        RuntimeMatchedChunk {
-            chunk_id: Uuid::now_v7(),
-            document_id: Uuid::now_v7(),
-            revision_id: Uuid::now_v7(),
-            chunk_index: ordinal,
-            chunk_kind: Some("metadata_block".to_string()),
-            document_label: "records.jsonl".to_string(),
-            excerpt: source_text.to_string(),
-            score_kind: crate::services::query::execution::RuntimeChunkScoreKind::Relevance,
-            score: Some(3.0),
-            source_text: source_text.to_string(),
-        }
-    }
-
-    fn latest_version_chunk(label: &str, chunk_index: i32, score: f32) -> RuntimeMatchedChunk {
-        RuntimeMatchedChunk {
-            chunk_id: Uuid::now_v7(),
-            document_id: Uuid::now_v7(),
-            revision_id: Uuid::now_v7(),
-            chunk_index,
-            chunk_kind: Some("paragraph".to_string()),
-            document_label: label.to_string(),
-            excerpt: format!("{label} excerpt {chunk_index}"),
-            score_kind: RuntimeChunkScoreKind::DocumentIdentity,
-            score: Some(score),
-            source_text: format!("{label} body {chunk_index}"),
-        }
-    }
-
-    fn source_profile(source_text: &str) -> RuntimeMatchedChunk {
-        RuntimeMatchedChunk {
-            chunk_id: Uuid::now_v7(),
-            document_id: Uuid::now_v7(),
-            revision_id: Uuid::now_v7(),
-            chunk_index: 0,
-            chunk_kind: Some("source_profile".to_string()),
-            document_label: "records.jsonl".to_string(),
-            excerpt: "[source_profile source_format=record_jsonl unit_count=2]".to_string(),
-            score_kind: crate::services::query::execution::RuntimeChunkScoreKind::Relevance,
-            score: Some(4.0),
-            source_text: source_text.to_string(),
-        }
-    }
-
-    fn ordinary_chunk(excerpt: &str, source_text: &str) -> RuntimeMatchedChunk {
-        RuntimeMatchedChunk {
-            chunk_id: Uuid::now_v7(),
-            document_id: Uuid::now_v7(),
-            revision_id: Uuid::now_v7(),
-            chunk_index: 1,
-            chunk_kind: Some("paragraph".to_string()),
-            document_label: "guide.md".to_string(),
-            excerpt: excerpt.to_string(),
-            score_kind: crate::services::query::execution::RuntimeChunkScoreKind::Relevance,
-            score: Some(1.0),
-            source_text: source_text.to_string(),
-        }
-    }
-
-    fn runtime_graph_node(
-        label: &str,
-        node_type: &str,
-        summary: Option<&str>,
-    ) -> RuntimeGraphQueryNodeRow {
-        RuntimeGraphQueryNodeRow {
-            id: Uuid::now_v7(),
-            library_id: Uuid::now_v7(),
-            canonical_key: format!("{node_type}:{label}"),
-            label: label.to_string(),
-            node_type: node_type.to_string(),
-            aliases_json: serde_json::json!([]),
-            summary: summary.map(str::to_string),
-            support_count: 1,
-            projection_version: 1,
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
-        }
-    }
-
-    fn graph_index_with_nodes(nodes: Vec<RuntimeGraphQueryNodeRow>) -> QueryGraphIndex {
-        let node_positions =
-            nodes.iter().enumerate().map(|(position, node)| (node.id, position)).collect();
-        QueryGraphIndex::new(
-            std::sync::Arc::new(ActiveRuntimeGraphProjection { nodes, edges: Vec::new() }),
-            node_positions,
-            Default::default(),
-        )
-    }
-
-    #[test]
-    fn target_entity_context_lines_surface_explicit_graph_summaries() {
-        let mut query_ir = entity_ir();
-        query_ir.target_entities = vec![
-            EntityMention { label: "alpha-core".to_string(), role: EntityRole::Object },
-            EntityMention { label: "alpha-sync".to_string(), role: EntityRole::Object },
-        ];
-        let graph_index = graph_index_with_nodes(vec![
-            runtime_graph_node(
-                "alpha-core",
-                "artifact",
-                Some("Runs the Alpha Suite core service."),
-            ),
-            runtime_graph_node("alpha-sync", "artifact", Some("Synchronizes Alpha Suite records.")),
-            runtime_graph_node("beta-core", "artifact", Some("Unrelated component.")),
-        ]);
-
-        let lines = target_entity_context_lines(&query_ir, &graph_index);
-
-        assert_eq!(lines.len(), 2);
-        assert!(lines[0].contains("alpha-core"));
-        assert!(lines[0].contains("Runs the Alpha Suite core service."));
-        assert!(lines[1].contains("alpha-sync"));
-        assert!(!lines.join("\n").contains("beta-core"));
-    }
-
-    #[test]
-    fn wildcard_inventory_target_context_expands_matching_graph_nodes() {
-        let mut query_ir = inventory_entity_ir("alpha-*");
-        query_ir.scope = QueryScope::SingleDocument;
-        let mut nodes = (0..90)
-            .map(|index| {
-                runtime_graph_node(
-                    &format!("alpha-{index:03}"),
-                    "artifact",
-                    Some("Installable Alpha Suite module."),
-                )
-            })
-            .collect::<Vec<_>>();
-        nodes.push(runtime_graph_node(
-            "beta-000",
-            "artifact",
-            Some("Unrelated Beta Suite module."),
-        ));
-        let graph_index = graph_index_with_nodes(nodes);
-
-        let lines = target_entity_context_lines(&query_ir, &graph_index);
-
-        assert!(lines.len() > TARGET_ENTITY_CONTEXT_LINE_LIMIT);
-        assert!(lines.iter().any(|line| line.contains("alpha-089")));
-        assert!(!lines.join("\n").contains("beta-000"));
-    }
-
-    #[test]
-    fn descriptive_wildcard_target_context_keeps_default_cap() {
-        let mut query_ir = inventory_entity_ir("alpha-*");
-        query_ir.act = QueryAct::Describe;
-        let nodes = (0..90)
-            .map(|index| {
-                runtime_graph_node(
-                    &format!("alpha-{index:03}"),
-                    "artifact",
-                    Some("Installable Alpha Suite module."),
-                )
-            })
-            .collect::<Vec<_>>();
-        let graph_index = graph_index_with_nodes(nodes);
-
-        let lines = target_entity_context_lines(&query_ir, &graph_index);
-
-        assert_eq!(lines.len(), TARGET_ENTITY_CONTEXT_LINE_LIMIT);
-        assert!(!lines.iter().any(|line| line.contains("alpha-064")));
-    }
-
-    #[test]
-    fn source_slice_context_renders_ordered_units_not_chunks() {
-        let query_ir = source_slice_ir(SourceSliceDirection::Tail, 2);
-        let chunks = vec![
-            source_slice_unit(2, "[unit_id=u-2] second"),
-            source_slice_unit(3, "[unit_id=u-3] third"),
-        ];
-
-        let context = assemble_bounded_context_for_query(
-            &query_ir,
-            "show latest records",
-            &[],
-            &[],
-            &chunks,
-            &[],
-            4096,
-        );
-
-        assert!(context.contains("SOURCE_SLICE_UNIT"));
-        assert!(context.contains("returned_unit_count: 2"));
-        assert!(!context.contains("SOURCE_SLICE_CHUNK"));
-        assert!(context.find("u-2").unwrap() < context.find("u-3").unwrap());
-    }
-
-    #[test]
-    fn source_slice_context_prefers_source_units_over_fallback_chunks() {
-        let query_ir = source_slice_ir(SourceSliceDirection::Tail, 1);
-        let mut selected_unit = source_slice_unit(7, "[unit_id=u-7] selected record");
-        selected_unit.chunk_kind = Some(super::super::SOURCE_UNIT_CHUNK_KIND.to_string());
-        let chunks =
-            vec![ordinary_chunk("fallback paragraph", "fallback paragraph"), selected_unit];
-
-        let context = assemble_bounded_context_for_query(
-            &query_ir,
-            "show latest record",
-            &[],
-            &[],
-            &chunks,
-            &[],
-            4096,
-        );
-
-        assert!(context.contains("returned_unit_count: 1"));
-        assert!(context.contains("[unit_id=u-7] selected record"));
-        assert!(!context.contains("fallback paragraph"));
-    }
-
-    #[test]
-    fn source_slice_context_does_not_leak_profile_sample_units() {
-        let query_ir = source_slice_ir(SourceSliceDirection::Tail, 1);
-        let chunks = vec![
-            source_profile(
-                "[source_profile source_format=record_jsonl unit_count=2]\n[unit_id=old] old sample",
-            ),
-            source_slice_unit(2, "[unit_id=u-2] latest unit"),
-        ];
-
-        let context = assemble_bounded_context_for_query(
-            &query_ir,
-            "show latest record",
-            &[],
-            &[],
-            &chunks,
-            &[],
-            4096,
-        );
-
-        assert!(context.contains("[source_profile source_format=record_jsonl unit_count=2]"));
-        assert!(context.contains("[unit_id=u-2] latest unit"));
-        assert!(!context.contains("[unit_id=old] old sample"));
-    }
-
-    #[test]
-    fn latest_version_source_slice_context_uses_runtime_rank_order() {
-        let query_ir = latest_version_slice_ir(3);
-        let chunks = vec![
-            latest_version_chunk("Version 1.0.1", 0, 100.0),
-            latest_version_chunk("Version 1.0.3", 0, 300.0),
-            latest_version_chunk("Version 1.0.2", 0, 200.0),
-            ordinary_chunk("unranked", "unranked"),
-        ];
-
-        let context = assemble_bounded_context_for_query(
-            &query_ir,
-            "latest releases",
-            &[],
-            &[],
-            &chunks,
-            &[],
-            4_000,
-        );
-
-        let newest = context.find("Version 1.0.3").unwrap();
-        let middle = context.find("Version 1.0.2").unwrap();
-        let oldest = context.find("Version 1.0.1").unwrap();
-        assert!(newest < middle);
-        assert!(middle < oldest);
-        assert!(!context.contains("unranked"));
-    }
-
-    #[test]
-    fn bounded_context_ranks_source_units_by_question_focus_and_renders_source_text() {
-        let query_ir = general_ir();
-        let document_id = Uuid::now_v7();
-        let revision_id = Uuid::now_v7();
-        let unrelated = RuntimeMatchedChunk {
-            document_id,
-            revision_id,
-            ..source_slice_unit(
-                194,
-                "[unit_id=later]\n44. video outline\n45. lesson plan\n46. music prompt",
-            )
-        };
-        let correct_body = format!(
-            "[unit_id=scripts]\n{}\n10. status report generator for ArcadeEditor beginners",
-            "1. ArcadeEditor calculator script for beginners. ".repeat(12)
-        );
-        let correct = RuntimeMatchedChunk {
-            document_id,
-            revision_id,
-            excerpt: excerpt_for(&correct_body, 120),
-            ..source_slice_unit(6, &correct_body)
-        };
-        let chunks = vec![unrelated, correct];
-
-        let context = assemble_bounded_context_for_query(
-            &query_ir,
-            "simple ArcadeEditor scripts for beginners",
-            &[],
-            &[],
-            &chunks,
-            &[],
-            8192,
-        );
-
-        assert!(context.find("unit_id=scripts").unwrap() < context.find("unit_id=later").unwrap());
-        assert!(context.contains("10. status report generator"));
-    }
-
-    #[test]
-    fn bounded_context_keeps_ordinary_chunks_on_excerpt_text() {
-        let context = assemble_bounded_context(
-            &[],
-            &[],
-            &[ordinary_chunk("short excerpt", "short excerpt plus hidden source body")],
-            4096,
-        );
-
-        assert!(context.contains("short excerpt"));
-        assert!(!context.contains("hidden source body"));
-    }
-
-    #[test]
-    fn bounded_context_keeps_source_context_block_text() {
-        let mut chunk = ordinary_chunk(
-            "Alpha Devices: Device A",
-            &format!(
-                "{}\nAlpha Devices:\n- Device A\n- Device B\n- Device C\n- Device D",
-                "preface ".repeat(160)
-            ),
-        );
-        chunk.score_kind = RuntimeChunkScoreKind::SourceContext;
-
-        let context = assemble_bounded_context_for_query(
-            &general_ir(),
-            "Which Alpha Devices are listed?",
-            &[],
-            &[],
-            &[chunk],
-            &[],
-            8192,
-        );
-
-        assert!(context.contains("[document source_context"));
-        assert!(context.contains("Device A"));
-        assert!(context.contains("Device D"));
-    }
-
-    #[test]
-    fn bounded_context_renders_document_identity_chunks_with_source_unit_budget() {
-        let source = format!(
-            "{}\nInstall the module:\nsample-install alpha-connector\n\nConfiguration file: /opt/alpha/modules/connector/connector.conf\n[Main]\nendpointUrl = https://alpha.example.test/api\npartnerId = demo-partner",
-            "Subject Alpha overview. ".repeat(80)
-        );
-        let mut chunk = ordinary_chunk("Subject Alpha setup", &source);
-        chunk.score_kind = RuntimeChunkScoreKind::DocumentIdentity;
-
-        let context = assemble_bounded_context_for_query(
-            &general_ir(),
-            "How do I configure Subject Alpha?",
-            &[],
-            &[],
-            &[chunk],
-            &[],
-            8192,
-        );
-
-        assert!(context.contains("[document document_identity"));
-        assert!(context.contains("sample-install alpha-connector"));
-        assert!(context.contains("/opt/alpha/modules/connector/connector.conf"));
-        assert!(context.contains("[Main]"));
-        assert!(context.contains("partnerId = demo-partner"));
-    }
-
-    #[test]
-    fn bounded_context_orders_document_identity_chunks_by_retrieval_score() {
-        let mut overview = ordinary_chunk("Subject Alpha overview", "Subject Alpha overview.");
-        overview.score_kind = RuntimeChunkScoreKind::DocumentIdentity;
-        overview.score = Some(1200.0);
-        overview.chunk_index = 0;
-
-        let mut setup = ordinary_chunk(
-            "Subject Alpha configuration",
-            "Install the module:\nsample-install alpha-connector\nConfiguration file: /opt/alpha/modules/connector/connector.conf",
-        );
-        setup.score_kind = RuntimeChunkScoreKind::DocumentIdentity;
-        setup.score = Some(2600.0);
-        setup.document_id = overview.document_id;
-        setup.revision_id = overview.revision_id;
-        setup.chunk_index = 1;
-
-        let chunks = vec![overview, setup];
-        let ordered = order_bounded_context_chunks(
-            "How do I configure Subject Alpha?",
-            &general_ir(),
-            &chunks,
-            &[],
-        );
-
-        assert_eq!(ordered.first().map(|chunk| chunk.chunk_index), Some(1));
-    }
-
-    #[test]
-    fn bounded_context_prioritizes_content_anchor_before_identity_headers() {
-        let mut query_ir = general_ir();
-        query_ir.scope = QueryScope::MultiDocument;
-        query_ir.retrieval_query = Some(
-            "List service plans from the section «Pricing policy: subscription plans». Include plan names."
-                .to_string(),
-        );
-
-        let mut identity_noise = ordinary_chunk(
-            "Image loading rules",
-            &format!(
-                "{}\nImage loading begins near the viewport. Add DNS records for the hosted domain.",
-                "Navigation and unrelated page chrome. ".repeat(80)
-            ),
-        );
-        identity_noise.score_kind = RuntimeChunkScoreKind::DocumentIdentity;
-        identity_noise.score = Some(1_000_000.0);
-        identity_noise.document_label = "FAQ index".to_string();
-        identity_noise.chunk_index = 0;
-
-        let mut related_body = ordinary_chunk(
-            "Pricing policy: subscription plans",
-            "Pricing policy: subscription plans\n\
-             The service can be used for free.\n\
-             Personal plan includes forms and integrations.\n\
-             Business plan includes multiple projects and code export.",
-        );
-        related_body.score = Some(1.0);
-        related_body.document_label = "Product overview".to_string();
-        related_body.chunk_index = 33;
-
-        let context = assemble_bounded_context_for_query(
-            &query_ir,
-            "what subscription plans are available?",
-            &[],
-            &[],
-            &[identity_noise, related_body],
-            &[],
-            900,
-        );
-
-        assert!(context.contains("Personal plan"), "{context}");
-        assert!(context.contains("Business plan"), "{context}");
-        assert!(
-            context.find("Pricing policy: subscription plans").unwrap()
-                < context.find("Image loading").unwrap_or(usize::MAX),
-            "{context}"
-        );
-    }
-
-    #[test]
-    fn bounded_context_uses_unquoted_question_tokens_for_content_anchors() {
-        let mut identity_noise = ordinary_chunk(
-            "Hosted domain troubleshooting",
-            &format!(
-                "{}\nHosted domain troubleshooting covers DNS records and image loading behavior.",
-                "General navigation text. ".repeat(80)
-            ),
-        );
-        identity_noise.score_kind = RuntimeChunkScoreKind::DocumentIdentity;
-        identity_noise.score = Some(1_000_000.0);
-
-        let mut related_body = ordinary_chunk(
-            "Subscription plan overview",
-            "Subscription plans\n\
-             Free plan covers publishing with platform branding.\n\
-             Personal plan adds forms and integrations.\n\
-             Business plan adds multiple projects and export options.",
-        );
-        related_body.score = Some(1.0);
-        related_body.chunk_index = 12;
-
-        let context = assemble_bounded_context_for_query(
-            &general_ir(),
-            "what subscription plans are available?",
-            &[],
-            &[],
-            &[identity_noise, related_body],
-            &[],
-            900,
-        );
-
-        assert!(context.contains("Free plan"), "{context}");
-        assert!(context.contains("Business plan"), "{context}");
-    }
-
-    #[test]
-    fn procedure_context_prioritizes_command_runbook_before_long_noise() {
-        let mut query_ir = general_ir();
-        query_ir.act = QueryAct::ConfigureHow;
-        query_ir.target_types = vec!["artifact".to_string(), "procedure".to_string()];
-        query_ir.target_entities = vec![EntityMention {
-            label: "Alpha subject server".to_string(),
-            role: EntityRole::Subject,
-        }];
-        query_ir.retrieval_query = Some("how to update Alpha subject server?".to_string());
-
-        let mut noise = ordinary_chunk(
-            "Alpha subject server reference",
-            &format!(
-                "Alpha subject server reference. {}",
-                "Long field description with request examples. ".repeat(120)
-            ),
-        );
-        noise.score = Some(100.0);
-        noise.chunk_index = 1;
-
-        let mut runbook = ordinary_chunk(
-            "Alpha subject server versioned update",
-            "Alpha subject server update:\n\
-             1. Install package alpha-upgrade command: sample-install alpha-upgrade\n\
-             2. Run update script from /opt/alpha/bin: cd /opt/alpha/bin ./upgrade_alpha.sh",
-        );
-        runbook.score_kind = RuntimeChunkScoreKind::FocusedDocument;
-        runbook.score = Some(1.0);
-        runbook.chunk_index = 21;
-
-        let chunks = vec![noise, runbook];
-        let context = assemble_bounded_context_for_query(
-            &query_ir,
-            "how to update Alpha subject server?",
-            &[],
-            &[],
-            &chunks,
-            &[],
-            900,
-        );
-
-        assert!(context.contains("sample-install alpha-upgrade"), "{context}");
-        assert!(context.contains("./upgrade_alpha.sh"), "{context}");
-    }
-
-    #[test]
-    fn procedure_context_model_ignores_scoped_previous_question_terms() {
-        let mut query_ir = general_ir();
-        query_ir.act = QueryAct::ConfigureHow;
-        query_ir.target_types = vec!["artifact".to_string(), "procedure".to_string()];
-        query_ir.target_entities =
-            vec![EntityMention { label: "Beta Service".to_string(), role: EntityRole::Subject }];
-
-        let bare = ProcedureContextModel::new("how to update Beta Service version?", &query_ir);
-        let scoped = ProcedureContextModel::new(
-            "scope: how to update Alpha Suite\nquestion: how to update Beta Service version?",
-            &query_ir,
-        );
-
-        assert_eq!(scoped.action_terms, bare.action_terms);
-        assert_eq!(scoped.subject_terms, bare.subject_terms);
-        assert!(!scoped.action_terms.contains("alpha"));
-        assert!(!scoped.action_terms.contains("suite"));
-    }
-
-    #[test]
-    fn retrieved_document_brief_preview_keeps_near_intro_identifiers() {
-        let source = format!(
-            "{}GatewayModuleAlpha is the installable module for Subject Alpha.",
-            "Introductory setup context. ".repeat(12)
-        );
-        let chunk = ordinary_chunk("Subject Alpha setup overview.", &source);
-        let preview = focused_preview_from_bundle_chunks(&[&chunk]).unwrap();
-
-        assert!(preview.contains("GatewayModuleAlpha"));
-    }
-
-    #[test]
-    fn entity_target_context_prioritizes_graph_lines_before_documents() {
-        let context = assemble_bounded_context_for_query(
-            &entity_ir(),
-            "Project Omega",
-            &[
-                RuntimeMatchedEntity {
-                    node_id: Uuid::now_v7(),
-                    label: "Project Omega".to_string(),
-                    node_type: "person".to_string(),
-                    summary: None,
-                    score: Some(0.9),
-                },
-                RuntimeMatchedEntity {
-                    node_id: Uuid::now_v7(),
-                    label: "Project Omega Peer".to_string(),
-                    node_type: "person".to_string(),
-                    summary: None,
-                    score: Some(0.8),
-                },
-            ],
-            &[],
-            &[ordinary_chunk(
-                "Project Omega appears in a long planning note.",
-                "Project Omega appears in a long planning note.",
-            )],
-            &[],
-            4096,
-        );
-
-        let graph_index = context.find("[graph-node]").unwrap_or_default();
-        let second_graph_index = context.find("Project Omega Peer").unwrap_or_default();
-        let document_index = context.find("[document]").unwrap_or_default();
-        assert!(graph_index < document_index);
-        assert!(second_graph_index < document_index);
-    }
-
-    #[test]
-    fn entity_target_context_keeps_unanchored_graph_evidence_before_documents() {
-        let graph_evidence_lines = vec![
-            "[graph-evidence target=\"Project Omega\"]\nProject Omega has a rare one-row fact."
-                .to_string(),
-        ];
-        let context = assemble_bounded_context_for_query(
-            &entity_ir(),
-            "Project Omega",
-            &[],
-            &[],
-            &[ordinary_chunk(
-                "Project Omega appears in a long planning note.",
-                "Project Omega appears in a long planning note.",
-            )],
-            &graph_evidence_lines,
-            4096,
-        );
-
-        let evidence_index = context.find("[graph-evidence").unwrap();
-        let document_index = context.find("[document]").unwrap();
-        assert!(evidence_index < document_index);
-        assert!(context.contains("rare one-row fact"));
-    }
-
-    #[test]
-    fn inventory_context_keeps_matching_graph_nodes_before_long_evidence() {
-        let graph_evidence_lines = vec![format!(
-            "[graph-evidence target=\"Alpha Suite\"]\n{}",
-            "Long supporting evidence. ".repeat(40)
-        )];
-        let context = assemble_bounded_context_for_query(
-            &inventory_entity_ir("alpha-*"),
-            "List alpha-* modules",
-            &[
-                RuntimeMatchedEntity {
-                    node_id: Uuid::now_v7(),
-                    label: "alpha-core".to_string(),
-                    node_type: "artifact".to_string(),
-                    summary: None,
-                    score: Some(0.9),
-                },
-                RuntimeMatchedEntity {
-                    node_id: Uuid::now_v7(),
-                    label: "alpha-desktop".to_string(),
-                    node_type: "artifact".to_string(),
-                    summary: None,
-                    score: Some(0.8),
-                },
-            ],
-            &[],
-            &[ordinary_chunk(
-                "Alpha Suite overview mentions several modules.",
-                "Alpha Suite overview mentions several modules.",
-            )],
-            &graph_evidence_lines,
-            512,
-        );
-
-        let match_index = context.find("[entity-match prefix] alpha-core").unwrap();
-        let node_index = context.find("[graph-node] alpha-core").unwrap();
-        assert!(match_index < node_index);
-        if let Some(evidence_index) = context.find("[graph-evidence") {
-            assert!(node_index < evidence_index);
-        }
-    }
-
-    #[test]
-    fn library_inventory_context_prioritizes_graph_nodes_without_target_entities() {
-        let context = assemble_bounded_context_for_query(
-            &library_inventory_ir(),
-            "List graph inventory",
-            &[RuntimeMatchedEntity {
-                node_id: Uuid::now_v7(),
-                label: "Alpha Gateway".to_string(),
-                node_type: "artifact".to_string(),
-                summary: None,
-                score: Some(0.9),
-            }],
-            &[],
-            &[ordinary_chunk(
-                "A long document overview also exists.",
-                "A long document overview also exists.",
-            )],
-            &[],
-            4096,
-        );
-
-        let graph_index = context.find("[graph-node] Alpha Gateway").unwrap();
-        let document_index = context.find("[document]").unwrap();
-        assert!(graph_index < document_index);
-    }
-
-    #[test]
-    fn graph_node_context_includes_entity_summary_as_answer_evidence() {
-        let context = assemble_bounded_context_for_query(
-            &library_inventory_ir(),
-            "List graph inventory",
-            &[RuntimeMatchedEntity {
-                node_id: Uuid::now_v7(),
-                label: "Alpha Worker".to_string(),
-                node_type: "artifact".to_string(),
-                summary: Some("Runs queued jobs and retries failed deliveries.".to_string()),
-                score: Some(0.9),
-            }],
-            &[],
-            &[ordinary_chunk(
-                "A long document overview also exists.",
-                "A long document overview also exists.",
-            )],
-            &[],
-            4096,
-        );
-
-        assert!(context.contains("[graph-node] evidence:"));
-        assert!(context.contains("Runs queued jobs and retries failed deliveries."));
-        assert!(context.contains("entity_hint: Alpha Worker (artifact)"));
-    }
-
-    #[test]
-    fn entity_target_context_marks_exact_and_token_overlap_matches() {
-        let context = assemble_bounded_context_for_query(
-            &entity_ir(),
-            "Project Omega",
-            &[
-                RuntimeMatchedEntity {
-                    node_id: Uuid::now_v7(),
-                    label: "Project Omega".to_string(),
-                    node_type: "person".to_string(),
-                    summary: None,
-                    score: Some(0.9),
-                },
-                RuntimeMatchedEntity {
-                    node_id: Uuid::now_v7(),
-                    label: "Omega Delta".to_string(),
-                    node_type: "person".to_string(),
-                    summary: None,
-                    score: Some(0.8),
-                },
-                RuntimeMatchedEntity {
-                    node_id: Uuid::now_v7(),
-                    label: "Project Alpha".to_string(),
-                    node_type: "person".to_string(),
-                    summary: None,
-                    score: Some(0.7),
-                },
-                RuntimeMatchedEntity {
-                    node_id: Uuid::now_v7(),
-                    label: "Project Beta".to_string(),
-                    node_type: "person".to_string(),
-                    summary: None,
-                    score: Some(0.6),
-                },
-                RuntimeMatchedEntity {
-                    node_id: Uuid::now_v7(),
-                    label: "Unrelated Sigma".to_string(),
-                    node_type: "person".to_string(),
-                    summary: None,
-                    score: Some(0.1),
-                },
-            ],
-            &[],
-            &[ordinary_chunk(
-                "Project Omega appears in a long planning note.",
-                "Project Omega appears in a long planning note.",
-            )],
-            &[],
-            4096,
-        );
-
-        let exact_index = context.find("[entity-match exact] Project Omega").unwrap();
-        let related_index = context.find("[entity-match token-overlap] Omega Delta").unwrap();
-        let graph_index = context.find("[graph-node]").unwrap();
-        assert!(exact_index < graph_index);
-        assert!(related_index < graph_index);
-        assert!(!context.contains("[entity-match token-overlap] Project Alpha"));
-        assert!(!context.contains("[entity-match token-overlap] Project Beta"));
-        assert!(!context.contains("[entity-match token-overlap] Unrelated Sigma"));
-    }
-
-    #[test]
-    fn entity_target_context_rejects_embedded_short_exact_match() {
-        let mut ir = entity_ir();
-        ir.target_entities[0].label = "Sasha Otoya".to_string();
-        let context = assemble_bounded_context_for_query(
-            &ir,
-            "Sasha Otoya",
-            &[
-                RuntimeMatchedEntity {
-                    node_id: Uuid::now_v7(),
-                    label: "OTO".to_string(),
-                    node_type: "organization".to_string(),
-                    summary: None,
-                    score: Some(0.9),
-                },
-                RuntimeMatchedEntity {
-                    node_id: Uuid::now_v7(),
-                    label: "Alex Otoya".to_string(),
-                    node_type: "person".to_string(),
-                    summary: None,
-                    score: Some(0.8),
-                },
-            ],
-            &[],
-            &[ordinary_chunk("Sasha Otoya is mentioned once.", "Sasha Otoya is mentioned once.")],
-            &[],
-            4096,
-        );
-
-        assert!(!context.contains("[entity-match exact] OTO"));
-        assert!(context.contains("[entity-match token-overlap] Alex Otoya"));
-    }
-
-    #[test]
-    fn bounded_context_renders_query_focused_source_text_for_ordinary_chunks() {
-        let hidden_rules = "retail_clock rules: register once at start and once at finish.";
-        let source_text = format!(
-            "{}\n{}",
-            "introductory material without the requested rule. ".repeat(20),
-            hidden_rules
-        );
-        let context = assemble_bounded_context_for_query(
-            &general_ir(),
-            "what are the retail_clock rules?",
-            &[],
-            &[],
-            &[ordinary_chunk("introductory material without details", &source_text)],
-            &[],
-            4096,
-        );
-
-        assert!(context.contains(hidden_rules));
-    }
-}
+#[path = "context_tests.rs"]
+mod tests;

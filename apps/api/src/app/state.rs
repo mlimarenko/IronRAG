@@ -1,6 +1,5 @@
-#![allow(clippy::missing_const_for_fn, clippy::struct_excessive_bools, clippy::too_many_lines)]
-
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
+use zeroize::Zeroize as _;
 
 use crate::{
     agent_runtime::{
@@ -8,7 +7,9 @@ use crate::{
         default_policy::{DefaultRuntimePolicy, DefaultRuntimePolicyRules},
         tasks::register_task_catalog,
     },
-    app::config::{RuntimeHookBehavior, Settings, UiBootstrapAdmin, UiBootstrapAiSetup},
+    app::config::{
+        McpHttpOriginPolicy, RuntimeHookBehavior, Settings, UiBootstrapAdmin, UiBootstrapAiSetup,
+    },
     domains::agent_runtime::{RuntimeDecisionTargetKind, RuntimeTaskKind},
     infra::{
         knowledge_plane::{ContextStoreRef, DocumentStoreRef, GraphStoreRef, SearchStoreRef},
@@ -20,7 +21,9 @@ use crate::{
     },
     integrations::concurrency_gateway::ConcurrencyLimitedGateway,
     integrations::llm::{LlmGateway, UnifiedGateway},
-    integrations::provider_budget::{ProviderBudgetConfig, ProviderBudgetRegistry},
+    integrations::provider_budget::{
+        ProviderBudgetConfig, ProviderBudgetRegistry, ProviderBudgetRegistryOptions,
+    },
     services::{
         ai_catalog_service::AiCatalogService,
         catalog_service::CatalogService,
@@ -50,6 +53,7 @@ use crate::{
         query::service::QueryService,
         webhook::WebhookService,
     },
+    shared::secret_encryption::CredentialCipher,
 };
 
 pub const UI_SESSION_COOKIE_NAME: &str = "ironrag_ui_session";
@@ -79,12 +83,44 @@ pub struct RetrievalIntelligenceSettings {
     pub query_intent_cache_max_entries_per_library: usize,
     pub rerank_enabled: bool,
     pub rerank_candidate_limit: usize,
+    pub semantic_rerank: SemanticRerankRuntimeSettings,
     pub balanced_context_enabled: bool,
     pub extraction_recovery_enabled: bool,
     pub extraction_recovery_max_attempts: usize,
     pub summary_refresh_batch_size: usize,
     pub targeted_reconciliation_enabled: bool,
     pub targeted_reconciliation_max_targets: usize,
+}
+
+#[derive(Clone, Copy)]
+pub struct SemanticRerankRuntimeSettings {
+    pub mode: crate::domains::query::SemanticRerankMode,
+    pub timeout_ms: u64,
+    pub candidate_limit: usize,
+    pub candidate_text_chars: usize,
+    pub total_text_chars: usize,
+}
+
+pub(crate) const SEMANTIC_RERANK_HARD_MAX_TIMEOUT_MS: u64 = 3_000;
+pub(crate) const SEMANTIC_RERANK_HARD_MAX_CANDIDATES: usize = 32;
+pub(crate) const SEMANTIC_RERANK_HARD_MAX_CANDIDATE_TEXT_CHARS: usize = 2_400;
+pub(crate) const SEMANTIC_RERANK_HARD_MAX_TOTAL_TEXT_CHARS: usize = 32_000;
+
+impl SemanticRerankRuntimeSettings {
+    #[must_use]
+    pub(crate) fn bounded(self) -> Self {
+        Self {
+            mode: self.mode,
+            timeout_ms: self.timeout_ms.clamp(1, SEMANTIC_RERANK_HARD_MAX_TIMEOUT_MS),
+            candidate_limit: self.candidate_limit.clamp(1, SEMANTIC_RERANK_HARD_MAX_CANDIDATES),
+            candidate_text_chars: self
+                .candidate_text_chars
+                .clamp(1, SEMANTIC_RERANK_HARD_MAX_CANDIDATE_TEXT_CHARS),
+            total_text_chars: self
+                .total_text_chars
+                .clamp(1, SEMANTIC_RERANK_HARD_MAX_TOTAL_TEXT_CHARS),
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -138,7 +174,7 @@ impl McpMemorySettings {
     }
 
     #[must_use]
-    pub fn max_upload_batch_bytes(&self) -> u64 {
+    pub const fn max_upload_batch_bytes(&self) -> u64 {
         self.max_upload_file_bytes()
     }
 
@@ -212,6 +248,7 @@ pub struct ResolveSettleBlockersServices {
 #[derive(Clone)]
 pub struct AppState {
     pub settings: Settings,
+    pub credential_cipher: CredentialCipher,
     pub persistence: Persistence,
     pub agent_runtime: AgentRuntime,
     pub llm_gateway: Arc<dyn LlmGateway>,
@@ -219,7 +256,15 @@ pub struct AppState {
     pub deployment_diagnostics: DeploymentDiagnosticsService,
     pub worker_runtime: WorkerRuntimeState,
     pub ui_runtime: UiRuntimeSettings,
+    pub(crate) mcp_http_origin_policy: McpHttpOriginPolicy,
+    /// Whether environment-managed bootstrap admin credentials were present at
+    /// startup. This non-secret flag remains available to API authorization
+    /// after the plaintext settings fields have been scrubbed.
+    pub bootstrap_admin_configured: bool,
     pub ui_bootstrap_admin: Option<UiBootstrapAdmin>,
+    /// Explicit embedding/test override. Production constructors leave this
+    /// empty and bootstrap provider credentials are resolved only inside the
+    /// operation that consumes them.
     pub ui_bootstrap_ai_setup: Option<UiBootstrapAiSetup>,
     pub ui_session_cookie: UiSessionCookieConfig,
     pub graph_runtime: GraphRuntimeSettings,
@@ -242,7 +287,7 @@ pub struct AppState {
     /// Per-library cache of admitted runtime graph projections keyed
     /// by `(library_id, projection_version)`. The projection is
     /// loaded lazily on first use and reused for every subsequent
-    /// query against the same version — grounded_answer pulled
+    /// query against the same version — `grounded_answer` pulled
     /// 100k+ edges from Postgres on every turn before this, which
     /// dominated MCP tool-call latency on large libraries. A version
     /// bump from `services::graph::projection::next_projection_version`
@@ -253,14 +298,32 @@ pub struct AppState {
 }
 
 impl AppState {
-    pub fn from_dependencies(settings: Settings, persistence: Persistence) -> anyhow::Result<Self> {
-        let bootstrap_settings = settings.bootstrap_settings();
+    pub fn from_dependencies(
+        mut settings: Settings,
+        persistence: Persistence,
+    ) -> anyhow::Result<Self> {
+        let credential_cipher = take_credential_cipher(&mut settings)?;
+        let bootstrap_secrets = take_bootstrap_secrets(&mut settings);
+        Self::from_prepared_dependencies(
+            settings,
+            persistence,
+            credential_cipher,
+            bootstrap_secrets,
+        )
+    }
+
+    fn from_prepared_dependencies(
+        settings: Settings,
+        persistence: Persistence,
+        credential_cipher: CredentialCipher,
+        bootstrap_secrets: BootstrapSecrets,
+    ) -> anyhow::Result<Self> {
         let public_origin_settings = settings.public_origin_settings();
+        let mcp_http_origin_policy =
+            settings.mcp_http_origin_policy().map_err(anyhow::Error::msg)?;
         let content_storage = ContentStorageService::from_settings(&settings)?;
         let deployment_diagnostics = DeploymentDiagnosticsService::new();
         let worker_runtime = WorkerRuntimeState::default();
-        let ui_bootstrap_admin = bootstrap_settings.ui_bootstrap_admin;
-        let ui_bootstrap_ai_setup = settings.resolved_ui_bootstrap_ai_setup();
         let ui_runtime = UiRuntimeSettings {
             frontend_origin: public_origin_settings.raw_frontend_origin,
             default_locale: settings.ui_default_locale.clone(),
@@ -286,6 +349,14 @@ impl AppState {
                 .query_intent_cache_max_entries_per_library,
             rerank_enabled: settings.query_rerank_enabled,
             rerank_candidate_limit: settings.query_rerank_candidate_limit,
+            semantic_rerank: SemanticRerankRuntimeSettings {
+                mode: settings.query_semantic_rerank_mode,
+                timeout_ms: settings.query_semantic_rerank_timeout_ms,
+                candidate_limit: settings.query_semantic_rerank_candidate_limit,
+                candidate_text_chars: settings.query_semantic_rerank_candidate_text_chars,
+                total_text_chars: settings.query_semantic_rerank_total_text_chars,
+            }
+            .bounded(),
             balanced_context_enabled: settings.query_balanced_context_enabled,
             extraction_recovery_enabled: settings.runtime_graph_extract_recovery_enabled,
             extraction_recovery_max_attempts: settings.runtime_graph_extract_recovery_max_attempts,
@@ -415,19 +486,25 @@ impl AppState {
             )),
             agent_runtime.hooks(),
         );
-        // Install the process-wide per-provider outbound concurrency budget.
-        // The default config (max_outbound == 0) is unlimited, so without an
-        // explicit operator opt-in the registry never caps or waits and the
-        // decorator below is a transparent pass-through.
         let provider_budget_config = ProviderBudgetConfig {
             max_outbound: settings.provider_concurrency_max_outbound,
             query_reserved: settings.provider_concurrency_query_reserved,
         };
-        crate::integrations::provider_budget::install_global_registry(Arc::new(
-            ProviderBudgetRegistry::uniform(provider_budget_config),
-        ));
+        let provider_budget_registry = Arc::new(ProviderBudgetRegistry::uniform(
+            provider_budget_config,
+            ProviderBudgetRegistryOptions {
+                acquire_timeout: Duration::from_millis(
+                    settings.provider_concurrency_acquire_timeout_ms,
+                ),
+                max_entries: settings.provider_concurrency_registry_max_entries,
+                idle_ttl: Duration::from_secs(
+                    settings.provider_concurrency_registry_idle_ttl_seconds,
+                ),
+            },
+        )?);
+        let provider_gateway = UnifiedGateway::from_settings(&settings)?;
         let llm_gateway: Arc<dyn LlmGateway> =
-            Arc::new(ConcurrencyLimitedGateway::new(UnifiedGateway::from_settings(&settings)));
+            Arc::new(ConcurrencyLimitedGateway::new(provider_gateway, provider_budget_registry));
         Ok(Self {
             agent_runtime,
             llm_gateway,
@@ -435,10 +512,13 @@ impl AppState {
             deployment_diagnostics,
             worker_runtime,
             settings,
+            credential_cipher,
             persistence,
             ui_runtime,
-            ui_bootstrap_admin,
-            ui_bootstrap_ai_setup,
+            mcp_http_origin_policy,
+            bootstrap_admin_configured: bootstrap_secrets.admin_configured,
+            ui_bootstrap_admin: bootstrap_secrets.startup_admin,
+            ui_bootstrap_ai_setup: None,
             ui_session_cookie,
             graph_runtime,
             document_store,
@@ -466,10 +546,70 @@ impl AppState {
     ///
     /// # Errors
     /// Returns any initialization error from persistence setup.
-    pub async fn new(settings: Settings) -> anyhow::Result<Self> {
+    pub async fn new(mut settings: Settings) -> anyhow::Result<Self> {
+        let credential_cipher = take_credential_cipher(&mut settings)?;
+        let bootstrap_secrets = take_bootstrap_secrets(&mut settings);
         let persistence = Persistence::connect(&settings).await?;
-        Self::from_dependencies(settings, persistence)
+        Self::from_prepared_dependencies(
+            settings,
+            persistence,
+            credential_cipher,
+            bootstrap_secrets,
+        )
     }
+
+    /// Creates shared state while the caller retains its `Settings` value.
+    ///
+    /// The raw credential keyring is parsed, removed and zeroized before cloning
+    /// the remaining non-secret settings into application state. This is the
+    /// required constructor for startup paths that continue using settings
+    /// after state creation.
+    ///
+    /// # Errors
+    /// Returns any credential parsing or persistence initialization error.
+    pub async fn new_from_retained_settings(settings: &mut Settings) -> anyhow::Result<Self> {
+        let credential_cipher = take_credential_cipher(settings)?;
+        let bootstrap_secrets = take_bootstrap_secrets(settings);
+        let persistence = Persistence::connect(settings).await?;
+        Self::from_prepared_dependencies(
+            settings.clone(),
+            persistence,
+            credential_cipher,
+            bootstrap_secrets,
+        )
+    }
+}
+
+struct BootstrapSecrets {
+    admin_configured: bool,
+    startup_admin: Option<UiBootstrapAdmin>,
+}
+
+fn take_bootstrap_secrets(settings: &mut Settings) -> BootstrapSecrets {
+    let resolved_admin = settings.resolved_ui_bootstrap_admin();
+    let admin_configured = resolved_admin.is_some();
+    let startup_admin = (settings.service_role == "startup").then_some(resolved_admin).flatten();
+    settings.discard_ui_bootstrap_admin_secrets();
+    BootstrapSecrets { admin_configured, startup_admin }
+}
+
+fn take_credential_cipher(settings: &mut Settings) -> anyhow::Result<CredentialCipher> {
+    let active_key_id = settings.credential_master_key_id.take();
+    let mut encoded_master_key = settings.credential_master_key.take();
+    let mut encoded_previous_keys = settings.credential_previous_master_keys.take();
+    let parsed = CredentialCipher::from_keyring_base64(
+        active_key_id.as_deref(),
+        encoded_master_key.as_deref(),
+        encoded_previous_keys.as_deref(),
+    )
+    .map_err(|error| anyhow::anyhow!(error));
+    if let Some(encoded_master_key) = encoded_master_key.as_mut() {
+        encoded_master_key.zeroize();
+    }
+    if let Some(encoded_previous_keys) = encoded_previous_keys.as_mut() {
+        encoded_previous_keys.zeroize();
+    }
+    parsed
 }
 
 fn parse_runtime_task_kind_list(value: Option<&String>) -> Vec<RuntimeTaskKind> {
@@ -496,4 +636,106 @@ fn parse_runtime_policy_list<T>(
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod credential_cipher_tests {
+    use base64::{Engine as _, engine::general_purpose::STANDARD};
+
+    use super::*;
+    use crate::shared::secret_encryption::SecretPurpose;
+
+    #[test]
+    fn retained_startup_settings_and_their_clones_cannot_keep_the_raw_key() {
+        let mut settings = Settings::from_env().expect("default settings should load");
+        settings.discard_credential_master_key();
+        settings.credential_master_key = Some(STANDARD.encode([59_u8; 32]));
+
+        let cipher = take_credential_cipher(&mut settings).expect("valid key should parse");
+        let cloned_after_preparation = settings.clone();
+        let record_id = uuid::Uuid::now_v7();
+
+        assert!(settings.credential_master_key.is_none());
+        assert!(settings.credential_master_key_id.is_none());
+        assert!(settings.credential_previous_master_keys.is_none());
+        assert!(cloned_after_preparation.credential_master_key.is_none());
+        assert!(cloned_after_preparation.credential_previous_master_keys.is_none());
+        let encrypted = cipher
+            .encrypt(SecretPurpose::AiAccountApiKey, record_id, "synthetic-value")
+            .expect("configured cipher should encrypt");
+        assert_eq!(
+            cipher
+                .decrypt(SecretPurpose::AiAccountApiKey, record_id, encrypted.as_str())
+                .expect("configured cipher should decrypt")
+                .expose_secret(),
+            "synthetic-value"
+        );
+        assert!(encrypted.as_str().starts_with("ironrag:enc:v3:xchacha20poly1305:default:"));
+    }
+
+    #[test]
+    fn prepared_state_uses_active_key_and_retains_previous_keys_only_in_the_cipher() {
+        let mut settings = Settings::from_env().expect("default settings should load");
+        settings.discard_credential_master_key();
+        settings.credential_master_key = Some(STANDARD.encode([61_u8; 32]));
+        settings.credential_master_key_id = Some("current-2026".into());
+        settings.credential_previous_master_keys =
+            Some(format!("old-2026={}", STANDARD.encode([60_u8; 32])));
+        let old_cipher = CredentialCipher::from_keyring_base64(
+            Some("old-2026"),
+            Some(&STANDARD.encode([60_u8; 32])),
+            None,
+        )
+        .expect("old cipher should parse");
+        let record_id = uuid::Uuid::now_v7();
+        let old_envelope = old_cipher
+            .encrypt(SecretPurpose::AiAccountApiKey, record_id, "old-value")
+            .expect("old value should encrypt");
+
+        let cipher = take_credential_cipher(&mut settings).expect("rotated keyring should parse");
+        let retained = settings.clone();
+
+        assert!(settings.credential_master_key.is_none());
+        assert!(settings.credential_master_key_id.is_none());
+        assert!(settings.credential_previous_master_keys.is_none());
+        assert!(retained.credential_master_key.is_none());
+        assert!(retained.credential_previous_master_keys.is_none());
+        assert_eq!(
+            cipher
+                .decrypt(SecretPurpose::AiAccountApiKey, record_id, old_envelope.as_str())
+                .expect("previous key should remain available in cipher")
+                .expose_secret(),
+            "old-value"
+        );
+        let current = cipher
+            .encrypt(SecretPurpose::AiAccountApiKey, record_id, "new-value")
+            .expect("active key should encrypt");
+        assert!(current.as_str().starts_with("ironrag:enc:v3:xchacha20poly1305:current-2026:"));
+    }
+
+    #[test]
+    fn bootstrap_admin_plaintext_is_retained_only_by_startup_role() {
+        let mut api_settings = Settings::from_env().expect("default settings should load");
+        api_settings.service_role = "api".to_string();
+        api_settings.ui_bootstrap_admin_login = Some("owner".to_string());
+        api_settings.ui_bootstrap_admin_password = Some("api-password-regression".to_string());
+        api_settings.ui_bootstrap_admin_api_token = Some("api-token-regression".to_string());
+
+        let api_secrets = take_bootstrap_secrets(&mut api_settings);
+        assert!(api_secrets.admin_configured);
+        assert!(api_secrets.startup_admin.is_none());
+        assert!(api_settings.ui_bootstrap_admin_password.is_none());
+        assert!(api_settings.ui_bootstrap_admin_api_token.is_none());
+
+        let mut startup_settings = Settings::from_env().expect("default settings should load");
+        startup_settings.service_role = "startup".to_string();
+        startup_settings.ui_bootstrap_admin_login = Some("owner".to_string());
+        startup_settings.ui_bootstrap_admin_password =
+            Some("startup-password-regression".to_string());
+
+        let startup_secrets = take_bootstrap_secrets(&mut startup_settings);
+        assert!(startup_secrets.admin_configured);
+        assert!(startup_secrets.startup_admin.is_some());
+        assert!(startup_settings.ui_bootstrap_admin_password.is_none());
+    }
 }

@@ -4,9 +4,6 @@ use crate::{
     domains::runtime_graph::RuntimeGraphArtifactFilterReason, infra::knowledge_rows::GraphViewData,
 };
 
-const EXPLICIT_SELF_LOOP_RELATION_TYPES: &[&str] =
-    &["alias_of", "aliases", "equivalent_to", "same_as", "self_reference", "self_refers_to"];
-
 #[derive(Debug, Clone)]
 pub struct GraphQualityGuardService {
     filter_empty_relations: bool,
@@ -21,7 +18,7 @@ impl Default for GraphQualityGuardService {
 
 impl GraphQualityGuardService {
     #[must_use]
-    pub fn new(filter_empty_relations: bool, filter_degenerate_self_loops: bool) -> Self {
+    pub const fn new(filter_empty_relations: bool, filter_degenerate_self_loops: bool) -> Self {
         Self { filter_empty_relations, filter_degenerate_self_loops }
     }
 
@@ -94,25 +91,9 @@ impl GraphQualityGuardService {
         if self.filter_empty_relations && trimmed.is_empty() {
             return Some(RuntimeGraphArtifactFilterReason::EmptyRelation);
         }
-        let raw_slug =
-            crate::services::graph::identity::normalize_graph_identity_component(trimmed);
         let normalized_relation_type =
             crate::services::graph::identity::normalize_relation_type(relation_type);
 
-        if self.filter_degenerate_self_loops
-            && !from_node_key.trim().is_empty()
-            && from_node_key == to_node_key
-            && self.is_explicit_self_loop_slug_or_normalized(
-                raw_slug.as_str(),
-                normalized_relation_type.as_str(),
-            )
-        {
-            return None;
-        }
-
-        if crate::services::graph::identity::is_noise_relation_type(&raw_slug) {
-            return Some(RuntimeGraphArtifactFilterReason::LowValueArtifact);
-        }
         if self.filter_empty_relations && normalized_relation_type.is_empty() {
             return Some(RuntimeGraphArtifactFilterReason::EmptyRelation);
         }
@@ -133,13 +114,6 @@ impl GraphQualityGuardService {
         relation_type: &str,
     ) -> bool {
         self.filter_reason(from_node_key, to_node_key, relation_type).is_none()
-    }
-
-    #[must_use]
-    fn is_explicit_self_loop_slug_or_normalized(&self, raw_slug: &str, normalized: &str) -> bool {
-        EXPLICIT_SELF_LOOP_RELATION_TYPES.iter().any(|&known| known == raw_slug)
-            || (!normalized.is_empty()
-                && (normalized.starts_with("self_") || normalized.ends_with("_self")))
     }
 }
 
@@ -170,20 +144,40 @@ mod tests {
     }
 
     #[test]
-    fn rejects_low_value_relation_types() {
+    fn accepts_arbitrary_structurally_valid_relation_types() {
+        let guard = GraphQualityGuardService::new(true, true);
+
+        assert_eq!(guard.filter_reason("foo", "bar", "opaque_predicate_7"), None);
+    }
+
+    #[test]
+    fn rejects_structurally_invalid_relation_types() {
         let guard = GraphQualityGuardService::new(true, true);
 
         assert_eq!(
-            guard.filter_reason("foo", "bar", "related_to"),
-            Some(RuntimeGraphArtifactFilterReason::LowValueArtifact)
+            guard.filter_reason("foo", "bar", "Invalid Predicate"),
+            Some(RuntimeGraphArtifactFilterReason::EmptyRelation)
         );
     }
 
     #[test]
-    fn allows_explicit_self_loop_relation_types() {
+    fn rejects_canonical_self_loops_without_typed_relation_metadata() {
         let guard = GraphQualityGuardService::new(true, true);
 
-        assert_eq!(guard.filter_reason("foo", "foo", "same_as"), None);
+        assert_eq!(
+            guard.filter_reason("foo", "foo", "aliases"),
+            Some(RuntimeGraphArtifactFilterReason::DegenerateSelfLoop)
+        );
+    }
+
+    #[test]
+    fn rejects_structurally_valid_self_loops_when_empty_filter_is_disabled() {
+        let guard = GraphQualityGuardService::new(false, true);
+
+        assert_eq!(
+            guard.filter_reason("foo", "foo", "same_as"),
+            Some(RuntimeGraphArtifactFilterReason::DegenerateSelfLoop)
+        );
     }
 
     #[test]

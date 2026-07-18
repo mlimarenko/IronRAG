@@ -291,7 +291,7 @@ Trailing note";
 }
 
 #[test]
-fn assemble_answer_context_excludes_recent_documents_for_mcp_ui_parity() {
+fn assemble_answer_context_excludes_volatile_ingest_metadata_for_mcp_ui_parity() {
     // Constitution §16 — direct MCP `grounded_answer` calls and UI-agent
     // `grounded_answer` tool calls must share the same deterministic
     // prompt for the same query and evidence. Live ingest metadata
@@ -320,15 +320,28 @@ fn assemble_answer_context_excludes_recent_documents_for_mcp_ui_parity() {
         "Context\n[document] spec.md: IronRAG",
         false,
     );
+    let churned_summary =
+        RuntimeQueryLibrarySummary { processing_count: 0, failed_count: 9, ..summary.clone() };
+    let context_after_queue_churn = assemble_answer_context(
+        &churned_summary,
+        &retrieved_documents,
+        Some("Exact technical literals\n- URLs: `http://demo.local:8080/wsdl`"),
+        "Context\n[document] spec.md: IronRAG",
+        false,
+    );
 
     assert!(context.contains("Context\n[document] spec.md: IronRAG"));
     assert!(context.contains("Library summary\n- Documents in library: 12"));
     assert!(context.contains("- Graph-ready documents: 8"));
-    assert!(context.contains("- Documents still processing: 3"));
-    assert!(context.contains("- Documents failed in pipeline: 1"));
+    assert!(!context.contains("Documents still processing"));
+    assert!(!context.contains("Documents failed in pipeline"));
     assert!(context.contains("- Graph coverage status: partial"));
     assert!(context.contains("Retrieved document briefs"));
     assert!(context.contains("Exact technical literals\n- URLs: `http://demo.local:8080/wsdl`"));
+    assert_eq!(
+        context, context_after_queue_churn,
+        "queue/attempt churn must not alter the deterministic answer prompt",
+    );
     // Anti-regression: the answer prompt must NOT inject the live
     // recent-uploads block, which is the canonical MCP-UI parity
     // violator under active ingestion.

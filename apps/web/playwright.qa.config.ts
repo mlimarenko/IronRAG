@@ -1,6 +1,6 @@
-import { defineConfig, devices } from '@playwright/test';
+import { defineConfig, devices } from '@playwright/test'
 
-const qaBaseURL = process.env.QA_BASE_URL ?? 'http://127.0.0.1:4173';
+const qaBaseURL = process.env.QA_BASE_URL ?? 'http://127.0.0.1:4173'
 
 /**
  * Self-contained Playwright config for release 0.3.1 visual QA.
@@ -18,7 +18,7 @@ const qaBaseURL = process.env.QA_BASE_URL ?? 'http://127.0.0.1:4173';
  */
 export default defineConfig({
   testDir: './visual-qa',
-  testMatch: /.*\.spec\.ts/,
+  testMatch: '**/*.spec.ts',
   fullyParallel: false,
   workers: 1,
   retries: 0,
@@ -61,4 +61,4 @@ export default defineConfig({
     stdout: 'ignore',
     stderr: 'pipe',
   },
-});
+})

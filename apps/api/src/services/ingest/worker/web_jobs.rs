@@ -39,7 +39,11 @@ pub(super) async fn run_canonical_web_discovery_job(
         )
         .await
         .context("failed to record web_discovery start stage event")?;
-    match state.canonical_services.web_ingest.execute_recursive_discovery_job(state, run_id).await {
+    match Box::pin(
+        state.canonical_services.web_ingest.execute_recursive_discovery_job(state, run_id),
+    )
+    .await
+    {
         Ok(()) => {
             state
                 .canonical_services
@@ -98,7 +102,7 @@ pub(super) async fn run_canonical_web_discovery_job(
                 )
                 .await
                 .context("failed to record web_discovery failure stage event")?;
-            Err(anyhow::anyhow!("web discovery job failed: {}", error))
+            Err(anyhow::anyhow!("web discovery job failed: {error}"))
         }
     }
 }
@@ -192,7 +196,7 @@ pub(super) async fn run_canonical_web_materialize_page_job(
                 )
                 .await
                 .context("failed to record web_materialize_page failure stage event")?;
-            Err(anyhow::anyhow!("web page materialization job failed: {}", error))
+            Err(anyhow::anyhow!("web page materialization job failed: {error}"))
         }
     }
 }
@@ -218,9 +222,7 @@ pub(super) async fn resolve_canonical_job_subject_id(
         operation.subject_id.context("canonical web ingest job subject_id is missing")?;
     if subject_kind != expected_subject_kind {
         anyhow::bail!(
-            "canonical web ingest job subject kind mismatch: expected {}, found {}",
-            expected_subject_kind,
-            subject_kind
+            "canonical web ingest job subject kind mismatch: expected {expected_subject_kind}, found {subject_kind}"
         );
     }
     Ok(subject_id)

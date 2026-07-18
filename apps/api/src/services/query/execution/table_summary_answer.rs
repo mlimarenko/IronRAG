@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 
 use uuid::Uuid;
 
-use crate::domains::query_ir::{QueryAct, QueryIR};
+use crate::domains::query_ir::{QueryAct, QueryIR, QueryTargetKind};
 use crate::shared::extraction::table_summary::{
     TableColumnSummary, TableSummaryValueKind, build_table_column_summaries, format_numeric_value,
     parse_table_column_summary, render_table_column_summary,
@@ -287,10 +287,8 @@ fn format_most_frequent_table_summary_answer(
 pub(crate) fn question_asks_table_aggregation(question: &str, ir: Option<&QueryIR>) -> bool {
     let _ = question;
     ir.is_some_and(|ir| {
-        let target_types =
-            ir.target_types.iter().map(|tag| normalized_ir_tag(tag)).collect::<Vec<_>>();
-        let has_table_summary = target_types.iter().any(|tag| tag == "table_summary");
-        let has_table_row = target_types.iter().any(|tag| tag == "table_row");
+        let has_table_summary = ir.targets(QueryTargetKind::TableSummary);
+        let has_table_row = ir.targets(QueryTargetKind::TableRow);
         question_asks_average(Some(ir))
             || question_asks_most_frequent(Some(ir))
             || (matches!(ir.act, QueryAct::RetrieveValue | QueryAct::Enumerate)
@@ -338,17 +336,11 @@ pub(crate) fn render_table_summary_chunk_section(
 }
 
 fn question_asks_average(ir: Option<&QueryIR>) -> bool {
-    ir.is_some_and(|ir| {
-        ir.target_types.iter().any(|tag| matches!(normalized_ir_tag(tag).as_str(), "table_average"))
-    })
+    ir.is_some_and(|ir| ir.targets(QueryTargetKind::TableAverage))
 }
 
 fn question_asks_most_frequent(ir: Option<&QueryIR>) -> bool {
-    ir.is_some_and(|ir| {
-        ir.target_types
-            .iter()
-            .any(|tag| matches!(normalized_ir_tag(tag).as_str(), "table_frequency"))
-    })
+    ir.is_some_and(|ir| ir.targets(QueryTargetKind::TableFrequency))
 }
 
 pub(crate) fn summary_matches_requested_aggregation(
@@ -363,8 +355,4 @@ pub(crate) fn summary_matches_requested_aggregation(
             && summary.most_frequent_count > 0;
     }
     false
-}
-
-fn normalized_ir_tag(tag: &str) -> String {
-    tag.trim().to_ascii_lowercase()
 }

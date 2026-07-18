@@ -16,6 +16,7 @@ from the OpenAPI contract.
 ## When does MSW intercept?
 
 The unhandled-request policy is `bypass`. That means:
+
 - Tests that already use `vi.mock('@/shared/api', ...)` or
   `vi.spyOn(Tag, 'method')` keep winning — MSW only ever sees requests
   that actually hit the network.
@@ -23,18 +24,18 @@ The unhandled-request policy is `bypass`. That means:
   `handlers.ts`. Override per-test with:
 
   ```ts
-  import { http, HttpResponse } from "msw";
-  import { opsLibraryDashboard } from "@/shared/api/mocks/fixtures";
-  import { server } from "@/shared/api/mocks/server";
+  import { http, HttpResponse } from 'msw'
+  import { opsLibraryDashboard } from '@/shared/api/mocks/fixtures'
+  import { server } from '@/shared/api/mocks/server'
 
-  it("renders the dashboard", () => {
+  it('renders the dashboard', () => {
     server.use(
-      http.get("/v1/ops/libraries/:libraryId/dashboard", () =>
+      http.get('/v1/ops/libraries/:libraryId/dashboard', () =>
         HttpResponse.json(opsLibraryDashboard()),
       ),
-    );
+    )
     // ...
-  });
+  })
   ```
 
 ## Reusable fixtures
@@ -44,16 +45,16 @@ Realistic synthetic fixtures for the highest-traffic endpoints live in
 scenario needs a non-empty response:
 
 ```ts
-import { http, HttpResponse } from "msw";
-import { iamSession } from "@/shared/api/mocks/fixtures";
-import { server } from "@/shared/api/mocks/server";
+import { http, HttpResponse } from 'msw'
+import { iamSession } from '@/shared/api/mocks/fixtures'
+import { server } from '@/shared/api/mocks/server'
 
-server.use(http.get("/v1/iam/session", () => HttpResponse.json(iamSession())));
+server.use(http.get('/v1/iam/session', () => HttpResponse.json(iamSession())))
 ```
 
 ## Regeneration
 
-After `make backend-emit-openapi` regenerates the contract, run:
+After `make openapi-emit` regenerates the contract, run:
 
 ```bash
 make frontend-mocks-regen

@@ -36,9 +36,37 @@ pub struct McpCapabilitySnapshot {
     /// information gain. Skipped when empty.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tools: Vec<String>,
+    /// Version of the canonical hash framing used for the visible MCP
+    /// tool contract. Consumers compare this together with
+    /// `tool_contract_hash`; a future incompatible canonicalization can
+    /// increment the version without making old hashes ambiguous.
+    pub tool_contract_version: u32,
+    /// SHA-256 over the ordered visible tool names, descriptions, and
+    /// canonical input schemas. The in-process UI agent and external MCP
+    /// transport derive this value from the same descriptors.
+    pub tool_contract_hash: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub generated_at: Option<DateTime<Utc>>,
 }
+
+/// Selects the amount of grounded-answer execution detail returned to an MCP
+/// caller. Ordinary external and in-process UI agent calls use `Compact`;
+/// `Full` preserves the debug-heavy contract for explicit diagnostic requests.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum McpGroundedAnswerResponseProfile {
+    #[default]
+    Full,
+    Compact,
+}
+
+/// Default number of typed evidence references returned by the compact
+/// grounded-answer response profile.
+pub const MCP_COMPACT_DEFAULT_REFERENCES: usize = 8;
+
+/// Hard upper bound for compact-profile references. The full execution trace
+/// remains available through the returned execution identifiers.
+pub const MCP_COMPACT_MAX_REFERENCES: usize = 16;
 
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
@@ -132,6 +160,34 @@ pub struct McpCreateLibraryRequest {
     pub library: String,
     pub title: Option<String>,
     pub description: Option<String>,
+}
+
+/// Fields are optional: any field left `None` keeps the workspace's
+/// current value unchanged (load-current -> merge -> write), so a
+/// caller renaming a workspace does not have to also restate its
+/// lifecycle state.
+#[derive(Debug, Clone, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct McpUpdateWorkspaceRequest {
+    pub workspace: String,
+    pub title: Option<String>,
+    /// `"active"` or `"archived"`. Omit to leave lifecycle unchanged.
+    pub lifecycle_state: Option<String>,
+}
+
+/// Fields are optional: any field left `None` keeps the library's
+/// current value unchanged (load-current -> merge -> write). Knobs not
+/// exposed here (extraction prompt, `includeDocumentHintInMcpAnswers`)
+/// are always preserved as-is — this tool is agent-ergonomic, not a 1:1
+/// mirror of the full REST library PATCH surface.
+#[derive(Debug, Clone, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct McpUpdateLibraryRequest {
+    pub library: String,
+    pub title: Option<String>,
+    pub description: Option<String>,
+    /// `"active"` or `"archived"`. Omit to leave lifecycle unchanged.
+    pub lifecycle_state: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
@@ -310,6 +366,10 @@ pub enum McpDocumentMutationKind {
 pub struct McpUpdateDocumentRequest {
     pub library: String,
     pub document_id: Uuid,
+    /// Renamed from `operationKind` on the wire: the tool itself is
+    /// `create_document_revision`, so the argument that used to repeat
+    /// "operation" would be redundant.
+    #[serde(rename = "mode")]
     pub operation_kind: McpDocumentMutationKind,
     pub idempotency_key: Option<String>,
     pub appended_text: Option<String>,
@@ -318,10 +378,15 @@ pub struct McpUpdateDocumentRequest {
     pub replacement_mime_type: Option<String>,
 }
 
+/// Request for the `get_operation` tool. Reads from the same canonical
+/// `ops_async_operation` store as `GET /v1/ops/operations/{operationId}`
+/// — superseding the old `get_mutation_status`/`receiptId` pair, which
+/// polled a content-mutation-specific receipt instead of the canonical
+/// operation record.
 #[derive(Debug, Clone, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct McpGetMutationStatusRequest {
-    pub receipt_id: Uuid,
+pub struct McpGetOperationRequest {
+    pub operation_id: Uuid,
 }
 
 #[derive(Debug, Clone, Deserialize, utoipa::ToSchema)]
@@ -432,48 +497,13 @@ pub enum McpMutationReceiptStatus {
     Superseded,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum McpAuditActionKind {
-    CapabilitySnapshot,
-    ListWorkspaces,
-    ListLibraries,
-    SearchDocuments,
-    ReadDocument,
-    ViewDocumentImage,
-    ListDocuments,
-    DeleteDocument,
-    CreateWorkspace,
-    CreateLibrary,
-    UploadDocuments,
-    UpdateDocument,
-    GetMutationStatus,
-    GetRuntimeExecution,
-    GetRuntimeExecutionTrace,
-    SubmitWebIngestRun,
-    GetWebIngestRun,
-    ListWebIngestRunPages,
-    CancelWebIngestRun,
-    SearchEntities,
-    GetGraphTopology,
-    ListRelations,
-    GetCommunities,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum McpAuditStatus {
-    Succeeded,
-    Rejected,
-    Failed,
-}
-
-#[derive(Debug, Clone, Default)]
-pub struct McpAuditScope {
-    pub workspace_id: Option<Uuid>,
-    pub library_id: Option<Uuid>,
-    pub document_id: Option<Uuid>,
-}
+// `McpAuditActionKind`/`McpAuditStatus`/`McpAuditScope` (and the
+// `record_success_audit`/`record_error_audit` no-ops that were their only
+// callers) were removed here: they fed a per-tool audit path that never
+// persisted anything (see `interfaces::http::mcp::audit`). Every
+// `tools/call` dispatch now runs through one mandatory audit chokepoint in
+// `interfaces::http::mcp::tools::handle_tools_call`, which persists via the
+// canonical `audit_event` store instead.
 
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
@@ -597,7 +627,7 @@ pub struct McpRuntimeExecutionTrace {
 #[cfg(test)]
 mod tests {
     use super::{
-        McpCancelWebIngestRunRequest, McpGetMutationStatusRequest, McpGetRuntimeExecutionRequest,
+        McpCancelWebIngestRunRequest, McpGetOperationRequest, McpGetRuntimeExecutionRequest,
         McpGetRuntimeExecutionTraceRequest, McpGetWebIngestRunRequest,
         McpListWebIngestRunPagesRequest, McpReadDocumentRequest, McpSearchDocumentsRequest,
         McpSubmitWebIngestRunRequest, McpUpdateDocumentRequest, McpUploadDocumentInput,
@@ -674,7 +704,7 @@ mod tests {
         let request: McpUpdateDocumentRequest = serde_json::from_value(json!({
             "library": "default/demo",
             "documentId": Uuid::now_v7(),
-            "operationKind": "append",
+            "mode": "append",
             "appendedText": "hello"
         }))
         .expect("request should deserialize");
@@ -684,14 +714,14 @@ mod tests {
     }
 
     #[test]
-    fn mutation_status_request_accepts_canonical_field() {
-        let receipt_id = Uuid::now_v7();
-        let request: McpGetMutationStatusRequest = serde_json::from_value(json!({
-            "receiptId": receipt_id
+    fn get_operation_request_accepts_canonical_field() {
+        let operation_id = Uuid::now_v7();
+        let request: McpGetOperationRequest = serde_json::from_value(json!({
+            "operationId": operation_id
         }))
         .expect("request should deserialize");
 
-        assert_eq!(request.receipt_id, receipt_id);
+        assert_eq!(request.operation_id, operation_id);
     }
 
     #[test]
@@ -757,7 +787,7 @@ mod tests {
         }))
         .expect("request should deserialize");
 
-        assert!(!request.crawl_filter.block_patterns.is_empty());
+        assert!(request.crawl_filter.block_patterns.is_empty());
         assert!(request.materialization_filter.allow_patterns.is_empty());
         assert!(request.materialization_filter.block_patterns.is_empty());
     }
@@ -864,7 +894,7 @@ mod tests {
         let error = serde_json::from_value::<McpUpdateDocumentRequest>(json!({
             "library": "default/demo",
             "documentId": Uuid::now_v7(),
-            "operationKind": "append",
+            "mode": "append",
             "appended_text": "hello"
         }))
         .expect_err("legacy alias must be rejected");
@@ -886,10 +916,15 @@ mod tests {
     }
 }
 
+/// Returned by `create_documents`/`create_document_revision`.
+/// `operation_id` (wire: `operationId`, renamed from `receiptId`) is the
+/// canonical async-operation identifier, pollable via the `get_operation`
+/// tool and `GET /v1/ops/operations/{operationId}` — not a
+/// content-mutation-specific receipt.
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct McpMutationReceipt {
-    pub receipt_id: Uuid,
+    pub operation_id: Uuid,
     pub token_id: Uuid,
     pub workspace_id: Uuid,
     pub library_id: Uuid,
@@ -900,4 +935,16 @@ pub struct McpMutationReceipt {
     pub accepted_at: DateTime<Utc>,
     pub last_status_at: DateTime<Utc>,
     pub failure_kind: Option<String>,
+}
+
+/// Canonical async-operation status returned by the `get_operation` MCP
+/// tool. Mirrors `GET /v1/ops/operations/{operationId}` field-for-field
+/// (the operation row flattened, plus aggregated child progress) instead
+/// of introducing a second operation-status shape.
+#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct McpOperationStatus {
+    #[serde(flatten)]
+    pub operation: crate::domains::ops::OpsAsyncOperation,
+    pub progress: crate::domains::ops::OpsAsyncOperationProgress,
 }

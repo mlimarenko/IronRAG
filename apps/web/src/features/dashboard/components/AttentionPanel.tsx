@@ -1,21 +1,23 @@
-import { memo } from 'react';
-import type { TFunction } from 'i18next';
-import { AlertTriangle, ArrowRight, CheckCircle2, Clock, XCircle } from 'lucide-react';
-import { StatusBadge } from '@/shared/components/StatusBadge';
-import type { DashboardAttentionItem } from "../model/types";
-import { attentionClass, localizeAttention, resolveAttentionRoute } from "../model/format";
+import { memo } from 'react'
+import type { TFunction } from 'i18next'
+import { AlertTriangle, ArrowRight, CheckCircle2, Clock, XCircle } from 'lucide-react'
+import { StatusBadge } from '@/shared/components/StatusBadge'
+import type { DashboardAttentionItem } from '../model/types'
+import { attentionClass, localizeAttention, resolveAttentionRoute } from '../model/format'
 
-type AttentionPanelProps = {
-  t: TFunction;
-  attention: DashboardAttentionItem[];
-  onNavigate: (path: string) => void;
-};
+type AttentionPanelProps = Readonly<{
+  t: TFunction
+  attention: DashboardAttentionItem[]
+  onNavigate: (path: string) => void
+}>
 
-function AttentionPanelImpl({
-  t,
-  attention,
-  onNavigate,
-}: AttentionPanelProps) {
+function attentionIcon(level: DashboardAttentionItem['level']) {
+  if (level === 'error') return <XCircle className="h-4 w-4" />
+  if (level === 'warning') return <AlertTriangle className="h-4 w-4" />
+  return <Clock className="h-4 w-4" />
+}
+
+function AttentionPanelImpl({ t, attention, onNavigate }: AttentionPanelProps) {
   return (
     <div className="workbench-surface p-4">
       <div className="flex items-center justify-between gap-3">
@@ -28,8 +30,8 @@ function AttentionPanelImpl({
       {attention.length > 0 ? (
         <div className="mt-4 space-y-2">
           {attention.map((item) => {
-            const content = localizeAttention(item, t);
-            const route = resolveAttentionRoute(item);
+            const content = localizeAttention(item, t)
+            const route = resolveAttentionRoute(item)
 
             return (
               <button
@@ -42,19 +44,11 @@ function AttentionPanelImpl({
                   <div
                     className={`mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-md ${attentionClass(item.level)}`}
                   >
-                    {item.level === 'error' ? (
-                      <XCircle className="h-4 w-4" />
-                    ) : item.level === 'warning' ? (
-                      <AlertTriangle className="h-4 w-4" />
-                    ) : (
-                      <Clock className="h-4 w-4" />
-                    )}
+                    {attentionIcon(item.level)}
                   </div>
                   <div className="min-w-0 flex-1">
                     <div className="flex items-start justify-between gap-3">
-                      <span className="text-sm font-semibold text-foreground">
-                        {content.title}
-                      </span>
+                      <span className="text-sm font-semibold text-foreground">{content.title}</span>
                     </div>
                     <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
                       {content.detail}
@@ -66,7 +60,7 @@ function AttentionPanelImpl({
                   </div>
                 </div>
               </button>
-            );
+            )
           })}
         </div>
       ) : (
@@ -87,7 +81,7 @@ function AttentionPanelImpl({
         </div>
       )}
     </div>
-  );
+  )
 }
 
-export const AttentionPanel = memo(AttentionPanelImpl);
+export const AttentionPanel = memo(AttentionPanelImpl)

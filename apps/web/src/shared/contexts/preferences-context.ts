@@ -1,30 +1,30 @@
-import { createContext, useContext } from 'react';
+import { createContext, useContext } from 'react'
 
 /** Theme preference. `system` follows the OS `prefers-color-scheme`. */
-export type ThemePreference = 'light' | 'dark' | 'system';
+export type ThemePreference = 'light' | 'dark' | 'system'
 
 /** The actually-applied theme after resolving `system`. */
-export type ResolvedTheme = 'light' | 'dark';
+export type ResolvedTheme = 'light' | 'dark'
 
 export interface PreferencesContextValue {
   /** The user's chosen theme preference (may be `system`). */
-  theme: ThemePreference;
+  theme: ThemePreference
   /** The concrete theme currently applied to the document. */
-  resolvedTheme: ResolvedTheme;
-  setTheme: (theme: ThemePreference) => void;
+  resolvedTheme: ResolvedTheme
+  setTheme: (theme: ThemePreference) => void
   /** Cycle light → dark → system → light, for a single toggle control. */
-  cycleTheme: () => void;
+  cycleTheme: () => void
   /**
    * Developer mode — a remembered per-user switch that later unlocks debug /
    * advanced surfaces (assistant debug inspector, AI catalog, raw payloads).
    * Persisted to localStorage so it survives reloads.
    */
-  developerMode: boolean;
-  setDeveloperMode: (enabled: boolean) => void;
-  toggleDeveloperMode: () => void;
+  developerMode: boolean
+  setDeveloperMode: (enabled: boolean) => void
+  toggleDeveloperMode: () => void
 }
 
-export const PreferencesContext = createContext<PreferencesContextValue | null>(null);
+export const PreferencesContext = createContext<PreferencesContextValue | null>(null)
 
 /**
  * Access theme + developer-mode preferences. Must be used within
@@ -32,9 +32,9 @@ export const PreferencesContext = createContext<PreferencesContextValue | null>(
  * their visibility off `developerMode`; chrome reads `resolvedTheme`.
  */
 export function usePreferences(): PreferencesContextValue {
-  const ctx = useContext(PreferencesContext);
-  if (!ctx) throw new Error('usePreferences must be used within PreferencesProvider');
-  return ctx;
+  const ctx = useContext(PreferencesContext)
+  if (!ctx) throw new Error('usePreferences must be used within PreferencesProvider')
+  return ctx
 }
 
 /**
@@ -45,6 +45,6 @@ export function usePreferences(): PreferencesContextValue {
  * provider is always mounted at the app root, so this reflects the real flag.
  */
 export function useDeveloperMode(): boolean {
-  const ctx = useContext(PreferencesContext);
-  return ctx?.developerMode ?? false;
+  const ctx = useContext(PreferencesContext)
+  return ctx?.developerMode ?? false
 }

@@ -9,48 +9,48 @@
  * `null` so the caller can drop the item entirely.
  */
 export interface FuzzyResult {
-  score: number;
+  score: number
   /** Indices in the target that matched, for optional highlight rendering. */
-  matched: number[];
+  matched: number[]
 }
 
-const SEPARATORS = new Set([' ', '-', '_', '/', '.', ':']);
+const SEPARATORS = new Set([' ', '-', '_', '/', '.', ':'])
 
 export function fuzzyMatch(query: string, target: string): FuzzyResult | null {
-  const q = query.trim().toLowerCase();
-  if (!q) return { score: 0, matched: [] };
+  const q = query.trim().toLowerCase()
+  if (!q) return { score: 0, matched: [] }
 
-  const t = target.toLowerCase();
-  const matched: number[] = [];
+  const t = target.toLowerCase()
+  const matched: number[] = []
 
-  let score = 0;
-  let qi = 0;
-  let prevMatchIdx = -2;
+  let score = 0
+  let qi = 0
+  let prevMatchIdx = -2
 
   for (let ti = 0; ti < t.length && qi < q.length; ti += 1) {
-    if (t[ti] !== q[qi]) continue;
+    if (t[ti] !== q[qi]) continue
 
-    matched.push(ti);
+    matched.push(ti)
 
     // Contiguous run bonus.
-    if (ti === prevMatchIdx + 1) score += 6;
-    else score += 1;
+    if (ti === prevMatchIdx + 1) score += 6
+    else score += 1
 
     // Word-boundary bonus (start of string or after a separator).
-    const prevChar = t[ti - 1];
-    if (ti === 0 || (prevChar !== undefined && SEPARATORS.has(prevChar))) score += 8;
+    const prevChar = t[ti - 1]
+    if (ti === 0 || (prevChar !== undefined && SEPARATORS.has(prevChar))) score += 8
 
-    prevMatchIdx = ti;
-    qi += 1;
+    prevMatchIdx = ti
+    qi += 1
   }
 
   // Not all query chars consumed → not a subsequence.
-  if (qi < q.length) return null;
+  if (qi < q.length) return null
 
   // Whole-string prefix is the strongest signal.
-  if (t.startsWith(q)) score += 16;
+  if (t.startsWith(q)) score += 16
   // Shorter targets that fully matched rank slightly higher.
-  score -= Math.max(0, t.length - q.length) * 0.1;
+  score -= Math.max(0, t.length - q.length) * 0.1
 
-  return { score, matched };
+  return { score, matched }
 }

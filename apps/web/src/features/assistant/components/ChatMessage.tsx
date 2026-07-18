@@ -1,85 +1,77 @@
-import { memo, useEffect, useState } from 'react';
-import type { TFunction } from 'i18next';
-import {
-  BrainCircuit,
-  Bug,
-  Check,
-  CheckCircle2,
-  Copy,
-  Layers,
-  Loader2,
-  Wrench,
-} from 'lucide-react';
-import ReactMarkdown from 'react-markdown';
-import type { AssistantAgentActivityEvent, AssistantMessage } from '@/shared/types';
-import { VerificationChip } from './VerificationChip';
+import { memo, useEffect, useState } from 'react'
+import type { TFunction } from 'i18next'
+import { BrainCircuit, Bug, Check, CheckCircle2, Copy, Layers, Loader2, Wrench } from 'lucide-react'
+import ReactMarkdown from 'react-markdown'
+import type { AssistantAgentActivityEvent, AssistantMessage } from '@/shared/types'
+import { shouldShowVerifiedEvidence } from '../model/verification'
+import { VerificationChip } from './VerificationChip'
 
-type ChatMessageProps = {
-  t: TFunction;
-  message: AssistantMessage;
-  responseMs?: number | undefined;
+type ChatMessageProps = Readonly<{
+  t: TFunction
+  message: AssistantMessage
+  responseMs?: number | undefined
   /** Total distinct evidence sources (segments + entities) backing this answer. */
-  totalSourceCount?: number | undefined;
+  totalSourceCount?: number | undefined
   /** Opens the evidence/citations panel scoped to this message. */
-  onOpenEvidence?: (() => void) | undefined;
+  onOpenEvidence?: (() => void) | undefined
   /** Opens the debug inspector for this turn (developer mode only). */
-  onInspect?: (() => void) | undefined;
+  onInspect?: (() => void) | undefined
   /** When true, surfaces the per-message debug affordance. */
-  developerMode?: boolean | undefined;
-};
+  developerMode?: boolean | undefined
+}>
 
 function formatElapsed(ms: number): string {
-  const seconds = Math.max(0, Math.floor(ms / 1000));
-  if (seconds < 60) return `${seconds}s`;
-  return `${Math.floor(seconds / 60)}m ${seconds % 60}s`;
+  const seconds = Math.max(0, Math.floor(ms / 1000))
+  if (seconds < 60) return `${seconds}s`
+  return `${Math.floor(seconds / 60)}m ${seconds % 60}s`
 }
 
 function formatTimestamp(isoString: string): string {
-  const date = new Date(isoString);
-  if (Number.isNaN(date.getTime())) return '';
-  const today = new Date();
+  const date = new Date(isoString)
+  if (Number.isNaN(date.getTime())) return ''
+  const today = new Date()
   const isToday =
     date.getFullYear() === today.getFullYear() &&
     date.getMonth() === today.getMonth() &&
-    date.getDate() === today.getDate();
+    date.getDate() === today.getDate()
   const timePart = date.toLocaleTimeString(undefined, {
     hour: '2-digit',
     minute: '2-digit',
     second: '2-digit',
     hour12: false,
-  });
-  if (isToday) return timePart;
+  })
+  if (isToday) return timePart
   const datePart = date.toLocaleDateString(undefined, {
     month: 'short',
     day: 'numeric',
-  });
-  return `${datePart} ${timePart}`;
+  })
+  return `${datePart} ${timePart}`
 }
 
 function formatLatency(ms: number): string {
-  if (ms < 1000) return `${Math.round(ms)} ms`;
-  return `${(ms / 1000).toFixed(1)} s`;
+  if (ms < 1000) return `${Math.round(ms)} ms`
+  return `${(ms / 1000).toFixed(1)} s`
 }
 
 function eventLabel(event: AssistantAgentActivityEvent, t: TFunction): string {
   switch (event.type) {
     case 'started':
-      return t('assistant.activity.started');
+      return t('assistant.activity.started')
     case 'model_request':
       return t('assistant.activity.modelRequest', {
         model: event.model_name ?? t('assistant.activity.modelUnknown'),
         iteration: event.iteration ?? 1,
-      });
+      })
     case 'model_response':
       return event.has_final_answer
         ? t('assistant.activity.modelFinal')
         : t('assistant.activity.modelToolPlan', {
             count: event.tool_call_count ?? 0,
-          });
+          })
     case 'tool_call_started':
       return t('assistant.activity.toolStarted', {
         tool: event.tool_name ?? t('assistant.activity.toolUnknown'),
-      });
+      })
     case 'tool_call_finished':
       return event.is_error
         ? t('assistant.activity.toolFailed', {
@@ -87,21 +79,21 @@ function eventLabel(event: AssistantAgentActivityEvent, t: TFunction): string {
           })
         : t('assistant.activity.toolFinished', {
             tool: event.tool_name ?? t('assistant.activity.toolUnknown'),
-          });
+          })
     case 'working':
-      return t('assistant.activity.working');
+      return t('assistant.activity.working')
     case 'persisting':
-      return t('assistant.activity.persisting');
+      return t('assistant.activity.persisting')
     default:
-      return t('assistant.activity.working');
+      return t('assistant.activity.working')
   }
 }
 
 function activityHeadline(event: AssistantAgentActivityEvent | undefined, t: TFunction): string {
   if (event?.type === 'tool_call_started') {
-    return t('assistant.activity.toolRunningTitle');
+    return t('assistant.activity.toolRunningTitle')
   }
-  return eventLabel(event ?? { type: 'started' }, t);
+  return eventLabel(event ?? { type: 'started' }, t)
 }
 
 function activityStatus(
@@ -109,25 +101,20 @@ function activityStatus(
   live: boolean,
   t: TFunction,
 ): string {
-  if (
-    event?.type === 'tool_call_started' &&
-    event.tool_name
-  ) {
-    return event.tool_name;
+  if (event?.type === 'tool_call_started' && event.tool_name) {
+    return event.tool_name
   }
-  return live ? t('assistant.activity.working') : t('assistant.activity.complete');
+  return live ? t('assistant.activity.working') : t('assistant.activity.complete')
 }
 
 function renderActivityIcon(event: AssistantAgentActivityEvent | undefined) {
-  const className = `h-4 w-4 ${
-    event?.type === 'persisting' ? 'text-status-ready' : 'text-primary'
-  }`;
-  if (event?.type?.startsWith('tool_call')) return <Wrench className={className} />;
+  const className = `h-4 w-4 ${event?.type === 'persisting' ? 'text-status-ready' : 'text-primary'}`
+  if (event?.type?.startsWith('tool_call')) return <Wrench className={className} />
   if (event?.type === 'model_request' || event?.type === 'model_response') {
-    return <BrainCircuit className={className} />;
+    return <BrainCircuit className={className} />
   }
-  if (event?.type === 'persisting') return <CheckCircle2 className={className} />;
-  return <Loader2 className={className} />;
+  if (event?.type === 'persisting') return <CheckCircle2 className={className} />
+  return <Loader2 className={className} />
 }
 
 function PendingAssistantActivity({
@@ -135,24 +122,24 @@ function PendingAssistantActivity({
   live = true,
   startedAt,
   t,
-}: {
-  events?: AssistantAgentActivityEvent[] | undefined;
-  live?: boolean;
-  startedAt: string;
-  t: TFunction;
-}) {
-  const [now, setNow] = useState(() => Date.now());
+}: Readonly<{
+  events?: AssistantAgentActivityEvent[] | undefined
+  live?: boolean
+  startedAt: string
+  t: TFunction
+}>) {
+  const [now, setNow] = useState(() => Date.now())
   useEffect(() => {
-    if (!live) return undefined;
-    const timer = window.setInterval(() => setNow(Date.now()), 1000);
-    return () => window.clearInterval(timer);
-  }, [live]);
+    if (!live) return undefined
+    const timer = window.setInterval(() => setNow(Date.now()), 1000)
+    return () => window.clearInterval(timer)
+  }, [live])
 
-  const startedAtMs = Date.parse(startedAt);
-  const elapsed = Number.isFinite(startedAtMs) ? now - startedAtMs : 0;
-  const latest = events[events.length - 1];
-  const latestLabel = activityHeadline(latest, t);
-  const statusLabel = activityStatus(latest, live, t);
+  const startedAtMs = Date.parse(startedAt)
+  const elapsed = Number.isFinite(startedAtMs) ? now - startedAtMs : 0
+  const latest = events[events.length - 1]
+  const latestLabel = activityHeadline(latest, t)
+  const statusLabel = activityStatus(latest, live, t)
 
   return (
     <div
@@ -173,9 +160,7 @@ function PendingAssistantActivity({
               </div>
               <div className="mt-1 flex items-center gap-1.5 text-2xs text-muted-foreground">
                 <span
-                  className={`h-1.5 w-1.5 rounded-full ${
-                    live ? 'bg-primary' : 'bg-status-ready'
-                  }`}
+                  className={`h-1.5 w-1.5 rounded-full ${live ? 'bg-primary' : 'bg-status-ready'}`}
                 />
                 <span className="truncate">{statusLabel}</span>
               </div>
@@ -187,7 +172,7 @@ function PendingAssistantActivity({
         </div>
       </div>
     </div>
-  );
+  )
 }
 
 const markdownComponents = {
@@ -207,18 +192,17 @@ const markdownComponents = {
         'break-words font-semibold text-primary underline decoration-primary/40 underline-offset-2 transition-colors',
         'hover:decoration-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2',
         className,
-      ].filter(Boolean).join(' ')}
+      ]
+        .filter(Boolean)
+        .join(' ')}
     >
       {children}
     </a>
   ),
-  img: ({
-    alt,
-    src,
-  }: React.ImgHTMLAttributes<HTMLImageElement>) => {
-    const label = alt?.trim() || src?.trim();
+  img: ({ alt, src }: React.ImgHTMLAttributes<HTMLImageElement>) => {
+    const label = alt?.trim() || src?.trim()
     if (!src) {
-      return label ? <span>{label}</span> : null;
+      return label ? <span>{label}</span> : null
     }
     return (
       <a
@@ -229,10 +213,10 @@ const markdownComponents = {
       >
         {label || src}
       </a>
-    );
+    )
   },
   code: ({ className, children, ...props }: React.HTMLAttributes<HTMLElement>) => {
-    const isInline = !className;
+    const isInline = !className
     return isInline ? (
       <code className="bg-muted px-1 py-0.5 rounded text-xs" {...props}>
         {children}
@@ -243,40 +227,38 @@ const markdownComponents = {
           {children}
         </code>
       </pre>
-    );
+    )
   },
-  table: ({ children }: { children?: React.ReactNode }) => (
+  table: ({ children }: Readonly<{ children?: React.ReactNode }>) => (
     <div className="overflow-x-auto">
       <table className="min-w-full text-xs border-collapse">{children}</table>
     </div>
   ),
-  th: ({ children }: { children?: React.ReactNode }) => (
-    <th className="border border-border px-2 py-1 bg-muted font-medium text-left">
-      {children}
-    </th>
+  th: ({ children }: Readonly<{ children?: React.ReactNode }>) => (
+    <th className="border border-border px-2 py-1 bg-muted font-medium text-left">{children}</th>
   ),
-  td: ({ children }: { children?: React.ReactNode }) => (
+  td: ({ children }: Readonly<{ children?: React.ReactNode }>) => (
     <td className="border border-border px-2 py-1">{children}</td>
   ),
-};
+}
 
-function CopyAnswerButton({ t, content }: { t: TFunction; content: string }) {
-  const [copied, setCopied] = useState(false);
+function CopyAnswerButton({ t, content }: Readonly<{ t: TFunction; content: string }>) {
+  const [copied, setCopied] = useState(false)
   useEffect(() => {
-    if (!copied) return undefined;
-    const timer = window.setTimeout(() => setCopied(false), 1800);
-    return () => window.clearTimeout(timer);
-  }, [copied]);
+    if (!copied) return undefined
+    const timer = window.setTimeout(() => setCopied(false), 1800)
+    return () => window.clearTimeout(timer)
+  }, [copied])
 
   const handleCopy = async () => {
     try {
-      await navigator.clipboard?.writeText(content);
-      setCopied(true);
+      await navigator.clipboard?.writeText(content)
+      setCopied(true)
     } catch {
       // Clipboard may be blocked (insecure context / denied permission); the
       // action is best-effort and must never throw into the render tree.
     }
-  };
+  }
 
   return (
     <button
@@ -293,7 +275,47 @@ function CopyAnswerButton({ t, content }: { t: TFunction; content: string }) {
       )}
       <span>{copied ? t('assistant.copied') : t('assistant.copyAnswer')}</span>
     </button>
-  );
+  )
+}
+
+function messageWidthClass(isUser: boolean, isPendingAssistant: boolean): string {
+  if (isUser) return 'max-w-xl'
+  if (isPendingAssistant) return 'w-full max-w-2xl'
+  return 'w-full'
+}
+
+function messageBubbleClass(isUser: boolean): string {
+  return isUser
+    ? 'rounded-xl rounded-br-sm bg-primary px-4 py-3 text-primary-foreground shadow-soft'
+    : 'space-y-2'
+}
+
+function messageContentClass(isUser: boolean, isPendingAssistant: boolean): string {
+  if (!isUser && !isPendingAssistant) {
+    return 'bg-card border rounded-xl rounded-bl-sm px-4 py-3 shadow-soft'
+  }
+  return ''
+}
+
+function userMessageLines(content: string) {
+  return content.split('\n').reduce<{
+    counts: Readonly<Record<string, number>>
+    lines: React.ReactNode[]
+  }>(
+    (result, line) => {
+      const occurrence = result.counts[line] ?? 0
+      return {
+        counts: { ...result.counts, [line]: occurrence + 1 },
+        lines: [
+          ...result.lines,
+          <p key={`${line}:${occurrence}`} className={result.lines.length > 0 ? 'mt-2' : ''}>
+            {line}
+          </p>,
+        ],
+      }
+    },
+    { counts: {}, lines: [] },
+  ).lines
 }
 
 function ChatMessageImpl({
@@ -305,43 +327,31 @@ function ChatMessageImpl({
   onInspect,
   developerMode,
 }: ChatMessageProps) {
-  const isUser = message.role === 'user';
-  const vcState = message.evidence?.verificationState;
-  const showVerdict = !isUser && vcState != null && vcState !== 'not_run';
-  const isPendingAssistant = !isUser && !message.content;
+  const isUser = message.role === 'user'
+  const evidence = message.evidence
+  const vcState = evidence?.verificationState
+  const showVerdict = !isUser && evidence != null && shouldShowVerifiedEvidence(evidence)
+  const isPendingAssistant = !isUser && !message.content
   const hasEvidence = Boolean(
     message.evidence &&
-      (message.evidence.segmentRefs.length > 0 ||
-        message.evidence.entityRefs.length > 0 ||
-        message.evidence.factRefs.length > 0),
-  );
-  const showFooterActions =
-    !isUser && !isPendingAssistant && Boolean(message.content);
-  const messageWidthClass = isUser
-    ? 'max-w-xl'
-    : isPendingAssistant
-      ? 'w-full max-w-2xl'
-      : 'w-full';
+    (message.evidence.segmentRefs.length > 0 ||
+      message.evidence.entityRefs.length > 0 ||
+      message.evidence.factRefs.length > 0),
+  )
+  const showFooterActions = !isUser && !isPendingAssistant && Boolean(message.content)
+  const widthClass = messageWidthClass(isUser, isPendingAssistant)
 
-  const timestampFormatted = message.timestamp ? formatTimestamp(message.timestamp) : '';
-  const showTimestamp = Boolean(timestampFormatted) && !isPendingAssistant;
-  const showLatency = !isUser && !isPendingAssistant && responseMs != null && responseMs > 0;
+  const timestampFormatted = message.timestamp ? formatTimestamp(message.timestamp) : ''
+  const showTimestamp = Boolean(timestampFormatted) && !isPendingAssistant
+  const showLatency = !isUser && !isPendingAssistant && responseMs != null && responseMs > 0
 
   return (
-    <div className={`flex w-full flex-col gap-0.5 ${isUser ? 'items-end' : 'items-start'} animate-fade-in`}>
-      <div
-        className={`${messageWidthClass} ${
-          isUser
-            ? 'rounded-xl rounded-br-sm bg-primary px-4 py-3 text-primary-foreground shadow-soft'
-            : 'space-y-2'
-        }`}
-      >
+    <div
+      className={`flex w-full flex-col gap-0.5 ${isUser ? 'items-end' : 'items-start'} animate-fade-in`}
+    >
+      <div className={`${widthClass} ${messageBubbleClass(isUser)}`}>
         <div
-          className={`text-sm leading-relaxed ${
-            !isUser && !isPendingAssistant
-              ? 'bg-card border rounded-xl rounded-bl-sm px-4 py-3 shadow-soft'
-              : ''
-          }`}
+          className={`text-sm leading-relaxed ${messageContentClass(isUser, isPendingAssistant)}`}
         >
           {!isUser && !message.content && (
             <PendingAssistantActivity
@@ -352,16 +362,10 @@ function ChatMessageImpl({
           )}
           {!isUser ? (
             <div className="prose prose-sm dark:prose-invert max-w-none">
-              <ReactMarkdown components={markdownComponents}>
-                {message.content}
-              </ReactMarkdown>
+              <ReactMarkdown components={markdownComponents}>{message.content}</ReactMarkdown>
             </div>
           ) : (
-            message.content.split('\n').map((line, i) => (
-              <p key={i} className={i > 0 ? 'mt-2' : ''}>
-                {line}
-              </p>
-            ))
+            userMessageLines(message.content)
           )}
         </div>
       </div>
@@ -426,7 +430,7 @@ function ChatMessageImpl({
         </div>
       )}
     </div>
-  );
+  )
 }
 
 /**
@@ -436,4 +440,4 @@ function ChatMessageImpl({
  * streaming delta actually touched re-renders (and re-runs ReactMarkdown).
  * Historical messages skip reconciliation entirely.
  */
-export const ChatMessage = memo(ChatMessageImpl);
+export const ChatMessage = memo(ChatMessageImpl)

@@ -4,35 +4,104 @@ export type ClientOptions = {
     baseUrl: `${string}://${string}` | (string & {});
 };
 
+/**
+ * Independent administration capabilities of the current principal.
+ */
 export type AdminCapabilityState = {
+    /**
+     * Whether the administration surface is available at all.
+     */
     adminEnabled: boolean;
+    /**
+     * Whether AI providers, credentials, presets, and bindings may be changed.
+     */
     canManageAi: boolean;
+    /**
+     * Whether access tokens may be created or revoked.
+     */
     canManageTokens: boolean;
+    /**
+     * Whether audit events may be viewed.
+     */
     canReadAudit: boolean;
+    /**
+     * Whether operational state may be viewed.
+     */
     canReadOperations: boolean;
 };
 
+/**
+ * Top-level sections of the administration console.
+ */
 export type AdminSection = 'access' | 'mcp' | 'operations' | 'queue' | 'ai' | 'pricing' | 'settings';
 
+/**
+ * Navigation metadata and access state for an administration section.
+ */
 export type AdminSectionSummary = {
+    /**
+     * Access decision for the current principal.
+     */
     gate: CapabilityGate;
+    /**
+     * Optional count of records represented by the section.
+     */
     itemCount?: number | null;
+    /**
+     * Section represented by the summary.
+     */
     section: AdminSection;
+    /**
+     * Short description of the section contents.
+     */
     summary: string;
+    /**
+     * Title shown in navigation.
+     */
     title: string;
 };
 
+/**
+ * Lightweight administration shell state used before section data loads.
+ */
 export type AdminSurface = {
+    /**
+     * Administration capabilities of the current principal.
+     */
     capabilities: AdminCapabilityState;
+    /**
+     * Navigation entries and access decisions for each section.
+     */
     sections: Array<AdminSectionSummary>;
+    /**
+     * Compact summary of the current principal.
+     */
     viewer: AdminViewerSummary;
+    /**
+     * Current warnings that require operator attention.
+     */
     warnings: Array<OperatorWarning>;
 };
 
+/**
+ * Compact identity and access summary for the administration shell.
+ */
 export type AdminViewerSummary = {
+    /**
+     * Human-readable description of the principal's access level.
+     */
     accessLabel: string;
+    /**
+     * Human-readable principal name.
+     */
     displayName: string;
+    /**
+     * Whether the principal has the system administrator role.
+     */
     isAdmin: boolean;
+    /**
+     * Principal represented by the current session.
+     */
     principalId: string;
 };
 
@@ -67,7 +136,10 @@ export type AiAccountResponse = {
     workspaceId?: string | null;
 };
 
-export type AiBindingPurpose = 'extract_text' | 'extract_graph' | 'embed_chunk' | 'query_compile' | 'query_retrieve' | 'query_answer' | 'vision' | 'agent';
+/**
+ * The six physical model bindings exposed to operators and runtime stages.
+ */
+export type AiBindingPurpose = 'extract_text' | 'extract_graph' | 'embed_chunk' | 'query_compile' | 'query_answer' | 'agent';
 
 export type AiBindingResponse = {
     accountId: string;
@@ -87,11 +159,6 @@ export type AiBindingResponse = {
 
 export type AiScopeKind = 'instance' | 'workspace' | 'library';
 
-export type AppendDocumentBodyRequest = {
-    appendedText: string;
-    idempotencyKey?: string | null;
-};
-
 /**
  * One typed disambiguation choice the answer pipeline surfaced alongside a
  * clarifying answer.
@@ -102,9 +169,21 @@ export type AppendDocumentBodyRequest = {
  * `confidence` is `None` when the branch has no ranking signal to expose.
  */
 export type AssistantAnswerCandidate = {
+    /**
+     * Ranking confidence, when the producing branch exposes one.
+     */
     confidence?: number | null;
+    /**
+     * Typed candidate category used for follow-up routing.
+     */
     kind: string;
+    /**
+     * User-facing label for the candidate.
+     */
     label: string;
+    /**
+     * Stable source identifiers associated with the candidate.
+     */
     provenance: AssistantAnswerCandidateProvenance;
 };
 
@@ -119,15 +198,49 @@ export type AssistantAnswerCandidate = {
  * and a missing id as "label only".
  */
 export type AssistantAnswerCandidateProvenance = {
+    /**
+     * Source chunk represented by the candidate, when applicable.
+     */
     chunkId?: string | null;
+    /**
+     * Source document represented by the candidate, when applicable.
+     */
     documentId?: string | null;
+    /**
+     * Graph entity represented by the candidate, when applicable.
+     */
     entityId?: string | null;
 };
 
+/**
+ * Finalizer-owned disposition of the public answer body.
+ *
+ * This is intentionally separate from [`AssistantVerificationState`]: a
+ * strict safe fallback is terminal but non-factual, while ordinary grounded
+ * prose may be factual-ready even when literal verification was not
+ * applicable.
+ */
+export type AssistantAnswerDisposition = 'non_terminal' | 'factual_ready' | 'safe_fallback' | 'clarification';
+
+/**
+ * Ranked citation linking an execution to a retrieved chunk.
+ */
 export type AssistantChunkReference = {
+    /**
+     * Referenced chunk identifier.
+     */
     chunkId: string;
+    /**
+     * Execution that selected the chunk.
+     */
     executionId: string;
+    /**
+     * Position assigned by evidence ranking.
+     */
     rank: number;
+    /**
+     * Relevance score used to rank the chunk.
+     */
     score: number;
 };
 
@@ -140,164 +253,548 @@ export type AssistantChunkReference = {
  * candidate list is empty and `question` is `None`.
  */
 export type AssistantClarification = {
+    /**
+     * Structured choices available for resolving the ambiguity.
+     */
     answerCandidates?: Array<AssistantAnswerCandidate>;
+    /**
+     * Clarifying question presented to the user.
+     */
     question?: string | null;
+    /**
+     * Whether the user must clarify before a factual answer can proceed.
+     */
     required: boolean;
 };
 
+/**
+ * Resolvable location for opening cited source content.
+ */
 export type AssistantContentSourceAccess = {
+    /**
+     * URI or application link used to open the source.
+     */
     href: string;
+    /**
+     * Access mechanism represented by the location.
+     */
     kind: string;
 };
 
+/**
+ * Hydrated message presented in assistant conversation history.
+ */
 export type AssistantConversationMessage = {
+    /**
+     * Plain-text message content.
+     */
     content: string;
     evidence?: null | AssistantEvidenceBundle;
+    /**
+     * Execution associated with the message, when applicable.
+     */
     executionId?: string | null;
+    /**
+     * Stable message identifier.
+     */
     id: string;
+    /**
+     * Author role represented by the message.
+     */
     role: AssistantTurnRole;
+    /**
+     * Time at which the message was recorded.
+     */
     timestamp: string;
 };
 
+/**
+ * Ranked citation to an entity in the knowledge graph.
+ */
 export type AssistantEntityReference = {
+    /**
+     * Graph entity type, when classified.
+     */
     entityType?: string | null;
+    /**
+     * Execution that selected the entity.
+     */
     executionId: string;
+    /**
+     * Human-readable entity label.
+     */
     label: string;
+    /**
+     * Referenced graph-node identifier.
+     */
     nodeId: string;
+    /**
+     * Position assigned by evidence ranking.
+     */
     rank: number;
+    /**
+     * Relevance score used to rank the entity.
+     */
     score: number;
+    /**
+     * Concise entity description, when available.
+     */
     summary?: string | null;
 };
 
+/**
+ * Evidence, verification, and runtime metadata attached to an answer.
+ */
 export type AssistantEvidenceBundle = {
+    /**
+     * Finalizer-owned outcome of the public answer body.
+     */
+    answerDisposition?: AssistantAnswerDisposition;
+    /**
+     * Ordered chunk citations that directly support the rendered answer.
+     */
     chunkReferences: Array<AssistantChunkReference>;
+    /**
+     * Typed terminal clarification and its structured choices. This is
+     * included on history evidence so a page reload preserves the same
+     * machine-readable outcome as the live execution response.
+     */
+    clarification: AssistantClarification;
+    /**
+     * Graph entities cited by the answer.
+     */
     entityReferences: Array<AssistantEntityReference>;
+    /**
+     * Prepared document segments used as structured answer evidence.
+     */
     preparedSegmentReferences: Array<AssistantPreparedSegmentReference>;
+    referenceSummary?: null | AssistantReferenceSummary;
+    /**
+     * Graph relations cited by the answer.
+     */
     relationReferences: Array<AssistantRelationReference>;
+    /**
+     * Ordered summaries of runtime stages observed for the answer.
+     */
     runtimeStageSummaries: Array<AssistantRuntimeStageSummary>;
+    /**
+     * Agent-runtime state associated with the answer.
+     */
     runtimeSummary: AssistantRuntimeSummary;
+    /**
+     * Typed facts selected from the evidence plane for this answer.
+     */
     technicalFactReferences: Array<AssistantTechnicalFactReference>;
+    /**
+     * Final evidence-verification outcome for the rendered answer.
+     */
     verificationState: AssistantVerificationState;
+    /**
+     * Structured verification limitations safe to present to the user.
+     */
     verificationWarnings: Array<AssistantVerificationWarning>;
 };
 
+/**
+ * Persisted execution that resolves one assistant request.
+ */
 export type AssistantExecution = {
+    /**
+     * Pipeline stage currently in progress, if any.
+     */
     activeStage?: string | null;
+    /**
+     * AI binding selected for the execution, when one was resolved.
+     */
     bindingId?: string | null;
+    /**
+     * Terminal completion time, or `None` while still active.
+     */
     completedAt?: string | null;
+    /**
+     * Captured context bundle used for this execution.
+     */
     contextBundleId: string;
+    /**
+     * Conversation that owns the execution.
+     */
     conversationId: string;
+    /**
+     * Stable failure code for an unsuccessful execution.
+     */
     failureCode?: string | null;
+    /**
+     * Stable execution identifier.
+     */
     id: string;
+    /**
+     * Knowledge library queried by the execution.
+     */
     libraryId: string;
+    /**
+     * Current execution lifecycle state.
+     */
     lifecycleState: string;
+    /**
+     * User query submitted for execution.
+     */
     queryText: string;
+    /**
+     * User turn that initiated the execution, when persisted.
+     */
     requestTurnId?: string | null;
+    /**
+     * Assistant turn produced by the execution, when persisted.
+     */
     responseTurnId?: string | null;
+    /**
+     * Associated agent-runtime execution, when delegated to the runtime.
+     */
     runtimeExecutionId?: string | null;
+    /**
+     * Time at which execution processing began.
+     */
     startedAt: string;
+    /**
+     * Workspace in which the execution ran.
+     */
     workspaceId: string;
 };
 
+/**
+ * Complete persisted evidence and turn context for one execution.
+ */
 export type AssistantExecutionDetail = {
+    /**
+     * Finalizer-owned typed outcome. Historical rows created before this
+     * field existed deserialize conservatively as `non_terminal`.
+     */
+    answerDisposition?: AssistantAnswerDisposition;
+    /**
+     * Chunk citations persisted with this execution record.
+     */
     chunkReferences: Array<AssistantChunkReference>;
     /**
      * Typed clarification metadata for this turn. Defaults to
      * `required: false` with no candidates for ordinary answers and for
-     * historical-replay reads (the replay surface carries no clarification
-     * metadata); a clarify turn populates `question` and `answer_candidates`.
+     * historical rows created before typed clarification persistence; a
+     * clarify turn populates `question` and `answer_candidates`.
      */
     clarification?: AssistantClarification;
+    /**
+     * Captured context bundle used for the execution.
+     */
     contextBundleId: string;
+    /**
+     * Entity citations retained for execution inspection and replay.
+     */
     entityReferences: Array<AssistantEntityReference>;
+    /**
+     * Core execution record.
+     */
     execution: AssistantExecution;
+    /**
+     * Structured segment citations persisted with this execution record.
+     */
     preparedSegmentReferences: Array<AssistantPreparedSegmentReference>;
+    referenceSummary?: null | AssistantReferenceSummary;
+    /**
+     * Relation citations retained for execution inspection and replay.
+     */
     relationReferences: Array<AssistantRelationReference>;
     requestTurn?: null | AssistantTurn;
     responseTurn?: null | AssistantTurn;
+    /**
+     * Ordered summaries of runtime stages observed during execution.
+     */
     runtimeStageSummaries: Array<AssistantRuntimeStageSummary>;
+    /**
+     * Agent-runtime state associated with the execution.
+     */
     runtimeSummary: AssistantRuntimeSummary;
+    /**
+     * Typed fact citations persisted with this execution record.
+     */
     technicalFactReferences: Array<AssistantTechnicalFactReference>;
+    /**
+     * Verification outcome stored when this execution reached its terminal state.
+     */
     verificationState: AssistantVerificationState;
+    /**
+     * Structured verification limitations stored with the execution.
+     */
     verificationWarnings: Array<AssistantVerificationWarning>;
 };
 
+/**
+ * Session summary paired with messages ready for conversation rendering.
+ */
 export type AssistantHydratedConversation = {
+    /**
+     * Hydrated messages in conversation order.
+     */
     messages: Array<AssistantConversationMessage>;
+    /**
+     * Conversation summary for navigation and status display.
+     */
     session: AssistantSessionListItem;
 };
 
+/**
+ * Recorded policy decision made during an assistant execution.
+ */
 export type AssistantPolicyDecisionSummary = {
+    /**
+     * Time at which the decision was recorded.
+     */
     decidedAt: string;
+    /**
+     * Policy outcome applied to the target.
+     */
     decisionKind: string;
+    /**
+     * Stable code explaining the decision.
+     */
     reasonCode: string;
+    /**
+     * Identifier of the evaluated target.
+     */
     targetId: string;
+    /**
+     * Category of runtime object evaluated by policy.
+     */
     targetKind: string;
 };
 
+/**
+ * Aggregate policy activity for one runtime execution.
+ */
 export type AssistantPolicySummary = {
+    /**
+     * Number of actions policy allowed.
+     */
     allowCount: number;
+    /**
+     * Most recent policy decisions retained for inspection.
+     */
     recentDecisions: Array<AssistantPolicyDecisionSummary>;
+    /**
+     * Number of actions policy rejected.
+     */
     rejectCount: number;
+    /**
+     * Number of decisions that terminated execution.
+     */
     terminateCount: number;
 };
 
+/**
+ * Ranked citation to a prepared document segment.
+ */
 export type AssistantPreparedSegmentReference = {
+    /**
+     * Structural block type of the prepared segment.
+     */
     blockKind: string;
+    /**
+     * Additional source label or disambiguation hint.
+     */
     documentHint?: string | null;
+    /**
+     * Source document identifier, when available.
+     */
     documentId?: string | null;
+    /**
+     * Display title of the source document, when available.
+     */
     documentTitle?: string | null;
+    /**
+     * Execution that selected the segment.
+     */
     executionId: string;
+    /**
+     * Ordered heading hierarchy enclosing the segment.
+     */
     headingTrail: Array<string>;
+    /**
+     * Position assigned by evidence ranking.
+     */
     rank: number;
+    /**
+     * Document revision containing the segment.
+     */
     revisionId: string;
+    /**
+     * Relevance score used to rank the segment.
+     */
     score: number;
+    /**
+     * Structural path locating the segment within the revision.
+     */
     sectionPath: Array<string>;
+    /**
+     * Referenced prepared-segment identifier.
+     */
     segmentId: string;
     sourceAccess?: null | AssistantContentSourceAccess;
 };
 
+/**
+ * Cardinality metadata for a user-facing projection of assistant evidence.
+ *
+ * Query execution storage and operator debug endpoints retain the complete
+ * evidence set. Interactive UI surfaces may return a deterministic bounded
+ * projection and use this summary to report how much durable evidence exists.
+ */
+export type AssistantReferenceSummary = {
+    /**
+     * Number of references included in this response.
+     */
+    returnedCount: number;
+    /**
+     * Number of durable references available before projection limits.
+     */
+    totalCount: number;
+    /**
+     * Whether additional references were omitted from the response.
+     */
+    truncated: boolean;
+};
+
+/**
+ * Ranked citation to a relation in the knowledge graph.
+ */
 export type AssistantRelationReference = {
+    /**
+     * Referenced graph-edge identifier.
+     */
     edgeId: string;
+    /**
+     * Execution that selected the relation.
+     */
     executionId: string;
+    /**
+     * Canonical relation statement, when one was produced.
+     */
     normalizedAssertion?: string | null;
+    /**
+     * Relation predicate connecting its endpoint entities.
+     */
     predicate: string;
+    /**
+     * Position assigned by evidence ranking.
+     */
     rank: number;
+    /**
+     * Relevance score used to rank the relation.
+     */
     score: number;
 };
 
+/**
+ * Timing and identity summary for one runtime pipeline stage.
+ */
 export type AssistantRuntimeStageSummary = {
     /**
      * Total wall-clock spent in this pipeline stage across its attempts.
      * `None` for executions recorded before stage timing existed.
      */
     durationMs?: number | null;
+    /**
+     * Stable machine-readable stage identifier.
+     */
     stageKind: string;
+    /**
+     * User-facing stage label.
+     */
     stageLabel: string;
 };
 
+/**
+ * Execution-state summary reported by the agent runtime.
+ */
 export type AssistantRuntimeSummary = {
+    /**
+     * Time at which the runtime accepted the execution.
+     */
     acceptedAt: string;
+    /**
+     * Runtime stage currently in progress, if any.
+     */
     activeStage?: string | null;
+    /**
+     * Terminal completion time, or `None` while still active.
+     */
     completedAt?: string | null;
+    /**
+     * Stable failure code for an unsuccessful runtime execution.
+     */
     failureCode?: string | null;
+    /**
+     * Redacted failure detail safe to expose to callers.
+     */
     failureSummaryRedacted?: string | null;
+    /**
+     * Current runtime execution lifecycle state.
+     */
     lifecycleState: string;
+    /**
+     * Maximum number of actions that may execute concurrently.
+     */
     parallelActionLimit: number;
+    /**
+     * Aggregate policy decisions made during execution.
+     */
     policySummary: AssistantPolicySummary;
+    /**
+     * Stable agent-runtime execution identifier.
+     */
     runtimeExecutionId: string;
+    /**
+     * Maximum number of runtime turns permitted.
+     */
     turnBudget: number;
+    /**
+     * Number of runtime turns consumed so far.
+     */
     turnCount: number;
 };
 
+/**
+ * Conversation summary shown in assistant session lists.
+ */
 export type AssistantSessionListItem = {
+    /**
+     * Current conversation lifecycle state.
+     */
     conversationState: string;
+    /**
+     * Time at which the conversation was created.
+     */
     createdAt: string;
+    /**
+     * Stable conversation identifier.
+     */
     id: string;
+    /**
+     * Knowledge library used by the conversation.
+     */
     libraryId: string;
+    /**
+     * User-facing conversation title.
+     */
     title: string;
+    /**
+     * Number of persisted turns in the conversation.
+     */
     turnCount: number;
+    /**
+     * Time of the most recent conversation change.
+     */
     updatedAt: string;
+    /**
+     * Workspace that owns the conversation.
+     */
     workspaceId: string;
 };
 
@@ -312,7 +809,7 @@ export type AssistantSystemPromptResponse = {
     /**
      * Raw template with the `{LIBRARY_REF}` placeholder. This is what
      * transport-agnostic external MCP clients should paste into their
-     * own system prompt when attaching IronRAG's MCP server. Documented
+     * own system prompt when attaching `IronRAG`'s MCP server. Documented
      * clients include Claude Desktop, Claude Code, Cursor, Codex, VS Code
      * with Continue/Cline/Roo, Zed, and Hermes, so every agent — in-app
      * or external — shares the same grounding discipline.
@@ -320,36 +817,111 @@ export type AssistantSystemPromptResponse = {
     template: string;
 };
 
+/**
+ * Ranked citation to a normalized technical fact.
+ */
 export type AssistantTechnicalFactReference = {
+    /**
+     * Normalized value used for comparison and matching.
+     */
     canonicalValue: string;
+    /**
+     * Source-facing value suitable for presentation.
+     */
     displayValue: string;
+    /**
+     * Execution that selected the fact.
+     */
     executionId: string;
+    /**
+     * Referenced fact identifier.
+     */
     factId: string;
+    /**
+     * Typed category assigned during fact extraction.
+     */
     factKind: string;
+    /**
+     * Position assigned by evidence ranking.
+     */
     rank: number;
+    /**
+     * Document revision from which the fact was extracted.
+     */
     revisionId: string;
+    /**
+     * Relevance score used to rank the fact.
+     */
     score: number;
 };
 
+/**
+ * Persisted, ordered message within an assistant conversation.
+ */
 export type AssistantTurn = {
+    /**
+     * Authenticated principal that authored the turn, when applicable.
+     */
     authorPrincipalId?: string | null;
+    /**
+     * Plain-text message content.
+     */
     contentText: string;
+    /**
+     * Conversation containing this turn.
+     */
     conversationId: string;
+    /**
+     * Time at which the turn was recorded.
+     */
     createdAt: string;
+    /**
+     * Execution that produced or consumed this turn, when present.
+     */
     executionId?: string | null;
+    /**
+     * Stable turn identifier.
+     */
     id: string;
+    /**
+     * Ordinal position of the turn in its conversation.
+     */
     turnIndex: number;
+    /**
+     * Author role represented by this turn.
+     */
     turnKind: AssistantTurnRole;
 };
 
+/**
+ * Author role assigned to a conversation turn.
+ */
 export type AssistantTurnRole = 'user' | 'assistant' | 'system' | 'tool';
 
+/**
+ * Evidence-verification outcome for an assistant answer.
+ */
 export type AssistantVerificationState = 'not_run' | 'verified' | 'partially_supported' | 'conflicting' | 'insufficient_evidence' | 'failed';
 
+/**
+ * User-safe explanation of a verification limitation.
+ */
 export type AssistantVerificationWarning = {
+    /**
+     * Stable machine-readable warning code.
+     */
     code: string;
+    /**
+     * Human-readable warning description.
+     */
     message: string;
+    /**
+     * Technical fact associated with the warning, when known.
+     */
     relatedFactId?: string | null;
+    /**
+     * Prepared segment associated with the warning, when known.
+     */
     relatedSegmentId?: string | null;
 };
 
@@ -392,8 +964,7 @@ export type AuditAssistantModelResponse = {
 
 export type AuditEventPageResponse = {
     items: Array<AuditEventResponse>;
-    limit: number;
-    offset: number;
+    nextCursor?: string | null;
     total: number;
 };
 
@@ -429,9 +1000,21 @@ export type AuditEventSubjectResponse = {
     workspaceId?: string | null;
 };
 
+/**
+ * Active session metadata and its authenticated user.
+ */
 export type AuthenticatedSession = {
+    /**
+     * Time after which the session is no longer valid.
+     */
     expiresAt: string;
+    /**
+     * Stable identifier of the session.
+     */
     sessionId: string;
+    /**
+     * User authenticated by the session.
+     */
     user: SessionUser;
 };
 
@@ -486,6 +1069,12 @@ export type BillingCharge = {
     usageId: string;
 };
 
+export type BillingChargePage = {
+    items: Array<BillingCharge>;
+    nextCursor?: string | null;
+    total?: number | null;
+};
+
 export type BillingExecutionCost = {
     currencyCode: string;
     id: string;
@@ -515,6 +1104,12 @@ export type BillingProviderCall = {
     workspaceId: string;
 };
 
+export type BillingProviderCallPage = {
+    items: Array<BillingProviderCall>;
+    nextCursor?: string | null;
+    total?: number | null;
+};
+
 export type BindingValidationResponse = {
     bindingId: string;
     checkedAt: string;
@@ -524,38 +1119,114 @@ export type BindingValidationResponse = {
     validationState: string;
 };
 
+/**
+ * AI configuration choices available during initial setup.
+ */
 export type BootstrapAiSetup = {
+    /**
+     * Providers and their proposed purpose bindings.
+     */
     bindingBundles: Array<BootstrapProviderBindingBundle>;
 };
 
-export type BootstrapBindingPurpose = 'extract_text' | 'extract_graph' | 'embed_chunk' | 'query_compile' | 'query_retrieve' | 'query_answer' | 'vision' | 'agent';
-
+/**
+ * Availability of bootstrap credentials for a provider.
+ */
 export type BootstrapCredentialSource = 'missing' | 'env';
 
+/**
+ * Model preset proposed for one AI purpose during initial setup.
+ */
 export type BootstrapProviderBinding = {
-    bindingPurpose: BootstrapBindingPurpose;
+    /**
+     * Pipeline purpose served by this model.
+     */
+    bindingPurpose: AiBindingPurpose;
+    /**
+     * Optional output-token limit that overrides the model default.
+     */
     maxOutputTokensOverride?: number | null;
+    /**
+     * Catalog entry that identifies the model.
+     */
     modelCatalogId: string;
+    /**
+     * Provider-facing model name.
+     */
     modelName: string;
+    /**
+     * Optional system prompt for the preset.
+     */
     systemPrompt?: string | null;
+    /**
+     * Optional sampling temperature.
+     */
     temperature?: number | null;
+    /**
+     * Optional nucleus-sampling threshold.
+     */
     topP?: number | null;
 };
 
+/**
+ * Provider metadata and model presets offered during initial setup.
+ */
 export type BootstrapProviderBindingBundle = {
+    /**
+     * Whether setup must supply an API key.
+     */
     apiKeyRequired: boolean;
+    /**
+     * Rules governing endpoint configuration.
+     */
     baseUrlPolicy: ProviderBaseUrlPolicy;
+    /**
+     * Whether setup must supply an endpoint URL.
+     */
     baseUrlRequired: boolean;
+    /**
+     * Proposed model preset for each supported AI purpose.
+     */
     bindings: Array<BootstrapProviderBinding>;
+    /**
+     * Features supported by the provider.
+     */
     capabilities: ProviderCapabilities;
+    /**
+     * Rules governing credentials for this provider.
+     */
     credentialPolicy: ProviderCredentialPolicy;
+    /**
+     * Source from which bootstrap credentials can be obtained.
+     */
     credentialSource: BootstrapCredentialSource;
+    /**
+     * Suggested endpoint when the provider has a default.
+     */
     defaultBaseUrl?: string | null;
+    /**
+     * Human-readable provider name.
+     */
     displayName: string;
+    /**
+     * Strategy used to discover available models.
+     */
     modelDiscovery: ProviderModelDiscovery;
+    /**
+     * Catalog entry that identifies the provider.
+     */
     providerCatalogId: string;
+    /**
+     * Stable provider implementation kind.
+     */
     providerKind: string;
+    /**
+     * Runtime behavior required by the provider adapter.
+     */
     runtime: ProviderRuntimeProfile;
+    /**
+     * Provider-defined presentation metadata for setup forms.
+     */
     uiHints: unknown;
 };
 
@@ -572,8 +1243,14 @@ export type BootstrapSetupRequest = {
     password: string;
 };
 
+/**
+ * Current requirement and options for initial system setup.
+ */
 export type BootstrapStatus = {
     aiSetup?: null | BootstrapAiSetup;
+    /**
+     * Whether an owner account must still be created.
+     */
     setupRequired: boolean;
 };
 
@@ -587,9 +1264,21 @@ export type BulkIngestQueueActionResponse = {
     results: Array<IngestQueueBulkResultItem>;
 };
 
+/**
+ * Access decision for one administration section.
+ */
 export type CapabilityGate = {
+    /**
+     * Whether the current principal may open the section.
+     */
     allowed: boolean;
+    /**
+     * Explanation shown when access is restricted.
+     */
     reason?: string | null;
+    /**
+     * Section governed by the decision.
+     */
     section: AdminSection;
 };
 
@@ -628,9 +1317,8 @@ export type CatalogWorkspaceResponse = {
 
 /**
  * Multi-turn conversation message used by answer calls and external
- * tool-capable agents. Mirrors the OpenAI chat.completions message shape
- * so the same wire format works for every OpenAI-compatible provider
- * (OpenAI, Qwen, DeepSeek, Ollama, etc.).
+ * tool-capable agents. Mirrors the `OpenAI` chat.completions message shape
+ * so the same wire format works across OpenAI-compatible runtimes.
  */
 export type ChatMessage = {
     /**
@@ -643,9 +1331,8 @@ export type ChatMessage = {
      */
     name?: string | null;
     /**
-     * Provider-emitted reasoning trace echoed back by DeepSeek thinking
-     * models when continuing a multi-turn tool-loop. Other providers
-     * ignore the field.
+     * Optional provider-emitted reasoning trace echoed back when an upstream
+     * runtime requires it for continuation of a multi-turn tool loop.
      */
     reasoning_content?: string | null;
     /**
@@ -899,7 +1586,6 @@ export type CreateDocumentRequest = {
     externalKey?: string | null;
     idempotencyKey?: string | null;
     languageCode?: string | null;
-    libraryId: string;
     mimeType?: string | null;
     /**
      * Optional connector-declared structural parent identity
@@ -911,20 +1597,11 @@ export type CreateDocumentRequest = {
     sourceUri?: string | null;
     storageKey?: string | null;
     title?: string | null;
-    workspaceId: string;
 };
 
 export type CreateDocumentResponse = {
     document: ContentDocumentDetailResponse;
     mutation: ContentMutationDetailResponse;
-};
-
-export type CreateGrantRequest = {
-    expiresAt?: string | null;
-    permissionKind: IamPermissionKind;
-    principalId: string;
-    resourceId: string;
-    resourceKind: IamGrantResourceKind;
 };
 
 export type CreateModelCatalogRequest = {
@@ -939,23 +1616,6 @@ export type CreateModelCatalogRequest = {
     providerCatalogId: string;
 };
 
-export type CreateMutationRequest = {
-    byteSize?: number | null;
-    checksum?: string | null;
-    contentSourceKind?: string | null;
-    documentHint?: string | null;
-    documentId: string;
-    idempotencyKey?: string | null;
-    languageCode?: string | null;
-    libraryId: string;
-    mimeType?: string | null;
-    operationKind: string;
-    sourceUri?: string | null;
-    storageKey?: string | null;
-    title?: string | null;
-    workspaceId: string;
-};
-
 export type CreateProviderCatalogRequest = {
     apiStyle: string;
     capabilityFlagsJson: unknown;
@@ -965,13 +1625,25 @@ export type CreateProviderCatalogRequest = {
     providerKind: string;
 };
 
+/**
+ * JSON body for `POST /v1/content/documents/{documentId}/revisions`.
+ * `mode = "append"` requires `appendedText`; `mode = "replace"` requires
+ * `markdown`. Replacing the underlying file bytes instead of markdown text
+ * uses `multipart/form-data` on the same endpoint, not this shape.
+ */
+export type CreateRevisionRequest = {
+    appendedText?: string | null;
+    idempotencyKey?: string | null;
+    markdown?: string | null;
+    mode: RevisionMode;
+};
+
 export type CreateSessionRequest = {
-    libraryId: string;
-    title?: string | null;
     /**
-     * When omitted, inferred from the library's parent workspace.
+     * Optional display title; the server derives one from the first turn
+     * when omitted.
      */
-    workspaceId?: string | null;
+    title?: string | null;
 };
 
 export type CreateSessionTurnRequest = {
@@ -987,7 +1659,6 @@ export type CreateSubscriptionRequest = {
     libraryId?: string | null;
     secret: string;
     targetUrl: string;
-    workspaceId: string;
 };
 
 export type CreateUserRequest = {
@@ -1020,36 +1691,65 @@ export type CreateWorkspacePriceOverrideRequest = {
     workspaceId: string;
 };
 
+/**
+ * Actionable condition highlighted on a library dashboard.
+ */
 export type DashboardAttentionItem = {
+    /**
+     * Machine-stable condition identifier.
+     */
     code: string;
+    /**
+     * Explanation of impact or suggested remediation.
+     */
     detail: string;
+    /**
+     * Operational severity of the condition.
+     */
     level: MessageLevel;
+    /**
+     * Application route where the condition can be inspected.
+     */
     routePath: string;
+    /**
+     * Short operator-facing summary.
+     */
     title: string;
 };
 
-export type DashboardMetric = {
-    key: string;
-    label: string;
-    level: MessageLevel;
-    value: string;
-};
-
+/**
+ * Aggregated library state required by the operational dashboard.
+ */
 export type DashboardSurface = {
+    /**
+     * Conditions that may require operator action.
+     */
     attention: Array<DashboardAttentionItem>;
     /**
-     * Canonical metrics row — the UI should prefer this over the
-     * legacy `overview` for new widgets. `overview` stays for
-     * backwards compatibility (existing dashboard cards still read
-     * it) but is derived from the same metrics source server-side.
+     * Canonical mutually exclusive document lifecycle and graph-readiness counts.
      */
     documentMetrics: LibraryDocumentMetrics;
+    /**
+     * Current graph topology and readiness summary.
+     */
     graph: GraphSurface;
-    metrics: Array<DashboardMetric>;
-    overview: DocumentsOverview;
+    /**
+     * Most recently mutated documents in the library.
+     */
     recentDocuments: Array<DocumentSummary>;
+    /**
+     * Most recently active web-ingestion runs.
+     */
     recentWebRuns: Array<WebIngestRunSummary>;
+    /**
+     * Non-fatal conditions affecting dashboard completeness or accuracy.
+     */
     warnings: Array<OperatorWarning>;
+};
+
+export type DeliveryAttemptListPageResponse = {
+    items: Array<DeliveryAttemptResponse>;
+    nextCursor?: string | null;
 };
 
 export type DeliveryAttemptResponse = {
@@ -1106,6 +1806,12 @@ export type DocumentAttempt = {
     totalElapsedMs?: number | null;
 };
 
+export type DocumentCostPage = {
+    items: Array<DocumentCostSummary>;
+    nextCursor?: string | null;
+    total?: number | null;
+};
+
 export type DocumentCostSummary = {
     currencyCode: string;
     documentId: string;
@@ -1139,6 +1845,9 @@ export type DocumentListStatusCounts = {
     total: number;
 };
 
+/**
+ * Highest query capability currently available for a document.
+ */
 export type DocumentReadiness = 'processing' | 'readable' | 'graph_sparse' | 'graph_ready' | 'failed';
 
 export type DocumentReadinessSummary = {
@@ -1189,41 +1898,88 @@ export type DocumentStageEvent = {
     totalTokens?: number | null;
 };
 
+/**
+ * Operational lifecycle of a document ingestion attempt.
+ */
 export type DocumentStatus = 'queued' | 'processing' | 'ready' | 'failed' | 'canceled';
 
+/**
+ * List-view metadata and current processing state for one document.
+ */
 export type DocumentSummary = {
+    /**
+     * Whether the current terminal state supports an operator retry.
+     */
     canRetry: boolean;
+    /**
+     * Attributed provider cost in US dollars when accounting is available.
+     */
     costUsd?: number | null;
+    /**
+     * Sanitized explanation of the terminal failure.
+     */
     failureMessage?: string | null;
+    /**
+     * Display name derived from the source or upload.
+     */
     fileName: string;
+    /**
+     * Source payload size in bytes.
+     */
     fileSize: number;
+    /**
+     * Source format or media-type label shown in document lists.
+     */
     fileType: string;
+    /**
+     * Stable document identifier.
+     */
     id: string;
+    /**
+     * Owning library when included by the response surface.
+     */
     libraryId?: string | null;
+    /**
+     * Extracted structural segment count when computed.
+     */
     preparedSegmentCount?: number | null;
+    /**
+     * Best-effort completion percentage for the active attempt.
+     */
     progressPercent?: number | null;
+    /**
+     * Highest query capability currently available.
+     */
     readiness: DocumentReadiness;
+    /**
+     * Normalized format selected by the extraction pipeline.
+     */
     sourceFormat?: string | null;
+    /**
+     * Operator-facing name of the active ingestion stage.
+     */
     stageLabel?: string | null;
+    /**
+     * Operational state of the current ingestion attempt.
+     */
     status: DocumentStatus;
+    /**
+     * Materialized typed-fact count when computed.
+     */
     technicalFactCount?: number | null;
+    /**
+     * Time at which the document mutation was accepted.
+     */
     uploadedAt: string;
+    /**
+     * Owning workspace when included by the response surface.
+     */
     workspaceId?: string | null;
 };
 
-export type DocumentsOverview = {
-    failedDocuments: number;
-    graphSparseDocuments: number;
-    processingDocuments: number;
-    readyDocuments: number;
-    totalDocuments: number;
-};
-
-export type EditDocumentRequest = {
-    idempotencyKey?: string | null;
-    markdown: string;
-};
-
+/**
+ * Resource scopes to which a permission grant can apply.
+ */
 export type GrantResourceKind = 'system' | 'workspace' | 'library' | 'document' | 'query_session' | 'async_operation' | 'connector' | 'provider_credential' | 'library_binding';
 
 export type GrantResponse = {
@@ -1237,67 +1993,202 @@ export type GrantResponse = {
     resourceKind: IamGrantResourceKind;
 };
 
+/**
+ * Degree to which the active graph reflects current source revisions.
+ */
 export type GraphConvergenceStatus = 'current' | 'partial' | 'degraded';
 
+/**
+ * Directed relation between two graph nodes.
+ */
 export type GraphEdge = {
+    /**
+     * Normalized identity used to converge equivalent extracted relations.
+     */
     canonicalKey: string;
+    /**
+     * Whether the relation is hidden by default as an extraction artifact.
+     */
     filteredArtifact: boolean;
+    /**
+     * Stable relation identifier within the library graph.
+     */
     id: string;
+    /**
+     * Extracted or normalized relation label.
+     */
     relationType: string;
+    /**
+     * Origin node of the directed relation.
+     */
     source: string;
+    /**
+     * Number of retained evidence records supporting this relation.
+     */
     supportCount: number;
+    /**
+     * Destination node of the directed relation.
+     */
     target: string;
 };
 
+/**
+ * Identity and health of the latest known graph generation.
+ */
 export type GraphGenerationSummary = {
+    /**
+     * Monotonic generation number currently serving graph reads.
+     */
     activeGraphGeneration: number;
+    /**
+     * Machine-readable degraded-state code, if the generation is impaired.
+     */
     degradedState?: string | null;
+    /**
+     * Persistent generation identifier when materialization has started.
+     */
     generationId?: string | null;
+    /**
+     * Time at which the generation status last changed.
+     */
     updatedAt?: string | null;
 };
 
+/**
+ * Compact node representation used to render graph topology.
+ */
 export type GraphNode = {
+    /**
+     * Normalized identity used to converge equivalent extracted mentions.
+     */
     canonicalKey: string;
+    /**
+     * Whether the node is hidden by default as an extraction artifact.
+     */
     filteredArtifact: boolean;
+    /**
+     * Stable node identifier within the library graph.
+     */
     id: string;
+    /**
+     * Primary human-readable node label.
+     */
     label: string;
+    /**
+     * Broad semantic class assigned during extraction.
+     */
     nodeType: GraphNodeType;
+    /**
+     * Optional disambiguating label shown alongside the primary label.
+     */
     secondaryLabel?: string | null;
+    /**
+     * Evidence-grounded summary when one has been materialized.
+     */
     summary?: string | null;
+    /**
+     * Number of retained evidence records supporting this node.
+     */
     supportCount: number;
 };
 
+/**
+ * Broad semantic class assigned to a graph node by extraction.
+ */
 export type GraphNodeType = 'entity' | 'person' | 'organization' | 'location' | 'event' | 'artifact' | 'natural' | 'process' | 'concept' | 'attribute';
 
+/**
+ * Document coverage and generation readiness for one library graph.
+ */
 export type GraphReadinessSummary = {
+    /**
+     * Document totals grouped by the canonical readiness state.
+     */
     documentCountsByReadiness: Array<[
         string,
         number
     ]>;
+    /**
+     * Documents with graph materialization complete.
+     */
     graphReadyDocumentCount: number;
+    /**
+     * Documents represented by too little graph evidence for full readiness.
+     */
     graphSparseDocumentCount: number;
     latestGeneration?: null | GraphGenerationSummary;
+    /**
+     * Library whose source revisions were counted.
+     */
     libraryId: string;
+    /**
+     * Documents contributing at least one typed fact.
+     */
     typedFactDocumentCount: number;
+    /**
+     * Time at which this coverage snapshot was assembled.
+     */
     updatedAt?: string | null;
 };
 
+/**
+ * Lifecycle state of a library's materialized graph.
+ */
 export type GraphStatus = 'empty' | 'building' | 'rebuilding' | 'ready' | 'partial' | 'failed' | 'stale';
 
+/**
+ * Topology, readiness, and diagnostics required by the graph viewer.
+ */
 export type GraphSurface = {
     convergenceStatus?: null | GraphConvergenceStatus;
+    /**
+     * Total directed edges available in the active view.
+     */
     edgeCount: number;
+    /**
+     * Directed relations included in the current topology response.
+     */
     edges: Array<GraphEdge>;
+    /**
+     * Documents with complete graph materialization.
+     */
     graphReadyDocumentCount: number;
+    /**
+     * Documents represented by sparse graph evidence.
+     */
     graphSparseDocumentCount: number;
+    /**
+     * Library represented by this graph snapshot.
+     */
     libraryId: string;
+    /**
+     * Total nodes available in the active view.
+     */
     nodeCount: number;
+    /**
+     * Nodes included in the current topology response.
+     */
     nodes: Array<GraphNode>;
     readinessSummary?: null | GraphReadinessSummary;
+    /**
+     * Number of distinct relation classes in the active view.
+     */
     relationCount: number;
+    /**
+     * Current graph materialization lifecycle.
+     */
     status: GraphStatus;
+    /**
+     * Documents contributing typed facts to the active graph.
+     */
     typedFactDocumentCount: number;
+    /**
+     * Time at which the graph snapshot was last refreshed.
+     */
     updatedAt?: string | null;
+    /**
+     * Operator-readable explanation of partial, failed, or stale state.
+     */
     warning?: string | null;
 };
 
@@ -1310,10 +2201,22 @@ export type HealthResponse = {
 
 export type IamGrantResourceKind = 'system' | 'workspace' | 'library' | 'document' | 'query_session' | 'async_operation' | 'connector' | 'provider_credential' | 'library_binding';
 
+/**
+ * Effective identity, memberships, and grants for the current principal.
+ */
 export type IamMe = {
+    /**
+     * Permissions effective for the principal.
+     */
     effectiveGrants: Array<TokenGrant>;
+    /**
+     * Core principal record.
+     */
     principal: PrincipalProfile;
     user?: null | UserProfile;
+    /**
+     * Workspace memberships held by the principal.
+     */
     workspaceMemberships: Array<WorkspaceMembership>;
 };
 
@@ -1340,6 +2243,11 @@ export type IngestAttempt = {
     worker_principal_id?: string | null;
 };
 
+export type IngestAttemptListPageResponse = {
+    items: Array<IngestAttempt>;
+    nextCursor?: string | null;
+};
+
 export type IngestAttemptResponse = {
     asyncOperation?: null | OpsAsyncOperation;
     attempt: IngestAttempt;
@@ -1363,6 +2271,11 @@ export type IngestJob = {
     queue_state: string;
     queued_at: string;
     workspace_id: string;
+};
+
+export type IngestJobListPageResponse = {
+    items: Array<IngestJobResponse>;
+    nextCursor?: string | null;
 };
 
 export type IngestJobResponse = {
@@ -1564,6 +2477,12 @@ export type KnowledgeContextBundleDetailResponse = {
     traces: Array<KnowledgeRetrievalTraceRow>;
 };
 
+export type KnowledgeContextBundleListResponse = {
+    items: Array<KnowledgeContextBundleRow>;
+    nextCursor?: string | null;
+    total?: number | null;
+};
+
 export type KnowledgeContextBundleRow = {
     assembly_diagnostics: unknown;
     bundle_id: string;
@@ -1581,16 +2500,6 @@ export type KnowledgeContextBundleRow = {
     verification_state: string;
     verification_warnings?: unknown;
     workspace_id: string;
-};
-
-export type KnowledgeDocumentDetailResponse = {
-    document: KnowledgeDocumentRow;
-    graphEvidenceSummary: KnowledgeGraphEvidenceSummary;
-    latestRevision?: null | KnowledgeRevisionRow;
-    latestRevisionChunks: Array<KnowledgeChunkRow>;
-    latestRevisionTypedFacts: Array<TypedTechnicalFact>;
-    revisions: Array<KnowledgeRevisionRow>;
-    technicalFactSummary: KnowledgeTechnicalFactProvenanceSummary;
 };
 
 export type KnowledgeDocumentProvenanceSummary = {
@@ -1749,6 +2658,12 @@ export type KnowledgeLibraryGeneration = {
     source_revision_id?: string | null;
 };
 
+export type KnowledgeLibraryGenerationListResponse = {
+    items: Array<KnowledgeLibraryGeneration>;
+    nextCursor?: string | null;
+    total?: number | null;
+};
+
 export type KnowledgeLibrarySummaryResponse = {
     documentCountsByReadiness: {
         [key: string]: number;
@@ -1769,6 +2684,12 @@ export type KnowledgeRelationDetailResponse = {
     supportingEvidence: Array<RuntimeKnowledgeEvidenceRow>;
     supportingEvidenceEdges: Array<KnowledgeEvidenceSupportRelationEdgeRow>;
     supportingTypedFacts: Array<TypedTechnicalFact>;
+};
+
+export type KnowledgeRelationListResponse = {
+    items: Array<RuntimeKnowledgeRelationRow>;
+    nextCursor?: string | null;
+    total?: number | null;
 };
 
 export type KnowledgeRelationSearchRow = {
@@ -1797,34 +2718,6 @@ export type KnowledgeRetrievalTraceRow = {
     workspace_id: string;
 };
 
-export type KnowledgeRevisionRow = {
-    byte_size: number;
-    checksum: string;
-    created_at: string;
-    document_hint?: string | null;
-    document_id: string;
-    graph_ready_at?: string | null;
-    graph_state: string;
-    image_checksum?: string | null;
-    library_id: string;
-    mime_type: string;
-    normalized_text?: string | null;
-    revision_id: string;
-    revision_kind: string;
-    revision_number: number;
-    revision_state: string;
-    source_uri?: string | null;
-    storage_ref?: string | null;
-    superseded_by_revision_id?: string | null;
-    text_checksum?: string | null;
-    text_readable_at?: string | null;
-    text_state: string;
-    title?: string | null;
-    vector_ready_at?: string | null;
-    vector_state: string;
-    workspace_id: string;
-};
-
 export type KnowledgeSearchDocumentHit = {
     chunkHits: Array<KnowledgeChunkSearchRow>;
     document: KnowledgeDocumentRow;
@@ -1840,6 +2733,21 @@ export type KnowledgeSearchDocumentHit = {
     vectorChunkHits: Array<KnowledgeChunkVectorSearchRow>;
     vectorRank?: number | null;
     vectorScore?: number | null;
+};
+
+/**
+ * JSON body for `POST /v1/knowledge/libraries/{libraryId}/search` — the
+ * single hybrid lexical+vector search interface (plan §1.5.1: the one
+ * sanctioned `POST`-that-reads exception in the whole redesign, because
+ * free-text query input does not fit a query string safely/practically).
+ * `text` replaces the former `query` field name to match the plan's wire
+ * contract.
+ */
+export type KnowledgeSearchRequest = {
+    chunkHitLimitPerDocument?: number | null;
+    evidenceSampleLimit?: number | null;
+    limit?: number | null;
+    text: string;
 };
 
 export type KnowledgeSearchRevisionSummary = {
@@ -1900,14 +2808,41 @@ export type LibraryCostSummary = {
  * same kind of double-counting drift we just finished removing.
  */
 export type LibraryDocumentMetrics = {
+    /**
+     * Documents whose current attempt was canceled or superseded.
+     */
     canceled: number;
+    /**
+     * Documents whose current attempt failed.
+     */
     failed: number;
+    /**
+     * Ready documents with complete graph materialization.
+     */
     graphReady: number;
+    /**
+     * Ready documents with sparse graph materialization.
+     */
     graphSparse: number;
+    /**
+     * Documents with an active worker attempt.
+     */
     processing: number;
+    /**
+     * Documents waiting for a worker attempt.
+     */
     queued: number;
+    /**
+     * Successfully ingested documents.
+     */
     ready: number;
+    /**
+     * Time at which the aggregate was recomputed.
+     */
     recomputedAt: string;
+    /**
+     * Sum of all mutually exclusive lifecycle buckets.
+     */
     total: number;
 };
 
@@ -1915,15 +2850,45 @@ export type LibraryRecognitionPolicy = {
     rasterImageEngine: RecognitionEngine;
 };
 
+/**
+ * Library metadata and readiness used by the application shell.
+ */
 export type LibrarySummary = {
+    /**
+     * Optional human-readable purpose or scope of the library.
+     */
     description?: string | null;
+    /**
+     * Stable library identifier.
+     */
     id: string;
+    /**
+     * Whether all requirements for accepting ingestion work are satisfied.
+     */
     ingestionReady: boolean;
+    /**
+     * Current library lifecycle state as exposed by the API.
+     */
     lifecycleState: string;
-    missingBindingPurposes: Array<BootstrapBindingPurpose>;
+    /**
+     * Required AI purposes without an effective model binding.
+     */
+    missingBindingPurposes: Array<AiBindingPurpose>;
+    /**
+     * Display name shown to users.
+     */
     name: string;
+    /**
+     * Query readiness when it has been evaluated for this response.
+     */
     queryReady?: boolean | null;
+    /**
+     * URL-safe library identifier within its workspace.
+     */
     slug: string;
+    /**
+     * Workspace that owns the library.
+     */
     workspaceId: string;
 };
 
@@ -2012,6 +2977,19 @@ export type McpCapabilitySnapshot = {
     tokenId?: string | null;
     tokenKind: string;
     /**
+     * SHA-256 over the ordered visible tool names, descriptions, and
+     * canonical input schemas. The in-process UI agent and external MCP
+     * transport derive this value from the same descriptors.
+     */
+    toolContractHash: string;
+    /**
+     * Version of the canonical hash framing used for the visible MCP
+     * tool contract. Consumers compare this together with
+     * `tool_contract_hash`; a future incompatible canonicalization can
+     * increment the version without making old hashes ambiguous.
+     */
+    toolContractVersion: number;
+    /**
      * The full tool name list is already in the `tools/list` response.
      * Repeating it in `initialize` doubles the context cost for zero
      * information gain. Skipped when empty.
@@ -2029,6 +3007,9 @@ export type MeResponse = {
     workspaceMemberships: Array<WorkspaceMembershipResponse>;
 };
 
+/**
+ * Severity attached to an operator-visible diagnostic.
+ */
 export type MessageLevel = 'info' | 'warning' | 'error';
 
 export type MintTokenRequest = {
@@ -2064,10 +3045,25 @@ export type MoveIngestQueueJobRequest = {
     direction: IngestQueueMoveDirection;
 };
 
+/**
+ * Stable, human-readable warning exposed on an operator surface.
+ */
 export type OperatorWarning = {
+    /**
+     * Machine-stable identifier suitable for filtering and support links.
+     */
     code: string;
+    /**
+     * Actionable explanation of the condition and its impact.
+     */
     detail: string;
+    /**
+     * Operational severity of the condition.
+     */
     level: MessageLevel;
+    /**
+     * Short summary intended for compact UI presentation.
+     */
     title: string;
 };
 
@@ -2138,6 +3134,26 @@ export type PatchDocumentMetadataRequest = {
     documentHint?: string | null;
 };
 
+/**
+ * Partial update for `PATCH /iam/tokens/{tokenId}`. Only `label` and
+ * `expiresAt` are mutable post-mint — the permission scope
+ * (`permissionKinds`/`libraryIds`) is immutable once a token is minted, so
+ * that the audit invariant "this plaintext was created with exactly these
+ * permissions" always holds; changing scope means minting a new token and
+ * deleting the old one, not patching this one.
+ *
+ * `expiresAt` distinguishes three states: omitted (leave untouched),
+ * `null` (clear the expiry, making the token non-expiring), and a
+ * timestamp (set the expiry).
+ */
+export type PatchTokenRequest = {
+    expiresAt?: string | null;
+    label?: string | null;
+};
+
+/**
+ * Actions that may be granted to a principal.
+ */
 export type PermissionKind = 'workspace_admin' | 'workspace_read' | 'library_read' | 'library_write' | 'document_read' | 'document_write' | 'connector_admin' | 'credential_admin' | 'binding_admin' | 'query_run' | 'ops_read' | 'audit_read' | 'iam_admin';
 
 export type PreparedSegmentDetail = {
@@ -2186,10 +3202,25 @@ export type PriceCatalogEntryResponse = {
     workspaceId?: string | null;
 };
 
+/**
+ * Core identity-and-access record for a principal.
+ */
 export type PrincipalProfile = {
+    /**
+     * Human-readable principal label.
+     */
     displayLabel: string;
+    /**
+     * Stable principal identifier.
+     */
     id: string;
+    /**
+     * Category of identity represented by the principal.
+     */
     principalKind: string;
+    /**
+     * Current lifecycle status of the principal.
+     */
     status: string;
 };
 
@@ -2202,26 +3233,71 @@ export type PrincipalResponse = {
     status: string;
 };
 
+/**
+ * HTTP authorization encoding expected by a provider endpoint.
+ */
 export type ProviderAuthScheme = 'bearer' | 'raw_authorization';
 
+/**
+ * Whether and how an operator supplies a provider base URL.
+ */
 export type ProviderBaseUrlMode = 'fixed' | 'required' | 'optional';
 
+/**
+ * Security and normalization policy for provider endpoint URLs.
+ */
 export type ProviderBaseUrlPolicy = {
+    /**
+     * Whether an operator may replace the catalog default.
+     */
     allowOverride: boolean;
+    /**
+     * Whether resolved private-network destinations are permitted.
+     */
     allowPrivateNetwork: boolean;
+    /**
+     * Whether non-TLS endpoint URLs must be rejected.
+     */
     requireHttps: boolean;
+    /**
+     * Known endpoint suffixes removed when normalizing a supplied base URL.
+     */
     trimSuffixes?: Array<string>;
 };
 
+/**
+ * Capability matrix declared for a provider kind.
+ */
 export type ProviderCapabilities = {
+    /**
+     * Text-generation availability.
+     */
     chat: ProviderCapabilityState;
+    /**
+     * Vector-embedding availability.
+     */
     embeddings: ProviderCapabilityState;
+    /**
+     * Remote model-discovery availability.
+     */
     modelDiscovery: ProviderCapabilityState;
+    /**
+     * Incremental response-streaming availability.
+     */
     streaming: ProviderCapabilityState;
+    /**
+     * Structured tool-calling availability.
+     */
     tools: ProviderCapabilityState;
+    /**
+     * Image-input availability.
+     */
     vision: ProviderCapabilityState;
 };
 
+/**
+ * Catalog confidence that a provider exposes a capability.
+ */
 export type ProviderCapabilityState = 'supported' | 'unsupported' | 'unknown';
 
 export type ProviderCatalogEntryResponse = {
@@ -2241,39 +3317,108 @@ export type ProviderCatalogEntryResponse = {
     uiHints: unknown;
 };
 
+/**
+ * Input and validation requirements for provider credentials.
+ */
 export type ProviderCredentialPolicy = {
+    /**
+     * Whether saving the provider requires an API key.
+     */
     apiKeyRequired: boolean;
+    /**
+     * Catalog policy governing base-URL input.
+     */
     baseUrlMode: ProviderBaseUrlMode;
+    /**
+     * Whether saving the provider requires an explicit base URL.
+     */
     baseUrlRequired: boolean;
+    /**
+     * Remote check performed before accepting the credential.
+     */
     validationMode: ProviderCredentialValidationMode;
 };
 
+/**
+ * Network operation used to validate provider credentials.
+ */
 export type ProviderCredentialValidationMode = 'chat_round_trip' | 'model_list' | 'none';
 
+/**
+ * Supported strategy and endpoints for enumerating provider models.
+ */
 export type ProviderModelDiscovery = {
+    /**
+     * Credential context required for discovery.
+     */
     mode: ProviderModelDiscoveryMode;
+    /**
+     * Discovery endpoints grouped by capability family.
+     */
     paths: Array<ProviderModelDiscoveryPath>;
 };
 
+/**
+ * Credential context required to discover provider models.
+ */
 export type ProviderModelDiscoveryMode = 'shared' | 'credential' | 'unsupported';
 
+/**
+ * Model-discovery endpoint for one provider capability family.
+ */
 export type ProviderModelDiscoveryPath = {
+    /**
+     * Capability family returned by this endpoint.
+     */
     capabilityKind: string;
+    /**
+     * Provider-relative path used for discovery.
+     */
     path: string;
 };
 
+/**
+ * Protocol details needed to construct requests for a provider kind.
+ */
 export type ProviderRuntimeProfile = {
+    /**
+     * Authorization-header encoding required by the provider.
+     */
     authScheme: ProviderAuthScheme;
+    /**
+     * Provider-relative path for chat or response generation.
+     */
     chatPath: string;
+    /**
+     * Provider-relative embedding path when embeddings are supported.
+     */
     embeddingsPath?: string | null;
+    /**
+     * Stable provider-kind identifier.
+     */
     kind: string;
+    /**
+     * Provider-relative model-list path when discovery is supported.
+     */
     modelsPath?: string | null;
+    /**
+     * Structured-output mechanism available to callers.
+     */
     structuredOutput: ProviderStructuredOutputMode;
+    /**
+     * Request field used to express an output-token limit.
+     */
     tokenLimitParameter: ProviderTokenLimitParameter;
 };
 
+/**
+ * Strongest structured-output contract supported by an endpoint.
+ */
 export type ProviderStructuredOutputMode = 'json_schema' | 'json_object' | 'prompt_only_json_object' | 'unsupported';
 
+/**
+ * Request field used by a provider to limit generated tokens.
+ */
 export type ProviderTokenLimitParameter = 'max_completion_tokens' | 'max_tokens';
 
 export type QueryConversation = {
@@ -2289,6 +3434,18 @@ export type QueryConversation = {
 
 export type QueryConversationState = 'active' | 'archived';
 
+export type QuerySessionListResponse = {
+    items: Array<AssistantSessionListItem>;
+    nextCursor?: string | null;
+    total: number;
+};
+
+export type QueryTurnListResponse = {
+    items: Array<AssistantTurn>;
+    nextCursor?: string | null;
+    total: number;
+};
+
 export type RecognitionEngine = 'native' | 'docling' | 'vision';
 
 export type ReleaseUpdateResponse = {
@@ -2301,6 +3458,16 @@ export type ReleaseUpdateResponse = {
 };
 
 export type ReleaseUpdateStatus = 'up_to_date' | 'update_available' | 'unknown';
+
+/**
+ * Validated user-facing title for an assistant conversation.
+ */
+export type RenameAssistantSessionRequest = {
+    /**
+     * Non-empty conversation title, bounded to 72 Unicode characters.
+     */
+    title: string;
+};
 
 export type ReprocessDocumentRequest = {
     idempotencyKey?: string | null;
@@ -2353,6 +3520,14 @@ export type RetrievalLexicalConfig = {
      */
     textSearchConfig?: string;
 };
+
+/**
+ * Discriminates the two JSON revision shapes on `POST .../revisions`. File
+ * replacement is a third, mutually exclusive shape carried over
+ * `multipart/form-data` instead — see `create_revision`'s content
+ * negotiation, mirroring `create_document`'s pattern.
+ */
+export type RevisionMode = 'append' | 'replace';
 
 export type RuntimeActionKind = 'deterministic_step' | 'model_request' | 'tool_request' | 'tool_result' | 'recovery_attempt' | 'persistence_write';
 
@@ -2508,13 +3683,31 @@ export type RuntimeSurfaceKind = 'ui' | 'rest' | 'mcp' | 'worker' | 'internal';
 
 export type RuntimeTaskKind = 'query_compile' | 'query_plan' | 'query_rerank' | 'query_answer' | 'query_verify' | 'graph_extract' | 'structured_prepare' | 'technical_fact_extract';
 
+/**
+ * Authentication state returned while resolving a browser session.
+ */
 export type SessionMode = 'guest' | 'bootstrap_required' | 'authenticated';
 
+/**
+ * Complete authentication and shell state needed to start the UI.
+ */
 export type SessionResolveResponse = {
+    /**
+     * Current initial-setup requirement and options.
+     */
     bootstrapStatus: BootstrapStatus;
+    /**
+     * Locale selected for the UI.
+     */
     locale: UiLocale;
     me?: null | IamMe;
+    /**
+     * Optional user-facing explanation of the resolved state.
+     */
     message?: string | null;
+    /**
+     * Resolved authentication state.
+     */
     mode: SessionMode;
     session?: null | AuthenticatedSession;
     shellBootstrap?: null | ShellBootstrap;
@@ -2526,10 +3719,25 @@ export type SessionResponse = {
     user: SessionUserResponse;
 };
 
+/**
+ * User identity embedded in an authenticated session.
+ */
 export type SessionUser = {
+    /**
+     * Human-readable account name.
+     */
     displayName: string;
+    /**
+     * Account email address.
+     */
     email: string;
+    /**
+     * Account login identifier.
+     */
     login: string;
+    /**
+     * Stable identity-and-access principal identifier.
+     */
     principalId: string;
 };
 
@@ -2557,32 +3765,98 @@ export type SetUserRoleRequest = {
     role: SystemRole;
 };
 
+/**
+ * Initial authenticated state needed to render the application shell.
+ */
 export type ShellBootstrap = {
+    /**
+     * Library selected for the initial view.
+     */
     activeLibraryId?: string | null;
+    /**
+     * Workspace selected for the initial view.
+     */
     activeWorkspaceId?: string | null;
+    /**
+     * Feature switches resolved from role, scope, and deployment state.
+     */
     capabilities: Array<ShellCapability>;
+    /**
+     * Token grants effective for the current session and scope.
+     */
     effectiveGrants: Array<TokenGrant>;
+    /**
+     * Libraries visible within the active workspace.
+     */
     libraries: Array<LibrarySummary>;
+    /**
+     * Locale resolved for this session.
+     */
     locale: UiLocale;
+    /**
+     * Authenticated viewer and effective coarse role.
+     */
     viewer: ShellViewer;
+    /**
+     * Non-fatal conditions the shell should surface to the viewer.
+     */
     warnings: Array<OperatorWarning>;
+    /**
+     * Membership records used to explain workspace access.
+     */
     workspaceMemberships: Array<WorkspaceMembership>;
+    /**
+     * Workspaces visible to the viewer.
+     */
     workspaces: Array<WorkspaceSummary>;
 };
 
+/**
+ * Feature capability resolved for the current viewer and scope.
+ */
 export type ShellCapability = {
+    /**
+     * Whether the viewer may use the capability in the active context.
+     */
     enabled: boolean;
+    /**
+     * Stable capability identifier consumed by the client.
+     */
     key: string;
 };
 
+/**
+ * Coarse role used to adapt the application shell.
+ */
 export type ShellRole = 'admin' | 'operator' | 'viewer';
 
+/**
+ * Identity and effective shell role of the authenticated viewer.
+ */
 export type ShellViewer = {
+    /**
+     * Human-readable summary of effective access.
+     */
     accessLabel: string;
+    /**
+     * Preferred name for UI presentation.
+     */
     displayName: string;
+    /**
+     * Whether deployment-wide administration is available.
+     */
     isAdmin: boolean;
+    /**
+     * Login name used to identify the viewer.
+     */
     login: string;
+    /**
+     * Stable principal identifier.
+     */
     principalId: string;
+    /**
+     * Coarse role used for shell presentation and navigation.
+     */
     role: ShellRole;
 };
 
@@ -2626,6 +3900,11 @@ export type StructuredTableCoordinates = {
     columnSpan: number;
     rowIndex: number;
     rowSpan: number;
+};
+
+export type SubscriptionListPageResponse = {
+    items: Array<SubscriptionResponse>;
+    nextCursor?: string | null;
 };
 
 export type SubscriptionResponse = {
@@ -2672,13 +3951,37 @@ export type TechnicalFactsPageResponse = {
     total: number;
 };
 
+/**
+ * Permission assigned to a principal for a scoped resource.
+ */
 export type TokenGrant = {
+    /**
+     * Time at which the grant expires, if temporary.
+     */
     expiresAt?: string | null;
+    /**
+     * Time at which the grant became effective.
+     */
     grantedAt: string;
+    /**
+     * Stable identifier of the grant.
+     */
     id: string;
+    /**
+     * Action permitted by the grant.
+     */
     permissionKind: PermissionKind;
+    /**
+     * Principal receiving the permission.
+     */
     principalId: string;
+    /**
+     * Identifier of the scoped resource.
+     */
     resourceId: string;
+    /**
+     * Category of the scoped resource.
+     */
     resourceKind: GrantResourceKind;
 };
 
@@ -2773,6 +4076,9 @@ export type TypedTechnicalFact = {
     workspaceId: string;
 };
 
+/**
+ * Locales supported by the user interface.
+ */
 export type UiLocale = 'en' | 'ru';
 
 export type UpdateAiAccountRequest = {
@@ -2798,6 +4104,18 @@ export type UpdateCatalogLibraryRequest = {
     displayName: string;
     extractionPrompt?: string | null;
     includeDocumentHintInMcpAnswers?: boolean | null;
+    lifecycleState?: string | null;
+    slug?: string | null;
+};
+
+/**
+ * Partial update for a workspace. Every field is optional (true PATCH
+ * semantics, unlike [`UpdateCatalogLibraryRequest`] below which still
+ * requires `displayName`) — an absent field leaves the current value
+ * unchanged.
+ */
+export type UpdateCatalogWorkspaceRequest = {
+    displayName?: string | null;
     lifecycleState?: string | null;
     slug?: string | null;
 };
@@ -2872,11 +4190,29 @@ export type UserLibraryAccessResponse = {
     workspaceId: string;
 };
 
+/**
+ * User-account attributes associated with a principal.
+ */
 export type UserProfile = {
+    /**
+     * Human-readable user name when one is recorded.
+     */
     displayName?: string | null;
+    /**
+     * Email address when one is recorded.
+     */
     email?: string | null;
+    /**
+     * Login identifier when the account supports direct sign-in.
+     */
     login?: string | null;
+    /**
+     * Principal represented by this user account.
+     */
     principalId: string;
+    /**
+     * System-wide role assigned to the user.
+     */
     role: SystemRole;
 };
 
@@ -2936,9 +4272,21 @@ export type WebDiscoveredPage = {
 
 export type WebIngestMode = 'single_page' | 'recursive_crawl';
 
+/**
+ * One typed URL-matching rule used by web-ingestion filters.
+ */
 export type WebIngestPattern = {
+    /**
+     * Matching strategy understood by the web-ingestion policy.
+     */
     kind: string;
+    /**
+     * Origin of the rule when it was inferred or imported.
+     */
     source?: string | null;
+    /**
+     * Pattern payload interpreted according to `kind`.
+     */
     value: string;
 };
 
@@ -2982,25 +4330,76 @@ export type WebIngestRunReceipt = {
     runState: string;
 };
 
+/**
+ * Lifecycle of a bounded web-ingestion run.
+ */
 export type WebIngestRunState = 'accepted' | 'discovering' | 'processing' | 'completed' | 'completed_partial' | 'failed' | 'canceled';
 
+/**
+ * Configuration, progress, and counters for an existing crawl run.
+ */
 export type WebIngestRunSummary = {
+    /**
+     * Origin or path boundary applied during discovery.
+     */
     boundaryPolicy: string;
+    /**
+     * Current candidate-state counters.
+     */
     counts: WebRunCounts;
+    /**
+     * URL rules applied before fetching a discovered candidate.
+     */
     crawlFilter: WebIngestUrlFilter;
+    /**
+     * Latest observed progress or terminal-state transition.
+     */
     lastActivityAt?: string | null;
+    /**
+     * Destination library for materialized pages.
+     */
     libraryId: string;
+    /**
+     * URL rules applied before persisting a fetched page as a document.
+     */
     materializationFilter: WebIngestUrlFilter;
+    /**
+     * Maximum link distance from the seed page.
+     */
     maxDepth: number;
+    /**
+     * Maximum unique page candidates admitted by the run.
+     */
     maxPages: number;
+    /**
+     * Traversal mode selected when the run was created.
+     */
     mode: string;
+    /**
+     * Stable run identifier.
+     */
     runId: string;
+    /**
+     * Current run lifecycle.
+     */
     runState: WebIngestRunState;
+    /**
+     * Normalized URL from which traversal began.
+     */
     seedUrl: string;
 };
 
+/**
+ * Ordered admission and rejection rules for candidate URLs.
+ */
 export type WebIngestUrlFilter = {
+    /**
+     * Rules that explicitly admit matching URLs.
+     */
     allowPatterns: Array<WebIngestPattern>;
+    /**
+     * Rules that explicitly reject matching URLs.
+     */
     blockPatterns: Array<WebIngestPattern>;
 };
 
@@ -3011,16 +4410,49 @@ export type WebPageProvenance = {
     sourceUri?: string | null;
 };
 
+/**
+ * Candidate counters partitioning the work observed by a web-ingestion run.
+ */
 export type WebRunCounts = {
+    /**
+     * Candidates rejected by safety or traversal-boundary policy.
+     */
     blocked: number;
+    /**
+     * Candidates canceled before a normal terminal outcome.
+     */
     canceled: number;
+    /**
+     * Unique page candidates found during traversal.
+     */
     discovered: number;
+    /**
+     * Candidates converged with an existing canonical page.
+     */
     duplicates: number;
+    /**
+     * Candidates admitted by boundary and crawl filters.
+     */
     eligible: number;
+    /**
+     * Candidates rejected by configured materialization filters.
+     */
     excluded: number;
+    /**
+     * Candidates ending in processing failure.
+     */
     failed: number;
+    /**
+     * Candidates whose processing reached a terminal outcome.
+     */
     processed: number;
+    /**
+     * Candidates with active processing attempts.
+     */
     processing: number;
+    /**
+     * Candidates waiting for processing.
+     */
     queued: number;
 };
 
@@ -3043,22 +4475,28 @@ export type WorkspaceCostSummary = {
 };
 
 /**
- * One library's restore counts inside a [`WorkspaceSnapshotImportReportResponse`].
+ * Principal membership and lifecycle within a workspace.
  */
-export type WorkspaceLibraryImportReportResponse = {
-    blobsRestored: number;
-    libraryId: string;
-    postgresRowsByTable: {
-        [key: string]: number;
-    };
-    slug: string;
-};
-
 export type WorkspaceMembership = {
+    /**
+     * Time at which the membership ended, if inactive.
+     */
     endedAt?: string | null;
+    /**
+     * Time at which the membership began.
+     */
     joinedAt: string;
+    /**
+     * Current membership lifecycle state.
+     */
     membershipState: string;
+    /**
+     * Principal holding the membership.
+     */
     principalId: string;
+    /**
+     * Workspace to which the membership applies.
+     */
     workspaceId: string;
 };
 
@@ -3070,20 +4508,32 @@ export type WorkspaceMembershipResponse = {
     workspaceId: string;
 };
 
-/**
- * Report returned by `POST /v1/catalog/workspaces/{workspaceId}/snapshot`.
- */
-export type WorkspaceSnapshotImportReportResponse = {
-    libraries: Array<WorkspaceLibraryImportReportResponse>;
-    librariesRestored: number;
-    overwriteMode: OverwriteMode;
+export type WorkspaceSnapshotImportAcceptedResponse = {
+    archiveBytes: number;
+    onConflict: OverwriteMode;
+    operationId: string;
     workspaceId: string;
 };
 
+/**
+ * Minimal workspace metadata needed by the scope selector.
+ */
 export type WorkspaceSummary = {
+    /**
+     * Stable workspace identifier.
+     */
     id: string;
+    /**
+     * Current workspace lifecycle state as exposed by the API.
+     */
     lifecycleState: string;
+    /**
+     * Display name shown in the scope selector.
+     */
     name: string;
+    /**
+     * URL-safe workspace identifier.
+     */
     slug: string;
 };
 
@@ -3163,7 +4613,7 @@ export type CreateAiAccountResponses = {
     /**
      * Newly created AI account
      */
-    200: AiAccountResponse;
+    201: AiAccountResponse;
 };
 
 export type CreateAiAccountResponse = CreateAiAccountResponses[keyof CreateAiAccountResponses];
@@ -3201,10 +4651,48 @@ export type DeleteAiAccountErrors = {
 
 export type DeleteAiAccountResponses = {
     /**
-     * Empty acknowledgement payload
+     * Account deleted
      */
-    200: unknown;
+    204: void;
 };
+
+export type DeleteAiAccountResponse = DeleteAiAccountResponses[keyof DeleteAiAccountResponses];
+
+export type GetAiAccountData = {
+    body?: never;
+    path: {
+        /**
+         * AI account identifier
+         */
+        accountId: string;
+    };
+    query?: never;
+    url: '/v1/ai/accounts/{accountId}';
+};
+
+export type GetAiAccountErrors = {
+    /**
+     * Caller is not authenticated
+     */
+    401: unknown;
+    /**
+     * Caller cannot view accounts in the account's scope
+     */
+    403: unknown;
+    /**
+     * Account not found
+     */
+    404: unknown;
+};
+
+export type GetAiAccountResponses = {
+    /**
+     * AI account (secret redacted, same as the list view)
+     */
+    200: AiAccountResponse;
+};
+
+export type GetAiAccountResponse = GetAiAccountResponses[keyof GetAiAccountResponses];
 
 export type UpdateAiAccountData = {
     body: UpdateAiAccountRequest;
@@ -3299,7 +4787,7 @@ export type CreateAiLibraryBindingResponses = {
     /**
      * Newly created binding
      */
-    200: AiBindingResponse;
+    201: AiBindingResponse;
 };
 
 export type CreateAiLibraryBindingResponse = CreateAiLibraryBindingResponses[keyof CreateAiLibraryBindingResponses];
@@ -3333,10 +4821,48 @@ export type DeleteAiLibraryBindingErrors = {
 
 export type DeleteAiLibraryBindingResponses = {
     /**
-     * Empty acknowledgement payload
+     * Binding deleted
      */
-    200: unknown;
+    204: void;
 };
+
+export type DeleteAiLibraryBindingResponse = DeleteAiLibraryBindingResponses[keyof DeleteAiLibraryBindingResponses];
+
+export type GetAiLibraryBindingData = {
+    body?: never;
+    path: {
+        /**
+         * Binding identifier
+         */
+        bindingId: string;
+    };
+    query?: never;
+    url: '/v1/ai/bindings/{bindingId}';
+};
+
+export type GetAiLibraryBindingErrors = {
+    /**
+     * Caller is not authenticated
+     */
+    401: unknown;
+    /**
+     * Caller cannot view bindings in the binding's scope
+     */
+    403: unknown;
+    /**
+     * Binding not found
+     */
+    404: unknown;
+};
+
+export type GetAiLibraryBindingResponses = {
+    /**
+     * Binding
+     */
+    200: AiBindingResponse;
+};
+
+export type GetAiLibraryBindingResponse = GetAiLibraryBindingResponses[keyof GetAiLibraryBindingResponses];
 
 export type UpdateAiLibraryBindingData = {
     body: UpdateAiBindingRequest;
@@ -3374,7 +4900,7 @@ export type UpdateAiLibraryBindingResponses = {
 
 export type UpdateAiLibraryBindingResponse = UpdateAiLibraryBindingResponses[keyof UpdateAiLibraryBindingResponses];
 
-export type ValidateAiLibraryBindingData = {
+export type ListAiBindingValidationsData = {
     body?: never;
     path: {
         /**
@@ -3383,10 +4909,46 @@ export type ValidateAiLibraryBindingData = {
         bindingId: string;
     };
     query?: never;
-    url: '/v1/ai/bindings/{bindingId}/validate';
+    url: '/v1/ai/bindings/{bindingId}/validations';
 };
 
-export type ValidateAiLibraryBindingErrors = {
+export type ListAiBindingValidationsErrors = {
+    /**
+     * Caller is not authenticated
+     */
+    401: unknown;
+    /**
+     * Caller cannot view validations in the binding's scope
+     */
+    403: unknown;
+    /**
+     * Binding not found
+     */
+    404: unknown;
+};
+
+export type ListAiBindingValidationsResponses = {
+    /**
+     * Validation attempt history for the binding, newest first
+     */
+    200: Array<BindingValidationResponse>;
+};
+
+export type ListAiBindingValidationsResponse = ListAiBindingValidationsResponses[keyof ListAiBindingValidationsResponses];
+
+export type CreateAiBindingValidationData = {
+    body?: never;
+    path: {
+        /**
+         * Binding identifier
+         */
+        bindingId: string;
+    };
+    query?: never;
+    url: '/v1/ai/bindings/{bindingId}/validations';
+};
+
+export type CreateAiBindingValidationErrors = {
     /**
      * Caller is not authenticated
      */
@@ -3401,14 +4963,54 @@ export type ValidateAiLibraryBindingErrors = {
     404: unknown;
 };
 
-export type ValidateAiLibraryBindingResponses = {
+export type CreateAiBindingValidationResponses = {
     /**
-     * Binding validation result
+     * Binding validation attempt created
+     */
+    201: BindingValidationResponse;
+};
+
+export type CreateAiBindingValidationResponse = CreateAiBindingValidationResponses[keyof CreateAiBindingValidationResponses];
+
+export type GetAiBindingValidationData = {
+    body?: never;
+    path: {
+        /**
+         * Binding identifier
+         */
+        bindingId: string;
+        /**
+         * Binding validation attempt identifier
+         */
+        validationId: string;
+    };
+    query?: never;
+    url: '/v1/ai/bindings/{bindingId}/validations/{validationId}';
+};
+
+export type GetAiBindingValidationErrors = {
+    /**
+     * Caller is not authenticated
+     */
+    401: unknown;
+    /**
+     * Caller cannot view validations in the binding's scope
+     */
+    403: unknown;
+    /**
+     * Binding or validation not found
+     */
+    404: unknown;
+};
+
+export type GetAiBindingValidationResponses = {
+    /**
+     * Binding validation outcome
      */
     200: BindingValidationResponse;
 };
 
-export type ValidateAiLibraryBindingResponse = ValidateAiLibraryBindingResponses[keyof ValidateAiLibraryBindingResponses];
+export type GetAiBindingValidationResponse = GetAiBindingValidationResponses[keyof GetAiBindingValidationResponses];
 
 export type ListAiModelsData = {
     body?: never;
@@ -3464,7 +5066,7 @@ export type CreateAiModelResponses = {
     /**
      * Newly created AI model catalog entry
      */
-    200: ModelCatalogEntryResponse;
+    201: ModelCatalogEntryResponse;
 };
 
 export type CreateAiModelResponse = CreateAiModelResponses[keyof CreateAiModelResponses];
@@ -3494,14 +5096,52 @@ export type DeleteAiModelErrors = {
      * Model not found
      */
     404: unknown;
+    /**
+     * Model is still referenced by a price override or binding
+     */
+    409: unknown;
 };
 
 export type DeleteAiModelResponses = {
     /**
-     * Model catalog entry was disabled
+     * Model catalog entry deleted
      */
-    200: unknown;
+    204: void;
 };
+
+export type DeleteAiModelResponse = DeleteAiModelResponses[keyof DeleteAiModelResponses];
+
+export type GetAiModelData = {
+    body?: never;
+    path: {
+        /**
+         * AI model catalog identifier
+         */
+        modelId: string;
+    };
+    query?: never;
+    url: '/v1/ai/models/{modelId}';
+};
+
+export type GetAiModelErrors = {
+    /**
+     * Caller is not authenticated
+     */
+    401: unknown;
+    /**
+     * Model not found
+     */
+    404: unknown;
+};
+
+export type GetAiModelResponses = {
+    /**
+     * AI model catalog entry with its resolved availability
+     */
+    200: ModelCatalogEntryResponse;
+};
+
+export type GetAiModelResponse = GetAiModelResponses[keyof GetAiModelResponses];
 
 export type UpdateAiModelData = {
     body: UpdateModelCatalogRequest;
@@ -3539,37 +5179,11 @@ export type UpdateAiModelResponses = {
 
 export type UpdateAiModelResponse = UpdateAiModelResponses[keyof UpdateAiModelResponses];
 
-export type ListAiPricesData = {
-    body?: never;
-    path?: never;
-    query?: {
-        modelCatalogId?: string;
-        workspaceId?: string;
-    };
-    url: '/v1/ai/prices';
-};
-
-export type ListAiPricesErrors = {
-    /**
-     * Caller is not authenticated
-     */
-    401: unknown;
-};
-
-export type ListAiPricesResponses = {
-    /**
-     * Price catalog entries for the requested model/workspace
-     */
-    200: Array<PriceCatalogEntryResponse>;
-};
-
-export type ListAiPricesResponse = ListAiPricesResponses[keyof ListAiPricesResponses];
-
 export type CreateAiPriceOverrideData = {
     body: CreateWorkspacePriceOverrideRequest;
     path?: never;
     query?: never;
-    url: '/v1/ai/prices';
+    url: '/v1/ai/price-overrides';
 };
 
 export type CreateAiPriceOverrideErrors = {
@@ -3587,7 +5201,7 @@ export type CreateAiPriceOverrideResponses = {
     /**
      * Newly created workspace price override
      */
-    200: PriceCatalogEntryResponse;
+    201: PriceCatalogEntryResponse;
 };
 
 export type CreateAiPriceOverrideResponse = CreateAiPriceOverrideResponses[keyof CreateAiPriceOverrideResponses];
@@ -3598,10 +5212,10 @@ export type DeleteAiPriceOverrideData = {
         /**
          * Price catalog entry identifier
          */
-        priceId: string;
+        overrideId: string;
     };
     query?: never;
-    url: '/v1/ai/prices/{priceId}';
+    url: '/v1/ai/price-overrides/{overrideId}';
 };
 
 export type DeleteAiPriceOverrideErrors = {
@@ -3629,10 +5243,44 @@ export type DeleteAiPriceOverrideErrors = {
 
 export type DeleteAiPriceOverrideResponses = {
     /**
-     * Empty acknowledgement payload
+     * Price override deleted
      */
-    200: unknown;
+    204: void;
 };
+
+export type DeleteAiPriceOverrideResponse = DeleteAiPriceOverrideResponses[keyof DeleteAiPriceOverrideResponses];
+
+export type GetAiPriceOverrideData = {
+    body?: never;
+    path: {
+        /**
+         * Price catalog entry identifier
+         */
+        overrideId: string;
+    };
+    query?: never;
+    url: '/v1/ai/price-overrides/{overrideId}';
+};
+
+export type GetAiPriceOverrideErrors = {
+    /**
+     * Caller is not authenticated
+     */
+    401: unknown;
+    /**
+     * Price override not found
+     */
+    404: unknown;
+};
+
+export type GetAiPriceOverrideResponses = {
+    /**
+     * Price catalog entry
+     */
+    200: PriceCatalogEntryResponse;
+};
+
+export type GetAiPriceOverrideResponse = GetAiPriceOverrideResponses[keyof GetAiPriceOverrideResponses];
 
 export type UpdateAiPriceOverrideData = {
     body: UpdateWorkspacePriceOverrideRequest;
@@ -3640,10 +5288,10 @@ export type UpdateAiPriceOverrideData = {
         /**
          * Price catalog entry identifier
          */
-        priceId: string;
+        overrideId: string;
     };
     query?: never;
-    url: '/v1/ai/prices/{priceId}';
+    url: '/v1/ai/price-overrides/{overrideId}';
 };
 
 export type UpdateAiPriceOverrideErrors = {
@@ -3669,6 +5317,32 @@ export type UpdateAiPriceOverrideResponses = {
 };
 
 export type UpdateAiPriceOverrideResponse = UpdateAiPriceOverrideResponses[keyof UpdateAiPriceOverrideResponses];
+
+export type ListAiPricesData = {
+    body?: never;
+    path?: never;
+    query?: {
+        modelCatalogId?: string;
+        workspaceId?: string;
+    };
+    url: '/v1/ai/prices';
+};
+
+export type ListAiPricesErrors = {
+    /**
+     * Caller is not authenticated
+     */
+    401: unknown;
+};
+
+export type ListAiPricesResponses = {
+    /**
+     * Price catalog entries for the requested model/workspace
+     */
+    200: Array<PriceCatalogEntryResponse>;
+};
+
+export type ListAiPricesResponse = ListAiPricesResponses[keyof ListAiPricesResponses];
 
 export type ListAiProvidersData = {
     body?: never;
@@ -3715,7 +5389,7 @@ export type CreateAiProviderResponses = {
     /**
      * Newly created AI provider catalog entry
      */
-    200: ProviderCatalogEntryResponse;
+    201: ProviderCatalogEntryResponse;
 };
 
 export type CreateAiProviderResponse = CreateAiProviderResponses[keyof CreateAiProviderResponses];
@@ -3745,14 +5419,52 @@ export type DeleteAiProviderErrors = {
      * Provider not found
      */
     404: unknown;
+    /**
+     * Provider is still referenced by a model
+     */
+    409: unknown;
 };
 
 export type DeleteAiProviderResponses = {
     /**
-     * Provider catalog entry was disabled
+     * Provider catalog entry deleted
      */
-    200: unknown;
+    204: void;
 };
+
+export type DeleteAiProviderResponse = DeleteAiProviderResponses[keyof DeleteAiProviderResponses];
+
+export type GetAiProviderData = {
+    body?: never;
+    path: {
+        /**
+         * AI provider catalog identifier
+         */
+        providerId: string;
+    };
+    query?: never;
+    url: '/v1/ai/providers/{providerId}';
+};
+
+export type GetAiProviderErrors = {
+    /**
+     * Caller is not authenticated
+     */
+    401: unknown;
+    /**
+     * Provider not found
+     */
+    404: unknown;
+};
+
+export type GetAiProviderResponses = {
+    /**
+     * AI provider catalog entry
+     */
+    200: ProviderCatalogEntryResponse;
+};
+
+export type GetAiProviderResponse = GetAiProviderResponses[keyof GetAiProviderResponses];
 
 export type UpdateAiProviderData = {
     body: UpdateProviderCatalogRequest;
@@ -3808,7 +5520,11 @@ export type ListAuditEventsData = {
         resultKind?: string;
         search?: string;
         limit?: number;
-        offset?: number;
+        /**
+         * Opaque keyset continuation token from a previous page's
+         * `nextCursor`. Absent starts from the newest event.
+         */
+        cursor?: string;
         internal?: boolean;
         includeAssistant?: boolean;
     };
@@ -3839,9 +5555,9 @@ export type GetBillingExecutionCostData = {
     body?: never;
     path: {
         /**
-         * Execution kind (query | runtime)
+         * Kind of execution the cost is attributed to
          */
-        executionKind: string;
+        executionKind: BillingExecutionOwnerKind;
         /**
          * Execution identifier
          */
@@ -3875,19 +5591,27 @@ export type ListBillingChargesData = {
     body?: never;
     path: {
         /**
-         * Execution kind (query | runtime)
+         * Kind of execution the charges are attributed to
          */
-        executionKind: string;
+        executionKind: BillingExecutionOwnerKind;
         /**
          * Execution identifier
          */
         executionId: string;
     };
-    query?: never;
+    query?: {
+        cursor?: string;
+        limit?: number;
+        includeTotal?: boolean;
+    };
     url: '/v1/billing/executions/{executionKind}/{executionId}/charges';
 };
 
 export type ListBillingChargesErrors = {
+    /**
+     * Invalid cursor
+     */
+    400: unknown;
     /**
      * Caller is not authenticated
      */
@@ -3900,9 +5624,9 @@ export type ListBillingChargesErrors = {
 
 export type ListBillingChargesResponses = {
     /**
-     * Aggregated billing charges for the execution
+     * Page of aggregated billing charges for the execution
      */
-    200: Array<BillingCharge>;
+    200: BillingChargePage;
 };
 
 export type ListBillingChargesResponse = ListBillingChargesResponses[keyof ListBillingChargesResponses];
@@ -3911,19 +5635,27 @@ export type ListBillingProviderCallsData = {
     body?: never;
     path: {
         /**
-         * Execution kind (query | runtime)
+         * Kind of execution the provider calls are attributed to
          */
-        executionKind: string;
+        executionKind: BillingExecutionOwnerKind;
         /**
          * Execution identifier
          */
         executionId: string;
     };
-    query?: never;
+    query?: {
+        cursor?: string;
+        limit?: number;
+        includeTotal?: boolean;
+    };
     url: '/v1/billing/executions/{executionKind}/{executionId}/provider-calls';
 };
 
 export type ListBillingProviderCallsErrors = {
+    /**
+     * Invalid cursor
+     */
+    400: unknown;
     /**
      * Caller is not authenticated
      */
@@ -3936,20 +5668,23 @@ export type ListBillingProviderCallsErrors = {
 
 export type ListBillingProviderCallsResponses = {
     /**
-     * Provider calls billed against the execution
+     * Page of provider calls billed against the execution
      */
-    200: Array<BillingProviderCall>;
+    200: BillingProviderCallPage;
 };
 
 export type ListBillingProviderCallsResponse = ListBillingProviderCallsResponses[keyof ListBillingProviderCallsResponses];
 
 export type GetLibraryCostSummaryData = {
     body?: never;
-    path?: never;
-    query: {
+    path: {
+        /**
+         * Library the cost summary is scoped to
+         */
         libraryId: string;
     };
-    url: '/v1/billing/library-cost-summary';
+    query?: never;
+    url: '/v1/billing/libraries/{libraryId}/cost-summary';
 };
 
 export type GetLibraryCostSummaryErrors = {
@@ -3974,14 +5709,25 @@ export type GetLibraryCostSummaryResponse = GetLibraryCostSummaryResponses[keyof
 
 export type ListBillingLibraryDocumentCostsData = {
     body?: never;
-    path?: never;
-    query: {
+    path: {
+        /**
+         * Library that owns the documents
+         */
         libraryId: string;
     };
-    url: '/v1/billing/library-document-costs';
+    query?: {
+        cursor?: string;
+        limit?: number;
+        includeTotal?: boolean;
+    };
+    url: '/v1/billing/libraries/{libraryId}/document-costs';
 };
 
 export type ListBillingLibraryDocumentCostsErrors = {
+    /**
+     * Invalid cursor
+     */
+    400: unknown;
     /**
      * Caller is not authenticated
      */
@@ -3994,20 +5740,23 @@ export type ListBillingLibraryDocumentCostsErrors = {
 
 export type ListBillingLibraryDocumentCostsResponses = {
     /**
-     * Per-document cost summaries for the library
+     * Page of per-document cost summaries for the library
      */
-    200: Array<DocumentCostSummary>;
+    200: DocumentCostPage;
 };
 
 export type ListBillingLibraryDocumentCostsResponse = ListBillingLibraryDocumentCostsResponses[keyof ListBillingLibraryDocumentCostsResponses];
 
 export type GetWorkspaceCostSummaryData = {
     body?: never;
-    path?: never;
-    query: {
+    path: {
+        /**
+         * Workspace the cost summary is scoped to
+         */
         workspaceId: string;
     };
-    url: '/v1/billing/workspace-cost-summary';
+    query?: never;
+    url: '/v1/billing/workspaces/{workspaceId}/cost-summary';
 };
 
 export type GetWorkspaceCostSummaryErrors = {
@@ -4368,6 +6117,42 @@ export type GetCatalogWorkspaceResponses = {
 
 export type GetCatalogWorkspaceResponse = GetCatalogWorkspaceResponses[keyof GetCatalogWorkspaceResponses];
 
+export type UpdateCatalogWorkspaceData = {
+    body: UpdateCatalogWorkspaceRequest;
+    path: {
+        /**
+         * Workspace identifier
+         */
+        workspaceId: string;
+    };
+    query?: never;
+    url: '/v1/catalog/workspaces/{workspaceId}';
+};
+
+export type UpdateCatalogWorkspaceErrors = {
+    /**
+     * Invalid lifecycle state
+     */
+    400: unknown;
+    /**
+     * Caller is not a system administrator
+     */
+    401: unknown;
+    /**
+     * Workspace not found
+     */
+    404: unknown;
+};
+
+export type UpdateCatalogWorkspaceResponses = {
+    /**
+     * Workspace after applying the update
+     */
+    200: CatalogWorkspaceResponse;
+};
+
+export type UpdateCatalogWorkspaceResponse = UpdateCatalogWorkspaceResponses[keyof UpdateCatalogWorkspaceResponses];
+
 export type ListCatalogLibrariesData = {
     body?: never;
     path: {
@@ -4472,7 +6257,7 @@ export type DeleteCatalogLibraryResponses = {
 
 export type DeleteCatalogLibraryResponse = DeleteCatalogLibraryResponses[keyof DeleteCatalogLibraryResponses];
 
-export type ExportWorkspaceSnapshotData = {
+export type ExportCatalogWorkspaceSnapshotData = {
     body?: never;
     path: {
         /**
@@ -4489,7 +6274,7 @@ export type ExportWorkspaceSnapshotData = {
     url: '/v1/catalog/workspaces/{workspaceId}/snapshot';
 };
 
-export type ExportWorkspaceSnapshotErrors = {
+export type ExportCatalogWorkspaceSnapshotErrors = {
     /**
      * Caller is not authenticated
      */
@@ -4504,16 +6289,16 @@ export type ExportWorkspaceSnapshotErrors = {
     404: unknown;
 };
 
-export type ExportWorkspaceSnapshotResponses = {
+export type ExportCatalogWorkspaceSnapshotResponses = {
     /**
      * Streaming plain tar bundling every library archive
      */
     200: Blob | File;
 };
 
-export type ExportWorkspaceSnapshotResponse = ExportWorkspaceSnapshotResponses[keyof ExportWorkspaceSnapshotResponses];
+export type ExportCatalogWorkspaceSnapshotResponse = ExportCatalogWorkspaceSnapshotResponses[keyof ExportCatalogWorkspaceSnapshotResponses];
 
-export type ImportWorkspaceSnapshotData = {
+export type ImportCatalogWorkspaceSnapshotData = {
     /**
      * Plain tar archive previously emitted by GET /v1/catalog/workspaces/{workspaceId}/snapshot
      */
@@ -4526,14 +6311,14 @@ export type ImportWorkspaceSnapshotData = {
     };
     query?: {
         /**
-         * Overwrite mode recorded in the report: 'reject' (default) or 'replace'. Each newly minted library is always restored in replace mode.
+         * 'reject' (default) or 'replace'
          */
-        overwrite?: string;
+        onConflict?: OverwriteMode;
     };
     url: '/v1/catalog/workspaces/{workspaceId}/snapshot';
 };
 
-export type ImportWorkspaceSnapshotErrors = {
+export type ImportCatalogWorkspaceSnapshotErrors = {
     /**
      * Caller is not authenticated
      */
@@ -4548,14 +6333,14 @@ export type ImportWorkspaceSnapshotErrors = {
     404: unknown;
 };
 
-export type ImportWorkspaceSnapshotResponses = {
+export type ImportCatalogWorkspaceSnapshotResponses = {
     /**
-     * Workspace snapshot import report (per-library row counts)
+     * Workspace snapshot import accepted; poll /v1/ops/operations/{operationId}
      */
-    200: WorkspaceSnapshotImportReportResponse;
+    202: WorkspaceSnapshotImportAcceptedResponse;
 };
 
-export type ImportWorkspaceSnapshotResponse = ImportWorkspaceSnapshotResponses[keyof ImportWorkspaceSnapshotResponses];
+export type ImportCatalogWorkspaceSnapshotResponse = ImportCatalogWorkspaceSnapshotResponses[keyof ImportCatalogWorkspaceSnapshotResponses];
 
 export type ListChunksData = {
     body?: never;
@@ -4585,87 +6370,6 @@ export type ListChunksResponses = {
 };
 
 export type ListChunksResponse = ListChunksResponses[keyof ListChunksResponses];
-
-export type ListContentDocumentsData = {
-    body?: never;
-    path?: never;
-    query?: {
-        libraryId?: string;
-        includeDeleted?: boolean;
-        cursor?: string;
-        limit?: number;
-        search?: string;
-        sortBy?: DocumentListSortKey;
-        sortOrder?: DocumentListSortOrder;
-        includeTotal?: boolean;
-        /**
-         * Comma-separated list of status buckets to keep. Accepted values:
-         * `canceled`, `failed`, `processing`, `queued`, `ready`. Empty or
-         * absent = no filter. Matches the canonical `derived_status` column
-         * in the list CTE and the 5 status pills on the documents page.
-         */
-        status?: string;
-        /**
-         * Comma-separated list of document ids to keep. Empty or absent = no
-         * filter. Lets a caller resolve specific documents (e.g. a deep link
-         * carrying `documentId`) through the same canonical list derivation
-         * that powers the table, instead of a divergent per-id detail mapper.
-         */
-        ids?: string;
-    };
-    url: '/v1/content/documents';
-};
-
-export type ListContentDocumentsErrors = {
-    /**
-     * Caller is not authenticated
-     */
-    401: unknown;
-    /**
-     * Caller is not authorized for the library
-     */
-    403: unknown;
-};
-
-export type ListContentDocumentsResponses = {
-    /**
-     * Document list page
-     */
-    200: DocumentListPageResponse;
-};
-
-export type ListContentDocumentsResponse = ListContentDocumentsResponses[keyof ListContentDocumentsResponses];
-
-export type CreateContentDocumentData = {
-    body: CreateDocumentRequest;
-    path?: never;
-    query?: never;
-    url: '/v1/content/documents';
-};
-
-export type CreateContentDocumentErrors = {
-    /**
-     * Invalid request payload
-     */
-    400: unknown;
-    /**
-     * Caller is not authenticated
-     */
-    401: unknown;
-    /**
-     * Caller is not authorized for the library
-     */
-    403: unknown;
-};
-
-export type CreateContentDocumentResponses = {
-    /**
-     * Newly created document
-     */
-    200: CreateDocumentResponse;
-};
-
-export type CreateContentDocumentResponse = CreateContentDocumentResponses[keyof CreateContentDocumentResponses];
 
 export type BatchCancelContentDocumentsData = {
     body: BatchCancelRequest;
@@ -4747,36 +6451,6 @@ export type BatchReprocessContentDocumentsResponses = {
 };
 
 export type BatchReprocessContentDocumentsResponse = BatchReprocessContentDocumentsResponses[keyof BatchReprocessContentDocumentsResponses];
-
-export type UploadContentDocumentData = {
-    /**
-     * Multipart upload with metadata + file part
-     */
-    body?: unknown;
-    path?: never;
-    query?: never;
-    url: '/v1/content/documents/upload';
-};
-
-export type UploadContentDocumentErrors = {
-    /**
-     * Caller is not authenticated
-     */
-    401: unknown;
-    /**
-     * Caller is not authorized for the library
-     */
-    403: unknown;
-};
-
-export type UploadContentDocumentResponses = {
-    /**
-     * Document accepted for ingest
-     */
-    200: CreateDocumentResponse;
-};
-
-export type UploadContentDocumentResponse = UploadContentDocumentResponses[keyof UploadContentDocumentResponses];
 
 export type DeleteContentDocumentData = {
     body?: never;
@@ -4890,78 +6564,6 @@ export type PatchContentDocumentMetadataResponses = {
 
 export type PatchContentDocumentMetadataResponse = PatchContentDocumentMetadataResponses[keyof PatchContentDocumentMetadataResponses];
 
-export type AppendContentDocumentData = {
-    body: AppendDocumentBodyRequest;
-    path: {
-        /**
-         * Document identifier
-         */
-        documentId: string;
-    };
-    query?: never;
-    url: '/v1/content/documents/{documentId}/append';
-};
-
-export type AppendContentDocumentErrors = {
-    /**
-     * Caller is not authenticated
-     */
-    401: unknown;
-    /**
-     * Caller is not authorized for the document
-     */
-    403: unknown;
-    /**
-     * Document not found
-     */
-    404: unknown;
-};
-
-export type AppendContentDocumentResponses = {
-    /**
-     * Mutation describing the append
-     */
-    200: ContentMutationDetailResponse;
-};
-
-export type AppendContentDocumentResponse = AppendContentDocumentResponses[keyof AppendContentDocumentResponses];
-
-export type EditContentDocumentData = {
-    body: EditDocumentRequest;
-    path: {
-        /**
-         * Document identifier
-         */
-        documentId: string;
-    };
-    query?: never;
-    url: '/v1/content/documents/{documentId}/edit';
-};
-
-export type EditContentDocumentErrors = {
-    /**
-     * Caller is not authenticated
-     */
-    401: unknown;
-    /**
-     * Caller is not authorized for the document
-     */
-    403: unknown;
-    /**
-     * Document not found
-     */
-    404: unknown;
-};
-
-export type EditContentDocumentResponses = {
-    /**
-     * Mutation describing the edit
-     */
-    200: ContentMutationDetailResponse;
-};
-
-export type EditContentDocumentResponse = EditContentDocumentResponses[keyof EditContentDocumentResponses];
-
 export type GetContentDocumentHeadData = {
     body?: never;
     path: {
@@ -5037,45 +6639,6 @@ export type ListContentPreparedSegmentsResponses = {
 
 export type ListContentPreparedSegmentsResponse = ListContentPreparedSegmentsResponses[keyof ListContentPreparedSegmentsResponses];
 
-export type ReplaceContentDocumentData = {
-    /**
-     * Multipart payload that replaces the latest revision
-     */
-    body?: unknown;
-    path: {
-        /**
-         * Document identifier
-         */
-        documentId: string;
-    };
-    query?: never;
-    url: '/v1/content/documents/{documentId}/replace';
-};
-
-export type ReplaceContentDocumentErrors = {
-    /**
-     * Caller is not authenticated
-     */
-    401: unknown;
-    /**
-     * Caller is not authorized for the document
-     */
-    403: unknown;
-    /**
-     * Document not found
-     */
-    404: unknown;
-};
-
-export type ReplaceContentDocumentResponses = {
-    /**
-     * Mutation describing the replacement
-     */
-    200: ContentMutationDetailResponse;
-};
-
-export type ReplaceContentDocumentResponse = ReplaceContentDocumentResponses[keyof ReplaceContentDocumentResponses];
-
 export type ReprocessContentDocumentData = {
     body: ReprocessDocumentRequest;
     path: {
@@ -5143,6 +6706,53 @@ export type ListContentRevisionsResponses = {
 };
 
 export type ListContentRevisionsResponse = ListContentRevisionsResponses[keyof ListContentRevisionsResponses];
+
+export type CreateContentRevisionData = {
+    /**
+     * JSON body for a text append/replace, OR multipart/form-data to replace the file
+     */
+    body: CreateRevisionRequest;
+    path: {
+        /**
+         * Document identifier
+         */
+        documentId: string;
+    };
+    query?: never;
+    url: '/v1/content/documents/{documentId}/revisions';
+};
+
+export type CreateContentRevisionErrors = {
+    /**
+     * Invalid request payload
+     */
+    400: unknown;
+    /**
+     * Caller is not authenticated
+     */
+    401: unknown;
+    /**
+     * Caller is not authorized for the document
+     */
+    403: unknown;
+    /**
+     * Document not found
+     */
+    404: unknown;
+    /**
+     * Content-Type is neither application/json nor multipart/form-data
+     */
+    415: unknown;
+};
+
+export type CreateContentRevisionResponses = {
+    /**
+     * Revision admitted for async processing
+     */
+    202: ContentMutationDetailResponse;
+};
+
+export type CreateContentRevisionResponse = CreateContentRevisionResponses[keyof CreateContentRevisionResponses];
 
 export type GetContentDocumentSourceData = {
     body?: never;
@@ -5218,6 +6828,107 @@ export type ListContentTechnicalFactsResponses = {
 };
 
 export type ListContentTechnicalFactsResponse = ListContentTechnicalFactsResponses[keyof ListContentTechnicalFactsResponses];
+
+export type ListContentDocumentsData = {
+    body?: never;
+    path: {
+        /**
+         * Library that owns the document collection
+         */
+        libraryId: string;
+    };
+    query?: {
+        includeDeleted?: boolean;
+        cursor?: string;
+        limit?: number;
+        search?: string;
+        sortBy?: DocumentListSortKey;
+        sortOrder?: DocumentListSortOrder;
+        includeTotal?: boolean;
+        /**
+         * Comma-separated list of status buckets to keep. Accepted values:
+         * `canceled`, `failed`, `processing`, `queued`, `ready`. Empty or
+         * absent = no filter. Matches the canonical `derived_status` column
+         * in the list CTE and the 5 status pills on the documents page.
+         */
+        status?: string;
+        /**
+         * Comma-separated list of document ids to keep. Empty or absent = no
+         * filter. Lets a caller resolve specific documents (e.g. a deep link
+         * carrying `documentId`) through the same canonical list derivation
+         * that powers the table, instead of a divergent per-id detail mapper.
+         */
+        ids?: string;
+    };
+    url: '/v1/content/libraries/{libraryId}/documents';
+};
+
+export type ListContentDocumentsErrors = {
+    /**
+     * Caller is not authenticated
+     */
+    401: unknown;
+    /**
+     * Caller is not authorized for the library
+     */
+    403: unknown;
+};
+
+export type ListContentDocumentsResponses = {
+    /**
+     * Document list page
+     */
+    200: DocumentListPageResponse;
+};
+
+export type ListContentDocumentsResponse = ListContentDocumentsResponses[keyof ListContentDocumentsResponses];
+
+export type CreateContentDocumentData = {
+    /**
+     * JSON body for a metadata/inline-text document, OR multipart/form-data for a file upload
+     */
+    body: CreateDocumentRequest;
+    path: {
+        /**
+         * Library that owns the new document
+         */
+        libraryId: string;
+    };
+    query?: never;
+    url: '/v1/content/libraries/{libraryId}/documents';
+};
+
+export type CreateContentDocumentErrors = {
+    /**
+     * Invalid request payload
+     */
+    400: unknown;
+    /**
+     * Caller is not authenticated
+     */
+    401: unknown;
+    /**
+     * Caller is not authorized for the library
+     */
+    403: unknown;
+    /**
+     * An active document with this external key already exists
+     */
+    409: unknown;
+    /**
+     * Content-Type is neither application/json nor multipart/form-data
+     */
+    415: unknown;
+};
+
+export type CreateContentDocumentResponses = {
+    /**
+     * Newly created document
+     */
+    201: CreateDocumentResponse;
+};
+
+export type CreateContentDocumentResponse = CreateContentDocumentResponses[keyof CreateContentDocumentResponses];
 
 export type ExportLibrarySnapshotData = {
     body?: never;
@@ -5303,98 +7014,6 @@ export type ImportLibrarySnapshotResponses = {
 
 export type ImportLibrarySnapshotResponse = ImportLibrarySnapshotResponses[keyof ImportLibrarySnapshotResponses];
 
-export type ListContentMutationsData = {
-    body?: never;
-    path?: never;
-    query?: {
-        libraryId?: string;
-    };
-    url: '/v1/content/mutations';
-};
-
-export type ListContentMutationsErrors = {
-    /**
-     * Caller is not authenticated
-     */
-    401: unknown;
-    /**
-     * Caller is not authorized
-     */
-    403: unknown;
-};
-
-export type ListContentMutationsResponses = {
-    /**
-     * Mutations visible to the caller
-     */
-    200: Array<ContentMutationDetailResponse>;
-};
-
-export type ListContentMutationsResponse = ListContentMutationsResponses[keyof ListContentMutationsResponses];
-
-export type CreateContentMutationData = {
-    body: CreateMutationRequest;
-    path?: never;
-    query?: never;
-    url: '/v1/content/mutations';
-};
-
-export type CreateContentMutationErrors = {
-    /**
-     * Caller is not authenticated
-     */
-    401: unknown;
-    /**
-     * Caller is not authorized for the document
-     */
-    403: unknown;
-};
-
-export type CreateContentMutationResponses = {
-    /**
-     * Newly created mutation
-     */
-    200: ContentMutationDetailResponse;
-};
-
-export type CreateContentMutationResponse = CreateContentMutationResponses[keyof CreateContentMutationResponses];
-
-export type GetContentMutationData = {
-    body?: never;
-    path: {
-        /**
-         * Mutation identifier
-         */
-        mutationId: string;
-    };
-    query?: never;
-    url: '/v1/content/mutations/{mutationId}';
-};
-
-export type GetContentMutationErrors = {
-    /**
-     * Caller is not authenticated
-     */
-    401: unknown;
-    /**
-     * Caller is not authorized for the mutation
-     */
-    403: unknown;
-    /**
-     * Mutation not found
-     */
-    404: unknown;
-};
-
-export type GetContentMutationResponses = {
-    /**
-     * Mutation detail
-     */
-    200: ContentMutationDetailResponse;
-};
-
-export type GetContentMutationResponse = GetContentMutationResponses[keyof GetContentMutationResponses];
-
 export type ListContentWebIngestRunsData = {
     body?: never;
     path?: never;
@@ -5402,7 +7021,7 @@ export type ListContentWebIngestRunsData = {
         libraryId?: string;
         /**
          * Upper bound on returned runs (newest first). Defaults to
-         * [`DEFAULT_WEB_RUNS_LIMIT`], clamped to [1, [`MAX_WEB_RUNS_LIMIT`]].
+         * `DEFAULT_WEB_RUNS_LIMIT`, clamped to `[1, MAX_WEB_RUNS_LIMIT]`.
          * The endpoint is surface-only; once a user needs deeper history
          * the canonical move is cursor pagination rather than raising the
          * cap further.
@@ -5622,102 +7241,6 @@ export type GetBootstrapStatusResponses = {
 
 export type GetBootstrapStatusResponse = GetBootstrapStatusResponses[keyof GetBootstrapStatusResponses];
 
-export type ListIamGrantsData = {
-    body?: never;
-    path?: never;
-    query?: {
-        principalId?: string;
-    };
-    url: '/v1/iam/grants';
-};
-
-export type ListIamGrantsErrors = {
-    /**
-     * Caller is not authenticated
-     */
-    401: unknown;
-    /**
-     * Caller is not an IAM administrator
-     */
-    403: unknown;
-};
-
-export type ListIamGrantsResponses = {
-    /**
-     * Grants visible to the IAM administrator
-     */
-    200: Array<GrantResponse>;
-};
-
-export type ListIamGrantsResponse = ListIamGrantsResponses[keyof ListIamGrantsResponses];
-
-export type CreateIamGrantData = {
-    body: CreateGrantRequest;
-    path?: never;
-    query?: never;
-    url: '/v1/iam/grants';
-};
-
-export type CreateIamGrantErrors = {
-    /**
-     * Invalid request payload
-     */
-    400: unknown;
-    /**
-     * Caller is not authenticated
-     */
-    401: unknown;
-    /**
-     * Caller is not an IAM administrator
-     */
-    403: unknown;
-};
-
-export type CreateIamGrantResponses = {
-    /**
-     * Newly created grant
-     */
-    200: GrantResponse;
-};
-
-export type CreateIamGrantResponse = CreateIamGrantResponses[keyof CreateIamGrantResponses];
-
-export type RevokeIamGrantData = {
-    body?: never;
-    path: {
-        /**
-         * Grant identifier
-         */
-        grantId: string;
-    };
-    query?: never;
-    url: '/v1/iam/grants/{grantId}';
-};
-
-export type RevokeIamGrantErrors = {
-    /**
-     * Caller is not authenticated
-     */
-    401: unknown;
-    /**
-     * Caller is not an IAM administrator
-     */
-    403: unknown;
-    /**
-     * Grant not found
-     */
-    404: unknown;
-};
-
-export type RevokeIamGrantResponses = {
-    /**
-     * Grant revoked
-     */
-    204: void;
-};
-
-export type RevokeIamGrantResponse = RevokeIamGrantResponses[keyof RevokeIamGrantResponses];
-
 export type GetIamMeData = {
     body?: never;
     path?: never;
@@ -5894,10 +7417,10 @@ export type DeleteIamTokenData = {
         /**
          * Revoked API token principal id to delete
          */
-        tokenPrincipalId: string;
+        tokenId: string;
     };
     query?: never;
-    url: '/v1/iam/tokens/{tokenPrincipalId}';
+    url: '/v1/iam/tokens/{tokenId}';
 };
 
 export type DeleteIamTokenErrors = {
@@ -5928,16 +7451,92 @@ export type DeleteIamTokenResponses = {
 
 export type DeleteIamTokenResponse = DeleteIamTokenResponses[keyof DeleteIamTokenResponses];
 
+export type GetIamTokenData = {
+    body?: never;
+    path: {
+        /**
+         * API token principal id
+         */
+        tokenId: string;
+    };
+    query?: never;
+    url: '/v1/iam/tokens/{tokenId}';
+};
+
+export type GetIamTokenErrors = {
+    /**
+     * Caller is not authenticated
+     */
+    401: unknown;
+    /**
+     * Caller is not an IAM administrator
+     */
+    403: unknown;
+    /**
+     * Token not found
+     */
+    404: unknown;
+};
+
+export type GetIamTokenResponses = {
+    /**
+     * API token detail (the plaintext secret is never returned)
+     */
+    200: TokenResponse;
+};
+
+export type GetIamTokenResponse = GetIamTokenResponses[keyof GetIamTokenResponses];
+
+export type PatchIamTokenData = {
+    body: PatchTokenRequest;
+    path: {
+        /**
+         * API token principal id
+         */
+        tokenId: string;
+    };
+    query?: never;
+    url: '/v1/iam/tokens/{tokenId}';
+};
+
+export type PatchIamTokenErrors = {
+    /**
+     * Invalid request payload
+     */
+    400: unknown;
+    /**
+     * Caller is not authenticated
+     */
+    401: unknown;
+    /**
+     * Caller is not an IAM administrator
+     */
+    403: unknown;
+    /**
+     * Token not found
+     */
+    404: unknown;
+};
+
+export type PatchIamTokenResponses = {
+    /**
+     * Updated API token detail
+     */
+    200: TokenResponse;
+};
+
+export type PatchIamTokenResponse = PatchIamTokenResponses[keyof PatchIamTokenResponses];
+
 export type RevokeIamTokenData = {
     body?: never;
     path: {
         /**
          * Principal id whose tokens are revoked
          */
-        tokenPrincipalId: string;
+        tokenId: string;
     };
     query?: never;
-    url: '/v1/iam/tokens/{tokenPrincipalId}/revoke';
+    url: '/v1/iam/tokens/{tokenId}/revoke';
 };
 
 export type RevokeIamTokenErrors = {
@@ -6026,16 +7625,56 @@ export type CreateIamUserResponses = {
 
 export type CreateIamUserResponse = CreateIamUserResponses[keyof CreateIamUserResponses];
 
+export type DeleteIamUserData = {
+    body?: never;
+    path: {
+        /**
+         * User principal id to delete
+         */
+        userId: string;
+    };
+    query?: never;
+    url: '/v1/iam/users/{userId}';
+};
+
+export type DeleteIamUserErrors = {
+    /**
+     * Caller is not authenticated
+     */
+    401: unknown;
+    /**
+     * Caller is not a system administrator
+     */
+    403: unknown;
+    /**
+     * User not found
+     */
+    404: unknown;
+    /**
+     * Would delete the last remaining administrator
+     */
+    409: unknown;
+};
+
+export type DeleteIamUserResponses = {
+    /**
+     * User deleted (sessions and grants revoked, principal disabled)
+     */
+    204: void;
+};
+
+export type DeleteIamUserResponse = DeleteIamUserResponses[keyof DeleteIamUserResponses];
+
 export type GetIamUserAccessData = {
     body?: never;
     path: {
         /**
          * User principal id whose access is read
          */
-        principalId: string;
+        userId: string;
     };
     query?: never;
-    url: '/v1/iam/users/{principalId}/access';
+    url: '/v1/iam/users/{userId}/access';
 };
 
 export type GetIamUserAccessErrors = {
@@ -6055,7 +7694,7 @@ export type GetIamUserAccessErrors = {
 
 export type GetIamUserAccessResponses = {
     /**
-     * The user's workspace and library access grants
+     * The user's workspace and library access grants. Carries an `ETag` header (a hash of the current grant set) for optimistic concurrency on the paired PUT.
      */
     200: UserAccessResponse;
 };
@@ -6068,10 +7707,10 @@ export type SetIamUserAccessData = {
         /**
          * User principal id whose access is set
          */
-        principalId: string;
+        userId: string;
     };
     query?: never;
-    url: '/v1/iam/users/{principalId}/access';
+    url: '/v1/iam/users/{userId}/access';
 };
 
 export type SetIamUserAccessErrors = {
@@ -6091,11 +7730,15 @@ export type SetIamUserAccessErrors = {
      * User, workspace or library not found
      */
     404: unknown;
+    /**
+     * The optional `If-Match` header did not match the current access ETag; re-fetch with GET and retry
+     */
+    409: unknown;
 };
 
 export type SetIamUserAccessResponses = {
     /**
-     * The user's access after reconciliation
+     * The user's access after reconciliation. Carries a fresh `ETag` header.
      */
     200: UserAccessResponse;
 };
@@ -6108,10 +7751,10 @@ export type SetIamUserRoleData = {
         /**
          * User principal id whose role changes
          */
-        principalId: string;
+        userId: string;
     };
     query?: never;
-    url: '/v1/iam/users/{principalId}/role';
+    url: '/v1/iam/users/{userId}/role';
 };
 
 export type SetIamUserRoleErrors = {
@@ -6214,40 +7857,6 @@ export type ListIngestStageEventsResponses = {
 
 export type ListIngestStageEventsResponse = ListIngestStageEventsResponses[keyof ListIngestStageEventsResponses];
 
-export type ListIngestJobsData = {
-    body?: never;
-    path?: never;
-    query?: {
-        workspaceId?: string;
-        libraryId?: string;
-    };
-    url: '/v1/ingest/jobs';
-};
-
-export type ListIngestJobsErrors = {
-    /**
-     * libraryId is required
-     */
-    400: unknown;
-    /**
-     * Caller is not authenticated
-     */
-    401: unknown;
-    /**
-     * Caller is not authorized for the library
-     */
-    403: unknown;
-};
-
-export type ListIngestJobsResponses = {
-    /**
-     * Ingest jobs visible to the caller for the requested library
-     */
-    200: Array<IngestJobResponse>;
-};
-
-export type ListIngestJobsResponse = ListIngestJobsResponses[keyof ListIngestJobsResponses];
-
 export type GetIngestJobData = {
     body?: never;
     path: {
@@ -6283,6 +7892,128 @@ export type GetIngestJobResponses = {
 };
 
 export type GetIngestJobResponse = GetIngestJobResponses[keyof GetIngestJobResponses];
+
+export type ListIngestJobAttemptsData = {
+    body?: never;
+    path: {
+        /**
+         * Ingest job identifier
+         */
+        jobId: string;
+    };
+    query?: {
+        cursor?: string;
+        limit?: number;
+    };
+    url: '/v1/ingest/jobs/{jobId}/attempts';
+};
+
+export type ListIngestJobAttemptsErrors = {
+    /**
+     * Invalid cursor
+     */
+    400: unknown;
+    /**
+     * Caller is not authenticated
+     */
+    401: unknown;
+    /**
+     * Caller is not authorized for the job's library
+     */
+    403: unknown;
+    /**
+     * Job not found
+     */
+    404: unknown;
+};
+
+export type ListIngestJobAttemptsResponses = {
+    /**
+     * Paginated attempt history for the job, newest first
+     */
+    200: IngestAttemptListPageResponse;
+};
+
+export type ListIngestJobAttemptsResponse = ListIngestJobAttemptsResponses[keyof ListIngestJobAttemptsResponses];
+
+export type ListIngestJobsData = {
+    body?: never;
+    path: {
+        /**
+         * Library that owns the ingest job collection
+         */
+        libraryId: string;
+    };
+    query?: {
+        cursor?: string;
+        limit?: number;
+        /**
+         * Comma-separated list of `ingest_queue_state` values to keep. Empty or
+         * absent = no filter. Accepted values: queued, leased, completed,
+         * failed, canceled, paused.
+         */
+        status?: string;
+    };
+    url: '/v1/ingest/libraries/{libraryId}/jobs';
+};
+
+export type ListIngestJobsErrors = {
+    /**
+     * Invalid cursor or status filter value
+     */
+    400: unknown;
+    /**
+     * Caller is not authenticated
+     */
+    401: unknown;
+    /**
+     * Caller is not authorized for the library
+     */
+    403: unknown;
+    /**
+     * Library not found
+     */
+    404: unknown;
+};
+
+export type ListIngestJobsResponses = {
+    /**
+     * Paginated ingest jobs for the library, newest first
+     */
+    200: IngestJobListPageResponse;
+};
+
+export type ListIngestJobsResponse = ListIngestJobsResponses[keyof ListIngestJobsResponses];
+
+export type ListIngestQueueData = {
+    body?: never;
+    path?: never;
+    query?: {
+        workspaceId?: string;
+        libraryId?: string;
+    };
+    url: '/v1/ingest/queue';
+};
+
+export type ListIngestQueueErrors = {
+    /**
+     * Caller is not authenticated
+     */
+    401: unknown;
+    /**
+     * Caller is not authorized to read operations
+     */
+    403: unknown;
+};
+
+export type ListIngestQueueResponses = {
+    /**
+     * Active ingest queue visible to the caller
+     */
+    200: IngestQueueResponse;
+};
+
+export type ListIngestQueueResponse = ListIngestQueueResponses[keyof ListIngestQueueResponses];
 
 export type GetKnowledgeContextBundleData = {
     body?: never;
@@ -6328,7 +8059,10 @@ export type ListKnowledgeContextBundlesData = {
          */
         libraryId: string;
     };
-    query?: never;
+    query?: {
+        cursor?: string;
+        limit?: number;
+    };
     url: '/v1/knowledge/libraries/{libraryId}/context-bundles';
 };
 
@@ -6347,82 +8081,10 @@ export type ListKnowledgeContextBundlesResponses = {
     /**
      * Context bundles for the library
      */
-    200: Array<KnowledgeContextBundleRow>;
+    200: KnowledgeContextBundleListResponse;
 };
 
 export type ListKnowledgeContextBundlesResponse = ListKnowledgeContextBundlesResponses[keyof ListKnowledgeContextBundlesResponses];
-
-export type ListKnowledgeDocumentsData = {
-    body?: never;
-    path: {
-        /**
-         * Library identifier
-         */
-        libraryId: string;
-    };
-    query?: never;
-    url: '/v1/knowledge/libraries/{libraryId}/documents';
-};
-
-export type ListKnowledgeDocumentsErrors = {
-    /**
-     * Caller is not authenticated
-     */
-    401: unknown;
-    /**
-     * Caller is not authorized for the library
-     */
-    403: unknown;
-};
-
-export type ListKnowledgeDocumentsResponses = {
-    /**
-     * Knowledge documents for the library
-     */
-    200: Array<KnowledgeDocumentRow>;
-};
-
-export type ListKnowledgeDocumentsResponse = ListKnowledgeDocumentsResponses[keyof ListKnowledgeDocumentsResponses];
-
-export type GetKnowledgeDocumentData = {
-    body?: never;
-    path: {
-        /**
-         * Library identifier
-         */
-        libraryId: string;
-        /**
-         * Document identifier
-         */
-        documentId: string;
-    };
-    query?: never;
-    url: '/v1/knowledge/libraries/{libraryId}/documents/{documentId}';
-};
-
-export type GetKnowledgeDocumentErrors = {
-    /**
-     * Caller is not authenticated
-     */
-    401: unknown;
-    /**
-     * Caller is not authorized for the document
-     */
-    403: unknown;
-    /**
-     * Document not found
-     */
-    404: unknown;
-};
-
-export type GetKnowledgeDocumentResponses = {
-    /**
-     * Knowledge document detail
-     */
-    200: KnowledgeDocumentDetailResponse;
-};
-
-export type GetKnowledgeDocumentResponse = GetKnowledgeDocumentResponses[keyof GetKnowledgeDocumentResponses];
 
 export type GetKnowledgeEntityData = {
     body?: never;
@@ -6495,7 +8157,7 @@ export type ListKnowledgeLibraryGenerationsResponses = {
     /**
      * Knowledge generation history for the library
      */
-    200: Array<KnowledgeLibraryGeneration>;
+    200: KnowledgeLibraryGenerationListResponse;
 };
 
 export type ListKnowledgeLibraryGenerationsResponse = ListKnowledgeLibraryGenerationsResponses[keyof ListKnowledgeLibraryGenerationsResponses];
@@ -6531,6 +8193,41 @@ export type GetKnowledgeGraphWorkbenchResponses = {
 };
 
 export type GetKnowledgeGraphWorkbenchResponse = GetKnowledgeGraphWorkbenchResponses[keyof GetKnowledgeGraphWorkbenchResponses];
+
+export type ListKnowledgeRelationsData = {
+    body?: never;
+    path: {
+        /**
+         * Library identifier
+         */
+        libraryId: string;
+    };
+    query?: {
+        cursor?: string;
+        limit?: number;
+    };
+    url: '/v1/knowledge/libraries/{libraryId}/relations';
+};
+
+export type ListKnowledgeRelationsErrors = {
+    /**
+     * Caller is not authenticated
+     */
+    401: unknown;
+    /**
+     * Caller is not authorized for the library
+     */
+    403: unknown;
+};
+
+export type ListKnowledgeRelationsResponses = {
+    /**
+     * Knowledge relations for the library
+     */
+    200: KnowledgeRelationListResponse;
+};
+
+export type ListKnowledgeRelationsResponse = ListKnowledgeRelationsResponses[keyof ListKnowledgeRelationsResponses];
 
 export type GetKnowledgeRelationData = {
     body?: never;
@@ -6572,24 +8269,23 @@ export type GetKnowledgeRelationResponses = {
 
 export type GetKnowledgeRelationResponse = GetKnowledgeRelationResponses[keyof GetKnowledgeRelationResponses];
 
-export type SearchKnowledgeDocumentsData = {
-    body?: never;
+export type SearchKnowledgeLibraryData = {
+    body: KnowledgeSearchRequest;
     path: {
         /**
          * Library identifier
          */
         libraryId: string;
     };
-    query?: {
-        query?: string;
-        limit?: number;
-        chunkHitLimitPerDocument?: number;
-        evidenceSampleLimit?: number;
-    };
-    url: '/v1/knowledge/libraries/{libraryId}/search/documents';
+    query?: never;
+    url: '/v1/knowledge/libraries/{libraryId}/search';
 };
 
-export type SearchKnowledgeDocumentsErrors = {
+export type SearchKnowledgeLibraryErrors = {
+    /**
+     * text must not be empty
+     */
+    400: unknown;
     /**
      * Caller is not authenticated
      */
@@ -6600,14 +8296,14 @@ export type SearchKnowledgeDocumentsErrors = {
     403: unknown;
 };
 
-export type SearchKnowledgeDocumentsResponses = {
+export type SearchKnowledgeLibraryResponses = {
     /**
-     * Hybrid lexical + vector document search results
+     * Hybrid lexical + vector search results for the library
      */
     200: KnowledgeDocumentSearchResponse;
 };
 
-export type SearchKnowledgeDocumentsResponse = SearchKnowledgeDocumentsResponses[keyof SearchKnowledgeDocumentsResponses];
+export type SearchKnowledgeLibraryResponse = SearchKnowledgeLibraryResponses[keyof SearchKnowledgeLibraryResponses];
 
 export type GetKnowledgeLibrarySummaryData = {
     body?: never;
@@ -6653,9 +8349,17 @@ export type PostMcpRequestData = {
 
 export type PostMcpRequestErrors = {
     /**
+     * Missing or unsupported MCP protocol-version header after initialization
+     */
+    400: unknown;
+    /**
      * Caller is not authenticated
      */
     401: unknown;
+    /**
+     * MCP session is missing, expired, terminated, or foreign
+     */
+    404: unknown;
 };
 
 export type PostMcpRequestResponses = {
@@ -6700,9 +8404,17 @@ export type PostMcpDiagnosticsRequestData = {
 
 export type PostMcpDiagnosticsRequestErrors = {
     /**
+     * Missing or unsupported MCP protocol-version header after initialization
+     */
+    400: unknown;
+    /**
      * Caller is not authenticated
      */
     401: unknown;
+    /**
+     * MCP session is missing, expired, terminated, or foreign
+     */
+    404: unknown;
 };
 
 export type PostMcpDiagnosticsRequestResponses = {
@@ -6750,36 +8462,6 @@ export type GetOpenApiContractResponses = {
 };
 
 export type GetOpenApiContractResponse = GetOpenApiContractResponses[keyof GetOpenApiContractResponses];
-
-export type ListIngestQueueData = {
-    body?: never;
-    path?: never;
-    query?: {
-        workspaceId?: string;
-        libraryId?: string;
-    };
-    url: '/v1/ops/ingest-queue';
-};
-
-export type ListIngestQueueErrors = {
-    /**
-     * Caller is not authenticated
-     */
-    401: unknown;
-    /**
-     * Caller is not authorized to read operations
-     */
-    403: unknown;
-};
-
-export type ListIngestQueueResponses = {
-    /**
-     * Active ingest queue visible to the caller
-     */
-    200: IngestQueueResponse;
-};
-
-export type ListIngestQueueResponse = ListIngestQueueResponses[keyof ListIngestQueueResponses];
 
 export type BulkIngestQueueActionData = {
     body: BulkIngestQueueActionRequest;
@@ -7069,7 +8751,7 @@ export type GetLibraryDashboardErrors = {
 
 export type GetLibraryDashboardResponses = {
     /**
-     * Library dashboard surface (overview, attention items, recent documents, graph, web run summaries)
+     * Library dashboard surface (canonical document metrics, attention items, recent documents, graph, web run summaries)
      */
     200: DashboardSurface;
 };
@@ -7111,35 +8793,6 @@ export type GetAsyncOperationResponses = {
 };
 
 export type GetAsyncOperationResponse = GetAsyncOperationResponses[keyof GetAsyncOperationResponses];
-
-export type GetAssistantSystemPromptData = {
-    body?: never;
-    path?: never;
-    query?: {
-        libraryId?: string;
-    };
-    url: '/v1/query/assistant/system-prompt';
-};
-
-export type GetAssistantSystemPromptErrors = {
-    /**
-     * Caller is not authenticated
-     */
-    401: unknown;
-    /**
-     * Caller is not authorized for the requested library
-     */
-    403: unknown;
-};
-
-export type GetAssistantSystemPromptResponses = {
-    /**
-     * Assistant system prompt template plus the version rendered for the active library
-     */
-    200: AssistantSystemPromptResponse;
-};
-
-export type GetAssistantSystemPromptResponse = GetAssistantSystemPromptResponses[keyof GetAssistantSystemPromptResponses];
 
 export type GetQueryExecutionData = {
     body?: never;
@@ -7215,18 +8868,17 @@ export type GetQueryExecutionLlmContextResponse = GetQueryExecutionLlmContextRes
 
 export type ListQuerySessionsData = {
     body?: never;
-    path?: never;
-    query?: {
-        libraryId?: string;
+    path: {
+        /**
+         * Library that owns the session collection
+         */
+        libraryId: string;
     };
-    url: '/v1/query/sessions';
+    query?: never;
+    url: '/v1/query/libraries/{libraryId}/sessions';
 };
 
 export type ListQuerySessionsErrors = {
-    /**
-     * libraryId is required
-     */
-    400: unknown;
     /**
      * Caller is not authenticated
      */
@@ -7235,25 +8887,34 @@ export type ListQuerySessionsErrors = {
      * Caller is not authorized for the library
      */
     403: unknown;
+    /**
+     * Library not found
+     */
+    404: unknown;
 };
 
 export type ListQuerySessionsResponses = {
     /**
-     * Query sessions visible to the caller
+     * Query session list page
      */
-    200: Array<AssistantSessionListItem>;
+    200: QuerySessionListResponse;
 };
 
 export type ListQuerySessionsResponse = ListQuerySessionsResponses[keyof ListQuerySessionsResponses];
 
 export type CreateQuerySessionData = {
     /**
-     * Target library, optional workspace assertion, and optional display title for the new assistant session.
+     * Optional display title for the new assistant session.
      */
     body: CreateSessionRequest;
-    path?: never;
+    path: {
+        /**
+         * Library that owns the new session
+         */
+        libraryId: string;
+    };
     query?: never;
-    url: '/v1/query/sessions';
+    url: '/v1/query/libraries/{libraryId}/sessions';
 };
 
 export type CreateQuerySessionErrors = {
@@ -7269,16 +8930,60 @@ export type CreateQuerySessionErrors = {
      * Caller is not authorized for the library
      */
     403: unknown;
+    /**
+     * Library not found
+     */
+    404: unknown;
 };
 
 export type CreateQuerySessionResponses = {
     /**
      * Newly created query conversation
      */
-    200: QueryConversation;
+    201: QueryConversation;
 };
 
 export type CreateQuerySessionResponse = CreateQuerySessionResponses[keyof CreateQuerySessionResponses];
+
+export type DeleteQuerySessionData = {
+    body?: never;
+    path: {
+        /**
+         * Assistant session identifier
+         */
+        sessionId: string;
+    };
+    query?: never;
+    url: '/v1/query/sessions/{sessionId}';
+};
+
+export type DeleteQuerySessionErrors = {
+    /**
+     * Caller is not authenticated or lacks scope access
+     */
+    401: unknown;
+    /**
+     * Caller may not mutate this session
+     */
+    403: unknown;
+    /**
+     * UI session not found
+     */
+    404: unknown;
+    /**
+     * Session has active work or retained replay provenance
+     */
+    409: unknown;
+};
+
+export type DeleteQuerySessionResponses = {
+    /**
+     * Assistant session deleted
+     */
+    204: void;
+};
+
+export type DeleteQuerySessionResponse = DeleteQuerySessionResponses[keyof DeleteQuerySessionResponses];
 
 export type GetQuerySessionData = {
     body?: never;
@@ -7315,6 +9020,85 @@ export type GetQuerySessionResponses = {
 };
 
 export type GetQuerySessionResponse = GetQuerySessionResponses[keyof GetQuerySessionResponses];
+
+export type RenameQuerySessionData = {
+    /**
+     * New durable session title.
+     */
+    body: RenameAssistantSessionRequest;
+    path: {
+        /**
+         * Assistant session identifier
+         */
+        sessionId: string;
+    };
+    query?: never;
+    url: '/v1/query/sessions/{sessionId}';
+};
+
+export type RenameQuerySessionErrors = {
+    /**
+     * Title is empty or exceeds the contract limit
+     */
+    400: unknown;
+    /**
+     * Caller is not authenticated or lacks scope access
+     */
+    401: unknown;
+    /**
+     * Caller may not mutate this session
+     */
+    403: unknown;
+    /**
+     * UI session not found
+     */
+    404: unknown;
+};
+
+export type RenameQuerySessionResponses = {
+    /**
+     * Renamed assistant session
+     */
+    200: QueryConversation;
+};
+
+export type RenameQuerySessionResponse = RenameQuerySessionResponses[keyof RenameQuerySessionResponses];
+
+export type ListQuerySessionTurnsData = {
+    body?: never;
+    path: {
+        /**
+         * Query session identifier
+         */
+        sessionId: string;
+    };
+    query?: never;
+    url: '/v1/query/sessions/{sessionId}/turns';
+};
+
+export type ListQuerySessionTurnsErrors = {
+    /**
+     * Caller is not authenticated
+     */
+    401: unknown;
+    /**
+     * Caller is not authorized for the session
+     */
+    403: unknown;
+    /**
+     * Session not found
+     */
+    404: unknown;
+};
+
+export type ListQuerySessionTurnsResponses = {
+    /**
+     * Query turn list page
+     */
+    200: QueryTurnListResponse;
+};
+
+export type ListQuerySessionTurnsResponse = ListQuerySessionTurnsResponses[keyof ListQuerySessionTurnsResponses];
 
 export type CreateQuerySessionTurnData = {
     /**
@@ -7354,6 +9138,75 @@ export type CreateQuerySessionTurnResponses = {
 };
 
 export type CreateQuerySessionTurnResponse = CreateQuerySessionTurnResponses[keyof CreateQuerySessionTurnResponses];
+
+export type GetQuerySessionTurnData = {
+    body?: never;
+    path: {
+        /**
+         * Query session identifier
+         */
+        sessionId: string;
+        /**
+         * Query turn identifier
+         */
+        turnId: string;
+    };
+    query?: never;
+    url: '/v1/query/sessions/{sessionId}/turns/{turnId}';
+};
+
+export type GetQuerySessionTurnErrors = {
+    /**
+     * Caller is not authenticated
+     */
+    401: unknown;
+    /**
+     * Caller is not authorized for the session
+     */
+    403: unknown;
+    /**
+     * Session or turn not found
+     */
+    404: unknown;
+};
+
+export type GetQuerySessionTurnResponses = {
+    /**
+     * Assistant session turn
+     */
+    200: AssistantTurn;
+};
+
+export type GetQuerySessionTurnResponse = GetQuerySessionTurnResponses[keyof GetQuerySessionTurnResponses];
+
+export type GetAssistantSystemPromptData = {
+    body?: never;
+    path?: never;
+    query?: {
+        libraryId?: string;
+    };
+    url: '/v1/query/system-prompt';
+};
+
+export type GetAssistantSystemPromptErrors = {
+    /**
+     * Caller is not authenticated
+     */
+    401: unknown;
+    /**
+     * Caller is not authorized for the requested library
+     */
+    403: unknown;
+};
+
+export type GetAssistantSystemPromptResponses = {
+    /**
+     * Assistant system prompt template plus the version rendered for the active library
+     */
+    200: AssistantSystemPromptResponse;
+};
+
+export type GetAssistantSystemPromptResponse = GetAssistantSystemPromptResponses[keyof GetAssistantSystemPromptResponses];
 
 export type GetReadinessData = {
     body?: never;
@@ -7452,43 +9305,6 @@ export type GetRuntimeExecutionTraceResponses = {
 
 export type GetRuntimeExecutionTraceResponse = GetRuntimeExecutionTraceResponses[keyof GetRuntimeExecutionTraceResponses];
 
-export type SearchDocumentsData = {
-    body?: never;
-    path?: never;
-    query: {
-        libraryId: string;
-        query?: string;
-        limit?: number;
-        chunkHitLimitPerDocument?: number;
-        evidenceSampleLimit?: number;
-    };
-    url: '/v1/search/documents';
-};
-
-export type SearchDocumentsErrors = {
-    /**
-     * libraryId is required
-     */
-    400: unknown;
-    /**
-     * Caller is not authenticated
-     */
-    401: unknown;
-    /**
-     * Caller is not authorized for the library
-     */
-    403: unknown;
-};
-
-export type SearchDocumentsResponses = {
-    /**
-     * Hybrid document search across the requested library
-     */
-    200: KnowledgeDocumentSearchResponse;
-};
-
-export type SearchDocumentsResponse = SearchDocumentsResponses[keyof SearchDocumentsResponses];
-
 export type GetVersionData = {
     body?: never;
     path?: never;
@@ -7521,76 +9337,16 @@ export type GetReleaseUpdateResponses = {
 
 export type GetReleaseUpdateResponse = GetReleaseUpdateResponses[keyof GetReleaseUpdateResponses];
 
-export type ListWebhookSubscriptionsData = {
-    body?: never;
-    path?: never;
-    query: {
-        workspaceId: string;
-    };
-    url: '/v1/webhooks/subscriptions';
-};
-
-export type ListWebhookSubscriptionsErrors = {
-    /**
-     * Caller is not authenticated
-     */
-    401: unknown;
-    /**
-     * Caller is not a workspace administrator
-     */
-    403: unknown;
-};
-
-export type ListWebhookSubscriptionsResponses = {
-    /**
-     * Outbound webhook subscriptions for a workspace
-     */
-    200: Array<SubscriptionResponse>;
-};
-
-export type ListWebhookSubscriptionsResponse = ListWebhookSubscriptionsResponses[keyof ListWebhookSubscriptionsResponses];
-
-export type CreateWebhookSubscriptionData = {
-    body: CreateSubscriptionRequest;
-    path?: never;
-    query?: never;
-    url: '/v1/webhooks/subscriptions';
-};
-
-export type CreateWebhookSubscriptionErrors = {
-    /**
-     * Request body is invalid
-     */
-    400: unknown;
-    /**
-     * Caller is not authenticated
-     */
-    401: unknown;
-    /**
-     * Caller is not a workspace administrator
-     */
-    403: unknown;
-};
-
-export type CreateWebhookSubscriptionResponses = {
-    /**
-     * Created outbound webhook subscription
-     */
-    201: SubscriptionResponse;
-};
-
-export type CreateWebhookSubscriptionResponse = CreateWebhookSubscriptionResponses[keyof CreateWebhookSubscriptionResponses];
-
 export type DeleteWebhookSubscriptionData = {
     body?: never;
     path: {
         /**
          * Webhook subscription identifier
          */
-        id: string;
+        subscriptionId: string;
     };
     query?: never;
-    url: '/v1/webhooks/subscriptions/{id}';
+    url: '/v1/webhooks/subscriptions/{subscriptionId}';
 };
 
 export type DeleteWebhookSubscriptionErrors = {
@@ -7599,16 +9355,16 @@ export type DeleteWebhookSubscriptionErrors = {
      */
     401: unknown;
     /**
-     * Caller is not a workspace administrator
-     */
-    403: unknown;
-    /**
      * Webhook subscription not found
      */
     404: unknown;
 };
 
 export type DeleteWebhookSubscriptionResponses = {
+    /**
+     * Deletion accepted; an already-owned delivery is still draining. Retry DELETE until it returns 204
+     */
+    202: unknown;
     /**
      * Webhook subscription deleted
      */
@@ -7623,10 +9379,10 @@ export type GetWebhookSubscriptionData = {
         /**
          * Webhook subscription identifier
          */
-        id: string;
+        subscriptionId: string;
     };
     query?: never;
-    url: '/v1/webhooks/subscriptions/{id}';
+    url: '/v1/webhooks/subscriptions/{subscriptionId}';
 };
 
 export type GetWebhookSubscriptionErrors = {
@@ -7634,10 +9390,6 @@ export type GetWebhookSubscriptionErrors = {
      * Caller is not authenticated
      */
     401: unknown;
-    /**
-     * Caller is not a workspace administrator
-     */
-    403: unknown;
     /**
      * Webhook subscription not found
      */
@@ -7659,10 +9411,10 @@ export type UpdateWebhookSubscriptionData = {
         /**
          * Webhook subscription identifier
          */
-        id: string;
+        subscriptionId: string;
     };
     query?: never;
-    url: '/v1/webhooks/subscriptions/{id}';
+    url: '/v1/webhooks/subscriptions/{subscriptionId}';
 };
 
 export type UpdateWebhookSubscriptionErrors = {
@@ -7675,13 +9427,13 @@ export type UpdateWebhookSubscriptionErrors = {
      */
     401: unknown;
     /**
-     * Caller is not a workspace administrator
-     */
-    403: unknown;
-    /**
      * Webhook subscription not found
      */
     404: unknown;
+    /**
+     * Webhook subscription is draining or quota enforcement rejected reactivation
+     */
+    409: unknown;
 };
 
 export type UpdateWebhookSubscriptionResponses = {
@@ -7699,12 +9451,24 @@ export type ListWebhookDeliveryAttemptsData = {
         /**
          * Webhook subscription identifier
          */
-        id: string;
+        subscriptionId: string;
     };
     query?: {
+        /**
+         * Optional delivery-state filter.
+         */
         state?: string;
+        /**
+         * Page size, clamped to 1..=200. Defaults to 200.
+         */
+        limit?: number;
+        /**
+         * Opaque keyset continuation token from a previous page's
+         * `nextCursor`. Absent starts from the newest attempt.
+         */
+        cursor?: string;
     };
-    url: '/v1/webhooks/subscriptions/{id}/attempts';
+    url: '/v1/webhooks/subscriptions/{subscriptionId}/attempts';
 };
 
 export type ListWebhookDeliveryAttemptsErrors = {
@@ -7712,10 +9476,6 @@ export type ListWebhookDeliveryAttemptsErrors = {
      * Caller is not authenticated
      */
     401: unknown;
-    /**
-     * Caller is not a workspace administrator
-     */
-    403: unknown;
     /**
      * Webhook subscription not found
      */
@@ -7726,7 +9486,89 @@ export type ListWebhookDeliveryAttemptsResponses = {
     /**
      * Delivery attempts for the outbound webhook subscription
      */
-    200: Array<DeliveryAttemptResponse>;
+    200: DeliveryAttemptListPageResponse;
 };
 
 export type ListWebhookDeliveryAttemptsResponse = ListWebhookDeliveryAttemptsResponses[keyof ListWebhookDeliveryAttemptsResponses];
+
+export type ListWebhookSubscriptionsData = {
+    body?: never;
+    path: {
+        /**
+         * Workspace that owns the subscriptions
+         */
+        workspaceId: string;
+    };
+    query?: {
+        /**
+         * Page size, clamped to 1..=200. Defaults to 100.
+         */
+        limit?: number;
+        /**
+         * Opaque keyset continuation token from a previous page's
+         * `nextCursor`. Absent starts from the oldest subscription.
+         */
+        cursor?: string;
+    };
+    url: '/v1/webhooks/workspaces/{workspaceId}/subscriptions';
+};
+
+export type ListWebhookSubscriptionsErrors = {
+    /**
+     * Caller is not authenticated
+     */
+    401: unknown;
+    /**
+     * Caller is not a workspace administrator
+     */
+    403: unknown;
+};
+
+export type ListWebhookSubscriptionsResponses = {
+    /**
+     * Outbound webhook subscriptions for a workspace
+     */
+    200: SubscriptionListPageResponse;
+};
+
+export type ListWebhookSubscriptionsResponse = ListWebhookSubscriptionsResponses[keyof ListWebhookSubscriptionsResponses];
+
+export type CreateWebhookSubscriptionData = {
+    body: CreateSubscriptionRequest;
+    path: {
+        /**
+         * Workspace that owns the subscription
+         */
+        workspaceId: string;
+    };
+    query?: never;
+    url: '/v1/webhooks/workspaces/{workspaceId}/subscriptions';
+};
+
+export type CreateWebhookSubscriptionErrors = {
+    /**
+     * Request body is invalid
+     */
+    400: unknown;
+    /**
+     * Caller is not authenticated
+     */
+    401: unknown;
+    /**
+     * Caller is not a workspace administrator
+     */
+    403: unknown;
+    /**
+     * Workspace webhook subscription quota is exhausted
+     */
+    409: unknown;
+};
+
+export type CreateWebhookSubscriptionResponses = {
+    /**
+     * Created outbound webhook subscription
+     */
+    201: SubscriptionResponse;
+};
+
+export type CreateWebhookSubscriptionResponse = CreateWebhookSubscriptionResponses[keyof CreateWebhookSubscriptionResponses];

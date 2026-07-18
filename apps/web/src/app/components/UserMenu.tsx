@@ -1,11 +1,11 @@
-import { useTranslation } from 'react-i18next';
-import { Check, ChevronDown, Globe, LogOut, Monitor, Moon, Sun } from 'lucide-react';
+import { useTranslation } from 'react-i18next'
+import { Check, ChevronDown, Globe, LogOut, Monitor, Moon, Sun } from 'lucide-react'
 
-import { useApp } from '@/shared/contexts/app-context';
-import { usePreferences } from '@/shared/contexts/preferences-context';
-import { useCan } from '@/shared/auth/useCan';
-import { AVAILABLE_LOCALES } from '@/shared/types';
-import { Avatar } from '@/shared/components/ui/avatar';
+import { useApp } from '@/shared/contexts/app-context'
+import { usePreferences } from '@/shared/contexts/preferences-context'
+import { useCan } from '@/shared/auth/useCan'
+import { AVAILABLE_LOCALES } from '@/shared/types'
+import { Avatar } from '@/shared/components/ui/avatar'
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -16,40 +16,38 @@ import {
   DropdownMenuSubContent,
   DropdownMenuSubTrigger,
   DropdownMenuTrigger,
-} from '@/shared/components/ui/dropdown-menu';
+} from '@/shared/components/ui/dropdown-menu'
 
 /**
  * Global-preferences home: identity + role, theme, language, logout. Rendered
  * as a dropdown on desktop and inline (variant="inline") at
  * the bottom of the mobile drawer so logout is reachable on every viewport.
  */
-export function UserMenu({
-  variant = 'menu',
-  onAfterAction,
-  collapsed = false,
-}: {
-  variant?: 'menu' | 'inline' | 'sidebar';
-  onAfterAction?: () => void;
-  collapsed?: boolean;
-}) {
-  const { t } = useTranslation();
-  const { user, logout, locale, setLocale } = useApp();
-  const { theme, setTheme } = usePreferences();
-  const { role } = useCan();
+type UserMenuProps = Readonly<{
+  variant?: 'menu' | 'inline' | 'sidebar'
+  onAfterAction?: () => void
+  collapsed?: boolean
+}>
 
-  const name = user?.displayName ?? t('shell.userFallback');
+export function UserMenu({ variant = 'menu', onAfterAction, collapsed = false }: UserMenuProps) {
+  const { t } = useTranslation()
+  const { user, logout, locale, setLocale } = useApp()
+  const { theme, setTheme } = usePreferences()
+  const { role } = useCan()
+
+  const name = user?.displayName ?? t('shell.userFallback')
   // Literal t() per role so the i18n static-analysis audit sees each key used.
-  const roleLabel =
-    role === 'admin'
-      ? t('shell.roleAdmin')
-      : role === 'operator'
-        ? t('shell.roleOperator')
-        : t('shell.roleViewer');
+  let roleLabel = t('shell.roleViewer')
+  if (role === 'admin') {
+    roleLabel = t('shell.roleAdmin')
+  } else if (role === 'operator') {
+    roleLabel = t('shell.roleOperator')
+  }
 
-  const handleLogout = () => {
-    void logout();
-    onAfterAction?.();
-  };
+  const handleLogout = async () => {
+    await logout()
+    onAfterAction?.()
+  }
 
   // Labels resolved as literal t() calls (not via a key indirection) so the
   // i18n audit's AST tracer registers each theme key as used.
@@ -57,7 +55,7 @@ export function UserMenu({
     { value: 'light' as const, icon: Sun, label: t('shell.themeLight') },
     { value: 'dark' as const, icon: Moon, label: t('shell.themeDark') },
     { value: 'system' as const, icon: Monitor, label: t('shell.themeSystem') },
-  ];
+  ]
 
   const menuContent = (
     <>
@@ -110,7 +108,7 @@ export function UserMenu({
         {t('shell.logout')}
       </DropdownMenuItem>
     </>
-  );
+  )
 
   if (variant === 'inline') {
     return (
@@ -181,7 +179,7 @@ export function UserMenu({
           {t('shell.logout')}
         </button>
       </div>
-    );
+    )
   }
 
   if (variant === 'sidebar') {
@@ -200,7 +198,9 @@ export function UserMenu({
             {!collapsed && (
               <>
                 <span className="min-w-0 flex-1">
-                  <span className="block truncate text-sm font-semibold text-shell-foreground">{name}</span>
+                  <span className="block truncate text-sm font-semibold text-shell-foreground">
+                    {name}
+                  </span>
                   <span className="block text-2xs font-medium uppercase tracking-wide text-shell-muted">
                     {roleLabel}
                   </span>
@@ -214,7 +214,7 @@ export function UserMenu({
           {menuContent}
         </DropdownMenuContent>
       </DropdownMenu>
-    );
+    )
   }
 
   return (
@@ -234,5 +234,5 @@ export function UserMenu({
         {menuContent}
       </DropdownMenuContent>
     </DropdownMenu>
-  );
+  )
 }

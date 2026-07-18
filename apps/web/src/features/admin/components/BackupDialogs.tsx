@@ -1,15 +1,16 @@
-import { useRef, useState } from 'react';
-import type { TFunction } from 'i18next';
-import { toast } from 'sonner';
-import { AlertTriangle, Download, Loader2, Upload } from 'lucide-react';
+import { useRef, useState } from 'react'
+import type { TFunction } from 'i18next'
+import { toast } from 'sonner'
+import { AlertTriangle, Download, Loader2, Upload } from 'lucide-react'
 
-import { librarySnapshotApi } from '@/shared/api';
-import type {
-  LibrarySnapshotIncludeKind,
-  LibrarySnapshotOverwriteMode,
-} from '@/shared/api/documents';
-import { Button } from '@/shared/components/ui/button';
-import { Checkbox } from '@/shared/components/ui/checkbox';
+import { librarySnapshotApi } from '@/shared/api'
+import {
+  SnapshotImportTimeoutError,
+  type LibrarySnapshotIncludeKind,
+  type LibrarySnapshotOverwriteMode,
+} from '@/shared/api/documents'
+import { Button } from '@/shared/components/ui/button'
+import { Checkbox } from '@/shared/components/ui/checkbox'
 import {
   Dialog,
   DialogContent,
@@ -17,39 +18,44 @@ import {
   DialogFooter,
   DialogHeader,
   DialogTitle,
-} from '@/shared/components/ui/dialog';
-import { errorMessage } from '@/shared/lib/errorMessage';
+} from '@/shared/components/ui/dialog'
+import { errorMessage } from '@/shared/lib/errorMessage'
 
 type BackupDialogProps = {
-  open: boolean;
-  onOpenChange: (open: boolean) => void;
-  libraryId: string;
-  t: TFunction;
-};
+  open: boolean
+  onOpenChange: (open: boolean) => void
+  libraryId: string
+  t: TFunction
+}
 
-export function BackupExportDialog({ open, onOpenChange, libraryId, t }: BackupDialogProps) {
+export function BackupExportDialog({
+  open,
+  onOpenChange,
+  libraryId,
+  t,
+}: Readonly<BackupDialogProps>) {
   // Canonical library scope. Documents, runtime graph, knowledge base
   // and edges are always exported together — they describe a single
   // library and splitting them used to confuse operators. The only
   // real-world choice is whether to also bundle the original source
   // files (PDFs / docx / etc.), which can easily dwarf the rest of
   // the archive.
-  const [includeBlobs, setIncludeBlobs] = useState(true);
+  const [includeBlobs, setIncludeBlobs] = useState(true)
   // Optional, portable extras the operator can fold into the archive: the
-  // owning workspace row and the AI configuration (provider/model catalogs,
-  // prices, presets, credentials without secrets, and binding assignments).
-  const [includeWorkspace, setIncludeWorkspace] = useState(false);
-  const [includeAiConfig, setIncludeAiConfig] = useState(false);
+  // owning workspace row and canonical AI configuration tables (provider,
+  // model, and price catalogs; accounts without secrets; and bindings).
+  const [includeWorkspace, setIncludeWorkspace] = useState(false)
+  const [includeAiConfig, setIncludeAiConfig] = useState(false)
 
   const runExport = () => {
-    const kinds: LibrarySnapshotIncludeKind[] = ['library_data'];
-    if (includeBlobs) kinds.push('blobs');
-    if (includeWorkspace) kinds.push('workspace');
-    if (includeAiConfig) kinds.push('ai_config');
-    librarySnapshotApi.downloadExport(libraryId, kinds);
-    toast.success(t('admin.snapshot.exportSuccess'));
-    onOpenChange(false);
-  };
+    const kinds: LibrarySnapshotIncludeKind[] = ['library_data']
+    if (includeBlobs) kinds.push('blobs')
+    if (includeWorkspace) kinds.push('workspace')
+    if (includeAiConfig) kinds.push('ai_config')
+    librarySnapshotApi.downloadExport(libraryId, kinds)
+    toast.success(t('admin.snapshot.exportSuccess'))
+    onOpenChange(false)
+  }
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -76,9 +82,7 @@ export function BackupExportDialog({ open, onOpenChange, libraryId, t }: BackupD
               className="mt-0.5"
             />
             <div className="min-w-0">
-              <div className="text-sm font-semibold">
-                {t('admin.snapshot.includeBlobsLabel')}
-              </div>
+              <div className="text-sm font-semibold">{t('admin.snapshot.includeBlobsLabel')}</div>
               <div className="text-xs text-muted-foreground mt-0.5">
                 {t('admin.snapshot.includeBlobsDesc')}
               </div>
@@ -133,12 +137,12 @@ export function BackupExportDialog({ open, onOpenChange, libraryId, t }: BackupD
         </DialogFooter>
       </DialogContent>
     </Dialog>
-  );
+  )
 }
 
 type BackupImportDialogProps = BackupDialogProps & {
-  onCompleted: () => void;
-};
+  onCompleted: () => void
+}
 
 export function BackupImportDialog({
   open,
@@ -146,43 +150,44 @@ export function BackupImportDialog({
   libraryId,
   t,
   onCompleted,
-}: BackupImportDialogProps) {
-  const [file, setFile] = useState<File | null>(null);
-  const [overwrite, setOverwrite] = useState<LibrarySnapshotOverwriteMode>('reject');
-  const [importing, setImporting] = useState(false);
-  const inputRef = useRef<HTMLInputElement | null>(null);
+}: Readonly<BackupImportDialogProps>) {
+  const [file, setFile] = useState<File | null>(null)
+  const [overwrite, setOverwrite] = useState<LibrarySnapshotOverwriteMode>('reject')
+  const [importing, setImporting] = useState(false)
+  const inputRef = useRef<HTMLInputElement | null>(null)
 
   const runImport = async () => {
-    if (!file) return;
-    setImporting(true);
+    if (!file) return
+    setImporting(true)
     try {
-      const result = await librarySnapshotApi.import(libraryId, file, overwrite);
+      const result = await librarySnapshotApi.import(libraryId, file, overwrite)
       if (result.kind === 'completed') {
-        let totalRows = 0;
+        let totalRows = 0
         for (const rowCount of Object.values(result.report.postgresRowsByTable ?? {})) {
-          if (typeof rowCount === 'number') totalRows += rowCount;
+          if (typeof rowCount === 'number') totalRows += rowCount
         }
-        toast.success(t('admin.snapshot.importSuccess', { count: totalRows }));
+        toast.success(t('admin.snapshot.importSuccess', { count: totalRows }))
       } else {
-        toast.info(t('admin.snapshot.importAccepted'));
-        const operation = await librarySnapshotApi.waitForImport(result.operation.operationId);
+        toast.info(t('admin.snapshot.importAccepted'))
+        const operation = await librarySnapshotApi.waitForImport(result.operation.operationId)
         if (operation.status !== 'ready') {
-          toast.error(t('admin.snapshot.importOperationFailed'));
-          return;
+          toast.error(t('admin.snapshot.importOperationFailed'))
+          return
         }
-        toast.success(t('admin.snapshot.importReady'));
+        toast.success(t('admin.snapshot.importReady'))
       }
-      onCompleted();
-      onOpenChange(false);
+      onCompleted()
+      onOpenChange(false)
     } catch (error: unknown) {
-      const fallback = error instanceof Error && error.message === 'snapshot_import_timeout'
-        ? t('admin.snapshot.importTimeout')
-        : errorMessage(error, t('admin.snapshot.importFailed'));
-      toast.error(fallback);
+      const fallback =
+        error instanceof SnapshotImportTimeoutError
+          ? t('admin.snapshot.importTimeout')
+          : errorMessage(error, t('admin.snapshot.importFailed'))
+      toast.error(fallback)
     } finally {
-      setImporting(false);
+      setImporting(false)
     }
-  };
+  }
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -262,5 +267,5 @@ export function BackupImportDialog({
         </DialogFooter>
       </DialogContent>
     </Dialog>
-  );
+  )
 }

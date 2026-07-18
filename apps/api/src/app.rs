@@ -2,6 +2,7 @@ pub mod bootstrap;
 pub mod config;
 pub mod shutdown;
 pub mod state;
+mod supervisor;
 
 use axum::Router;
 use std::net::SocketAddr;
@@ -19,57 +20,73 @@ use crate::{
 /// # Errors
 /// Returns any configuration, bind, listener, or serve error encountered during startup.
 pub async fn run() -> anyhow::Result<()> {
-    let config = config::Settings::from_env()?;
+    let mut config = config::Settings::from_env()?;
     let deployment_id = crate::observability::resolve_deployment_id(&config.database_url).await;
     crate::observability::init_tracing(deployment_id)?;
     let role = config.service_role_kind().map_err(anyhow::Error::msg)?;
 
-    let state = state::AppState::new(config.clone()).await?;
+    // `run` retains settings for role-specific listeners. Build state through
+    // the in-place path so the retained copy is scrubbed before any clone.
+    let state = state::AppState::new_from_retained_settings(&mut config).await?;
     let graph_backend = state.graph_runtime.backend_name.as_str();
     let shutdown = shutdown::ShutdownSignal::new();
     let signal_listener = spawn_signal_listener(shutdown.clone());
-    let worker_handle = role.runs_ingestion_workers().then(|| {
-        crate::services::ingest::worker::spawn_ingestion_worker(state.clone(), shutdown.subscribe())
-    });
-    let maintenance_handle = crate::services::maintenance::scheduler::spawn_maintenance_scheduler(
+    let mut critical_tasks = Vec::with_capacity(3);
+    if role.runs_ingestion_workers() {
+        critical_tasks.push(supervisor::CriticalTask::new(
+            "ingestion-worker",
+            crate::services::ingest::worker::spawn_ingestion_worker(
+                state.clone(),
+                shutdown.subscribe(),
+            ),
+        ));
+    }
+    if let Some(handle) = crate::services::maintenance::scheduler::spawn_maintenance_scheduler(
         state.clone(),
         shutdown.subscribe(),
-    );
+    ) {
+        critical_tasks.push(supervisor::CriticalTask::new("maintenance-scheduler", handle));
+    }
+    if let Some(handle) = crate::services::webhook::outbox::spawn_webhook_lifecycle_outbox_relay(
+        state.clone(),
+        shutdown.subscribe(),
+    ) {
+        critical_tasks.push(supervisor::CriticalTask::new("webhook-outbox-relay", handle));
+    }
 
-    let run_result = match role {
-        ServiceRole::Startup => {
-            run_startup_authority(
-                &state,
-                &config.bootstrap_settings(),
-                &config.destructive_fresh_bootstrap_settings(),
-            )
-            .await
-        }
-        ServiceRole::Api => run_http_api(&config, &state, graph_backend, shutdown.clone()).await,
-        ServiceRole::Worker => {
-            info!(
-                service = %config.service_name,
-                service_role = %config.service_role,
-                environment = %config.environment,
-                graph_backend,
-                ingestion_max_parallel_jobs_global = config.ingestion_max_parallel_jobs_global,
-                ingestion_max_parallel_jobs_per_workspace = config.ingestion_max_parallel_jobs_per_workspace,
-                ingestion_max_parallel_jobs_per_library = config.ingestion_max_parallel_jobs_per_library,
-                "starting ironrag worker service",
-            );
-            run_probe_http_api(&config, &state, graph_backend, shutdown.clone()).await
+    let role_future = async {
+        match role {
+            ServiceRole::Startup => {
+                run_startup_authority(
+                    &state,
+                    &config.bootstrap_settings(),
+                    &config.destructive_fresh_bootstrap_settings(),
+                )
+                .await
+            }
+            ServiceRole::Api => {
+                run_http_api(&config, &state, graph_backend, shutdown.clone()).await
+            }
+            ServiceRole::Worker => {
+                info!(
+                    service = %config.service_name,
+                    service_role = %config.service_role,
+                    environment = %config.environment,
+                    graph_backend,
+                    ingestion_max_parallel_jobs_global = config.ingestion_max_parallel_jobs_global,
+                    ingestion_max_parallel_jobs_per_workspace = config.ingestion_max_parallel_jobs_per_workspace,
+                    ingestion_max_parallel_jobs_per_library = config.ingestion_max_parallel_jobs_per_library,
+                    "starting ironrag worker service",
+                );
+                run_probe_http_api(&config, &state, graph_backend, shutdown.clone()).await
+            }
         }
     };
+    let run_result =
+        Box::pin(supervisor::supervise(role_future, critical_tasks, shutdown.clone())).await;
 
-    let _ = shutdown.trigger();
     signal_listener.abort();
     let _ = signal_listener.await;
-    if let Some(worker_handle) = worker_handle {
-        let _ = worker_handle.await;
-    }
-    if let Some(maintenance_handle) = maintenance_handle {
-        let _ = maintenance_handle.await;
-    }
     crate::observability::shutdown_tracing().await;
     run_result
 }
@@ -213,7 +230,7 @@ async fn run_startup_bootstraps(
     // Env-keyed account side effects must run on every startup, regardless
     // of whether a bootstrap admin login is configured. Operators who
     // created the admin via the UI still need their
-    // `IRONRAG_<PROVIDER>_API_KEY` values to land as instance-scope
+    // `IRONRAG_AI_PROVIDER_API_KEYS_JSON_B64` entries to land as instance-scope
     // accounts; gating that on `ui_bootstrap_admin` was the bug behind "I
     // added a key and it never appeared in admin → AI".
     state.canonical_services.ai_catalog.ensure_env_ai_accounts(state).await.map_err(|error| {

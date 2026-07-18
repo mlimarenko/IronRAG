@@ -36,7 +36,7 @@ pub const BATCH_SLEEP: Duration = Duration::from_millis(100);
 
 /// Default retention window for `ingest_stage_event` rows. Anything
 /// older than this is no longer load-bearing for ingest debugging.
-pub const DEFAULT_STAGE_EVENT_RETENTION: Duration = Duration::from_secs(90 * 24 * 60 * 60);
+pub const DEFAULT_STAGE_EVENT_RETENTION: Duration = Duration::from_hours(2160);
 
 /// One-shot report for a retention sweep.
 #[derive(Debug, Default, Clone, Copy, Serialize, Deserialize)]

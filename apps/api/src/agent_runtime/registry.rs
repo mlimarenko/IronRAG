@@ -71,8 +71,7 @@ impl RuntimeTaskRegistry {
     }
 
     #[must_use]
-    #[allow(clippy::missing_const_for_fn)]
-    pub fn validate_owner_kind(
+    pub const fn validate_owner_kind(
         &self,
         task_kind: RuntimeTaskKind,
         owner_kind: RuntimeExecutionOwnerKind,

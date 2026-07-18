@@ -1,9 +1,10 @@
 //! LLM turn helpers used by the assistant answer surfaces.
 //!
-//! The in-app UI assistant runs as the same kind of tool-using MCP
-//! client agent an external chat client would run: the model sees the
-//! answer-tool registry, chooses tool calls, receives tool
-//! results, and then writes the final reply.
+//! The in-app UI assistant mirrors the public MCP answer contract with a
+//! deterministic runtime-first entry: the runtime dispatches the canonical
+//! `grounded_answer` call before model tool selection. If that result is
+//! nonterminal, the model sees the answer-tool registry and returned evidence
+//! before choosing any lower-level follow-up tools.
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -12,19 +13,27 @@ use std::{
     time::{Duration, Instant},
 };
 
-use anyhow::Context as _;
 use futures::{StreamExt as _, stream};
 use serde_json::Value;
 use tokio::sync::mpsc::Sender;
 use uuid::Uuid;
 
 use crate::{
+    agent_runtime::tasks::query_answer::{
+        QueryProviderCall, QueryProviderCallAttribution, QueryProviderCallKind,
+    },
     app::state::AppState,
     domains::provider_profiles::ProviderModelSelection,
-    domains::query::{QueryTurnKind, resolve_contextual_grounded_answer_top_k},
-    domains::query_ir::literal_text_is_identifier_shaped,
+    domains::query::{
+        MAX_TOP_K, QueryAnswerCandidate, QueryAnswerDisposition, QueryClarification, QueryTurnKind,
+        resolve_contextual_grounded_answer_top_k,
+    },
+    domains::query_ir::{QueryLanguage, literal_text_is_identifier_shaped},
     domains::{agent_runtime::RuntimeSurfaceKind, ai::AiBindingPurpose},
-    integrations::llm::{ChatMessage, ChatToolCall, ChatToolDef, ToolUseRequest},
+    integrations::{
+        llm::{ChatMessage, ChatToolCall, ChatToolDef, ToolUseRequest, ToolUseResponse},
+        retry::ProviderCallError,
+    },
     interfaces::http::{
         auth::AuthContext,
         mcp::{
@@ -35,23 +44,28 @@ use crate::{
             },
         },
     },
+    services::ai_catalog_service::ResolvedRuntimeBinding,
     services::query::{
         assistant_grounding::AssistantGroundingEvidence,
+        completion_policy::{
+            AnswerCompletionAssessment, AnswerCompletionGapReason, GroundedAnswerCompletionEnvelope,
+        },
         error::QueryServiceError,
+        i18n::grounded_repair_messages,
         llm_context_debug::{
             AgentLoopMetadata, AgentStopReason, LlmIterationDebug, ResponseToolCallDebug,
         },
+        provider_billing::{QueryProviderCallReservation, QueryProviderExecutionContext},
         service::ExternalConversationTurn,
-        text_match::normalized_alnum_token_sequence,
     },
+    shared::text_tokens::backtick_literal_spans,
 };
 
 const RUNTIME_RETRIEVED_CONTEXT_TOOL: &str = "ironrag_retrieved_context";
 const RUNTIME_LITERAL_REVISION_CONTEXT_TOOL: &str = "ironrag_literal_revision_context";
 const GROUNDED_ANSWER_TOOL_NAME: &str = "grounded_answer";
+const RUNTIME_REPAIR_ARGUMENT_FIELD: &str = "_ironragRuntimeRepair";
 const GROUNDED_ANSWER_LIFECYCLE_COMPLETED: &str = "completed";
-const GROUNDED_ANSWER_VERIFICATION_NOT_RUN: &str = "not_run";
-const GROUNDED_ANSWER_VERIFICATION_VERIFIED: &str = "verified";
 const TOOL_MODEL_DEFAULT_CONTENT_CHAR_LIMIT: usize = 3_000;
 const TOOL_MODEL_GROUNDED_ANSWER_CONTENT_CHAR_LIMIT: usize = 12_000;
 const TOOL_MODEL_READ_DOCUMENT_CONTENT_CHAR_LIMIT: usize = 5_000;
@@ -87,39 +101,41 @@ const NO_PROGRESS_ITERATION_LIMIT: usize = 2;
 /// bounds the wait.
 const PER_TOOL_CALL_MAX_WAIT: Duration = Duration::from_secs(35);
 const GROUNDED_ANSWER_TOOL_MAX_WAIT: Duration = Duration::from_secs(90);
-const VERBATIM_USER_FRAGMENT_LIMIT: usize = 6;
-const VERBATIM_USER_FRAGMENT_MIN_CHARS: usize = 4;
-const VERBATIM_USER_FRAGMENT_MAX_CHARS: usize = 400;
-const VERBATIM_USER_FRAGMENT_TOTAL_CHARS: usize = 1_200;
-const HISTORY_PADDED_QUERY_ANCHOR_LIMIT: usize = 24;
-const HISTORY_PADDED_QUERY_MAX_CHARS: usize = 900;
-const HISTORY_PADDED_QUERY_ANCHOR_MAX_CHARS: usize = 180;
-const CONTEXTUAL_SEARCH_QUERY_ANCHOR_LIMIT: usize = 10;
-const CONTEXTUAL_SEARCH_QUERY_MIN_ANCHORS: usize = 2;
-const CONTEXTUAL_SEARCH_QUERY_HISTORY_OVERLAP_SELF_SUFFICIENT: usize = 2;
+// A repair is optional recovery after a completed canonical answer. Bound it
+// below a full canonical execution so a slow second retrieval cannot consume
+// the turn; the completed first result remains available as an explicit
+// partial fallback.
+const GROUNDED_ANSWER_REPAIR_MAX_WAIT: Duration = Duration::from_secs(45);
+const GROUNDED_ANSWER_REPAIR_TOP_K_INCREMENT: usize = 8;
+const GROUNDED_ANSWER_REPAIR_TOP_K_HEADROOM: usize = 1;
+const STRUCTURAL_IDENTIFIER_MIN_CHARS: usize = 4;
+const STRUCTURAL_IDENTIFIER_MAX_CHARS: usize = 400;
+const STRUCTURAL_LITERAL_ANCHOR_MAX_CHARS: usize = 180;
 const VERIFIED_GROUNDED_LITERAL_GUARD_MIN_LITERALS: usize = 4;
-const PRIOR_ASSISTANT_ANSWER_FALLBACK_MIN_ANCHORS: usize = 3;
-const USER_FRAGMENT_QUOTE_PAIRS: [(char, char); 8] = [
-    ('«', '»'),
-    ('“', '”'),
-    ('„', '“'),
-    ('「', '」'),
-    ('『', '』'),
-    ('‹', '›'),
-    ('"', '"'),
-    ('`', '`'),
-];
-const HISTORY_COMPACT_LITERAL_MEMORY_CONTEXT_PREFIX: &str = "ir.context.compact-literal-memory.v1:";
-const HISTORY_PINNED_LITERAL_ANCHORS_CONTEXT_PREFIX: &str = "ir.context.pinned-literal-anchors.v1:";
-const HISTORY_DENSE_LITERAL_PREFIX: &str = "ir.memory.literals.v1:";
-const HISTORY_LITERAL_ANCHOR_PREFIX: &str = "ir.memory.anchors.v1:";
-
 /// Final result of one assistant turn.
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub(crate) enum AgentAnswerProvenance {
+    Composed,
+    CanonicalGroundedAnswerPassthrough,
+}
+
+/// Typed finalizer-owned outcome coupled to an exact canonical
+/// `grounded_answer` passthrough. Composed answers intentionally carry no
+/// child outcome because the parent finalizer owns their disposition.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct AgentCanonicalAnswerOutcome {
+    pub disposition: QueryAnswerDisposition,
+    pub clarification: QueryClarification,
+}
+
 #[derive(Debug, Clone)]
-pub struct AgentTurnResult {
+pub(crate) struct AgentTurnResult {
     pub answer: String,
-    pub provider: ProviderModelSelection,
+    pub answer_provenance: AgentAnswerProvenance,
+    pub canonical_answer_outcome: Option<AgentCanonicalAnswerOutcome>,
     pub usage_json: serde_json::Value,
+    /// One immutable attribution record per actual provider response.
+    pub provider_calls: Vec<QueryProviderCall>,
     pub iterations: usize,
     pub assistant_grounding: AssistantGroundingEvidence,
     pub child_query_execution_ids: Vec<Uuid>,
@@ -132,26 +148,109 @@ pub struct AgentTurnResult {
     pub agent_loop: Option<AgentLoopMetadata>,
 }
 
+fn provider_call_attribution(
+    binding: &ResolvedRuntimeBinding,
+    call_kind: QueryProviderCallKind,
+) -> Result<QueryProviderCallAttribution, QueryServiceError> {
+    QueryProviderCallAttribution::try_new(
+        binding.binding_id,
+        binding.binding_purpose,
+        ProviderModelSelection {
+            provider_kind: binding.provider_kind.clone(),
+            model_name: binding.model_name.clone(),
+        },
+        call_kind,
+    )
+    .map_err(|error| {
+        tracing::error!(
+            binding_id = %binding.binding_id,
+            actual_purpose = binding.binding_purpose.as_str(),
+            expected_purpose = call_kind.binding_purpose().as_str(),
+            call_kind = call_kind.as_str(),
+            "query provider-call attribution purpose mismatch"
+        );
+        QueryServiceError::Internal(anyhow::Error::new(error))
+    })
+}
+
+async fn reserve_attributed_provider_call(
+    state: &AppState,
+    execution_context: QueryProviderExecutionContext,
+    binding: &ResolvedRuntimeBinding,
+    call_kind: QueryProviderCallKind,
+) -> Result<(QueryProviderCallAttribution, QueryProviderCallReservation), QueryServiceError> {
+    // Purpose validation must happen before reservation and before provider
+    // I/O; a misrouted binding is never represented as a billable call.
+    let attribution = provider_call_attribution(binding, call_kind)?;
+    let reservation = QueryProviderCallReservation::reserve(
+        state,
+        execution_context,
+        binding,
+        call_kind.binding_purpose(),
+        call_kind.as_str(),
+    )
+    .await
+    .map_err(|error| {
+        QueryServiceError::Internal(anyhow::anyhow!(
+            "failed to reserve {} provider call: {error}",
+            call_kind.as_str()
+        ))
+    })?;
+    Ok((attribution, reservation))
+}
+
+async fn complete_attributed_provider_call(
+    attribution: &QueryProviderCallAttribution,
+    reservation: &mut QueryProviderCallReservation,
+    usage_json: serde_json::Value,
+) -> Result<QueryProviderCall, QueryServiceError> {
+    let provider_call_id = reservation.provider_call_id();
+    reservation.complete(&usage_json).await.map_err(|error| {
+        QueryServiceError::Internal(anyhow::anyhow!(
+            "failed to persist provider-call usage {provider_call_id}: {error}"
+        ))
+    })?;
+    Ok(attribution.record(provider_call_id, usage_json))
+}
+
+async fn fail_provider_call(reservation: &mut QueryProviderCallReservation) {
+    if let Err(error) = reservation.fail().await {
+        tracing::error!(
+            provider_call_id = %reservation.provider_call_id(),
+            %error,
+            "failed to terminalize query provider-call reservation"
+        );
+    }
+}
+
 /// Agent-loop failure with the partial provider transcript preserved
 /// for the debug panel.
 #[derive(Debug)]
-pub struct AgentTurnFailure {
+pub(crate) struct AgentTurnFailure {
     pub error: QueryServiceError,
+    /// Provider responses completed before the loop failed.
+    pub provider_calls: Vec<QueryProviderCall>,
     pub debug_iterations: Vec<LlmIterationDebug>,
     pub agent_loop: Option<AgentLoopMetadata>,
 }
 
 impl AgentTurnFailure {
     fn empty(error: impl Into<QueryServiceError>) -> Self {
-        Self { error: error.into(), debug_iterations: Vec::new(), agent_loop: None }
+        Self {
+            error: error.into(),
+            provider_calls: Vec::new(),
+            debug_iterations: Vec::new(),
+            agent_loop: None,
+        }
     }
 
     fn with_loop(
         error: impl Into<QueryServiceError>,
+        provider_calls: Vec<QueryProviderCall>,
         debug_iterations: Vec<LlmIterationDebug>,
         agent_loop: AgentLoopMetadata,
     ) -> Self {
-        Self { error: error.into(), debug_iterations, agent_loop: Some(agent_loop) }
+        Self { error: error.into(), provider_calls, debug_iterations, agent_loop: Some(agent_loop) }
     }
 }
 
@@ -169,8 +268,9 @@ impl Error for AgentTurnFailure {
 
 /// Inputs for the UI assistant's MCP-backed tool loop.
 #[derive(Clone)]
-pub struct McpToolAgentTurnInput<'a> {
+pub(crate) struct McpToolAgentTurnInput<'a> {
     pub state: &'a AppState,
+    pub execution_context: QueryProviderExecutionContext,
     pub auth: &'a AuthContext,
     pub library_id: Uuid,
     pub library_ref: &'a str,
@@ -224,9 +324,18 @@ struct ToolExecutionOutcome {
     result_text: Option<String>,
     result_json: Option<Value>,
     grounding_text: Option<String>,
+    /// Exact structured `answerBody` captured before debug/result compaction.
+    /// This is the only text eligible for canonical verbatim passthrough.
+    grounded_answer_body: Option<String>,
+    /// Typed terminal outcome parsed from the unabridged MCP structured
+    /// content. Debug compaction must never be used to reconstruct it.
+    canonical_answer_outcome: Option<AgentCanonicalAnswerOutcome>,
     grounded_answer_ready: bool,
     grounded_answer_completed: bool,
     grounded_answer_needs_follow_up: bool,
+    grounded_answer_repair_reason: Option<GroundedAnswerRepairReason>,
+    grounded_answer_language: QueryLanguage,
+    grounded_answer_clarification_required: bool,
     is_error: bool,
     /// True when this outcome was replayed from a prior successful call's
     /// cached payload (effective-duplicate) rather than produced by a fresh
@@ -241,6 +350,168 @@ struct ToolExecutionOutcome {
     child_runtime_execution_ids: Vec<Uuid>,
 }
 
+#[derive(Debug, PartialEq)]
+struct TerminalGroundedAnswerPassthrough {
+    answer: String,
+    stop_reason: AgentStopReason,
+    canonical_answer_outcome: AgentCanonicalAnswerOutcome,
+}
+
+impl TerminalGroundedAnswerPassthrough {
+    fn final_answer(answer: String, canonical_answer_outcome: AgentCanonicalAnswerOutcome) -> Self {
+        Self { answer, stop_reason: AgentStopReason::FinalAnswer, canonical_answer_outcome }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+enum GroundedAnswerRepairReason {
+    ProcedureIncomplete,
+    TroubleshootingIncomplete,
+    AnswerStructureIncomplete,
+    OrderedInventory { expected: usize, observed: usize },
+    VerificationIncomplete,
+}
+
+#[derive(Debug, Clone, Copy, serde::Deserialize, Eq, PartialEq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+enum RuntimeGroundedRepairKind {
+    ProcedureIncomplete,
+    TroubleshootingIncomplete,
+    AnswerStructureIncomplete,
+    #[serde(rename = "ordered_inventory_incomplete")]
+    OrderedInventory,
+    VerificationIncomplete,
+}
+
+#[derive(Debug, Clone, Copy, serde::Deserialize, Eq, PartialEq, serde::Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RuntimeGroundedRepairMetadata {
+    reason: RuntimeGroundedRepairKind,
+    language: QueryLanguage,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    expected: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    observed: Option<usize>,
+}
+
+impl RuntimeGroundedRepairMetadata {
+    fn from_reason(reason: GroundedAnswerRepairReason, language: QueryLanguage) -> Self {
+        match reason {
+            GroundedAnswerRepairReason::ProcedureIncomplete => Self {
+                reason: RuntimeGroundedRepairKind::ProcedureIncomplete,
+                language,
+                expected: None,
+                observed: None,
+            },
+            GroundedAnswerRepairReason::TroubleshootingIncomplete => Self {
+                reason: RuntimeGroundedRepairKind::TroubleshootingIncomplete,
+                language,
+                expected: None,
+                observed: None,
+            },
+            GroundedAnswerRepairReason::AnswerStructureIncomplete => Self {
+                reason: RuntimeGroundedRepairKind::AnswerStructureIncomplete,
+                language,
+                expected: None,
+                observed: None,
+            },
+            GroundedAnswerRepairReason::OrderedInventory { expected, observed } => Self {
+                reason: RuntimeGroundedRepairKind::OrderedInventory,
+                language,
+                expected: Some(expected),
+                observed: Some(observed),
+            },
+            GroundedAnswerRepairReason::VerificationIncomplete => Self {
+                reason: RuntimeGroundedRepairKind::VerificationIncomplete,
+                language,
+                expected: None,
+                observed: None,
+            },
+        }
+    }
+
+    fn is_consistent(self) -> bool {
+        match self.reason {
+            RuntimeGroundedRepairKind::OrderedInventory => matches!(
+                (self.expected, self.observed),
+                (Some(expected), Some(observed)) if expected > 0 && observed < expected
+            ),
+            RuntimeGroundedRepairKind::ProcedureIncomplete
+            | RuntimeGroundedRepairKind::TroubleshootingIncomplete
+            | RuntimeGroundedRepairKind::AnswerStructureIncomplete
+            | RuntimeGroundedRepairKind::VerificationIncomplete => {
+                self.expected.is_none() && self.observed.is_none()
+            }
+        }
+    }
+}
+
+/// A grounded answer gets at most one deterministic repair probe per parent
+/// turn. Keeping this budget in the runtime (rather than only in the prompt)
+/// prevents chooser/retry loops while guaranteeing that the repair query is
+/// not an effective duplicate of the original probe.
+#[derive(Debug)]
+struct FocusedGroundedFollowUpState {
+    pending: Option<RuntimeGroundedRepairMetadata>,
+    attempted: bool,
+    unresolved: bool,
+    language: QueryLanguage,
+}
+
+impl Default for FocusedGroundedFollowUpState {
+    fn default() -> Self {
+        Self { pending: None, attempted: false, unresolved: false, language: QueryLanguage::Auto }
+    }
+}
+
+impl FocusedGroundedFollowUpState {
+    fn schedule(&mut self, reason: GroundedAnswerRepairReason, language: QueryLanguage) -> bool {
+        if self.attempted || self.pending.is_some() {
+            return false;
+        }
+        self.pending = Some(RuntimeGroundedRepairMetadata::from_reason(reason, language));
+        self.unresolved = true;
+        self.language = language;
+        true
+    }
+
+    fn take_call(&mut self, user_question: &str, grounded_top_k: usize) -> Option<ChatToolCall> {
+        let metadata = self.pending.take()?;
+        self.attempted = true;
+        Some(focused_grounded_answer_follow_up_call(user_question, grounded_top_k, metadata))
+    }
+
+    fn observe_attempt_outcome(&mut self, outcome: &ToolExecutionOutcome) {
+        if !self.attempted || !self.unresolved {
+            return;
+        }
+        if !outcome.is_error
+            && !outcome.is_replay
+            && outcome.grounded_answer_ready
+            && !outcome.grounded_answer_needs_follow_up
+            && outcome.grounded_answer_repair_reason.is_none()
+        {
+            self.unresolved = false;
+        }
+    }
+
+    fn requires_resolution(&self) -> bool {
+        self.unresolved
+    }
+
+    fn is_unresolved_after_attempt(&self) -> bool {
+        self.attempted && self.pending.is_none() && self.unresolved
+    }
+
+    fn was_attempted(&self) -> bool {
+        self.attempted
+    }
+
+    fn language(&self) -> QueryLanguage {
+        self.language
+    }
+}
+
 #[derive(Debug, Default, Clone)]
 struct GroundedAnswerEvidenceLedger {
     entries: Vec<GroundedAnswerEvidenceEntry>,
@@ -253,6 +524,7 @@ struct GroundedAnswerEvidenceEntry {
     execution_id: Option<String>,
     final_answer_ready: bool,
     finalizable: bool,
+    answer_disposition: ironrag_contracts::assistant::AssistantAnswerDisposition,
     verification_state: Option<String>,
     warning_codes: Vec<String>,
     unsupported_literal_spans: BTreeSet<String>,
@@ -369,6 +641,10 @@ impl GroundedAnswerEvidenceLedger {
         self.entries.iter().filter(|entry| entry.can_guard_final_answer())
     }
 
+    fn has_guardable_evidence(&self) -> bool {
+        self.guardable_entries().next().is_some()
+    }
+
     fn answer_guard_text(&self) -> Option<String> {
         let mut lines = Vec::new();
         let mut seen = BTreeSet::new();
@@ -391,6 +667,7 @@ impl GroundedAnswerEvidenceLedger {
 impl GroundedAnswerEvidenceEntry {
     fn from_result(index: usize, result_json: &Value, fallback_text: Option<&str>) -> Option<Self> {
         let structured = result_json.get("structuredContent")?;
+        let completion_envelope = parse_grounded_answer_completion_envelope(structured);
         let answer_body = structured
             .get("answerBody")
             .and_then(Value::as_str)
@@ -420,6 +697,16 @@ impl GroundedAnswerEvidenceEntry {
             "normalizedAssertion",
             GROUNDED_EVIDENCE_LEDGER_SOURCE_LABEL_LIMIT,
         );
+        for field_name in ["documentTitle", "displayValue", "label", "assertion", "predicate"] {
+            push_reference_field_values(
+                &mut source_labels,
+                &mut seen_labels,
+                Some(structured),
+                "/referenceSummary/references",
+                field_name,
+                GROUNDED_EVIDENCE_LEDGER_SOURCE_LABEL_LIMIT,
+            );
+        }
         push_reference_field_values(
             &mut source_labels,
             &mut seen_labels,
@@ -455,17 +742,24 @@ impl GroundedAnswerEvidenceEntry {
                 .get("executionId")
                 .and_then(Value::as_str)
                 .map(ToOwned::to_owned),
-            final_answer_ready: structured
-                .get("finalAnswerReady")
-                .and_then(Value::as_bool)
-                .unwrap_or(false),
-            finalizable: structured.get("finalizable").and_then(Value::as_bool).unwrap_or(false),
+            final_answer_ready: completion_envelope
+                .as_ref()
+                .is_some_and(|envelope| envelope.final_answer_ready),
+            finalizable: completion_envelope.as_ref().is_some_and(|envelope| envelope.finalizable),
+            answer_disposition: completion_envelope.as_ref().map_or(
+                ironrag_contracts::assistant::AssistantAnswerDisposition::NonTerminal,
+                |envelope| envelope.readiness.answer_disposition,
+            ),
             verification_state: execution_detail
                 .and_then(|detail| detail.get("verificationState"))
+                .or_else(|| structured.pointer("/verifier/state"))
                 .and_then(Value::as_str)
                 .map(ToOwned::to_owned),
-            warning_codes: collect_verification_warning_codes(execution_detail),
-            unsupported_literal_spans: collect_unsupported_literal_spans(execution_detail),
+            warning_codes: collect_verification_warning_codes(execution_detail, Some(structured)),
+            unsupported_literal_spans: collect_unsupported_literal_spans(
+                execution_detail,
+                Some(structured),
+            ),
             answer_body,
             answer_excerpt,
             must_preserve_spans,
@@ -503,33 +797,10 @@ impl GroundedAnswerEvidenceEntry {
     }
 
     fn can_guard_final_answer(&self) -> bool {
-        self.final_answer_ready
-            || self.finalizable
-            || self.verification_state.as_deref() == Some(GROUNDED_ANSWER_VERIFICATION_VERIFIED)
-            || self.has_guardable_partial_inventory()
-    }
-
-    fn has_guardable_partial_inventory(&self) -> bool {
-        if self.answer_body.as_deref().map(str::trim).unwrap_or_default().is_empty() {
-            return false;
-        }
-        if self.verification_state.as_deref() == Some("conflicting") {
-            return false;
-        }
-        if self.warning_codes.iter().any(|code| code != "unsupported_literal") {
-            return false;
-        }
-        self.must_preserve_spans
-            .iter()
-            .filter(|span| {
-                let anchor = single_line_text(span);
-                let anchor = anchor.trim();
-                !self.unsupported_literal_spans.contains(anchor)
-                    && is_high_signal_grounded_answer_anchor(anchor)
-            })
-            .take(GROUNDED_EVIDENCE_LEDGER_GUARD_MIN_MISSING_HIGH_SIGNAL_ANCHORS + 1)
-            .count()
-            > GROUNDED_EVIDENCE_LEDGER_GUARD_MIN_MISSING_HIGH_SIGNAL_ANCHORS
+        matches!(
+            self.answer_disposition,
+            ironrag_contracts::assistant::AssistantAnswerDisposition::FactualReady
+        ) && self.answer_body.as_deref().is_some_and(|answer| !answer.trim().is_empty())
     }
 }
 
@@ -543,718 +814,1295 @@ impl GroundedAnswerEvidenceEntry {
 pub(crate) fn answer_surface_tool_defs(
     auth: &AuthContext,
     capabilities: ToolVisibilityCapabilities,
-) -> Vec<ChatToolDef> {
-    tools::visible_tool_names_with_capabilities(auth, McpToolSurface::Answer, capabilities)
+) -> Result<Vec<ChatToolDef>, tools::McpToolContractError> {
+    Ok(tools::visible_tool_contract_with_capabilities(auth, McpToolSurface::Answer, capabilities)?
+        .descriptors
         .into_iter()
-        .filter_map(|name| tools::descriptor_for(&name))
         .map(|descriptor| ChatToolDef {
             name: descriptor.name.to_string(),
             description: descriptor.description.to_string(),
             parameters: descriptor.input_schema,
         })
-        .collect()
+        .collect())
 }
 
-/// Run the web UI assistant as a native tool-using agent over the
-/// answer MCP surface. The model chooses tools, receives real tool
-/// results, can fan out independent calls within one iteration, and
-/// can refine the next query from prior results.
-pub async fn run_mcp_tool_agent_turn(
+/// Run the web UI assistant over the answer MCP surface. Every turn starts
+/// with the canonical `grounded_answer` tool and may execute one deterministic
+/// focused repair. Complete canonical results bypass model synthesis; the
+/// model loop remains only for completed results that cannot be returned
+/// directly under the answer contract.
+pub(crate) async fn run_mcp_tool_agent_turn(
     input: McpToolAgentTurnInput<'_>,
 ) -> Result<AgentTurnResult, AgentTurnFailure> {
+    let context = initialize_mcp_agent_loop(input).await?;
+    let mut state = McpAgentLoopState::new(&context);
+    for iteration in 1..=context.iteration_cap {
+        match run_mcp_agent_iteration(&context, &mut state, iteration)
+            .await
+            .map_err(|failure| *failure)?
+        {
+            AgentIterationControl::Continue => {}
+            AgentIterationControl::Stop(reason) => {
+                state.stopped_reason = reason;
+                break;
+            }
+            AgentIterationControl::Complete(result) => return Ok(*result),
+        }
+    }
+    finish_mcp_agent_loop(&context, state).map_err(|failure| *failure)
+}
+
+struct McpAgentLoopContext<'a> {
+    input: McpToolAgentTurnInput<'a>,
+    binding: ResolvedRuntimeBinding,
+    tool_defs: Vec<ChatToolDef>,
+    allowed_tool_names: BTreeSet<String>,
+    iteration_cap: usize,
+    max_parallel_actions: usize,
+    deadline_started: Instant,
+}
+
+struct McpAgentLoopState {
+    messages: Vec<ChatMessage>,
+    usage_json: Value,
+    provider_calls: Vec<QueryProviderCall>,
+    debug_iterations: Vec<LlmIterationDebug>,
+    total_tool_call_count: usize,
+    successful_tool_call_count: usize,
+    successful_tool_names: BTreeSet<String>,
+    seen_effective_tool_payloads: BTreeMap<String, EffectiveToolPayloadEntry>,
+    assistant_grounding: AssistantGroundingEvidence,
+    child_query_execution_ids: Vec<Uuid>,
+    stopped_reason: AgentStopReason,
+    last_required_tool_refusal_answer: Option<String>,
+    verified_grounded_answer_count: usize,
+    last_verified_grounded_answer: Option<String>,
+    verified_grounded_answer_guard_text: Option<String>,
+    last_completed_grounded_answer: Option<String>,
+    last_verified_partial_grounded_answer: Option<String>,
+    grounded_answer_evidence_ledger: GroundedAnswerEvidenceLedger,
+    focused_grounded_follow_up: FocusedGroundedFollowUpState,
+    incomplete_grounded_answer_needs_follow_up: bool,
+    no_progress_iterations: usize,
+    no_progress_force_final: bool,
+}
+
+impl McpAgentLoopState {
+    fn new(context: &McpAgentLoopContext<'_>) -> Self {
+        let input = &context.input;
+        let mut messages = Vec::with_capacity(
+            input
+                .conversation_history
+                .len()
+                .saturating_add(input.follow_up_context_messages.len())
+                .saturating_add(context.iteration_cap * 3 + 2),
+        );
+        messages
+            .push(ChatMessage::system(super::assistant_prompt::render(input.library_ref, None)));
+        messages.extend(input.conversation_history.iter().cloned());
+        messages.push(ChatMessage::user(input.user_question.to_string()));
+        messages.extend(input.follow_up_context_messages.iter().cloned());
+        Self {
+            messages,
+            usage_json: serde_json::json!({}),
+            provider_calls: Vec::new(),
+            debug_iterations: Vec::new(),
+            total_tool_call_count: 0,
+            successful_tool_call_count: 0,
+            successful_tool_names: BTreeSet::new(),
+            seen_effective_tool_payloads: BTreeMap::new(),
+            assistant_grounding: AssistantGroundingEvidence::default(),
+            child_query_execution_ids: Vec::new(),
+            stopped_reason: AgentStopReason::IterationCap,
+            last_required_tool_refusal_answer: None,
+            verified_grounded_answer_count: 0,
+            last_verified_grounded_answer: None,
+            verified_grounded_answer_guard_text: None,
+            last_completed_grounded_answer: None,
+            last_verified_partial_grounded_answer: None,
+            grounded_answer_evidence_ledger: GroundedAnswerEvidenceLedger::default(),
+            focused_grounded_follow_up: FocusedGroundedFollowUpState::default(),
+            incomplete_grounded_answer_needs_follow_up: false,
+            no_progress_iterations: 0,
+            no_progress_force_final: false,
+        }
+    }
+
+    fn take_result(
+        &mut self,
+        context: &McpAgentLoopContext<'_>,
+        answer: String,
+        answer_provenance: AgentAnswerProvenance,
+        canonical_answer_outcome: Option<AgentCanonicalAnswerOutcome>,
+        stopped_reason: AgentStopReason,
+    ) -> AgentTurnResult {
+        let iterations = self.debug_iterations.len();
+        AgentTurnResult {
+            answer,
+            answer_provenance,
+            canonical_answer_outcome,
+            usage_json: std::mem::replace(&mut self.usage_json, serde_json::json!({})),
+            provider_calls: std::mem::take(&mut self.provider_calls),
+            iterations,
+            assistant_grounding: std::mem::take(&mut self.assistant_grounding),
+            child_query_execution_ids: std::mem::take(&mut self.child_query_execution_ids),
+            debug_iterations: std::mem::take(&mut self.debug_iterations),
+            agent_loop: Some(agent_loop_metadata(
+                context.iteration_cap,
+                context.input.deadline,
+                stopped_reason,
+                self.total_tool_call_count,
+            )),
+        }
+    }
+}
+
+async fn initialize_mcp_agent_loop(
+    input: McpToolAgentTurnInput<'_>,
+) -> Result<McpAgentLoopContext<'_>, AgentTurnFailure> {
     let binding = input
         .state
         .canonical_services
         .ai_catalog
         .resolve_active_runtime_binding(input.state, input.library_id, AiBindingPurpose::Agent)
         .await
-        .map_err(|e| {
-            AgentTurnFailure::empty(anyhow::anyhow!("failed to resolve agent binding: {e}"))
-        })?
-        .ok_or_else(|| {
-            AgentTurnFailure::empty(anyhow::anyhow!(
-                "no active agent binding configured for library {}",
-                input.library_id
-            ))
-        })?;
+        .map_err(AgentTurnFailure::empty)?
+        .ok_or_else(|| missing_agent_binding(input.library_id))?;
+    let agent_vision_available = resolve_agent_vision_available(&input, &binding).await;
+    let tool_defs =
+        answer_surface_tool_defs(input.auth, ToolVisibilityCapabilities { agent_vision_available })
+            .map_err(|error| AgentTurnFailure::empty(anyhow::Error::new(error)))?;
+    if let Some(failure) = validate_agent_tool_definitions(&tool_defs) {
+        return Err(failure);
+    }
+    let allowed_tool_names = tool_defs.iter().map(|tool| tool.name.clone()).collect();
+    Ok(McpAgentLoopContext {
+        iteration_cap: input.iteration_cap.max(1),
+        max_parallel_actions: input.max_parallel_actions.max(1),
+        input,
+        binding,
+        tool_defs,
+        allowed_tool_names,
+        deadline_started: Instant::now(),
+    })
+}
 
-    let provider = ProviderModelSelection {
-        provider_kind: binding.provider_kind.clone(),
-        model_name: binding.model_name.clone(),
-    };
-    // Tool-surface parity with external MCP clients: expose
-    // `view_document_image` exactly when the agent model that runs this
-    // turn is vision-capable, mirroring the MCP `tools/list` capability
-    // gate. Gate on the turn's resolved binding (not "any visible library
-    // has vision") so we never offer the tool to a model that cannot
-    // consume image content.
-    let agent_vision_available = input
+fn missing_agent_binding(library_id: Uuid) -> AgentTurnFailure {
+    AgentTurnFailure::empty(QueryServiceError::BindingNotConfigured {
+        message: format!("no active agent binding configured for library {library_id}"),
+    })
+}
+
+async fn resolve_agent_vision_available(
+    input: &McpToolAgentTurnInput<'_>,
+    binding: &ResolvedRuntimeBinding,
+) -> bool {
+    input
         .state
         .canonical_services
         .ai_catalog
         .get_model_catalog(input.state, binding.model_catalog_id)
         .await
-        .map(|model| model.modality_kind == "multimodal")
-        .unwrap_or(false);
-    let tool_defs =
-        answer_surface_tool_defs(input.auth, ToolVisibilityCapabilities { agent_vision_available });
+        .is_ok_and(|model| model.modality_kind == "multimodal")
+}
+
+fn validate_agent_tool_definitions(tool_defs: &[ChatToolDef]) -> Option<AgentTurnFailure> {
     if tool_defs.is_empty() {
-        return Err(AgentTurnFailure::empty(anyhow::anyhow!(
-            "no MCP answer tools are visible for the current caller"
-        )));
+        return Some(AgentTurnFailure::empty(QueryServiceError::StateConflict {
+            message: "no MCP answer tools are visible for the current caller".to_string(),
+        }));
     }
+    (!tool_defs.iter().any(|tool| tool.name == GROUNDED_ANSWER_TOOL_NAME)).then(|| {
+        AgentTurnFailure::empty(QueryServiceError::StateConflict {
+            message: format!(
+                "required MCP answer tool '{GROUNDED_ANSWER_TOOL_NAME}' is not visible for the current caller"
+            ),
+        })
+    })
+}
 
-    let iteration_cap = input.iteration_cap.max(1);
-    let max_parallel_actions = input.max_parallel_actions.max(1);
-    let deadline_started = Instant::now();
-    let mut messages = Vec::with_capacity(
-        input
-            .conversation_history
-            .len()
-            .saturating_add(input.follow_up_context_messages.len())
-            .saturating_add(iteration_cap * 3 + 2),
+enum AgentIterationControl {
+    Continue,
+    Stop(AgentStopReason),
+    Complete(Box<AgentTurnResult>),
+}
+
+struct AgentIterationPlan {
+    deadline_budget: Duration,
+    initial_grounded_answer_iteration: bool,
+    focused_follow_up_iteration: bool,
+    runtime_enforced_call: Option<ChatToolCall>,
+    force_final_answer: bool,
+    require_tool_call: bool,
+    tools_for_iteration: Vec<ChatToolDef>,
+    request_messages: Vec<ChatMessage>,
+}
+
+struct AgentIterationResponse {
+    response: ToolUseResponse,
+    request_messages: Vec<ChatMessage>,
+    model_call_duration_ms: u64,
+    runtime_enforced_iteration: bool,
+}
+
+async fn run_mcp_agent_iteration(
+    context: &McpAgentLoopContext<'_>,
+    state: &mut McpAgentLoopState,
+    iteration: usize,
+) -> Result<AgentIterationControl, Box<AgentTurnFailure>> {
+    let plan = match prepare_agent_iteration(context, state, iteration) {
+        Ok(plan) => plan,
+        Err(reason) => return Ok(AgentIterationControl::Stop(reason)),
+    };
+    let mut iteration_response =
+        request_agent_iteration(context, state, iteration, &plan).await.map_err(Box::new)?;
+    if enforce_forced_final_response(
+        context,
+        state,
+        iteration,
+        plan.force_final_answer,
+        &mut iteration_response,
+    )
+    .await
+    .map_err(Box::new)?
+    {
+        return Ok(AgentIterationControl::Stop(AgentStopReason::Deadline));
+    }
+    inject_required_grounded_answer_call(
+        context,
+        iteration,
+        &plan,
+        &mut iteration_response.response,
     );
-    messages.push(ChatMessage::system(super::assistant_prompt::render(input.library_ref, None)));
-    messages.extend(input.conversation_history.iter().cloned());
-    messages.push(ChatMessage::user(input.user_question.to_string()));
-    messages.extend(input.follow_up_context_messages.iter().cloned());
-    if let Some(reminder) = latest_user_verbatim_fragment_reminder(input.user_question) {
-        messages.push(ChatMessage::system(reminder));
+    if iteration_response.response.tool_calls.is_empty() {
+        return handle_agent_final_response(context, state, iteration, &plan, iteration_response);
     }
+    handle_agent_tool_response(context, state, iteration, &plan, iteration_response).await
+}
 
-    let mut usage_json = serde_json::json!({});
-    let mut debug_iterations = Vec::new();
-    let mut total_tool_call_count = 0usize;
-    let mut successful_tool_call_count = 0usize;
-    let mut successful_tool_names = BTreeSet::new();
-    let mut seen_effective_tool_payloads = BTreeMap::new();
-    let mut assistant_grounding = AssistantGroundingEvidence::default();
-    let mut child_query_execution_ids = Vec::new();
-    let mut stopped_reason = AgentStopReason::IterationCap;
-    let mut last_required_tool_refusal_answer: Option<String> = None;
-    let mut verified_grounded_answer_count = 0usize;
-    let mut last_verified_grounded_answer: Option<String> = None;
-    let mut verified_grounded_answer_guard_text: Option<String> = None;
-    let mut last_completed_grounded_answer: Option<String> = None;
-    let mut grounded_answer_evidence_ledger = GroundedAnswerEvidenceLedger::default();
-    let mut incomplete_grounded_answer_needs_follow_up = false;
-    // No-progress early-stop: count consecutive tool-running iterations that
-    // produced zero successful *new* tool results. Once it reaches
-    // `NO_PROGRESS_ITERATION_LIMIT` the next iteration is forced into the
-    // existing forced-final machinery instead of burning the rest of the
-    // budget on a stuck model. `no_progress_force_final` carries that decision
-    // into the loop body and marks the stop reason as `NoProgress`.
-    let mut no_progress_iterations = 0usize;
-    let mut no_progress_force_final = false;
-    // There is no hidden post-loop synthesis pass: the model must spend
-    // one of these iterations on a final answer after seeing tool results.
-    // The caller budgets one extra iteration beyond the tool-round cap.
-    for iteration in 1..=iteration_cap {
-        let Some(deadline_budget) = deadline_remaining(deadline_started, input.deadline) else {
-            stopped_reason = AgentStopReason::Deadline;
-            break;
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+enum UnresolvedFocusedFollowUpAction {
+    ReturnSavedFallback,
+    SynthesizeFromEvidence,
+    FailClosed,
+}
+
+fn unresolved_focused_follow_up_action(
+    has_saved_fallback: bool,
+    has_grounded_evidence: bool,
+) -> UnresolvedFocusedFollowUpAction {
+    if has_saved_fallback {
+        UnresolvedFocusedFollowUpAction::ReturnSavedFallback
+    } else if has_grounded_evidence {
+        UnresolvedFocusedFollowUpAction::SynthesizeFromEvidence
+    } else {
+        UnresolvedFocusedFollowUpAction::FailClosed
+    }
+}
+
+fn prepare_agent_iteration(
+    context: &McpAgentLoopContext<'_>,
+    state: &mut McpAgentLoopState,
+    iteration: usize,
+) -> Result<AgentIterationPlan, AgentStopReason> {
+    let Some(deadline_budget) =
+        deadline_remaining(context.deadline_started, context.input.deadline)
+    else {
+        return Err(AgentStopReason::Deadline);
+    };
+    let initial_call = initial_grounded_answer_tool_call(
+        iteration,
+        state.total_tool_call_count,
+        context.input.user_question,
+        context.input.grounded_answer_top_k,
+    );
+    let initial_grounded_answer_iteration = initial_call.is_some();
+    let focused_call = initial_call
+        .is_none()
+        .then(|| {
+            state
+                .focused_grounded_follow_up
+                .take_call(context.input.user_question, context.input.grounded_answer_top_k)
+        })
+        .flatten();
+    let focused_follow_up_iteration = focused_call.is_some();
+    if !focused_follow_up_iteration
+        && state.focused_grounded_follow_up.is_unresolved_after_attempt()
+    {
+        log_unresolved_focused_follow_up(context, iteration);
+        return match unresolved_focused_follow_up_action(
+            failed_focused_follow_up_answer(state).is_some(),
+            state.grounded_answer_evidence_ledger.has_guardable_evidence(),
+        ) {
+            UnresolvedFocusedFollowUpAction::ReturnSavedFallback => Err(AgentStopReason::ToolError),
+            UnresolvedFocusedFollowUpAction::SynthesizeFromEvidence => Ok(AgentIterationPlan {
+                deadline_budget,
+                initial_grounded_answer_iteration,
+                focused_follow_up_iteration,
+                runtime_enforced_call: None,
+                force_final_answer: true,
+                require_tool_call: false,
+                tools_for_iteration: Vec::new(),
+                request_messages: final_answer_request_messages(&state.messages, true),
+            }),
+            UnresolvedFocusedFollowUpAction::FailClosed => Err(AgentStopReason::ToolError),
         };
+    }
+    let runtime_enforced_call = initial_call.or(focused_call);
+    let force_final_answer =
+        should_force_agent_final_answer(context, state, iteration, focused_follow_up_iteration);
+    let require_tool_call = focused_follow_up_iteration
+        || should_require_tool_call_before_final(
+            force_final_answer,
+            &context.tool_defs,
+            &state.successful_tool_names,
+            state.incomplete_grounded_answer_needs_follow_up,
+        );
+    let tools_for_iteration =
+        agent_iteration_tool_defs(context, state, focused_follow_up_iteration, force_final_answer);
+    Ok(AgentIterationPlan {
+        deadline_budget,
+        initial_grounded_answer_iteration,
+        focused_follow_up_iteration,
+        runtime_enforced_call,
+        force_final_answer,
+        require_tool_call,
+        tools_for_iteration,
+        request_messages: final_answer_request_messages(&state.messages, force_final_answer),
+    })
+}
 
-        let force_final_answer = no_progress_force_final
+fn log_unresolved_focused_follow_up(context: &McpAgentLoopContext<'_>, iteration: usize) {
+    tracing::warn!(
+        request_id = context.input.request_id,
+        library_id = %context.input.library_id,
+        iteration,
+        "query.agent_loop.focused_grounded_follow_up_unresolved"
+    );
+}
+
+fn should_force_agent_final_answer(
+    context: &McpAgentLoopContext<'_>,
+    state: &McpAgentLoopState,
+    iteration: usize,
+    focused_follow_up_iteration: bool,
+) -> bool {
+    !focused_follow_up_iteration
+        && (state.no_progress_force_final
             || force_final_answer_iteration(
                 iteration,
-                iteration_cap,
-                total_tool_call_count,
-                successful_tool_call_count,
-                verified_grounded_answer_count,
-                &successful_tool_names,
-                incomplete_grounded_answer_needs_follow_up,
-                deadline_started,
-                input.soft_final_answer_deadline,
-            );
-        let require_tool_call = should_require_tool_call_before_final(
-            force_final_answer,
-            &tool_defs,
-            &successful_tool_names,
-            incomplete_grounded_answer_needs_follow_up,
-        );
-        let tools_for_iteration =
-            tool_defs_for_agent_iteration(&tool_defs, &successful_tool_names, force_final_answer);
-        let mut request_messages = final_answer_request_messages(&messages, force_final_answer);
-        emit_activity(
-            &input.activity_tx,
-            AgentLoopActivityEvent::ModelRequest {
-                iteration,
-                provider_kind: binding.provider_kind.clone(),
-                model_name: binding.model_name.clone(),
-            },
-        );
-        let model_call_started = std::time::Instant::now();
-        let mut response = match tokio::time::timeout(
-            deadline_budget,
-            input.state.llm_gateway.generate_with_tools(ToolUseRequest {
-                provider_kind: binding.provider_kind.clone(),
-                model_name: binding.model_name.clone(),
-                api_key_override: binding.api_key.clone(),
-                base_url_override: binding.provider_base_url.clone(),
-                temperature: binding.temperature,
-                top_p: binding.top_p,
-                max_output_tokens_override: binding.max_output_tokens_override,
-                messages: request_messages.clone(),
-                tools: tools_for_iteration,
-                extra_parameters_json: binding.extra_parameters_json.clone(),
-                require_tool_call,
-            }),
-        )
-        .await
-        {
-            Ok(Ok(response)) => response,
-            Ok(Err(error)) => {
-                tracing::warn!(
-                    provider = %binding.provider_kind,
-                    model = %binding.model_name,
-                    iteration,
-                    max_output_tokens_override = ?binding.max_output_tokens_override,
-                    error = %error,
-                    "MCP-backed assistant agent provider call failed"
-                );
-                return Err(AgentTurnFailure::with_loop(
-                    error.context("MCP-backed assistant agent LLM call failed"),
-                    debug_iterations.clone(),
-                    agent_loop_metadata(
-                        iteration_cap,
-                        input.deadline,
-                        AgentStopReason::ProviderError,
-                        total_tool_call_count,
-                    ),
-                ));
-            }
-            Err(_) => {
-                return Err(AgentTurnFailure::with_loop(
-                    anyhow::anyhow!(
-                        "assistant agent exceeded its turn deadline while waiting for the model"
-                    ),
-                    debug_iterations.clone(),
-                    agent_loop_metadata(
-                        iteration_cap,
-                        input.deadline,
-                        AgentStopReason::Deadline,
-                        total_tool_call_count,
-                    ),
-                ));
-            }
-        };
-        merge_usage_into(&mut usage_json, &response.usage_json);
-        let mut model_call_duration_ms =
-            model_call_started.elapsed().as_millis().try_into().unwrap_or(u64::MAX);
-        if force_final_answer && !response.tool_calls.is_empty() {
-            tracing::warn!(
-                request_id = input.request_id,
-                library_id = %input.library_id,
-                iteration,
-                tool_call_count = response.tool_calls.len(),
-                has_output_text = !response.output_text.trim().is_empty(),
-                "assistant agent provider returned tool calls during forced-final iteration"
-            );
-            if response.output_text.trim().is_empty() {
-                let Some(retry_deadline_remaining) =
-                    deadline_remaining(deadline_started, input.deadline)
-                else {
-                    stopped_reason = AgentStopReason::Deadline;
-                    break;
-                };
-                let retry_messages = final_answer_retry_messages(
-                    &request_messages,
-                    response.reasoning_content.clone(),
-                    &response.tool_calls,
-                );
-                emit_activity(
-                    &input.activity_tx,
-                    AgentLoopActivityEvent::ModelRequest {
-                        iteration,
-                        provider_kind: binding.provider_kind.clone(),
-                        model_name: binding.model_name.clone(),
-                    },
-                );
-                let retry_started = std::time::Instant::now();
-                let retry_response = match tokio::time::timeout(
-                    retry_deadline_remaining,
-                    input.state.llm_gateway.generate_with_tools(ToolUseRequest {
-                        provider_kind: binding.provider_kind.clone(),
-                        model_name: binding.model_name.clone(),
-                        api_key_override: binding.api_key.clone(),
-                        base_url_override: binding.provider_base_url.clone(),
-                        temperature: binding.temperature,
-                        top_p: binding.top_p,
-                        max_output_tokens_override: binding.max_output_tokens_override,
-                        messages: retry_messages.clone(),
-                        tools: Vec::new(),
-                        extra_parameters_json: binding.extra_parameters_json.clone(),
-                        require_tool_call: false,
-                    }),
-                )
-                .await
-                {
-                    Ok(Ok(response)) => response,
-                    Ok(Err(error)) => {
-                        tracing::warn!(
-                            provider = %binding.provider_kind,
-                            model = %binding.model_name,
-                            iteration,
-                            max_output_tokens_override = ?binding.max_output_tokens_override,
-                            error = %error,
-                            "MCP-backed assistant agent forced-final retry failed"
-                        );
-                        return Err(AgentTurnFailure::with_loop(
-                            error.context("MCP-backed assistant agent forced-final retry failed"),
-                            debug_iterations.clone(),
-                            agent_loop_metadata(
-                                iteration_cap,
-                                input.deadline,
-                                AgentStopReason::ProviderError,
-                                total_tool_call_count,
-                            ),
-                        ));
-                    }
-                    Err(_) => {
-                        return Err(AgentTurnFailure::with_loop(
-                            anyhow::anyhow!(
-                                "assistant agent exceeded its turn deadline while waiting for the forced-final retry"
-                            ),
-                            debug_iterations.clone(),
-                            agent_loop_metadata(
-                                iteration_cap,
-                                input.deadline,
-                                AgentStopReason::Deadline,
-                                total_tool_call_count,
-                            ),
-                        ));
-                    }
-                };
-                merge_usage_into(&mut usage_json, &retry_response.usage_json);
-                model_call_duration_ms = model_call_duration_ms.saturating_add(
-                    retry_started.elapsed().as_millis().try_into().unwrap_or(u64::MAX),
-                );
-                request_messages = retry_messages;
-                response = retry_response;
-                if !response.tool_calls.is_empty() {
-                    tracing::warn!(
-                        request_id = input.request_id,
-                        library_id = %input.library_id,
-                        iteration,
-                        tool_call_count = response.tool_calls.len(),
-                        "assistant agent forced-final retry still returned tool calls; discarding them"
-                    );
-                    response.tool_calls.clear();
-                }
-            } else {
-                response.tool_calls.clear();
-            }
-        }
+                context.iteration_cap,
+                state.total_tool_call_count,
+                state.successful_tool_call_count,
+                state.verified_grounded_answer_count,
+                &state.successful_tool_names,
+                state.incomplete_grounded_answer_needs_follow_up,
+                context.deadline_started,
+                context.input.soft_final_answer_deadline,
+            ))
+}
 
-        if should_inject_required_grounded_answer_tool_call(
-            response.tool_calls.is_empty(),
-            require_tool_call,
-            force_final_answer,
-            &tool_defs,
-        ) {
-            tracing::warn!(
-                request_id = input.request_id,
-                library_id = %input.library_id,
-                iteration,
-                provider = %binding.provider_kind,
-                model = %binding.model_name,
-                has_output_text = !response.output_text.trim().is_empty(),
-                "assistant agent omitted a required MCP tool call; executing grounded_answer fallback"
-            );
-            response.tool_calls.push(required_grounded_answer_tool_call(
-                input.user_question,
-                input.grounded_answer_top_k,
+fn agent_iteration_tool_defs(
+    context: &McpAgentLoopContext<'_>,
+    state: &McpAgentLoopState,
+    focused_follow_up_iteration: bool,
+    force_final_answer: bool,
+) -> Vec<ChatToolDef> {
+    if focused_follow_up_iteration {
+        return context
+            .tool_defs
+            .iter()
+            .filter(|tool| tool.name == GROUNDED_ANSWER_TOOL_NAME)
+            .cloned()
+            .collect();
+    }
+    tool_defs_for_agent_iteration(
+        &context.tool_defs,
+        &state.successful_tool_names,
+        force_final_answer,
+    )
+}
+
+async fn request_agent_iteration(
+    context: &McpAgentLoopContext<'_>,
+    state: &mut McpAgentLoopState,
+    iteration: usize,
+    plan: &AgentIterationPlan,
+) -> Result<AgentIterationResponse, AgentTurnFailure> {
+    if let Some(call) = plan.runtime_enforced_call.clone() {
+        log_runtime_enforced_agent_call(context, iteration, plan.initial_grounded_answer_iteration);
+        return Ok(AgentIterationResponse {
+            response: runtime_enforced_tool_response(
+                call,
+                &context.binding.provider_kind,
+                &context.binding.model_name,
+            ),
+            request_messages: plan.request_messages.clone(),
+            model_call_duration_ms: 0,
+            runtime_enforced_iteration: true,
+        });
+    }
+    let (response, duration_ms) = request_agent_model_response(
+        context,
+        state,
+        iteration,
+        plan.deadline_budget,
+        plan.request_messages.clone(),
+        plan.tools_for_iteration.clone(),
+        plan.require_tool_call,
+        AgentModelRequestKind::Iteration,
+    )
+    .await?;
+    Ok(AgentIterationResponse {
+        response,
+        request_messages: plan.request_messages.clone(),
+        model_call_duration_ms: duration_ms,
+        runtime_enforced_iteration: false,
+    })
+}
+
+fn log_runtime_enforced_agent_call(
+    context: &McpAgentLoopContext<'_>,
+    iteration: usize,
+    initial_grounded_answer_iteration: bool,
+) {
+    if initial_grounded_answer_iteration {
+        tracing::debug!(
+            request_id = context.input.request_id,
+            library_id = %context.input.library_id,
+            iteration,
+            "query.agent_loop.runtime_enforced_initial_grounded_answer"
+        );
+        return;
+    }
+    tracing::debug!(
+        request_id = context.input.request_id,
+        library_id = %context.input.library_id,
+        iteration,
+        "query.agent_loop.runtime_enforced_focused_grounded_follow_up"
+    );
+}
+
+#[derive(Clone, Copy)]
+enum AgentModelRequestKind {
+    Iteration,
+    ForcedFinalRetry,
+}
+
+impl AgentModelRequestKind {
+    const fn error_context(self) -> &'static str {
+        match self {
+            Self::Iteration => "MCP-backed assistant agent LLM call failed",
+            Self::ForcedFinalRetry => "MCP-backed assistant agent forced-final retry failed",
+        }
+    }
+}
+
+async fn request_agent_model_response(
+    context: &McpAgentLoopContext<'_>,
+    state: &mut McpAgentLoopState,
+    iteration: usize,
+    deadline_budget: Duration,
+    messages: Vec<ChatMessage>,
+    tools: Vec<ChatToolDef>,
+    require_tool_call: bool,
+    request_kind: AgentModelRequestKind,
+) -> Result<(ToolUseResponse, u64), AgentTurnFailure> {
+    let (attribution, mut reservation) = reserve_attributed_provider_call(
+        context.input.state,
+        context.input.execution_context,
+        &context.binding,
+        QueryProviderCallKind::QueryAgent,
+    )
+    .await
+    .map_err(AgentTurnFailure::empty)?;
+    emit_model_request_activity(context, iteration);
+    let started = Instant::now();
+    let request = ToolUseRequest {
+        provider_kind: context.binding.provider_kind.clone(),
+        model_name: context.binding.model_name.clone(),
+        api_key_override: context.binding.api_key.clone(),
+        base_url_override: context.binding.provider_base_url.clone(),
+        temperature: context.binding.temperature,
+        top_p: context.binding.top_p,
+        max_output_tokens_override: context.binding.max_output_tokens_override,
+        messages,
+        tools,
+        extra_parameters_json: context.binding.extra_parameters_json.clone(),
+        require_tool_call,
+    };
+    let response = match tokio::time::timeout(
+        deadline_budget,
+        context.input.state.llm_gateway.generate_with_tools(request),
+    )
+    .await
+    {
+        Ok(Ok(response)) => response,
+        Ok(Err(error)) => {
+            fail_provider_call(&mut reservation).await;
+            log_agent_provider_error(context, iteration, &error, request_kind);
+            return Err(agent_loop_failure(
+                state,
+                context,
+                error.context(request_kind.error_context()),
+                AgentStopReason::ProviderError,
             ));
         }
-
-        if response.tool_calls.is_empty() {
-            let answer = response.output_text.trim().to_string();
-            emit_activity(
-                &input.activity_tx,
-                AgentLoopActivityEvent::ModelResponse {
-                    iteration,
-                    provider_kind: binding.provider_kind.clone(),
-                    model_name: binding.model_name.clone(),
-                    tool_call_count: 0,
-                    has_final_answer: !answer.is_empty(),
-                },
-            );
-            if answer.is_empty() {
-                return Err(AgentTurnFailure::with_loop(
-                    anyhow::anyhow!("assistant agent returned an empty final answer"),
-                    debug_iterations,
-                    agent_loop_metadata(
-                        iteration_cap,
-                        input.deadline,
-                        AgentStopReason::ProviderError,
-                        total_tool_call_count,
-                    ),
-                ));
-            }
-            debug_iterations.push(LlmIterationDebug {
-                iteration,
-                provider_kind: binding.provider_kind.clone(),
-                model_name: binding.model_name.clone(),
-                request_messages,
-                response_text: Some(answer.clone()),
-                response_tool_calls: Vec::new(),
-                usage: response.usage_json,
-                duration_ms: Some(model_call_duration_ms),
-                child_runtime_execution_ids: Vec::new(),
-                child_query_execution_ids: Vec::new(),
-            });
-            if require_tool_call {
-                if last_required_tool_refusal_answer.is_some() || iteration == iteration_cap {
-                    stopped_reason = final_answer_stop_reason(no_progress_force_final);
-                    let prior_answer_guard = prior_assistant_answer_fallback_candidate(
-                        input.grounded_answer_tool_history,
-                        input.conversation_history,
-                    );
-                    let ledger_guard =
-                        grounded_answer_evidence_ledger.guard_candidate_for_answer(&answer);
-                    let grounded_guard = ledger_guard
-                        .as_deref()
-                        .or_else(|| {
-                            verified_grounded_answer_guard_candidate(
-                                last_verified_grounded_answer.as_deref(),
-                                verified_grounded_answer_guard_text.as_deref(),
-                                verified_grounded_answer_count,
-                                successful_tool_call_count,
-                            )
-                        })
-                        .or_else(|| {
-                            prior_assistant_answer_guard_for_final_answer(
-                                &answer,
-                                prior_answer_guard.as_deref(),
-                            )
-                        });
-                    let answer = finalize_agent_loop_answer(
-                        answer,
-                        input.user_question,
-                        grounded_guard,
-                        input.request_id,
-                        input.library_id,
-                    );
-                    return Ok(AgentTurnResult {
-                        answer,
-                        provider,
-                        usage_json,
-                        iterations: debug_iterations.len(),
-                        assistant_grounding,
-                        child_query_execution_ids,
-                        debug_iterations,
-                        agent_loop: Some(agent_loop_metadata(
-                            iteration_cap,
-                            input.deadline,
-                            stopped_reason,
-                            total_tool_call_count,
-                        )),
-                    });
-                }
-                last_required_tool_refusal_answer = Some(answer.clone());
-                messages.push(ChatMessage::assistant_text(answer));
-                messages.push(ChatMessage::system(tool_requirement_reminder()));
-                continue;
-            }
-            stopped_reason = final_answer_stop_reason(no_progress_force_final);
-            let prior_answer_guard = prior_assistant_answer_fallback_candidate(
-                input.grounded_answer_tool_history,
-                input.conversation_history,
-            );
-            let ledger_guard = grounded_answer_evidence_ledger.guard_candidate_for_answer(&answer);
-            let grounded_guard = ledger_guard
-                .as_deref()
-                .or_else(|| {
-                    verified_grounded_answer_guard_candidate(
-                        last_verified_grounded_answer.as_deref(),
-                        verified_grounded_answer_guard_text.as_deref(),
-                        verified_grounded_answer_count,
-                        successful_tool_call_count,
-                    )
-                })
-                .or_else(|| {
-                    prior_assistant_answer_guard_for_final_answer(
-                        &answer,
-                        prior_answer_guard.as_deref(),
-                    )
-                });
-            let answer = finalize_agent_loop_answer(
-                answer,
-                input.user_question,
-                grounded_guard,
-                input.request_id,
-                input.library_id,
-            );
-            return Ok(AgentTurnResult {
-                answer,
-                provider,
-                usage_json,
-                iterations: debug_iterations.len(),
-                assistant_grounding,
-                child_query_execution_ids,
-                debug_iterations,
-                agent_loop: Some(agent_loop_metadata(
-                    iteration_cap,
-                    input.deadline,
-                    stopped_reason,
-                    total_tool_call_count,
-                )),
-            });
-        }
-
-        let tool_calls = response.tool_calls.clone();
-        emit_activity(
-            &input.activity_tx,
-            AgentLoopActivityEvent::ModelResponse {
-                iteration,
-                provider_kind: binding.provider_kind.clone(),
-                model_name: binding.model_name.clone(),
-                tool_call_count: tool_calls.len(),
-                has_final_answer: false,
-            },
-        );
-        messages.push(ChatMessage {
-            role: "assistant".to_string(),
-            content: (!response.output_text.trim().is_empty())
-                .then(|| response.output_text.trim().to_string()),
-            reasoning_content: response.reasoning_content.clone(),
-            tool_calls: tool_calls.clone(),
-            tool_call_id: None,
-            name: None,
-        });
-
-        let outcomes = execute_tool_calls(
-            input.clone(),
-            iteration,
-            &tool_calls,
-            max_parallel_actions,
-            deadline_started,
-            &mut seen_effective_tool_payloads,
-        )
-        .await;
-        total_tool_call_count = total_tool_call_count.saturating_add(tool_calls.len());
-
-        let mut response_tool_calls = Vec::with_capacity(tool_calls.len());
-        let mut child_runtime_execution_ids = Vec::new();
-        let mut iteration_child_query_execution_ids = Vec::new();
-        let mut iteration_had_incomplete_grounded_answer = false;
-        let mut iteration_had_follow_up_after_incomplete_grounded_answer = false;
-        // A *new* successful tool result resets the no-progress streak; a
-        // replay (effective-duplicate cache hit), a suppressed duplicate, or an
-        // error does not count as progress.
-        let mut iteration_made_progress = false;
-        for (call, outcome) in tool_calls.iter().zip(outcomes.iter()) {
-            child_query_execution_ids.extend(outcome.child_query_execution_ids.iter().copied());
-            iteration_child_query_execution_ids
-                .extend(outcome.child_query_execution_ids.iter().copied());
-            child_runtime_execution_ids.extend(outcome.child_runtime_execution_ids.iter().copied());
-            if !outcome.is_error {
-                successful_tool_call_count = successful_tool_call_count.saturating_add(1);
-                successful_tool_names.insert(call.name.clone());
-                if !outcome.is_replay {
-                    iteration_made_progress = true;
-                }
-                if incomplete_grounded_answer_needs_follow_up
-                    && tool_outcome_satisfies_incomplete_grounded_follow_up(&call.name, outcome)
-                {
-                    iteration_had_follow_up_after_incomplete_grounded_answer = true;
-                }
-                if outcome.grounded_answer_ready {
-                    verified_grounded_answer_count =
-                        verified_grounded_answer_count.saturating_add(1);
-                    last_verified_grounded_answer = remember_verified_grounded_answer(
-                        last_verified_grounded_answer,
-                        &call.name,
-                        &outcome,
-                    );
-                    verified_grounded_answer_guard_text =
-                        remember_verified_grounded_answer_guard_text(
-                            verified_grounded_answer_guard_text,
-                            &call.name,
-                            &outcome,
-                        );
-                }
-                if outcome.grounded_answer_completed {
-                    last_completed_grounded_answer = remember_completed_grounded_answer(
-                        last_completed_grounded_answer,
-                        &call.name,
-                        &outcome,
-                    );
-                }
-                if outcome.grounded_answer_needs_follow_up {
-                    iteration_had_incomplete_grounded_answer = true;
-                }
-                grounded_answer_evidence_ledger.remember(&call.name, outcome);
-                if let Some(grounding_text) = &outcome.grounding_text {
-                    push_tool_grounding_fragment(
-                        &mut assistant_grounding,
-                        &call.name,
-                        grounding_text,
-                    );
-                }
-            }
-            response_tool_calls.push(ResponseToolCallDebug {
-                id: call.id.clone(),
-                name: call.name.clone(),
-                arguments_json: outcome
-                    .arguments_json
-                    .clone()
-                    .unwrap_or_else(|| call.arguments_json.clone()),
-                requested_arguments_json: outcome.requested_arguments_json.clone(),
-                result_text: outcome.result_text.clone(),
-                result_json: outcome.result_json.clone(),
-                is_error: outcome.is_error,
-                duration_ms: Some(outcome.duration_ms),
-            });
-            messages.push(ChatMessage::tool_result(
-                call.id.clone(),
-                call.name.clone(),
-                outcome.message_content.clone(),
+        Err(_) => {
+            return Err(agent_loop_failure(
+                state,
+                context,
+                QueryServiceError::DeadlineExceeded,
+                AgentStopReason::Deadline,
             ));
         }
-        if let Some(ledger_message) = grounded_answer_evidence_ledger.system_message() {
-            messages.push(ChatMessage::system(ledger_message));
-        }
-        if let Some(reminder) = latest_user_verbatim_fragment_reminder(input.user_question) {
-            messages.push(ChatMessage::system(reminder));
-        }
+    };
+    let provider_call = complete_attributed_provider_call(
+        &attribution,
+        &mut reservation,
+        response.usage_json.clone(),
+    )
+    .await
+    .map_err(|error| agent_loop_failure(state, context, error, AgentStopReason::ProviderError))?;
+    state.provider_calls.push(provider_call);
+    merge_usage_into(&mut state.usage_json, &response.usage_json);
+    let duration_ms = started.elapsed().as_millis().try_into().unwrap_or(u64::MAX);
+    Ok((response, duration_ms))
+}
 
-        debug_iterations.push(LlmIterationDebug {
+fn log_agent_provider_error(
+    context: &McpAgentLoopContext<'_>,
+    iteration: usize,
+    error: &anyhow::Error,
+    request_kind: AgentModelRequestKind,
+) {
+    match request_kind {
+        AgentModelRequestKind::Iteration => tracing::warn!(
+            provider = %context.binding.provider_kind,
+            model = %context.binding.model_name,
             iteration,
-            provider_kind: binding.provider_kind.clone(),
-            model_name: binding.model_name.clone(),
-            request_messages,
-            response_text: (!response.output_text.trim().is_empty())
-                .then(|| response.output_text.trim().to_string()),
-            response_tool_calls,
-            usage: response.usage_json,
-            duration_ms: Some(model_call_duration_ms),
-            child_runtime_execution_ids,
-            child_query_execution_ids: iteration_child_query_execution_ids,
-        });
-
-        let next_incomplete_grounded_answer_needs_follow_up =
-            next_incomplete_grounded_answer_follow_up_required(
-                incomplete_grounded_answer_needs_follow_up,
-                iteration_had_incomplete_grounded_answer,
-                iteration_had_follow_up_after_incomplete_grounded_answer,
-            );
-        if next_incomplete_grounded_answer_needs_follow_up
-            != incomplete_grounded_answer_needs_follow_up
-        {
-            tracing::debug!(
-                request_id = input.request_id,
-                library_id = %input.library_id,
-                iteration,
-                previous = incomplete_grounded_answer_needs_follow_up,
-                iteration_had_incomplete_grounded_answer,
-                iteration_had_follow_up_after_incomplete_grounded_answer,
-                next = next_incomplete_grounded_answer_needs_follow_up,
-                "query.agent_loop.grounded_answer_follow_up_state"
-            );
-        }
-        incomplete_grounded_answer_needs_follow_up =
-            next_incomplete_grounded_answer_needs_follow_up;
-
-        let force_final_for_no_progress;
-        (no_progress_iterations, force_final_for_no_progress) =
-            next_no_progress_state(no_progress_iterations, iteration_made_progress);
-        if force_final_for_no_progress {
-            tracing::warn!(
-                request_id = input.request_id,
-                library_id = %input.library_id,
-                iteration,
-                no_progress_iterations,
-                "query.agent_loop.no_progress_forced_final"
-            );
-            no_progress_force_final = true;
-        }
+            max_output_tokens_override = ?context.binding.max_output_tokens_override,
+            error = %error,
+            "MCP-backed assistant agent provider call failed"
+        ),
+        AgentModelRequestKind::ForcedFinalRetry => tracing::warn!(
+            provider = %context.binding.provider_kind,
+            model = %context.binding.model_name,
+            iteration,
+            max_output_tokens_override = ?context.binding.max_output_tokens_override,
+            error = %error,
+            "MCP-backed assistant agent forced-final retry failed"
+        ),
     }
+}
 
-    if matches!(stopped_reason, AgentStopReason::IterationCap)
-        && successful_tool_call_count == 0
-        && total_tool_call_count > 0
-    {
-        stopped_reason = AgentStopReason::ToolError;
+fn emit_model_request_activity(context: &McpAgentLoopContext<'_>, iteration: usize) {
+    emit_activity(
+        &context.input.activity_tx,
+        AgentLoopActivityEvent::ModelRequest {
+            iteration,
+            provider_kind: context.binding.provider_kind.clone(),
+            model_name: context.binding.model_name.clone(),
+        },
+    );
+}
+
+fn agent_loop_failure(
+    state: &McpAgentLoopState,
+    context: &McpAgentLoopContext<'_>,
+    error: impl Into<QueryServiceError>,
+    stop_reason: AgentStopReason,
+) -> AgentTurnFailure {
+    AgentTurnFailure::with_loop(
+        error,
+        state.provider_calls.clone(),
+        state.debug_iterations.clone(),
+        agent_loop_metadata(
+            context.iteration_cap,
+            context.input.deadline,
+            stop_reason,
+            state.total_tool_call_count,
+        ),
+    )
+}
+
+async fn enforce_forced_final_response(
+    context: &McpAgentLoopContext<'_>,
+    state: &mut McpAgentLoopState,
+    iteration: usize,
+    force_final_answer: bool,
+    iteration_response: &mut AgentIterationResponse,
+) -> Result<bool, AgentTurnFailure> {
+    if !force_final_answer || iteration_response.response.tool_calls.is_empty() {
+        return Ok(false);
     }
-
-    if matches!(stopped_reason, AgentStopReason::IterationCap)
-        && let Some(answer) = verified_grounded_answer_fallback_candidate(
-            last_verified_grounded_answer.as_deref(),
-            verified_grounded_answer_count,
-            successful_tool_call_count,
-        )
-    {
-        let answer = ensure_user_fragments_visible(answer.to_string(), input.user_question);
-        return Ok(AgentTurnResult {
-            answer,
-            provider,
-            usage_json,
-            iterations: debug_iterations.len(),
-            assistant_grounding,
-            child_query_execution_ids,
-            debug_iterations,
-            agent_loop: Some(agent_loop_metadata(
-                iteration_cap,
-                input.deadline,
-                AgentStopReason::IterationCap,
-                total_tool_call_count,
-            )),
-        });
+    log_forced_final_tool_calls(context, iteration, &iteration_response.response);
+    if !iteration_response.response.output_text.trim().is_empty() {
+        iteration_response.response.tool_calls.clear();
+        return Ok(false);
     }
+    let Some(deadline_budget) =
+        deadline_remaining(context.deadline_started, context.input.deadline)
+    else {
+        return Ok(true);
+    };
+    let retry_messages = final_answer_retry_messages(
+        &iteration_response.request_messages,
+        iteration_response.response.reasoning_content.clone(),
+        &iteration_response.response.tool_calls,
+    );
+    let (retry_response, retry_duration_ms) = request_agent_model_response(
+        context,
+        state,
+        iteration,
+        deadline_budget,
+        retry_messages.clone(),
+        Vec::new(),
+        false,
+        AgentModelRequestKind::ForcedFinalRetry,
+    )
+    .await?;
+    iteration_response.request_messages = retry_messages;
+    iteration_response.model_call_duration_ms =
+        iteration_response.model_call_duration_ms.saturating_add(retry_duration_ms);
+    iteration_response.response = retry_response;
+    discard_forced_final_retry_tool_calls(context, iteration, &mut iteration_response.response);
+    Ok(false)
+}
 
-    if should_return_completed_grounded_answer_on_iteration_cap(
-        stopped_reason,
-        successful_tool_call_count,
-        last_completed_grounded_answer.as_deref(),
+fn log_forced_final_tool_calls(
+    context: &McpAgentLoopContext<'_>,
+    iteration: usize,
+    response: &ToolUseResponse,
+) {
+    tracing::warn!(
+        request_id = context.input.request_id,
+        library_id = %context.input.library_id,
+        iteration,
+        tool_call_count = response.tool_calls.len(),
+        has_output_text = !response.output_text.trim().is_empty(),
+        "assistant agent provider returned tool calls during forced-final iteration"
+    );
+}
+
+fn discard_forced_final_retry_tool_calls(
+    context: &McpAgentLoopContext<'_>,
+    iteration: usize,
+    response: &mut ToolUseResponse,
+) {
+    if response.tool_calls.is_empty() {
+        return;
+    }
+    tracing::warn!(
+        request_id = context.input.request_id,
+        library_id = %context.input.library_id,
+        iteration,
+        tool_call_count = response.tool_calls.len(),
+        "assistant agent forced-final retry still returned tool calls; discarding them"
+    );
+    response.tool_calls.clear();
+}
+
+fn inject_required_grounded_answer_call(
+    context: &McpAgentLoopContext<'_>,
+    iteration: usize,
+    plan: &AgentIterationPlan,
+    response: &mut ToolUseResponse,
+) {
+    if !should_inject_required_grounded_answer_tool_call(
+        response.tool_calls.is_empty(),
+        plan.require_tool_call,
+        plan.force_final_answer,
+        &context.tool_defs,
     ) {
-        let answer = last_completed_grounded_answer.unwrap_or_default();
-        let answer = ensure_user_fragments_visible(answer, input.user_question);
-        return Ok(AgentTurnResult {
-            answer,
-            provider,
-            usage_json,
-            iterations: debug_iterations.len(),
-            assistant_grounding,
-            child_query_execution_ids,
-            debug_iterations,
-            agent_loop: Some(agent_loop_metadata(
-                iteration_cap,
-                input.deadline,
-                AgentStopReason::IterationCap,
-                total_tool_call_count,
-            )),
-        });
+        return;
     }
+    tracing::warn!(
+        request_id = context.input.request_id,
+        library_id = %context.input.library_id,
+        iteration,
+        provider = %context.binding.provider_kind,
+        model = %context.binding.model_name,
+        has_output_text = !response.output_text.trim().is_empty(),
+        "assistant agent omitted a required MCP tool call; executing grounded_answer fallback"
+    );
+    response.tool_calls.push(required_grounded_answer_tool_call(
+        context.input.user_question,
+        context.input.grounded_answer_top_k,
+    ));
+}
 
-    if matches!(stopped_reason, AgentStopReason::IterationCap)
-        && successful_tool_call_count > 0
-        && successful_tool_names.iter().any(|name| tool_result_can_ground_final_answer(name))
-        && let Some(answer) = prior_assistant_answer_fallback_candidate(
-            input.grounded_answer_tool_history,
-            input.conversation_history,
-        )
+fn handle_agent_final_response(
+    context: &McpAgentLoopContext<'_>,
+    state: &mut McpAgentLoopState,
+    iteration: usize,
+    plan: &AgentIterationPlan,
+    iteration_response: AgentIterationResponse,
+) -> Result<AgentIterationControl, Box<AgentTurnFailure>> {
+    let answer = iteration_response.response.output_text.trim().to_string();
+    emit_model_response_activity(context, iteration, 0, !answer.is_empty());
+    if answer.is_empty() {
+        return Err(Box::new(agent_loop_failure(
+            state,
+            context,
+            ProviderCallError::protocol("assistant agent returned an empty final answer"),
+            AgentStopReason::ProviderError,
+        )));
+    }
+    state.debug_iterations.push(LlmIterationDebug {
+        iteration,
+        provider_kind: context.binding.provider_kind.clone(),
+        model_name: context.binding.model_name.clone(),
+        request_messages: iteration_response.request_messages,
+        response_text: Some(answer.clone()),
+        response_tool_calls: Vec::new(),
+        usage: iteration_response.response.usage_json,
+        duration_ms: Some(iteration_response.model_call_duration_ms),
+        child_runtime_execution_ids: Vec::new(),
+        child_query_execution_ids: Vec::new(),
+    });
+    if plan.require_tool_call
+        && state.last_required_tool_refusal_answer.is_none()
+        && iteration < context.iteration_cap
     {
-        let answer = ensure_user_fragments_visible(answer, input.user_question);
-        return Ok(AgentTurnResult {
-            answer,
-            provider,
-            usage_json,
-            iterations: debug_iterations.len(),
-            assistant_grounding,
-            child_query_execution_ids,
-            debug_iterations,
-            agent_loop: Some(agent_loop_metadata(
-                iteration_cap,
-                input.deadline,
-                AgentStopReason::IterationCap,
-                total_tool_call_count,
-            )),
-        });
+        state.last_required_tool_refusal_answer = Some(answer.clone());
+        state.messages.push(ChatMessage::assistant_text(answer));
+        state.messages.push(ChatMessage::system(tool_requirement_reminder()));
+        return Ok(AgentIterationControl::Continue);
     }
+    let stop_reason = final_answer_stop_reason(state.no_progress_force_final);
+    let answer = finalize_composed_agent_answer(context, state, answer);
+    let answer = mark_unresolved_repair_synthesis(&state.focused_grounded_follow_up, answer);
+    Ok(AgentIterationControl::Complete(Box::new(state.take_result(
+        context,
+        answer,
+        AgentAnswerProvenance::Composed,
+        None,
+        stop_reason,
+    ))))
+}
 
-    let mut message = match stopped_reason {
+fn emit_model_response_activity(
+    context: &McpAgentLoopContext<'_>,
+    iteration: usize,
+    tool_call_count: usize,
+    has_final_answer: bool,
+) {
+    emit_activity(
+        &context.input.activity_tx,
+        AgentLoopActivityEvent::ModelResponse {
+            iteration,
+            provider_kind: context.binding.provider_kind.clone(),
+            model_name: context.binding.model_name.clone(),
+            tool_call_count,
+            has_final_answer,
+        },
+    );
+}
+
+fn mark_unresolved_repair_synthesis(
+    focused_follow_up: &FocusedGroundedFollowUpState,
+    answer: String,
+) -> String {
+    if focused_follow_up.is_unresolved_after_attempt() {
+        explicitly_mark_unverified_completed_grounded_answer(&answer, focused_follow_up.language())
+    } else {
+        answer
+    }
+}
+
+fn finalize_composed_agent_answer(
+    context: &McpAgentLoopContext<'_>,
+    state: &McpAgentLoopState,
+    answer: String,
+) -> String {
+    let ledger_guard = state.grounded_answer_evidence_ledger.guard_candidate_for_answer(&answer);
+    let grounded_guard = ledger_guard.as_deref().or_else(|| {
+        verified_grounded_answer_guard_candidate(
+            state.last_verified_grounded_answer.as_deref(),
+            state.verified_grounded_answer_guard_text.as_deref(),
+            state.verified_grounded_answer_count,
+            state.successful_tool_call_count,
+        )
+    });
+    finalize_agent_loop_answer(
+        answer,
+        context.input.user_question,
+        grounded_guard,
+        context.input.request_id,
+        context.input.library_id,
+    )
+}
+
+async fn handle_agent_tool_response(
+    context: &McpAgentLoopContext<'_>,
+    state: &mut McpAgentLoopState,
+    iteration: usize,
+    plan: &AgentIterationPlan,
+    iteration_response: AgentIterationResponse,
+) -> Result<AgentIterationControl, Box<AgentTurnFailure>> {
+    let tool_calls = iteration_response.response.tool_calls.clone();
+    if !iteration_response.runtime_enforced_iteration {
+        emit_model_response_activity(context, iteration, tool_calls.len(), false);
+    }
+    push_agent_tool_request_message(state, &iteration_response.response, &tool_calls);
+    let outcomes = execute_tool_calls(
+        context.input.clone(),
+        iteration,
+        &tool_calls,
+        context.max_parallel_actions,
+        context.deadline_started,
+        plan.focused_follow_up_iteration,
+        &context.allowed_tool_names,
+        &mut state.seen_effective_tool_payloads,
+    )
+    .await;
+    state.total_tool_call_count = state.total_tool_call_count.saturating_add(tool_calls.len());
+    let observed = observe_agent_tool_outcomes(
+        context,
+        state,
+        iteration,
+        plan.focused_follow_up_iteration,
+        &tool_calls,
+        &outcomes,
+    );
+    let canonical_passthrough = canonical_passthrough_candidate(
+        plan.focused_follow_up_iteration,
+        &tool_calls,
+        &outcomes,
+        context.input.user_question,
+    );
+    push_grounded_evidence_ledger_message(state);
+    state.debug_iterations.push(LlmIterationDebug {
+        iteration,
+        provider_kind: context.binding.provider_kind.clone(),
+        model_name: context.binding.model_name.clone(),
+        request_messages: iteration_response.request_messages,
+        response_text: (!iteration_response.response.output_text.trim().is_empty())
+            .then(|| iteration_response.response.output_text.trim().to_string()),
+        response_tool_calls: observed.response_tool_calls,
+        usage: iteration_response.response.usage_json,
+        duration_ms: Some(iteration_response.model_call_duration_ms),
+        child_runtime_execution_ids: observed.child_runtime_execution_ids,
+        child_query_execution_ids: observed.child_query_execution_ids,
+    });
+    if runtime_initial_grounded_answer_failed(
+        plan.initial_grounded_answer_iteration,
+        &tool_calls,
+        &outcomes,
+        state.focused_grounded_follow_up.requires_resolution(),
+    ) {
+        log_runtime_initial_grounded_answer_failure(context, iteration);
+        return Ok(AgentIterationControl::Stop(AgentStopReason::ToolError));
+    }
+    if let Some(passthrough) = canonical_passthrough {
+        return Ok(complete_canonical_passthrough(context, state, iteration, passthrough));
+    }
+    update_focused_follow_up_requirement(
+        context,
+        state,
+        iteration,
+        plan.focused_follow_up_iteration,
+    );
+    update_agent_no_progress(context, state, iteration, observed.iteration_made_progress);
+    Ok(AgentIterationControl::Continue)
+}
+
+fn push_agent_tool_request_message(
+    state: &mut McpAgentLoopState,
+    response: &ToolUseResponse,
+    tool_calls: &[ChatToolCall],
+) {
+    state.messages.push(ChatMessage {
+        role: "assistant".to_string(),
+        content: (!response.output_text.trim().is_empty())
+            .then(|| response.output_text.trim().to_string()),
+        reasoning_content: response.reasoning_content.clone(),
+        tool_calls: tool_calls.to_vec(),
+        tool_call_id: None,
+        name: None,
+    });
+}
+
+struct ObservedAgentToolOutcomes {
+    response_tool_calls: Vec<ResponseToolCallDebug>,
+    child_runtime_execution_ids: Vec<Uuid>,
+    child_query_execution_ids: Vec<Uuid>,
+    iteration_made_progress: bool,
+}
+
+fn observe_agent_tool_outcomes(
+    context: &McpAgentLoopContext<'_>,
+    state: &mut McpAgentLoopState,
+    iteration: usize,
+    focused_follow_up_iteration: bool,
+    tool_calls: &[ChatToolCall],
+    outcomes: &[ToolExecutionOutcome],
+) -> ObservedAgentToolOutcomes {
+    let mut observed = ObservedAgentToolOutcomes {
+        response_tool_calls: Vec::with_capacity(tool_calls.len()),
+        child_runtime_execution_ids: Vec::new(),
+        child_query_execution_ids: Vec::new(),
+        iteration_made_progress: false,
+    };
+    for (call, outcome) in tool_calls.iter().zip(outcomes) {
+        observe_agent_tool_outcome(
+            context,
+            state,
+            iteration,
+            focused_follow_up_iteration,
+            call,
+            outcome,
+            &mut observed,
+        );
+    }
+    observed
+}
+
+fn observe_agent_tool_outcome(
+    context: &McpAgentLoopContext<'_>,
+    state: &mut McpAgentLoopState,
+    iteration: usize,
+    focused_follow_up_iteration: bool,
+    call: &ChatToolCall,
+    outcome: &ToolExecutionOutcome,
+    observed: &mut ObservedAgentToolOutcomes,
+) {
+    observe_focused_follow_up_outcome(
+        context,
+        state,
+        iteration,
+        focused_follow_up_iteration,
+        call,
+        outcome,
+    );
+    state.child_query_execution_ids.extend(outcome.child_query_execution_ids.iter().copied());
+    observed.child_query_execution_ids.extend(outcome.child_query_execution_ids.iter().copied());
+    observed
+        .child_runtime_execution_ids
+        .extend(outcome.child_runtime_execution_ids.iter().copied());
+    if !outcome.is_error {
+        observe_successful_agent_tool_outcome(state, call, outcome, observed);
+    }
+    observed.response_tool_calls.push(ResponseToolCallDebug {
+        id: call.id.clone(),
+        name: call.name.clone(),
+        arguments_json: outcome
+            .arguments_json
+            .clone()
+            .unwrap_or_else(|| call.arguments_json.clone()),
+        requested_arguments_json: outcome.requested_arguments_json.clone(),
+        result_text: outcome.result_text.clone(),
+        result_json: outcome.result_json.clone(),
+        is_error: outcome.is_error,
+        duration_ms: Some(outcome.duration_ms),
+    });
+    state.messages.push(ChatMessage::tool_result(
+        call.id.clone(),
+        call.name.clone(),
+        outcome.message_content.clone(),
+    ));
+}
+
+fn observe_focused_follow_up_outcome(
+    context: &McpAgentLoopContext<'_>,
+    state: &mut McpAgentLoopState,
+    iteration: usize,
+    focused_follow_up_iteration: bool,
+    call: &ChatToolCall,
+    outcome: &ToolExecutionOutcome,
+) {
+    if !focused_follow_up_iteration || call.name != GROUNDED_ANSWER_TOOL_NAME {
+        return;
+    }
+    state.focused_grounded_follow_up.observe_attempt_outcome(outcome);
+    tracing::info!(
+        request_id = context.input.request_id,
+        library_id = %context.input.library_id,
+        iteration,
+        duration_ms = outcome.duration_ms,
+        succeeded = !outcome.is_error && outcome.grounded_answer_ready,
+        unresolved = state.focused_grounded_follow_up.requires_resolution(),
+        "query.agent_loop.focused_grounded_follow_up_outcome"
+    );
+}
+
+fn observe_successful_agent_tool_outcome(
+    state: &mut McpAgentLoopState,
+    call: &ChatToolCall,
+    outcome: &ToolExecutionOutcome,
+    observed: &mut ObservedAgentToolOutcomes,
+) {
+    state.successful_tool_call_count = state.successful_tool_call_count.saturating_add(1);
+    state.successful_tool_names.insert(call.name.clone());
+    observed.iteration_made_progress |= !outcome.is_replay;
+    remember_grounded_answer_outcome(state, call, outcome);
+    schedule_grounded_answer_repair(state, outcome);
+    state.grounded_answer_evidence_ledger.remember(&call.name, outcome);
+    if let Some(grounding_text) = &outcome.grounding_text {
+        push_tool_grounding_fragment(&mut state.assistant_grounding, &call.name, grounding_text);
+    }
+}
+
+fn remember_grounded_answer_outcome(
+    state: &mut McpAgentLoopState,
+    call: &ChatToolCall,
+    outcome: &ToolExecutionOutcome,
+) {
+    if outcome.grounded_answer_ready {
+        state.verified_grounded_answer_count =
+            state.verified_grounded_answer_count.saturating_add(1);
+        state.last_verified_grounded_answer = remember_verified_grounded_answer(
+            state.last_verified_grounded_answer.take(),
+            &call.name,
+            outcome,
+        );
+        state.verified_grounded_answer_guard_text = remember_verified_grounded_answer_guard_text(
+            state.verified_grounded_answer_guard_text.take(),
+            &call.name,
+            outcome,
+        );
+    }
+    if !outcome.grounded_answer_completed {
+        return;
+    }
+    state.last_completed_grounded_answer = remember_completed_grounded_answer(
+        state.last_completed_grounded_answer.take(),
+        &call.name,
+        outcome,
+    );
+    state.last_verified_partial_grounded_answer = remember_verified_partial_grounded_answer(
+        state.last_verified_partial_grounded_answer.take(),
+        &call.name,
+        outcome,
+    );
+}
+
+fn schedule_grounded_answer_repair(state: &mut McpAgentLoopState, outcome: &ToolExecutionOutcome) {
+    if outcome.grounded_answer_clarification_required {
+        return;
+    }
+    if let Some(reason) = outcome.grounded_answer_repair_reason {
+        state.focused_grounded_follow_up.schedule(reason, outcome.grounded_answer_language);
+    }
+}
+
+fn canonical_passthrough_candidate(
+    focused_follow_up_iteration: bool,
+    tool_calls: &[ChatToolCall],
+    outcomes: &[ToolExecutionOutcome],
+    user_question: &str,
+) -> Option<TerminalGroundedAnswerPassthrough> {
+    terminal_grounded_answer_nonfactual_candidate(tool_calls, outcomes, user_question)
+        .or_else(|| {
+            focused_grounded_answer_passthrough_candidate(
+                focused_follow_up_iteration,
+                tool_calls,
+                outcomes,
+            )
+        })
+        .or_else(|| {
+            canonical_grounded_answer_passthrough_candidate(tool_calls, outcomes, user_question)
+        })
+}
+
+fn push_grounded_evidence_ledger_message(state: &mut McpAgentLoopState) {
+    if let Some(message) = state.grounded_answer_evidence_ledger.system_message() {
+        state.messages.push(ChatMessage::system(message));
+    }
+}
+
+fn log_runtime_initial_grounded_answer_failure(
+    context: &McpAgentLoopContext<'_>,
+    iteration: usize,
+) {
+    tracing::warn!(
+        request_id = context.input.request_id,
+        library_id = %context.input.library_id,
+        iteration,
+        "query.agent_loop.runtime_initial_grounded_answer_failed"
+    );
+}
+
+fn complete_canonical_passthrough(
+    context: &McpAgentLoopContext<'_>,
+    state: &mut McpAgentLoopState,
+    iteration: usize,
+    passthrough: TerminalGroundedAnswerPassthrough,
+) -> AgentIterationControl {
+    let TerminalGroundedAnswerPassthrough { answer, stop_reason, canonical_answer_outcome } =
+        passthrough;
+    tracing::info!(
+        request_id = context.input.request_id,
+        library_id = %context.input.library_id,
+        iteration,
+        answer_chars = answer.chars().count(),
+        "query.agent_loop.canonical_grounded_answer_passthrough"
+    );
+    AgentIterationControl::Complete(Box::new(state.take_result(
+        context,
+        answer,
+        AgentAnswerProvenance::CanonicalGroundedAnswerPassthrough,
+        Some(canonical_answer_outcome),
+        stop_reason,
+    )))
+}
+
+fn update_focused_follow_up_requirement(
+    context: &McpAgentLoopContext<'_>,
+    state: &mut McpAgentLoopState,
+    iteration: usize,
+    focused_follow_up_iteration: bool,
+) {
+    let next = state.focused_grounded_follow_up.requires_resolution();
+    if next != state.incomplete_grounded_answer_needs_follow_up {
+        tracing::debug!(
+            request_id = context.input.request_id,
+            library_id = %context.input.library_id,
+            iteration,
+            previous = state.incomplete_grounded_answer_needs_follow_up,
+            focused_follow_up_iteration,
+            next,
+            "query.agent_loop.grounded_answer_follow_up_state"
+        );
+    }
+    state.incomplete_grounded_answer_needs_follow_up = next;
+}
+
+fn update_agent_no_progress(
+    context: &McpAgentLoopContext<'_>,
+    state: &mut McpAgentLoopState,
+    iteration: usize,
+    iteration_made_progress: bool,
+) {
+    let force_final;
+    (state.no_progress_iterations, force_final) =
+        next_no_progress_state(state.no_progress_iterations, iteration_made_progress);
+    if !force_final {
+        return;
+    }
+    tracing::warn!(
+        request_id = context.input.request_id,
+        library_id = %context.input.library_id,
+        iteration,
+        no_progress_iterations = state.no_progress_iterations,
+        "query.agent_loop.no_progress_forced_final"
+    );
+    state.no_progress_force_final = true;
+}
+
+fn finish_mcp_agent_loop(
+    context: &McpAgentLoopContext<'_>,
+    mut state: McpAgentLoopState,
+) -> Result<AgentTurnResult, Box<AgentTurnFailure>> {
+    normalize_agent_loop_stop_reason(&mut state);
+    if failed_focused_follow_up_answer(&state).is_some() {
+        let answer = mark_failed_follow_up_answer(&state);
+        return Ok(state.take_result(
+            context,
+            answer,
+            AgentAnswerProvenance::Composed,
+            None,
+            AgentStopReason::ToolError,
+        ));
+    }
+    if let Some(answer) = iteration_cap_grounded_answer(&state) {
+        return Ok(state.take_result(
+            context,
+            answer,
+            AgentAnswerProvenance::Composed,
+            None,
+            AgentStopReason::IterationCap,
+        ));
+    }
+    Err(Box::new(terminal_agent_loop_failure(context, state)))
+}
+
+fn normalize_agent_loop_stop_reason(state: &mut McpAgentLoopState) {
+    if matches!(state.stopped_reason, AgentStopReason::IterationCap)
+        && state.successful_tool_call_count == 0
+        && state.total_tool_call_count > 0
+    {
+        state.stopped_reason = AgentStopReason::ToolError;
+    }
+}
+
+fn failed_focused_follow_up_answer(state: &McpAgentLoopState) -> Option<&str> {
+    let failed_follow_up = state.incomplete_grounded_answer_needs_follow_up
+        && state.focused_grounded_follow_up.is_unresolved_after_attempt();
+    let verified_partial = failed_follow_up
+        .then_some(state.last_verified_partial_grounded_answer.as_deref())
+        .flatten()
+        .filter(|answer| !answer.trim().is_empty());
+    verified_partial.or_else(|| {
+        completed_grounded_answer_after_failed_focused_follow_up(
+            state.incomplete_grounded_answer_needs_follow_up,
+            state.focused_grounded_follow_up.was_attempted(),
+            state.focused_grounded_follow_up.is_unresolved_after_attempt(),
+            state.last_completed_grounded_answer.as_deref(),
+        )
+    })
+}
+
+fn mark_failed_follow_up_answer(state: &McpAgentLoopState) -> String {
+    if let Some(answer) = state
+        .last_verified_partial_grounded_answer
+        .as_deref()
+        .filter(|answer| !answer.trim().is_empty())
+    {
+        return explicitly_mark_partial_grounded_answer(
+            answer,
+            state.focused_grounded_follow_up.language(),
+        );
+    }
+    let answer = state.last_completed_grounded_answer.as_deref().unwrap_or_default();
+    explicitly_mark_unverified_completed_grounded_answer(
+        answer,
+        state.focused_grounded_follow_up.language(),
+    )
+}
+
+fn iteration_cap_grounded_answer(state: &McpAgentLoopState) -> Option<String> {
+    current_turn_grounded_answer_on_iteration_cap(
+        state.stopped_reason,
+        state.incomplete_grounded_answer_needs_follow_up,
+        state.focused_grounded_follow_up.was_attempted(),
+        state.successful_tool_call_count,
+        state.verified_grounded_answer_count,
+        state.last_verified_grounded_answer.as_deref(),
+        state.last_completed_grounded_answer.as_deref(),
+    )
+    .map(ToOwned::to_owned)
+}
+
+fn terminal_agent_loop_failure(
+    context: &McpAgentLoopContext<'_>,
+    state: McpAgentLoopState,
+) -> AgentTurnFailure {
+    let mut message = agent_loop_stop_message(state.stopped_reason).to_string();
+    if state.successful_tool_call_count == 0 && state.total_tool_call_count > 0 {
+        message.push_str("; no successful MCP tool result was received");
+    }
+    let error = match state.stopped_reason {
+        AgentStopReason::Deadline => QueryServiceError::DeadlineExceeded,
+        AgentStopReason::ProviderError => QueryServiceError::ProviderUnavailable { message },
+        _ => QueryServiceError::Internal(anyhow::anyhow!(message)),
+    };
+    AgentTurnFailure::with_loop(
+        error,
+        state.provider_calls,
+        state.debug_iterations,
+        agent_loop_metadata(
+            context.iteration_cap,
+            context.input.deadline,
+            state.stopped_reason,
+            state.total_tool_call_count,
+        ),
+    )
+}
+
+fn agent_loop_stop_message(reason: AgentStopReason) -> &'static str {
+    match reason {
         AgentStopReason::Deadline => {
             "assistant agent exceeded its turn deadline before producing a final answer"
         }
@@ -1268,15 +2116,6 @@ pub async fn run_mcp_tool_agent_turn(
         AgentStopReason::ToolError => "assistant agent stopped after a tool error",
         AgentStopReason::ProviderError => "assistant agent stopped after a provider error",
     }
-    .to_string();
-    if successful_tool_call_count == 0 && total_tool_call_count > 0 {
-        message.push_str("; no successful MCP tool result was received");
-    }
-    Err(AgentTurnFailure::with_loop(
-        anyhow::anyhow!(message),
-        debug_iterations,
-        agent_loop_metadata(iteration_cap, input.deadline, stopped_reason, total_tool_call_count),
-    ))
 }
 
 /// Advance the no-progress streak counter after one tool-running iteration.
@@ -1387,12 +2226,69 @@ fn required_grounded_answer_tool_call(user_question: &str, grounded_top_k: usize
         name: GROUNDED_ANSWER_TOOL_NAME.to_string(),
         arguments_json: serde_json::json!({
             "query": user_question,
-            "topK": grounded_top_k.max(1),
+            "topK": initial_grounded_answer_top_k(grounded_top_k),
+            "responseProfile": "compact",
+            "maxReferences": crate::services::mcp::agent_policy::AGENT_COMPACT_REFERENCE_LIMIT,
         })
         .to_string(),
     }
 }
 
+fn initial_grounded_answer_top_k(grounded_top_k: usize) -> usize {
+    let repair_ceiling = MAX_TOP_K.saturating_sub(GROUNDED_ANSWER_REPAIR_TOP_K_HEADROOM).max(1);
+    grounded_top_k.max(1).min(repair_ceiling)
+}
+
+fn initial_grounded_answer_tool_call(
+    iteration: usize,
+    total_tool_call_count: usize,
+    user_question: &str,
+    grounded_top_k: usize,
+) -> Option<ChatToolCall> {
+    (iteration == 1 && total_tool_call_count == 0)
+        .then(|| required_grounded_answer_tool_call(user_question, grounded_top_k))
+}
+
+fn runtime_enforced_tool_response(
+    call: ChatToolCall,
+    provider_kind: &str,
+    model_name: &str,
+) -> ToolUseResponse {
+    ToolUseResponse {
+        provider_kind: provider_kind.to_string(),
+        model_name: model_name.to_string(),
+        output_text: String::new(),
+        tool_calls: vec![call],
+        finish_reason: Some("runtime_enforced_tool_call".to_string()),
+        usage_json: serde_json::json!({ "runtimeEnforced": true }),
+        reasoning_content: None,
+    }
+}
+
+fn focused_grounded_answer_follow_up_call(
+    user_question: &str,
+    grounded_top_k: usize,
+    metadata: RuntimeGroundedRepairMetadata,
+) -> ChatToolCall {
+    ChatToolCall {
+        id: format!("call_{GROUNDED_ANSWER_TOOL_NAME}_focused_follow_up"),
+        name: GROUNDED_ANSWER_TOOL_NAME.to_string(),
+        arguments_json: serde_json::json!({
+            "query": user_question,
+            "topK": focused_grounded_answer_repair_top_k(grounded_top_k),
+            "responseProfile": "compact",
+            "maxReferences": crate::services::mcp::agent_policy::AGENT_COMPACT_REFERENCE_LIMIT,
+            (RUNTIME_REPAIR_ARGUMENT_FIELD): metadata,
+        })
+        .to_string(),
+    }
+}
+
+fn focused_grounded_answer_repair_top_k(grounded_top_k: usize) -> usize {
+    grounded_top_k.max(1).saturating_add(GROUNDED_ANSWER_REPAIR_TOP_K_INCREMENT).min(MAX_TOP_K)
+}
+
+#[cfg(test)]
 fn next_incomplete_grounded_answer_follow_up_required(
     previous_required: bool,
     iteration_had_incomplete_grounded_answer: bool,
@@ -1402,18 +2298,7 @@ fn next_incomplete_grounded_answer_follow_up_required(
         || (previous_required && !iteration_had_follow_up_after_incomplete_grounded_answer)
 }
 
-fn tool_outcome_satisfies_incomplete_grounded_follow_up(
-    tool_name: &str,
-    outcome: &ToolExecutionOutcome,
-) -> bool {
-    tool_result_satisfies_incomplete_grounded_follow_up(
-        tool_name,
-        outcome.is_error,
-        outcome.grounded_answer_ready,
-        outcome.grounding_text.as_deref(),
-    )
-}
-
+#[cfg(test)]
 fn tool_result_satisfies_incomplete_grounded_follow_up(
     tool_name: &str,
     is_error: bool,
@@ -1516,59 +2401,6 @@ fn final_answer_retry_reminder() -> String {
     "The previous response requested another tool, but this is the final answer step and tools are unavailable. Do not request tools. Produce the answer from the existing tool results now.".to_string()
 }
 
-fn latest_user_verbatim_fragment_reminder(user_question: &str) -> Option<String> {
-    let fragments = extract_verbatim_user_fragments(user_question);
-    if fragments.is_empty() {
-        return None;
-    }
-
-    let mut reminder = String::from(
-        "Latest-user verbatim fragments that may identify a user-visible value, label, code, quoted phrase, requested output slot, or diagnostic message. These fragments come from the user; use them only to identify what the user asked about, not as evidence for external facts. If the final answer explains one of these items, keep the exact fragment visible before explaining it instead of replacing it with a paraphrase. If a fragment names requested answer slots, keep those slot labels visible when you cover them.",
-    );
-    for (index, fragment) in fragments.iter().enumerate() {
-        reminder.push_str("\n\nFragment ");
-        reminder.push_str(&(index + 1).to_string());
-        reminder.push_str(":\n```text\n");
-        reminder.push_str(fragment);
-        reminder.push_str("\n```");
-    }
-    Some(reminder)
-}
-
-fn extract_verbatim_user_fragments(user_question: &str) -> Vec<String> {
-    let mut fragments = extract_quoted_verbatim_user_fragments(user_question);
-    extend_delimited_user_fragments(user_question, &mut fragments);
-    extend_identifier_user_fragments(user_question, &mut fragments);
-    fragments
-}
-
-fn extract_quoted_verbatim_user_fragments(user_question: &str) -> Vec<String> {
-    let mut fragments = Vec::new();
-    for (open, close) in USER_FRAGMENT_QUOTE_PAIRS {
-        extract_quoted_user_fragments(user_question, open, close, &mut fragments);
-        if fragments.len() >= VERBATIM_USER_FRAGMENT_LIMIT {
-            break;
-        }
-    }
-    fragments
-}
-
-fn ensure_user_fragments_visible(answer: String, user_question: &str) -> String {
-    let missing = extract_required_visible_user_fragments(user_question)
-        .into_iter()
-        .filter(|fragment| !fragment.is_visible_in(&answer))
-        .map(|fragment| fragment.text)
-        .collect::<Vec<_>>();
-    if missing.is_empty() {
-        return answer;
-    }
-
-    let mut prefixed = missing.join("\n");
-    prefixed.push_str("\n\n");
-    prefixed.push_str(answer.trim_start());
-    prefixed
-}
-
 fn finalize_agent_loop_answer(
     answer: String,
     user_question: &str,
@@ -1576,31 +2408,166 @@ fn finalize_agent_loop_answer(
     request_id: &str,
     library_id: Uuid,
 ) -> String {
+    let answer = prefer_verified_grounded_answer_on_unverified_procedure_rewrite(
+        answer,
+        verified_grounded_answer,
+        request_id,
+        library_id,
+    );
     let answer = prefer_verified_grounded_answer_on_ordered_source_loss(
         answer,
         verified_grounded_answer,
         request_id,
         library_id,
     );
-    let answer = prefer_verified_grounded_answer_on_literal_drift(
+    prefer_verified_grounded_answer_on_literal_drift(
         answer,
         user_question,
         verified_grounded_answer,
         request_id,
         library_id,
-    );
-    ensure_user_fragments_visible(answer, user_question)
+    )
 }
 
-fn verified_grounded_answer_fallback_candidate<'a>(
-    last_verified_grounded_answer: Option<&'a str>,
+fn verified_grounded_answer_fallback_candidate(
+    last_verified_grounded_answer: Option<&str>,
     verified_grounded_answer_count: usize,
     successful_tool_call_count: usize,
-) -> Option<&'a str> {
+) -> Option<&str> {
     if verified_grounded_answer_count == 1 && successful_tool_call_count == 1 {
         return last_verified_grounded_answer;
     }
     None
+}
+
+fn terminal_grounded_answer_nonfactual_candidate(
+    tool_calls: &[ChatToolCall],
+    outcomes: &[ToolExecutionOutcome],
+    user_question: &str,
+) -> Option<TerminalGroundedAnswerPassthrough> {
+    let ([call], [outcome]) = (tool_calls, outcomes) else {
+        return None;
+    };
+    if call.name != GROUNDED_ANSWER_TOOL_NAME
+        || outcome.is_error
+        || outcome.is_replay
+        || !outcome.grounded_answer_completed
+        || !grounded_answer_outcome_is_terminal_nonfactual(outcome)
+        || !grounded_answer_executed_query_matches_user_question(outcome, user_question)
+    {
+        return None;
+    }
+    let answer =
+        outcome.grounded_answer_body.as_ref().filter(|answer| !answer.trim().is_empty())?.clone();
+    let canonical_answer_outcome = outcome.canonical_answer_outcome.clone()?;
+    Some(TerminalGroundedAnswerPassthrough::final_answer(answer, canonical_answer_outcome))
+}
+
+fn grounded_answer_outcome_is_terminal_nonfactual(outcome: &ToolExecutionOutcome) -> bool {
+    outcome.canonical_answer_outcome.as_ref().is_some_and(|typed| {
+        matches!(
+            typed.disposition,
+            QueryAnswerDisposition::SafeFallback | QueryAnswerDisposition::Clarification
+        )
+    })
+}
+
+fn canonical_grounded_answer_passthrough_candidate(
+    tool_calls: &[ChatToolCall],
+    outcomes: &[ToolExecutionOutcome],
+    user_question: &str,
+) -> Option<TerminalGroundedAnswerPassthrough> {
+    let ([call], [outcome]) = (tool_calls, outcomes) else {
+        return None;
+    };
+    if call.name != GROUNDED_ANSWER_TOOL_NAME
+        || outcome.is_error
+        || outcome.is_replay
+        || !outcome.grounded_answer_ready
+        || !outcome.grounded_answer_completed
+        || outcome.grounded_answer_needs_follow_up
+        || outcome.grounded_answer_repair_reason.is_some()
+        || !grounded_answer_executed_query_matches_user_question(outcome, user_question)
+    {
+        return None;
+    }
+    let answer =
+        outcome.grounded_answer_body.as_ref().filter(|answer| !answer.trim().is_empty())?.clone();
+    let canonical_answer_outcome = outcome
+        .canonical_answer_outcome
+        .as_ref()
+        .filter(|typed| matches!(typed.disposition, QueryAnswerDisposition::FactualReady))?
+        .clone();
+    Some(TerminalGroundedAnswerPassthrough::final_answer(answer, canonical_answer_outcome))
+}
+
+fn focused_grounded_answer_passthrough_candidate(
+    focused_grounded_follow_up: bool,
+    tool_calls: &[ChatToolCall],
+    outcomes: &[ToolExecutionOutcome],
+) -> Option<TerminalGroundedAnswerPassthrough> {
+    if !focused_grounded_follow_up {
+        return None;
+    }
+    let ([call], [outcome]) = (tool_calls, outcomes) else {
+        return None;
+    };
+    if call.name != GROUNDED_ANSWER_TOOL_NAME
+        || outcome.is_error
+        || outcome.is_replay
+        || !outcome.grounded_answer_ready
+        || !outcome.grounded_answer_completed
+        || outcome.grounded_answer_needs_follow_up
+        || outcome.grounded_answer_repair_reason.is_some()
+    {
+        return None;
+    }
+    let answer =
+        outcome.grounded_answer_body.as_ref().filter(|answer| !answer.trim().is_empty())?.clone();
+    let canonical_answer_outcome = outcome
+        .canonical_answer_outcome
+        .as_ref()
+        .filter(|typed| matches!(typed.disposition, QueryAnswerDisposition::FactualReady))?
+        .clone();
+    Some(TerminalGroundedAnswerPassthrough::final_answer(answer, canonical_answer_outcome))
+}
+
+fn runtime_initial_grounded_answer_failed(
+    initial_grounded_answer_iteration: bool,
+    tool_calls: &[ChatToolCall],
+    outcomes: &[ToolExecutionOutcome],
+    focused_follow_up_scheduled: bool,
+) -> bool {
+    if !initial_grounded_answer_iteration || focused_follow_up_scheduled {
+        return false;
+    }
+    let ([call], [outcome]) = (tool_calls, outcomes) else {
+        return true;
+    };
+    call.name != GROUNDED_ANSWER_TOOL_NAME || outcome.is_error || !outcome.grounded_answer_completed
+}
+
+fn grounded_answer_executed_query_matches_user_question(
+    outcome: &ToolExecutionOutcome,
+    user_question: &str,
+) -> bool {
+    let Some(arguments_json) = outcome.arguments_json.as_deref() else {
+        return false;
+    };
+    let Ok(arguments) = serde_json::from_str::<Value>(arguments_json) else {
+        return false;
+    };
+    let Some(executed_query) = arguments.get("query").and_then(Value::as_str) else {
+        return false;
+    };
+
+    let canonical_user_question = canonical_passthrough_question(user_question);
+    !canonical_user_question.is_empty()
+        && canonical_passthrough_question(executed_query) == canonical_user_question
+}
+
+fn canonical_passthrough_question(value: &str) -> String {
+    value.replace("\r\n", "\n").replace('\r', "\n").trim().to_string()
 }
 
 fn verified_grounded_answer_guard_candidate<'a>(
@@ -1614,89 +2581,9 @@ fn verified_grounded_answer_guard_candidate<'a>(
         verified_grounded_answer_count,
         successful_tool_call_count,
     )
-    .or_else(|| {
+    .or({
         if verified_grounded_answer_count > 1 { verified_grounded_answer_guard_text } else { None }
     })
-}
-
-fn prior_assistant_answer_fallback_candidate(
-    grounded_answer_tool_history: &[ExternalConversationTurn],
-    conversation_history: &[ChatMessage],
-) -> Option<String> {
-    let grounded_candidates = grounded_answer_tool_history
-        .iter()
-        .rev()
-        .filter(|turn| matches!(turn.turn_kind, QueryTurnKind::Assistant))
-        .filter_map(|turn| normalize_prior_assistant_answer_fallback(&turn.content_text));
-    let chat_candidates = conversation_history
-        .iter()
-        .rev()
-        .filter(|message| message.role == "assistant" || message.role == "system")
-        .filter_map(|message| message.content.as_deref())
-        .filter_map(normalize_prior_assistant_answer_fallback);
-
-    grounded_candidates
-        .chain(chat_candidates)
-        .max_by(|left, right| {
-            left.anchor_count
-                .cmp(&right.anchor_count)
-                .then_with(|| left.answer.chars().count().cmp(&right.answer.chars().count()))
-        })
-        .map(|candidate| candidate.answer)
-}
-
-#[derive(Debug, Clone)]
-struct PriorAssistantAnswerFallbackCandidate {
-    answer: String,
-    anchor_count: usize,
-}
-
-fn normalize_prior_assistant_answer_fallback(
-    value: &str,
-) -> Option<PriorAssistantAnswerFallbackCandidate> {
-    let answer = strip_compact_literal_memory_line(value);
-    let trimmed = answer.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
-    let anchors = verified_grounded_answer_surface_anchor_set(trimmed);
-    (anchors.len() >= PRIOR_ASSISTANT_ANSWER_FALLBACK_MIN_ANCHORS).then(|| {
-        PriorAssistantAnswerFallbackCandidate {
-            answer: trimmed.to_string(),
-            anchor_count: anchors.len(),
-        }
-    })
-}
-
-fn strip_compact_literal_memory_line(value: &str) -> String {
-    let mut trimmed = value.trim_start();
-    loop {
-        let Some((first, rest)) = trimmed.split_once('\n') else {
-            return trimmed.to_string();
-        };
-        let first = first.trim_start();
-        if first.starts_with(HISTORY_COMPACT_LITERAL_MEMORY_CONTEXT_PREFIX)
-            || first.starts_with(HISTORY_PINNED_LITERAL_ANCHORS_CONTEXT_PREFIX)
-            || (first.starts_with(HISTORY_DENSE_LITERAL_PREFIX) && first.contains('`'))
-            || (first.starts_with(HISTORY_LITERAL_ANCHOR_PREFIX) && first.contains('`'))
-        {
-            trimmed = rest.trim_start();
-            continue;
-        }
-        return trimmed.to_string();
-    }
-}
-
-fn prior_assistant_answer_guard_for_final_answer<'a>(
-    answer: &str,
-    prior_answer: Option<&'a str>,
-) -> Option<&'a str> {
-    let prior_answer = prior_answer?;
-    let answer_anchor_count = verified_grounded_answer_surface_anchor_set(answer).len();
-    if answer_anchor_count >= PRIOR_ASSISTANT_ANSWER_FALLBACK_MIN_ANCHORS {
-        return None;
-    }
-    Some(prior_answer)
 }
 
 fn prefer_verified_grounded_answer_on_ordered_source_loss(
@@ -1710,10 +2597,13 @@ fn prefer_verified_grounded_answer_on_ordered_source_loss(
     else {
         return answer;
     };
-    if !answer_has_ordered_source_markers(verified_grounded_answer) {
+    let grounded_marker_count = ordered_source_marker_count(verified_grounded_answer);
+    if grounded_marker_count < 2 {
         return answer;
     }
-    if answer_has_ordered_source_markers(&answer) {
+    if ordered_source_marker_count(&answer) >= grounded_marker_count
+        || answer_ordered_item_count(&answer) >= grounded_marker_count
+    {
         return answer;
     }
     tracing::debug!(
@@ -1724,18 +2614,47 @@ fn prefer_verified_grounded_answer_on_ordered_source_loss(
     verified_grounded_answer.to_string()
 }
 
-fn answer_has_ordered_source_markers(answer: &str) -> bool {
-    let mut marker_count = 0usize;
-    for line in answer.lines() {
-        let trimmed = line.trim_start();
-        if trimmed.starts_with("source=`") || trimmed.contains(" source=`") {
-            marker_count = marker_count.saturating_add(1);
-            if marker_count >= 2 {
-                return true;
-            }
-        }
+fn ordered_source_marker_count(answer: &str) -> usize {
+    answer
+        .lines()
+        .filter(|line| {
+            let trimmed = line.trim_start();
+            trimmed.starts_with("source=`") || trimmed.contains(" source=`")
+        })
+        .count()
+}
+
+fn prefer_verified_grounded_answer_on_unverified_procedure_rewrite(
+    answer: String,
+    verified_grounded_answer: Option<&str>,
+    request_id: &str,
+    library_id: Uuid,
+) -> String {
+    let Some(verified_grounded_answer) =
+        verified_grounded_answer.map(str::trim).filter(|value| !value.is_empty())
+    else {
+        return answer;
+    };
+    if !answer_rewrites_unverified_procedure(&answer, verified_grounded_answer) {
+        return answer;
     }
-    false
+    tracing::debug!(
+        request_id,
+        library_id = %library_id,
+        "query.agent_loop.verified_grounded_procedure_rewrite_guard"
+    );
+    verified_grounded_answer.to_string()
+}
+
+fn answer_rewrites_unverified_procedure(answer: &str, grounded: &str) -> bool {
+    if canonical_passthrough_question(answer) == canonical_passthrough_question(grounded) {
+        return false;
+    }
+
+    let grounded_step_count = answer_ordered_item_count(grounded);
+    grounded_step_count >= 2
+        && ordered_source_marker_count(grounded) < 2
+        && answer_ordered_item_count(answer) != grounded_step_count
 }
 
 fn prefer_verified_grounded_answer_on_literal_drift(
@@ -1802,7 +2721,9 @@ fn prefer_verified_grounded_answer_on_surface_anchor_loss(
     let high_signal_missing_count = grounded_anchors
         .iter()
         .filter(|anchor| is_high_signal_grounded_answer_anchor(anchor))
-        .filter(|anchor| !answer_anchors.contains(*anchor))
+        .filter(|anchor| {
+            !answer_anchors.contains(*anchor) && !answer_contains_guard_anchor(&answer, anchor)
+        })
         .count();
     if high_signal_missing_count >= GROUNDED_EVIDENCE_LEDGER_GUARD_MIN_MISSING_HIGH_SIGNAL_ANCHORS {
         tracing::debug!(
@@ -1815,7 +2736,12 @@ fn prefer_verified_grounded_answer_on_surface_anchor_loss(
         );
         return verified_grounded_answer.to_string();
     }
-    let missing_count = grounded_anchors.difference(&answer_anchors).count();
+    let missing_count = grounded_anchors
+        .iter()
+        .filter(|anchor| {
+            !answer_anchors.contains(*anchor) && !answer_contains_guard_anchor(&answer, anchor)
+        })
+        .count();
     let missing_threshold = grounded_anchors.len().div_ceil(3).max(2);
     if missing_count < missing_threshold {
         return answer;
@@ -1901,207 +2827,14 @@ fn push_verified_grounded_answer_literal_candidate(
     if candidate.is_empty() {
         return;
     }
-    if is_structural_literal_anchor(candidate) || is_plain_history_code_literal(candidate) {
+    if is_structural_literal_anchor(candidate) || is_plain_code_literal(candidate) {
         literals.insert(candidate.to_string());
     }
 }
 
-fn contains_casefolded(haystack: &str, needle: &str) -> bool {
-    haystack.to_lowercase().contains(&needle.to_lowercase())
-}
-
-#[derive(Debug, Clone, Eq, PartialEq)]
-struct RequiredVisibleUserFragment {
-    text: String,
-    match_kind: RequiredVisibleMatchKind,
-}
-
-impl RequiredVisibleUserFragment {
-    fn casefolded(text: String) -> Self {
-        Self { text, match_kind: RequiredVisibleMatchKind::CaseFolded }
-    }
-
-    fn exact(text: String) -> Self {
-        Self { text, match_kind: RequiredVisibleMatchKind::Exact }
-    }
-
-    fn is_visible_in(&self, answer: &str) -> bool {
-        match self.match_kind {
-            RequiredVisibleMatchKind::CaseFolded => contains_casefolded(answer, &self.text),
-            RequiredVisibleMatchKind::Exact => answer.contains(&self.text),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
-enum RequiredVisibleMatchKind {
-    CaseFolded,
-    Exact,
-}
-
-fn extract_required_visible_user_fragments(
-    user_question: &str,
-) -> Vec<RequiredVisibleUserFragment> {
-    let raw_fragments = extract_quoted_verbatim_user_fragments(user_question);
-    let mut required =
-        raw_fragments.into_iter().map(RequiredVisibleUserFragment::casefolded).collect::<Vec<_>>();
-    let mut identifier_fragments = Vec::new();
-    extend_identifier_user_fragments(user_question, &mut identifier_fragments);
-    for fragment in identifier_fragments {
-        if required.iter().any(|existing| existing.text == fragment) {
-            continue;
-        }
-        required.push(RequiredVisibleUserFragment::exact(fragment));
-        if required.len() >= VERBATIM_USER_FRAGMENT_LIMIT {
-            break;
-        }
-    }
-    required
-}
-
-fn extract_quoted_user_fragments(
-    user_question: &str,
-    open: char,
-    close: char,
-    fragments: &mut Vec<String>,
-) {
-    if fragments.len() >= VERBATIM_USER_FRAGMENT_LIMIT {
-        return;
-    }
-
-    if open == close {
-        let mut open_at: Option<usize> = None;
-        for (index, ch) in user_question.char_indices() {
-            if ch != open {
-                continue;
-            }
-            if let Some(start) = open_at.take() {
-                push_verbatim_fragment(&user_question[start + open.len_utf8()..index], fragments);
-                if fragments.len() >= VERBATIM_USER_FRAGMENT_LIMIT {
-                    return;
-                }
-            } else {
-                open_at = Some(index);
-            }
-        }
-        return;
-    }
-
-    let mut search_from = 0usize;
-    while search_from < user_question.len() && fragments.len() < VERBATIM_USER_FRAGMENT_LIMIT {
-        let Some(open_offset) = user_question[search_from..].find(open) else {
-            return;
-        };
-        let content_start = search_from + open_offset + open.len_utf8();
-        let Some(close_offset) = user_question[content_start..].find(close) else {
-            return;
-        };
-        let close_index = content_start + close_offset;
-        push_verbatim_fragment(&user_question[content_start..close_index], fragments);
-        search_from = close_index + close.len_utf8();
-    }
-}
-
-fn push_verbatim_fragment(candidate: &str, fragments: &mut Vec<String>) {
-    if fragments.len() >= VERBATIM_USER_FRAGMENT_LIMIT {
-        return;
-    }
-
-    let candidate = candidate.trim();
-    let char_count = candidate.chars().count();
-    if !(VERBATIM_USER_FRAGMENT_MIN_CHARS..=VERBATIM_USER_FRAGMENT_MAX_CHARS).contains(&char_count)
-    {
-        return;
-    }
-    if fragments.iter().any(|existing| existing == candidate) {
-        return;
-    }
-    let total_chars: usize =
-        fragments.iter().map(|fragment: &String| fragment.chars().count()).sum();
-    if total_chars.saturating_add(char_count) > VERBATIM_USER_FRAGMENT_TOTAL_CHARS {
-        return;
-    }
-    fragments.push(candidate.to_string());
-}
-
-fn extend_delimited_user_fragments(user_question: &str, fragments: &mut Vec<String>) {
-    if fragments.len() >= VERBATIM_USER_FRAGMENT_LIMIT {
-        return;
-    }
-
-    let mut segment_start = 0usize;
-    let mut saw_delimiter = false;
-    let mut active_quote_close: Option<char> = None;
-    for (index, ch) in user_question.char_indices() {
-        if let Some(close) = active_quote_close {
-            if ch == close {
-                active_quote_close = None;
-            }
-            continue;
-        }
-        if let Some(close) = quote_close_for_open(ch) {
-            active_quote_close = Some(close);
-            continue;
-        }
-        if !is_verbatim_fragment_delimiter(ch) {
-            continue;
-        }
-        if saw_delimiter {
-            push_verbatim_clause(&user_question[segment_start..index], fragments);
-            if fragments.len() >= VERBATIM_USER_FRAGMENT_LIMIT {
-                return;
-            }
-        }
-        saw_delimiter = true;
-        segment_start = index + ch.len_utf8();
-    }
-    if saw_delimiter && segment_start < user_question.len() {
-        push_verbatim_clause(&user_question[segment_start..], fragments);
-    }
-}
-
-fn extend_identifier_user_fragments(user_question: &str, fragments: &mut Vec<String>) {
-    if fragments.len() >= VERBATIM_USER_FRAGMENT_LIMIT {
-        return;
-    }
-
-    let mut token_start: Option<usize> = None;
-    for (index, ch) in user_question.char_indices() {
-        if is_identifier_fragment_char(ch) {
-            token_start.get_or_insert(index);
-            continue;
-        }
-        if let Some(start) = token_start.take() {
-            push_identifier_fragment(&user_question[start..index], fragments);
-            if fragments.len() >= VERBATIM_USER_FRAGMENT_LIMIT {
-                return;
-            }
-        }
-    }
-    if let Some(start) = token_start {
-        push_identifier_fragment(&user_question[start..], fragments);
-    }
-}
-
-fn is_identifier_fragment_char(ch: char) -> bool {
-    ch.is_alphanumeric() || matches!(ch, '-' | '_' | '.' | '/')
-}
-
-fn push_identifier_fragment(candidate: &str, fragments: &mut Vec<String>) {
-    let candidate = candidate.trim_matches(|ch: char| matches!(ch, '.' | '-' | '_' | '/'));
-    if !is_identifier_shaped_fragment(candidate) {
-        return;
-    }
-    if fragments.iter().any(|existing| existing.contains(candidate)) {
-        return;
-    }
-    push_verbatim_fragment(candidate, fragments);
-}
-
 fn is_identifier_shaped_fragment(candidate: &str) -> bool {
     let char_count = candidate.chars().count();
-    if !(VERBATIM_USER_FRAGMENT_MIN_CHARS..=VERBATIM_USER_FRAGMENT_MAX_CHARS).contains(&char_count)
-    {
+    if !(STRUCTURAL_IDENTIFIER_MIN_CHARS..=STRUCTURAL_IDENTIFIER_MAX_CHARS).contains(&char_count) {
         return false;
     }
     let alnum_count = candidate.chars().filter(|ch| ch.is_alphanumeric()).count();
@@ -2133,38 +2866,14 @@ fn is_identifier_shaped_fragment(candidate: &str) -> bool {
     has_dot && (has_digit || all_cased_upper)
 }
 
-fn is_verbatim_fragment_delimiter(ch: char) -> bool {
-    matches!(ch, ',' | ';' | ':' | '(' | ')' | '[' | ']' | '\n')
-}
-
-fn quote_close_for_open(ch: char) -> Option<char> {
-    match ch {
-        '«' => Some('»'),
-        '“' => Some('”'),
-        '„' => Some('“'),
-        '「' => Some('」'),
-        '『' => Some('』'),
-        '‹' => Some('›'),
-        '"' => Some('"'),
-        '`' => Some('`'),
-        _ => None,
-    }
-}
-
-fn push_verbatim_clause(candidate: &str, fragments: &mut Vec<String>) {
-    let candidate = candidate.trim();
-    if candidate.chars().all(|ch| !ch.is_alphanumeric()) {
-        return;
-    }
-    push_verbatim_fragment(candidate, fragments);
-}
-
 async fn execute_tool_calls(
     input: McpToolAgentTurnInput<'_>,
     iteration: usize,
     tool_calls: &[ChatToolCall],
     max_parallel_actions: usize,
     deadline_started: Instant,
+    focused_grounded_follow_up: bool,
+    allowed_tool_names: &BTreeSet<String>,
     seen_effective_payloads: &mut BTreeMap<String, EffectiveToolPayloadEntry>,
 ) -> Vec<ToolExecutionOutcome> {
     let mut outcomes: Vec<Option<ToolExecutionOutcome>> = vec![None; tool_calls.len()];
@@ -2205,13 +2914,19 @@ async fn execute_tool_calls(
                             &pending.call.name,
                             remaining,
                             input.soft_final_answer_deadline,
+                            focused_grounded_follow_up,
                         );
-                        run_tool_call_within_budget(
-                            execute_one_tool_call(&input, &pending.call, single_tool_iteration),
+                        Box::pin(run_tool_call_within_budget(
+                            execute_one_tool_call(
+                                &input,
+                                &pending.call,
+                                single_tool_iteration,
+                                allowed_tool_names,
+                            ),
                             per_call_wait,
                             &pending.call.name,
                             iteration,
-                        )
+                        ))
                         .await
                     }
                     None => tool_execution_error(format!(
@@ -2271,9 +2986,14 @@ struct CompletedToolPayload {
     result_text: Option<String>,
     result_json: Option<Value>,
     grounding_text: Option<String>,
+    grounded_answer_body: Option<String>,
+    canonical_answer_outcome: Option<AgentCanonicalAnswerOutcome>,
     grounded_answer_ready: bool,
     grounded_answer_completed: bool,
     grounded_answer_needs_follow_up: bool,
+    grounded_answer_repair_reason: Option<GroundedAnswerRepairReason>,
+    grounded_answer_language: QueryLanguage,
+    grounded_answer_clarification_required: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -2444,9 +3164,15 @@ fn record_effective_tool_payload_outcome(
                 result_text: outcome.result_text.clone(),
                 result_json: outcome.result_json.clone(),
                 grounding_text: outcome.grounding_text.clone(),
+                grounded_answer_body: outcome.grounded_answer_body.clone(),
+                canonical_answer_outcome: outcome.canonical_answer_outcome.clone(),
                 grounded_answer_ready: outcome.grounded_answer_ready,
                 grounded_answer_completed: outcome.grounded_answer_completed,
                 grounded_answer_needs_follow_up: outcome.grounded_answer_needs_follow_up,
+                grounded_answer_repair_reason: outcome.grounded_answer_repair_reason,
+                grounded_answer_language: outcome.grounded_answer_language,
+                grounded_answer_clarification_required: outcome
+                    .grounded_answer_clarification_required,
             })),
         },
     );
@@ -2476,9 +3202,14 @@ fn replayed_tool_execution_outcome(payload: CompletedToolPayload) -> ToolExecuti
         result_text: payload.result_text,
         result_json: payload.result_json,
         grounding_text: payload.grounding_text,
+        grounded_answer_body: payload.grounded_answer_body,
+        canonical_answer_outcome: payload.canonical_answer_outcome,
         grounded_answer_ready: payload.grounded_answer_ready,
         grounded_answer_completed: payload.grounded_answer_completed,
         grounded_answer_needs_follow_up: payload.grounded_answer_needs_follow_up,
+        grounded_answer_repair_reason: payload.grounded_answer_repair_reason,
+        grounded_answer_language: payload.grounded_answer_language,
+        grounded_answer_clarification_required: payload.grounded_answer_clarification_required,
         is_error: false,
         is_replay: true,
         duration_ms: 0,
@@ -2505,7 +3236,11 @@ async fn execute_one_tool_call(
     input: &McpToolAgentTurnInput<'_>,
     call: &ChatToolCall,
     single_tool_iteration: bool,
+    allowed_tool_names: &BTreeSet<String>,
 ) -> ToolExecutionOutcome {
+    if let Err(message) = validate_ui_agent_tool_allowed(&call.name, allowed_tool_names) {
+        return tool_execution_error(message);
+    }
     let mut arguments = match serde_json::from_str::<Value>(&call.arguments_json) {
         Ok(arguments) => arguments,
         Err(error) => {
@@ -2534,9 +3269,10 @@ async fn execute_one_tool_call(
         auth: input.auth,
         state: input.state,
         request_id: input.request_id,
-        surface_kind: RuntimeSurfaceKind::Mcp,
+        surface_kind: RuntimeSurfaceKind::Ui,
     };
-    let Some(result) = tools::call_named_tool(&call.name, context, &arguments).await else {
+    let Some(result) = Box::pin(tools::call_named_tool(&call.name, context, &arguments)).await
+    else {
         return tool_execution_error(format!("unsupported MCP answer tool '{}'", call.name));
     };
 
@@ -2548,9 +3284,20 @@ async fn execute_one_tool_call(
     let is_error = result.is_error;
     let message_content = tool_result_model_message(&call.name, &result);
     let grounding_text = tool_result_verification_text(&call.name, &result);
-    let grounded_answer_ready = grounded_answer_ready(&call.name, &result);
+    let grounded_answer_body = grounded_answer_verbatim_body(&call.name, &result);
+    let canonical_answer_outcome = grounded_answer_canonical_outcome(&call.name, &result);
+    let grounded_answer_repair_reason =
+        grounded_answer_repair_reason(&call.name, input.user_question, &result);
+    let grounded_answer_ready =
+        grounded_answer_ready_for_question(&call.name, input.user_question, &result);
     let grounded_answer_completed = grounded_answer_completed(&call.name, &result);
-    let grounded_answer_needs_follow_up = grounded_answer_needs_follow_up(&call.name, &result);
+    let grounded_answer_needs_follow_up = grounded_answer_repair_reason.is_some()
+        || grounded_answer_needs_follow_up(&call.name, &result);
+    let grounded_answer_language = grounded_answer_query_language(&call.name, &result);
+    let grounded_answer_clarification_required =
+        canonical_answer_outcome.as_ref().is_some_and(|outcome| {
+            matches!(outcome.disposition, QueryAnswerDisposition::Clarification)
+        });
     let result_json = Some(debug_tool_result_json(&result));
     let arguments_json = Some(arguments.to_string());
     let requested_arguments_json =
@@ -2563,15 +3310,29 @@ async fn execute_one_tool_call(
         result_text,
         result_json,
         grounding_text,
+        grounded_answer_body,
+        canonical_answer_outcome,
         grounded_answer_ready,
         grounded_answer_completed,
         grounded_answer_needs_follow_up,
+        grounded_answer_repair_reason,
+        grounded_answer_language,
+        grounded_answer_clarification_required,
         is_error,
         is_replay: false,
         duration_ms: 0,
         child_query_execution_ids,
         child_runtime_execution_ids,
     }
+}
+
+fn validate_ui_agent_tool_allowed(
+    tool_name: &str,
+    allowed_tool_names: &BTreeSet<String>,
+) -> Result<(), String> {
+    allowed_tool_names.contains(tool_name).then_some(()).ok_or_else(|| {
+        format!("tool '{tool_name}' is not available on the UI assistant answer surface")
+    })
 }
 
 fn validate_agent_tool_library_scope(
@@ -2621,7 +3382,7 @@ fn normalize_agent_tool_argument_types(tool_name: &str, arguments: &mut Value) {
     if tool_name == SEARCH_DOCUMENTS_TOOL_NAME {
         normalize_stringified_json_array_field(object, "libraries");
     }
-    for field in ["limit", "topK", "startOffset", "length", "maxBytes"] {
+    for field in ["limit", "topK", "startOffset", "length", "maxBytes", "maxReferences"] {
         normalize_unsigned_integer_string_field(object, field);
     }
 }
@@ -2683,7 +3444,7 @@ fn apply_agent_tool_argument_defaults_with_context(
     arguments: &mut Value,
     user_question: &str,
     contextual_follow_up: bool,
-    single_tool_iteration: bool,
+    _single_tool_iteration: bool,
     grounded_top_k: usize,
     library_ref: &str,
     grounded_answer_tool_history: &[ExternalConversationTurn],
@@ -2691,88 +3452,108 @@ fn apply_agent_tool_argument_defaults_with_context(
     let Value::Object(object) = arguments else {
         return;
     };
+    let runtime_repair = take_runtime_grounded_repair_metadata(object);
+    apply_agent_tool_library_defaults(tool_name, object, library_ref);
+    let bounded_top_k = grounded_top_k.max(1);
+    if tool_name == GROUNDED_ANSWER_TOOL_NAME {
+        apply_grounded_answer_argument_defaults(
+            object,
+            user_question,
+            contextual_follow_up,
+            bounded_top_k,
+            grounded_answer_tool_history,
+            runtime_repair.is_some(),
+        );
+        return;
+    }
+    apply_agent_tool_limit_default(tool_name, object, bounded_top_k);
+}
+
+fn take_runtime_grounded_repair_metadata(
+    object: &mut serde_json::Map<String, Value>,
+) -> Option<RuntimeGroundedRepairMetadata> {
+    object
+        .remove(RUNTIME_REPAIR_ARGUMENT_FIELD)
+        .and_then(|value| serde_json::from_value::<RuntimeGroundedRepairMetadata>(value).ok())
+        .filter(|metadata| metadata.is_consistent())
+}
+
+fn apply_agent_tool_library_defaults(
+    tool_name: &str,
+    object: &mut serde_json::Map<String, Value>,
+    library_ref: &str,
+) {
     if tool_uses_single_library_scope(tool_name) {
         object.insert("library".to_string(), serde_json::json!(library_ref));
     }
     if tool_name == SEARCH_DOCUMENTS_TOOL_NAME {
         object.insert("libraries".to_string(), serde_json::json!([library_ref]));
-        if contextual_follow_up
-            && let Some(query) = object.get("query").and_then(Value::as_str)
-            && let Some(compact_query) = contextual_search_documents_query(
-                query,
-                user_question,
-                grounded_answer_tool_history,
-            )
-        {
-            object.insert("query".to_string(), serde_json::json!(compact_query));
-        }
     }
-    let bounded_top_k = grounded_top_k.max(1);
-    if tool_name == GROUNDED_ANSWER_TOOL_NAME {
-        let use_contextual_history = contextual_follow_up;
-        let contextual_history = use_contextual_history.then_some(grounded_answer_tool_history);
-        if let Some(query) = object.get("query").and_then(Value::as_str) {
-            let compact_query = if use_contextual_history {
-                compact_history_padded_grounded_answer_query(
-                    query,
-                    user_question,
-                    grounded_answer_tool_history,
-                )
-            } else if single_tool_iteration {
-                compact_standalone_single_grounded_answer_query(query, user_question).or_else(
-                    || {
-                        compact_non_contextual_history_scoped_grounded_answer_query(
-                            query,
-                            user_question,
-                            grounded_answer_tool_history,
-                        )
-                    },
-                )
-            } else {
-                compact_non_contextual_history_scoped_grounded_answer_query(
-                    query,
-                    user_question,
-                    grounded_answer_tool_history,
-                )
-            };
-            if let Some(compact_query) = compact_query {
-                object.insert("query".to_string(), serde_json::json!(compact_query));
-            }
-        }
-        let requested_top_k = object
-            .get("topK")
-            .and_then(Value::as_u64)
-            .and_then(|value| usize::try_from(value).ok());
-        let turns =
-            grounded_answer_conversation_turn_defaults(contextual_history.unwrap_or_default());
-        object.insert("conversationTurns".to_string(), Value::Array(turns));
-        let has_contextual_turns = contextual_history.is_some_and(|history| !history.is_empty());
-        let effective_top_k = resolve_agent_grounded_answer_top_k(
-            requested_top_k,
-            has_contextual_turns,
-            bounded_top_k,
-        );
-        if requested_top_k != Some(effective_top_k) {
-            object.insert("topK".to_string(), serde_json::json!(effective_top_k));
-        }
+}
+
+fn apply_grounded_answer_argument_defaults(
+    object: &mut serde_json::Map<String, Value>,
+    user_question: &str,
+    contextual_follow_up: bool,
+    bounded_top_k: usize,
+    grounded_answer_tool_history: &[ExternalConversationTurn],
+    is_runtime_repair: bool,
+) {
+    apply_grounded_answer_response_profile_defaults(object);
+    let contextual_history = if contextual_follow_up { grounded_answer_tool_history } else { &[] };
+    // UI and MCP must cross the same semantic boundary. The current
+    // question and server-owned typed history are canonical; a model or
+    // runtime repair may not reconstruct intent by rewriting either one.
+    object.insert("query".to_string(), serde_json::json!(user_question));
+    let requested_top_k =
+        object.get("topK").and_then(Value::as_u64).and_then(|value| usize::try_from(value).ok());
+    object.insert(
+        "conversationTurns".to_string(),
+        Value::Array(grounded_answer_conversation_turn_defaults(contextual_history)),
+    );
+    let effective_top_k = resolve_agent_grounded_answer_top_k(
+        requested_top_k,
+        !contextual_history.is_empty(),
+        if is_runtime_repair { MAX_TOP_K } else { bounded_top_k },
+    );
+    if requested_top_k != Some(effective_top_k) {
+        object.insert("topK".to_string(), serde_json::json!(effective_top_k));
+    }
+}
+
+fn apply_grounded_answer_response_profile_defaults(object: &mut serde_json::Map<String, Value>) {
+    if object.get("includeDebug").and_then(Value::as_bool) == Some(true) {
+        object.insert("responseProfile".to_string(), serde_json::json!("full"));
+        object.remove("maxReferences");
         return;
     }
+    object.insert("responseProfile".to_string(), serde_json::json!("compact"));
+    let reference_limit = crate::services::mcp::agent_policy::AGENT_COMPACT_REFERENCE_LIMIT;
+    let requested_references = object
+        .get("maxReferences")
+        .and_then(Value::as_u64)
+        .and_then(|value| usize::try_from(value).ok());
+    if requested_references.is_none_or(|value| value == 0 || value > reference_limit) {
+        object.insert("maxReferences".to_string(), serde_json::json!(reference_limit));
+    }
+}
 
-    if agent_tool_limit_cap(tool_name).is_some() {
-        // Static tool caps are ceilings; the parent turn's top-k budget
-        // tightens them further so UI-agent subqueries cannot fan out wider
-        // than the turn that spawned them.
-        let bounded_limit = agent_tool_limit_cap(tool_name)
-            .unwrap_or(bounded_top_k)
-            .min(bounded_top_k.max(8))
-            .max(1);
-        let requested_limit = object
-            .get("limit")
-            .and_then(Value::as_u64)
-            .and_then(|value| usize::try_from(value).ok());
-        if requested_limit.is_none_or(|value| value > bounded_limit) {
-            object.insert("limit".to_string(), serde_json::json!(bounded_limit));
-        }
+fn apply_agent_tool_limit_default(
+    tool_name: &str,
+    object: &mut serde_json::Map<String, Value>,
+    bounded_top_k: usize,
+) {
+    let Some(limit_cap) = agent_tool_limit_cap(tool_name) else {
+        return;
+    };
+    // Static tool caps are ceilings; the parent turn's top-k budget
+    // tightens them further so UI-agent subqueries cannot fan out wider
+    // than the turn that spawned them.
+    let bounded_limit = limit_cap.min(bounded_top_k.max(8)).max(1);
+    let requested_limit =
+        object.get("limit").and_then(Value::as_u64).and_then(|value| usize::try_from(value).ok());
+    if requested_limit.is_none_or(|value| value > bounded_limit) {
+        object.insert("limit".to_string(), serde_json::json!(bounded_limit));
     }
 }
 
@@ -2852,300 +3633,6 @@ fn canonical_json_value(value: &Value) -> Value {
     }
 }
 
-fn compact_history_padded_grounded_answer_query(
-    query: &str,
-    user_question: &str,
-    grounded_answer_tool_history: &[ExternalConversationTurn],
-) -> Option<String> {
-    if !should_replace_history_padded_grounded_answer_query(
-        query,
-        user_question,
-        grounded_answer_tool_history,
-    ) {
-        return None;
-    }
-
-    let user_question = user_question.trim();
-    let mut anchors = ordered_query_literal_anchors(query, user_question);
-    extend_history_code_literals_present_in_query(
-        &mut anchors,
-        query,
-        user_question,
-        grounded_answer_tool_history,
-    );
-
-    if anchors.is_empty() {
-        return Some(user_question.to_string());
-    }
-
-    let mut compact = user_question.to_string();
-    let mut appended_anchor = false;
-    for anchor in anchors {
-        let prefix = if appended_anchor { " " } else { "\n@: " };
-        let candidate = format!("{compact}{prefix}{anchor};");
-        if candidate.chars().count() > HISTORY_PADDED_QUERY_MAX_CHARS {
-            continue;
-        }
-        compact = candidate;
-        appended_anchor = true;
-    }
-    if !appended_anchor {
-        return Some(user_question.to_string());
-    }
-    Some(compact)
-}
-
-fn compact_non_contextual_history_scoped_grounded_answer_query(
-    query: &str,
-    user_question: &str,
-    grounded_answer_tool_history: &[ExternalConversationTurn],
-) -> Option<String> {
-    if grounded_answer_tool_history.is_empty() {
-        return None;
-    }
-    let query = query.trim();
-    let user_question = user_question.trim();
-    if query.is_empty() || user_question.is_empty() || query == user_question {
-        return None;
-    }
-    if !query_mentions_user_question(query, user_question) {
-        return None;
-    }
-    if query.chars().count() <= user_question.chars().count().saturating_add(24) {
-        return None;
-    }
-    if history_added_query_token_overlap(query, user_question, grounded_answer_tool_history) < 2 {
-        return None;
-    }
-    Some(user_question.to_string())
-}
-
-fn compact_standalone_single_grounded_answer_query(
-    query: &str,
-    user_question: &str,
-) -> Option<String> {
-    let query = query.trim();
-    let user_question = user_question.trim();
-    if query.is_empty() || user_question.is_empty() || query == user_question {
-        return None;
-    }
-    let query_chars = query.chars().count();
-    let user_chars = user_question.chars().count();
-    if !query_mentions_user_question(query, user_question) {
-        return None;
-    }
-    let query_tokens =
-        normalized_alnum_token_sequence(query, 3).into_iter().collect::<BTreeSet<_>>();
-    let user_tokens =
-        normalized_alnum_token_sequence(user_question, 3).into_iter().collect::<BTreeSet<_>>();
-    if query_tokens.is_empty() {
-        return None;
-    }
-    let shared_count = query_tokens.iter().filter(|token| user_tokens.contains(*token)).count();
-    let query_only_count = query_tokens.len().saturating_sub(shared_count);
-    let user_only_count = user_tokens.iter().filter(|token| !query_tokens.contains(*token)).count();
-    if user_only_count == 0 {
-        return None;
-    }
-    if query_chars.saturating_mul(100) > user_chars.saturating_mul(115) {
-        return None;
-    }
-    if query_chars.saturating_mul(100) > user_chars.saturating_mul(85) && user_only_count < 2 {
-        return None;
-    }
-    if query_only_count > user_only_count.max(2) {
-        return None;
-    }
-    Some(user_question.to_string())
-}
-
-fn contextual_search_documents_query(
-    query: &str,
-    user_question: &str,
-    grounded_answer_tool_history: &[ExternalConversationTurn],
-) -> Option<String> {
-    let query = query.trim();
-    if query.is_empty() || grounded_answer_tool_history.is_empty() {
-        return None;
-    }
-    if history_added_query_token_overlap(query, user_question, grounded_answer_tool_history)
-        >= CONTEXTUAL_SEARCH_QUERY_HISTORY_OVERLAP_SELF_SUFFICIENT
-    {
-        return None;
-    }
-    let anchors =
-        contextual_search_history_anchors(query, user_question, grounded_answer_tool_history);
-    if anchors.len() < CONTEXTUAL_SEARCH_QUERY_MIN_ANCHORS {
-        return None;
-    }
-
-    let mut compact = query.to_string();
-    let mut appended_anchor = false;
-    for anchor in anchors {
-        let prefix = if appended_anchor { " " } else { "\n@: " };
-        let candidate = format!("{compact}{prefix}{anchor};");
-        if candidate.chars().count() > HISTORY_PADDED_QUERY_MAX_CHARS {
-            continue;
-        }
-        compact = candidate;
-        appended_anchor = true;
-    }
-    appended_anchor.then_some(compact)
-}
-
-fn contextual_search_history_anchors(
-    query: &str,
-    user_question: &str,
-    grounded_answer_tool_history: &[ExternalConversationTurn],
-) -> Vec<String> {
-    let mut structural = Vec::new();
-    let mut identifier = Vec::new();
-    let mut seen = BTreeSet::new();
-    for turn in grounded_answer_tool_history.iter().rev() {
-        for span in backtick_literal_spans(&turn.content_text) {
-            for candidate in split_literal_anchor_candidates(&span) {
-                let candidate = candidate.trim();
-                if candidate.is_empty()
-                    || query_contains_literal(query, candidate)
-                    || query_contains_literal(user_question, candidate)
-                {
-                    continue;
-                }
-                let key = candidate.to_lowercase();
-                if !seen.insert(key) {
-                    continue;
-                }
-                if is_structural_literal_anchor(candidate) {
-                    structural.push(candidate.to_string());
-                } else if contextual_search_plain_anchor(candidate) {
-                    identifier.push(candidate.to_string());
-                }
-                if structural.len().saturating_add(identifier.len())
-                    >= CONTEXTUAL_SEARCH_QUERY_ANCHOR_LIMIT
-                {
-                    break;
-                }
-            }
-            if structural.len().saturating_add(identifier.len())
-                >= CONTEXTUAL_SEARCH_QUERY_ANCHOR_LIMIT
-            {
-                break;
-            }
-        }
-        if structural.len().saturating_add(identifier.len()) >= CONTEXTUAL_SEARCH_QUERY_ANCHOR_LIMIT
-        {
-            break;
-        }
-    }
-    structural.extend(identifier);
-    structural.truncate(CONTEXTUAL_SEARCH_QUERY_ANCHOR_LIMIT);
-    structural
-}
-
-fn contextual_search_plain_anchor(candidate: &str) -> bool {
-    is_plain_history_code_literal(candidate) && literal_text_is_identifier_shaped(candidate)
-}
-
-fn should_replace_history_padded_grounded_answer_query(
-    query: &str,
-    user_question: &str,
-    grounded_answer_tool_history: &[ExternalConversationTurn],
-) -> bool {
-    if grounded_answer_tool_history.is_empty() {
-        return false;
-    }
-    let query = query.trim();
-    let user_question = user_question.trim();
-    if query.is_empty() || user_question.is_empty() || query == user_question {
-        return false;
-    }
-    if !query_mentions_user_question(query, user_question) {
-        return false;
-    }
-    let query_chars = query.chars().count();
-    let user_chars = user_question.chars().count();
-    if query_chars <= user_chars.saturating_add(80) {
-        return false;
-    }
-    let query_markers = technical_surface_marker_count(query);
-    let user_markers = technical_surface_marker_count(user_question);
-    if query_markers < user_markers.saturating_add(8) {
-        return false;
-    }
-    history_added_query_token_overlap(query, user_question, grounded_answer_tool_history) >= 3
-}
-
-fn query_mentions_user_question(query: &str, user_question: &str) -> bool {
-    if query.to_lowercase().contains(&user_question.to_lowercase()) {
-        return true;
-    }
-    let query_tokens = normalized_alnum_token_sequence(query, 3);
-    let user_tokens = normalized_alnum_token_sequence(user_question, 3);
-    if user_tokens.is_empty() || query_tokens.is_empty() {
-        return false;
-    }
-    let overlap = user_tokens.iter().filter(|token| query_tokens.contains(token)).count();
-    overlap >= user_tokens.len().min(3)
-}
-
-fn history_added_query_token_overlap(
-    query: &str,
-    user_question: &str,
-    grounded_answer_tool_history: &[ExternalConversationTurn],
-) -> usize {
-    let user_tokens =
-        normalized_alnum_token_sequence(user_question, 3).into_iter().collect::<BTreeSet<_>>();
-    let history_tokens = grounded_answer_tool_history
-        .iter()
-        .flat_map(|turn| normalized_alnum_token_sequence(&turn.content_text, 3))
-        .collect::<BTreeSet<_>>();
-
-    normalized_alnum_token_sequence(query, 3)
-        .into_iter()
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .filter(|token| !user_tokens.contains(token) && history_tokens.contains(token))
-        .count()
-}
-
-fn ordered_query_literal_anchors(query: &str, user_question: &str) -> Vec<String> {
-    let mut anchors = Vec::new();
-    let mut seen = BTreeSet::new();
-    for candidate in split_literal_anchor_candidates(query) {
-        push_literal_anchor_candidate(&mut anchors, &mut seen, candidate, user_question);
-        if anchors.len() >= HISTORY_PADDED_QUERY_ANCHOR_LIMIT {
-            break;
-        }
-    }
-    anchors
-}
-
-fn extend_history_code_literals_present_in_query(
-    anchors: &mut Vec<String>,
-    query: &str,
-    user_question: &str,
-    grounded_answer_tool_history: &[ExternalConversationTurn],
-) {
-    if anchors.len() >= HISTORY_PADDED_QUERY_ANCHOR_LIMIT {
-        return;
-    }
-    let mut seen = anchors.iter().map(|anchor| anchor.to_lowercase()).collect::<BTreeSet<_>>();
-    let query_lower = query.to_lowercase();
-    for turn in grounded_answer_tool_history {
-        for span in backtick_literal_spans(&turn.content_text) {
-            for candidate in split_literal_anchor_candidates(&span) {
-                if !query_lower.contains(&candidate.to_lowercase()) {
-                    continue;
-                }
-                push_history_code_literal_candidate(anchors, &mut seen, candidate, user_question);
-                if anchors.len() >= HISTORY_PADDED_QUERY_ANCHOR_LIMIT {
-                    return;
-                }
-            }
-        }
-    }
-}
-
 fn split_literal_anchor_candidates(text: &str) -> Vec<String> {
     let mut candidates = Vec::new();
     let mut token_start: Option<usize> = None;
@@ -3218,60 +3705,13 @@ fn trim_literal_anchor_candidate(raw: &str) -> &str {
     })
 }
 
-fn push_literal_anchor_candidate(
-    anchors: &mut Vec<String>,
-    seen: &mut BTreeSet<String>,
-    candidate: String,
-    user_question: &str,
-) {
-    if !is_structural_literal_anchor(&candidate) {
-        return;
-    }
-    push_literal_anchor(anchors, seen, candidate, user_question);
-}
-
-fn push_history_code_literal_candidate(
-    anchors: &mut Vec<String>,
-    seen: &mut BTreeSet<String>,
-    candidate: String,
-    user_question: &str,
-) {
-    if !is_structural_literal_anchor(&candidate) && !is_plain_history_code_literal(&candidate) {
-        return;
-    }
-    push_literal_anchor(anchors, seen, candidate, user_question);
-}
-
-fn push_literal_anchor(
-    anchors: &mut Vec<String>,
-    seen: &mut BTreeSet<String>,
-    candidate: String,
-    user_question: &str,
-) {
-    let candidate = candidate.trim();
-    if candidate.is_empty() {
-        return;
-    }
-    let char_count = candidate.chars().count();
-    if !(2..=HISTORY_PADDED_QUERY_ANCHOR_MAX_CHARS).contains(&char_count) {
-        return;
-    }
-    if query_contains_literal(user_question, candidate) {
-        return;
-    }
-    let key = candidate.to_lowercase();
-    if seen.insert(key) {
-        anchors.push(candidate.to_string());
-    }
-}
-
 fn is_structural_literal_anchor(candidate: &str) -> bool {
     let candidate = candidate.trim();
     if candidate.is_empty() {
         return false;
     }
     let char_count = candidate.chars().count();
-    if !(2..=HISTORY_PADDED_QUERY_ANCHOR_MAX_CHARS).contains(&char_count) {
+    if !(2..=STRUCTURAL_LITERAL_ANCHOR_MAX_CHARS).contains(&char_count) {
         return false;
     }
     let bracket_inner =
@@ -3308,13 +3748,13 @@ fn is_structural_literal_anchor(candidate: &str) -> bool {
     literal_text_is_identifier_shaped(unwrapped) || is_identifier_shaped_fragment(unwrapped)
 }
 
-fn is_plain_history_code_literal(candidate: &str) -> bool {
+fn is_plain_code_literal(candidate: &str) -> bool {
     let candidate = candidate.trim();
     if candidate.is_empty() || candidate.chars().any(char::is_whitespace) {
         return false;
     }
     let char_count = candidate.chars().count();
-    if !(2..=HISTORY_PADDED_QUERY_ANCHOR_MAX_CHARS).contains(&char_count) {
+    if !(2..=STRUCTURAL_LITERAL_ANCHOR_MAX_CHARS).contains(&char_count) {
         return false;
     }
     let alnum_count = candidate.chars().filter(|ch| ch.is_alphanumeric()).count();
@@ -3322,37 +3762,6 @@ fn is_plain_history_code_literal(candidate: &str) -> bool {
         && candidate.chars().all(|ch| {
             ch.is_alphanumeric() || matches!(ch, '_' | '-' | '.' | '/' | '\\' | ':' | '=')
         })
-}
-
-fn query_contains_literal(query: &str, literal: &str) -> bool {
-    query.to_lowercase().contains(&literal.to_lowercase())
-}
-
-fn backtick_literal_spans(text: &str) -> Vec<String> {
-    let mut spans = Vec::new();
-    let mut span_start: Option<usize> = None;
-    for (index, ch) in text.char_indices() {
-        if ch != '`' {
-            continue;
-        }
-        if let Some(start) = span_start.take() {
-            if start < index {
-                spans.push(text[start..index].to_string());
-            }
-        } else {
-            span_start = Some(index + ch.len_utf8());
-        }
-    }
-    spans
-}
-
-fn technical_surface_marker_count(value: &str) -> usize {
-    value
-        .chars()
-        .filter(|ch| {
-            matches!(ch, '`' | '/' | '\\' | '[' | ']' | '_' | ':' | '=' | '.' | '<' | '>' | '"')
-        })
-        .count()
 }
 
 fn grounded_answer_conversation_turn_defaults(
@@ -3491,12 +3900,20 @@ fn answer_contains_guard_anchor(answer: &str, anchor: &str) -> bool {
     answer.to_lowercase().contains(&anchor.to_lowercase())
 }
 
-fn collect_unsupported_literal_spans(execution_detail: Option<&Value>) -> BTreeSet<String> {
+fn collect_unsupported_literal_spans(
+    execution_detail: Option<&Value>,
+    structured_content: Option<&Value>,
+) -> BTreeSet<String> {
     let mut literals = BTreeSet::new();
-    let Some(warnings) = execution_detail
+    let warnings = execution_detail
         .and_then(|detail| detail.get("verificationWarnings"))
         .and_then(Value::as_array)
-    else {
+        .or_else(|| {
+            structured_content
+                .and_then(|structured| structured.get("warnings"))
+                .and_then(Value::as_array)
+        });
+    let Some(warnings) = warnings else {
         return literals;
     };
     for warning in warnings {
@@ -3590,12 +4007,16 @@ fn push_ledger_string(
     }
 }
 
-fn collect_verification_warning_codes(execution_detail: Option<&Value>) -> Vec<String> {
+fn collect_verification_warning_codes(
+    execution_detail: Option<&Value>,
+    structured_content: Option<&Value>,
+) -> Vec<String> {
     let mut codes = Vec::new();
     let mut seen = BTreeSet::new();
-    let Some(Value::Array(warnings)) =
-        execution_detail.and_then(|detail| detail.get("verificationWarnings"))
-    else {
+    let warnings = execution_detail
+        .and_then(|detail| detail.get("verificationWarnings"))
+        .or_else(|| structured_content.and_then(|structured| structured.get("warnings")));
+    let Some(Value::Array(warnings)) = warnings else {
         return codes;
     };
     for warning in warnings {
@@ -3645,9 +4066,14 @@ fn tool_execution_error(message: impl Into<String>) -> ToolExecutionOutcome {
             .map(ToString::to_string),
         result_json: Some(result_json),
         grounding_text: None,
+        grounded_answer_body: None,
+        canonical_answer_outcome: None,
         grounded_answer_ready: false,
         grounded_answer_completed: false,
         grounded_answer_needs_follow_up: false,
+        grounded_answer_repair_reason: None,
+        grounded_answer_language: QueryLanguage::Auto,
+        grounded_answer_clarification_required: false,
         is_error: true,
         is_replay: false,
         duration_ms: 0,
@@ -3679,9 +4105,15 @@ fn per_tool_call_wait_for_tool(
     tool_name: &str,
     remaining_turn_deadline: Duration,
     soft_final_answer_deadline: Option<Duration>,
+    focused_grounded_follow_up: bool,
 ) -> Duration {
     if tool_name == GROUNDED_ANSWER_TOOL_NAME {
-        return remaining_turn_deadline.min(GROUNDED_ANSWER_TOOL_MAX_WAIT);
+        let max_wait = if focused_grounded_follow_up {
+            GROUNDED_ANSWER_REPAIR_MAX_WAIT
+        } else {
+            GROUNDED_ANSWER_TOOL_MAX_WAIT
+        };
+        return remaining_turn_deadline.min(max_wait);
     }
     per_tool_call_wait(remaining_turn_deadline, soft_final_answer_deadline)
 }
@@ -3740,6 +4172,11 @@ fn debug_tool_result_json(result: &crate::interfaces::http::mcp::McpToolResult) 
         "content": serde_json::to_value(&result.content).unwrap_or_else(|_| serde_json::json!([])),
         "structuredContent": {
             "truncated": true,
+            "clarification": result
+                .structured_content
+                .get("clarification")
+                .cloned()
+                .unwrap_or_else(|| serde_json::json!({"required": false})),
             "jsonPrefix": compact_json_string(
                 &result.structured_content,
                 TOOL_DEBUG_RESULT_JSON_CHAR_LIMIT
@@ -3862,18 +4299,250 @@ fn grounded_answer_ready(
     tool_name: &str,
     result: &crate::interfaces::http::mcp::McpToolResult,
 ) -> bool {
+    grounded_answer_completion_envelope(result).is_some_and(|envelope| {
+        envelope.completion.complete && grounded_answer_has_final_candidate(tool_name, result)
+    })
+}
+
+fn grounded_answer_has_final_candidate(
+    tool_name: &str,
+    result: &crate::interfaces::http::mcp::McpToolResult,
+) -> bool {
     if tool_name != GROUNDED_ANSWER_TOOL_NAME || result.is_error {
         return false;
     }
-    if result.structured_content.get("finalAnswerReady").and_then(Value::as_bool) != Some(true) {
+    let Some(envelope) = grounded_answer_completion_envelope(result) else {
+        return false;
+    };
+    if !envelope.final_answer_ready || !envelope.finalizable {
         return false;
     }
-    if grounded_answer_lifecycle_state(result) != Some(GROUNDED_ANSWER_LIFECYCLE_COMPLETED)
-        || grounded_answer_verification_state(result) != Some(GROUNDED_ANSWER_VERIFICATION_VERIFIED)
+    if result
+        .structured_content
+        .get("answerBody")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .is_none_or(str::is_empty)
     {
         return false;
     }
+    if envelope.readiness.lifecycle_state != GROUNDED_ANSWER_LIFECYCLE_COMPLETED {
+        return false;
+    }
     true
+}
+
+fn grounded_answer_ready_for_question(
+    tool_name: &str,
+    user_question: &str,
+    result: &crate::interfaces::http::mcp::McpToolResult,
+) -> bool {
+    grounded_answer_ready(tool_name, result)
+        && grounded_answer_repair_reason(tool_name, user_question, result).is_none()
+}
+
+fn grounded_answer_repair_reason(
+    tool_name: &str,
+    _user_question: &str,
+    result: &crate::interfaces::http::mcp::McpToolResult,
+) -> Option<GroundedAnswerRepairReason> {
+    if tool_name != GROUNDED_ANSWER_TOOL_NAME || result.is_error {
+        return None;
+    }
+    let Some(envelope) = grounded_answer_completion_envelope(result) else {
+        return Some(GroundedAnswerRepairReason::VerificationIncomplete);
+    };
+    if matches!(
+        grounded_answer_canonical_outcome(tool_name, result).map(|outcome| outcome.disposition),
+        Some(QueryAnswerDisposition::SafeFallback | QueryAnswerDisposition::Clarification)
+    ) {
+        return None;
+    }
+    if let Some(reason) = completion_assessment_repair_reason(&envelope.completion) {
+        return Some(reason);
+    }
+    if grounded_answer_ready(tool_name, result)
+        || envelope.readiness.lifecycle_state != GROUNDED_ANSWER_LIFECYCLE_COMPLETED
+    {
+        return None;
+    }
+    Some(GroundedAnswerRepairReason::VerificationIncomplete)
+}
+
+fn grounded_answer_query_language(
+    tool_name: &str,
+    result: &crate::interfaces::http::mcp::McpToolResult,
+) -> QueryLanguage {
+    if tool_name != GROUNDED_ANSWER_TOOL_NAME || result.is_error {
+        return QueryLanguage::Auto;
+    }
+    result
+        .structured_content
+        .get("queryLanguage")
+        .cloned()
+        .and_then(|value| serde_json::from_value(value).ok())
+        .unwrap_or(QueryLanguage::Auto)
+}
+
+fn grounded_answer_completion_envelope(
+    result: &crate::interfaces::http::mcp::McpToolResult,
+) -> Option<GroundedAnswerCompletionEnvelope> {
+    parse_grounded_answer_completion_envelope(&result.structured_content)
+}
+
+fn parse_grounded_answer_completion_envelope(
+    structured_content: &Value,
+) -> Option<GroundedAnswerCompletionEnvelope> {
+    match GroundedAnswerCompletionEnvelope::from_structured_content(structured_content) {
+        Ok(envelope) => Some(envelope),
+        Err(error) => {
+            tracing::warn!(
+                error = %error,
+                "grounded-answer completion envelope rejected; consumer is failing closed"
+            );
+            None
+        }
+    }
+}
+
+fn grounded_answer_canonical_outcome(
+    tool_name: &str,
+    result: &crate::interfaces::http::mcp::McpToolResult,
+) -> Option<AgentCanonicalAnswerOutcome> {
+    if tool_name != GROUNDED_ANSWER_TOOL_NAME || result.is_error {
+        return None;
+    }
+    let envelope = grounded_answer_completion_envelope(result)?;
+    if envelope.readiness.lifecycle_state != GROUNDED_ANSWER_LIFECYCLE_COMPLETED
+        || result
+            .structured_content
+            .get("answerBody")
+            .and_then(Value::as_str)
+            .is_none_or(|answer| answer.trim().is_empty())
+    {
+        return None;
+    }
+    let disposition = match envelope.readiness.answer_disposition {
+        ironrag_contracts::assistant::AssistantAnswerDisposition::NonTerminal => return None,
+        ironrag_contracts::assistant::AssistantAnswerDisposition::FactualReady => {
+            QueryAnswerDisposition::FactualReady
+        }
+        ironrag_contracts::assistant::AssistantAnswerDisposition::SafeFallback => {
+            QueryAnswerDisposition::SafeFallback
+        }
+        ironrag_contracts::assistant::AssistantAnswerDisposition::Clarification => {
+            QueryAnswerDisposition::Clarification
+        }
+    };
+    let clarification = grounded_answer_typed_clarification(
+        &result.structured_content,
+        matches!(disposition, QueryAnswerDisposition::Clarification),
+    )?;
+    Some(AgentCanonicalAnswerOutcome { disposition, clarification })
+}
+
+fn grounded_answer_typed_clarification(
+    structured_content: &Value,
+    clarification_expected: bool,
+) -> Option<QueryClarification> {
+    let clarification = structured_content.get("clarification")?.as_object()?;
+    let required = clarification.get("required")?.as_bool()?;
+    if required != clarification_expected {
+        return None;
+    }
+    let question = match clarification.get("question") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(question)) if !question.trim().is_empty() => Some(question.clone()),
+        Some(_) => return None,
+    };
+    if !required {
+        return question.is_none().then(QueryClarification::default);
+    }
+
+    let candidates = match structured_content.get("responseProfile").and_then(Value::as_str) {
+        Some("compact") => {
+            let summary = structured_content.get("answerCandidateSummary")?.as_object()?;
+            if summary.get("truncated")?.as_bool()? {
+                return None;
+            }
+            let total_count = summary.get("totalCount")?.as_u64()?;
+            let returned_count = summary.get("returnedCount")?.as_u64()?;
+            let candidates = summary.get("candidates")?.clone();
+            if total_count != returned_count
+                || returned_count != candidates.as_array()?.len() as u64
+            {
+                return None;
+            }
+            candidates
+        }
+        Some("full") => structured_content.get("answerCandidates")?.clone(),
+        _ => return None,
+    };
+    let answer_candidates = serde_json::from_value::<Vec<QueryAnswerCandidate>>(candidates).ok()?;
+    Some(QueryClarification { required, question, answer_candidates })
+}
+
+fn completion_assessment_repair_reason(
+    assessment: &AnswerCompletionAssessment,
+) -> Option<GroundedAnswerRepairReason> {
+    match assessment.reason? {
+        AnswerCompletionGapReason::OrderedInventory => {
+            Some(GroundedAnswerRepairReason::OrderedInventory {
+                expected: assessment.expected.unwrap_or(1),
+                observed: assessment.observed.unwrap_or(0),
+            })
+        }
+        AnswerCompletionGapReason::Procedure => {
+            Some(GroundedAnswerRepairReason::ProcedureIncomplete)
+        }
+        AnswerCompletionGapReason::Troubleshooting => {
+            Some(GroundedAnswerRepairReason::TroubleshootingIncomplete)
+        }
+        AnswerCompletionGapReason::AnswerStructure => {
+            Some(GroundedAnswerRepairReason::AnswerStructureIncomplete)
+        }
+    }
+}
+
+fn grounded_answer_verbatim_body(
+    tool_name: &str,
+    result: &crate::interfaces::http::mcp::McpToolResult,
+) -> Option<String> {
+    if tool_name != GROUNDED_ANSWER_TOOL_NAME || result.is_error {
+        return None;
+    }
+    result
+        .structured_content
+        .get("answerBody")
+        .and_then(Value::as_str)
+        .filter(|answer| !answer.trim().is_empty())
+        .map(ToOwned::to_owned)
+}
+
+fn answer_ordered_item_count(answer: &str) -> usize {
+    answer.lines().filter(|line| ordered_item_body(line).is_some()).count()
+}
+
+fn ordered_item_body(line: &str) -> Option<&str> {
+    let trimmed = line.trim_start();
+    if let Some(body) = trimmed
+        .strip_prefix("- ")
+        .or_else(|| trimmed.strip_prefix("* "))
+        .or_else(|| trimmed.strip_prefix("• "))
+    {
+        return body.chars().any(char::is_alphanumeric).then_some(body);
+    }
+    let digit_chars = trimmed.chars().take_while(char::is_ascii_digit).count();
+    if digit_chars == 0 {
+        return None;
+    }
+    let after_digits = &trimmed[digit_chars..];
+    let body = after_digits
+        .strip_prefix('.')
+        .or_else(|| after_digits.strip_prefix(')'))
+        .or_else(|| after_digits.strip_prefix(':'))?
+        .trim_start();
+    body.chars().any(char::is_alphanumeric).then_some(body)
 }
 
 fn grounded_answer_needs_follow_up(
@@ -3883,50 +4552,23 @@ fn grounded_answer_needs_follow_up(
     if tool_name != GROUNDED_ANSWER_TOOL_NAME || result.is_error {
         return false;
     }
-    if grounded_answer_warning_requires_follow_up(result) {
+    let Some(envelope) = grounded_answer_completion_envelope(result) else {
         return true;
+    };
+    if matches!(
+        envelope.readiness.answer_disposition,
+        ironrag_contracts::assistant::AssistantAnswerDisposition::SafeFallback
+            | ironrag_contracts::assistant::AssistantAnswerDisposition::Clarification
+    ) {
+        return grounded_answer_canonical_outcome(tool_name, result).is_none();
     }
     if grounded_answer_ready(tool_name, result) {
         return false;
     }
-    if grounded_answer_lifecycle_state(result) != Some(GROUNDED_ANSWER_LIFECYCLE_COMPLETED) {
+    if envelope.readiness.lifecycle_state != GROUNDED_ANSWER_LIFECYCLE_COMPLETED {
         return false;
     }
-    match grounded_answer_verification_state(result) {
-        Some(GROUNDED_ANSWER_VERIFICATION_VERIFIED | GROUNDED_ANSWER_VERIFICATION_NOT_RUN) => false,
-        Some(_) | None => true,
-    }
-}
-
-fn grounded_answer_warning_requires_follow_up(
-    result: &crate::interfaces::http::mcp::McpToolResult,
-) -> bool {
-    result
-        .structured_content
-        .pointer("/executionDetail/verificationWarnings")
-        .and_then(Value::as_array)
-        .is_some_and(|warnings| {
-            warnings.iter().any(|warning| {
-                warning
-                    .get("code")
-                    .and_then(Value::as_str)
-                    .is_some_and(verification_warning_code_requires_follow_up)
-            })
-        })
-}
-
-fn verification_warning_code_requires_follow_up(code: &str) -> bool {
-    matches!(
-        code,
-        "unsupported_literal"
-            | "unsupported_canonical_claim"
-            | "no_canonical_evidence"
-            | "no_verifiable_tool_evidence"
-            | "no_agent_tool_evidence"
-            | "conflicting_evidence"
-            | "partial_coverage"
-            | "empty_answer"
-    )
+    envelope.repair_policy.required
 }
 
 fn grounded_answer_completed(
@@ -3935,24 +4577,15 @@ fn grounded_answer_completed(
 ) -> bool {
     tool_name == GROUNDED_ANSWER_TOOL_NAME
         && !result.is_error
-        && grounded_answer_lifecycle_state(result) == Some(GROUNDED_ANSWER_LIFECYCLE_COMPLETED)
+        && grounded_answer_lifecycle_completed(result)
 }
 
-fn grounded_answer_lifecycle_state(
+fn grounded_answer_lifecycle_completed(
     result: &crate::interfaces::http::mcp::McpToolResult,
-) -> Option<&str> {
-    result.structured_content.get("lifecycleState").and_then(Value::as_str).or_else(|| {
-        result
-            .structured_content
-            .pointer("/executionDetail/execution/lifecycleState")
-            .and_then(Value::as_str)
+) -> bool {
+    grounded_answer_completion_envelope(result).is_some_and(|envelope| {
+        envelope.readiness.lifecycle_state == GROUNDED_ANSWER_LIFECYCLE_COMPLETED
     })
-}
-
-fn grounded_answer_verification_state(
-    result: &crate::interfaces::http::mcp::McpToolResult,
-) -> Option<&str> {
-    result.structured_content.pointer("/executionDetail/verificationState").and_then(Value::as_str)
 }
 
 fn tool_result_full_text(
@@ -3980,10 +4613,15 @@ fn tool_result_answer_text(
 
 fn grounded_answer_body_text(outcome: &ToolExecutionOutcome) -> Option<&str> {
     outcome
-        .result_json
-        .as_ref()
-        .and_then(|json| json.pointer("/structuredContent/answerBody"))
-        .and_then(Value::as_str)
+        .grounded_answer_body
+        .as_deref()
+        .or_else(|| {
+            outcome
+                .result_json
+                .as_ref()
+                .and_then(|json| json.pointer("/structuredContent/answerBody"))
+                .and_then(Value::as_str)
+        })
         .or(outcome.result_text.as_deref())
         .map(str::trim)
         .filter(|text| !text.is_empty())
@@ -4030,7 +4668,89 @@ fn remember_completed_grounded_answer(
     if tool_name != GROUNDED_ANSWER_TOOL_NAME || !outcome.grounded_answer_completed {
         return current;
     }
+    let factual_disposition = outcome
+        .result_json
+        .as_ref()
+        .and_then(|json| json.get("structuredContent"))
+        .and_then(parse_grounded_answer_completion_envelope)
+        .is_some_and(|envelope| {
+            matches!(
+                envelope.readiness.answer_disposition,
+                ironrag_contracts::assistant::AssistantAnswerDisposition::FactualReady
+            )
+        });
+    if !factual_disposition {
+        return current;
+    }
     grounded_answer_body_text(outcome).map(ToOwned::to_owned).or(current)
+}
+
+fn remember_verified_partial_grounded_answer(
+    current: Option<String>,
+    tool_name: &str,
+    outcome: &ToolExecutionOutcome,
+) -> Option<String> {
+    if tool_name != GROUNDED_ANSWER_TOOL_NAME
+        || outcome.is_error
+        || !outcome.grounded_answer_completed
+        || outcome.grounded_answer_ready
+        || !matches!(
+            outcome.grounded_answer_repair_reason,
+            Some(
+                GroundedAnswerRepairReason::ProcedureIncomplete
+                    | GroundedAnswerRepairReason::TroubleshootingIncomplete
+                    | GroundedAnswerRepairReason::AnswerStructureIncomplete
+                    | GroundedAnswerRepairReason::OrderedInventory { .. }
+            )
+        )
+    {
+        return current;
+    }
+    let Some(completion_envelope) = outcome
+        .result_json
+        .as_ref()
+        .and_then(|json| json.get("structuredContent"))
+        .and_then(parse_grounded_answer_completion_envelope)
+    else {
+        return current;
+    };
+    if completion_envelope.completion.complete {
+        return current;
+    }
+    if !matches!(
+        completion_envelope.readiness.answer_disposition,
+        ironrag_contracts::assistant::AssistantAnswerDisposition::FactualReady
+    ) {
+        return current;
+    }
+    grounded_answer_body_text(outcome).map(ToOwned::to_owned).or(current)
+}
+
+fn explicitly_mark_partial_grounded_answer(answer: &str, language: QueryLanguage) -> String {
+    let notice = grounded_repair_messages(language).partial_answer_notice;
+    format!("{notice}\n\n{}", answer.trim())
+}
+
+fn explicitly_mark_unverified_completed_grounded_answer(
+    answer: &str,
+    language: QueryLanguage,
+) -> String {
+    let notice = grounded_repair_messages(language).unverified_answer_notice;
+    format!("{notice}\n\n{}", answer.trim())
+}
+
+fn completed_grounded_answer_after_failed_focused_follow_up(
+    incomplete_grounded_answer_needs_follow_up: bool,
+    focused_grounded_follow_up_attempted: bool,
+    focused_grounded_follow_up_unresolved: bool,
+    last_completed_grounded_answer: Option<&str>,
+) -> Option<&str> {
+    (incomplete_grounded_answer_needs_follow_up
+        && focused_grounded_follow_up_attempted
+        && focused_grounded_follow_up_unresolved)
+        .then_some(last_completed_grounded_answer)
+        .flatten()
+        .filter(|answer| !answer.trim().is_empty())
 }
 
 fn should_return_completed_grounded_answer_on_iteration_cap(
@@ -4043,11 +4763,58 @@ fn should_return_completed_grounded_answer_on_iteration_cap(
         && last_completed_grounded_answer.is_some_and(|answer| !answer.trim().is_empty())
 }
 
+/// Select an iteration-cap answer exclusively from grounded results produced
+/// during the current turn. Conversation history can shape follow-up query
+/// compilation, but a prior assistant/system message is never itself a valid
+/// answer for a new turn.
+fn current_turn_grounded_answer_on_iteration_cap<'a>(
+    stopped_reason: AgentStopReason,
+    incomplete_grounded_answer_needs_follow_up: bool,
+    focused_grounded_follow_up_attempted: bool,
+    successful_tool_call_count: usize,
+    verified_grounded_answer_count: usize,
+    last_verified_grounded_answer: Option<&'a str>,
+    last_completed_grounded_answer: Option<&'a str>,
+) -> Option<&'a str> {
+    if incomplete_grounded_answer_needs_follow_up
+        || !matches!(stopped_reason, AgentStopReason::IterationCap)
+    {
+        return None;
+    }
+
+    if let Some(answer) = verified_grounded_answer_fallback_candidate(
+        last_verified_grounded_answer,
+        verified_grounded_answer_count,
+        successful_tool_call_count,
+    )
+    .filter(|answer| !answer.trim().is_empty())
+    {
+        return Some(answer);
+    }
+
+    if focused_grounded_follow_up_attempted
+        && let Some(answer) =
+            last_verified_grounded_answer.filter(|answer| !answer.trim().is_empty())
+    {
+        return Some(answer);
+    }
+
+    should_return_completed_grounded_answer_on_iteration_cap(
+        stopped_reason,
+        successful_tool_call_count,
+        last_completed_grounded_answer,
+    )
+    .then_some(last_completed_grounded_answer)
+    .flatten()
+}
+
 fn compact_grounded_answer_structured_content_for_model(
     value: &Value,
     fallback_limit: usize,
 ) -> Value {
-    let reference_limit = if value.get("finalizable").and_then(Value::as_bool) == Some(true) {
+    let reference_limit = if parse_grounded_answer_completion_envelope(value)
+        .is_some_and(|envelope| envelope.finalizable)
+    {
         TOOL_MODEL_FINALIZABLE_GROUNDED_REFERENCE_LIMIT
     } else {
         TOOL_MODEL_GROUNDED_REFERENCE_LIMIT
@@ -4071,19 +4838,28 @@ fn compact_grounded_answer_structured_content(
     fallback_limit: usize,
     reference_limit: usize,
 ) -> Value {
+    if value.get("responseProfile").and_then(Value::as_str) == Some("compact") {
+        return compact_existing_grounded_answer_profile(value, reference_limit, fallback_limit);
+    }
     let Some(execution_detail) = value.get("executionDetail") else {
         return compact_structured_content(value, fallback_limit);
     };
-    serde_json::json!({
+    let completion_envelope = parse_grounded_answer_completion_envelope(value);
+    let compact = serde_json::json!({
         "executionId": value.get("executionId").cloned().unwrap_or(Value::Null),
         "runtimeExecutionId": value.get("runtimeExecutionId").cloned().unwrap_or(Value::Null),
         "conversationId": value.get("conversationId").cloned().unwrap_or(Value::Null),
         "libraryId": value.get("libraryId").cloned().unwrap_or(Value::Null),
         "workspaceId": value.get("workspaceId").cloned().unwrap_or(Value::Null),
         "lifecycleState": value.get("lifecycleState").cloned().unwrap_or(Value::Null),
-        "finalAnswerReady": value.get("finalAnswerReady").cloned().unwrap_or(Value::Bool(false)),
-        "finalizable": value.get("finalizable").cloned().unwrap_or(Value::Bool(false)),
+        "finalAnswerReady": completion_envelope.as_ref().is_some_and(|envelope| envelope.final_answer_ready),
+        "finalizable": completion_envelope.as_ref().is_some_and(|envelope| envelope.finalizable),
+        "completion": completion_envelope.as_ref().map(|envelope| serde_json::json!(&envelope.completion)).unwrap_or(Value::Null),
+        "repairPolicy": completion_envelope.as_ref().map(|envelope| serde_json::json!(&envelope.repair_policy)).unwrap_or(Value::Null),
+        "readiness": completion_envelope.as_ref().map(|envelope| serde_json::json!(&envelope.readiness)).unwrap_or(Value::Null),
         "mustPreserveSpans": value.get("mustPreserveSpans").cloned().unwrap_or_else(|| serde_json::json!([])),
+        "clarification": value.get("clarification").cloned().unwrap_or_else(|| serde_json::json!({"required": false})),
+        "answerCandidates": compact_reference_array(value.get("answerCandidates"), TOOL_MODEL_GROUNDED_REFERENCE_LIMIT),
         "verificationState": execution_detail.get("verificationState").cloned().unwrap_or(Value::Null),
         "verificationWarnings": execution_detail.get("verificationWarnings").cloned().unwrap_or_else(|| serde_json::json!([])),
         "referenceCounts": {
@@ -4093,14 +4869,165 @@ fn compact_grounded_answer_structured_content(
             "entityReferences": reference_array_len(execution_detail.get("entityReferences")),
             "relationReferences": reference_array_len(execution_detail.get("relationReferences"))
         },
-        "references": {
-            "chunkReferences": compact_reference_array(execution_detail.get("chunkReferences"), reference_limit),
-            "preparedSegmentReferences": compact_reference_array(execution_detail.get("preparedSegmentReferences"), reference_limit),
-            "technicalFactReferences": compact_reference_array(execution_detail.get("technicalFactReferences"), reference_limit),
-            "entityReferences": compact_reference_array(execution_detail.get("entityReferences"), reference_limit),
-            "relationReferences": compact_reference_array(execution_detail.get("relationReferences"), reference_limit)
+        "references": compact_grounded_reference_groups(execution_detail, reference_limit)
+    });
+    enforce_grounded_structured_content_limit(compact, fallback_limit)
+}
+
+fn compact_existing_grounded_answer_profile(
+    value: &Value,
+    reference_limit: usize,
+    fallback_limit: usize,
+) -> Value {
+    let reference_summary = value.get("referenceSummary");
+    let references = bounded_json_array(
+        reference_summary.and_then(|summary| summary.get("references")),
+        reference_limit,
+    );
+    let total_reference_count = reference_summary
+        .and_then(|summary| summary.get("totalCount"))
+        .and_then(Value::as_u64)
+        .unwrap_or_else(|| u64::try_from(references.len()).unwrap_or(u64::MAX));
+    let returned_reference_count = u64::try_from(references.len()).unwrap_or(u64::MAX);
+
+    let candidate_summary = value.get("answerCandidateSummary");
+    let answer_candidates = bounded_json_array(
+        candidate_summary.and_then(|summary| summary.get("candidates")),
+        TOOL_MODEL_GROUNDED_REFERENCE_LIMIT,
+    );
+    let total_candidate_count = candidate_summary
+        .and_then(|summary| summary.get("totalCount"))
+        .and_then(Value::as_u64)
+        .unwrap_or_else(|| u64::try_from(answer_candidates.len()).unwrap_or(u64::MAX));
+    let returned_candidate_count = u64::try_from(answer_candidates.len()).unwrap_or(u64::MAX);
+    let verifier_state = value.pointer("/verifier/state").cloned().unwrap_or(Value::Null);
+    let warnings = bounded_json_array(value.get("warnings"), TOOL_MODEL_GROUNDED_REFERENCE_LIMIT);
+    let completion_envelope = parse_grounded_answer_completion_envelope(value);
+
+    let compact = serde_json::json!({
+        "responseProfile": "compact",
+        "executionId": value.get("executionId").cloned().unwrap_or(Value::Null),
+        "runtimeExecutionId": value.get("runtimeExecutionId").cloned().unwrap_or(Value::Null),
+        "conversationId": value.get("conversationId").cloned().unwrap_or(Value::Null),
+        "libraryId": value.get("libraryId").cloned().unwrap_or(Value::Null),
+        "workspaceId": value.get("workspaceId").cloned().unwrap_or(Value::Null),
+        "lifecycleState": value.get("lifecycleState").cloned().unwrap_or(Value::Null),
+        "finalAnswerReady": completion_envelope.as_ref().is_some_and(|envelope| envelope.final_answer_ready),
+        "finalizable": completion_envelope.as_ref().is_some_and(|envelope| envelope.finalizable),
+        "completion": completion_envelope.as_ref().map(|envelope| serde_json::json!(&envelope.completion)).unwrap_or(Value::Null),
+        "repairPolicy": completion_envelope.as_ref().map(|envelope| serde_json::json!(&envelope.repair_policy)).unwrap_or(Value::Null),
+        "readiness": completion_envelope.as_ref().map(|envelope| serde_json::json!(&envelope.readiness)).unwrap_or(Value::Null),
+        "verifier": value.get("verifier").cloned().unwrap_or_else(|| serde_json::json!({"state": verifier_state.clone()})),
+        "verificationState": verifier_state,
+        "verificationWarnings": warnings,
+        "mustPreserveSpans": value.get("mustPreserveSpans").cloned().unwrap_or_else(|| serde_json::json!([])),
+        "clarification": value.get("clarification").cloned().unwrap_or_else(|| serde_json::json!({"required": false})),
+        "referenceSummary": {
+            "totalCount": total_reference_count,
+            "returnedCount": returned_reference_count,
+            "truncated": total_reference_count > returned_reference_count,
+            "references": references,
+        },
+        "answerCandidateSummary": {
+            "totalCount": total_candidate_count,
+            "returnedCount": returned_candidate_count,
+            "truncated": total_candidate_count > returned_candidate_count,
+            "candidates": answer_candidates,
         }
+    });
+    enforce_grounded_structured_content_limit(compact, fallback_limit)
+}
+
+fn compact_grounded_reference_groups(execution_detail: &Value, total_limit: usize) -> Value {
+    let mut remaining = total_limit;
+    let mut groups = serde_json::Map::new();
+    for field in [
+        "chunkReferences",
+        "preparedSegmentReferences",
+        "technicalFactReferences",
+        "entityReferences",
+        "relationReferences",
+    ] {
+        let items = execution_detail.get(field).and_then(Value::as_array);
+        let selected = items
+            .map(|items| {
+                let take = items.len().min(remaining);
+                remaining = remaining.saturating_sub(take);
+                let mut selected = items.iter().take(take).cloned().collect::<Vec<_>>();
+                if items.len() > take {
+                    selected.push(serde_json::json!({
+                        "truncated": true,
+                        "omittedCount": items.len() - take,
+                    }));
+                }
+                selected
+            })
+            .unwrap_or_default();
+        groups.insert(field.to_string(), Value::Array(selected));
+    }
+    Value::Object(groups)
+}
+
+fn enforce_grounded_structured_content_limit(value: Value, char_limit: usize) -> Value {
+    let original_char_count = serde_json::to_string(&value)
+        .map(|serialized| serialized.chars().count())
+        .unwrap_or(usize::MAX);
+    if original_char_count <= char_limit {
+        return value;
+    }
+    let warning_codes = value
+        .get("verificationWarnings")
+        .or_else(|| value.get("warnings"))
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|warning| warning.get("code").and_then(Value::as_str))
+        .take(8)
+        .map(|code| code.chars().take(80).collect::<String>())
+        .collect::<Vec<_>>();
+    let preserve_spans = value
+        .get("mustPreserveSpans")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .take(8)
+        .map(|span| span.chars().take(160).collect::<String>())
+        .collect::<Vec<_>>();
+    let completion_envelope = parse_grounded_answer_completion_envelope(&value);
+    serde_json::json!({
+        "truncated": true,
+        "originalCharCount": original_char_count,
+        "executionId": value.get("executionId").cloned().unwrap_or(Value::Null),
+        "runtimeExecutionId": value.get("runtimeExecutionId").cloned().unwrap_or(Value::Null),
+        "conversationId": value.get("conversationId").cloned().unwrap_or(Value::Null),
+        "libraryId": value.get("libraryId").cloned().unwrap_or(Value::Null),
+        "workspaceId": value.get("workspaceId").cloned().unwrap_or(Value::Null),
+        "lifecycleState": value.get("lifecycleState").cloned().unwrap_or(Value::Null),
+        "finalAnswerReady": completion_envelope.as_ref().is_some_and(|envelope| envelope.final_answer_ready),
+        "finalizable": completion_envelope.as_ref().is_some_and(|envelope| envelope.finalizable),
+        "completion": completion_envelope.as_ref().map(|envelope| serde_json::json!(&envelope.completion)).unwrap_or(Value::Null),
+        "repairPolicy": completion_envelope.as_ref().map(|envelope| serde_json::json!(&envelope.repair_policy)).unwrap_or(Value::Null),
+        "readiness": completion_envelope.as_ref().map(|envelope| serde_json::json!(&envelope.readiness)).unwrap_or(Value::Null),
+        "clarification": value.get("clarification").cloned().unwrap_or_else(|| serde_json::json!({"required": false})),
+        "verificationState": value.get("verificationState").cloned().unwrap_or(Value::Null),
+        "verificationWarningCodes": warning_codes,
+        "mustPreserveSpans": preserve_spans,
+        "referenceCounts": value.get("referenceCounts").cloned().unwrap_or(Value::Null),
+        "referenceSummary": value.get("referenceSummary").map(|summary| serde_json::json!({
+            "totalCount": summary.get("totalCount").cloned().unwrap_or(Value::Null),
+            "returnedCount": 0,
+            "truncated": true,
+            "references": [],
+        })).unwrap_or(Value::Null),
     })
+}
+
+fn bounded_json_array(value: Option<&Value>, limit: usize) -> Vec<Value> {
+    match value {
+        Some(Value::Array(items)) => items.iter().take(limit).cloned().collect(),
+        _ => Vec::new(),
+    }
 }
 
 fn reference_array_len(value: Option<&Value>) -> usize {
@@ -4211,318 +5138,180 @@ fn extract_child_runtime_execution_ids(tool_name: &str, value: &Value) -> Vec<Uu
 /// Verification is the caller's responsibility: if the output is empty
 /// or trips the verifier, the caller either revises over the same
 /// grounded context or returns the verifier state to the user.
-pub async fn run_single_shot_turn(
+pub(crate) async fn run_single_shot_turn(
     state: &AppState,
+    execution_context: QueryProviderExecutionContext,
     library_id: Uuid,
     user_question: &str,
     conversation_history: &[ChatMessage],
     grounded_context: &str,
 ) -> Result<AgentTurnResult, QueryServiceError> {
-    let binding = state
-        .canonical_services
-        .ai_catalog
-        .resolve_active_runtime_binding(state, library_id, AiBindingPurpose::QueryAnswer)
-        .await
-        .map_err(|e| anyhow::anyhow!("failed to resolve query_answer binding: {e}"))?
-        .ok_or_else(|| {
-            anyhow::anyhow!("no active query_answer binding configured for library {library_id}")
-        })?;
-
-    let provider = ProviderModelSelection {
-        provider_kind: binding.provider_kind.clone(),
-        model_name: binding.model_name.clone(),
-    };
-
     // The runtime has already performed retrieval. Model-visible
     // context is represented as the same chat transcript shape a
     // tool-using agent would see: prior messages, current user, an
     // assistant tool-call record, and the matching tool result.
-    let messages = build_runtime_tool_answer_messages(
-        super::assistant_prompt::render_single_shot(),
-        conversation_history,
-        user_question,
-        RUNTIME_RETRIEVED_CONTEXT_TOOL,
-        serde_json::json!({ "question": user_question }),
-        grounded_context,
-    );
-
-    let tool_use_request = ToolUseRequest {
-        provider_kind: binding.provider_kind.clone(),
-        model_name: binding.model_name.clone(),
-        api_key_override: binding.api_key.clone(),
-        base_url_override: binding.provider_base_url.clone(),
-        temperature: binding.temperature,
-        top_p: binding.top_p,
-        max_output_tokens_override: binding.max_output_tokens_override,
-        messages: messages.clone(),
-        tools: Vec::new(),
-        extra_parameters_json: binding.extra_parameters_json.clone(),
-        require_tool_call: false,
-    };
-
-    let llm_call_started = std::time::Instant::now();
-    let response = state
-        .llm_gateway
-        .generate_with_tools(tool_use_request)
-        .await
-        .with_context(|| "single-shot grounded-answer LLM call failed")?;
-
-    let answer = response.output_text.trim().to_string();
-    let debug_iteration = super::llm_context_debug::LlmIterationDebug {
-        iteration: 1,
-        provider_kind: binding.provider_kind.clone(),
-        model_name: binding.model_name.clone(),
-        request_messages: messages,
-        response_text: (!answer.is_empty()).then(|| answer.clone()),
-        response_tool_calls: Vec::new(),
-        usage: response.usage_json.clone(),
-        duration_ms: Some(llm_call_started.elapsed().as_millis().try_into().unwrap_or(u64::MAX)),
-        child_runtime_execution_ids: Vec::new(),
-        child_query_execution_ids: Vec::new(),
-    };
-
-    Ok(AgentTurnResult {
-        answer,
-        provider,
-        usage_json: response.usage_json,
-        iterations: 1,
-        // Single-shot did not observe any tool results. The answer
-        // pipeline attaches the selected retrieval context as verifier
-        // grounding when it records the generation stage.
-        assistant_grounding: AssistantGroundingEvidence::default(),
-        child_query_execution_ids: Vec::new(),
-        debug_iterations: vec![debug_iteration],
-        agent_loop: None,
-    })
+    run_fixed_context_turn(
+        state,
+        execution_context,
+        FixedContextTurnRequest {
+            library_id,
+            user_question,
+            conversation_history,
+            context: grounded_context,
+            system_prompt: super::assistant_prompt::render_single_shot(),
+            tool_name: RUNTIME_RETRIEVED_CONTEXT_TOOL,
+            tool_arguments: serde_json::json!({ "question": user_question }),
+            call_kind: QueryProviderCallKind::QueryAnswer,
+            failure_context: "single-shot grounded-answer LLM call failed",
+        },
+    )
+    .await
 }
 
-pub async fn run_literal_fidelity_revision_turn(
-    state: &AppState,
-    library_id: Uuid,
-    user_question: &str,
-    conversation_history: &[ChatMessage],
-    original_answer: &str,
-    unsupported_literals: &[String],
-    grounded_context: &str,
-) -> Result<AgentTurnResult, QueryServiceError> {
-    let binding = state
-        .canonical_services
-        .ai_catalog
-        .resolve_active_runtime_binding(state, library_id, AiBindingPurpose::QueryAnswer)
-        .await
-        .map_err(|e| anyhow::anyhow!("failed to resolve query_answer binding: {e}"))?
-        .ok_or_else(|| {
-            anyhow::anyhow!("no active query_answer binding configured for library {library_id}")
-        })?;
-
-    let provider = ProviderModelSelection {
-        provider_kind: binding.provider_kind.clone(),
-        model_name: binding.model_name.clone(),
-    };
-
-    let system_prompt = super::assistant_prompt::render_literal_fidelity_revision(
-        "Provided in the `ironrag_literal_revision_context` runtime tool result.",
-        original_answer,
-        unsupported_literals,
-        None,
-    );
-    let messages = build_runtime_tool_answer_messages(
-        system_prompt,
-        conversation_history,
-        user_question,
-        RUNTIME_LITERAL_REVISION_CONTEXT_TOOL,
-        serde_json::json!({
-            "question": user_question,
-            "unsupportedLiterals": unsupported_literals,
-        }),
-        grounded_context,
-    );
-
-    let tool_use_request = ToolUseRequest {
-        provider_kind: binding.provider_kind.clone(),
-        model_name: binding.model_name.clone(),
-        api_key_override: binding.api_key.clone(),
-        base_url_override: binding.provider_base_url.clone(),
-        temperature: binding.temperature,
-        top_p: binding.top_p,
-        max_output_tokens_override: binding.max_output_tokens_override,
-        messages: messages.clone(),
-        tools: Vec::new(),
-        extra_parameters_json: binding.extra_parameters_json.clone(),
-        require_tool_call: false,
-    };
-
-    let llm_call_started = std::time::Instant::now();
-    let response = state
-        .llm_gateway
-        .generate_with_tools(tool_use_request)
-        .await
-        .with_context(|| "literal-fidelity revision LLM call failed")?;
-
-    let answer = response.output_text.trim().to_string();
-    let debug_iteration = super::llm_context_debug::LlmIterationDebug {
-        iteration: 1,
-        provider_kind: binding.provider_kind.clone(),
-        model_name: binding.model_name.clone(),
-        request_messages: messages,
-        response_text: (!answer.is_empty()).then(|| answer.clone()),
-        response_tool_calls: Vec::new(),
-        usage: response.usage_json.clone(),
-        duration_ms: Some(llm_call_started.elapsed().as_millis().try_into().unwrap_or(u64::MAX)),
-        child_runtime_execution_ids: Vec::new(),
-        child_query_execution_ids: Vec::new(),
-    };
-
-    Ok(AgentTurnResult {
-        answer,
-        provider,
-        usage_json: response.usage_json,
-        iterations: 1,
-        assistant_grounding: AssistantGroundingEvidence::default(),
-        child_query_execution_ids: Vec::new(),
-        debug_iterations: vec![debug_iteration],
-        agent_loop: None,
-    })
+pub(crate) enum LiteralRevisionRequest<'a> {
+    Fidelity {
+        library_id: Uuid,
+        user_question: &'a str,
+        conversation_history: &'a [ChatMessage],
+        original_answer: &'a str,
+        unsupported_literals: &'a [String],
+        grounded_context: &'a str,
+    },
+    InventoryCoverage {
+        library_id: Uuid,
+        user_question: &'a str,
+        conversation_history: &'a [ChatMessage],
+        original_answer: &'a str,
+        required_literals: &'a [String],
+        revision_context: &'a str,
+    },
 }
 
-pub async fn run_literal_inventory_coverage_revision_turn(
+pub(crate) async fn run_literal_revision_turn(
     state: &AppState,
-    library_id: Uuid,
-    user_question: &str,
-    conversation_history: &[ChatMessage],
-    original_answer: &str,
-    required_literals: &[String],
-    revision_context: &str,
+    execution_context: QueryProviderExecutionContext,
+    request: LiteralRevisionRequest<'_>,
 ) -> Result<AgentTurnResult, QueryServiceError> {
-    let binding = state
-        .canonical_services
-        .ai_catalog
-        .resolve_active_runtime_binding(state, library_id, AiBindingPurpose::QueryAnswer)
-        .await
-        .map_err(|e| anyhow::anyhow!("failed to resolve query_answer binding: {e}"))?
-        .ok_or_else(|| {
-            anyhow::anyhow!("no active query_answer binding configured for library {library_id}")
-        })?;
-
-    let provider = ProviderModelSelection {
-        provider_kind: binding.provider_kind.clone(),
-        model_name: binding.model_name.clone(),
-    };
-
-    let system_prompt = super::assistant_prompt::render_literal_inventory_coverage_revision(
-        original_answer,
-        required_literals,
-        "Provided in the `ironrag_literal_revision_context` runtime tool result.",
-    );
-    let messages = build_runtime_tool_answer_messages(
-        system_prompt,
-        conversation_history,
+    let (
+        library_id,
         user_question,
-        RUNTIME_LITERAL_REVISION_CONTEXT_TOOL,
-        serde_json::json!({
-            "question": user_question,
-            "requiredLiterals": required_literals,
-        }),
+        conversation_history,
         revision_context,
-    );
-
-    let tool_use_request = ToolUseRequest {
-        provider_kind: binding.provider_kind.clone(),
-        model_name: binding.model_name.clone(),
-        api_key_override: binding.api_key.clone(),
-        base_url_override: binding.provider_base_url.clone(),
-        temperature: binding.temperature,
-        top_p: binding.top_p,
-        max_output_tokens_override: binding.max_output_tokens_override,
-        messages: messages.clone(),
-        tools: Vec::new(),
-        extra_parameters_json: binding.extra_parameters_json.clone(),
-        require_tool_call: false,
+        call_kind,
+        system_prompt,
+        tool_arguments,
+        failure_context,
+    ) = match request {
+        LiteralRevisionRequest::Fidelity {
+            library_id,
+            user_question,
+            conversation_history,
+            original_answer,
+            unsupported_literals,
+            grounded_context,
+        } => (
+            library_id,
+            user_question,
+            conversation_history,
+            grounded_context,
+            QueryProviderCallKind::QueryAnswerLiteralRevision,
+            super::assistant_prompt::render_literal_fidelity_revision(
+                "Provided in the `ironrag_literal_revision_context` runtime tool result.",
+                original_answer,
+                unsupported_literals,
+                None,
+            ),
+            serde_json::json!({
+                "question": user_question,
+                "unsupportedLiterals": unsupported_literals,
+            }),
+            "literal-fidelity revision LLM call failed",
+        ),
+        LiteralRevisionRequest::InventoryCoverage {
+            library_id,
+            user_question,
+            conversation_history,
+            original_answer,
+            required_literals,
+            revision_context,
+        } => (
+            library_id,
+            user_question,
+            conversation_history,
+            revision_context,
+            QueryProviderCallKind::QueryAnswerInventoryRevision,
+            super::assistant_prompt::render_literal_inventory_coverage_revision(
+                original_answer,
+                required_literals,
+                "Provided in the `ironrag_literal_revision_context` runtime tool result.",
+            ),
+            serde_json::json!({
+                "question": user_question,
+                "requiredLiterals": required_literals,
+            }),
+            "literal-inventory coverage revision LLM call failed",
+        ),
     };
 
-    let llm_call_started = std::time::Instant::now();
-    let response = state
-        .llm_gateway
-        .generate_with_tools(tool_use_request)
-        .await
-        .with_context(|| "literal-inventory coverage revision LLM call failed")?;
-
-    let answer = response.output_text.trim().to_string();
-    let debug_iteration = super::llm_context_debug::LlmIterationDebug {
-        iteration: 1,
-        provider_kind: binding.provider_kind.clone(),
-        model_name: binding.model_name.clone(),
-        request_messages: messages,
-        response_text: (!answer.is_empty()).then(|| answer.clone()),
-        response_tool_calls: Vec::new(),
-        usage: response.usage_json.clone(),
-        duration_ms: Some(llm_call_started.elapsed().as_millis().try_into().unwrap_or(u64::MAX)),
-        child_runtime_execution_ids: Vec::new(),
-        child_query_execution_ids: Vec::new(),
-    };
-
-    Ok(AgentTurnResult {
-        answer,
-        provider,
-        usage_json: response.usage_json,
-        iterations: 1,
-        assistant_grounding: AssistantGroundingEvidence::default(),
-        child_query_execution_ids: Vec::new(),
-        debug_iterations: vec![debug_iteration],
-        agent_loop: None,
-    })
+    run_fixed_context_turn(
+        state,
+        execution_context,
+        FixedContextTurnRequest {
+            library_id,
+            user_question,
+            conversation_history,
+            context: revision_context,
+            system_prompt,
+            tool_name: RUNTIME_LITERAL_REVISION_CONTEXT_TOOL,
+            tool_arguments,
+            call_kind,
+            failure_context,
+        },
+    )
+    .await
 }
 
-/// Run one clarify-with-fallback turn.
-///
-/// The post-retrieval router decided (see
-/// `answer_pipeline::classify_answer_disposition`) that the topic the
-/// user asked about spans several distinct variants in the library with
-/// no dominant one, so a single-shot answer would not cleanly cover them.
-/// The caller passes the variant labels PLUS the same retrieved
-/// `answer_context` the single-shot would answer from; this function asks
-/// the answer model to lead with a grounded best-effort answer only when
-/// the evidence itself settles which content to give, then enumerate the
-/// variants and ask the user to pick one or add a narrowing constraint.
-///
-/// Uses the same `QueryAnswer` binding as `run_single_shot_turn`
-/// so the reply shares model identity, temperature caps and per-turn
-/// billing plumbing.
-pub async fn run_clarify_turn(
-    state: &AppState,
+struct FixedContextTurnRequest<'a> {
     library_id: Uuid,
-    user_question: &str,
-    conversation_history: &[ChatMessage],
-    variants: &[String],
-    answer_context: &str,
+    user_question: &'a str,
+    conversation_history: &'a [ChatMessage],
+    context: &'a str,
+    system_prompt: String,
+    tool_name: &'static str,
+    tool_arguments: Value,
+    call_kind: QueryProviderCallKind,
+    failure_context: &'static str,
+}
+
+async fn run_fixed_context_turn(
+    state: &AppState,
+    execution_context: QueryProviderExecutionContext,
+    request: FixedContextTurnRequest<'_>,
 ) -> Result<AgentTurnResult, QueryServiceError> {
     let binding = state
         .canonical_services
         .ai_catalog
-        .resolve_active_runtime_binding(state, library_id, AiBindingPurpose::QueryAnswer)
+        .resolve_active_runtime_binding(state, request.library_id, AiBindingPurpose::QueryAnswer)
         .await
-        .map_err(|e| anyhow::anyhow!("failed to resolve query_answer binding: {e}"))?
+        .map_err(|error| anyhow::anyhow!("failed to resolve query_answer binding: {error}"))?
         .ok_or_else(|| {
-            anyhow::anyhow!("no active query_answer binding configured for library {library_id}")
+            anyhow::anyhow!(
+                "no active query_answer binding configured for library {}",
+                request.library_id
+            )
         })?;
 
-    let provider = ProviderModelSelection {
-        provider_kind: binding.provider_kind.clone(),
-        model_name: binding.model_name.clone(),
-    };
+    let (provider_call_attribution, mut provider_call_reservation) =
+        reserve_attributed_provider_call(state, execution_context, &binding, request.call_kind)
+            .await?;
 
-    // Clarify-with-fallback: the model receives the SAME retrieved evidence the
-    // single-shot answer would (as the `ironrag_retrieved_context` tool result) so
-    // it can ground a best-effort answer for the dominant variant, while the
-    // candidate variants live in the system prompt for the clarifying menu.
-    let system_prompt = super::assistant_prompt::render_clarify(variants, None);
     let messages = build_runtime_tool_answer_messages(
-        system_prompt,
-        conversation_history,
-        user_question,
-        RUNTIME_RETRIEVED_CONTEXT_TOOL,
-        serde_json::json!({ "question": user_question }),
-        answer_context,
+        request.system_prompt,
+        request.conversation_history,
+        request.user_question,
+        request.tool_name,
+        request.tool_arguments,
+        request.context,
     );
 
     let tool_use_request = ToolUseRequest {
@@ -4540,11 +5329,19 @@ pub async fn run_clarify_turn(
     };
 
     let llm_call_started = std::time::Instant::now();
-    let response = state
-        .llm_gateway
-        .generate_with_tools(tool_use_request)
-        .await
-        .with_context(|| "clarify-path LLM call failed")?;
+    let response = match state.llm_gateway.generate_with_tools(tool_use_request).await {
+        Ok(response) => response,
+        Err(error) => {
+            fail_provider_call(&mut provider_call_reservation).await;
+            return Err(error.context(request.failure_context).into());
+        }
+    };
+    let provider_call = complete_attributed_provider_call(
+        &provider_call_attribution,
+        &mut provider_call_reservation,
+        response.usage_json.clone(),
+    )
+    .await?;
 
     let answer = response.output_text.trim().to_string();
     let debug_iteration = super::llm_context_debug::LlmIterationDebug {
@@ -4559,11 +5356,14 @@ pub async fn run_clarify_turn(
         child_runtime_execution_ids: Vec::new(),
         child_query_execution_ids: Vec::new(),
     };
+    let provider_calls = vec![provider_call];
 
     Ok(AgentTurnResult {
         answer,
-        provider,
+        answer_provenance: AgentAnswerProvenance::Composed,
+        canonical_answer_outcome: None,
         usage_json: response.usage_json,
+        provider_calls,
         iterations: 1,
         assistant_grounding: AssistantGroundingEvidence::default(),
         child_query_execution_ids: Vec::new(),
@@ -4598,18 +5398,16 @@ fn build_runtime_tool_answer_messages(
     messages
 }
 
-/// Accumulate one iteration's `usage_json` into the running total for
-/// a turn. The billing pipeline (`services::ops::billing`) reads token
-/// counts from any of the provider-specific key aliases (`prompt_tokens`
-/// / `input_tokens`, `completion_tokens` / `output_tokens`, plus cached
-/// input variants); we normalize to the OpenAI shape on write so a
-/// mixed-provider trace still produces one correct billing row.
+/// Accumulate one iteration's `usage_json` into the diagnostic turn summary.
+/// Billing never consumes this aggregate: it persists the typed
+/// `provider_calls` ledger one response at a time. We still normalize common
+/// provider protocol fields here so the debug summary remains useful.
 ///
 /// Numbers are summed, and per-iteration counters (`iteration_count`,
 /// `provider_call_count`) expose the round-trip volume separately from
-/// raw tokens so an operator reading the debug snapshot or the billing
-/// `usage_json` can tell a single-shot call apart from a 6-iteration
-/// escalation without cross-referencing `debug_iterations`.
+/// raw tokens so an operator reading the debug snapshot can tell a single-shot
+/// call apart from a multi-iteration escalation without cross-referencing
+/// `debug_iterations`.
 pub(crate) fn merge_usage_into(accumulator: &mut serde_json::Value, iteration: &serde_json::Value) {
     fn sum_key(
         accumulator: &mut serde_json::Map<String, serde_json::Value>,
@@ -4647,8 +5445,7 @@ pub(crate) fn merge_usage_into(accumulator: &mut serde_json::Value, iteration: &
         &["cached_input_tokens", "cache_read_input_tokens", "input_cached_tokens"],
     );
     // Nested `{"prompt_tokens_details": {"cached_tokens": N}}` shape
-    // some providers emit — merge it into the flat key too
-    // so billing sees it regardless of which path upstream used.
+    // some providers emit — merge it into the flat diagnostic key too.
     let nested_cached = iteration
         .get("prompt_tokens_details")
         .and_then(|details| details.get("cached_tokens"))
@@ -4683,6 +5480,158 @@ mod tests {
     };
 
     use super::*;
+
+    #[test]
+    fn provider_call_record_captures_exact_resolved_binding_and_unmodified_usage() {
+        let binding_id = Uuid::now_v7();
+        let usage_json = serde_json::json!({});
+        let binding = ResolvedRuntimeBinding {
+            binding_id,
+            workspace_id: Uuid::now_v7(),
+            library_id: Uuid::now_v7(),
+            binding_purpose: AiBindingPurpose::Agent,
+            provider_catalog_id: Uuid::now_v7(),
+            provider_kind: "provider-a".to_string(),
+            provider_base_url: None,
+            provider_api_style: "chat".to_string(),
+            account_id: Uuid::now_v7(),
+            api_key: None,
+            model_catalog_id: Uuid::now_v7(),
+            model_name: "model-a".to_string(),
+            effective_embedding_dimensions: None,
+            system_prompt: None,
+            temperature: None,
+            top_p: None,
+            max_output_tokens_override: None,
+            extra_parameters_json: serde_json::json!({}),
+        };
+
+        let attribution = provider_call_attribution(&binding, QueryProviderCallKind::QueryAgent)
+            .expect("valid agent attribution");
+        let provider_call_id = Uuid::now_v7();
+        let call = attribution.record(provider_call_id, usage_json.clone());
+
+        assert_eq!(call.binding_id(), binding_id);
+        assert_eq!(call.binding_purpose(), AiBindingPurpose::Agent);
+        assert_eq!(call.provider().provider_kind, "provider-a");
+        assert_eq!(call.provider().model_name, "model-a");
+        assert_eq!(call.call_kind(), QueryProviderCallKind::QueryAgent);
+        assert_eq!(call.usage_json(), &usage_json);
+    }
+
+    #[test]
+    fn provider_call_attribution_mismatch_fails_before_response_recording() {
+        let binding = ResolvedRuntimeBinding {
+            binding_id: Uuid::now_v7(),
+            workspace_id: Uuid::now_v7(),
+            library_id: Uuid::now_v7(),
+            binding_purpose: AiBindingPurpose::QueryAnswer,
+            provider_catalog_id: Uuid::now_v7(),
+            provider_kind: "provider-a".to_string(),
+            provider_base_url: None,
+            provider_api_style: "chat".to_string(),
+            account_id: Uuid::now_v7(),
+            api_key: None,
+            model_catalog_id: Uuid::now_v7(),
+            model_name: "model-a".to_string(),
+            effective_embedding_dimensions: None,
+            system_prompt: None,
+            temperature: None,
+            top_p: None,
+            max_output_tokens_override: None,
+            extra_parameters_json: serde_json::json!({}),
+        };
+
+        let result = provider_call_attribution(&binding, QueryProviderCallKind::QueryAgent);
+
+        assert!(matches!(result, Err(QueryServiceError::Internal(_))));
+    }
+
+    #[test]
+    fn paid_response_ledger_survives_a_later_loop_deadline() {
+        let attribution = QueryProviderCallAttribution::try_new(
+            Uuid::now_v7(),
+            AiBindingPurpose::Agent,
+            ProviderModelSelection {
+                provider_kind: "provider-a".to_string(),
+                model_name: "model-a".to_string(),
+            },
+            QueryProviderCallKind::QueryAgent,
+        )
+        .expect("valid agent attribution");
+        let provider_call =
+            attribution.record(Uuid::now_v7(), serde_json::json!({"output_tokens": 5}));
+
+        let failure = AgentTurnFailure::with_loop(
+            QueryServiceError::DeadlineExceeded,
+            vec![provider_call.clone()],
+            Vec::new(),
+            agent_loop_metadata(2, Duration::from_secs(1), AgentStopReason::Deadline, 0),
+        );
+
+        assert_eq!(failure.provider_calls, vec![provider_call]);
+    }
+
+    fn with_test_completion_envelope(mut structured: Value) -> Value {
+        let candidate_ready =
+            structured.get("finalAnswerReady").and_then(Value::as_bool).unwrap_or(false);
+        let answer_text = structured.get("answerBody").and_then(Value::as_str).unwrap_or_default();
+        let lifecycle_state =
+            structured.get("lifecycleState").and_then(Value::as_str).unwrap_or("completed");
+        let clarification_required =
+            structured.pointer("/clarification/required").and_then(Value::as_bool).unwrap_or(false);
+        let answer_disposition = structured
+            .pointer("/executionDetail/answerDisposition")
+            .cloned()
+            .map(|value| {
+                serde_json::from_value(value)
+                    .expect("test answer disposition must use the contract vocabulary")
+            })
+            .unwrap_or_else(|| {
+                if clarification_required {
+                    ironrag_contracts::assistant::AssistantAnswerDisposition::Clarification
+                } else if candidate_ready {
+                    ironrag_contracts::assistant::AssistantAnswerDisposition::FactualReady
+                } else {
+                    ironrag_contracts::assistant::AssistantAnswerDisposition::NonTerminal
+                }
+            });
+        let completion = structured
+            .get("completion")
+            .cloned()
+            .map(|value| {
+                serde_json::from_value(value)
+                    .expect("test completion assessment must match the typed contract")
+            })
+            .filter(AnswerCompletionAssessment::is_consistent)
+            .unwrap_or_else(AnswerCompletionAssessment::complete);
+        let envelope = GroundedAnswerCompletionEnvelope::new(
+            answer_disposition,
+            answer_text,
+            completion,
+            lifecycle_state,
+            None,
+        );
+        let Value::Object(envelope_fields) = serde_json::json!(envelope) else {
+            return structured;
+        };
+        if let Some(fields) = structured.as_object_mut() {
+            fields.extend(envelope_fields);
+            fields
+                .entry("responseProfile".to_string())
+                .or_insert_with(|| Value::String("full".to_string()));
+            fields.entry("clarification".to_string()).or_insert_with(|| {
+                serde_json::json!({
+                    "required": clarification_required,
+                    "question": Value::Null,
+                })
+            });
+            fields
+                .entry("answerCandidates".to_string())
+                .or_insert_with(|| Value::Array(Vec::new()));
+        }
+        structured
+    }
 
     fn auth_with_answer_tool_access() -> AuthContext {
         AuthContext {
@@ -4751,7 +5700,8 @@ mod tests {
                 McpToolSurface::Answer,
                 capabilities,
             );
-            let tool_defs = answer_surface_tool_defs(&auth, capabilities);
+            let tool_defs = answer_surface_tool_defs(&auth, capabilities)
+                .expect("complete answer tool contract");
 
             assert_eq!(
                 tool_defs.iter().map(|tool| tool.name.as_str()).collect::<Vec<_>>(),
@@ -4759,7 +5709,7 @@ mod tests {
                 "UI agent tool set diverged from MCP answer surface (vision={agent_vision_available})"
             );
             assert!(tool_defs.iter().any(|tool| tool.name == "grounded_answer"));
-            assert!(!tool_defs.iter().any(|tool| tool.name == "upload_documents"));
+            assert!(!tool_defs.iter().any(|tool| tool.name == "create_documents"));
             assert_eq!(
                 tool_defs.iter().any(|tool| tool.name == "view_document_image"),
                 agent_vision_available,
@@ -5193,6 +6143,11 @@ mod tests {
         assert_eq!(call.name, GROUNDED_ANSWER_TOOL_NAME);
         assert_eq!(arguments["query"], "Q?");
         assert_eq!(arguments["topK"], 1);
+        assert_eq!(arguments["responseProfile"], "compact");
+        assert_eq!(
+            arguments["maxReferences"],
+            crate::services::mcp::agent_policy::AGENT_COMPACT_REFERENCE_LIMIT
+        );
     }
 
     #[test]
@@ -5224,6 +6179,648 @@ mod tests {
         let grounded = BTreeSet::from([GROUNDED_ANSWER_TOOL_NAME.to_string()]);
 
         assert!(!should_require_tool_call_before_final(false, &tool_defs, &grounded, false));
+    }
+
+    #[test]
+    fn typed_clarification_is_terminal_exact_passthrough_without_retry() {
+        let question = "How do I configure the connector?";
+        let answer_body = "Choose one of the matching variants.";
+        let result = crate::interfaces::http::mcp::McpToolResult {
+            content: vec![crate::interfaces::http::mcp::McpContentBlock {
+                content_type: "text",
+                text: answer_body.to_string(),
+            }],
+            structured_content: with_test_completion_envelope(serde_json::json!({
+                "queryLanguage": "en",
+                "answerBody": answer_body,
+                "finalAnswerReady": false,
+                "finalizable": false,
+                "lifecycleState": "completed",
+                "clarification": {
+                    "required": true,
+                    "question": "Which variant?"
+                },
+                "answerCandidates": [
+                    {"label": "Variant Alpha", "kind": "document", "provenance": {}},
+                    {"label": "Variant Beta", "kind": "document", "provenance": {}}
+                ],
+                "executionDetail": {
+                    "verificationState": "not_run",
+                    "verificationWarnings": [{
+                        "code": "clarification_not_answer",
+                        "message": "This is a clarification, not an answer."
+                    }]
+                }
+            })),
+            is_error: false,
+        };
+        let call = ChatToolCall {
+            id: "call-grounded".to_string(),
+            name: GROUNDED_ANSWER_TOOL_NAME.to_string(),
+            arguments_json: serde_json::json!({"query": question}).to_string(),
+        };
+        let repair_reason =
+            grounded_answer_repair_reason(GROUNDED_ANSWER_TOOL_NAME, question, &result);
+        let mut state = FocusedGroundedFollowUpState::default();
+        if let Some(reason) = repair_reason {
+            state.schedule(
+                reason,
+                grounded_answer_query_language(GROUNDED_ANSWER_TOOL_NAME, &result),
+            );
+        }
+        let canonical_answer_outcome =
+            grounded_answer_canonical_outcome(GROUNDED_ANSWER_TOOL_NAME, &result);
+        let grounded_answer_clarification_required =
+            canonical_answer_outcome.as_ref().is_some_and(|outcome| {
+                matches!(outcome.disposition, QueryAnswerDisposition::Clarification)
+            });
+        let outcome = ToolExecutionOutcome {
+            arguments_json: Some(serde_json::json!({"query": question}).to_string()),
+            requested_arguments_json: None,
+            message_content: String::new(),
+            result_text: Some(answer_body.to_string()),
+            result_json: Some(debug_tool_result_json(&result)),
+            grounding_text: None,
+            grounded_answer_body: grounded_answer_verbatim_body(GROUNDED_ANSWER_TOOL_NAME, &result),
+            canonical_answer_outcome,
+            grounded_answer_ready: false,
+            grounded_answer_completed: grounded_answer_completed(
+                GROUNDED_ANSWER_TOOL_NAME,
+                &result,
+            ),
+            grounded_answer_needs_follow_up: grounded_answer_needs_follow_up(
+                GROUNDED_ANSWER_TOOL_NAME,
+                &result,
+            ),
+            grounded_answer_repair_reason: repair_reason,
+            grounded_answer_language: grounded_answer_query_language(
+                GROUNDED_ANSWER_TOOL_NAME,
+                &result,
+            ),
+            grounded_answer_clarification_required,
+            is_error: false,
+            is_replay: false,
+            duration_ms: 5,
+            child_query_execution_ids: Vec::new(),
+            child_runtime_execution_ids: Vec::new(),
+        };
+
+        assert!(repair_reason.is_none());
+        assert!(!state.requires_resolution());
+        assert!(state.take_call(question, 24).is_none());
+        assert!(!outcome.grounded_answer_needs_follow_up);
+        let terminal = terminal_grounded_answer_nonfactual_candidate(
+            std::slice::from_ref(&call),
+            std::slice::from_ref(&outcome),
+            question,
+        )
+        .expect("typed clarification should terminate the initial canonical call");
+        let metadata = agent_loop_metadata(6, Duration::from_secs(60), terminal.stop_reason, 1);
+
+        assert_eq!(terminal.answer, answer_body);
+        assert_eq!(
+            terminal.canonical_answer_outcome.disposition,
+            QueryAnswerDisposition::Clarification,
+        );
+        assert_eq!(terminal.canonical_answer_outcome.clarification.answer_candidates.len(), 2);
+        assert_eq!(metadata.stopped_reason, AgentStopReason::FinalAnswer);
+        assert_eq!(metadata.tool_call_count, 1);
+        assert_eq!(
+            outcome
+                .result_json
+                .as_ref()
+                .and_then(|json| json.pointer("/structuredContent/clarification")),
+            Some(&serde_json::json!({
+                "required": true,
+                "question": "Which variant?",
+            })),
+        );
+    }
+
+    #[test]
+    fn focused_follow_up_stays_effectively_non_identical_after_ui_normalization() {
+        let question = "How do I configure the connector?";
+        let initial = required_grounded_answer_tool_call(question, 24);
+        let focused = focused_grounded_answer_follow_up_call(
+            question,
+            24,
+            RuntimeGroundedRepairMetadata::from_reason(
+                GroundedAnswerRepairReason::ProcedureIncomplete,
+                QueryLanguage::En,
+            ),
+        );
+        let initial_fingerprint = effective_tool_call_fingerprint_with_context(
+            GROUNDED_ANSWER_TOOL_NAME,
+            &initial.arguments_json,
+            question,
+            false,
+            true,
+            24,
+            "workspace-a/library-b",
+            &[],
+        )
+        .expect("initial fingerprint");
+        let focused_fingerprint = effective_tool_call_fingerprint_with_context(
+            GROUNDED_ANSWER_TOOL_NAME,
+            &focused.arguments_json,
+            question,
+            false,
+            true,
+            24,
+            "workspace-a/library-b",
+            &[],
+        )
+        .expect("focused fingerprint");
+        let mut normalized =
+            serde_json::from_str::<Value>(&focused.arguments_json).expect("focused arguments");
+        normalize_agent_tool_argument_types(GROUNDED_ANSWER_TOOL_NAME, &mut normalized);
+        apply_agent_tool_argument_defaults_with_context(
+            GROUNDED_ANSWER_TOOL_NAME,
+            &mut normalized,
+            question,
+            false,
+            true,
+            24,
+            "workspace-a/library-b",
+            &[],
+        );
+
+        assert_ne!(initial_fingerprint, focused_fingerprint);
+        assert_eq!(normalized["query"].as_str(), Some(question));
+        assert_eq!(normalized["topK"], serde_json::json!(32));
+        assert!(normalized.get(RUNTIME_REPAIR_ARGUMENT_FIELD).is_none());
+    }
+
+    #[test]
+    fn maximum_initial_breadth_reserves_one_candidate_for_a_fresh_repair_probe() {
+        let question = "How do I configure the connector?";
+        let initial = required_grounded_answer_tool_call(question, MAX_TOP_K);
+        let focused = focused_grounded_answer_follow_up_call(
+            question,
+            MAX_TOP_K,
+            RuntimeGroundedRepairMetadata::from_reason(
+                GroundedAnswerRepairReason::ProcedureIncomplete,
+                QueryLanguage::En,
+            ),
+        );
+        let initial_arguments =
+            serde_json::from_str::<Value>(&initial.arguments_json).expect("initial arguments");
+        let focused_arguments =
+            serde_json::from_str::<Value>(&focused.arguments_json).expect("focused arguments");
+
+        assert_eq!(initial_arguments["query"].as_str(), Some(question));
+        assert_eq!(focused_arguments["query"].as_str(), Some(question));
+        assert_eq!(initial_arguments["topK"], serde_json::json!(MAX_TOP_K - 1));
+        assert_eq!(focused_arguments["topK"], serde_json::json!(MAX_TOP_K));
+    }
+
+    #[test]
+    fn focused_follow_up_uses_runtime_dispatch_instead_of_the_model() {
+        let call = focused_grounded_answer_follow_up_call(
+            "How do I configure the connector?",
+            24,
+            RuntimeGroundedRepairMetadata::from_reason(
+                GroundedAnswerRepairReason::ProcedureIncomplete,
+                QueryLanguage::En,
+            ),
+        );
+
+        let response =
+            runtime_enforced_tool_response(call.clone(), "synthetic-provider", "synthetic-model");
+
+        assert_eq!(response.tool_calls.len(), 1);
+        assert_eq!(response.tool_calls[0].name, GROUNDED_ANSWER_TOOL_NAME);
+        assert_eq!(response.tool_calls[0].arguments_json, call.arguments_json);
+        assert_eq!(response.usage_json["runtimeEnforced"], serde_json::json!(true));
+    }
+
+    #[test]
+    fn initial_grounded_answer_uses_runtime_dispatch_before_the_model() {
+        let call =
+            initial_grounded_answer_tool_call(1, 0, "How do I configure the sample connector?", 24)
+                .expect("first iteration must use the canonical answer tool");
+        let arguments = serde_json::from_str::<Value>(&call.arguments_json).expect("arguments");
+
+        assert_eq!(call.name, GROUNDED_ANSWER_TOOL_NAME);
+        assert_eq!(arguments["query"], "How do I configure the sample connector?");
+        assert_eq!(arguments["responseProfile"], "compact");
+        assert_eq!(arguments["maxReferences"], serde_json::json!(8));
+        assert!(initial_grounded_answer_tool_call(2, 1, "Q?", 24).is_none());
+    }
+
+    #[test]
+    fn failed_runtime_initial_grounded_answer_stops_before_a_model_retry() {
+        let call = required_grounded_answer_tool_call("How do I configure it?", 24);
+        let outcome = tool_execution_error("canonical answer timed out");
+
+        assert!(runtime_initial_grounded_answer_failed(
+            true,
+            std::slice::from_ref(&call),
+            std::slice::from_ref(&outcome),
+            false,
+        ));
+        assert!(!runtime_initial_grounded_answer_failed(
+            false,
+            std::slice::from_ref(&call),
+            std::slice::from_ref(&outcome),
+            false,
+        ));
+        assert!(!runtime_initial_grounded_answer_failed(true, &[call], &[outcome], true,));
+    }
+
+    #[test]
+    fn focused_follow_up_carries_typed_language_and_inventory_counts_without_query_prose() {
+        let question = "Вопрос с отступами ";
+        let call = focused_grounded_answer_follow_up_call(
+            question,
+            24,
+            RuntimeGroundedRepairMetadata::from_reason(
+                GroundedAnswerRepairReason::OrderedInventory { expected: 5, observed: 2 },
+                QueryLanguage::Ru,
+            ),
+        );
+        let arguments = serde_json::from_str::<Value>(&call.arguments_json).expect("arguments");
+
+        assert_eq!(arguments["query"].as_str(), Some(question));
+        assert_eq!(
+            arguments[RUNTIME_REPAIR_ARGUMENT_FIELD],
+            serde_json::json!({
+                "reason": "ordered_inventory_incomplete",
+                "language": "ru",
+                "expected": 5,
+                "observed": 2,
+            })
+        );
+        assert_eq!(arguments["responseProfile"], "compact");
+        assert_eq!(
+            arguments["maxReferences"],
+            crate::services::mcp::agent_policy::AGENT_COMPACT_REFERENCE_LIMIT
+        );
+    }
+
+    #[test]
+    fn unresolved_focused_repair_prefers_saved_grounded_fallback() {
+        assert_eq!(
+            unresolved_focused_follow_up_action(true, true),
+            UnresolvedFocusedFollowUpAction::ReturnSavedFallback
+        );
+    }
+
+    #[test]
+    fn unresolved_focused_repair_synthesizes_only_from_grounded_evidence() {
+        assert_eq!(
+            unresolved_focused_follow_up_action(false, true),
+            UnresolvedFocusedFollowUpAction::SynthesizeFromEvidence
+        );
+        assert_eq!(
+            unresolved_focused_follow_up_action(false, false),
+            UnresolvedFocusedFollowUpAction::FailClosed
+        );
+    }
+
+    #[test]
+    fn failed_focused_follow_up_remains_unresolved() {
+        let mut state = FocusedGroundedFollowUpState::default();
+        assert!(
+            state.schedule(GroundedAnswerRepairReason::ProcedureIncomplete, QueryLanguage::Auto,)
+        );
+        assert!(state.take_call("How do I configure it?", 24).is_some());
+
+        state.observe_attempt_outcome(&tool_execution_error("repair timed out"));
+
+        assert!(state.requires_resolution());
+        assert!(state.is_unresolved_after_attempt());
+    }
+
+    #[test]
+    fn repeated_incomplete_focused_follow_up_remains_unresolved() {
+        let mut state = FocusedGroundedFollowUpState::default();
+        assert!(
+            state.schedule(GroundedAnswerRepairReason::ProcedureIncomplete, QueryLanguage::Auto,)
+        );
+        assert!(state.take_call("How do I configure it?", 24).is_some());
+        let mut outcome = synthetic_success_outcome();
+        outcome.grounded_answer_completed = true;
+        outcome.grounded_answer_needs_follow_up = true;
+        outcome.grounded_answer_repair_reason =
+            Some(GroundedAnswerRepairReason::ProcedureIncomplete);
+
+        state.observe_attempt_outcome(&outcome);
+
+        assert!(state.requires_resolution());
+        assert!(state.is_unresolved_after_attempt());
+        assert!(
+            !state.schedule(GroundedAnswerRepairReason::ProcedureIncomplete, QueryLanguage::Auto,)
+        );
+    }
+
+    #[test]
+    fn unresolved_repair_synthesis_is_marked_unverified() {
+        let mut state = FocusedGroundedFollowUpState::default();
+        assert!(state.schedule(GroundedAnswerRepairReason::ProcedureIncomplete, QueryLanguage::En));
+        assert!(state.take_call("How do I configure it?", 24).is_some());
+        state.observe_attempt_outcome(&tool_execution_error("repair timed out"));
+
+        let answer =
+            mark_unresolved_repair_synthesis(&state, "Evidence-backed synthesis.".to_string());
+
+        assert!(answer.starts_with("Below is the last completed system answer."));
+        assert!(answer.ends_with("Evidence-backed synthesis."));
+    }
+
+    #[test]
+    fn failed_focused_repair_returns_the_completed_initial_result_as_partial() {
+        assert_eq!(
+            completed_grounded_answer_after_failed_focused_follow_up(
+                true,
+                true,
+                true,
+                Some("Completed initial evidence."),
+            ),
+            Some("Completed initial evidence.")
+        );
+        assert!(
+            completed_grounded_answer_after_failed_focused_follow_up(
+                true,
+                true,
+                false,
+                Some("Completed initial evidence."),
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn ready_runtime_focused_repair_passthrough_skips_model_synthesis() {
+        let call = focused_grounded_answer_follow_up_call(
+            "How do I configure it?",
+            24,
+            RuntimeGroundedRepairMetadata::from_reason(
+                GroundedAnswerRepairReason::ProcedureIncomplete,
+                QueryLanguage::En,
+            ),
+        );
+        let outcome = ready_grounded_answer_passthrough_outcome(
+            "Complete repaired answer.",
+            "How do I configure it?",
+        );
+
+        assert_eq!(
+            focused_grounded_answer_passthrough_candidate(
+                true,
+                std::slice::from_ref(&call),
+                std::slice::from_ref(&outcome),
+            )
+            .as_ref()
+            .map(|passthrough| passthrough.answer.as_str()),
+            Some("Complete repaired answer."),
+        );
+        assert!(
+            focused_grounded_answer_passthrough_candidate(false, &[call], &[outcome]).is_none()
+        );
+    }
+
+    #[test]
+    fn ready_focused_follow_up_resolves_the_gap() {
+        let mut state = FocusedGroundedFollowUpState::default();
+        assert!(
+            state.schedule(GroundedAnswerRepairReason::ProcedureIncomplete, QueryLanguage::En,)
+        );
+        assert!(state.take_call("How do I configure it?", 24).is_some());
+        let mut outcome = synthetic_success_outcome();
+        outcome.grounded_answer_ready = true;
+        outcome.grounded_answer_completed = true;
+
+        state.observe_attempt_outcome(&outcome);
+
+        assert!(!state.requires_resolution());
+        assert!(!state.is_unresolved_after_attempt());
+    }
+
+    #[test]
+    fn ui_consumes_typed_completion_gap_from_grounded_answer_result() {
+        let question = "How do I configure the connector?";
+        let result = crate::interfaces::http::mcp::McpToolResult {
+            content: vec![crate::interfaces::http::mcp::McpContentBlock {
+                content_type: "text",
+                text: "The connector is a configurable integration component.".to_string(),
+            }],
+            structured_content: with_test_completion_envelope(serde_json::json!({
+                "answerBody": "The connector is a configurable integration component.",
+                "finalAnswerReady": false,
+                "finalizable": false,
+                "lifecycleState": "completed",
+                "completion": {
+                    "complete": false,
+                    "reason": "procedure_incomplete",
+                    "expected": 2,
+                    "observed": 0
+                },
+                "executionDetail": {
+                    "verificationState": "verified",
+                    "verificationWarnings": []
+                }
+            })),
+            is_error: false,
+        };
+
+        assert_eq!(
+            grounded_answer_repair_reason(GROUNDED_ANSWER_TOOL_NAME, question, &result),
+            Some(GroundedAnswerRepairReason::ProcedureIncomplete),
+        );
+        assert!(!grounded_answer_ready_for_question(GROUNDED_ANSWER_TOOL_NAME, question, &result,));
+    }
+
+    #[test]
+    fn ui_completion_envelope_fails_closed_when_missing_malformed_or_inconsistent() {
+        let question = "Describe the sample component.";
+        let missing = serde_json::json!({
+            "answerBody": "Grounded text.",
+            "executionDetail": {"verificationState": "verified"}
+        });
+        let mut malformed = with_test_completion_envelope(serde_json::json!({
+            "answerBody": "Grounded text.",
+            "finalAnswerReady": true,
+            "finalizable": true,
+            "lifecycleState": "completed",
+            "executionDetail": {"verificationState": "verified"}
+        }));
+        malformed["repairPolicy"]["maxAdditionalGroundedAnswerCalls"] = serde_json::json!(2);
+        let mut inconsistent = with_test_completion_envelope(serde_json::json!({
+            "answerBody": "Grounded text.",
+            "finalAnswerReady": true,
+            "finalizable": true,
+            "lifecycleState": "completed",
+            "executionDetail": {"verificationState": "verified"}
+        }));
+        inconsistent["readiness"]["finalizable"] = serde_json::json!(false);
+
+        for structured_content in [missing, malformed, inconsistent] {
+            let result = crate::interfaces::http::mcp::McpToolResult {
+                content: vec![crate::interfaces::http::mcp::McpContentBlock {
+                    content_type: "text",
+                    text: "Grounded text.".to_string(),
+                }],
+                structured_content,
+                is_error: false,
+            };
+
+            assert!(!grounded_answer_ready(GROUNDED_ANSWER_TOOL_NAME, &result));
+            assert!(grounded_answer_needs_follow_up(GROUNDED_ANSWER_TOOL_NAME, &result));
+            assert_eq!(
+                grounded_answer_repair_reason(GROUNDED_ANSWER_TOOL_NAME, question, &result),
+                Some(GroundedAnswerRepairReason::VerificationIncomplete),
+            );
+        }
+    }
+
+    #[test]
+    fn typed_canonical_outcome_fails_closed_on_mismatch_or_truncated_candidates() {
+        let answer_body = "Choose a neutral variant.";
+        let mismatched = crate::interfaces::http::mcp::McpToolResult {
+            content: Vec::new(),
+            structured_content: with_test_completion_envelope(serde_json::json!({
+                "answerBody": answer_body,
+                "lifecycleState": "completed",
+                "executionDetail": {"answerDisposition": "clarification"},
+                "clarification": {"required": false, "question": null},
+                "answerCandidates": []
+            })),
+            is_error: false,
+        };
+        let mut truncated_content = with_test_completion_envelope(serde_json::json!({
+            "answerBody": answer_body,
+            "lifecycleState": "completed",
+            "clarification": {"required": true, "question": "Which neutral variant?"},
+            "answerCandidates": []
+        }));
+        truncated_content["responseProfile"] = serde_json::json!("compact");
+        truncated_content["answerCandidateSummary"] = serde_json::json!({
+            "totalCount": 2,
+            "returnedCount": 1,
+            "truncated": true,
+            "candidates": [{
+                "label": "Neutral variant",
+                "kind": "document",
+                "provenance": {}
+            }]
+        });
+        let truncated = crate::interfaces::http::mcp::McpToolResult {
+            content: Vec::new(),
+            structured_content: truncated_content,
+            is_error: false,
+        };
+
+        for result in [mismatched, truncated] {
+            assert!(
+                grounded_answer_canonical_outcome(GROUNDED_ANSWER_TOOL_NAME, &result).is_none()
+            );
+            assert_eq!(
+                grounded_answer_repair_reason(
+                    GROUNDED_ANSWER_TOOL_NAME,
+                    "Neutral question",
+                    &result
+                ),
+                Some(GroundedAnswerRepairReason::VerificationIncomplete),
+            );
+            assert!(grounded_answer_needs_follow_up(GROUNDED_ANSWER_TOOL_NAME, &result));
+        }
+    }
+
+    #[test]
+    fn verified_but_incomplete_procedure_cannot_finalize() {
+        let question = "How do I configure the connector?";
+        let result = verified_grounded_result(
+            "The connector is an integration component with several configuration variants.",
+            AnswerCompletionAssessment::incomplete(AnswerCompletionGapReason::Procedure, 2, 0),
+        );
+
+        assert!(!grounded_answer_ready_for_question(GROUNDED_ANSWER_TOOL_NAME, question, &result,));
+        assert_eq!(
+            grounded_answer_repair_reason(GROUNDED_ANSWER_TOOL_NAME, question, &result),
+            Some(GroundedAnswerRepairReason::ProcedureIncomplete),
+        );
+    }
+
+    #[test]
+    fn verified_but_incomplete_troubleshooting_cannot_finalize() {
+        let question = "What should I do when the operation fails with `E-17`?";
+        let result = verified_grounded_result(
+            "`E-17` means that the operation encountered duplicate state.",
+            AnswerCompletionAssessment::incomplete(
+                AnswerCompletionGapReason::Troubleshooting,
+                1,
+                0,
+            ),
+        );
+
+        assert!(!grounded_answer_ready_for_question(GROUNDED_ANSWER_TOOL_NAME, question, &result,));
+        assert_eq!(
+            grounded_answer_repair_reason(GROUNDED_ANSWER_TOOL_NAME, question, &result),
+            Some(GroundedAnswerRepairReason::TroubleshootingIncomplete),
+        );
+    }
+
+    #[test]
+    fn verified_but_structurally_incomplete_answer_cannot_finalize() {
+        let question = "Configure Subject Alpha.";
+        let result = verified_grounded_result(
+            "1. Open the configuration.\n1. Open the configuration.",
+            AnswerCompletionAssessment::incomplete(
+                AnswerCompletionGapReason::AnswerStructure,
+                1,
+                0,
+            ),
+        );
+
+        assert!(!grounded_answer_ready_for_question(GROUNDED_ANSWER_TOOL_NAME, question, &result));
+        assert_eq!(
+            grounded_answer_repair_reason(GROUNDED_ANSWER_TOOL_NAME, question, &result),
+            Some(GroundedAnswerRepairReason::AnswerStructureIncomplete),
+        );
+    }
+
+    #[test]
+    fn verified_but_short_latest_n_inventory_cannot_finalize() {
+        let question = "What changed in the latest 4 revisions?";
+        let result = verified_grounded_result(
+            "1. Revision 4: improved startup.\n2. Revision 3: improved diagnostics.",
+            AnswerCompletionAssessment::incomplete(
+                AnswerCompletionGapReason::OrderedInventory,
+                4,
+                2,
+            ),
+        );
+
+        assert!(!grounded_answer_ready_for_question(GROUNDED_ANSWER_TOOL_NAME, question, &result,));
+        assert_eq!(
+            grounded_answer_repair_reason(GROUNDED_ANSWER_TOOL_NAME, question, &result),
+            Some(GroundedAnswerRepairReason::OrderedInventory { expected: 4, observed: 2 }),
+        );
+    }
+
+    fn verified_grounded_result(
+        answer_body: &str,
+        completion: AnswerCompletionAssessment,
+    ) -> crate::interfaces::http::mcp::McpToolResult {
+        crate::interfaces::http::mcp::McpToolResult {
+            content: vec![crate::interfaces::http::mcp::McpContentBlock {
+                content_type: "text",
+                text: answer_body.to_string(),
+            }],
+            structured_content: with_test_completion_envelope(serde_json::json!({
+                "answerBody": answer_body,
+                "finalAnswerReady": true,
+                "finalizable": true,
+                "lifecycleState": "completed",
+                "completion": completion,
+                "executionDetail": {
+                    "verificationState": "verified",
+                    "verificationWarnings": []
+                }
+            })),
+            is_error: false,
+        }
     }
 
     #[test]
@@ -5341,7 +6938,7 @@ mod tests {
     }
 
     #[test]
-    fn grounded_answer_evidence_ledger_guards_insufficient_high_signal_inventory() {
+    fn grounded_answer_evidence_ledger_rejects_insufficient_high_signal_inventory() {
         let mut ledger = GroundedAnswerEvidenceLedger::default();
         let answer_body = "`Provider Alpha Guide`\n\
 - `/opt/alpha/alpha.conf`\n\
@@ -5403,11 +7000,10 @@ mod tests {
 - `secretKey`\n\
 - `retryWindow = 60`\n\
 - `pollInterval = 1`";
-        let guard = ledger.guard_candidate_for_answer(dropped_answer).expect("guard candidate");
-
-        assert!(guard.contains("fillDetails = true"));
-        assert!(guard.contains("printSlip = false"));
-        assert!(guard.contains("visible = true"));
+        assert!(
+            ledger.guard_candidate_for_answer(dropped_answer).is_none(),
+            "a non-terminal typed answer must not be promoted back to factual evidence"
+        );
     }
 
     #[test]
@@ -5589,7 +7185,10 @@ mod tests {
         assert!(guard.contains("\n- lateIdentifier = preserve_me"));
     }
 
-    fn grounded_answer_ledger_outcome(result_json: Value) -> ToolExecutionOutcome {
+    fn grounded_answer_ledger_outcome(mut result_json: Value) -> ToolExecutionOutcome {
+        if let Some(structured_content) = result_json.get_mut("structuredContent") {
+            *structured_content = with_test_completion_envelope(std::mem::take(structured_content));
+        }
         ToolExecutionOutcome {
             arguments_json: None,
             requested_arguments_json: None,
@@ -5600,14 +7199,59 @@ mod tests {
                 .map(ToOwned::to_owned),
             result_json: Some(result_json),
             grounding_text: None,
+            grounded_answer_body: None,
+            canonical_answer_outcome: None,
             grounded_answer_ready: false,
             grounded_answer_completed: true,
             grounded_answer_needs_follow_up: false,
+            grounded_answer_repair_reason: None,
+            grounded_answer_language: QueryLanguage::Auto,
+            grounded_answer_clarification_required: false,
             is_error: false,
             is_replay: false,
             duration_ms: 0,
             child_query_execution_ids: Vec::new(),
             child_runtime_execution_ids: Vec::new(),
+        }
+    }
+
+    fn ready_grounded_answer_passthrough_outcome(
+        answer_body: &str,
+        executed_query: &str,
+    ) -> ToolExecutionOutcome {
+        let structured_content = with_test_completion_envelope(serde_json::json!({
+            "answerBody": answer_body,
+            "finalAnswerReady": true,
+            "finalizable": true,
+            "completion": {"complete": true},
+            "lifecycleState": "completed",
+        }));
+        ToolExecutionOutcome {
+            arguments_json: Some(serde_json::json!({"query": executed_query}).to_string()),
+            requested_arguments_json: None,
+            message_content: String::new(),
+            result_text: Some("human text must not replace structured answerBody".to_string()),
+            result_json: Some(serde_json::json!({
+                "structuredContent": structured_content,
+                "isError": false
+            })),
+            grounding_text: Some("verifier-grade evidence".to_string()),
+            grounded_answer_body: Some(answer_body.to_string()),
+            canonical_answer_outcome: Some(AgentCanonicalAnswerOutcome {
+                disposition: QueryAnswerDisposition::FactualReady,
+                clarification: QueryClarification::default(),
+            }),
+            grounded_answer_ready: true,
+            grounded_answer_completed: true,
+            grounded_answer_needs_follow_up: false,
+            grounded_answer_repair_reason: None,
+            grounded_answer_language: QueryLanguage::Auto,
+            grounded_answer_clarification_required: false,
+            is_error: false,
+            is_replay: false,
+            duration_ms: 5,
+            child_query_execution_ids: vec![Uuid::from_u128(101)],
+            child_runtime_execution_ids: vec![Uuid::from_u128(102)],
         }
     }
 
@@ -5654,220 +7298,19 @@ mod tests {
     }
 
     #[test]
-    fn extracts_latest_user_verbatim_fragments_from_common_quote_pairs() {
-        let fragments = extract_verbatim_user_fragments(
-            "Explain «Status: 未確認?» and \"ERR-42: retry?\" without changing the labels.",
-        );
-
-        assert_eq!(fragments, vec!["Status: 未確認?", "ERR-42: retry?"]);
-    }
-
-    #[test]
-    fn extracts_latest_user_verbatim_fragments_from_delimited_clauses() {
-        let fragments = extract_verbatim_user_fragments(
-            "What should happen if the form shows, item MARK-17 was already accepted?",
-        );
-
-        assert!(fragments.iter().any(|fragment| fragment == "item MARK-17 was already accepted?"));
-    }
-
-    #[test]
-    fn extracts_latest_user_verbatim_fragments_from_identifier_tokens() {
-        let fragments = extract_verbatim_user_fragments(
-            "Describe SYNC-AGENT topology and compare it with API_V2.",
-        );
-
-        assert!(fragments.iter().any(|fragment| fragment == "SYNC-AGENT"));
-        assert!(fragments.iter().any(|fragment| fragment == "API_V2"));
-    }
-
-    #[test]
-    fn ignores_natural_language_punctuation_as_identifier_tokens() {
-        let fragments = extract_verbatim_user_fragments(
-            "Explain set-up flow, ad-hoc about sync-agent and graph.example.com.",
-        );
-
-        assert!(!fragments.iter().any(|fragment| fragment == "set-up"));
-        assert!(!fragments.iter().any(|fragment| fragment == "ad-hoc"));
-        assert!(!fragments.iter().any(|fragment| fragment == "sync-agent"));
-        assert!(!fragments.iter().any(|fragment| fragment == "graph.example.com"));
-    }
-
-    #[test]
-    fn latest_user_verbatim_fragment_reminder_marks_fragments_as_identifiers_not_evidence() {
-        let reminder =
-            latest_user_verbatim_fragment_reminder("What does «Result: timeout?» mean?").unwrap();
-
-        assert!(reminder.contains("Result: timeout?"));
-        assert!(reminder.contains("not as evidence for external facts"));
-        assert!(reminder.contains("requested answer slots"));
-        assert!(reminder.contains("instead of replacing it with a paraphrase"));
-    }
-
-    #[test]
-    fn final_answer_keeps_missing_quoted_user_fragment_visible() {
-        let answer = ensure_user_fragments_visible(
-            "It means the workstation cannot reach the account servers.".to_string(),
-            "Explain «Cash register access to account servers: no».",
-        );
-
-        assert!(answer.starts_with("Cash register access to account servers: no\n\n"));
-    }
-
-    #[test]
-    fn final_answer_does_not_duplicate_visible_quoted_user_fragment() {
-        let answer = ensure_user_fragments_visible(
-            "cash register access to account servers: no means network access is disabled."
-                .to_string(),
-            "Explain «Cash register access to account servers: no».",
-        );
-
-        assert_eq!(
-            answer,
-            "cash register access to account servers: no means network access is disabled."
-        );
-    }
-
-    #[test]
-    fn final_answer_does_not_prefix_requested_slot_fragment() {
-        let answer = ensure_user_fragments_visible(
-            "Package: alpha-plugin.\nConfig path: /opt/app/config.ini.".to_string(),
-            "Configure Alpha: name package, config path and parameters, then explain defaults.",
-        );
-
-        assert_eq!(answer, "Package: alpha-plugin.\nConfig path: /opt/app/config.ini.");
-    }
-
-    #[test]
-    fn final_answer_keeps_missing_identifier_fragment_with_exact_case_visible() {
-        let answer = ensure_user_fragments_visible(
-            "sync-agent exchanges data between the register and central server.".to_string(),
-            "Describe SYNC-AGENT topology.",
-        );
-
-        assert!(answer.starts_with("SYNC-AGENT\n\n"));
-    }
-
-    #[test]
-    fn prior_assistant_answer_fallback_strips_compact_literal_memory() {
-        let history = vec![
-            ExternalConversationTurn {
-                turn_kind: QueryTurnKind::Assistant,
-                content_text: "A0".to_string(),
-            },
-            ExternalConversationTurn {
-                turn_kind: QueryTurnKind::Assistant,
-                content_text: format!(
-                    "{HISTORY_DENSE_LITERAL_PREFIX} `A1`, `/p/A1`, `K1`\n`A1` `/p/A1` `K1`"
-                ),
-            },
-        ];
-
-        let answer = prior_assistant_answer_fallback_candidate(&history, &[])
-            .expect("anchored prior assistant answer");
-
-        assert!(answer.starts_with("`A1`"));
-        assert!(!answer.starts_with(HISTORY_DENSE_LITERAL_PREFIX));
-    }
-
-    #[test]
-    fn prior_assistant_answer_fallback_strips_compact_literal_system_wrapper() {
-        let history = vec![ExternalConversationTurn {
-            turn_kind: QueryTurnKind::Assistant,
-            content_text: format!(
-                "{HISTORY_COMPACT_LITERAL_MEMORY_CONTEXT_PREFIX}\n\
-                 {HISTORY_DENSE_LITERAL_PREFIX} `A1`, `/p/A1`, `K1`\n\
-                 `A1` `/p/A1` `K1`"
-            ),
-        }];
-
-        let answer = prior_assistant_answer_fallback_candidate(&history, &[])
-            .expect("anchored prior assistant answer");
-
-        assert!(answer.starts_with("`A1`"));
-        assert!(!answer.contains(HISTORY_COMPACT_LITERAL_MEMORY_CONTEXT_PREFIX));
-        assert!(!answer.starts_with(HISTORY_DENSE_LITERAL_PREFIX));
-    }
-
-    #[test]
-    fn prior_assistant_answer_fallback_ignores_unanchored_history() {
-        let history = vec![ExternalConversationTurn {
-            turn_kind: QueryTurnKind::Assistant,
-            content_text: "A0".to_string(),
-        }];
-
-        assert!(prior_assistant_answer_fallback_candidate(&history, &[]).is_none());
-    }
-
-    #[test]
-    fn prior_assistant_answer_fallback_uses_chat_history_when_tool_history_is_empty() {
-        let conversation_history = vec![ChatMessage::assistant_text(
-            "Use `alpha-package`, `/etc/alpha.ini`, and `alphaTimeout`.".to_string(),
-        )];
-
-        let answer = prior_assistant_answer_fallback_candidate(&[], &conversation_history)
-            .expect("anchored chat history answer");
-
-        assert!(answer.contains("`alpha-package`"));
-        assert!(answer.contains("`alphaTimeout`"));
-    }
-
-    #[test]
-    fn prior_assistant_answer_fallback_prefers_more_anchored_history_candidate() {
-        let compact_tool_history = vec![ExternalConversationTurn {
-            turn_kind: QueryTurnKind::Assistant,
-            content_text:
-                "ir.memory.literals.v1: `alpha-package`, `/etc/alpha.ini`, `alphaTimeout`, `alphaMode`, `alphaUrl`, `alphaRetry`\nUse `alpha-package`, `/etc/alpha.ini`, and `alphaTimeout`."
-                    .to_string(),
-        }];
-        let conversation_history = vec![ChatMessage::assistant_text(
-            "Use `alpha-package`, `/etc/alpha.ini`, `alphaTimeout`, `alphaMode`, `alphaUrl`, and `alphaRetry`."
-                .to_string(),
-        )];
-
-        let answer =
-            prior_assistant_answer_fallback_candidate(&compact_tool_history, &conversation_history)
-                .expect("anchored prior assistant answer");
-
-        assert!(answer.contains("`alphaRetry`"));
-        assert!(answer.contains("`alphaMode`"));
-        assert!(!answer.starts_with("ir.memory.literals.v1:"));
-    }
-
-    #[test]
-    fn final_answer_prefers_prior_assistant_fallback_when_parent_drops_anchors() {
-        let history = vec![ExternalConversationTurn {
-            turn_kind: QueryTurnKind::Assistant,
-            content_text: "Use `alpha-package`, `/etc/alpha.ini`, `alphaTimeout`, `alphaMode`, and `alphaUrl`."
-                .to_string(),
-        }];
-        let prior = prior_assistant_answer_fallback_candidate(&history, &[])
-            .expect("anchored prior assistant answer");
-        let answer = "Install the module and configure the connection settings.".to_string();
-        let guard = prior_assistant_answer_guard_for_final_answer(&answer, Some(&prior));
-
-        let finalized =
-            finalize_agent_loop_answer(answer, "Explain all settings.", guard, "req", Uuid::nil());
-
-        assert_eq!(finalized, prior);
-    }
-
-    #[test]
-    fn final_answer_keeps_fresh_anchored_answer_over_prior_fallback() {
-        let prior = "Choose one option: alphaProvider, betaProvider, gammaProvider, deltaProvider.";
-        let answer =
-            "Install `alpha-package`, edit `/etc/alpha.ini`, and set `alphaTimeout`.".to_string();
-        let guard = prior_assistant_answer_guard_for_final_answer(&answer, Some(prior));
+    fn final_answer_never_splices_raw_user_fragments_into_grounded_text() {
+        let answer = "The verified evidence does not support that claim.".to_string();
 
         let finalized = finalize_agent_loop_answer(
             answer.clone(),
-            "Explain all settings.",
-            guard,
+            "Explain «UNTRUSTED-USER-FRAGMENT».",
+            None,
             "req",
             Uuid::nil(),
         );
 
         assert_eq!(finalized, answer);
+        assert!(!finalized.contains("UNTRUSTED-USER-FRAGMENT"));
     }
 
     #[test]
@@ -5879,6 +7322,22 @@ mod tests {
         let finalized = finalize_agent_loop_answer(
             answer.clone(),
             "How do I configure it?",
+            Some(grounded),
+            "req",
+            Uuid::nil(),
+        );
+
+        assert_eq!(finalized, answer);
+    }
+
+    #[test]
+    fn final_answer_keeps_a_narrative_rewording_with_the_same_formal_literals() {
+        let grounded = "The `mode` field documents the `stable` value.";
+        let answer = "The documented value for `mode` is `stable`.".to_string();
+
+        let finalized = finalize_agent_loop_answer(
+            answer.clone(),
+            "Describe the mode field.",
             Some(grounded),
             "req",
             Uuid::nil(),
@@ -6120,7 +7579,7 @@ mod tests {
     fn grounded_answer_tool_result_is_compact_for_model_messages() {
         let execution_id = Uuid::now_v7();
         let runtime_execution_id = Uuid::now_v7();
-        let structured_content = serde_json::json!({
+        let structured_content = with_test_completion_envelope(serde_json::json!({
             "answerBody": "Use `/etc/alpha.ini`.",
             "executionId": execution_id,
             "runtimeExecutionId": runtime_execution_id,
@@ -6128,6 +7587,7 @@ mod tests {
             "libraryId": Uuid::now_v7(),
             "workspaceId": Uuid::now_v7(),
             "lifecycleState": "completed",
+            "finalAnswerReady": true,
             "finalizable": true,
             "mustPreserveSpans": ["/etc/alpha.ini"],
             "executionDetail": {
@@ -6149,7 +7609,7 @@ mod tests {
                 "entityReferences": [],
                 "relationReferences": []
             }
-        });
+        }));
         let result = crate::interfaces::http::mcp::McpToolResult {
             content: vec![crate::interfaces::http::mcp::McpContentBlock {
                 content_type: "text",
@@ -6177,6 +7637,134 @@ mod tests {
             tool_result_verification_text(GROUNDED_ANSWER_TOOL_NAME, &result).unwrap();
         assert!(verification_text.contains("\"omittedCount\": 4"));
         assert!(verification_text.contains("\"rank\": 1"));
+    }
+
+    #[test]
+    fn grounded_answer_model_projection_never_defaults_missing_completion_to_complete() {
+        let structured_content = serde_json::json!({
+            "answerBody": "Grounded text with missing completion metadata.",
+            "executionId": Uuid::now_v7(),
+            "lifecycleState": "completed",
+            "executionDetail": {
+                "verificationState": "verified",
+                "verificationWarnings": []
+            }
+        });
+
+        let compacted = compact_grounded_answer_structured_content_for_model(
+            &structured_content,
+            TOOL_MODEL_STRUCTURED_JSON_CHAR_LIMIT,
+        );
+
+        assert_eq!(compacted["completion"], Value::Null);
+        assert_eq!(compacted["finalAnswerReady"], serde_json::json!(false));
+        assert_eq!(compacted["finalizable"], serde_json::json!(false));
+    }
+
+    #[test]
+    fn already_compact_grounded_answer_keeps_references_and_candidates_for_ui_agent() {
+        let structured_content = with_test_completion_envelope(serde_json::json!({
+            "responseProfile": "compact",
+            "executionId": Uuid::now_v7(),
+            "runtimeExecutionId": Uuid::now_v7(),
+            "conversationId": Uuid::now_v7(),
+            "libraryId": Uuid::now_v7(),
+            "workspaceId": Uuid::now_v7(),
+            "lifecycleState": "completed",
+            "finalAnswerReady": false,
+            "finalizable": false,
+            "completion": {
+                "complete": false,
+                "reason": "procedure_incomplete",
+                "expected": 2,
+                "observed": 0
+            },
+            "verifier": {"state": "verified", "warningCount": 1},
+            "warnings": [{"code": "procedure_incomplete", "message": "More steps required."}],
+            "mustPreserveSpans": ["alphaMode"],
+            "clarification": {"required": true, "question": "Which variant?"},
+            "referenceSummary": {
+                "totalCount": 2,
+                "returnedCount": 2,
+                "truncated": false,
+                "references": [
+                    {"kind": "prepared_segment", "documentTitle": "Guide Alpha", "rank": 1},
+                    {"kind": "technical_fact", "displayValue": "alphaMode", "rank": 2}
+                ]
+            },
+            "answerCandidateSummary": {
+                "totalCount": 1,
+                "returnedCount": 1,
+                "truncated": false,
+                "candidates": [{"label": "Variant Alpha", "kind": "document"}]
+            }
+        }));
+
+        let compacted = compact_grounded_answer_structured_content_for_model(
+            &structured_content,
+            TOOL_MODEL_STRUCTURED_JSON_CHAR_LIMIT,
+        );
+
+        assert_eq!(compacted["referenceSummary"]["totalCount"], serde_json::json!(2));
+        assert_eq!(compacted["referenceSummary"]["returnedCount"], serde_json::json!(2));
+        assert_eq!(compacted["referenceSummary"]["references"][0]["documentTitle"], "Guide Alpha");
+        assert_eq!(compacted["answerCandidateSummary"]["returnedCount"], serde_json::json!(1));
+        assert_eq!(compacted["answerCandidateSummary"]["candidates"][0]["label"], "Variant Alpha");
+        assert_eq!(compacted["verificationState"], "verified");
+    }
+
+    #[test]
+    fn grounded_answer_model_projection_obeys_its_character_budget() {
+        let huge = "x".repeat(5_000);
+        let references = (0..20)
+            .map(|rank| serde_json::json!({"rank": rank, "payload": huge.clone()}))
+            .collect::<Vec<_>>();
+        let preserve_spans = vec![huge.clone(); 16];
+        let answer_candidates =
+            (0..8).map(|_| serde_json::json!({"label": huge.clone()})).collect::<Vec<_>>();
+        let warnings = (0..16)
+            .map(|_| serde_json::json!({"code": "partial_coverage", "message": huge.clone()}))
+            .collect::<Vec<_>>();
+        let structured_content = with_test_completion_envelope(serde_json::json!({
+            "answerBody": "Grounded partial answer.",
+            "executionId": Uuid::now_v7(),
+            "runtimeExecutionId": Uuid::now_v7(),
+            "conversationId": Uuid::now_v7(),
+            "libraryId": Uuid::now_v7(),
+            "workspaceId": Uuid::now_v7(),
+            "lifecycleState": "completed",
+            "finalAnswerReady": false,
+            "finalizable": false,
+            "completion": {
+                "complete": false,
+                "reason": "procedure_incomplete",
+                "expected": 2,
+                "observed": 0
+            },
+            "mustPreserveSpans": preserve_spans,
+            "answerCandidates": answer_candidates,
+            "clarification": {"required": false},
+            "executionDetail": {
+                "verificationState": "verified",
+                "verificationWarnings": warnings,
+                "chunkReferences": references.clone(),
+                "preparedSegmentReferences": references.clone(),
+                "technicalFactReferences": references.clone(),
+                "entityReferences": references.clone(),
+                "relationReferences": references
+            }
+        }));
+
+        let compacted = compact_grounded_answer_structured_content_for_model(
+            &structured_content,
+            TOOL_MODEL_STRUCTURED_JSON_CHAR_LIMIT,
+        );
+        let serialized = serde_json::to_string(&compacted).expect("serialize compact projection");
+
+        assert!(serialized.chars().count() <= TOOL_MODEL_STRUCTURED_JSON_CHAR_LIMIT);
+        assert_eq!(compacted["finalAnswerReady"], serde_json::json!(false));
+        assert_eq!(compacted["repairPolicy"]["required"], serde_json::json!(true));
+        assert_eq!(compacted["verificationState"], "verified");
     }
 
     #[test]
@@ -6226,6 +7814,53 @@ mod tests {
             &[],
         );
         assert_eq!(narrower["topK"], 8);
+    }
+
+    #[test]
+    fn ui_agent_enforces_shared_compact_profile_and_reference_ceiling() {
+        let mut arguments = serde_json::json!({
+            "query": "focused subquestion",
+            "responseProfile": "full",
+            "maxReferences": 64
+        });
+
+        normalize_agent_tool_argument_types(GROUNDED_ANSWER_TOOL_NAME, &mut arguments);
+        apply_agent_tool_argument_defaults(
+            GROUNDED_ANSWER_TOOL_NAME,
+            &mut arguments,
+            "focused subquestion",
+            24,
+            "workspace-a/library-b",
+            &[],
+        );
+
+        assert_eq!(arguments["responseProfile"], "compact");
+        assert_eq!(
+            arguments["maxReferences"],
+            crate::services::mcp::agent_policy::AGENT_COMPACT_REFERENCE_LIMIT
+        );
+    }
+
+    #[test]
+    fn ui_agent_explicit_debug_request_uses_full_profile_without_compact_limit() {
+        let mut arguments = serde_json::json!({
+            "query": "focused subquestion",
+            "includeDebug": true,
+            "responseProfile": "compact",
+            "maxReferences": 8
+        });
+
+        apply_agent_tool_argument_defaults(
+            GROUNDED_ANSWER_TOOL_NAME,
+            &mut arguments,
+            "focused subquestion",
+            24,
+            "workspace-a/library-b",
+            &[],
+        );
+
+        assert_eq!(arguments["responseProfile"], "full");
+        assert!(arguments.get("maxReferences").is_none());
     }
 
     #[test]
@@ -6545,9 +8180,14 @@ mod tests {
             result_text: Some("ok".to_string()),
             result_json: None,
             grounding_text: None,
+            grounded_answer_body: None,
+            canonical_answer_outcome: None,
             grounded_answer_ready: false,
             grounded_answer_completed: false,
             grounded_answer_needs_follow_up: false,
+            grounded_answer_repair_reason: None,
+            grounded_answer_language: QueryLanguage::Auto,
+            grounded_answer_clarification_required: false,
             is_error: false,
             is_replay: false,
             duration_ms: 0,
@@ -6582,7 +8222,8 @@ mod tests {
         let remaining = Duration::from_secs(150);
         let soft = Duration::from_secs(35);
 
-        let wait = per_tool_call_wait_for_tool(GROUNDED_ANSWER_TOOL_NAME, remaining, Some(soft));
+        let wait =
+            per_tool_call_wait_for_tool(GROUNDED_ANSWER_TOOL_NAME, remaining, Some(soft), false);
 
         assert_eq!(wait, GROUNDED_ANSWER_TOOL_MAX_WAIT);
         assert_eq!(
@@ -6590,10 +8231,36 @@ mod tests {
                 GROUNDED_ANSWER_TOOL_NAME,
                 Duration::from_secs(45),
                 Some(soft),
+                false,
             ),
             Duration::from_secs(45),
         );
-        assert_eq!(per_tool_call_wait_for_tool("search_documents", remaining, Some(soft)), soft,);
+        assert_eq!(
+            per_tool_call_wait_for_tool("search_documents", remaining, Some(soft), false),
+            soft,
+        );
+        assert_eq!(
+            per_tool_call_wait_for_tool(GROUNDED_ANSWER_TOOL_NAME, remaining, Some(soft), true,),
+            GROUNDED_ANSWER_REPAIR_MAX_WAIT,
+        );
+        assert_eq!(
+            per_tool_call_wait_for_tool(
+                GROUNDED_ANSWER_TOOL_NAME,
+                Duration::from_secs(45),
+                Some(soft),
+                true,
+            ),
+            Duration::from_secs(45),
+        );
+        assert_eq!(
+            per_tool_call_wait_for_tool(
+                GROUNDED_ANSWER_TOOL_NAME,
+                Duration::from_secs(20),
+                Some(soft),
+                true,
+            ),
+            Duration::from_secs(20),
+        );
     }
 
     // GUARD 1 — per-tool-call timeout.
@@ -6709,9 +8376,14 @@ mod tests {
             result_text: Some("cached".to_string()),
             result_json: None,
             grounding_text: None,
+            grounded_answer_body: None,
+            canonical_answer_outcome: None,
             grounded_answer_ready: false,
             grounded_answer_completed: false,
             grounded_answer_needs_follow_up: false,
+            grounded_answer_repair_reason: None,
+            grounded_answer_language: QueryLanguage::Auto,
+            grounded_answer_clarification_required: false,
         };
         let outcome = replayed_tool_execution_outcome(payload);
         assert!(!outcome.is_error);
@@ -6839,9 +8511,17 @@ mod tests {
                     result_text: Some("cached body".to_string()),
                     result_json: None,
                     grounding_text: None,
+                    grounded_answer_body: Some("cached body".to_string()),
+                    canonical_answer_outcome: Some(AgentCanonicalAnswerOutcome {
+                        disposition: QueryAnswerDisposition::FactualReady,
+                        clarification: QueryClarification::default(),
+                    }),
                     grounded_answer_ready: true,
                     grounded_answer_completed: true,
                     grounded_answer_needs_follow_up: false,
+                    grounded_answer_repair_reason: None,
+                    grounded_answer_language: QueryLanguage::Auto,
+                    grounded_answer_clarification_required: false,
                 })),
             },
         );
@@ -7085,7 +8765,7 @@ mod tests {
     }
 
     #[test]
-    fn ui_agent_keeps_short_multi_tool_grounded_answer_query_focused() {
+    fn ui_agent_keeps_grounded_answer_query_at_the_canonical_current_question() {
         let user_question =
             "AlphaZero BetaOne GammaTwo DeltaThree EpsilonFour ZetaFive EtaSix ThetaSeven";
         let mut arguments = serde_json::json!({
@@ -7105,7 +8785,7 @@ mod tests {
             &[],
         );
 
-        assert_eq!(arguments["query"], "AlphaZero GammaTwo DeltaThree");
+        assert_eq!(arguments["query"], user_question);
     }
 
     #[test]
@@ -7140,7 +8820,7 @@ mod tests {
         );
 
         assert_eq!(single_tool_arguments["query"], user_question);
-        assert_eq!(multi_tool_arguments["query"], "AlphaOne BetaTwo GammaThree DeltaFour");
+        assert_eq!(multi_tool_arguments["query"], user_question);
     }
 
     #[test]
@@ -7332,6 +9012,7 @@ mod tests {
         );
 
         assert_eq!(arguments["topK"], 24);
+        assert_eq!(arguments["query"], "focused subquestion");
         assert_eq!(arguments["conversationTurns"], serde_json::json!([]));
     }
 
@@ -7461,7 +9142,7 @@ mod tests {
     }
 
     #[test]
-    fn ui_agent_compacts_history_padded_grounded_answer_query_without_losing_anchors() {
+    fn ui_agent_does_not_reclassify_or_reconstruct_grounded_query_from_history() {
         let mut arguments = serde_json::json!({
             "library": "workspace-a/library-b",
             "query": "Q: [S0], k0, https://localhost/api, [X.f0], http://localhost, k1, merchantId0, cred0, p0-module, staticId0, staticPayload0, codeTtl0, /opt/p0/p0.conf, /var/log/p0.log",
@@ -7489,16 +9170,7 @@ mod tests {
             &history,
         );
 
-        let compact_query = arguments["query"].as_str().unwrap();
-        assert!(compact_query.starts_with("Q\n@:"));
-        assert!(compact_query.chars().count() < 900);
-        assert!(compact_query.contains("[S0]"));
-        assert!(compact_query.contains("https://localhost/api"));
-        assert!(compact_query.contains("[X.f0]"));
-        assert!(compact_query.contains("merchantId0"));
-        assert!(compact_query.contains("cred0"));
-        assert!(compact_query.contains("p0-module"));
-        assert!(compact_query.contains("/opt/p0/p0.conf"));
+        assert_eq!(arguments["query"], "Q");
         assert_eq!(
             arguments["conversationTurns"],
             serde_json::json!([
@@ -7536,7 +9208,7 @@ mod tests {
     }
 
     #[test]
-    fn ui_agent_keeps_current_turn_rewrite_when_literals_are_not_from_history() {
+    fn ui_agent_rejects_model_rewrite_even_when_it_contains_new_literals() {
         let user_question = "Q";
         let rewritten_query = "Q: `/opt/p1/p1.conf`, `[S0]`, `cred0`, `tok0`, `https://p1.local/api`, `k1 = 30`, `p1-module`";
         let mut arguments = serde_json::json!({
@@ -7557,11 +9229,11 @@ mod tests {
             &history,
         );
 
-        assert_eq!(arguments["query"], rewritten_query);
+        assert_eq!(arguments["query"], user_question);
     }
 
     #[test]
-    fn ui_agent_preserves_plain_code_literals_from_prior_grounded_answer_when_compacting_query() {
+    fn ui_agent_passes_prior_code_literals_only_through_typed_conversation_history() {
         let mut arguments = serde_json::json!({
             "library": "workspace-a/library-b",
             "query": "Q: [S0], [X.f0], https://p0.local/api, k0, k1, k2, fn0, cred0, codeTtl0, /opt/p0/p0.conf, staticId0, staticPayload0, qrId0, qrPayload0, qrTtl0, qrPoll0, qrStatusTtl0, /var/log/p0.log",
@@ -7583,15 +9255,14 @@ mod tests {
             &history,
         );
 
-        let compact_query = arguments["query"].as_str().unwrap();
-        assert!(compact_query.starts_with("Q\n@:"));
-        assert!(compact_query.contains("k0"));
-        assert!(compact_query.contains("k1"));
-        assert!(compact_query.contains("k2"));
-        assert!(compact_query.contains("fn0"));
-        assert!(compact_query.contains("cred0"));
-        assert!(compact_query.contains("codeTtl0"));
-        assert!(compact_query.contains("/opt/p0/p0.conf"));
+        assert_eq!(arguments["query"], "Q");
+        assert_eq!(
+            arguments["conversationTurns"],
+            serde_json::json!([{
+                "role": "assistant",
+                "content": "`k0` `k1` `k2` `fn0` `cred0` `codeTtl0` `/opt/p0/p0.conf`"
+            }])
+        );
     }
 
     #[test]
@@ -7622,7 +9293,7 @@ mod tests {
         );
 
         let compact_query = arguments["query"].as_str().unwrap();
-        assert_eq!(compact_query, user_question.trim());
+        assert_eq!(compact_query, user_question);
         assert!(!compact_query.contains("\n@:"));
     }
 
@@ -7693,7 +9364,7 @@ mod tests {
     }
 
     #[test]
-    fn ui_agent_pads_search_documents_with_contextual_history_anchors() {
+    fn ui_agent_does_not_rewrite_search_query_from_raw_history() {
         let mut arguments = serde_json::json!({
             "query": "settings parameters",
             "limit": 5
@@ -7715,13 +9386,7 @@ mod tests {
             &history,
         );
 
-        let query = arguments["query"].as_str().expect("query string");
-        assert!(query.starts_with("settings parameters"));
-        assert!(query.contains("alpha-package"));
-        assert!(query.contains("/etc/alpha.ini"));
-        assert!(query.contains("[Main]"));
-        assert!(query.contains("retryTimeout"));
-        assert!(!query.contains("plainword"));
+        assert_eq!(arguments["query"], "settings parameters");
         assert_eq!(arguments["libraries"], serde_json::json!(["workspace-a/library-b"]));
     }
 
@@ -7822,6 +9487,22 @@ mod tests {
     }
 
     #[test]
+    fn ui_dispatcher_rejects_tools_hidden_from_the_answer_contract() {
+        let allowed = BTreeSet::from([
+            GROUNDED_ANSWER_TOOL_NAME.to_string(),
+            SEARCH_DOCUMENTS_TOOL_NAME.to_string(),
+        ]);
+
+        assert!(validate_ui_agent_tool_allowed(GROUNDED_ANSWER_TOOL_NAME, &allowed).is_ok());
+        for hidden in ["delete_document", "create_documents", "view_document_image"] {
+            let error = validate_ui_agent_tool_allowed(hidden, &allowed)
+                .expect_err("hidden tool must be rejected");
+            assert!(error.contains("not available"));
+            assert!(error.contains(hidden));
+        }
+    }
+
+    #[test]
     fn ui_agent_rejects_cross_library_single_scope_arguments() {
         let arguments = serde_json::json!({
             "library": "workspace-x/library-y",
@@ -7872,7 +9553,10 @@ mod tests {
                 },
             ],
             structured_content: serde_json::json!({
+                "answerBody": "Ready answer.",
                 "finalAnswerReady": true,
+                "finalizable": true,
+                "completion": {"complete": true},
                 "lifecycleState": "completed",
                 "executionDetail": {
                     "verificationState": "verified"
@@ -7903,9 +9587,14 @@ mod tests {
             result_text: Some(fallback_text),
             result_json: None,
             grounding_text: None,
+            grounded_answer_body: None,
+            canonical_answer_outcome: None,
             grounded_answer_ready: true,
             grounded_answer_completed: true,
             grounded_answer_needs_follow_up: false,
+            grounded_answer_repair_reason: None,
+            grounded_answer_language: QueryLanguage::Auto,
+            grounded_answer_clarification_required: false,
             is_error: false,
             is_replay: false,
             duration_ms: 0,
@@ -7924,6 +9613,15 @@ mod tests {
 
     #[test]
     fn verified_grounded_answer_memory_prefers_structured_answer_body() {
+        let structured_content = with_test_completion_envelope(serde_json::json!({
+            "answerBody": "Clean Alpha answer.",
+            "finalAnswerReady": true,
+            "finalizable": true,
+            "lifecycleState": "completed",
+            "executionDetail": {
+                "verificationState": "verified"
+            }
+        }));
         let outcome = ToolExecutionOutcome {
             arguments_json: None,
             requested_arguments_json: None,
@@ -7937,20 +9635,21 @@ mod tests {
                     "type": "text",
                     "text": "Clean Alpha answer.\n\nSources:\nAlpha source title\nBeta source title"
                 }],
-                "structuredContent": {
-                    "answerBody": "Clean Alpha answer.",
-                    "finalAnswerReady": true,
-                    "lifecycleState": "completed",
-                    "executionDetail": {
-                        "verificationState": "verified"
-                    }
-                },
+                "structuredContent": structured_content,
                 "isError": false
             })),
             grounding_text: None,
+            grounded_answer_body: Some("Clean Alpha answer.".to_string()),
+            canonical_answer_outcome: Some(AgentCanonicalAnswerOutcome {
+                disposition: QueryAnswerDisposition::FactualReady,
+                clarification: QueryClarification::default(),
+            }),
             grounded_answer_ready: true,
             grounded_answer_completed: true,
             grounded_answer_needs_follow_up: false,
+            grounded_answer_repair_reason: None,
+            grounded_answer_language: QueryLanguage::Auto,
+            grounded_answer_clarification_required: false,
             is_error: false,
             is_replay: false,
             duration_ms: 0,
@@ -7974,7 +9673,7 @@ mod tests {
     }
 
     #[test]
-    fn finalization_keeps_verified_ordered_source_inventory() {
+    fn source_marker_reformatting_keeps_good_synthesis_instead_of_raw_tool_body() {
         let verified = "3/3\n\n\
 1. source=`Release 3.0.0`\n   Added Gamma support.\n\
 2. source=`Release 2.0.0`\n   Added Beta support.\n\
@@ -7987,6 +9686,24 @@ mod tests {
         let answer = finalize_agent_loop_answer(
             model_rewrite.to_string(),
             "list latest release records",
+            Some(verified),
+            "request-1",
+            Uuid::now_v7(),
+        );
+
+        assert_eq!(answer, model_rewrite);
+    }
+
+    #[test]
+    fn finalization_fails_closed_when_synthesis_adds_an_unverified_structured_step() {
+        let verified = "1. Δelta phase.\n2. Ωmega phase.";
+        let model_rewrite = "1. Δelta phase.\n\
+2. Ωmega phase.\n\
+3. Sigma phase.";
+
+        let answer = finalize_agent_loop_answer(
+            model_rewrite.to_string(),
+            "How do I configure the connector?",
             Some(verified),
             "request-1",
             Uuid::now_v7(),
@@ -8061,7 +9778,7 @@ Parameters: `url`, `staticQrPayload`.";
     }
 
     #[test]
-    fn clarification_grounded_answer_does_not_force_follow_up() {
+    fn completed_grounded_answer_without_verification_requires_follow_up() {
         let result = crate::interfaces::http::mcp::McpToolResult {
             content: vec![crate::interfaces::http::mcp::McpContentBlock {
                 content_type: "text",
@@ -8078,7 +9795,7 @@ Parameters: `url`, `staticQrPayload`.";
         };
 
         assert!(!grounded_answer_ready(GROUNDED_ANSWER_TOOL_NAME, &result));
-        assert!(!grounded_answer_needs_follow_up(GROUNDED_ANSWER_TOOL_NAME, &result));
+        assert!(grounded_answer_needs_follow_up(GROUNDED_ANSWER_TOOL_NAME, &result));
     }
 
     #[test]
@@ -8106,13 +9823,13 @@ Parameters: `url`, `staticQrPayload`.";
                 content_type: "text",
                 text: "Completed answer with warnings.".to_string(),
             }],
-            structured_content: serde_json::json!({
+            structured_content: with_test_completion_envelope(serde_json::json!({
                 "finalAnswerReady": false,
                 "lifecycleState": "completed",
                 "executionDetail": {
                     "verificationState": "lenient"
                 }
-            }),
+            })),
             is_error: false,
         };
 
@@ -8122,48 +9839,379 @@ Parameters: `url`, `staticQrPayload`.";
     }
 
     #[test]
-    fn final_grounded_answer_ready_flag_controls_final_readiness() {
-        let ready_without_execution_detail = crate::interfaces::http::mcp::McpToolResult {
+    fn typed_grounded_answer_envelope_controls_final_readiness() {
+        let ready_without_legacy_execution_detail = crate::interfaces::http::mcp::McpToolResult {
             content: vec![crate::interfaces::http::mcp::McpContentBlock {
                 content_type: "text",
                 text: "Flag-only answer.".to_string(),
             }],
-            structured_content: serde_json::json!({
+            structured_content: with_test_completion_envelope(serde_json::json!({
+                "answerBody": "Flag-only answer.",
                 "finalAnswerReady": true,
-            }),
+            })),
             is_error: false,
         };
-        assert!(!grounded_answer_ready(GROUNDED_ANSWER_TOOL_NAME, &ready_without_execution_detail));
+        assert!(grounded_answer_ready(
+            GROUNDED_ANSWER_TOOL_NAME,
+            &ready_without_legacy_execution_detail,
+        ));
 
         let result = crate::interfaces::http::mcp::McpToolResult {
             content: vec![crate::interfaces::http::mcp::McpContentBlock {
                 content_type: "text",
                 text: "Ready answer.".to_string(),
             }],
-            structured_content: serde_json::json!({
+            structured_content: with_test_completion_envelope(serde_json::json!({
+                "answerBody": "Ready answer.",
                 "finalAnswerReady": true,
+                "finalizable": true,
+                "completion": {"complete": true},
                 "lifecycleState": "completed",
                 "executionDetail": {
                     "verificationState": "verified"
                 }
-            }),
+            })),
             is_error: false,
         };
 
         assert!(grounded_answer_ready(GROUNDED_ANSWER_TOOL_NAME, &result));
+
+        let empty = crate::interfaces::http::mcp::McpToolResult {
+            content: vec![],
+            structured_content: serde_json::json!({
+                "answerBody": "   ",
+                "finalAnswerReady": true,
+                "finalizable": true,
+                "completion": {"complete": true},
+                "lifecycleState": "completed",
+                "executionDetail": {"verificationState": "verified"}
+            }),
+            is_error: false,
+        };
+        assert!(!grounded_answer_ready(GROUNDED_ANSWER_TOOL_NAME, &empty));
     }
 
     #[test]
-    fn final_grounded_answer_with_verifier_warnings_is_ready_when_verified() {
+    fn typed_safe_fallback_is_terminal_without_becoming_factual_ready() {
+        let question = "Explain the documented behavior.";
+        let answer_body = "Safe fallback selected by the typed producer.";
+        let result = crate::interfaces::http::mcp::McpToolResult {
+            content: vec![crate::interfaces::http::mcp::McpContentBlock {
+                content_type: "text",
+                text: answer_body.to_string(),
+            }],
+            structured_content: with_test_completion_envelope(serde_json::json!({
+                "answerBody": answer_body,
+                "finalAnswerReady": false,
+                "finalizable": false,
+                "completion": {"complete": true},
+                "lifecycleState": "completed",
+                "executionDetail": {
+                    "answerDisposition": "safe_fallback",
+                    "verificationState": "not_run",
+                    "verificationWarnings": [{
+                        "code": "semantic_verification_not_run",
+                        "message": "The typed producer selected a terminal-safe fallback."
+                    }]
+                }
+            })),
+            is_error: false,
+        };
+
+        assert!(!grounded_answer_ready_for_question(GROUNDED_ANSWER_TOOL_NAME, question, &result,));
+        assert!(!grounded_answer_needs_follow_up(GROUNDED_ANSWER_TOOL_NAME, &result));
+        assert_eq!(
+            grounded_answer_repair_reason(GROUNDED_ANSWER_TOOL_NAME, question, &result),
+            None,
+            "a validated terminal safe fallback must not schedule a focused retry",
+        );
+
+        let call = ChatToolCall {
+            id: "safe-fallback".to_string(),
+            name: GROUNDED_ANSWER_TOOL_NAME.to_string(),
+            arguments_json: serde_json::json!({"query": question}).to_string(),
+        };
+        let mut outcome = grounded_answer_ledger_outcome(debug_tool_result_json(&result));
+        outcome.arguments_json = Some(call.arguments_json.clone());
+        outcome.grounded_answer_body = Some(answer_body.to_string());
+        outcome.canonical_answer_outcome =
+            grounded_answer_canonical_outcome(GROUNDED_ANSWER_TOOL_NAME, &result);
+        let terminal = terminal_grounded_answer_nonfactual_candidate(
+            std::slice::from_ref(&call),
+            std::slice::from_ref(&outcome),
+            question,
+        )
+        .expect("a fresh terminal result must not depend on previous tool-call counters");
+
+        assert_eq!(terminal.answer, answer_body);
+        assert_eq!(terminal.stop_reason, AgentStopReason::FinalAnswer);
+    }
+
+    #[test]
+    fn typed_final_readiness_still_blocks_unsupported_exact_literals() {
+        let result = crate::interfaces::http::mcp::McpToolResult {
+            content: vec![crate::interfaces::http::mcp::McpContentBlock {
+                content_type: "text",
+                text: "Candidate with an unsupported exact literal.".to_string(),
+            }],
+            structured_content: with_test_completion_envelope(serde_json::json!({
+                "answerBody": "Candidate with an unsupported exact literal.",
+                "finalAnswerReady": false,
+                "finalizable": false,
+                "completion": {"complete": true},
+                "lifecycleState": "completed",
+                "executionDetail": {
+                    "answerDisposition": "non_terminal",
+                    "verificationState": "insufficient_evidence",
+                    "verificationWarnings": [{
+                        "code": "unsupported_literal",
+                        "message": "An exact literal is unsupported."
+                    }]
+                }
+            })),
+            is_error: false,
+        };
+
+        assert!(!grounded_answer_ready_for_question(
+            GROUNDED_ANSWER_TOOL_NAME,
+            "Explain the documented behavior.",
+            &result,
+        ));
+        assert!(grounded_answer_needs_follow_up(GROUNDED_ANSWER_TOOL_NAME, &result));
+    }
+
+    #[test]
+    fn final_grounded_answer_readiness_requires_complete_assessment() {
+        let result = crate::interfaces::http::mcp::McpToolResult {
+            content: vec![crate::interfaces::http::mcp::McpContentBlock {
+                content_type: "text",
+                text: "Incomplete answer.".to_string(),
+            }],
+            structured_content: with_test_completion_envelope(serde_json::json!({
+                "answerBody": "Incomplete answer.",
+                "finalAnswerReady": true,
+                "finalizable": true,
+                "completion": {
+                    "complete": false,
+                    "reason": "procedure_incomplete",
+                    "expected": 2,
+                    "observed": 0
+                },
+                "lifecycleState": "completed",
+                "executionDetail": {"verificationState": "verified"}
+            })),
+            is_error: false,
+        };
+
+        assert!(!grounded_answer_ready(GROUNDED_ANSWER_TOOL_NAME, &result));
+    }
+
+    #[test]
+    fn ready_grounded_answer_passthrough_is_independent_of_prior_global_tool_counters() {
+        let user_question = "refresh Alpha Tool";
+        let answer = "1. Run `alpha-tool --refresh`.\n\n```ini\n[Main]\nmode=true\n```";
+        let call = ChatToolCall {
+            id: "call-grounded".to_string(),
+            name: GROUNDED_ANSWER_TOOL_NAME.to_string(),
+            arguments_json: serde_json::json!({"query": "refresh Alpha Tool"}).to_string(),
+        };
+        let outcome = ready_grounded_answer_passthrough_outcome(answer, "refresh Alpha Tool");
+
+        let passthrough = canonical_grounded_answer_passthrough_candidate(
+            std::slice::from_ref(&call),
+            std::slice::from_ref(&outcome),
+            user_question,
+        )
+        .expect("one current fresh, complete, verified result should skip parent finalization");
+
+        assert_eq!(passthrough.answer, answer);
+        assert_eq!(
+            passthrough.canonical_answer_outcome.disposition,
+            QueryAnswerDisposition::FactualReady,
+        );
+    }
+
+    #[test]
+    fn canonical_grounded_answer_passthrough_allows_only_outer_whitespace_and_line_endings() {
+        let answer = "Canonical answer.";
+        let call = ChatToolCall {
+            id: "call-grounded".to_string(),
+            name: GROUNDED_ANSWER_TOOL_NAME.to_string(),
+            arguments_json:
+                serde_json::json!({"query": "Refresh Alpha Tool\nusing the documented mode."})
+                    .to_string(),
+        };
+        let outcome = ready_grounded_answer_passthrough_outcome(
+            answer,
+            "  Refresh Alpha Tool\r\nusing the documented mode.  ",
+        );
+
+        assert_eq!(
+            canonical_grounded_answer_passthrough_candidate(
+                std::slice::from_ref(&call),
+                std::slice::from_ref(&outcome),
+                "Refresh Alpha Tool\nusing the documented mode.",
+            )
+            .as_ref()
+            .map(|passthrough| passthrough.answer.as_str()),
+            Some(answer),
+        );
+    }
+
+    #[test]
+    fn canonical_grounded_answer_passthrough_preserves_literal_case_and_spacing() {
+        let call = ChatToolCall {
+            id: "call-grounded".to_string(),
+            name: GROUNDED_ANSWER_TOOL_NAME.to_string(),
+            arguments_json:
+                serde_json::json!({"query": "Inspect `/opt/app.ini` after error \"A B\"."})
+                    .to_string(),
+        };
+        let case_changed = ready_grounded_answer_passthrough_outcome(
+            "Candidate answer.",
+            "Inspect `/opt/app.ini` after error \"A B\".",
+        );
+        assert!(
+            canonical_grounded_answer_passthrough_candidate(
+                std::slice::from_ref(&call),
+                std::slice::from_ref(&case_changed),
+                "Inspect `/Opt/App.ini` after error \"A B\".",
+            )
+            .is_none(),
+            "case-sensitive path literals must compare exactly",
+        );
+
+        let spacing_changed = ready_grounded_answer_passthrough_outcome(
+            "Candidate answer.",
+            "Inspect `/opt/app.ini` after error \"A B\".",
+        );
+        assert!(
+            canonical_grounded_answer_passthrough_candidate(
+                std::slice::from_ref(&call),
+                std::slice::from_ref(&spacing_changed),
+                "Inspect `/opt/app.ini` after error \"A  B\".",
+            )
+            .is_none(),
+            "spacing inside quoted literals must compare exactly",
+        );
+    }
+
+    #[test]
+    fn canonical_grounded_answer_passthrough_rejects_narrowed_composite_query() {
+        let user_question = "Compare Alpha and Beta across deployment behavior, then list every Gamma constraint and exception.";
+        let executed_query =
+            "Compare Alpha and Beta in detail across deployment behavior and runtime architecture.";
+        let call = ChatToolCall {
+            id: "call-grounded".to_string(),
+            name: GROUNDED_ANSWER_TOOL_NAME.to_string(),
+            arguments_json: serde_json::json!({"query": executed_query}).to_string(),
+        };
+        let outcome = ready_grounded_answer_passthrough_outcome(
+            "Alpha and Beta differ in their deployment behavior.",
+            executed_query,
+        );
+
+        assert!(
+            canonical_grounded_answer_passthrough_candidate(
+                std::slice::from_ref(&call),
+                std::slice::from_ref(&outcome),
+                user_question,
+            )
+            .is_none(),
+            "a narrowed A/B answer must return to parent synthesis when the full request also asks for Gamma",
+        );
+    }
+
+    #[test]
+    fn canonical_grounded_answer_passthrough_rejects_incomplete_or_repair_result() {
+        let call = ChatToolCall {
+            id: "call-grounded".to_string(),
+            name: GROUNDED_ANSWER_TOOL_NAME.to_string(),
+            arguments_json: serde_json::json!({"query": "configure Alpha Tool"}).to_string(),
+        };
+        let mut incomplete =
+            ready_grounded_answer_passthrough_outcome("Partial answer.", "configure Alpha Tool");
+        incomplete.grounded_answer_ready = false;
+        assert!(
+            canonical_grounded_answer_passthrough_candidate(
+                std::slice::from_ref(&call),
+                std::slice::from_ref(&incomplete),
+                "configure Alpha Tool",
+            )
+            .is_none()
+        );
+
+        let mut repair =
+            ready_grounded_answer_passthrough_outcome("Repair candidate.", "configure Alpha Tool");
+        repair.grounded_answer_needs_follow_up = true;
+        repair.grounded_answer_repair_reason =
+            Some(GroundedAnswerRepairReason::ProcedureIncomplete);
+        assert!(
+            canonical_grounded_answer_passthrough_candidate(
+                std::slice::from_ref(&call),
+                std::slice::from_ref(&repair),
+                "configure Alpha Tool",
+            )
+            .is_none()
+        );
+
+        let mut replay =
+            ready_grounded_answer_passthrough_outcome("Cached answer.", "configure Alpha Tool");
+        replay.is_replay = true;
+        assert!(
+            canonical_grounded_answer_passthrough_candidate(
+                std::slice::from_ref(&call),
+                std::slice::from_ref(&replay),
+                "configure Alpha Tool",
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn canonical_grounded_answer_passthrough_rejects_multiple_tool_calls() {
+        let calls = vec![
+            ChatToolCall {
+                id: "call-grounded".to_string(),
+                name: GROUNDED_ANSWER_TOOL_NAME.to_string(),
+                arguments_json: serde_json::json!({"query": "describe Alpha Tool"}).to_string(),
+            },
+            ChatToolCall {
+                id: "call-document".to_string(),
+                name: READ_DOCUMENT_TOOL_NAME.to_string(),
+                arguments_json: serde_json::json!({"documentId": Uuid::nil()}).to_string(),
+            },
+        ];
+        let outcomes = vec![
+            ready_grounded_answer_passthrough_outcome("Ready answer.", "describe Alpha Tool"),
+            synthetic_success_outcome(),
+        ];
+
+        assert!(
+            canonical_grounded_answer_passthrough_candidate(
+                &calls,
+                &outcomes,
+                "describe Alpha Tool",
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn typed_nonterminal_disposition_blocks_even_when_verifier_says_verified() {
         let result = crate::interfaces::http::mcp::McpToolResult {
             content: vec![crate::interfaces::http::mcp::McpContentBlock {
                 content_type: "text",
                 text: "Warning-bearing but verified answer.".to_string(),
             }],
-            structured_content: serde_json::json!({
-                "finalAnswerReady": true,
+            structured_content: with_test_completion_envelope(serde_json::json!({
+                "answerBody": "Warning-bearing but verified answer.",
+                "finalAnswerReady": false,
+                "finalizable": false,
+                "completion": {"complete": true},
                 "lifecycleState": "completed",
                 "executionDetail": {
+                    "answerDisposition": "non_terminal",
                     "verificationState": "verified",
                     "verificationWarnings": [
                         {
@@ -8172,11 +10220,11 @@ Parameters: `url`, `staticQrPayload`.";
                         }
                     ]
                 }
-            }),
+            })),
             is_error: false,
         };
 
-        assert!(grounded_answer_ready(GROUNDED_ANSWER_TOOL_NAME, &result));
+        assert!(!grounded_answer_ready(GROUNDED_ANSWER_TOOL_NAME, &result));
         assert!(grounded_answer_needs_follow_up(GROUNDED_ANSWER_TOOL_NAME, &result));
     }
 
@@ -8187,8 +10235,11 @@ Parameters: `url`, `staticQrPayload`.";
                 content_type: "text",
                 text: "Warning-bearing verified answer.".to_string(),
             }],
-            structured_content: serde_json::json!({
+            structured_content: with_test_completion_envelope(serde_json::json!({
+                "answerBody": "Warning-bearing verified answer.",
                 "finalAnswerReady": true,
+                "finalizable": true,
+                "completion": {"complete": true},
                 "lifecycleState": "completed",
                 "executionDetail": {
                     "verificationState": "verified",
@@ -8199,7 +10250,7 @@ Parameters: `url`, `staticQrPayload`.";
                         }
                     ]
                 }
-            }),
+            })),
             is_error: false,
         };
 
@@ -8208,17 +10259,36 @@ Parameters: `url`, `staticQrPayload`.";
     }
 
     #[test]
-    fn completed_grounded_answer_fallback_keeps_non_verified_text() {
+    fn completed_nonterminal_answer_is_not_remembered_as_a_fallback() {
+        let structured_content = with_test_completion_envelope(serde_json::json!({
+            "answerBody": "Completed tool answer.",
+            "finalAnswerReady": false,
+            "finalizable": false,
+            "lifecycleState": "completed",
+            "executionDetail": {
+                "answerDisposition": "non_terminal",
+                "verificationState": "insufficient_evidence"
+            }
+        }));
         let outcome = ToolExecutionOutcome {
             arguments_json: None,
             requested_arguments_json: None,
             message_content: String::new(),
             result_text: Some("  Completed tool answer.  ".to_string()),
-            result_json: None,
+            result_json: Some(serde_json::json!({
+                "content": [{"type": "text", "text": "Completed tool answer."}],
+                "structuredContent": structured_content,
+                "isError": false
+            })),
             grounding_text: None,
+            grounded_answer_body: Some("Completed tool answer.".to_string()),
+            canonical_answer_outcome: None,
             grounded_answer_ready: false,
             grounded_answer_completed: true,
             grounded_answer_needs_follow_up: true,
+            grounded_answer_repair_reason: Some(GroundedAnswerRepairReason::VerificationIncomplete),
+            grounded_answer_language: QueryLanguage::Auto,
+            grounded_answer_clarification_required: false,
             is_error: false,
             is_replay: false,
             duration_ms: 0,
@@ -8226,11 +10296,72 @@ Parameters: `url`, `staticQrPayload`.";
             child_runtime_execution_ids: Vec::new(),
         };
 
-        let remembered =
-            remember_completed_grounded_answer(None, GROUNDED_ANSWER_TOOL_NAME, &outcome)
-                .expect("remembered answer");
+        assert!(
+            remember_completed_grounded_answer(None, GROUNDED_ANSWER_TOOL_NAME, &outcome).is_none()
+        );
+    }
 
-        assert_eq!(remembered, "Completed tool answer.");
+    #[test]
+    fn verified_completion_partial_is_returnable_only_with_an_explicit_notice() {
+        let structured_content = with_test_completion_envelope(serde_json::json!({
+            "answerBody": "Подтверждённая часть ответа.",
+            "finalAnswerReady": false,
+            "finalizable": false,
+            "lifecycleState": "completed",
+            "completion": {
+                "complete": false,
+                "reason": "procedure_incomplete",
+                "expected": 2,
+                "observed": 0
+            },
+            "executionDetail": {
+                "answerDisposition": "factual_ready",
+                "verificationState": "verified",
+                "verificationWarnings": []
+            }
+        }));
+        let mut outcome = grounded_answer_ledger_outcome(serde_json::json!({
+            "content": [{"type": "text", "text": "Подтверждённая часть ответа."}],
+            "structuredContent": structured_content,
+            "isError": false
+        }));
+        outcome.grounded_answer_repair_reason =
+            Some(GroundedAnswerRepairReason::ProcedureIncomplete);
+
+        let partial =
+            remember_verified_partial_grounded_answer(None, GROUNDED_ANSWER_TOOL_NAME, &outcome)
+                .expect("verified completion partial");
+        let visible = explicitly_mark_partial_grounded_answer(&partial, QueryLanguage::Ru);
+
+        assert!(visible.starts_with("Ниже приведена только подтверждённая источниками часть"));
+        assert!(visible.ends_with("Подтверждённая часть ответа."));
+
+        let nonterminal_structured_content = with_test_completion_envelope(serde_json::json!({
+            "answerBody": "Подтверждённая часть ответа.",
+            "finalAnswerReady": false,
+            "finalizable": false,
+            "lifecycleState": "completed",
+            "completion": {
+                "complete": false,
+                "reason": "procedure_incomplete",
+                "expected": 2,
+                "observed": 0
+            },
+            "executionDetail": {
+                "answerDisposition": "non_terminal",
+                "verificationState": "insufficient_evidence",
+                "verificationWarnings": [{
+                    "code": "unsupported_literal",
+                    "message": "Unsupported literal"
+                }]
+            }
+        }));
+        outcome.result_json.as_mut().expect("result json")["structuredContent"] =
+            nonterminal_structured_content;
+        assert!(
+            remember_verified_partial_grounded_answer(None, GROUNDED_ANSWER_TOOL_NAME, &outcome,)
+                .is_none()
+        );
     }
 
     #[test]
@@ -8260,6 +10391,56 @@ Parameters: `url`, `staticQrPayload`.";
             1,
             Some("   ")
         ));
+    }
+
+    #[test]
+    fn current_turn_iteration_cap_rejects_unrelated_prior_turn_without_a_current_answer() {
+        let unrelated_prior_turn = ChatMessage::assistant_text(
+            "Use `legacy-package`, `/etc/legacy.ini`, and `legacyTimeout`.".to_string(),
+        );
+        assert_eq!(unrelated_prior_turn.role, "assistant");
+
+        let answer = current_turn_grounded_answer_on_iteration_cap(
+            AgentStopReason::IterationCap,
+            false,
+            false,
+            1,
+            0,
+            None,
+            None,
+        );
+
+        assert!(answer.is_none(), "an unrelated prior turn is not a current-turn answer source");
+    }
+
+    #[test]
+    fn current_turn_iteration_cap_uses_explicit_follow_up_verified_result() {
+        let answer = current_turn_grounded_answer_on_iteration_cap(
+            AgentStopReason::IterationCap,
+            false,
+            true,
+            2,
+            1,
+            Some("Current verified follow-up answer."),
+            None,
+        );
+
+        assert_eq!(answer, Some("Current verified follow-up answer."));
+    }
+
+    #[test]
+    fn current_turn_iteration_cap_keeps_completed_result() {
+        let answer = current_turn_grounded_answer_on_iteration_cap(
+            AgentStopReason::IterationCap,
+            false,
+            false,
+            1,
+            0,
+            None,
+            Some("Current completed answer."),
+        );
+
+        assert_eq!(answer, Some("Current completed answer."));
     }
 
     #[test]
@@ -8393,6 +10574,10 @@ Parameters: `url`, `staticQrPayload`.";
                 text: "Large result completed.".to_string(),
             }],
             structured_content: serde_json::json!({
+                "clarification": {
+                    "required": true,
+                    "question": "Which documented variant?"
+                },
                 "payload": "x".repeat(TOOL_DEBUG_RESULT_JSON_CHAR_LIMIT + 128)
             }),
             is_error: false,
@@ -8403,6 +10588,13 @@ Parameters: `url`, `staticQrPayload`.";
         assert_eq!(debug_json["isError"], false);
         assert_eq!(debug_json["content"][0]["text"], "Large result completed.");
         assert_eq!(debug_json["structuredContent"]["truncated"], true);
+        assert_eq!(
+            debug_json["structuredContent"]["clarification"],
+            serde_json::json!({
+                "required": true,
+                "question": "Which documented variant?"
+            })
+        );
         assert!(
             debug_json["structuredContent"]["originalCharCount"].as_u64().unwrap()
                 > TOOL_DEBUG_RESULT_JSON_CHAR_LIMIT as u64

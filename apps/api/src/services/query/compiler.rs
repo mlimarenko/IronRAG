@@ -15,9 +15,11 @@
 //!
 //! Robustness guarantees:
 //! - Missing `QueryCompile` binding, provider call failures, and invalid
-//!   provider output fail loudly with `ApiError::ProviderFailure`. A turn must
-//!   not continue with a synthetic IR because that hides routing regressions
-//!   behind low-quality retrieval.
+//!   provider output fail loudly from the compiler service with
+//!   `ApiError::ProviderFailure`. The canonical answer boundary may recover
+//!   with `provider_free_fallback_query_ir`, whose low-confidence IR keeps
+//!   the full retrieval query and formal evidence visible in diagnostics
+//!   without guessing semantic intent or language.
 //! - Cache hits are allowed only after the active `QueryCompile` binding has
 //!   resolved successfully. The cache key includes the resolved binding
 //!   fingerprint, so model/provider/preset changes do not replay stale IR.
@@ -30,7 +32,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use sqlx::PgPool;
-use std::{collections::BTreeSet, sync::LazyLock};
+use std::sync::LazyLock;
 use uuid::Uuid;
 
 use crate::{
@@ -38,38 +40,25 @@ use crate::{
     domains::{
         ai::AiBindingPurpose,
         query_ir::{
-            ClarificationReason, ConversationRefKind, EntityRole, QUERY_IR_SCHEMA_VERSION,
-            QueryAct, QueryIR, QueryScope, SourceSliceDirection, SourceSliceFilter,
-            SourceSliceSpec, UnresolvedRef, VerificationLevel, query_ir_json_schema,
+            ClarificationReason, LiteralKind, LiteralSpan, QUERY_IR_SCHEMA_VERSION, QueryAct,
+            QueryIR, QueryLanguage, QueryScope, VerificationLevel, query_ir_json_schema,
         },
     },
     infra::repositories::query_ir_cache_repository::{get_query_ir_cache, upsert_query_ir_cache},
-    integrations::llm::{LlmGateway, build_structured_chat_request},
+    integrations::llm::{ChatResponse, LlmGateway, build_structured_chat_request},
     interfaces::http::router_support::ApiError,
     services::{
         ai_catalog_service::ResolvedRuntimeBinding,
-        query::effective_query::current_question_segment,
+        query::provider_billing::{QueryProviderCallReservation, QueryProviderExecutionContext},
     },
 };
 
 /// Canonical Redis key prefix for the hot IR cache.
 const REDIS_IR_CACHE_PREFIX: &str = "ir_cache";
-const STRUCTURAL_CONFIGURATION_REPAIR_CONFIDENCE: f32 = 0.65;
-const STRUCTURAL_CONFIGURATION_TARGET_TYPES: [&str; 3] =
-    ["configuration_file", "config_key", "parameter"];
-
-/// Minimum compiler confidence at which an over-eager single-document focus is
-/// trusted enough to downgrade. Below this the IR is treated as genuinely
-/// uncertain and the focus is left untouched so a clarify / stub path can run.
-const OVEREAGER_FOCUS_DOWNGRADE_MIN_CONFIDENCE: f32 = 0.6;
-
-/// Ontology target tags that, when present, indicate the user is structurally
-/// referencing a document object (its title / a heading) rather than merely
-/// naming a product or module. Their presence keeps a `document_focus` pin.
-const EXPLICIT_DOCUMENT_REFERENCE_TARGET_TYPES: [&str; 3] =
-    ["document", "primary_heading", "secondary_heading"];
-const CONFIGURATION_FILE_EXTENSIONS: [&str; 8] =
-    [".conf", ".ini", ".cfg", ".properties", ".yaml", ".yml", ".toml", ".json"];
+const PROVIDER_FREE_FALLBACK_LITERAL_LIMIT: usize = 8;
+const PROVIDER_FREE_FALLBACK_TOKEN_MAX_CHARS: usize = 80;
+const PROVIDER_FREE_FALLBACK_QUOTED_LITERAL_MAX_CHARS: usize = 240;
+const PROVIDER_FREE_FALLBACK_CONFIDENCE: f32 = 0.25;
 
 /// Hot-tier TTL. Chosen so even low-traffic libraries see regular warm
 /// reads without pinning stale IR past a day.
@@ -94,13 +83,14 @@ pub struct CompileHistoryTurn {
 }
 
 #[derive(Debug, Clone)]
-pub struct CompileQueryCommand {
-    pub library_id: Uuid,
-    pub question: String,
+pub(crate) struct CompileQueryCommand {
+    pub(crate) library_id: Uuid,
+    pub(crate) execution_context: QueryProviderExecutionContext,
+    pub(crate) question: String,
     /// Last N turns of conversation, ordered oldest → newest. Empty for the
     /// first turn in a session. The compiler only uses this to detect
     /// unresolved references — it is NOT fed to downstream retrieval.
-    pub history: Vec<CompileHistoryTurn>,
+    pub(crate) history: Vec<CompileHistoryTurn>,
 }
 
 #[derive(Debug, Clone)]
@@ -278,9 +268,9 @@ impl<'a> QueryIrCache for PersistenceQueryIrCache<'a> {
 }
 
 /// Compute the canonical cache key hash for one compile request. The hash is
-/// content-addressed: equal inputs under the same compiler runtime and resolved
-/// QueryCompile binding produce equal keys regardless of trailing whitespace or
-/// letter case so trivially-reworded repeats share a cache entry.
+/// content-addressed over the exact question/history bytes under the same
+/// compiler runtime and resolved QueryCompile binding. Case, whitespace, and
+/// formal literal spelling are source-significant and must never alias.
 /// Compiler/runtime source files and binding fields are part of the address, so
 /// semantic fixes or provider/model changes never serve stale IR rows that were
 /// compiled under a different routing contract.
@@ -298,13 +288,11 @@ fn hash_compile_request(
     hasher.update(query_ir_runtime_fingerprint().as_bytes());
     hasher.update(b"|binding|");
     hasher.update(query_compile_binding_fingerprint(binding).as_bytes());
-    hasher.update(b"|q|");
-    hasher.update(normalize(question).as_bytes());
+    hash_field(&mut hasher, "question", question);
+    hash_field(&mut hasher, "history_len", &history.len().to_string());
     for turn in history {
-        hasher.update(b"|t|");
-        hasher.update(normalize(&turn.role).as_bytes());
-        hasher.update(b":");
-        hasher.update(normalize(&turn.content).as_bytes());
+        hash_field(&mut hasher, "history_role", &turn.role);
+        hash_field(&mut hasher, "history_content", &turn.content);
     }
     hex::encode(hasher.finalize())
 }
@@ -419,10 +407,6 @@ pub fn query_ir_runtime_fingerprint() -> &'static str {
     FINGERPRINT.as_str()
 }
 
-fn normalize(value: &str) -> String {
-    value.trim().to_lowercase()
-}
-
 async fn redis_get_ir(
     redis: &RedisClient,
     library_id: Uuid,
@@ -498,7 +482,7 @@ impl QueryCompilerService {
     /// 5. Miss: call the LLM with the resolved binding,
     ///    write successful compiles through to both tiers. Missing binding
     ///    or provider failures return `ApiError::ProviderFailure`.
-    pub async fn compile(
+    pub(crate) async fn compile(
         &self,
         state: &AppState,
         command: CompileQueryCommand,
@@ -533,18 +517,48 @@ impl QueryCompilerService {
             &binding,
         );
 
-        if let Some(entry) = cache.get(command.library_id, &question_hash).await {
-            return Ok(cached_outcome(entry));
+        if let Some(entry) = cache.get(command.library_id, &question_hash).await
+            && let Some(outcome) =
+                validated_cached_outcome(entry, &command.question, &command.history)
+        {
+            return Ok(outcome);
         }
 
-        let outcome = self
-            .compile_with_gateway(
+        let mut provider_call = QueryProviderCallReservation::reserve(
+            state,
+            command.execution_context,
+            &binding,
+            AiBindingPurpose::QueryCompile,
+            "query_compile",
+        )
+        .await?;
+
+        let response = match self
+            .request_compile_response(
                 state.llm_gateway.as_ref(),
                 &binding,
                 &command.question,
                 &command.history,
             )
-            .await?;
+            .await
+        {
+            Ok(response) => response,
+            Err(error) => {
+                if let Err(billing_error) = provider_call.fail().await {
+                    tracing::error!(
+                        provider_call_id = %provider_call.provider_call_id(),
+                        %billing_error,
+                        "failed to terminalize query compiler provider-call reservation"
+                    );
+                }
+                return Err(error);
+            }
+        };
+        // Account for the paid response before parsing or semantic validation:
+        // a malformed/rejected QueryIR is still a real provider call.
+        provider_call.complete(&response.usage_json).await?;
+        let outcome =
+            self.compile_response(&binding, &command.question, &command.history, response)?;
 
         cache
             .put(
@@ -577,8 +591,10 @@ impl QueryCompilerService {
         let question_hash =
             hash_compile_request(question, history, QUERY_IR_SCHEMA_VERSION, binding);
 
-        if let Some(entry) = cache.get(library_id, &question_hash).await {
-            return Ok(cached_outcome(entry));
+        if let Some(entry) = cache.get(library_id, &question_hash).await
+            && let Some(outcome) = validated_cached_outcome(entry, question, history)
+        {
+            return Ok(outcome);
         }
 
         let outcome = self.compile_with_gateway(gateway, binding, question, history).await?;
@@ -601,7 +617,7 @@ impl QueryCompilerService {
 
     /// Lower-level entry point used by the OpenAI smoke test and by
     /// integration tests that already hold a concrete binding + gateway.
-    /// Production callers use [`Self::compile`].
+    /// Production callers use the canonical compiler path.
     pub async fn compile_with_gateway(
         &self,
         gateway: &dyn LlmGateway,
@@ -609,6 +625,17 @@ impl QueryCompilerService {
         question: &str,
         history: &[CompileHistoryTurn],
     ) -> Result<CompileQueryOutcome, ApiError> {
+        let response = self.request_compile_response(gateway, binding, question, history).await?;
+        self.compile_response(binding, question, history, response)
+    }
+
+    async fn request_compile_response(
+        &self,
+        gateway: &dyn LlmGateway,
+        binding: &ResolvedRuntimeBinding,
+        question: &str,
+        history: &[CompileHistoryTurn],
+    ) -> Result<ChatResponse, ApiError> {
         let schema = query_ir_json_schema();
         let response_format = json!({
             "type": "json_schema",
@@ -645,7 +672,16 @@ impl QueryCompilerService {
                 )));
             }
         };
+        Ok(response)
+    }
 
+    fn compile_response(
+        &self,
+        binding: &ResolvedRuntimeBinding,
+        question: &str,
+        history: &[CompileHistoryTurn],
+        response: ChatResponse,
+    ) -> Result<CompileQueryOutcome, ApiError> {
         let ir: QueryIR = match serde_json::from_str(&response.output_text) {
             Ok(value) => value,
             Err(error) => {
@@ -662,7 +698,18 @@ impl QueryCompilerService {
                 )));
             }
         };
-        let ir = normalize_compiled_ir(question, history, ir);
+        if let Err(error) = validate_compiled_ir_for_request(question, history, &ir) {
+            tracing::error!(
+                provider = %binding.provider_kind,
+                model = %binding.model_name,
+                ?error,
+                "query compile output failed typed request validation"
+            );
+            return Err(ApiError::ProviderFailure(format!(
+                "QueryCompile provider returned invalid QueryIR for provider `{}` model `{}`",
+                binding.provider_kind, binding.model_name
+            )));
+        }
 
         tracing::info!(
             target: "ironrag::query_compile",
@@ -677,13 +724,6 @@ impl QueryCompilerService {
             history_turn_count = history.len(),
             confidence = ir.confidence,
             "query compiled"
-        );
-
-        #[cfg(debug_assertions)]
-        debug_assert!(
-            crate::domains::query_ir::validate_ir(&ir).is_ok(),
-            "compiled QueryIR failed self-consistency checks: {:?}",
-            crate::domains::query_ir::validate_ir(&ir).err()
         );
 
         Ok(CompileQueryOutcome {
@@ -710,763 +750,240 @@ fn cached_outcome(entry: CachedIrEntry) -> CompileQueryOutcome {
     }
 }
 
-fn normalize_compiled_ir(
+fn validated_cached_outcome(
+    entry: CachedIrEntry,
     question: &str,
     history: &[CompileHistoryTurn],
-    mut ir: QueryIR,
-) -> QueryIR {
-    repair_target_entity_labels(question, history, &mut ir);
-    repair_history_backed_elliptic_ref(question, history, &mut ir);
-    repair_history_injected_raw_question_comparison(question, history, &mut ir);
-    normalize_latest_version_source_slice(&mut ir);
-    normalize_source_slice_filter(&mut ir);
-    normalize_structural_configuration_request(question, &mut ir);
-    downgrade_overeager_single_document_focus(&mut ir);
-
-    let stateless_with_explicit_target =
-        history.is_empty() && stateless_ir_has_explicit_target(&ir);
-    if stateless_with_explicit_target && matches!(ir.act, QueryAct::FollowUp) {
-        tracing::info!(
-            target: "ironrag::query_compile",
-            question_len = question.len(),
-            target_entities_count = ir.target_entities.len(),
-            has_document_focus = ir.document_focus.is_some(),
-            literal_constraints_count = ir.literal_constraints.len(),
-            "query compile repaired stateless follow_up IR"
+) -> Option<CompileQueryOutcome> {
+    if let Err(error) = validate_compiled_ir_for_request(question, history, &entry.ir) {
+        tracing::warn!(
+            provider = %entry.provider_kind,
+            model = %entry.model_name,
+            ?error,
+            "query compiler cache entry failed typed request validation; recompiling"
         );
-        // A stateless call has no prior turn to resolve. If the IR still
-        // carries an explicit target, it is a standalone question and must
-        // stay on the grounded single-shot path; the raw question text still
-        // tells the answer model whether the user asked for a procedure.
-        ir.act = QueryAct::Describe;
-        ir.conversation_refs.clear();
+        return None;
     }
-    if stateless_with_explicit_target && !ir.conversation_refs.is_empty() {
-        tracing::info!(
-            target: "ironrag::query_compile",
-            question_len = question.len(),
-            act = ir.act.as_str(),
-            target_entities_count = ir.target_entities.len(),
-            has_document_focus = ir.document_focus.is_some(),
-            literal_constraints_count = ir.literal_constraints.len(),
-            conversation_refs_count = ir.conversation_refs.len(),
-            "query compile repaired stateless explicit-target refs"
-        );
-        ir.conversation_refs.clear();
-        if ir.needs_clarification.as_ref().is_some_and(|clarification| {
-            matches!(clarification.reason, ClarificationReason::AnaphoraUnresolved)
-        }) {
-            ir.needs_clarification = None;
-        }
-    }
-    ir
+    Some(cached_outcome(entry))
 }
 
-fn repair_history_injected_raw_question_comparison(
+#[derive(Debug, Clone, PartialEq)]
+enum CompileRequestValidationError {
+    InvalidTypedIr(crate::domains::query_ir::QueryIrValidationError),
+    StatelessConversationDependency,
+    UngroundedTargetEntity,
+    UngroundedLiteral,
+    UngroundedTemporalSurface,
+    UngroundedDocumentFocus,
+    UngroundedConversationReference,
+    UngroundedComparisonOperand,
+    IncompleteRetrievalQuery,
+}
+
+fn validate_compiled_ir_for_request(
     question: &str,
     history: &[CompileHistoryTurn],
-    ir: &mut QueryIR,
-) {
-    if history.is_empty() || !matches!(ir.act, QueryAct::Compare) {
-        return;
-    }
-    let Some(comparison) = ir.comparison.as_ref() else {
-        return;
-    };
-    let current_question = current_question_segment(question);
-    let Some((raw_current_side, history_side)) =
-        comparison_raw_current_and_history_sides(current_question, history, comparison)
-    else {
-        return;
-    };
+    ir: &QueryIR,
+) -> Result<(), CompileRequestValidationError> {
+    crate::domains::query_ir::validate_ir(ir)
+        .map_err(CompileRequestValidationError::InvalidTypedIr)?;
 
-    tracing::info!(
-        target: "ironrag::query_compile",
-        question_len = current_question.len(),
-        raw_current_side_len = raw_current_side.chars().count(),
-        history_side_len = history_side.chars().count(),
-        history_turn_count = history.len(),
-        "query compile repaired history-injected raw-question comparison"
-    );
-    ir.act = QueryAct::Describe;
-    ir.comparison = None;
-    ir.conversation_refs.clear();
-    if ir.needs_clarification.as_ref().is_some_and(|clarification| {
-        matches!(clarification.reason, ClarificationReason::AnaphoraUnresolved)
-    }) {
-        ir.needs_clarification = None;
-    }
-}
-
-fn comparison_raw_current_and_history_sides<'a>(
-    current_question: &str,
-    history: &[CompileHistoryTurn],
-    comparison: &'a crate::domains::query_ir::ComparisonSpec,
-) -> Option<(&'a str, &'a str)> {
-    let a = comparison.a.as_deref()?.trim();
-    let b = comparison.b.as_deref()?.trim();
-    if comparison_side_is_raw_current_question(current_question, a)
-        && comparison_side_is_history_only(current_question, history, b)
+    if history.is_empty()
+        && (ir.is_follow_up()
+            || ir.needs_clarification.as_ref().is_some_and(|clarification| {
+                matches!(clarification.reason, ClarificationReason::AnaphoraUnresolved)
+            }))
     {
-        return Some((a, b));
+        return Err(CompileRequestValidationError::StatelessConversationDependency);
     }
-    if comparison_side_is_raw_current_question(current_question, b)
-        && comparison_side_is_history_only(current_question, history, a)
+
+    if ir
+        .target_entities
+        .iter()
+        .any(|entity| !request_contains_exact_surface(question, history, &entity.label))
     {
-        return Some((b, a));
+        return Err(CompileRequestValidationError::UngroundedTargetEntity);
     }
-    None
-}
-
-fn comparison_side_is_raw_current_question(current_question: &str, side: &str) -> bool {
-    let current_tokens = normalized_repair_tokens(current_question);
-    let side_tokens = normalized_repair_tokens(side);
-    if current_tokens.len() < 4 || side_tokens.len() < 4 {
-        return false;
-    }
-    let ratio = side_tokens.len() as f32 / current_tokens.len() as f32;
-    ratio >= 0.65
-        && (contains_label_token_sequence(current_question, side)
-            || contains_label_token_sequence(side, current_question))
-}
-
-fn comparison_side_is_history_only(
-    current_question: &str,
-    history: &[CompileHistoryTurn],
-    side: &str,
-) -> bool {
-    if side.trim().is_empty() || contains_label_token_sequence(current_question, side) {
-        return false;
-    }
-    history.iter().any(|turn| contains_label_token_sequence(&turn.content, side))
-}
-
-fn normalize_latest_version_source_slice(ir: &mut QueryIR) {
-    if ir.source_slice.is_some()
-        || !crate::services::query::latest_versions::query_requests_latest_versions(ir)
+    if ir
+        .literal_constraints
+        .iter()
+        .any(|literal| !request_contains_exact_surface(question, history, &literal.text))
     {
-        return;
+        return Err(CompileRequestValidationError::UngroundedLiteral);
     }
-    let requested_count =
-        crate::services::query::latest_versions::requested_latest_version_count(ir)
-            .min(u16::MAX as usize) as u16;
-    ir.source_slice = Some(SourceSliceSpec {
-        direction: SourceSliceDirection::Tail,
-        count: Some(requested_count),
-        filter: SourceSliceFilter::ReleaseMarker,
-    });
-}
-
-fn normalize_source_slice_filter(ir: &mut QueryIR) {
-    if ir.source_slice.is_none() {
-        return;
-    };
-    let filter = if crate::services::query::latest_versions::query_requests_latest_versions(ir) {
-        SourceSliceFilter::ReleaseMarker
-    } else {
-        SourceSliceFilter::None
-    };
-    if let Some(slice) = ir.source_slice.as_mut() {
-        slice.filter = filter;
-    }
-}
-
-fn normalize_structural_configuration_request(question: &str, ir: &mut QueryIR) {
-    if !compiled_ir_is_low_confidence_unfocused_description(ir)
-        || !question_has_structural_configuration_surface(question)
+    if ir
+        .temporal_constraints
+        .iter()
+        .any(|constraint| !request_contains_exact_surface(question, history, &constraint.surface))
     {
-        return;
+        return Err(CompileRequestValidationError::UngroundedTemporalSurface);
     }
-    tracing::info!(
-        target: "ironrag::query_compile",
-        question_len = question.len(),
-        confidence = ir.confidence,
-        "query compile repaired structural configuration request"
-    );
-    ir.act = QueryAct::ConfigureHow;
-    ir.confidence = ir.confidence.max(STRUCTURAL_CONFIGURATION_REPAIR_CONFIDENCE);
-    ir.needs_clarification = None;
-    for target_type in STRUCTURAL_CONFIGURATION_TARGET_TYPES {
-        push_target_type_once(&mut ir.target_types, target_type);
-    }
-}
-
-/// Drop an over-eager single-document focus when the IR describes a generic,
-/// directly-answerable question that merely *names* a product / module /
-/// subsystem rather than *referencing a specific document*.
-///
-/// Root cause: a question that names a module ("how do I update `<Module>`")
-/// makes the compiler emit `scope = single_document` + a `document_focus.hint`
-/// equal to that module name, which then hard-locks retrieval onto whichever
-/// single document's TITLE matches — often a thin overview stub — so the
-/// answer pipeline reports "not in the available context".
-///
-/// This repair is the conservative, deterministic half of the fix (the
-/// retrieval-side coverage fallback re-broadens after the fact). It fires
-/// ONLY on a clearly-generic shape and leaves genuinely document-scoped
-/// questions untouched. The discriminator is entirely structural / typed —
-/// no natural-language keyword list:
-///
-/// - high compiler confidence (the question is pinned, not a guess);
-/// - a concrete answerable act (`describe` / `configure_how` / `enumerate`);
-/// - a resolved subject entity (the named component) and no comparison;
-/// - NO explicit document reference: no exact technical literal (a literal
-///   the user quoted verbatim such as a path / URL / version / identifier),
-///   no `document` / heading ontology target type, and a `document_focus.hint`
-///   that carries no path separator or known configuration-file extension
-///   (i.e. it is a bare name, not a filename / title token).
-///
-/// When all hold, the focus pin is the product of naming a component, so we
-/// drop `document_focus` and widen `scope` to `MultiDocument` — the codebase's
-/// canonical broadened state (mirrors the latest-release inference at
-/// `retrieve.rs`) — so retrieval can draw from every relevant document.
-fn downgrade_overeager_single_document_focus(ir: &mut QueryIR) {
-    if !compiled_ir_is_generic_overeager_single_document_focus(ir) {
-        return;
-    }
-    tracing::info!(
-        target: "ironrag::query_compile",
-        act = ir.act.as_str(),
-        scope = ir.scope.as_str(),
-        confidence = ir.confidence,
-        target_entities_count = ir.target_entities.len(),
-        "query compile downgraded over-eager single_document focus to multi_document"
-    );
-    ir.document_focus = None;
-    ir.scope = QueryScope::MultiDocument;
-}
-
-/// Structural predicate for [`downgrade_overeager_single_document_focus`].
-///
-/// All conditions are typed / structural so the guard cannot drift into a
-/// natural-language keyword list. Kept as its own function so it is directly
-/// unit-testable against synthetic [`QueryIR`] inputs.
-fn compiled_ir_is_generic_overeager_single_document_focus(ir: &QueryIR) -> bool {
-    matches!(ir.scope, QueryScope::SingleDocument)
-        && ir.document_focus.is_some()
-        && ir.confidence >= OVEREAGER_FOCUS_DOWNGRADE_MIN_CONFIDENCE
-        && matches!(ir.act, QueryAct::Describe | QueryAct::ConfigureHow | QueryAct::Enumerate)
-        && ir.comparison.is_none()
-        && ir.source_slice.is_none()
-        && ir.target_entities.iter().any(|mention| matches!(mention.role, EntityRole::Subject))
-        && !ir_has_explicit_document_reference(ir)
-}
-
-/// `true` when the IR carries a structural signal that the user referenced a
-/// specific document object (a quoted technical literal, a `document` / heading
-/// ontology target type, or a `document_focus.hint` shaped like a filename /
-/// path token) rather than merely naming a product / module by its bare name.
-fn ir_has_explicit_document_reference(ir: &QueryIR) -> bool {
-    if ir.has_exact_technical_literal() {
-        return true;
-    }
-    if ir.target_types.iter().any(|target_type| {
-        EXPLICIT_DOCUMENT_REFERENCE_TARGET_TYPES.iter().any(|reference| reference == target_type)
-    }) {
-        return true;
-    }
-    ir.document_focus
+    if ir
+        .document_focus
         .as_ref()
-        .is_some_and(|focus| document_focus_hint_is_explicit_reference(&focus.hint))
-}
-
-/// A `document_focus.hint` is an explicit document reference when it looks like
-/// a filename / path rather than a bare component name: it contains a path
-/// separator or ends in a known configuration-file extension.
-fn document_focus_hint_is_explicit_reference(hint: &str) -> bool {
-    let trimmed = hint.trim();
-    if trimmed.is_empty() {
-        return false;
+        .is_some_and(|focus| !request_contains_exact_surface(question, history, &focus.hint))
+    {
+        return Err(CompileRequestValidationError::UngroundedDocumentFocus);
     }
-    if trimmed.contains('/') || trimmed.contains('\\') {
-        return true;
+    if ir
+        .conversation_refs
+        .iter()
+        .any(|reference| !request_contains_exact_surface(question, history, &reference.surface))
+    {
+        return Err(CompileRequestValidationError::UngroundedConversationReference);
     }
-    let lowered = trimmed.to_lowercase();
-    CONFIGURATION_FILE_EXTENSIONS.iter().any(|extension| lowered.ends_with(extension))
-}
-
-fn compiled_ir_is_low_confidence_unfocused_description(ir: &QueryIR) -> bool {
-    ir.confidence <= 0.35
-        && matches!(ir.act, QueryAct::Describe | QueryAct::RetrieveValue)
-        && ir.comparison.is_none()
-        && ir.source_slice.is_none()
-        && ir.document_focus.is_none()
-        && ir.target_types.is_empty()
-        && ir.target_entities.is_empty()
-        && ir.literal_constraints.is_empty()
-        && ir.temporal_constraints.is_empty()
-        && ir.conversation_refs.is_empty()
-}
-
-fn question_has_structural_configuration_surface(question: &str) -> bool {
-    let path_count = count_configuration_file_path_literals(question, 8);
-    let section_count = count_configuration_section_literals(question, 8);
-    let assignment_count = count_configuration_assignment_literals(question, 8);
-    let identifier_count = count_identifier_like_backtick_literals(question, 32);
-    let has_configuration_surface = path_count > 0 || section_count > 0 || assignment_count > 0;
-    has_configuration_surface
-        && (path_count.saturating_add(section_count).saturating_add(assignment_count) >= 2
-            || identifier_count >= 2
-            || assignment_count >= 1)
-}
-
-fn count_configuration_file_path_literals(text: &str, limit: usize) -> usize {
-    if limit == 0 {
-        return 0;
+    if ir.comparison.as_ref().is_some_and(|comparison| {
+        comparison
+            .a
+            .as_deref()
+            .into_iter()
+            .chain(comparison.b.as_deref())
+            .any(|operand| !request_contains_exact_surface(question, history, operand))
+    }) {
+        return Err(CompileRequestValidationError::UngroundedComparisonOperand);
     }
-    let mut seen = BTreeSet::new();
-    for literal in backtick_literals(text).into_iter().chain(whitespace_literals(text)) {
-        let normalized = literal.trim_matches(literal_boundary_char).to_ascii_lowercase();
-        if normalized.is_empty() {
-            continue;
+    let history_target_requires_self_contained_query = ir.target_entities.iter().any(|entity| {
+        !question.contains(&entity.label)
+            && history.iter().any(|turn| turn.content.contains(&entity.label))
+    });
+    let retrieval_query = ir.retrieval_query.as_deref();
+    if history_target_requires_self_contained_query
+        && ir
+            .target_entities
+            .iter()
+            .any(|entity| !retrieval_query.is_some_and(|query| query.contains(&entity.label)))
+    {
+        return Err(CompileRequestValidationError::IncompleteRetrievalQuery);
+    }
+
+    Ok(())
+}
+
+fn request_contains_exact_surface(
+    question: &str,
+    history: &[CompileHistoryTurn],
+    surface: &str,
+) -> bool {
+    !surface.is_empty()
+        && surface == surface.trim()
+        && (question.contains(surface) || history.iter().any(|turn| turn.content.contains(surface)))
+}
+
+/// Build a conservative IR without calling a model after the configured query
+/// compiler fails.
+///
+/// Semantic classification belongs exclusively to the operator-configured
+/// compiler model. This fallback therefore preserves the full retrieval query
+/// and extracts only language-neutral formal evidence (quoted spans and tokens
+/// shaped like paths, URLs, versions, or identifiers). It never infers an act,
+/// language, entity, ontology target, or ordered source slice from raw words.
+#[must_use]
+pub(crate) fn provider_free_fallback_query_ir(question: &str) -> QueryIR {
+    let retrieval_query = question.trim();
+
+    QueryIR {
+        act: QueryAct::Describe,
+        scope: QueryScope::MultiDocument,
+        language: QueryLanguage::Auto,
+        target_types: Vec::new(),
+        target_entities: Vec::new(),
+        literal_constraints: provider_free_fallback_literal_constraints(question),
+        temporal_constraints: Vec::new(),
+        comparison: None,
+        document_focus: None,
+        conversation_refs: Vec::new(),
+        needs_clarification: None,
+        source_slice: None,
+        retrieval_query: (!retrieval_query.is_empty()).then(|| retrieval_query.to_string()),
+        confidence: PROVIDER_FREE_FALLBACK_CONFIDENCE,
+    }
+}
+
+fn provider_free_fallback_literal_constraints(question: &str) -> Vec<LiteralSpan> {
+    let mut literals = provider_free_quoted_literals(question)
+        .into_iter()
+        .map(|text| LiteralSpan { kind: LiteralKind::infer(&text), text })
+        .collect::<Vec<_>>();
+    literals.truncate(PROVIDER_FREE_FALLBACK_LITERAL_LIMIT);
+    for token in provider_free_structural_question_tokens(question) {
+        if literals.len() >= PROVIDER_FREE_FALLBACK_LITERAL_LIMIT {
+            break;
         }
-        if configuration_file_path_literal(&normalized) && seen.insert(normalized) {
-            if seen.len() >= limit {
-                break;
-            }
-        }
-    }
-    seen.len()
-}
-
-fn count_configuration_section_literals(text: &str, limit: usize) -> usize {
-    if limit == 0 {
-        return 0;
-    }
-    let mut seen = BTreeSet::new();
-    for literal in backtick_literals(text).into_iter().chain(whitespace_literals(text)) {
-        let cleaned = literal.trim_matches(non_section_literal_boundary_char);
-        if cleaned.len() <= 2 || !cleaned.starts_with('[') || !cleaned.ends_with(']') {
-            continue;
-        }
-        if cleaned.chars().any(char::is_alphanumeric) && seen.insert(cleaned.to_string()) {
-            if seen.len() >= limit {
-                break;
-            }
-        }
-    }
-    seen.len()
-}
-
-fn count_configuration_assignment_literals(text: &str, limit: usize) -> usize {
-    if limit == 0 {
-        return 0;
-    }
-    let mut seen = BTreeSet::new();
-    for literal in backtick_literals(text).into_iter().chain(whitespace_literals(text)) {
-        let Some((name, _)) = literal.split_once('=') else {
-            continue;
-        };
-        let name = name.trim_matches(literal_boundary_char);
-        if identifier_like_literal(name) && seen.insert(name.to_string()) {
-            if seen.len() >= limit {
-                break;
-            }
-        }
-    }
-    seen.len()
-}
-
-fn count_identifier_like_backtick_literals(text: &str, limit: usize) -> usize {
-    if limit == 0 {
-        return 0;
-    }
-    let mut seen = BTreeSet::new();
-    for literal in backtick_literals(text) {
-        let cleaned = literal.trim_matches(literal_boundary_char);
-        if identifier_like_literal(cleaned) && seen.insert(cleaned.to_string()) {
-            if seen.len() >= limit {
-                break;
-            }
-        }
-    }
-    seen.len()
-}
-
-fn configuration_file_path_literal(value: &str) -> bool {
-    let has_path_separator = value.contains('/') || value.contains('\\');
-    let has_config_extension =
-        CONFIGURATION_FILE_EXTENSIONS.iter().any(|extension| value.ends_with(extension));
-    has_path_separator && has_config_extension
-}
-
-fn identifier_like_literal(value: &str) -> bool {
-    let value = value.trim();
-    if !(2..=96).contains(&value.chars().count()) {
-        return false;
-    }
-    let mut has_alphanumeric = false;
-    let mut has_letter = false;
-    let mut has_digit = false;
-    let mut has_lowercase = false;
-    let mut has_uppercase = false;
-    let mut has_structural_separator = false;
-    for ch in value.chars() {
-        if ch.is_alphanumeric() {
-            has_alphanumeric = true;
-            has_letter |= ch.is_alphabetic();
-            has_digit |= ch.is_numeric();
-            has_lowercase |= ch.is_lowercase();
-            has_uppercase |= ch.is_uppercase();
-            continue;
-        }
-        if matches!(ch, '_' | '-' | '.' | ':') {
-            has_structural_separator = true;
-            continue;
-        }
-        return false;
-    }
-    has_alphanumeric
-        && has_letter
-        && (has_digit || has_structural_separator || (has_lowercase && has_uppercase))
-}
-
-fn backtick_literals(text: &str) -> Vec<&str> {
-    let mut literals = Vec::new();
-    let mut start = None;
-    for (index, ch) in text.char_indices() {
-        if ch != '`' {
-            continue;
-        }
-        if let Some(open) = start.take() {
-            let literal = text[open..index].trim();
-            if !literal.is_empty() {
-                literals.push(literal);
-            }
-        } else {
-            start = Some(index + ch.len_utf8());
+        let kind = LiteralKind::infer(&token);
+        if provider_free_literal_kind_is_structural(kind, &token) {
+            push_provider_free_fallback_literal(&mut literals, LiteralSpan { text: token, kind });
         }
     }
     literals
 }
 
-fn whitespace_literals(text: &str) -> impl Iterator<Item = &str> {
-    text.split_whitespace()
-}
-
-fn literal_boundary_char(ch: char) -> bool {
-    matches!(ch, '`' | '"' | '\'' | ',' | ';' | ':' | '.' | '(' | ')' | '[' | ']' | '{' | '}')
-}
-
-fn non_section_literal_boundary_char(ch: char) -> bool {
-    matches!(ch, '`' | '"' | '\'' | ',' | ';' | ':' | '.' | '(' | ')' | '{' | '}')
-}
-
-fn push_target_type_once(target_types: &mut Vec<String>, target_type: &str) {
-    if !target_types.iter().any(|current| current.trim().eq_ignore_ascii_case(target_type)) {
-        target_types.push(target_type.to_string());
-    }
-}
-
-fn repair_target_entity_labels(question: &str, history: &[CompileHistoryTurn], ir: &mut QueryIR) {
-    if ir.target_entities.is_empty() {
-        return;
-    }
-
-    let sources = target_label_repair_sources(question, history);
-    if sources.is_empty() {
-        return;
-    }
-
-    for mention in &mut ir.target_entities {
-        let label = mention.label.trim();
-        if label.is_empty()
-            || sources.iter().any(|source| contains_label_token_sequence(source, label))
-        {
-            continue;
-        }
-
-        let Some(repaired) = closest_source_label_span(label, &sources) else {
-            continue;
-        };
-        if repaired == label {
-            continue;
-        }
-        tracing::info!(
-            target: "ironrag::query_compile",
-            original_label_len = label.chars().count(),
-            repaired_label_len = repaired.chars().count(),
-            "query compile repaired target entity label to user-visible span"
-        );
-        mention.label = repaired;
-    }
-}
-
-fn repair_history_backed_elliptic_ref(
-    question: &str,
-    history: &[CompileHistoryTurn],
-    ir: &mut QueryIR,
-) {
-    // An elliptic ref marks a follow-up whose subject is still *unresolved* and
-    // must be recovered from history. If the compiler already folded the prior
-    // turn into a concrete typed anchor (subject/object entities or an explicit
-    // document focus), the ellipsis is resolved — flagging it would flip
-    // `is_follow_up()` and wrongly disqualify focused-document scope and the
-    // single-shot coverage path for what is a resolvable single-document query.
-    if history.is_empty()
-        || !ir.conversation_refs.is_empty()
-        || ir.comparison.is_some()
-        || ir.source_slice.is_some()
-        || !ir.literal_constraints.is_empty()
-        || !ir.temporal_constraints.is_empty()
-        || !ir.target_entities.is_empty()
-        || ir.document_focus.is_some()
+fn push_provider_free_fallback_literal(literals: &mut Vec<LiteralSpan>, literal: LiteralSpan) {
+    if literals.len() < PROVIDER_FREE_FALLBACK_LITERAL_LIMIT
+        && !literals.iter().any(|existing| existing.text.eq_ignore_ascii_case(&literal.text))
     {
-        return;
+        literals.push(literal);
     }
-    let current_question = effective_current_question_text(question);
-    if !is_short_elliptic_question(current_question) {
-        return;
-    }
-    tracing::info!(
-        target: "ironrag::query_compile",
-        question_len = current_question.len(),
-        act = ir.act.as_str(),
-        history_turn_count = history.len(),
-        target_entities_count = ir.target_entities.len(),
-        has_document_focus = ir.document_focus.is_some(),
-        "query compile repaired history-backed elliptic reference"
-    );
-    ir.conversation_refs.push(UnresolvedRef {
-        surface: current_question.to_string(),
-        kind: ConversationRefKind::Elliptic,
-    });
 }
 
-fn effective_current_question_text(question: &str) -> &str {
-    current_question_segment(question)
+fn provider_free_literal_kind_is_structural(kind: LiteralKind, text: &str) -> bool {
+    matches!(kind, LiteralKind::Url | LiteralKind::Path | LiteralKind::Version)
+        || (matches!(kind, LiteralKind::Identifier)
+            && text.chars().any(|ch| matches!(ch, '_' | '-' | '.' | '/' | ':') || ch.is_numeric()))
 }
 
-fn is_short_elliptic_question(value: &str) -> bool {
-    let tokens = normalized_repair_tokens(value);
-    let informative_token_count = tokens.iter().filter(|token| token.chars().count() >= 4).count();
-    !tokens.is_empty() && tokens.len() <= 2 && informative_token_count <= 1
-}
-
-fn target_label_repair_sources(question: &str, history: &[CompileHistoryTurn]) -> Vec<String> {
-    let mut sources = Vec::new();
-    let question = question.trim();
-    if !question.is_empty() {
-        sources.push(question.to_string());
-    }
-    for turn in history.iter().rev() {
-        let content = turn.content.trim();
-        if !content.is_empty() {
-            sources.push(content.to_string());
-        }
-    }
-    sources
-}
-
-fn contains_label_token_sequence(haystack: &str, needle: &str) -> bool {
-    let needle_tokens = normalized_repair_tokens(needle);
-    if needle_tokens.is_empty() {
-        return false;
-    }
-    let haystack_tokens = normalized_repair_tokens(haystack);
-    if haystack_tokens.len() < needle_tokens.len() {
-        return false;
-    }
-    haystack_tokens.windows(needle_tokens.len()).any(|window| window == needle_tokens)
-}
-
-fn closest_source_label_span(label: &str, sources: &[String]) -> Option<String> {
-    let label_tokens = alnum_token_spans(label);
-    let token_count = label_tokens.len();
-    if token_count == 0 || token_count > 8 {
-        return None;
-    }
-
-    let normalized_label = normalize_label_candidate(label);
-    if normalized_label.is_empty() {
-        return None;
-    }
-    if token_count == 1
-        && let Some(expanded) = closest_containing_source_token(&normalized_label, sources)
-    {
-        return Some(expanded);
-    }
-    let allowed_distance = allowed_label_repair_distance(normalized_label.chars().count());
-    if allowed_distance == 0 {
-        return None;
-    }
-
-    let mut best: Option<LabelRepairCandidate> = None;
-    for (source_index, source) in sources.iter().enumerate() {
-        let spans = alnum_token_spans(source);
-        if spans.len() < token_count {
-            continue;
-        }
-
-        for window in spans.windows(token_count) {
-            let Some(first) = window.first() else {
-                continue;
-            };
-            let Some(last) = window.last() else {
-                continue;
-            };
-            let candidate = source[first.start..last.end].trim();
-            if candidate.is_empty() {
-                continue;
+fn provider_free_quoted_literals(question: &str) -> Vec<String> {
+    let mut literals = Vec::new();
+    let mut open: Option<(char, usize)> = None;
+    for (index, ch) in question.char_indices() {
+        if let Some((closing, start)) = open {
+            if ch == closing {
+                let literal = question[start..index].trim();
+                if !literal.is_empty() {
+                    literals.push(
+                        literal
+                            .chars()
+                            .take(PROVIDER_FREE_FALLBACK_QUOTED_LITERAL_MAX_CHARS)
+                            .collect(),
+                    );
+                }
+                open = None;
             }
-            let normalized_candidate = normalize_label_candidate(candidate);
-            let Some(distance) =
-                bounded_edit_distance(&normalized_label, &normalized_candidate, allowed_distance)
-            else {
-                continue;
-            };
-            let candidate = LabelRepairCandidate {
-                text: candidate.to_string(),
-                distance,
-                source_index,
-                char_len: candidate.chars().count(),
-            };
-            if best.as_ref().is_none_or(|current| candidate.is_better_than(current)) {
-                best = Some(candidate);
-            }
+        } else if let Some(closing) = provider_free_quote_closer(ch) {
+            open = Some((closing, index + ch.len_utf8()));
         }
     }
-
-    best.map(|candidate| candidate.text)
+    literals
 }
 
-fn closest_containing_source_token(label: &str, sources: &[String]) -> Option<String> {
-    if label.chars().count() < 3 {
-        return None;
+fn provider_free_quote_closer(opening: char) -> Option<char> {
+    match opening {
+        '`' | '"' => Some(opening),
+        '«' => Some('»'),
+        '“' => Some('”'),
+        '„' => Some('“'),
+        _ => None,
     }
+}
 
-    let mut best: Option<LabelRepairCandidate> = None;
-    for (source_index, source) in sources.iter().enumerate() {
-        for span in alnum_token_spans(source) {
-            let candidate = source[span.start..span.end].trim();
-            if candidate.is_empty() {
-                continue;
-            }
-            let normalized_candidate = normalize_label_candidate(candidate);
-            if normalized_candidate == label || !normalized_candidate.contains(label) {
-                continue;
-            }
-            let candidate = LabelRepairCandidate {
-                text: candidate.to_string(),
-                distance: normalized_candidate
-                    .chars()
-                    .count()
-                    .saturating_sub(label.chars().count()),
-                source_index,
-                char_len: candidate.chars().count(),
-            };
-            if best.as_ref().is_none_or(|current| candidate.is_better_than(current)) {
-                best = Some(candidate);
-            }
+fn provider_free_structural_question_tokens(question: &str) -> Vec<String> {
+    let mut tokens = Vec::new();
+    let mut current = String::new();
+    for ch in question.chars() {
+        if ch.is_alphanumeric() || matches!(ch, '_' | '-' | '.' | '/' | ':') {
+            current.push(ch);
+        } else if !current.is_empty() {
+            tokens.push(provider_free_take_token(&current));
+            current.clear();
         }
     }
-
-    best.map(|candidate| candidate.text)
-}
-
-#[derive(Debug)]
-struct LabelRepairCandidate {
-    text: String,
-    distance: usize,
-    source_index: usize,
-    char_len: usize,
-}
-
-impl LabelRepairCandidate {
-    fn is_better_than(&self, other: &Self) -> bool {
-        (self.distance, self.source_index, self.char_len)
-            < (other.distance, other.source_index, other.char_len)
+    if !current.is_empty() {
+        tokens.push(provider_free_take_token(&current));
     }
+    tokens
 }
 
-#[derive(Debug)]
-struct AlnumTokenSpan {
-    start: usize,
-    end: usize,
-}
-
-fn alnum_token_spans(value: &str) -> Vec<AlnumTokenSpan> {
-    let mut spans = Vec::new();
-    let mut current_start = None;
-    let mut current_end = 0usize;
-
-    for (index, ch) in value.char_indices() {
-        if ch.is_alphanumeric() {
-            if current_start.is_none() {
-                current_start = Some(index);
-            }
-            current_end = index + ch.len_utf8();
-            continue;
-        }
-
-        if let Some(start) = current_start.take() {
-            spans.push(AlnumTokenSpan { start, end: current_end });
-        }
-    }
-
-    if let Some(start) = current_start {
-        spans.push(AlnumTokenSpan { start, end: current_end });
-    }
-
-    spans
-}
-
-fn normalize_label_candidate(value: &str) -> String {
-    normalized_repair_tokens(value).join(" ")
-}
-
-fn normalized_repair_tokens(value: &str) -> Vec<String> {
-    value
-        .split(|ch: char| !ch.is_alphanumeric())
-        .map(str::trim)
-        .filter(|token| !token.is_empty())
-        .map(str::to_lowercase)
-        .collect()
-}
-
-fn allowed_label_repair_distance(char_count: usize) -> usize {
-    if char_count < 5 {
-        return 0;
-    }
-    (char_count / 8).clamp(1, 3)
-}
-
-fn bounded_edit_distance(left: &str, right: &str, max_distance: usize) -> Option<usize> {
-    let left_chars = left.chars().collect::<Vec<_>>();
-    let right_chars = right.chars().collect::<Vec<_>>();
-    if left_chars.len().abs_diff(right_chars.len()) > max_distance {
-        return None;
-    }
-
-    let mut previous = (0..=right_chars.len()).collect::<Vec<_>>();
-    let mut current = vec![0; right_chars.len() + 1];
-    for (left_index, left_char) in left_chars.iter().enumerate() {
-        current[0] = left_index + 1;
-        let mut row_min = current[0];
-        for (right_index, right_char) in right_chars.iter().enumerate() {
-            let substitution_cost = usize::from(left_char != right_char);
-            let deletion = previous[right_index + 1] + 1;
-            let insertion = current[right_index] + 1;
-            let substitution = previous[right_index] + substitution_cost;
-            let distance = deletion.min(insertion).min(substitution);
-            current[right_index + 1] = distance;
-            row_min = row_min.min(distance);
-        }
-        if row_min > max_distance {
-            return None;
-        }
-        std::mem::swap(&mut previous, &mut current);
-    }
-
-    let distance = previous[right_chars.len()];
-    (distance <= max_distance).then_some(distance)
-}
-
-fn stateless_ir_has_explicit_target(ir: &QueryIR) -> bool {
-    !ir.target_entities.is_empty()
-        || !ir.literal_constraints.is_empty()
-        || !ir.temporal_constraints.is_empty()
-        || ir.source_slice.is_some()
+fn provider_free_take_token(value: &str) -> String {
+    value.chars().take(PROVIDER_FREE_FALLBACK_TOKEN_MAX_CHARS).collect()
 }
 
 const QUERY_COMPILER_SYSTEM_PROMPT: &str = "You are the IronRAG query compiler. Your only job is to \
@@ -1523,17 +1040,9 @@ Worked examples use numeric calendar forms so the rule stays script-agnostic:\n\
 5. `conversation_refs` lists unresolved anaphora / deixis / ellipsis that point to prior \
 user-assistant turns, not to positions, ranges, neighboring units, or anchors inside the source \
 documents being searched. `act = follow_up` is typical when the question cannot stand on its own.\n\
-6. `target_types` are canonical ontology tags. Use built-in tags exactly as written when they fit: \
-endpoint, url, path, wsdl, base_url, port, parameter, http_method, protocol, config_key, \
-configuration_file, filesystem_path, artifact, package, error_code, env_var, version, release, \
-procedure, metric, table_row, table_summary, table_average, table_frequency, document, \
-primary_heading, secondary_heading, formats_under_test, concept, relationship. For graph facts, \
-use runtime node-type tags: person, organization, location, event, artifact, natural, process, \
-concept, attribute, entity. \
-Endpoint-like tags (`endpoint`, `url`, `path`, `wsdl`, `base_url`) identify exact network or \
-interface identifiers only; do not use them for timing, severity, status, count, metric, or \
-outcome attributes unless the user asks for the identifier itself. You may invent a new singular \
-snake_case tag only when no built-in tag fits.\n\
+6. `target_types` are finite semantic enum values. Select only values advertised by the supplied \
+JSON schema. When no enum value fits, leave `target_types` empty and represent the subject in \
+`target_entities`; never invent, translate, or alias a target type.\n\
 7. `source_slice` is null for ordinary summaries, comparisons, procedures, and needle lookups. \
 Set it only when the user asks for a positional slice of a sequential source: earliest units \
 (`head`), latest units (`tail`), or a bounded representation of the whole sequence (`all`). \
@@ -1542,11 +1051,15 @@ Populate `count` only when the user asks for a concrete number of units. Set \
 records; otherwise set it to `none`.\n\
 For ordered change-summary requests over version or release records, include the `release` or \
 `version` target type and use a `tail` source slice when the user asks for the latest records.\n\
-8. `target_entities[*].label`, `document_focus.hint`, and verbatim literal-like values must \
-preserve the exact writing system and spelling visible in the current question or prior turns. \
-When a named target appears in that user-visible text, emit that target as a verbatim substring; \
-do not translate, transliterate, normalize look-alike glyphs, or substitute visually similar \
-characters.\n\
+8. Every source-bearing text field — `target_entities[*].label`, `literal_constraints[*].text`, \
+`temporal_constraints[*].surface`, `document_focus.hint`, `conversation_refs[*].surface`, and each \
+non-null `comparison` operand — must be a non-empty, surrounding-whitespace-free verbatim substring \
+of the current question or prior turns. Preserve the exact writing system, spelling, case, \
+punctuation, and internal whitespace visible to the user; do not translate, transliterate, \
+normalize look-alike glyphs, repair spelling, or \
+substitute visually similar characters. Omit a source-bearing field when no exact substring supports \
+it. When no prior conversation block is supplied, do not emit a history-dependent `follow_up` act, \
+conversation reference, or `anaphora_unresolved` clarification.\n\
 When a scoped follow-up includes a `literal anchors:` line, treat those values as prior-turn \
 referents for retrieval and disambiguation. They may populate `literal_constraints` when the \
 current question points back to them, but they are not source evidence by themselves.\n\
@@ -1567,6 +1080,12 @@ refinement token R, `retrieval_query` is a standalone phrasing containing S and 
 optional source-preserving action/facet terms; if the current turn already carries its own subject \
 token, `retrieval_query` starts from the current question and may add only source-preserving \
 action/facet terms.\n\
+12. `needs_clarification` is a last-resort typed signal. Set it only when a missing user choice makes \
+a grounded answer impossible. Do not use it merely because several evidence-backed variants may \
+exist. A broad `configure_how`, `describe`, or `enumerate` request remains answerable: retrieve the \
+available evidence and explain the evidence-derived variants in the answer. Request clarification \
+only when the user must choose one mutually exclusive interpretation before any useful grounded \
+answer can be produced.\n\
 \n\
 Output nothing but the JSON object described by the schema.";
 
@@ -1609,7 +1128,10 @@ fn preview(text: &str, max: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domains::query_ir::{ComparisonSpec, EntityMention, QueryLanguage};
+    use crate::domains::query_ir::{
+        ComparisonSpec, ConversationRefKind, DocumentHint, EntityMention, EntityRole,
+        QueryLanguage, SourceSliceDirection, TemporalConstraint, UnresolvedRef,
+    };
     use crate::integrations::llm::{
         ChatRequest, ChatResponse, EmbeddingBatchRequest, EmbeddingBatchResponse, EmbeddingRequest,
         EmbeddingResponse, VisionRequest, VisionResponse,
@@ -1662,6 +1184,7 @@ mod tests {
             api_key: Some("test-key".to_string()),
             model_catalog_id: Uuid::now_v7(),
             model_name: "gpt-5.4-nano".to_string(),
+            effective_embedding_dimensions: None,
             system_prompt: None,
             temperature: None,
             top_p: None,
@@ -1718,10 +1241,98 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn repairs_structural_configuration_request_from_unfocused_provider_ir() {
+    async fn preserves_valid_provider_ir_without_post_llm_semantic_rewrite() {
         let ir_json = json!({
             "act": "describe",
             "scope": "single_document",
+            "language": "en",
+            "target_types": ["procedure"],
+            "target_entities": [{"label": "Subject Alpha", "role": "subject"}],
+            "literal_constraints": [],
+            "temporal_constraints": [],
+            "comparison": null,
+            "document_focus": {"hint": "Guide A"},
+            "conversation_refs": [],
+            "needs_clarification": null,
+            "source_slice": null,
+            "retrieval_query": "Subject Alpha setup",
+            "confidence": 0.25
+        })
+        .to_string();
+        let expected: QueryIR = serde_json::from_str(&ir_json).expect("fixture QueryIR");
+        let gateway = StubGateway::new(Ok(chat_response_with(&ir_json)));
+
+        let outcome = QueryCompilerService
+            .compile_with_gateway(&gateway, &sample_binding(), "Use Guide A for Subject Alpha", &[])
+            .await
+            .expect("valid provider IR");
+
+        assert_eq!(outcome.ir, expected);
+    }
+
+    #[tokio::test]
+    async fn rejects_stateless_conversation_dependent_ir_instead_of_rewriting_it() {
+        let ir_json = json!({
+            "act": "follow_up",
+            "scope": "single_document",
+            "language": "en",
+            "target_types": [],
+            "target_entities": [],
+            "literal_constraints": [],
+            "temporal_constraints": [],
+            "comparison": null,
+            "document_focus": null,
+            "conversation_refs": [{"surface": "that", "kind": "deictic"}],
+            "needs_clarification": "anaphora_unresolved",
+            "source_slice": null,
+            "retrieval_query": "that",
+            "confidence": 0.35
+        })
+        .to_string();
+        let gateway = StubGateway::new(Ok(chat_response_with(&ir_json)));
+
+        let error = QueryCompilerService
+            .compile_with_gateway(&gateway, &sample_binding(), "that", &[])
+            .await
+            .expect_err("stateless conversation dependency must fail closed");
+
+        assert!(matches!(error, ApiError::ProviderFailure(_)));
+    }
+
+    #[tokio::test]
+    async fn rejects_ungrounded_provider_entity_instead_of_fuzzy_repairing_it() {
+        let ir_json = json!({
+            "act": "describe",
+            "scope": "single_document",
+            "language": "en",
+            "target_types": ["artifact"],
+            "target_entities": [{"label": "Subject Alpah", "role": "subject"}],
+            "literal_constraints": [],
+            "temporal_constraints": [],
+            "comparison": null,
+            "document_focus": null,
+            "conversation_refs": [],
+            "needs_clarification": null,
+            "source_slice": null,
+            "retrieval_query": "Subject Alpha",
+            "confidence": 0.8
+        })
+        .to_string();
+        let gateway = StubGateway::new(Ok(chat_response_with(&ir_json)));
+
+        let error = QueryCompilerService
+            .compile_with_gateway(&gateway, &sample_binding(), "Describe Subject Alpha", &[])
+            .await
+            .expect_err("ungrounded entity must fail closed");
+
+        assert!(matches!(error, ApiError::ProviderFailure(_)));
+    }
+
+    #[tokio::test]
+    async fn rejects_structurally_invalid_provider_ir_in_release_path() {
+        let ir_json = json!({
+            "act": "compare",
+            "scope": "multi_document",
             "language": "en",
             "target_types": [],
             "target_entities": [],
@@ -1732,28 +1343,169 @@ mod tests {
             "conversation_refs": [],
             "needs_clarification": null,
             "source_slice": null,
-            "confidence": 0.25
+            "retrieval_query": "compare",
+            "confidence": 0.8
+        })
+        .to_string();
+        let gateway = StubGateway::new(Ok(chat_response_with(&ir_json)));
+
+        let error = QueryCompilerService
+            .compile_with_gateway(&gateway, &sample_binding(), "compare", &[])
+            .await
+            .expect_err("invalid typed IR must fail in every build profile");
+
+        assert!(matches!(error, ApiError::ProviderFailure(_)));
+    }
+
+    #[test]
+    fn request_validation_rejects_follow_up_retrieval_query_that_drops_prior_target() {
+        let history = vec![CompileHistoryTurn {
+            role: "user".to_string(),
+            content: "Configure Subject Alpha with Variant A or Variant B.".to_string(),
+        }];
+        let mut ir = canonical_ir();
+        ir.act = QueryAct::ConfigureHow;
+        ir.target_entities = vec![
+            EntityMention { label: "Subject Alpha".to_string(), role: EntityRole::Subject },
+            EntityMention { label: "Variant B".to_string(), role: EntityRole::Object },
+        ];
+        ir.retrieval_query = Some("Variant B".to_string());
+
+        assert_eq!(
+            validate_compiled_ir_for_request("Variant B", &history, &ir),
+            Err(CompileRequestValidationError::IncompleteRetrievalQuery)
+        );
+
+        ir.retrieval_query = Some("Subject Alpha".to_string());
+        assert_eq!(
+            validate_compiled_ir_for_request("Variant B", &history, &ir),
+            Err(CompileRequestValidationError::IncompleteRetrievalQuery)
+        );
+
+        ir.retrieval_query = Some("Subject Alpha Variant B".to_string());
+        assert_eq!(validate_compiled_ir_for_request("Variant B", &history, &ir), Ok(()));
+    }
+
+    #[test]
+    fn request_validation_accepts_exact_surfaces_from_question_and_history() {
+        let history = vec![CompileHistoryTurn {
+            role: "assistant".to_string(),
+            content: "EntityH rightH refH".to_string(),
+        }];
+        let mut ir = canonical_ir();
+        ir.target_entities = vec![
+            EntityMention { label: "EntityQ".to_string(), role: EntityRole::Subject },
+            EntityMention { label: "EntityH".to_string(), role: EntityRole::Object },
+        ];
+        ir.literal_constraints =
+            vec![LiteralSpan { text: "LIT_Q".to_string(), kind: LiteralKind::Identifier }];
+        ir.temporal_constraints = vec![TemporalConstraint {
+            surface: "2026-03".to_string(),
+            start: Some("2026-03-01T00:00:00Z".to_string()),
+            end: Some("2026-04-01T00:00:00Z".to_string()),
+        }];
+        ir.document_focus = Some(DocumentHint { hint: "GuideQ".to_string() });
+        ir.conversation_refs =
+            vec![UnresolvedRef { surface: "refH".to_string(), kind: ConversationRefKind::Deictic }];
+        ir.comparison = Some(ComparisonSpec {
+            a: Some("leftQ".to_string()),
+            b: Some("rightH".to_string()),
+            dimension: "fixture".to_string(),
+        });
+        ir.retrieval_query = Some("EntityQ EntityH LIT_Q 2026-03 GuideQ leftQ rightH".to_string());
+
+        assert_eq!(
+            validate_compiled_ir_for_request("EntityQ LIT_Q 2026-03 GuideQ leftQ", &history, &ir,),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn request_validation_rejects_every_ungrounded_source_field() {
+        let history = vec![CompileHistoryTurn {
+            role: "user".to_string(),
+            content: "prior source".to_string(),
+        }];
+
+        let mut entity = canonical_ir();
+        entity.target_entities =
+            vec![EntityMention { label: "missing entity".to_string(), role: EntityRole::Subject }];
+
+        let mut literal = canonical_ir();
+        literal.literal_constraints = vec![LiteralSpan {
+            text: "missing_literal".to_string(),
+            kind: LiteralKind::Identifier,
+        }];
+
+        let mut temporal = canonical_ir();
+        temporal.temporal_constraints = vec![TemporalConstraint {
+            surface: "missing temporal".to_string(),
+            start: None,
+            end: None,
+        }];
+
+        let mut document = canonical_ir();
+        document.document_focus = Some(DocumentHint { hint: "missing document".to_string() });
+
+        let mut reference = canonical_ir();
+        reference.conversation_refs = vec![UnresolvedRef {
+            surface: "missing reference".to_string(),
+            kind: ConversationRefKind::Deictic,
+        }];
+
+        let mut comparison = canonical_ir();
+        comparison.comparison = Some(ComparisonSpec {
+            a: Some("missing operand".to_string()),
+            b: None,
+            dimension: "fixture".to_string(),
+        });
+
+        for (ir, expected) in [
+            (entity, CompileRequestValidationError::UngroundedTargetEntity),
+            (literal, CompileRequestValidationError::UngroundedLiteral),
+            (temporal, CompileRequestValidationError::UngroundedTemporalSurface),
+            (document, CompileRequestValidationError::UngroundedDocumentFocus),
+            (reference, CompileRequestValidationError::UngroundedConversationReference),
+            (comparison, CompileRequestValidationError::UngroundedComparisonOperand),
+        ] {
+            assert_eq!(
+                validate_compiled_ir_for_request("current source", &history, &ir),
+                Err(expected)
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn rejects_unknown_provider_target_kind_without_reclassification() {
+        let ir_json = json!({
+            "act": "describe",
+            "scope": "multi_document",
+            "language": "auto",
+            "target_types": ["fixture_kind"],
+            "target_entities": [],
+            "literal_constraints": [
+                {"text": "urn:fixture:item-17", "kind": "identifier"}
+            ],
+            "temporal_constraints": [],
+            "comparison": null,
+            "document_focus": null,
+            "conversation_refs": [],
+            "needs_clarification": null,
+            "source_slice": null,
+            "confidence": 0.82
         })
         .to_string();
         let gateway = StubGateway::new(Ok(chat_response_with(&ir_json)));
         let service = QueryCompilerService;
         let binding = sample_binding();
-        let question = "scope: Provider Alpha setup was selected earlier\nliteral anchors: `/opt/alpha/alpha.conf`, `[Main]`, `alphaEndpoint`, `alphaSecret`, `printSlip`\nquestion: Provider Alpha setup parameter inventory";
+        let question = "∆ ⟦urn:fixture:item-17⟧";
 
-        let outcome = service
+        let error = service
             .compile_with_gateway(&gateway, &binding, question, &[])
             .await
-            .expect("compile ok");
+            .expect_err("unknown target kind must fail the compile boundary");
 
-        assert_eq!(outcome.ir.act, QueryAct::ConfigureHow);
-        assert!(outcome.ir.confidence >= STRUCTURAL_CONFIGURATION_REPAIR_CONFIDENCE);
-        for target_type in STRUCTURAL_CONFIGURATION_TARGET_TYPES {
-            assert!(
-                outcome.ir.target_types.iter().any(|value| value == target_type),
-                "{:?}",
-                outcome.ir.target_types
-            );
-        }
+        assert!(matches!(error, ApiError::ProviderFailure(_)));
     }
 
     #[tokio::test]
@@ -1788,45 +1540,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn downgrades_overeager_single_document_focus_for_generic_named_component() {
-        // High-confidence configure_how about a named module that the model
-        // over-pinned to a single document by echoing the module name as the
-        // focus hint. No quoted literal, no document/heading target type, and
-        // the hint is a bare name -> the pin is a false trigger and must drop.
-        let ir_json = json!({
-            "act": "configure_how",
-            "scope": "single_document",
-            "language": "en",
-            "target_types": ["procedure"],
-            "target_entities": [{"label": "S", "role": "subject"}],
-            "literal_constraints": [],
-            "temporal_constraints": [],
-            "comparison": null,
-            "document_focus": {"hint": "S"},
-            "conversation_refs": [],
-            "needs_clarification": null,
-            "source_slice": null,
-            "confidence": 0.9
-        })
-        .to_string();
-        let gateway = StubGateway::new(Ok(chat_response_with(&ir_json)));
-        let service = QueryCompilerService;
-        let binding = sample_binding();
-
-        let outcome = service
-            .compile_with_gateway(&gateway, &binding, "how do I update S", &[])
-            .await
-            .expect("compile ok");
-
-        assert_eq!(outcome.ir.scope, QueryScope::MultiDocument);
-        assert!(outcome.ir.document_focus.is_none());
-        assert_eq!(outcome.ir.act, QueryAct::ConfigureHow);
-    }
-
-    #[tokio::test]
     async fn preserves_single_document_focus_when_user_quotes_a_technical_literal() {
-        // Same generic shape, but the user quoted a path-shaped literal — an
-        // explicit reference to a specific document/object — so the pin stays.
+        // The typed provider output is accepted unchanged because every
+        // source-bearing field is present verbatim in the request.
         let ir_json = json!({
             "act": "configure_how",
             "scope": "single_document",
@@ -1848,7 +1564,7 @@ mod tests {
         let binding = sample_binding();
 
         let outcome = service
-            .compile_with_gateway(&gateway, &binding, "how do I configure /v2/pay", &[])
+            .compile_with_gateway(&gateway, &binding, "how do I configure S using /v2/pay", &[])
             .await
             .expect("compile ok");
 
@@ -1858,8 +1574,8 @@ mod tests {
 
     #[tokio::test]
     async fn preserves_single_document_focus_when_focus_hint_is_a_filename() {
-        // The focus hint itself is a filename / path token — a structural
-        // document reference — so it is a genuine single-document pin.
+        // Exact source grounding validates the filename without inferring
+        // whether the filename should or should not select one document.
         let ir_json = json!({
             "act": "describe",
             "scope": "single_document",
@@ -1894,8 +1610,8 @@ mod tests {
 
     #[tokio::test]
     async fn preserves_single_document_focus_when_target_type_is_document() {
-        // A `document` ontology target type is an explicit document reference
-        // even when the focus hint is a bare name.
+        // Closed target kinds are trusted from the typed compiler output;
+        // source-bearing labels and focus hints still require exact grounding.
         let ir_json = json!({
             "act": "describe",
             "scope": "single_document",
@@ -1927,8 +1643,8 @@ mod tests {
 
     #[tokio::test]
     async fn keeps_low_confidence_single_document_focus_untouched() {
-        // Below the downgrade confidence floor the IR is treated as genuinely
-        // uncertain; the focus is left alone for the clarify / stub path.
+        // Validation is profile- and confidence-independent: valid typed IR is
+        // never rewritten after the provider returns it.
         let ir_json = json!({
             "act": "describe",
             "scope": "single_document",
@@ -1957,7 +1673,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn normalizes_broad_latest_release_ir_to_release_tail_slice() {
+    async fn does_not_infer_release_tail_slice_from_ontology_words() {
         let ir_json = json!({
             "act": "enumerate",
             "scope": "single_document",
@@ -1984,27 +1700,24 @@ mod tests {
             .expect("compile ok");
 
         assert_eq!(outcome.ir.scope, QueryScope::SingleDocument);
-        let slice = outcome.ir.source_slice.expect("latest release requests need ordered context");
-        assert_eq!(slice.direction, SourceSliceDirection::Tail);
-        assert_eq!(slice.count, Some(10));
-        assert_eq!(slice.filter, SourceSliceFilter::ReleaseMarker);
+        assert!(outcome.ir.source_slice.is_none());
     }
 
     #[tokio::test]
-    async fn latest_release_normalization_preserves_numeric_literal_count() {
+    async fn preserves_compiler_emitted_twenty_item_release_slice() {
         let ir_json = json!({
             "act": "enumerate",
             "scope": "single_document",
             "language": "en",
             "target_types": ["release", "version"],
             "target_entities": [],
-            "literal_constraints": [{"text": "3", "kind": "numeric_code"}],
+            "literal_constraints": [{"text": "20", "kind": "numeric_code"}],
             "temporal_constraints": [],
             "comparison": null,
             "document_focus": null,
             "conversation_refs": [],
             "needs_clarification": null,
-            "source_slice": null,
+            "source_slice": {"direction": "tail", "count": 20, "filter": "release_marker"},
             "confidence": 0.95
         })
         .to_string();
@@ -2013,14 +1726,14 @@ mod tests {
         let binding = sample_binding();
 
         let outcome = service
-            .compile_with_gateway(&gateway, &binding, "list the latest 3 release records", &[])
+            .compile_with_gateway(&gateway, &binding, "list the latest 20 release records", &[])
             .await
             .expect("compile ok");
 
-        assert_eq!(outcome.ir.source_slice.as_ref().and_then(|slice| slice.count), Some(3));
+        assert_eq!(outcome.ir.source_slice.as_ref().and_then(|slice| slice.count), Some(20));
         assert_eq!(
             crate::services::query::latest_versions::requested_latest_version_count(&outcome.ir),
-            3
+            20
         );
     }
 
@@ -2058,7 +1771,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn preserves_focused_latest_release_scope_when_normalizing_tail_slice() {
+    async fn preserves_focused_typed_latest_release_slice() {
         let ir_json = json!({
             "act": "describe",
             "scope": "single_document",
@@ -2071,7 +1784,7 @@ mod tests {
             "document_focus": null,
             "conversation_refs": [],
             "needs_clarification": null,
-            "source_slice": null,
+            "source_slice": {"direction": "tail", "count": 1, "filter": "release_marker"},
             "confidence": 0.9
         })
         .to_string();
@@ -2092,183 +1805,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn repairs_stateless_follow_up_with_explicit_target() {
-        let ir_json = json!({
-            "act": "follow_up",
-            "scope": "single_document",
-            "language": "en",
-            "target_types": ["service"],
-            "target_entities": [{"label": "TargetName", "role": "subject"}],
-            "literal_constraints": [],
-            "temporal_constraints": [],
-            "comparison": null,
-            "document_focus": null,
-            "conversation_refs": [{"surface": "how", "kind": "bare_interrogative"}],
-            "needs_clarification": "ambiguous_too_short",
-            "source_slice": null,
-            "confidence": 0.35
-        })
-        .to_string();
-        let gateway = StubGateway::new(Ok(chat_response_with(&ir_json)));
-        let service = QueryCompilerService;
-        let binding = sample_binding();
-
-        let outcome = service
-            .compile_with_gateway(&gateway, &binding, "TargetName how", &[])
-            .await
-            .expect("compile ok");
-
-        assert_eq!(outcome.ir.act, QueryAct::Describe);
-        assert!(outcome.ir.conversation_refs.is_empty());
-        assert_eq!(outcome.ir.target_entities.len(), 1);
-    }
-
-    #[tokio::test]
-    async fn preserves_stateless_document_focus_follow_up_signal() {
-        let ir_json = json!({
-            "act": "follow_up",
-            "scope": "single_document",
-            "language": "en",
-            "target_types": [],
-            "target_entities": [],
-            "literal_constraints": [],
-            "temporal_constraints": [],
-            "comparison": null,
-            "document_focus": {"hint": "Alpha Guide"},
-            "conversation_refs": [{"surface": "that one", "kind": "deictic"}],
-            "needs_clarification": "anaphora_unresolved",
-            "source_slice": null,
-            "confidence": 0.35
-        })
-        .to_string();
-        let gateway = StubGateway::new(Ok(chat_response_with(&ir_json)));
-        let service = QueryCompilerService;
-        let binding = sample_binding();
-
-        let outcome = service
-            .compile_with_gateway(&gateway, &binding, "that one", &[])
-            .await
-            .expect("compile ok");
-
-        assert_eq!(outcome.ir.act, QueryAct::FollowUp);
-        assert_eq!(outcome.ir.conversation_refs.len(), 1);
-        assert!(outcome.ir.document_focus.is_some());
-    }
-
-    #[tokio::test]
-    async fn repairs_target_entity_labels_to_verbatim_question_spans() {
-        let substituted_label = format!("Project Om{}ga", '\u{0435}');
-        let ir_json = json!({
-            "act": "describe",
-            "scope": "single_document",
-            "language": "en",
-            "target_types": ["artifact"],
-            "target_entities": [
-                {"label": substituted_label, "role": "subject"},
-                {"label": "Δelta Meridion", "role": "object"}
-            ],
-            "literal_constraints": [],
-            "temporal_constraints": [],
-            "comparison": null,
-            "document_focus": null,
-            "conversation_refs": [],
-            "needs_clarification": null,
-            "source_slice": null,
-            "confidence": 0.8
-        })
-        .to_string();
-        let gateway = StubGateway::new(Ok(chat_response_with(&ir_json)));
-        let service = QueryCompilerService;
-        let binding = sample_binding();
-
-        let outcome = service
-            .compile_with_gateway(
-                &gateway,
-                &binding,
-                "Compare Project Omega and Δelta Meridian",
-                &[],
-            )
-            .await
-            .expect("compile ok");
-
-        let labels = outcome
-            .ir
-            .target_entities
-            .iter()
-            .map(|mention| mention.label.as_str())
-            .collect::<Vec<_>>();
-        assert_eq!(labels, vec!["Project Omega", "Δelta Meridian"]);
-    }
-
-    #[tokio::test]
-    async fn expands_embedded_short_target_label_to_source_token() {
-        let ir_json = json!({
-            "act": "describe",
-            "scope": "multi_document",
-            "language": "auto",
-            "target_types": ["person"],
-            "target_entities": [{"label": "OTO", "role": "subject"}],
-            "literal_constraints": [],
-            "temporal_constraints": [],
-            "comparison": null,
-            "document_focus": null,
-            "conversation_refs": [],
-            "needs_clarification": null,
-            "source_slice": null,
-            "confidence": 0.8
-        })
-        .to_string();
-        let gateway = StubGateway::new(Ok(chat_response_with(&ir_json)));
-        let service = QueryCompilerService;
-        let binding = sample_binding();
-
-        let outcome = service
-            .compile_with_gateway(&gateway, &binding, "Tell me about Alpha Otoya", &[])
-            .await
-            .expect("compile ok");
-
-        assert_eq!(outcome.ir.target_entities[0].label, "Otoya");
-    }
-
-    #[tokio::test]
-    async fn repairs_stateless_explicit_target_refs_without_changing_act() {
-        let ir_json = json!({
-            "act": "retrieve_value",
-            "scope": "single_document",
-            "language": "en",
-            "target_types": ["person", "conversation_turn"],
-            "target_entities": [{"label": "user name", "role": "subject"}],
-            "literal_constraints": [],
-            "temporal_constraints": [],
-            "comparison": null,
-            "document_focus": null,
-            "conversation_refs": [
-                {"surface": "source beginning", "kind": "deictic"},
-                {"surface": "neighboring source units", "kind": "elliptic"}
-            ],
-            "needs_clarification": {
-                "reason": "anaphora_unresolved",
-                "suggestion": "clarify the prior turn"
-            },
-            "source_slice": null,
-            "confidence": 0.55
-        })
-        .to_string();
-        let gateway = StubGateway::new(Ok(chat_response_with(&ir_json)));
-        let service = QueryCompilerService;
-        let binding = sample_binding();
-
-        let outcome = service
-            .compile_with_gateway(&gateway, &binding, "Who introduced themself by name?", &[])
-            .await
-            .expect("compile ok");
-
-        assert_eq!(outcome.ir.act, QueryAct::RetrieveValue);
-        assert!(outcome.ir.conversation_refs.is_empty());
-        assert!(outcome.ir.needs_clarification.is_none());
-    }
-
-    #[tokio::test]
     async fn preserves_follow_up_when_history_exists() {
         let ir_json = json!({
             "act": "follow_up",
@@ -2283,6 +1819,7 @@ mod tests {
             "conversation_refs": [{"surface": "how", "kind": "bare_interrogative"}],
             "needs_clarification": null,
             "source_slice": null,
+            "retrieval_query": "TargetName how",
             "confidence": 0.75
         })
         .to_string();
@@ -2301,201 +1838,6 @@ mod tests {
 
         assert_eq!(outcome.ir.act, QueryAct::FollowUp);
         assert_eq!(outcome.ir.conversation_refs.len(), 1);
-    }
-
-    #[test]
-    fn normalization_drops_history_injected_raw_question_comparison() {
-        let current = "Which entries does Alpha Catalog include, and how are messages signed?";
-        let prior =
-            "Which status values are valid for Alpha Catalog, and which code means rejected?";
-        let ir = QueryIR {
-            act: QueryAct::Compare,
-            scope: QueryScope::SingleDocument,
-            language: QueryLanguage::En,
-            target_types: vec!["document".to_string(), "concept".to_string()],
-            target_entities: vec![EntityMention {
-                label: "Alpha Catalog".to_string(),
-                role: EntityRole::Subject,
-            }],
-            literal_constraints: Vec::new(),
-            temporal_constraints: Vec::new(),
-            comparison: Some(ComparisonSpec {
-                a: Some(current.to_string()),
-                b: Some(prior.to_string()),
-                dimension: "catalog entries versus status values".to_string(),
-            }),
-            document_focus: None,
-            conversation_refs: Vec::new(),
-            needs_clarification: None,
-            source_slice: None,
-            retrieval_query: Some(current.to_string()),
-            confidence: 0.8,
-        };
-        let normalized = normalize_compiled_ir(
-            current,
-            &[CompileHistoryTurn { role: "user".to_string(), content: prior.to_string() }],
-            ir,
-        );
-
-        assert_eq!(normalized.act, QueryAct::Describe);
-        assert!(normalized.comparison.is_none());
-        assert!(normalized.conversation_refs.is_empty());
-    }
-
-    #[test]
-    fn normalization_preserves_real_history_backed_comparison() {
-        let current = "How does Beta mode compare to it?";
-        let prior = "Summarize Alpha mode.";
-        let ir = QueryIR {
-            act: QueryAct::Compare,
-            scope: QueryScope::SingleDocument,
-            language: QueryLanguage::En,
-            target_types: vec!["attribute".to_string()],
-            target_entities: vec![EntityMention {
-                label: "Beta mode".to_string(),
-                role: EntityRole::Subject,
-            }],
-            literal_constraints: Vec::new(),
-            temporal_constraints: Vec::new(),
-            comparison: Some(ComparisonSpec {
-                a: Some("Alpha mode".to_string()),
-                b: Some("Beta mode".to_string()),
-                dimension: "mode behavior".to_string(),
-            }),
-            document_focus: None,
-            conversation_refs: Vec::new(),
-            needs_clarification: None,
-            source_slice: None,
-            retrieval_query: Some(current.to_string()),
-            confidence: 0.8,
-        };
-        let normalized = normalize_compiled_ir(
-            current,
-            &[CompileHistoryTurn { role: "user".to_string(), content: prior.to_string() }],
-            ir,
-        );
-
-        assert_eq!(normalized.act, QueryAct::Compare);
-        assert!(normalized.comparison.is_some());
-    }
-
-    #[tokio::test]
-    async fn anchored_short_follow_up_stays_resolved_without_spurious_elliptic_ref() {
-        let ir_json = json!({
-            "act": "configure_how",
-            "scope": "single_document",
-            "language": "en",
-            "target_types": ["procedure"],
-            "target_entities": [{"label": "Beta", "role": "subject"}],
-            "literal_constraints": [],
-            "temporal_constraints": [],
-            "comparison": null,
-            "document_focus": {"hint": "Beta Setup Guide"},
-            "conversation_refs": [],
-            "needs_clarification": null,
-            "source_slice": null,
-            "confidence": 0.8
-        })
-        .to_string();
-        let gateway = StubGateway::new(Ok(chat_response_with(&ir_json)));
-        let service = QueryCompilerService;
-        let binding = sample_binding();
-        let history = vec![CompileHistoryTurn {
-            role: "user".to_string(),
-            content: "How do I configure payment providers?".to_string(),
-        }];
-
-        let outcome = service
-            .compile_with_gateway(&gateway, &binding, "Beta", &history)
-            .await
-            .expect("compile ok");
-
-        // A short follow-up the compiler already resolved into a concrete
-        // anchor (subject entity + document focus) must NOT be flagged as an
-        // unresolved ellipsis, so it stays a resolvable single-document query
-        // and keeps focused-document scope available downstream.
-        assert_eq!(outcome.ir.act, QueryAct::ConfigureHow);
-        assert!(outcome.ir.conversation_refs.is_empty());
-        assert!(!outcome.ir.is_follow_up());
-    }
-
-    #[tokio::test]
-    async fn anchored_effective_query_short_question_stays_resolved() {
-        let ir_json = json!({
-            "act": "retrieve_value",
-            "scope": "single_document",
-            "language": "en",
-            "target_types": ["parameter"],
-            "target_entities": [{"label": "Gamma", "role": "subject"}],
-            "literal_constraints": [],
-            "temporal_constraints": [],
-            "comparison": null,
-            "document_focus": null,
-            "conversation_refs": [],
-            "needs_clarification": null,
-            "source_slice": null,
-            "confidence": 0.75
-        })
-        .to_string();
-        let gateway = StubGateway::new(Ok(chat_response_with(&ir_json)));
-        let service = QueryCompilerService;
-        let binding = sample_binding();
-        let history = vec![CompileHistoryTurn {
-            role: "user".to_string(),
-            content: "Which parameters are supported?".to_string(),
-        }];
-
-        let outcome = service
-            .compile_with_gateway(
-                &gateway,
-                &binding,
-                "scope: Which parameters are supported?\nquestion: Gamma",
-                &history,
-            )
-            .await
-            .expect("compile ok");
-
-        // Subject entity is a concrete anchor: no spurious elliptic ref.
-        assert_eq!(outcome.ir.act, QueryAct::RetrieveValue);
-        assert!(outcome.ir.conversation_refs.is_empty());
-        assert!(!outcome.ir.is_follow_up());
-    }
-
-    #[tokio::test]
-    async fn anchorless_short_follow_up_still_flags_elliptic_ref() {
-        let ir_json = json!({
-            "act": "describe",
-            "scope": "single_document",
-            "language": "en",
-            "target_types": ["concept"],
-            "target_entities": [],
-            "literal_constraints": [],
-            "temporal_constraints": [],
-            "comparison": null,
-            "document_focus": null,
-            "conversation_refs": [],
-            "needs_clarification": null,
-            "source_slice": null,
-            "confidence": 0.7
-        })
-        .to_string();
-        let gateway = StubGateway::new(Ok(chat_response_with(&ir_json)));
-        let service = QueryCompilerService;
-        let binding = sample_binding();
-        let history = vec![CompileHistoryTurn {
-            role: "user".to_string(),
-            content: "How do I configure payment providers?".to_string(),
-        }];
-
-        let outcome = service
-            .compile_with_gateway(&gateway, &binding, "details", &history)
-            .await
-            .expect("compile ok");
-
-        // No concrete anchor was recovered, so the short follow-up remains an
-        // unresolved ellipsis that downstream stages must resolve from history.
-        assert_eq!(outcome.ir.conversation_refs.len(), 1);
-        assert_eq!(outcome.ir.conversation_refs[0].kind, ConversationRefKind::Elliptic);
     }
 
     #[tokio::test]
@@ -2526,6 +1868,82 @@ mod tests {
         assert!(matches!(error, ApiError::ProviderFailure(_)));
     }
 
+    #[test]
+    fn provider_free_fallback_is_semantically_neutral() {
+        let question = "∆ qlorm vexu 5?";
+        let ir = provider_free_fallback_query_ir(question);
+
+        assert_eq!(ir.act, QueryAct::Describe);
+        assert_eq!(ir.scope, QueryScope::MultiDocument);
+        assert_eq!(ir.language, QueryLanguage::Auto);
+        assert!(ir.target_types.is_empty());
+        assert!(ir.target_entities.is_empty());
+        assert!(ir.source_slice.is_none());
+        assert_eq!(ir.effective_retrieval_query("unused"), question);
+        assert!(ir.needs_clarification.is_none());
+    }
+
+    #[test]
+    fn provider_free_fallback_preserves_only_structural_evidence() {
+        let question = "∆ `urn:fixture:item-17` /spec/v2.3.4 NODE_9";
+        let ir = provider_free_fallback_query_ir(question);
+
+        assert_eq!(ir.act, QueryAct::Describe);
+        assert_eq!(ir.language, QueryLanguage::Auto);
+        assert!(ir.target_types.is_empty());
+        assert!(ir.target_entities.is_empty());
+        assert!(ir.source_slice.is_none());
+        for expected in ["urn:fixture:item-17", "/spec/v2.3.4", "NODE_9"] {
+            assert!(
+                ir.literal_constraints.iter().any(|literal| literal.text == expected),
+                "missing structural literal {expected:?} in {:?}",
+                ir.literal_constraints
+            );
+        }
+    }
+
+    #[test]
+    fn provider_free_fallback_never_infers_entities_from_surface_shape() {
+        for question in [
+            "∆ qlorm Nimbus",
+            "NODE_9 status",
+            "CamelCaseSubject details",
+            "service-name rollout",
+            "API:v2 overview",
+        ] {
+            let ir = provider_free_fallback_query_ir(question);
+            assert!(
+                ir.target_entities.is_empty(),
+                "provider-free fallback must not classify entity semantics from {question:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn compiler_production_path_has_no_lexical_fallback_classifiers() {
+        let production_source = include_str!("compiler.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .expect("compiler has a production section");
+
+        for forbidden_symbol in [
+            "provider_free_fallback_words",
+            "provider_free_fallback_source_slice",
+            "provider_free_fallback_requests_procedure",
+            "provider_free_fallback_requests_remediation",
+            "provider_free_fallback_requests_exact_value",
+            "normalize_troubleshooting_remediation_request",
+            "provider_free_fallback_entity_mentions",
+            "provider_free_token_has_entity_signal",
+            "provider_free_token_is_plain_titlecase",
+        ] {
+            assert!(
+                !production_source.contains(forbidden_symbol),
+                "lexical semantic classifier remains in production: {forbidden_symbol}"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn history_turns_are_embedded_in_prompt() {
         let ir_json = serde_json::to_string(&canonical_ir()).unwrap();
@@ -2548,7 +1966,7 @@ mod tests {
             .await
             .expect("compile ok");
 
-        let prompt = gateway.last_request.lock().unwrap().clone().unwrap().prompt;
+        let prompt = gateway.last_request.lock().unwrap().clone().unwrap().prompt.clone();
         assert!(prompt.contains("Prior conversation"));
         assert!(prompt.contains("payment module"));
         assert!(prompt.contains("how do I configure it?"));
@@ -2562,11 +1980,37 @@ mod tests {
     }
 
     #[test]
+    fn compiler_prompt_declares_exact_source_and_stateless_contract() {
+        assert!(QUERY_COMPILER_SYSTEM_PROMPT.contains("Every source-bearing text field"));
+        assert!(
+            QUERY_COMPILER_SYSTEM_PROMPT.contains("surrounding-whitespace-free verbatim substring")
+        );
+        assert!(QUERY_COMPILER_SYSTEM_PROMPT.contains("When no prior conversation block"));
+        assert!(QUERY_COMPILER_SYSTEM_PROMPT.contains("anaphora_unresolved"));
+    }
+
+    #[test]
     fn compiler_prompt_keeps_configuration_artifact_requests_as_configure_how() {
         assert!(QUERY_COMPILER_SYSTEM_PROMPT.contains("artifact-shaped output"));
         assert!(QUERY_COMPILER_SYSTEM_PROMPT.contains("still `configure_how`"));
         assert!(QUERY_COMPILER_SYSTEM_PROMPT.contains("do not downgrade them to `describe`"));
         assert!(QUERY_COMPILER_SYSTEM_PROMPT.contains("`configuration_file` and `config_key`"));
+    }
+
+    #[test]
+    fn compiler_prompt_reserves_clarification_for_a_blocking_missing_choice() {
+        assert!(
+            QUERY_COMPILER_SYSTEM_PROMPT
+                .contains("missing user choice makes a grounded answer impossible")
+        );
+        assert!(
+            QUERY_COMPILER_SYSTEM_PROMPT
+                .contains("broad `configure_how`, `describe`, or `enumerate` request")
+        );
+        assert!(
+            QUERY_COMPILER_SYSTEM_PROMPT
+                .contains("explain the evidence-derived variants in the answer")
+        );
     }
 
     // -----------------------------------------------------------------
@@ -2621,7 +2065,7 @@ mod tests {
             act: QueryAct::ConfigureHow,
             scope: QueryScope::SingleDocument,
             language: QueryLanguage::Ru,
-            target_types: vec!["procedure".to_string()],
+            target_types: vec![crate::domains::query_ir::QueryTargetKind::Procedure],
             target_entities: Vec::new(),
             literal_constraints: Vec::new(),
             temporal_constraints: Vec::new(),
@@ -2667,6 +2111,44 @@ mod tests {
             "gateway.generate must not be called on cache hit"
         );
         assert_eq!(cache.put_calls(), 0, "cache must not be rewritten on hit");
+    }
+
+    #[tokio::test]
+    async fn invalid_cached_ir_is_rejected_and_recompiled() {
+        let library_id = Uuid::now_v7();
+        let question = "current question";
+        let history: Vec<CompileHistoryTurn> = Vec::new();
+        let binding = sample_binding();
+        let hash = hash_compile_request(question, &history, QUERY_IR_SCHEMA_VERSION, &binding);
+        let mut invalid_ir = canonical_ir();
+        invalid_ir.act = QueryAct::Compare;
+        invalid_ir.comparison = None;
+        let cache = StubCache::seeded(
+            library_id,
+            hash,
+            CachedIrEntry {
+                ir: invalid_ir,
+                provider_kind: CACHE_HIT_REDIS_PROVIDER_KIND.to_string(),
+                model_name: String::new(),
+                usage_json: json!({"source": "redis"}),
+            },
+        );
+        let live_ir = canonical_ir();
+        let gateway = StubGateway::new(Ok(chat_response_with(
+            &serde_json::to_string(&live_ir).expect("serialize live fixture"),
+        )));
+
+        let outcome = QueryCompilerService
+            .compile_with_cache_and_gateway(
+                &cache, &gateway, &binding, library_id, question, &history,
+            )
+            .await
+            .expect("invalid cache entry must fall through to a live compile");
+
+        assert_eq!(outcome.ir, live_ir);
+        assert!(!outcome.served_from_cache);
+        assert!(gateway.last_request.lock().unwrap().is_some());
+        assert_eq!(cache.put_calls(), 1);
     }
 
     #[tokio::test]
@@ -2807,12 +2289,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn hash_compile_request_is_normalized_history_and_binding_sensitive() {
+    async fn hash_compile_request_preserves_exact_question_history_and_binding_bytes() {
         let binding = sample_binding();
         let base = hash_compile_request("Hello World", &[], QUERY_IR_SCHEMA_VERSION, &binding);
-        let variant =
-            hash_compile_request("  hello world  ", &[], QUERY_IR_SCHEMA_VERSION, &binding);
-        assert_eq!(base, variant, "trim + lowercase must produce the same hash");
+        let case_variant =
+            hash_compile_request("hello world", &[], QUERY_IR_SCHEMA_VERSION, &binding);
+        let whitespace_variant =
+            hash_compile_request(" Hello World ", &[], QUERY_IR_SCHEMA_VERSION, &binding);
+        let formal_literal_variant =
+            hash_compile_request("Hello World `A_B`", &[], QUERY_IR_SCHEMA_VERSION, &binding);
+        assert_ne!(base, case_variant, "question case is source-significant");
+        assert_ne!(base, whitespace_variant, "question whitespace is source-significant");
+        assert_ne!(base, formal_literal_variant, "formal literals are source-significant");
 
         let with_history = hash_compile_request(
             "Hello World",
@@ -2824,6 +2312,27 @@ mod tests {
             &binding,
         );
         assert_ne!(base, with_history, "history must contribute to the hash");
+
+        let history_case_variant = hash_compile_request(
+            "Hello World",
+            &[CompileHistoryTurn {
+                role: "user".to_string(),
+                content: "Prior context".to_string(),
+            }],
+            QUERY_IR_SCHEMA_VERSION,
+            &binding,
+        );
+        let history_role_variant = hash_compile_request(
+            "Hello World",
+            &[CompileHistoryTurn {
+                role: "assistant".to_string(),
+                content: "prior context".to_string(),
+            }],
+            QUERY_IR_SCHEMA_VERSION,
+            &binding,
+        );
+        assert_ne!(with_history, history_case_variant, "history content bytes are exact");
+        assert_ne!(with_history, history_role_variant, "history role bytes are exact");
 
         let bumped = hash_compile_request(
             "Hello World",

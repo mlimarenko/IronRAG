@@ -1,35 +1,35 @@
-import { Search } from "lucide-react";
-import type { Meta, StoryObj } from "@storybook/react";
-import { Input } from "./input";
-import { Label } from "./label";
+import { Search } from 'lucide-react'
+import type { Meta, StoryObj } from '@storybook/react'
+import { Input } from './input'
+import { Label } from './label'
 
 const meta = {
-  title: "UI/Input",
+  title: 'UI/Input',
   component: Input,
   args: {
-    placeholder: "Search documents",
+    placeholder: 'Search documents',
   },
-} satisfies Meta<typeof Input>;
+} satisfies Meta<typeof Input>
 
-export default meta;
-type Story = StoryObj<typeof meta>;
+export default meta
+type Story = StoryObj<typeof meta>
 
-export const Default: Story = {};
+export const Default: Story = {}
 
 export const WithValue: Story = {
   args: {
-    value: "policy-handbook.pdf",
+    value: 'policy-handbook.pdf',
     readOnly: true,
   },
-};
+}
 
 export const Disabled: Story = {
   args: {
     disabled: true,
-    value: "Locked field",
+    value: 'Locked field',
     readOnly: true,
   },
-};
+}
 
 export const SearchField: Story = {
   render: () => (
@@ -41,10 +41,10 @@ export const SearchField: Story = {
       </div>
     </div>
   ),
-};
+}
 
 export const FileInput: Story = {
   args: {
-    type: "file",
+    type: 'file',
   },
-};
+}

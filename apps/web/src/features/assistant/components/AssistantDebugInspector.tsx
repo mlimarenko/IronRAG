@@ -6,9 +6,9 @@ import {
   type KeyboardEvent,
   type PointerEvent,
   type ReactNode,
-} from 'react';
-import type { TFunction } from 'i18next';
-import { useQuery } from '@tanstack/react-query';
+} from 'react'
+import type { TFunction } from 'i18next'
+import { useQuery } from '@tanstack/react-query'
 import {
   AlertCircle,
   Braces,
@@ -25,113 +25,113 @@ import {
   ScrollText,
   Wrench,
   X,
-} from 'lucide-react';
+} from 'lucide-react'
 
-import { queryApi } from '@/shared/api';
-import type { LlmContextDebugResponse } from '@/shared/api/query';
-import type { EvidenceBundle } from '@/shared/types';
+import { queryApi } from '@/shared/api'
+import type { LlmContextDebugResponse } from '@/shared/api/query'
+import type { EvidenceBundle } from '@/shared/types'
 import {
   Tooltip,
   TooltipContent,
   TooltipProvider,
   TooltipTrigger,
-} from '@/shared/components/ui/tooltip';
+} from '@/shared/components/ui/tooltip'
 
-const DEBUG_PANEL_MIN_WIDTH = 420;
-const DEBUG_PANEL_MAX_WIDTH = 960;
+const DEBUG_PANEL_MIN_WIDTH = 420
+const DEBUG_PANEL_MAX_WIDTH = 960
 
-type InspectorView = 'timeline' | 'context' | 'raw';
+type InspectorView = 'timeline' | 'context' | 'raw'
 
 type ContextToolCallPreview = {
-  id: string;
-  name: string;
-  argumentsJson: string;
-  isError: boolean;
-};
+  id: string
+  name: string
+  argumentsJson: string
+  isError: boolean
+}
 
-type ContextTranscriptPhase = 'request' | 'model' | 'tool' | 'final';
+type ContextTranscriptPhase = 'request' | 'model' | 'tool' | 'final'
 
 type ContextTranscriptEntry = {
-  key: string;
-  role: string;
-  phase: ContextTranscriptPhase;
-  content?: string | null | undefined;
-  toolCallId?: string | null | undefined;
-  toolName?: string | null | undefined;
-  toolCalls?: ContextToolCallPreview[] | undefined;
-  resultJson?: unknown;
-  isError?: boolean | undefined;
-};
+  key: string
+  role: string
+  phase: ContextTranscriptPhase
+  content?: string | null | undefined
+  toolCallId?: string | null | undefined
+  toolName?: string | null | undefined
+  toolCalls?: ContextToolCallPreview[] | undefined
+  resultJson?: unknown
+  isError?: boolean | undefined
+}
 
 type ContextTranscriptSection = {
-  iteration: number;
-  entries: ContextTranscriptEntry[];
-};
+  iteration: number
+  entries: ContextTranscriptEntry[]
+}
 
-type AssistantDebugInspectorProps = {
-  t: TFunction;
-  open: boolean;
-  width: number;
-  snapshot: LlmContextDebugResponse | null;
-  loading: boolean;
-  error: string | null;
-  evidence: EvidenceBundle | null;
-  turnWallClockMs?: number | undefined;
-  onClose: () => void;
-  onWidthChange: (width: number) => void;
-};
+type AssistantDebugInspectorProps = Readonly<{
+  t: TFunction
+  open: boolean
+  width: number
+  snapshot: LlmContextDebugResponse | null
+  loading: boolean
+  error: string | null
+  evidence: EvidenceBundle | null
+  turnWallClockMs?: number | undefined
+  onClose: () => void
+  onWidthChange: (width: number) => void
+}>
 
 function clampPanelWidth(width: number) {
-  return Math.min(DEBUG_PANEL_MAX_WIDTH, Math.max(DEBUG_PANEL_MIN_WIDTH, Math.round(width)));
+  return Math.min(DEBUG_PANEL_MAX_WIDTH, Math.max(DEBUG_PANEL_MIN_WIDTH, Math.round(width)))
 }
 
 function formatDuration(ms: number | null | undefined) {
-  if (ms == null) return '-';
-  if (ms <= 0) return '<1 ms';
-  if (ms < 1000) return `${Math.round(ms)} ms`;
-  return `${(ms / 1000).toFixed(2)} s`;
+  if (ms == null) return '-'
+  if (ms <= 0) return '<1 ms'
+  if (ms < 1000) return `${Math.round(ms)} ms`
+  return `${(ms / 1000).toFixed(2)} s`
 }
 
 function truncate(text: string, max: number) {
-  if (text.length <= max) return text;
-  return `${text.slice(0, max)}...`;
+  if (text.length <= max) return text
+  return `${text.slice(0, max)}...`
 }
 
 function stringifyJson(value: unknown): string {
-  if (value == null) return 'null';
-  return JSON.stringify(value, null, 2);
+  if (value == null) return 'null'
+  return JSON.stringify(value, null, 2)
 }
 
 function formatJsonish(value: string): string {
-  const trimmed = value.trim();
-  if (!trimmed) return '';
+  const trimmed = value.trim()
+  if (!trimmed) return ''
   try {
-    return JSON.stringify(JSON.parse(trimmed), null, 2);
+    return JSON.stringify(JSON.parse(trimmed), null, 2)
   } catch {
-    return trimmed;
+    return trimmed
   }
 }
 
 function hasJsonPayload(value: unknown): boolean {
-  if (value == null) return false;
-  if (typeof value !== 'object') return true;
-  if (Array.isArray(value)) return value.length > 0;
-  return Object.keys(value).length > 0;
+  if (value == null) return false
+  if (typeof value !== 'object') return true
+  if (Array.isArray(value)) return value.length > 0
+  return Object.keys(value).length > 0
 }
 
 function pickNumber(record: Record<string, unknown> | null, ...keys: string[]): number | null {
-  if (!record) return null;
+  if (!record) return null
   for (const key of keys) {
-    const value = record[key];
-    if (typeof value === 'number' && Number.isFinite(value)) return value;
+    const value = record[key]
+    if (typeof value === 'number' && Number.isFinite(value)) return value
   }
-  return null;
+  return null
 }
 
 function asRecord(value: unknown): Record<string, unknown> | null {
   return value && typeof value === 'object' && !Array.isArray(value)
     ? (value as Record<string, unknown>)
-    : null;
+    : null
 }
 
 export function AssistantDebugInspector({
@@ -146,86 +146,86 @@ export function AssistantDebugInspector({
   onClose,
   onWidthChange,
 }: AssistantDebugInspectorProps) {
-  const panelWidth = clampPanelWidth(width);
-  const [activeView, setActiveView] = useState<InspectorView>('timeline');
+  const panelWidth = clampPanelWidth(width)
+  const [activeView, setActiveView] = useState<InspectorView>('timeline')
   const panelStyle = {
     '--assistant-debug-width': `${panelWidth}px`,
-  } as CSSProperties;
+  } as CSSProperties
 
   const startResize = useCallback(
-    (event: PointerEvent<HTMLDivElement>) => {
-      if (event.pointerType === 'mouse' && event.button !== 0) return;
-      event.preventDefault();
-      const startX = event.clientX;
-      const startWidth = panelWidth;
+    (event: PointerEvent<HTMLElement>) => {
+      if (event.pointerType === 'mouse' && event.button !== 0) return
+      event.preventDefault()
+      const startX = event.clientX
+      const startWidth = panelWidth
       const handleMove = (moveEvent: globalThis.PointerEvent) => {
-        onWidthChange(clampPanelWidth(startWidth + startX - moveEvent.clientX));
-      };
+        onWidthChange(clampPanelWidth(startWidth + startX - moveEvent.clientX))
+      }
       const handleUp = () => {
-        window.removeEventListener('pointermove', handleMove);
-        window.removeEventListener('pointerup', handleUp);
-      };
-      window.addEventListener('pointermove', handleMove);
-      window.addEventListener('pointerup', handleUp);
+        window.removeEventListener('pointermove', handleMove)
+        window.removeEventListener('pointerup', handleUp)
+      }
+      window.addEventListener('pointermove', handleMove)
+      window.addEventListener('pointerup', handleUp)
     },
     [onWidthChange, panelWidth],
-  );
+  )
 
   const handleResizeKeyDown = useCallback(
-    (event: KeyboardEvent<HTMLDivElement>) => {
+    (event: KeyboardEvent<HTMLInputElement>) => {
       if (event.key === 'ArrowLeft') {
-        event.preventDefault();
-        onWidthChange(clampPanelWidth(panelWidth + 16));
+        event.preventDefault()
+        onWidthChange(clampPanelWidth(panelWidth - 16))
       } else if (event.key === 'ArrowRight') {
-        event.preventDefault();
-        onWidthChange(clampPanelWidth(panelWidth - 16));
+        event.preventDefault()
+        onWidthChange(clampPanelWidth(panelWidth + 16))
       } else if (event.key === 'Home') {
-        event.preventDefault();
-        onWidthChange(DEBUG_PANEL_MIN_WIDTH);
+        event.preventDefault()
+        onWidthChange(DEBUG_PANEL_MIN_WIDTH)
       } else if (event.key === 'End') {
-        event.preventDefault();
-        onWidthChange(DEBUG_PANEL_MAX_WIDTH);
+        event.preventDefault()
+        onWidthChange(DEBUG_PANEL_MAX_WIDTH)
       }
     },
     [onWidthChange, panelWidth],
-  );
+  )
 
   const stagesAggregated = useMemo(() => {
-    const stagesRaw = evidence?.runtimeSummary?.stages ?? [];
-    const map = new Map<string, { stage: string; durationMs: number; itemCount: number; calls: number }>();
+    const stagesRaw = evidence?.runtimeSummary?.stages ?? []
+    const map = new Map<
+      string,
+      { stage: string; durationMs: number; itemCount: number; calls: number }
+    >()
     for (const stage of stagesRaw) {
-      const existing = map.get(stage.stage);
+      const existing = map.get(stage.stage)
       if (existing) {
-        existing.durationMs += stage.durationMs ?? 0;
-        existing.itemCount += stage.itemCount ?? 0;
-        existing.calls += 1;
+        existing.durationMs += stage.durationMs ?? 0
+        existing.itemCount += stage.itemCount ?? 0
+        existing.calls += 1
       } else {
         map.set(stage.stage, {
           stage: stage.stage,
           durationMs: stage.durationMs ?? 0,
           itemCount: stage.itemCount ?? 0,
           calls: 1,
-        });
+        })
       }
     }
-    return Array.from(map.values());
-  }, [evidence?.runtimeSummary?.stages]);
+    return Array.from(map.values())
+  }, [evidence?.runtimeSummary?.stages])
 
-  const totalStageMs = stagesAggregated.reduce((sum, stage) => sum + stage.durationMs, 0);
+  const totalStageMs = stagesAggregated.reduce((sum, stage) => sum + stage.durationMs, 0)
   const iterations = (snapshot?.iterations ?? []).map((iter, index) => ({
     ...iter,
     displayIndex: index + 1,
-  }));
-  const totalToolCalls = iterations.reduce(
-    (sum, iter) => sum + iter.responseToolCalls.length,
-    0,
-  );
-  const totalModelMs = iterations.reduce((sum, iter) => sum + (iter.durationMs ?? 0), 0);
+  }))
+  const totalToolCalls = iterations.reduce((sum, iter) => sum + iter.responseToolCalls.length, 0)
+  const totalModelMs = iterations.reduce((sum, iter) => sum + (iter.durationMs ?? 0), 0)
   const totalToolMs = iterations.reduce(
     (sum, iter) =>
       sum + iter.responseToolCalls.reduce((inner, tc) => inner + (tc.durationMs ?? 0), 0),
     0,
-  );
+  )
   const maxIterationSpanMs = Math.max(
     1,
     ...iterations.map(
@@ -233,89 +233,95 @@ export function AssistantDebugInspector({
         (iter.durationMs ?? 0) +
         iter.responseToolCalls.reduce((inner, tc) => inner + (tc.durationMs ?? 0), 0),
     ),
-  );
-  const totalTurnMs = Math.max(totalStageMs, totalModelMs + totalToolMs);
-  const summary = evidence?.runtimeSummary;
-  const finalAnswer = snapshot?.finalAnswer ?? null;
-  const lastIterationResponse = iterations[iterations.length - 1]?.responseText ?? null;
-  const latestIteration = iterations[iterations.length - 1] ?? null;
-  const contextSections: ContextTranscriptSection[] = latestIteration ? (() => {
-    const entries: ContextTranscriptEntry[] = latestIteration.requestMessages.map((message, index) => ({
-      key: `request-${latestIteration.iteration}-${index}`,
-      role: message.role,
-      phase: 'request',
-      content: message.content,
-      toolCallId: message.tool_call_id,
-      toolName: message.name,
-      toolCalls: message.tool_calls?.map(toolCall => ({
-        id: toolCall.id,
-        name: toolCall.name,
-        argumentsJson: toolCall.arguments_json,
-        isError: false,
-      })),
-    }));
+  )
+  const totalTurnMs = Math.max(totalStageMs, totalModelMs + totalToolMs)
+  const summary = evidence?.runtimeSummary
+  const finalAnswer = snapshot?.finalAnswer ?? null
+  const lastIterationResponse = iterations[iterations.length - 1]?.responseText ?? null
+  const latestIteration = iterations[iterations.length - 1] ?? null
+  const contextSections: ContextTranscriptSection[] = latestIteration
+    ? (() => {
+        const entries: ContextTranscriptEntry[] = latestIteration.requestMessages.map(
+          (message, index) => ({
+            key: `request-${latestIteration.iteration}-${index}`,
+            role: message.role,
+            phase: 'request',
+            content: message.content,
+            toolCallId: message.tool_call_id,
+            toolName: message.name,
+            toolCalls: message.tool_calls?.map((toolCall) => ({
+              id: toolCall.id,
+              name: toolCall.name,
+              argumentsJson: toolCall.arguments_json,
+              isError: false,
+            })),
+          }),
+        )
 
-    if (latestIteration.responseToolCalls.length > 0) {
-      entries.push({
-        key: `assistant-response-${latestIteration.iteration}`,
-        role: 'assistant',
-        phase: 'model',
-        content: latestIteration.responseText,
-        toolCalls: latestIteration.responseToolCalls.map(toolCall => ({
-          id: toolCall.id,
-          name: toolCall.name,
-          argumentsJson: toolCall.argumentsJson,
-          isError: toolCall.isError,
-        })),
-      });
-    }
+        if (latestIteration.responseToolCalls.length > 0) {
+          entries.push({
+            key: `assistant-response-${latestIteration.iteration}`,
+            role: 'assistant',
+            phase: 'model',
+            content: latestIteration.responseText,
+            toolCalls: latestIteration.responseToolCalls.map((toolCall) => ({
+              id: toolCall.id,
+              name: toolCall.name,
+              argumentsJson: toolCall.argumentsJson,
+              isError: toolCall.isError,
+            })),
+          })
+        }
 
-    for (const [index, toolCall] of latestIteration.responseToolCalls.entries()) {
-      entries.push({
-        key: `tool-result-${latestIteration.iteration}-${toolCall.id || toolCall.name}-${index}`,
-        role: 'tool',
-        phase: 'tool',
-        content: toolCall.resultText,
-        toolCallId: toolCall.id,
-        toolName: toolCall.name,
-        resultJson: toolCall.resultJson,
-        isError: toolCall.isError,
-      });
-    }
+        for (const [index, toolCall] of latestIteration.responseToolCalls.entries()) {
+          entries.push({
+            key: `tool-result-${latestIteration.iteration}-${toolCall.id || toolCall.name}-${index}`,
+            role: 'tool',
+            phase: 'tool',
+            content: toolCall.resultText,
+            toolCallId: toolCall.id,
+            toolName: toolCall.name,
+            resultJson: toolCall.resultJson,
+            isError: toolCall.isError,
+          })
+        }
 
-    return [{
-      iteration: latestIteration.iteration,
-      entries,
-    }];
-  })() : [];
-  const transcriptFinalAnswer = finalAnswer?.trim() ? finalAnswer : lastIterationResponse;
-  const transcriptFinalAnswerText = transcriptFinalAnswer?.trim() ?? '';
-  const hasMatchingAssistantContextEntry = contextSections.some(section =>
-    section.entries.some(entry =>
-      entry.role === 'assistant' &&
-      (entry.content ?? '').trim() === transcriptFinalAnswerText,
+        return [
+          {
+            iteration: latestIteration.iteration,
+            entries,
+          },
+        ]
+      })()
+    : []
+  const transcriptFinalAnswer = finalAnswer?.trim() ? finalAnswer : lastIterationResponse
+  const transcriptFinalAnswerText = transcriptFinalAnswer?.trim() ?? ''
+  const hasMatchingAssistantContextEntry = contextSections.some((section) =>
+    section.entries.some(
+      (entry) =>
+        entry.role === 'assistant' && (entry.content ?? '').trim() === transcriptFinalAnswerText,
     ),
-  );
+  )
   const showFinalAnswerInContext = Boolean(
     transcriptFinalAnswerText && !hasMatchingAssistantContextEntry,
-  );
+  )
   const contextEntryCount = contextSections.reduce(
     (sum, section) => sum + section.entries.length,
     showFinalAnswerInContext ? 1 : 0,
-  );
+  )
   const rawBlockCount = [
     hasJsonPayload(snapshot?.queryIr),
     hasJsonPayload(snapshot?.agentLoop),
-  ].filter(Boolean).length;
+  ].filter(Boolean).length
   const hasContent =
     stagesAggregated.length > 0 ||
     iterations.length > 0 ||
     Boolean(summary) ||
     hasJsonPayload(snapshot?.queryIr) ||
     hasJsonPayload(snapshot?.agentLoop) ||
-    Boolean(finalAnswer);
+    Boolean(finalAnswer)
 
-  if (!open) return null;
+  if (!open) return null
 
   return (
     <aside
@@ -323,17 +329,20 @@ export function AssistantDebugInspector({
       style={panelStyle}
       data-testid="assistant-debug-inspector"
     >
-      <div
-        role="separator"
-        tabIndex={0}
-        aria-orientation="vertical"
-        aria-valuemin={DEBUG_PANEL_MIN_WIDTH}
-        aria-valuemax={DEBUG_PANEL_MAX_WIDTH}
-        aria-valuenow={panelWidth}
-        className="absolute -left-2 top-0 hidden h-full w-4 cursor-col-resize items-center justify-center text-muted-foreground transition-colors hover:text-foreground min-[1800px]:flex"
+      <input
+        type="range"
+        min={DEBUG_PANEL_MIN_WIDTH}
+        max={DEBUG_PANEL_MAX_WIDTH}
+        value={panelWidth}
         aria-label={t('assistant.debugInspectorResize')}
+        className="absolute -left-2 top-0 hidden h-full w-4 cursor-col-resize appearance-none bg-transparent text-muted-foreground transition-colors hover:text-foreground min-[1800px]:block"
+        onChange={(event) => onWidthChange(clampPanelWidth(Number(event.target.value)))}
         onPointerDown={startResize}
         onKeyDown={handleResizeKeyDown}
+      />
+      <div
+        aria-hidden="true"
+        className="pointer-events-none absolute -left-2 top-0 hidden h-full w-4 items-center justify-center text-muted-foreground min-[1800px]:flex"
       >
         <span className="rounded-full border border-border/70 bg-card p-0.5 shadow-soft">
           <GripVertical className="h-3.5 w-3.5" />
@@ -418,8 +427,17 @@ export function AssistantDebugInspector({
                 </div>
               )}
               <div className="grid grid-cols-2 gap-2 text-2xs sm:grid-cols-4">
-                {(Number.isFinite(turnWallClockMs) && (turnWallClockMs ?? 0) > 0 ? true : totalTurnMs > 0) && (
-                  <Stat label={t('assistant.debugTotalTime')} value={formatDuration(Number.isFinite(turnWallClockMs) && (turnWallClockMs ?? 0) > 0 ? (turnWallClockMs ?? null) : totalTurnMs)} />
+                {(Number.isFinite(turnWallClockMs) && (turnWallClockMs ?? 0) > 0
+                  ? true
+                  : totalTurnMs > 0) && (
+                  <Stat
+                    label={t('assistant.debugTotalTime')}
+                    value={formatDuration(
+                      Number.isFinite(turnWallClockMs) && (turnWallClockMs ?? 0) > 0
+                        ? (turnWallClockMs ?? null)
+                        : totalTurnMs,
+                    )}
+                  />
                 )}
                 {snapshot && (
                   <Stat label={t('assistant.mcpStatIterations')} value={iterations.length} />
@@ -496,21 +514,34 @@ export function AssistantDebugInspector({
                     <div className="section-label mt-1">{t('assistant.mcpModelCallsTitle')}</div>
                   )}
 
-                  {iterations.map(iter => {
-                    const userMsgs = iter.requestMessages.filter(m => m.role === 'user').length;
-                    const sysMsgs = iter.requestMessages.filter(m => m.role === 'system').length;
-                    const usage = asRecord(iter.usage);
-                    const promptTokens = pickNumber(usage, 'promptTokens', 'prompt_tokens', 'input_tokens');
-                    const completionTokens = pickNumber(usage, 'completionTokens', 'completion_tokens', 'output_tokens');
-                    const totalTokens = pickNumber(usage, 'totalTokens', 'total_tokens')
-                      ?? ((promptTokens ?? 0) + (completionTokens ?? 0) || null);
-                    const responsePreview = iter.responseText ? truncate(iter.responseText.trim(), 240) : '';
+                  {iterations.map((iter) => {
+                    const userMsgs = iter.requestMessages.filter((m) => m.role === 'user').length
+                    const sysMsgs = iter.requestMessages.filter((m) => m.role === 'system').length
+                    const usage = asRecord(iter.usage)
+                    const promptTokens = pickNumber(
+                      usage,
+                      'promptTokens',
+                      'prompt_tokens',
+                      'input_tokens',
+                    )
+                    const completionTokens = pickNumber(
+                      usage,
+                      'completionTokens',
+                      'completion_tokens',
+                      'output_tokens',
+                    )
+                    const totalTokens =
+                      pickNumber(usage, 'totalTokens', 'total_tokens') ??
+                      ((promptTokens ?? 0) + (completionTokens ?? 0) || null)
+                    const responsePreview = iter.responseText
+                      ? truncate(iter.responseText.trim(), 240)
+                      : ''
                     const modelCallTooltip = t('assistant.tooltipModelCall', {
                       iteration: iter.displayIndex,
                       think: formatDuration(iter.durationMs),
                       tokIn: promptTokens ?? '-',
                       tokOut: completionTokens ?? '-',
-                    });
+                    })
                     return (
                       <TimelineStep
                         key={`iter-${iter.displayIndex}-${iter.iteration}`}
@@ -543,12 +574,12 @@ export function AssistantDebugInspector({
                             <div className="mb-1 flex items-center gap-2 text-2xs tabular-nums text-muted-foreground">
                               <Tooltip>
                                 <TooltipTrigger asChild>
-                                  <span
-                                    tabIndex={0}
+                                  <button
+                                    type="button"
                                     className="cursor-default font-semibold uppercase tracking-wide underline decoration-dotted decoration-muted-foreground/40 underline-offset-2 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring rounded"
                                   >
                                     {t('assistant.mcpModelThink')}
-                                  </span>
+                                  </button>
                                 </TooltipTrigger>
                                 <TooltipContent>{t('assistant.stageTipModelThink')}</TooltipContent>
                               </Tooltip>
@@ -556,7 +587,11 @@ export function AssistantDebugInspector({
                                 {formatDuration(iter.durationMs)}
                               </span>
                             </div>
-                            <DurationBar ms={iter.durationMs} maxMs={maxIterationSpanMs} color={spanColor(0)} />
+                            <DurationBar
+                              ms={iter.durationMs}
+                              maxMs={maxIterationSpanMs}
+                              color={spanColor(0)}
+                            />
                           </div>
                         )}
                         {totalTokens != null && (
@@ -564,7 +599,9 @@ export function AssistantDebugInspector({
                             <span className="font-semibold uppercase tracking-wide">tokens</span>
                             {promptTokens != null && <span>in {promptTokens}</span>}
                             {completionTokens != null && <span>out {completionTokens}</span>}
-                            <span className="ml-auto font-mono font-semibold text-foreground">{totalTokens}</span>
+                            <span className="ml-auto font-mono font-semibold text-foreground">
+                              {totalTokens}
+                            </span>
                           </div>
                         )}
                         {iter.responseToolCalls.length > 0 && (
@@ -596,7 +633,7 @@ export function AssistantDebugInspector({
                           </details>
                         )}
                       </TimelineStep>
-                    );
+                    )
                   })}
 
                   {snapshot?.spans && snapshot.spans.length > 0 && (
@@ -608,7 +645,7 @@ export function AssistantDebugInspector({
               {activeView === 'context' && contextEntryCount > 0 && (
                 <>
                   <div className="section-label mt-2">{t('assistant.requestMessages')}</div>
-                  {contextSections.map(section => (
+                  {contextSections.map((section) => (
                     <details
                       key={`messages-${section.iteration}`}
                       className="rounded-md border border-border/70 bg-card"
@@ -618,12 +655,8 @@ export function AssistantDebugInspector({
                         {t('assistant.iteration')} #{section.iteration} · {section.entries.length}
                       </summary>
                       <div className="space-y-2 border-t border-border/60 p-3">
-                        {section.entries.map(entry => (
-                          <ContextTranscriptCard
-                            key={entry.key}
-                            t={t}
-                            entry={entry}
-                          />
+                        {section.entries.map((entry) => (
+                          <ContextTranscriptCard key={entry.key} t={t} entry={entry} />
                         ))}
                       </div>
                     </details>
@@ -655,11 +688,19 @@ export function AssistantDebugInspector({
                   {snapshot?.agentLoop && <AgentLoopSummary t={t} agentLoop={snapshot.agentLoop} />}
 
                   {hasJsonPayload(snapshot?.queryIr) && (
-                    <RawJsonBlock icon={<FileJson className="h-3.5 w-3.5" />} title={t('assistant.queryIr')} value={snapshot?.queryIr} />
+                    <RawJsonBlock
+                      icon={<FileJson className="h-3.5 w-3.5" />}
+                      title={t('assistant.queryIr')}
+                      value={snapshot?.queryIr}
+                    />
                   )}
 
                   {hasJsonPayload(snapshot?.agentLoop) && (
-                    <RawJsonBlock icon={<FileJson className="h-3.5 w-3.5" />} title={t('assistant.agentLoop')} value={snapshot?.agentLoop} />
+                    <RawJsonBlock
+                      icon={<FileJson className="h-3.5 w-3.5" />}
+                      title={t('assistant.agentLoop')}
+                      value={snapshot?.agentLoop}
+                    />
                   )}
                 </>
               )}
@@ -668,40 +709,40 @@ export function AssistantDebugInspector({
         </div>
       </TooltipProvider>
     </aside>
-  );
+  )
 }
 
 function stageTooltip(t: TFunction, stageKind: string): string | undefined {
   switch (stageKind) {
     case 'compile':
-      return t('assistant.stageTipCompile');
+      return t('assistant.stageTipCompile')
     case 'retrieve':
-      return t('assistant.stageTipRetrieve');
+      return t('assistant.stageTipRetrieve')
     case 'answer':
-      return t('assistant.stageTipAnswer');
+      return t('assistant.stageTipAnswer')
     case 'verify':
-      return t('assistant.stageTipVerify');
+      return t('assistant.stageTipVerify')
     case 'persist':
-      return t('assistant.stageTipPersist');
+      return t('assistant.stageTipPersist')
     default:
-      return undefined;
+      return undefined
   }
 }
 
 function stoppedReasonLabel(t: TFunction, reason: string) {
   switch (reason) {
     case 'final_answer':
-      return t('assistant.agentStopFinalAnswer');
+      return t('assistant.agentStopFinalAnswer')
     case 'iteration_cap':
-      return t('assistant.agentStopIterationCap');
+      return t('assistant.agentStopIterationCap')
     case 'deadline':
-      return t('assistant.agentStopDeadline');
+      return t('assistant.agentStopDeadline')
     case 'tool_error':
-      return t('assistant.agentStopToolError');
+      return t('assistant.agentStopToolError')
     case 'provider_error':
-      return t('assistant.agentStopProviderError');
+      return t('assistant.agentStopProviderError')
     default:
-      return reason;
+      return reason
   }
 }
 
@@ -709,16 +750,19 @@ function stoppedReasonLabel(t: TFunction, reason: string) {
 function AgentLoopSummary({
   t,
   agentLoop,
-}: {
-  t: TFunction;
-  agentLoop: NonNullable<LlmContextDebugResponse['agentLoop']>;
-}) {
+}: Readonly<{
+  t: TFunction
+  agentLoop: NonNullable<LlmContextDebugResponse['agentLoop']>
+}>) {
   const fields: { label: string; value: string | number }[] = [
-    { label: t('assistant.agentLoopStopped'), value: stoppedReasonLabel(t, agentLoop.stoppedReason) },
+    {
+      label: t('assistant.agentLoopStopped'),
+      value: stoppedReasonLabel(t, agentLoop.stoppedReason),
+    },
     { label: t('assistant.mcpStatTools'), value: agentLoop.toolCallCount },
     { label: t('assistant.agentLoopIterationCap'), value: agentLoop.iterationCap },
     { label: t('assistant.debugBudget'), value: formatDuration(agentLoop.deadlineMs) },
-  ];
+  ]
   return (
     <div className="overflow-hidden rounded-md border border-border/70 bg-card">
       <div className="flex items-center gap-2 border-b border-border/60 px-3 py-2 text-xs font-semibold">
@@ -728,96 +772,100 @@ function AgentLoopSummary({
       <div className="grid grid-cols-2 gap-px bg-border/40">
         {fields.map((field) => (
           <div key={field.label} className="flex flex-col gap-0.5 bg-card px-3 py-2">
-            <span className="section-label">
-              {field.label}
-            </span>
+            <span className="section-label">{field.label}</span>
             <span className="font-mono text-xs font-semibold tabular-nums">{field.value}</span>
           </div>
         ))}
       </div>
     </div>
-  );
+  )
 }
 
-const SPAN_COLORS = ['#6366f1', '#0ea5e9', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6', '#14b8a6'];
+const SPAN_COLORS = ['#6366f1', '#0ea5e9', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6', '#14b8a6']
 
 function spanColor(index: number): string {
   // index % SPAN_COLORS.length is always a valid in-bounds index into the
   // non-empty SPAN_COLORS array; noUncheckedIndexedAccess can't prove that.
-  return SPAN_COLORS[index % SPAN_COLORS.length]!;
+  return SPAN_COLORS[index % SPAN_COLORS.length]!
 }
 
 function shareOf(ms: number, totalMs: number) {
-  if (totalMs <= 0) return 0;
-  return Math.round((ms / totalMs) * 100);
+  if (totalMs <= 0) return 0
+  return Math.round((ms / totalMs) * 100)
 }
 
 type ShareSegment = {
-  key: string;
-  ms: number;
-  color: string;
+  key: string
+  ms: number
+  color: string
   /** Human-readable description for the tooltip (falls back to `key`). */
-  tip?: string | undefined;
+  tip?: string | undefined
   /** Repeat-call count, surfaced as an `x{n}` badge when > 1. */
-  calls?: number | undefined;
-};
+  calls?: number | undefined
+}
 
 /** Rich hover card for one stage: bold label + monospace duration · share. */
-function StageTooltipContent({ segment, share }: { segment: ShareSegment; share: number }) {
+function StageTooltipContent({
+  segment,
+  share,
+}: Readonly<{ segment: ShareSegment; share: number }>) {
   return (
     <TooltipContent>
       <div className="font-semibold text-popover-foreground">{segment.tip ?? segment.key}</div>
       <div className="mt-0.5 font-mono text-2xs tabular-nums text-muted-foreground">
         {formatDuration(segment.ms)}
         {' · '}
-        {share}%
-        {segment.calls && segment.calls > 1 ? ` · x${segment.calls}` : ''}
+        {share}%{segment.calls && segment.calls > 1 ? ` · x${segment.calls}` : ''}
       </div>
     </TooltipContent>
-  );
+  )
 }
 
 /** Compact single-row stacked bar. Each segment is hover/focus-revealable and
  * shows its stage, duration and share in a tooltip — no verbose list needed. */
-function StackedShareBar({ segments }: { segments: ShareSegment[] }) {
-  const total = segments.reduce((sum, seg) => sum + seg.ms, 0);
-  if (total <= 0) return null;
+function StackedShareBar({ segments }: Readonly<{ segments: ShareSegment[] }>) {
+  const total = segments.reduce((sum, seg) => sum + seg.ms, 0)
+  if (total <= 0) return null
   return (
     <div className="flex h-3 w-full gap-px overflow-hidden rounded-full bg-muted ring-1 ring-inset ring-border/50">
       {segments.map((seg) => {
-        const pct = (seg.ms / total) * 100;
-        if (pct <= 0) return null;
+        const pct = (seg.ms / total) * 100
+        if (pct <= 0) return null
         return (
           <Tooltip key={seg.key}>
             <TooltipTrigger asChild>
-              <div
-                tabIndex={0}
+              <button
+                type="button"
+                aria-label={`${seg.tip ?? seg.key}: ${formatDuration(seg.ms)} · ${Math.round(pct)}%`}
                 className="h-full cursor-default outline-none transition-[filter] duration-150 first:rounded-l-full last:rounded-r-full hover:brightness-110 focus-visible:brightness-125"
                 style={{ width: `${pct}%`, backgroundColor: seg.color }}
               />
             </TooltipTrigger>
             <StageTooltipContent segment={seg} share={Math.round(pct)} />
           </Tooltip>
-        );
+        )
       })}
     </div>
-  );
+  )
 }
 
 /** Wrapping legend of color-dot + stage + duration chips, each hover-revealable.
  * Pairs with `StackedShareBar` to give a glanceable summary without bulky rows. */
-function StageLegend({ segments }: { segments: ShareSegment[] }) {
-  const total = segments.reduce((sum, seg) => sum + seg.ms, 0);
+function StageLegend({ segments }: Readonly<{ segments: ShareSegment[] }>) {
+  const total = segments.reduce((sum, seg) => sum + seg.ms, 0)
   return (
     <div className="flex flex-wrap gap-x-3 gap-y-1.5">
       {segments.map((seg) => (
         <Tooltip key={seg.key}>
           <TooltipTrigger asChild>
-            <div
-              tabIndex={0}
+            <button
+              type="button"
               className="flex cursor-default items-center gap-1.5 rounded outline-none transition-opacity hover:opacity-80 focus-visible:ring-1 focus-visible:ring-ring"
             >
-              <span className="h-2 w-2 shrink-0 rounded-full" style={{ backgroundColor: seg.color }} />
+              <span
+                className="h-2 w-2 shrink-0 rounded-full"
+                style={{ backgroundColor: seg.color }}
+              />
               <code className="font-mono text-2xs font-semibold text-foreground">{seg.key}</code>
               <span className="font-mono text-2xs tabular-nums text-muted-foreground">
                 {formatDuration(seg.ms)}
@@ -827,40 +875,41 @@ function StageLegend({ segments }: { segments: ShareSegment[] }) {
                   x{seg.calls}
                 </span>
               ) : null}
-            </div>
+            </button>
           </TooltipTrigger>
           <StageTooltipContent segment={seg} share={shareOf(seg.ms, total)} />
         </Tooltip>
       ))}
     </div>
-  );
+  )
 }
 
 /** Stage breakdown: an interactive stacked bar over a compact wrapping legend.
  * Both surfaces share the same hover tooltips, so the panel stays one or two
  * rows tall instead of a column of bordered per-stage cards. */
-function StagePanel({ segments }: { segments: ShareSegment[] }) {
-  if (segments.length === 0) return null;
+function StagePanel({ segments }: Readonly<{ segments: ShareSegment[] }>) {
+  if (segments.length === 0) return null
   return (
     <div className="flex flex-col gap-2.5">
       <StackedShareBar segments={segments} />
       <StageLegend segments={segments} />
     </div>
-  );
+  )
 }
 
 /** A single proportional fill bar (one span's duration vs. the section max). */
-function DurationBar({ ms, maxMs, color }: { ms: number; maxMs: number; color: string }) {
-  const pct = maxMs > 0 ? Math.max(2, Math.min(100, (ms / maxMs) * 100)) : 0;
+function DurationBar({ ms, maxMs, color }: Readonly<{ ms: number; maxMs: number; color: string }>) {
+  const pct = maxMs > 0 ? Math.max(2, Math.min(100, (ms / maxMs) * 100)) : 0
   return (
     <div className="h-1.5 w-full overflow-hidden rounded-full bg-muted">
       <div className="h-full rounded-full" style={{ width: `${pct}%`, backgroundColor: color }} />
     </div>
-  );
+  )
 }
 
-type ToolCallDebug =
-  NonNullable<LlmContextDebugResponse['iterations']>[number]['responseToolCalls'][number];
+type ToolCallDebug = NonNullable<
+  LlmContextDebugResponse['iterations']
+>[number]['responseToolCalls'][number]
 
 /** A tool call inside a model iteration. When it spawned a child execution
  * (e.g. grounded_answer), it can be expanded to drill into that child's own
@@ -870,20 +919,43 @@ function ToolCallRow({
   toolCall,
   maxIterationSpanMs,
   childExecutionId,
-}: {
-  t: TFunction;
-  toolCall: ToolCallDebug;
-  maxIterationSpanMs: number;
-  childExecutionId?: string | undefined;
-}) {
-  const [expanded, setExpanded] = useState(false);
-  const canDrill = Boolean(childExecutionId);
-  const toolWaitTooltip = toolCall.durationMs != null && toolCall.durationMs > 0
-    ? t('assistant.tooltipToolCall', {
-        name: toolCall.name,
-        wait: formatDuration(toolCall.durationMs),
-      })
-    : undefined;
+}: Readonly<{
+  t: TFunction
+  toolCall: ToolCallDebug
+  maxIterationSpanMs: number
+  childExecutionId?: string | undefined
+}>) {
+  const [expanded, setExpanded] = useState(false)
+  const canDrill = Boolean(childExecutionId)
+  const toolWaitTooltip =
+    toolCall.durationMs != null && toolCall.durationMs > 0
+      ? t('assistant.tooltipToolCall', {
+          name: toolCall.name,
+          wait: formatDuration(toolCall.durationMs),
+        })
+      : undefined
+  let toolIcon: ReactNode
+  if (canDrill) {
+    toolIcon = (
+      <button
+        type="button"
+        onClick={() => setExpanded((value) => !value)}
+        aria-expanded={expanded}
+        aria-label={t('assistant.mcpChildExecution')}
+        className="shrink-0 text-muted-foreground transition-colors hover:text-foreground"
+      >
+        {expanded ? (
+          <ChevronDown className="h-3.5 w-3.5" />
+        ) : (
+          <ChevronRight className="h-3.5 w-3.5" />
+        )}
+      </button>
+    )
+  } else if (toolCall.isError) {
+    toolIcon = <AlertCircle className="h-3.5 w-3.5 shrink-0 text-status-failed" />
+  } else {
+    toolIcon = <Wrench className="h-3.5 w-3.5 shrink-0 text-primary" />
+  }
   return (
     <article
       className={`rounded-md border px-2 py-1.5 text-2xs ${
@@ -893,25 +965,7 @@ function ToolCallRow({
       }`}
     >
       <header className="flex items-center gap-2">
-        {canDrill ? (
-          <button
-            type="button"
-            onClick={() => setExpanded((value) => !value)}
-            aria-expanded={expanded}
-            aria-label={t('assistant.mcpChildExecution')}
-            className="shrink-0 text-muted-foreground transition-colors hover:text-foreground"
-          >
-            {expanded ? (
-              <ChevronDown className="h-3.5 w-3.5" />
-            ) : (
-              <ChevronRight className="h-3.5 w-3.5" />
-            )}
-          </button>
-        ) : toolCall.isError ? (
-          <AlertCircle className="h-3.5 w-3.5 shrink-0 text-status-failed" />
-        ) : (
-          <Wrench className="h-3.5 w-3.5 shrink-0 text-primary" />
-        )}
+        {toolIcon}
         <Tooltip>
           <TooltipTrigger asChild>
             <code className="cursor-default truncate font-mono text-2xs font-bold">
@@ -923,12 +977,12 @@ function ToolCallRow({
         {toolCall.durationMs != null && toolCall.durationMs > 0 && (
           <Tooltip>
             <TooltipTrigger asChild>
-              <span
-                tabIndex={0}
+              <button
+                type="button"
                 className="ml-auto shrink-0 cursor-default font-mono text-2xs tabular-nums text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring rounded"
               >
                 {t('assistant.mcpToolWait')} {formatDuration(toolCall.durationMs)}
-              </span>
+              </button>
             </TooltipTrigger>
             <TooltipContent>{t('assistant.stageTipToolWait')}</TooltipContent>
           </Tooltip>
@@ -949,44 +1003,50 @@ function ToolCallRow({
         <JsonDetails label={t('assistant.mcpToolsResult')} value={toolCall.resultText} />
       )}
       {hasJsonPayload(toolCall.resultJson) && (
-        <JsonDetails label={t('assistant.mcpToolsPayload')} value={stringifyJson(toolCall.resultJson)} />
+        <JsonDetails
+          label={t('assistant.mcpToolsPayload')}
+          value={stringifyJson(toolCall.resultJson)}
+        />
       )}
     </article>
-  );
+  )
 }
 
 /** Lazily fetches a child execution and renders its pipeline-stage breakdown
  * (where the tool spent its time internally). Fetch only fires on expand. */
-function ChildExecutionDrilldown({ t, executionId }: { t: TFunction; executionId: string }) {
+function ChildExecutionDrilldown({
+  t,
+  executionId,
+}: Readonly<{ t: TFunction; executionId: string }>) {
   const { data, isLoading, isError } = useQuery({
     queryKey: ['assistant', 'child-execution', executionId],
     queryFn: () => queryApi.getExecution(executionId),
     staleTime: 60_000,
-  });
+  })
   const { data: childContext } = useQuery({
     queryKey: ['assistant', 'child-llm-context', executionId],
     queryFn: () => queryApi.getExecutionLlmContext(executionId),
     staleTime: 60_000,
-  });
+  })
   if (isLoading) {
     return (
       <div className="mt-2 flex items-center gap-2 rounded-md border border-border/60 bg-background/40 px-2 py-2 text-2xs text-muted-foreground">
         <Loader2 className="h-3.5 w-3.5 animate-spin text-primary/70" />
         {t('assistant.debugInspectorLoading')}
       </div>
-    );
+    )
   }
   if (isError || !data) {
     return (
       <div className="mt-2 rounded-md border border-status-failed/30 bg-status-failed/5 px-2 py-2 text-2xs text-status-failed">
         {t('assistant.llmContextUnavailable')}
       </div>
-    );
+    )
   }
   const stages = (data.runtimeStageSummaries ?? []).map((stage) => ({
     stage: stage.stageKind,
     durationMs: stage.durationMs ?? 0,
-  }));
+  }))
   return (
     <div className="mt-2 border-l-2 border-primary/40 bg-card/60 ml-1 pl-3 py-2 rounded-r-md">
       <div className="mb-1.5 flex items-center gap-1.5 section-label">
@@ -1011,45 +1071,45 @@ function ChildExecutionDrilldown({ t, executionId }: { t: TFunction; executionId
         </div>
       )}
     </div>
-  );
+  )
 }
 
-type TurnSpanView = NonNullable<LlmContextDebugResponse['spans']>[number];
+type TurnSpanView = NonNullable<LlmContextDebugResponse['spans']>[number]
 
 function spanKindColor(kind: string): string {
   switch (kind) {
     case 'db':
-      return spanColor(1);
+      return spanColor(1)
     case 'lane':
-      return spanColor(2);
+      return spanColor(2)
     case 'llm':
-      return spanColor(5);
+      return spanColor(5)
     case 'stage':
-      return spanColor(0);
+      return spanColor(0)
     default:
-      return spanColor(6);
+      return spanColor(6)
   }
 }
 
 /** Canonical kind order so groups render predictably (high-level lanes first,
  * then the raw DB calls they contain, then model calls and stage rollups). */
-const SPAN_KIND_ORDER = ['lane', 'db', 'llm', 'stage'] as const;
+const SPAN_KIND_ORDER = ['lane', 'db', 'llm', 'stage'] as const
 /** Per-group cap: a heavy turn can fire dozens of DB spans; show the slowest
  * few and summarise the rest so the panel stays scannable. */
-const SPANS_PER_GROUP = 10;
+const SPANS_PER_GROUP = 10
 
 function spanGroupLabel(t: TFunction, kind: string): string {
   switch (kind) {
     case 'lane':
-      return t('assistant.mcpSpanGroupLane');
+      return t('assistant.mcpSpanGroupLane')
     case 'db':
-      return t('assistant.mcpSpanGroupDb');
+      return t('assistant.mcpSpanGroupDb')
     case 'llm':
-      return t('assistant.mcpSpanGroupLlm');
+      return t('assistant.mcpSpanGroupLlm')
     case 'stage':
-      return t('assistant.mcpSpanGroupStage');
+      return t('assistant.mcpSpanGroupStage')
     default:
-      return t('assistant.mcpSpanGroupOther');
+      return t('assistant.mcpSpanGroupOther')
   }
 }
 
@@ -1057,17 +1117,17 @@ function spanGroupLabel(t: TFunction, kind: string): string {
  * lanes vs the DB calls they contain vs model calls), each sorted by duration
  * so the slowest section in every category is obvious and the lane aggregates
  * are not confused with their child DB queries. */
-function SpansSection({ t, spans }: { t: TFunction; spans: TurnSpanView[] }) {
-  if (spans.length === 0) return null;
+function SpansSection({ t, spans }: Readonly<{ t: TFunction; spans: TurnSpanView[] }>) {
+  if (spans.length === 0) return null
   // One shared scale so bar lengths are comparable across groups.
-  const maxMs = Math.max(1, ...spans.map((span) => span.durationMs));
-  const presentKinds = Array.from(new Set(spans.map((span) => span.kind)));
+  const maxMs = Math.max(1, ...spans.map((span) => span.durationMs))
+  const presentKinds = Array.from(new Set(spans.map((span) => span.kind)))
   const orderedKinds = [
     ...SPAN_KIND_ORDER.filter((kind) => presentKinds.includes(kind)),
     ...presentKinds.filter(
       (kind) => !SPAN_KIND_ORDER.includes(kind as (typeof SPAN_KIND_ORDER)[number]),
     ),
-  ];
+  ]
   return (
     <div className="rounded-md border border-border/70 bg-card p-3">
       <div className="section-label mb-2">{t('assistant.mcpSpansTitle')}</div>
@@ -1075,9 +1135,9 @@ function SpansSection({ t, spans }: { t: TFunction; spans: TurnSpanView[] }) {
         {orderedKinds.map((kind) => {
           const groupSpans = spans
             .filter((span) => span.kind === kind)
-            .sort((left, right) => right.durationMs - left.durationMs);
-          const shown = groupSpans.slice(0, SPANS_PER_GROUP);
-          const hidden = groupSpans.length - shown.length;
+            .sort((left, right) => right.durationMs - left.durationMs)
+          const shown = groupSpans.slice(0, SPANS_PER_GROUP)
+          const hidden = groupSpans.length - shown.length
           return (
             <div key={kind} className="flex flex-col gap-1.5">
               <div className="flex items-center gap-2">
@@ -1085,9 +1145,7 @@ function SpansSection({ t, spans }: { t: TFunction; spans: TurnSpanView[] }) {
                   className="h-2 w-2 shrink-0 rounded-full"
                   style={{ backgroundColor: spanKindColor(kind) }}
                 />
-                <span className="section-label">
-                  {spanGroupLabel(t, kind)}
-                </span>
+                <span className="section-label">{spanGroupLabel(t, kind)}</span>
                 <span className="ml-auto shrink-0 font-mono text-2xs tabular-nums text-muted-foreground">
                   {groupSpans.length}
                 </span>
@@ -1097,7 +1155,7 @@ function SpansSection({ t, spans }: { t: TFunction; spans: TurnSpanView[] }) {
                   name: span.detail ?? span.name,
                   duration: formatDuration(span.durationMs),
                   rows: span.rows ?? '-',
-                });
+                })
                 return (
                   <div key={`${span.name}-${span.startedOffsetMs}-${index}`}>
                     <div className="flex items-center gap-2">
@@ -1122,7 +1180,7 @@ function SpansSection({ t, spans }: { t: TFunction; spans: TurnSpanView[] }) {
                       <DurationBar ms={span.durationMs} maxMs={maxMs} color={spanKindColor(kind)} />
                     </div>
                   </div>
-                );
+                )
               })}
               {hidden > 0 && (
                 <div className="text-2xs text-muted-foreground">
@@ -1130,22 +1188,21 @@ function SpansSection({ t, spans }: { t: TFunction; spans: TurnSpanView[] }) {
                 </div>
               )}
             </div>
-          );
+          )
         })}
       </div>
     </div>
-  );
+  )
 }
 
-function Stat({ label, value }: { label: string; value: number | string }) {
+function Stat({ label, value }: Readonly<{ label: string; value: number | string }>) {
   return (
     <div className="flex flex-col gap-0.5 rounded-md border border-border/60 bg-card px-2 py-1.5">
       <span className="section-label">{label}</span>
       <span className="font-mono text-sm font-semibold tabular-nums">{value}</span>
     </div>
-  );
+  )
 }
-
 
 function InspectorTab({
   active,
@@ -1153,13 +1210,13 @@ function InspectorTab({
   label,
   count,
   onClick,
-}: {
-  active: boolean;
-  icon: ReactNode;
-  label: string;
-  count: number;
-  onClick: () => void;
-}) {
+}: Readonly<{
+  active: boolean
+  icon: ReactNode
+  label: string
+  count: number
+  onClick: () => void
+}>) {
   return (
     <button
       type="button"
@@ -1177,17 +1234,21 @@ function InspectorTab({
         {count}
       </span>
     </button>
-  );
+  )
+}
+
+function contextEntryTone(entry: ContextTranscriptEntry): string {
+  if (entry.role !== 'tool') return 'bg-primary/10 text-primary'
+  return entry.isError
+    ? 'bg-status-failed/10 text-status-failed'
+    : 'bg-status-ready/10 text-status-ready'
 }
 
 function ContextTranscriptCard({
   t,
   entry,
-}: {
-  t: TFunction;
-  entry: ContextTranscriptEntry;
-}) {
-  const contentHeightClass = entry.role === 'system' ? 'max-h-32' : 'max-h-60';
+}: Readonly<{ t: TFunction; entry: ContextTranscriptEntry }>) {
+  const contentHeightClass = entry.role === 'system' ? 'max-h-32' : 'max-h-60'
   return (
     <article
       className={`rounded-md border p-2 ${
@@ -1197,15 +1258,7 @@ function ContextTranscriptCard({
       }`}
     >
       <header className="mb-1 flex min-w-0 items-center gap-2">
-        <span
-          className={`rounded px-1.5 py-0.5 text-2xs font-semibold ${
-            entry.role === 'tool'
-              ? entry.isError
-                ? 'bg-status-failed/10 text-status-failed'
-                : 'bg-status-ready/10 text-status-ready'
-              : 'bg-primary/10 text-primary'
-          }`}
-        >
+        <span className={`rounded px-1.5 py-0.5 text-2xs font-semibold ${contextEntryTone(entry)}`}>
           {contextEntryLabel(t, entry)}
         </span>
         {entry.toolName && (
@@ -1225,7 +1278,9 @@ function ContextTranscriptCard({
         )}
       </header>
       {entry.content && (
-        <pre className={`${contentHeightClass} overflow-auto whitespace-pre-wrap break-words font-mono text-2xs leading-relaxed text-foreground/80`}>
+        <pre
+          className={`${contentHeightClass} overflow-auto whitespace-pre-wrap break-words font-mono text-2xs leading-relaxed text-foreground/80`}
+        >
           {entry.content}
         </pre>
       )}
@@ -1248,9 +1303,7 @@ function ContextTranscriptCard({
                   </TooltipTrigger>
                   <TooltipContent>{toolCall.name}</TooltipContent>
                 </Tooltip>
-                <span className="ml-auto truncate text-2xs opacity-75">
-                  {toolCall.id}
-                </span>
+                <span className="ml-auto truncate text-2xs opacity-75">{toolCall.id}</span>
               </div>
               {toolCall.argumentsJson && toolCall.argumentsJson !== '{}' && (
                 <pre className="max-h-36 overflow-auto whitespace-pre-wrap [overflow-wrap:anywhere]">
@@ -1268,22 +1321,22 @@ function ContextTranscriptCard({
         />
       )}
     </article>
-  );
+  )
 }
 
 function contextEntryLabel(t: TFunction, entry: ContextTranscriptEntry) {
-  if (entry.phase === 'final') return t('assistant.contextPhaseFinal');
+  if (entry.phase === 'final') return t('assistant.contextPhaseFinal')
   switch (entry.role) {
     case 'system':
-      return t('assistant.ctxRoleSystem');
+      return t('assistant.ctxRoleSystem')
     case 'user':
-      return t('assistant.ctxRoleUser');
+      return t('assistant.ctxRoleUser')
     case 'tool':
-      return t('assistant.ctxRoleTool');
+      return t('assistant.ctxRoleTool')
     case 'assistant':
-      return t('assistant.ctxRoleModel');
+      return t('assistant.ctxRoleModel')
     default:
-      return entry.role;
+      return entry.role
   }
 }
 
@@ -1291,62 +1344,57 @@ function JsonDetails({
   label,
   value,
   defaultOpen = false,
-}: {
-  label: string;
-  value: string;
-  defaultOpen?: boolean;
-}) {
+}: Readonly<{
+  label: string
+  value: string
+  defaultOpen?: boolean
+}>) {
   const identity = useMemo(
     () => `${label}:${defaultOpen ? 'open' : 'closed'}:${jsonDetailsFingerprint(value)}`,
     [defaultOpen, label, value],
-  );
-  return (
-    <JsonDetailsContent
-      key={identity}
-      label={label}
-      value={value}
-      defaultOpen={defaultOpen}
-    />
-  );
+  )
+  return <JsonDetailsContent key={identity} label={label} value={value} defaultOpen={defaultOpen} />
 }
 
 function JsonDetailsContent({
   label,
   value,
   defaultOpen,
-}: {
-  label: string;
-  value: string;
-  defaultOpen: boolean;
-}) {
-  const [isOpen, setIsOpen] = useState(defaultOpen);
-  const formatted = formatJsonish(value);
+}: Readonly<{
+  label: string
+  value: string
+  defaultOpen: boolean
+}>) {
+  const [isOpen, setIsOpen] = useState(defaultOpen)
+  const formatted = formatJsonish(value)
   return (
     <details
       className="mt-1.5"
       open={isOpen}
       onToggle={(event) => setIsOpen(event.currentTarget.open)}
     >
-      <summary className="cursor-pointer section-label hover:text-foreground">
-        {label}
-      </summary>
+      <summary className="cursor-pointer section-label hover:text-foreground">{label}</summary>
       <pre className="mt-1 max-h-40 overflow-auto rounded border border-border/40 bg-background p-2 font-mono text-2xs leading-relaxed [overflow-wrap:anywhere] whitespace-pre-wrap">
         {formatted}
       </pre>
     </details>
-  );
+  )
 }
 
 function jsonDetailsFingerprint(value: string): string {
-  let hash = 2166136261;
+  let hash = 2166136261
   for (let index = 0; index < value.length; index += 1) {
-    hash ^= value.charCodeAt(index);
-    hash = Math.imul(hash, 16777619);
+    hash ^= value.codePointAt(index) ?? 0
+    hash = Math.imul(hash, 16777619)
   }
-  return `${value.length}:${hash >>> 0}`;
+  return `${value.length}:${hash >>> 0}`
 }
 
-function RawJsonBlock({ icon, title, value }: { icon: ReactNode; title: string; value: unknown }) {
+function RawJsonBlock({
+  icon,
+  title,
+  value,
+}: Readonly<{ icon: ReactNode; title: string; value: unknown }>) {
   return (
     <details className="rounded-md border border-border/70 bg-card">
       <summary className="flex cursor-pointer items-center gap-2 px-3 py-2 text-xs font-semibold">
@@ -1357,24 +1405,24 @@ function RawJsonBlock({ icon, title, value }: { icon: ReactNode; title: string; 
         {stringifyJson(value)}
       </pre>
     </details>
-  );
+  )
 }
 
-type TimelineStepProps = {
-  icon: ReactNode;
-  tone: 'primary' | 'iteration' | 'success';
-  order: string;
-  title: ReactNode;
-  meta?: string;
-  children?: ReactNode;
-};
+type TimelineStepProps = Readonly<{
+  icon: ReactNode
+  tone: 'primary' | 'iteration' | 'success'
+  order: string
+  title: ReactNode
+  meta?: string
+  children?: ReactNode
+}>
 
 function TimelineStep({ icon, tone, order, title, meta, children }: TimelineStepProps) {
   const toneClasses = {
     primary: 'border-primary/40 bg-primary/5 text-primary',
     iteration: 'border-border bg-card text-foreground',
     success: 'border-status-ready/40 bg-status-ready/5 text-status-ready',
-  } as const;
+  } as const
   return (
     <div className="relative pl-8">
       <span
@@ -1387,11 +1435,9 @@ function TimelineStep({ icon, tone, order, title, meta, children }: TimelineStep
           <span className="text-muted-foreground">{icon}</span>
           <div className="min-w-0 flex-1 truncate text-sm font-semibold">{title}</div>
         </header>
-        {meta && (
-          <div className="mt-1 text-2xs tabular-nums text-muted-foreground">{meta}</div>
-        )}
+        {meta && <div className="mt-1 text-2xs tabular-nums text-muted-foreground">{meta}</div>}
         {children}
       </div>
     </div>
-  );
+  )
 }

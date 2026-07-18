@@ -11,6 +11,16 @@ import {
 import { getUrl } from '../core/utils.gen';
 import type { Client, ClientOptions, Config, RequestOptions } from './types.gen';
 
+const serializeQueryParameter = (name: string, value: unknown, options: QuerySerializerOptions): string => {
+  if (Array.isArray(value)) {
+    return serializeArrayParam({ ...(options.allowReserved !== undefined ? { allowReserved: options.allowReserved } : {}), explode: true, name, style: 'form', value, ...options.array });
+  }
+  if (typeof value === 'object' && value !== null) {
+    return serializeObjectParam({ ...(options.allowReserved !== undefined ? { allowReserved: options.allowReserved } : {}), explode: true, name, style: 'deepObject', value: value as Record<string, unknown>, ...options.object });
+  }
+  return serializePrimitiveParam({ name, value: value as string, ...(options.allowReserved !== undefined ? { allowReserved: options.allowReserved } : {}) });
+};
+
 export const createQuerySerializer = <T = unknown>({
   parameters = {},
   ...args
@@ -20,41 +30,9 @@ export const createQuerySerializer = <T = unknown>({
     if (queryParams && typeof queryParams === 'object') {
       for (const name in queryParams) {
         const value = queryParams[name];
-
-        if (value === undefined || value === null) {
-          continue;
-        }
-
-        const options = parameters[name] || args;
-
-        if (Array.isArray(value)) {
-          const serializedArray = serializeArrayParam({
-            ...(options.allowReserved !== undefined ? { allowReserved: options.allowReserved } : {}),
-            explode: true,
-            name,
-            style: 'form',
-            value,
-            ...options.array,
-          });
-          if (serializedArray) search.push(serializedArray);
-        } else if (typeof value === 'object') {
-          const serializedObject = serializeObjectParam({
-            ...(options.allowReserved !== undefined ? { allowReserved: options.allowReserved } : {}),
-            explode: true,
-            name,
-            style: 'deepObject',
-            value: value as Record<string, unknown>,
-            ...options.object,
-          });
-          if (serializedObject) search.push(serializedObject);
-        } else {
-          const serializedPrimitive = serializePrimitiveParam({
-            ...(options.allowReserved !== undefined ? { allowReserved: options.allowReserved } : {}),
-            name,
-            value: value as string,
-          });
-          if (serializedPrimitive) search.push(serializedPrimitive);
-        }
+        if (value == null) continue;
+        const serialized = serializeQueryParameter(name, value, parameters[name] || args);
+        if (serialized) search.push(serialized);
       }
     }
     return search.join('&');
@@ -95,8 +73,6 @@ export const getParseAs = (contentType: string | null): Exclude<Config['parseAs'
   if (cleanContent.startsWith('text/')) {
     return 'text';
   }
-
-  return;
 };
 
 const checkForExistence = (
@@ -105,17 +81,12 @@ const checkForExistence = (
   },
   name?: string,
 ): boolean => {
-  if (!name) {
-    return false;
-  }
-  if (
-    options.headers.has(name) ||
-    options.query?.[name] ||
-    options.headers.get('Cookie')?.includes(`${name}=`)
-  ) {
-    return true;
-  }
-  return false;
+  return Boolean(
+    name &&
+      (options.headers.has(name) ||
+        options.query?.[name] ||
+        options.headers.get('Cookie')?.includes(`${name}=`))
+  );
 };
 
 export async function setAuthParams(
@@ -138,9 +109,7 @@ export async function setAuthParams(
 
     switch (auth.in) {
       case 'query':
-        if (!options.query) {
-          options.query = {};
-        }
+        options.query ??= {};
         options.query[name] = token;
         break;
       case 'cookie':
@@ -157,6 +126,7 @@ export async function setAuthParams(
 export const buildUrl: Client['buildUrl'] = (options) =>
   getUrl({
     baseUrl: options.baseUrl as string,
+
     querySerializer:
       typeof options.querySerializer === 'function'
         ? options.querySerializer
@@ -183,6 +153,12 @@ const headersEntries = (headers: Headers): Array<[string, string]> => {
   return entries;
 };
 
+function appendHeader(merged: Headers, key: string, value: unknown): void {
+  if (value === null) { merged.delete(key); return; }
+  if (Array.isArray(value)) { value.forEach((item) => merged.append(key, item as string)); return; }
+  if (value !== undefined) merged.set(key, typeof value === 'object' ? JSON.stringify(value) : value as string);
+}
+
 export const mergeHeaders = (
   ...headers: Array<Required<Config>['headers'] | undefined>
 ): Headers => {
@@ -194,22 +170,7 @@ export const mergeHeaders = (
 
     const iterator = header instanceof Headers ? headersEntries(header) : Object.entries(header);
 
-    for (const [key, value] of iterator) {
-      if (value === null) {
-        mergedHeaders.delete(key);
-      } else if (Array.isArray(value)) {
-        for (const v of value) {
-          mergedHeaders.append(key, v as string);
-        }
-      } else if (value !== undefined) {
-        // assume object headers are meant to be JSON stringified, i.e., their
-        // content value in OpenAPI specification is 'application/json'
-        mergedHeaders.set(
-          key,
-          typeof value === 'object' ? JSON.stringify(value) : (value as string),
-        );
-      }
-    }
+    for (const [key, value] of iterator) appendHeader(mergedHeaders, key, value);
   }
   return mergedHeaders;
 };

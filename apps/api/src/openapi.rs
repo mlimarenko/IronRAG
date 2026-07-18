@@ -1,6 +1,6 @@
-//! OpenAPI document construction (utoipa code-first).
+//! `OpenAPI` document construction (utoipa code-first).
 //!
-//! Single source of truth for the IronRAG HTTP contract. Sub-sprint 1a
+//! Single source of truth for the `IronRAG` HTTP contract. Sub-sprint 1a
 //! scaffolds the [`ApiDoc`] struct with shared metadata and security schemes.
 //! Paths and components are registered incrementally in sub-sprints
 //! 1b (DTOs via `#[derive(ToSchema)]`) and 1c (handlers via
@@ -23,6 +23,137 @@ const API_DESCRIPTION: &str = concat!(
     "(`apps/api/src/interfaces/http`). Operation paths include the `/v1` ",
     "prefix. `servers.url` is the API origin without the `/v1` suffix.",
 );
+
+const OPERATION_PURPOSES: &[(&[&str], &str)] = &[
+    (
+        &["AiAccount"],
+        "Manages stored AI provider accounts used by runtime bindings. Use these endpoints from the admin UI or automation when registering, rotating, or listing provider secrets without exposing secret material in responses.",
+    ),
+    (
+        &["AiLibraryBinding", "Binding"],
+        "Manages library-level AI runtime bindings. A binding assigns an account and model to a purpose (embedding, query answering, graph extraction, and other AI purposes) for one library, with tuning parameters (system prompt, temperature, top-p, output token budget) stored inline.",
+    ),
+    (
+        &["AiPrice"],
+        "Manages AI price catalog overrides. Billing and cost dashboards use these rows to attribute provider calls and estimate execution cost.",
+    ),
+    (
+        &["AiModel", "AiProvider"],
+        "Reads the AI provider catalog used by the admin configuration screens. Operators use this metadata to choose providers, models, capabilities, and binding targets.",
+    ),
+    (
+        &["Billing", "Cost", "Charges"],
+        "Reads billing and cost attribution data collected from runtime executions. Use these endpoints for dashboards, audits, and per-execution/provider-call cost inspection.",
+    ),
+    (
+        &["CatalogWorkspace", "Workspace"],
+        "Manages catalog workspaces. Workspaces group libraries, IAM scope, billing summaries, and administrative ownership boundaries.",
+    ),
+    (
+        &["CatalogLibrary", "Library"],
+        "Manages catalog libraries and their policies. Libraries own documents, knowledge graph data, assistant sessions, ingest settings, and query readiness.",
+    ),
+    (
+        &["ContentWebIngest", "WebIngest"],
+        "Manages web-ingest runs. These endpoints submit seed URLs, inspect crawl/materialization results, list candidate pages, and cancel active web ingestion.",
+    ),
+    (
+        &["ContentMutation", "Mutation"],
+        "Manages document mutation receipts. Use these endpoints to create or inspect append, replace, delete, and other asynchronous document lifecycle operations.",
+    ),
+    (
+        &["ContentDocument", "Document", "Chunks"],
+        "Manages document content and derived document views. These endpoints are used by document workspaces, upload flows, source viewers, revision history, and document-level diagnostics.",
+    ),
+    (
+        &["IamToken", "Token"],
+        "Manages API tokens and token lifecycle. Operators use these endpoints to mint, list, revoke, or delete bearer tokens for users, services, and MCP clients.",
+    ),
+    (
+        &["IamGrant", "Grant"],
+        "Manages IAM grants. Grants assign scoped permissions to principals so UI users, API tokens, and automation can access only the intended workspaces and libraries.",
+    ),
+    (
+        &["IamSession", "Bootstrap", "login", "logout"],
+        "Manages browser authentication and bootstrap state. The web shell uses these endpoints for login, logout, session restore, first-admin setup, and access-label resolution.",
+    ),
+    (
+        &["Ingest", "Stage", "Job"],
+        "Reads or controls ingest runtime state. Operators use these endpoints to inspect queued work, attempts, stage events, and document-processing failures.",
+    ),
+    (
+        &["Knowledge", "Graph", "Entity", "Relation", "ContextBundle"],
+        "Reads the knowledge model derived from ingested documents. These endpoints power graph workbench views, document memory search, context-bundle inspection, and entity/relation drill-downs.",
+    ),
+    (
+        &["Runtime"],
+        "Reads runtime execution traces. Use these endpoints to inspect lifecycle state, stages, actions, policy decisions, failures, and child work for asynchronous operations.",
+    ),
+    (
+        &["Audit"],
+        "Reads immutable audit events. Security and operations teams use this endpoint to inspect who performed sensitive actions and which resources were affected.",
+    ),
+    (
+        &["Webhook"],
+        "Manages outbound webhook subscriptions and delivery attempts. External systems use these subscriptions to receive document and revision lifecycle notifications.",
+    ),
+    (
+        &["AdminSurface"],
+        "Returns the admin shell aggregate. The admin UI uses this endpoint to load configuration, readiness, IAM, and model-catalog state with fewer round trips.",
+    ),
+    (
+        &["OpenApi"],
+        "Returns the generated OpenAPI 3.1 contract served by the running backend. Swagger UI and API clients use it as the HTTP contract source.",
+    ),
+];
+
+const PATH_USAGES: &[(&str, &str, &str)] = &[
+    (
+        "GET",
+        "/source",
+        "Call it when the UI or an integration needs the original stored source file rather than extracted text or derived metadata.",
+    ),
+    (
+        "GET",
+        "/snapshot",
+        "Call it to export a portable library archive for backup, migration, or offline inspection.",
+    ),
+    (
+        "POST",
+        "/snapshot",
+        "Call it to import a previously exported library archive into the selected library scope.",
+    ),
+    (
+        "POST",
+        "/upload",
+        "Call it for multipart or direct document uploads; ingestion continues asynchronously after the document record is accepted.",
+    ),
+    (
+        "POST",
+        "batch",
+        "Call it from bulk-action UI flows; the response describes accepted items and any per-item admission failures.",
+    ),
+    (
+        "GET",
+        "/dashboard",
+        "Call it to hydrate dashboards with one server-computed view instead of issuing many smaller requests.",
+    ),
+];
+
+const OPERATION_ID_USAGES: &[(&str, &str)] = &[
+    (
+        "list",
+        "Call it for paginated or filtered table views. Prefer server-side filters and cursors over fetching broad result sets into the client.",
+    ),
+    (
+        "search",
+        "Call it when the caller has a query and needs ranked candidates before reading or drilling into a specific resource.",
+    ),
+    (
+        "get",
+        "Call it when the caller already has the resource identifier and needs the latest authorized server view.",
+    ),
+];
 
 #[derive(OpenApi)]
 #[openapi(
@@ -47,7 +178,6 @@ const API_DESCRIPTION: &str = concat!(
         (name = "ai"),
         (name = "knowledge"),
         (name = "ingest"),
-        (name = "search"),
         (name = "query"),
         (name = "runtime"),
         (name = "billing"),
@@ -67,7 +197,6 @@ const API_DESCRIPTION: &str = concat!(
         crate::interfaces::http::audit::list_audit_events,
         crate::interfaces::http::ops::get_async_operation,
         crate::interfaces::http::ops::get_library_state,
-        crate::interfaces::http::ops::list_ingest_queue,
         crate::interfaces::http::ops::bulk_ingest_queue_action,
         crate::interfaces::http::ops::move_ingest_queue_job,
         crate::interfaces::http::ops::retry_ingest_queue_job,
@@ -78,8 +207,10 @@ const API_DESCRIPTION: &str = concat!(
         crate::interfaces::http::runtime::get_runtime_execution_trace,
         crate::interfaces::http::ingestion::list_jobs,
         crate::interfaces::http::ingestion::get_job,
+        crate::interfaces::http::ingestion::list_job_attempts,
         crate::interfaces::http::ingestion::get_attempt,
         crate::interfaces::http::ingestion::list_stage_events,
+        crate::interfaces::http::ingestion::list_ingest_queue,
         crate::interfaces::http::billing::list_provider_calls,
         crate::interfaces::http::billing::list_charges,
         crate::interfaces::http::billing::get_execution_cost,
@@ -92,32 +223,45 @@ const API_DESCRIPTION: &str = concat!(
         crate::interfaces::http::query::list_sessions,
         crate::interfaces::http::query::create_session,
         crate::interfaces::http::query::get_session,
+        crate::interfaces::http::query_session_mutations::rename_session,
+        crate::interfaces::http::query_session_mutations::delete_session,
+        crate::interfaces::http::query::list_session_turns,
+        crate::interfaces::http::query::get_session_turn,
         crate::interfaces::http::query::create_session_turn,
         crate::interfaces::http::query::get_execution,
         crate::interfaces::http::catalog::list_workspaces,
         crate::interfaces::http::catalog::get_workspace,
         crate::interfaces::http::catalog::create_workspace,
+        crate::interfaces::http::catalog::update_workspace,
         crate::interfaces::http::catalog::delete_workspace,
         crate::interfaces::http::catalog::list_libraries,
         crate::interfaces::http::catalog::create_library,
         crate::interfaces::http::catalog::delete_library,
         crate::interfaces::http::catalog::get_library,
         crate::interfaces::http::catalog::update_library_web_ingest_policy,
+        crate::interfaces::http::catalog::snapshot::export_workspace_snapshot,
+        crate::interfaces::http::catalog::snapshot::import_workspace_snapshot,
         crate::interfaces::http::ai::list_providers,
         crate::interfaces::http::ai::create_provider,
+        crate::interfaces::http::ai::get_provider,
         crate::interfaces::http::ai::update_provider,
         crate::interfaces::http::ai::delete_provider,
         crate::interfaces::http::ai::list_models,
         crate::interfaces::http::ai::create_model,
+        crate::interfaces::http::ai::get_model,
         crate::interfaces::http::ai::update_model,
         crate::interfaces::http::ai::delete_model,
         crate::interfaces::http::ai::list_prices,
         crate::interfaces::http::ai::list_accounts,
         crate::interfaces::http::ai::create_account,
+        crate::interfaces::http::ai::get_account,
         crate::interfaces::http::ai::list_bindings,
         crate::interfaces::http::ai::create_binding,
+        crate::interfaces::http::ai::get_binding,
         crate::interfaces::http::ai::update_binding,
-        crate::interfaces::http::ai::validate_binding,
+        crate::interfaces::http::ai::create_binding_validation,
+        crate::interfaces::http::ai::get_binding_validation,
+        crate::interfaces::http::ai::list_binding_validations,
         crate::interfaces::http::iam::session::get_bootstrap_status,
         crate::interfaces::http::iam::session::setup_bootstrap_admin,
         crate::interfaces::http::iam::session::login_session,
@@ -126,43 +270,35 @@ const API_DESCRIPTION: &str = concat!(
         crate::interfaces::http::iam::get_me,
         crate::interfaces::http::iam::list_users,
         crate::interfaces::http::iam::create_user,
+        crate::interfaces::http::iam::delete_user,
         crate::interfaces::http::iam::set_user_role,
         crate::interfaces::http::iam::get_user_access,
         crate::interfaces::http::iam::set_user_access,
         crate::interfaces::http::iam::list_tokens,
         crate::interfaces::http::iam::mint_token,
+        crate::interfaces::http::iam::get_token,
+        crate::interfaces::http::iam::patch_token,
         crate::interfaces::http::iam::delete_token,
         crate::interfaces::http::iam::revoke_token,
-        crate::interfaces::http::iam::list_grants,
-        crate::interfaces::http::iam::create_grant,
-        crate::interfaces::http::iam::revoke_grant,
         crate::interfaces::http::knowledge::library::list_context_bundles,
-        crate::interfaces::http::knowledge::library::list_documents,
         crate::interfaces::http::knowledge::library::get_library_summary,
-        crate::interfaces::http::knowledge::library::get_document,
         crate::interfaces::http::knowledge::library::get_context_bundle,
         crate::interfaces::http::knowledge::library::list_library_generations,
         crate::interfaces::http::knowledge::get_graph,
         crate::interfaces::http::knowledge::get_entity,
+        crate::interfaces::http::knowledge::list_relations,
         crate::interfaces::http::knowledge::get_relation,
-        crate::interfaces::http::knowledge::search::search_documents,
-        crate::interfaces::http::knowledge::search::search_documents_by_library_query,
+        crate::interfaces::http::knowledge::search::search_library,
         crate::interfaces::http::content::list_documents,
         crate::interfaces::http::content::list_chunks,
         crate::interfaces::http::content::create_document,
-        crate::interfaces::http::content::upload_document,
         crate::interfaces::http::content::get_document,
         crate::interfaces::http::content::patch_document_metadata,
         crate::interfaces::http::content::get_document_prepared_segments,
         crate::interfaces::http::content::get_document_technical_facts,
         crate::interfaces::http::content::delete_document,
-        crate::interfaces::http::content::append_document,
-        crate::interfaces::http::content::edit_document,
-        crate::interfaces::http::content::replace_document,
         crate::interfaces::http::content::list_revisions,
-        crate::interfaces::http::content::create_mutation,
-        crate::interfaces::http::content::list_mutations,
-        crate::interfaces::http::content::get_mutation,
+        crate::interfaces::http::content::create_revision,
         crate::interfaces::http::content::reprocess_document,
         crate::interfaces::http::content::batch::batch_delete_documents,
         crate::interfaces::http::content::batch::batch_cancel_documents,
@@ -176,11 +312,10 @@ const API_DESCRIPTION: &str = concat!(
         crate::interfaces::http::content::get_document_head,
         crate::interfaces::http::content::snapshot::export_library_snapshot,
         crate::interfaces::http::content::snapshot::import_library_snapshot,
-        crate::interfaces::http::content::snapshot::export_workspace_snapshot,
-        crate::interfaces::http::content::snapshot::import_workspace_snapshot,
         crate::interfaces::http::ai::update_account,
         crate::interfaces::http::ai::delete_account,
         crate::interfaces::http::ai::create_price_override,
+        crate::interfaces::http::ai::get_price_override,
         crate::interfaces::http::ai::update_price_override,
         crate::interfaces::http::ai::delete_price_override,
         crate::interfaces::http::ai::delete_binding,
@@ -308,84 +443,15 @@ fn operation_description(path: &str, method: &str, operation: &Operation) -> Str
 }
 
 fn operation_purpose(operation_id: &str, tag: Option<&str>) -> &'static str {
-    if operation_id.contains("AiAccount") || operation_id.contains("AiAccounts") {
-        return "Manages stored AI provider accounts used by runtime bindings. Use these endpoints from the admin UI or automation when registering, rotating, or listing provider secrets without exposing secret material in responses.";
-    }
-    if operation_id.contains("AiLibraryBinding") || operation_id.contains("Binding") {
-        return "Manages library-level AI runtime bindings. A binding assigns an account and model to a purpose (embedding, query answering, graph extraction, and other AI purposes) for one library, with tuning parameters (system prompt, temperature, top-p, output token budget) stored inline.";
-    }
-    if operation_id.contains("AiPrice") {
-        return "Manages AI price catalog overrides. Billing and cost dashboards use these rows to attribute provider calls and estimate execution cost.";
-    }
-    if operation_id.contains("AiModel") || operation_id.contains("AiProvider") {
-        return "Reads the AI provider catalog used by the admin configuration screens. Operators use this metadata to choose providers, models, capabilities, and binding targets.";
-    }
-    if operation_id.contains("Billing")
-        || operation_id.contains("Cost")
-        || operation_id.contains("Charges")
-    {
-        return "Reads billing and cost attribution data collected from runtime executions. Use these endpoints for dashboards, audits, and per-execution/provider-call cost inspection.";
-    }
-    if operation_id.contains("CatalogWorkspace") || operation_id.contains("Workspace") {
-        return "Manages catalog workspaces. Workspaces group libraries, IAM scope, billing summaries, and administrative ownership boundaries.";
-    }
-    if operation_id.contains("CatalogLibrary") || operation_id.contains("Library") {
-        return "Manages catalog libraries and their policies. Libraries own documents, knowledge graph data, assistant sessions, ingest settings, and query readiness.";
-    }
-    if operation_id.contains("ContentWebIngest") || operation_id.contains("WebIngest") {
-        return "Manages web-ingest runs. These endpoints submit seed URLs, inspect crawl/materialization results, list candidate pages, and cancel active web ingestion.";
-    }
-    if operation_id.contains("ContentMutation") || operation_id.contains("Mutation") {
-        return "Manages document mutation receipts. Use these endpoints to create or inspect append, replace, delete, and other asynchronous document lifecycle operations.";
-    }
-    if operation_id.contains("ContentDocument")
-        || operation_id.contains("Document")
-        || operation_id.contains("Chunks")
-    {
-        return "Manages document content and derived document views. These endpoints are used by document workspaces, upload flows, source viewers, revision history, and document-level diagnostics.";
-    }
-    if operation_id.contains("IamToken") || operation_id.contains("Token") {
-        return "Manages API tokens and token lifecycle. Operators use these endpoints to mint, list, revoke, or delete bearer tokens for users, services, and MCP clients.";
-    }
-    if operation_id.contains("IamGrant") || operation_id.contains("Grant") {
-        return "Manages IAM grants. Grants assign scoped permissions to principals so UI users, API tokens, and automation can access only the intended workspaces and libraries.";
-    }
-    if operation_id.contains("IamSession")
-        || operation_id.contains("Bootstrap")
-        || operation_id.contains("login")
-        || operation_id.contains("logout")
-    {
-        return "Manages browser authentication and bootstrap state. The web shell uses these endpoints for login, logout, session restore, first-admin setup, and access-label resolution.";
-    }
-    if operation_id.contains("Ingest")
-        || operation_id.contains("Stage")
-        || operation_id.contains("Job")
-    {
-        return "Reads or controls ingest runtime state. Operators use these endpoints to inspect queued work, attempts, stage events, and document-processing failures.";
-    }
-    if operation_id.contains("Knowledge")
-        || operation_id.contains("Graph")
-        || operation_id.contains("Entity")
-        || operation_id.contains("Relation")
-        || operation_id.contains("ContextBundle")
-    {
-        return "Reads the knowledge model derived from ingested documents. These endpoints power graph workbench views, document memory search, context-bundle inspection, and entity/relation drill-downs.";
-    }
-    if operation_id.contains("Runtime") {
-        return "Reads runtime execution traces. Use these endpoints to inspect lifecycle state, stages, actions, policy decisions, failures, and child work for asynchronous operations.";
-    }
-    if operation_id.contains("Audit") {
-        return "Reads immutable audit events. Security and operations teams use this endpoint to inspect who performed sensitive actions and which resources were affected.";
-    }
-    if operation_id.contains("Webhook") {
-        return "Manages outbound webhook subscriptions and delivery attempts. External systems use these subscriptions to receive document and revision lifecycle notifications.";
-    }
-    if operation_id.contains("AdminSurface") {
-        return "Returns the admin shell aggregate. The admin UI uses this endpoint to load configuration, readiness, IAM, and model-catalog state with fewer round trips.";
-    }
-    if operation_id.contains("OpenApi") {
-        return "Returns the generated OpenAPI 3.1 contract served by the running backend. Swagger UI and API clients use it as the HTTP contract source.";
-    }
+    OPERATION_PURPOSES
+        .iter()
+        .find(|(identifiers, _)| {
+            identifiers.iter().any(|identifier| operation_id.contains(identifier))
+        })
+        .map_or_else(|| operation_purpose_fallback(operation_id, tag), |(_, purpose)| *purpose)
+}
+
+fn operation_purpose_fallback(_operation_id: &str, tag: Option<&str>) -> &'static str {
     if matches!(tag, Some("system")) {
         return "Reads service health, readiness, version, or release metadata. Monitoring systems and the UI shell use these endpoints before calling heavier APIs.";
     }
@@ -398,46 +464,42 @@ fn operation_usage(
     operation_id: &str,
     tag: Option<&str>,
 ) -> &'static str {
-    if method == "GET" && path.contains("/source") {
-        return "Call it when the UI or an integration needs the original stored source file rather than extracted text or derived metadata.";
+    if let Some((_, _, usage)) = PATH_USAGES.iter().find(|(usage_method, path_fragment, _)| {
+        method == *usage_method && path.contains(path_fragment)
+    }) {
+        return usage;
     }
-    if method == "GET" && path.contains("/snapshot") {
-        return "Call it to export a portable library archive for backup, migration, or offline inspection.";
+    if let Some(usage) = operation_health_usage(path) {
+        return usage;
     }
-    if method == "POST" && path.contains("/snapshot") {
-        return "Call it to import a previously exported library archive into the selected library scope.";
+    if let Some(usage) = OPERATION_ID_USAGES
+        .iter()
+        .find(|(prefix, _)| operation_id.starts_with(prefix))
+        .map(|(_, usage)| *usage)
+    {
+        return usage;
     }
-    if method == "POST" && path.contains("/upload") {
-        return "Call it for multipart or direct document uploads; ingestion continues asynchronously after the document record is accepted.";
-    }
-    if method == "POST" && path.contains("batch") {
-        return "Call it from bulk-action UI flows; the response describes accepted items and any per-item admission failures.";
-    }
-    if method == "GET" && path.contains("/dashboard") {
-        return "Call it to hydrate dashboards with one server-computed view instead of issuing many smaller requests.";
-    }
+    operation_usage_by_method(method, operation_id, tag)
+}
+
+fn operation_health_usage(path: &str) -> Option<&'static str> {
     if path.contains("/ready") {
-        return "Call it from load balancers, deploy checks, and UI startup gates; it reports whether dependencies and required bootstrap state are usable.";
+        return Some(
+            "Call it from load balancers, deploy checks, and UI startup gates; it reports whether dependencies and required bootstrap state are usable.",
+        );
     }
-    if path.contains("/health") {
-        return "Call it for cheap liveness checks; it does not prove that downstream stores or AI bindings are ready.";
-    }
-    if operation_id.starts_with("list") {
-        return "Call it for paginated or filtered table views. Prefer server-side filters and cursors over fetching broad result sets into the client.";
-    }
-    if operation_id.starts_with("search") {
-        return "Call it when the caller has a query and needs ranked candidates before reading or drilling into a specific resource.";
-    }
-    if operation_id.starts_with("get") {
-        return "Call it when the caller already has the resource identifier and needs the latest authorized server view.";
-    }
+    path.contains("/health").then_some(
+        "Call it for cheap liveness checks; it does not prove that downstream stores or AI bindings are ready.",
+    )
+}
+
+fn operation_usage_by_method(method: &str, operation_id: &str, tag: Option<&str>) -> &'static str {
     if operation_id.starts_with("create") || operation_id.starts_with("post") || method == "POST" {
         return "Call it to create work or submit a command. Some commands complete synchronously, while ingest, mutation, and runtime work can continue asynchronously.";
     }
     if operation_id.starts_with("update")
         || operation_id.starts_with("patch")
-        || method == "PUT"
-        || method == "PATCH"
+        || matches!(method, "PUT" | "PATCH")
     {
         return "Call it to replace or partially update server-owned configuration. The request body is validated before changes are persisted.";
     }

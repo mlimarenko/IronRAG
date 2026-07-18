@@ -6,10 +6,10 @@ pub mod search;
 use axum::{
     Json, Router,
     body::Body,
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::header,
     response::Response,
-    routing::get,
+    routing::{get, post},
 };
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -35,21 +35,70 @@ pub fn router() -> Router<AppState> {
             "/knowledge/libraries/{library_id}/context-bundles",
             get(library::list_context_bundles),
         )
-        .route("/knowledge/libraries/{library_id}/documents", get(library::list_documents))
-        .route(
-            "/knowledge/libraries/{library_id}/documents/{document_id}",
-            get(library::get_document),
-        )
         .route("/knowledge/libraries/{library_id}/summary", get(library::get_library_summary))
         .route("/knowledge/libraries/{library_id}/graph", get(get_graph))
         .route("/knowledge/libraries/{library_id}/entities/{entity_id}", get(get_entity))
+        .route("/knowledge/libraries/{library_id}/relations", get(list_relations))
         .route("/knowledge/libraries/{library_id}/relations/{relation_id}", get(get_relation))
         .route(
             "/knowledge/libraries/{library_id}/generations",
             get(library::list_library_generations),
         )
-        .route("/knowledge/libraries/{library_id}/search/documents", get(search::search_documents))
-        .route("/search/documents", get(search::search_documents_by_library_query))
+        .route("/knowledge/libraries/{library_id}/search", post(search::search_library))
+}
+
+/// Query params shared by every knowledge list endpoint (`context-bundles`,
+/// `relations`). `cursor` is the opaque offset token from a previous page's
+/// `nextCursor`; absent = start from the top. `limit` is clamped server-side
+/// (see `DEFAULT_LIST_LIMIT`/`MAX_LIST_LIMIT`).
+#[derive(Debug, Deserialize, utoipa::ToSchema, utoipa::IntoParams)]
+#[serde(rename_all = "camelCase")]
+#[into_params(parameter_in = Query)]
+pub struct KnowledgeListPageQuery {
+    pub cursor: Option<String>,
+    pub limit: Option<u32>,
+}
+
+pub(super) const DEFAULT_LIST_LIMIT: u32 = 50;
+pub(super) const MAX_LIST_LIMIT: u32 = 500;
+
+/// Opaque offset cursor for the in-memory-paginated knowledge list
+/// endpoints (`context-bundles`, `relations`). These lists are already
+/// materialized in full by their backing store call (bounded per-library
+/// volumes, not the unbounded-corpus case `content` documents pagination
+/// solves), so a base64-encoded offset is an honest `nextCursor` — it
+/// really does resume at that row — without building full DB-level keyset
+/// pagination for read surfaces this plan explicitly frames as
+/// verification/registration, not new query engineering.
+pub(super) fn encode_list_offset_cursor(offset: usize) -> String {
+    use base64::Engine;
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(offset.to_string())
+}
+
+pub(super) fn decode_list_offset_cursor(token: &str) -> Result<usize, ApiError> {
+    use base64::Engine;
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(token)
+        .map_err(|_| ApiError::invalid_continuation_token("invalid cursor"))?;
+    let text = String::from_utf8(bytes)
+        .map_err(|_| ApiError::invalid_continuation_token("invalid cursor"))?;
+    text.parse::<usize>().map_err(|_| ApiError::invalid_continuation_token("invalid cursor"))
+}
+
+pub(super) fn paginate_offset_slice<T>(
+    items: Vec<T>,
+    query: &KnowledgeListPageQuery,
+) -> Result<(Vec<T>, Option<String>, i64), ApiError> {
+    let total = items.len() as i64;
+    let offset = match query.cursor.as_deref() {
+        Some(token) => decode_list_offset_cursor(token)?,
+        None => 0,
+    };
+    let limit = query.limit.unwrap_or(DEFAULT_LIST_LIMIT).clamp(1, MAX_LIST_LIMIT) as usize;
+    let next_offset = offset.saturating_add(limit);
+    let next_cursor = (next_offset < items.len()).then(|| encode_list_offset_cursor(next_offset));
+    let page = items.into_iter().skip(offset).take(limit).collect();
+    Ok((page, next_cursor, total))
 }
 
 #[derive(Debug, Serialize, utoipa::ToSchema)]
@@ -309,6 +358,74 @@ pub async fn get_entity(
         supporting_typed_facts,
         graph_evidence_summary,
     }))
+}
+
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct KnowledgeRelationListResponse {
+    items: Vec<RuntimeKnowledgeRelationRow>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    next_cursor: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    total: Option<i64>,
+}
+
+/// Paginated parent collection for the restored relation item read below.
+/// Slim rows only (no per-relation evidence expansion) — callers that need
+/// the full detail follow up with `GET .../relations/{relationId}`.
+#[tracing::instrument(
+    level = "info",
+    name = "http.knowledge.list_relations",
+    skip_all,
+    fields(library_id = %library_id, item_count)
+)]
+#[utoipa::path(
+    get,
+    path = "/v1/knowledge/libraries/{libraryId}/relations",
+    tag = "knowledge",
+    operation_id = "listKnowledgeRelations",
+    params(
+        ("libraryId" = uuid::Uuid, Path, description = "Library identifier"),
+        KnowledgeListPageQuery,
+    ),
+    responses(
+        (status = 200, description = "Knowledge relations for the library", body = KnowledgeRelationListResponse),
+        (status = 401, description = "Caller is not authenticated"),
+        (status = 403, description = "Caller is not authorized for the library"),
+    ),
+)]
+pub async fn list_relations(
+    auth: AuthContext,
+    State(state): State<AppState>,
+    Path(library_id): Path<Uuid>,
+    Query(query): Query<KnowledgeListPageQuery>,
+) -> Result<Json<KnowledgeRelationListResponse>, ApiError> {
+    let span = tracing::Span::current();
+    let library =
+        load_library_and_authorize(&auth, &state, library_id, POLICY_KNOWLEDGE_READ).await?;
+    let snapshot =
+        repositories::get_runtime_graph_snapshot(&state.persistence.postgres, library_id)
+            .await
+            .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
+    let edges = match snapshot {
+        Some(snapshot) if snapshot.graph_status != "empty" && snapshot.projection_version > 0 => {
+            repositories::list_runtime_graph_edges_by_library(
+                &state.persistence.postgres,
+                library_id,
+                snapshot.projection_version,
+            )
+            .await
+            .map_err(|e| ApiError::internal_with_log(e, "internal"))?
+        }
+        _ => Vec::new(),
+    };
+    let relations: Vec<RuntimeKnowledgeRelationRow> = edges
+        .into_iter()
+        .map(|edge| map_runtime_graph_edge_to_relation_row(library.workspace_id, library_id, edge))
+        .collect();
+    let (items, next_cursor, total) = paginate_offset_slice(relations, &query)?;
+    span.record("item_count", items.len());
+    Ok(Json(KnowledgeRelationListResponse { items, next_cursor, total: Some(total) }))
 }
 
 #[tracing::instrument(

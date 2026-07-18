@@ -13,7 +13,7 @@ use tokio::sync::{Mutex, RwLock};
 
 use crate::{
     app::state::AppState,
-    domains::deployment::{DependencyKind, DependencyMode, ServiceRole, StartupAuthorityMode},
+    domains::deployment::{DependencyKind, DependencyMode, StartupAuthorityMode},
     infra::persistence::{canonical_baseline_present, validate_postgres_migration_state},
     services::content::storage::types::ContentStorageProbeStatus,
 };
@@ -294,145 +294,37 @@ impl DeploymentDiagnosticsService {
         &self,
         state: &AppState,
     ) -> (bool, DeploymentReadinessSnapshot) {
-        let role = state
-            .settings
-            .service_role_kind()
-            .map(ServiceRole::as_str)
-            .unwrap_or(state.settings.service_role.as_str())
-            .to_string();
-
-        let postgres_status = dependency_status(
-            state.settings.dependency_mode(DependencyKind::Postgres),
-            sqlx::query("select 1")
-                .fetch_one(&state.persistence.heartbeat_postgres)
-                .await
-                .map(|row| row.get::<i32, _>(0) == 1)
-                .unwrap_or(false),
-            "postgres unreachable".to_string(),
-        );
-
-        let redis_ok = match state.persistence.redis.get_multiplexed_async_connection().await {
-            Ok(mut conn) => redis::cmd("PING")
-                .query_async::<String>(&mut conn)
-                .await
-                .map(|value| value == "PONG")
-                .unwrap_or(false),
-            Err(_) => false,
-        };
-        let redis_status = dependency_status(
-            state.settings.dependency_mode(DependencyKind::Redis),
-            redis_ok,
-            "redis unreachable".to_string(),
-        );
-
-        let knowledge_plane_status = match state.settings.knowledge_plane_backend.as_str() {
-            "postgres" => dependency_status(
-                state.settings.dependency_mode(DependencyKind::Postgres),
-                postgres_knowledge_plane_ready(state).await,
-                "postgres knowledge plane not ready".to_string(),
-            ),
-            backend => DependencyStatus {
-                mode: DEPENDENCY_MODE_MISCONFIGURED.to_string(),
-                status: DependencyHealth::Misconfigured,
-                message: Some(format!("unsupported knowledge_plane_backend `{backend}`")),
-            },
-        };
-
-        let storage_probe = state.content_storage.probe().await;
-        let storage = StorageStatus {
-            provider: state.content_storage.diagnostics().provider.as_str().to_string(),
-            status: match storage_probe.status {
-                ContentStorageProbeStatus::Ok => StorageHealth::Ok,
-                ContentStorageProbeStatus::Down => StorageHealth::Down,
-                ContentStorageProbeStatus::Unsupported => StorageHealth::Unsupported,
-                ContentStorageProbeStatus::Misconfigured => StorageHealth::Misconfigured,
-            },
-            topology: state.content_storage.diagnostics().topology.as_str().to_string(),
-            bucket: state.content_storage.diagnostics().bucket.clone(),
-            root_path: state
-                .content_storage
-                .diagnostics()
-                .root_path
-                .as_ref()
-                .map(|path| path.display().to_string()),
-            endpoint: state.content_storage.diagnostics().endpoint.clone(),
-            message: storage_probe.message,
-        };
-
-        let topology = if storage.status == StorageHealth::Unsupported {
-            TopologyStatus {
-                status: TopologySupport::NotSupported,
-                message: Some(
-                    "deployment topology is incompatible with the configured content storage provider"
-                        .to_string(),
-                ),
-            }
-        } else {
-            TopologyStatus { status: TopologySupport::Supported, message: None }
-        };
-
+        let role = configured_service_role(state);
+        let postgres_status = postgres_dependency_status(state).await;
+        let redis_status = redis_dependency_status(state).await;
+        let knowledge_plane_status = knowledge_plane_dependency_status(state).await;
+        let storage = storage_status(state).await;
+        let topology = topology_status(&storage);
         let startup_authority = self.startup_authority_status(state).await;
         let worker_snapshot = state.worker_runtime.snapshot().await;
 
-        // Log individual dependency health checks
-        for (name, dep_status) in [
+        log_dependency_statuses([
             ("postgres", &postgres_status),
             ("redis", &redis_status),
             ("knowledge_plane", &knowledge_plane_status),
-        ] {
-            tracing::debug!(stage = "readiness", dependency = %name, status = ?dep_status.status, "health check completed");
-            if !matches!(dep_status.status, DependencyHealth::Ok) {
-                tracing::warn!(stage = "readiness", dependency = %name, status = ?dep_status.status, "dependency degraded");
-            }
-        }
+        ]);
 
-        let all_dependencies_ok =
-            [postgres_status.status, redis_status.status, knowledge_plane_status.status]
-                .into_iter()
-                .all(|status| matches!(status, DependencyHealth::Ok));
-        let storage_ok = storage.status == StorageHealth::Ok;
-        let topology_ok = topology.status == TopologySupport::Supported;
-        let startup_ok = matches!(
-            startup_authority.state,
-            StartupAuthorityState::Succeeded | StartupAuthorityState::NotRequired
-        );
-        let worker_ok = if state.settings.runs_ingestion_workers() {
-            worker_snapshot.status != WORKER_STATUS_ERROR
-        } else {
-            true
-        };
-        let all_ok = all_dependencies_ok && storage_ok && topology_ok && startup_ok && worker_ok;
-
-        let message = if !all_dependencies_ok {
-            Some("one or more dependencies are unavailable".to_string())
-        } else if !storage_ok {
-            Some("content storage provider is not ready".to_string())
-        } else if !topology_ok {
-            Some("deployment topology is unsupported for the selected storage provider".to_string())
-        } else if !startup_ok {
-            startup_authority.message.clone()
-        } else if !worker_ok {
-            worker_snapshot
-                .message
-                .clone()
-                .or_else(|| Some("worker runtime is degraded".to_string()))
-        } else {
-            None
-        };
-
-        let overall_status = if all_ok {
-            OverallReadiness::Ready
-        } else if topology_ok {
-            OverallReadiness::Degraded
-        } else {
-            OverallReadiness::Blocked
-        };
-        tracing::info!(stage = "readiness", overall = ?overall_status, "readiness probe completed");
+        let readiness = ReadinessAssessment::new(ReadinessInputs {
+            runs_ingestion_workers: state.settings.runs_ingestion_workers(),
+            postgres: &postgres_status,
+            redis: &redis_status,
+            knowledge_plane: &knowledge_plane_status,
+            storage: &storage,
+            topology: &topology,
+            startup_authority: &startup_authority,
+            worker: &worker_snapshot,
+        });
+        tracing::info!(stage = "readiness", overall = ?readiness.overall_status, "readiness probe completed");
 
         (
-            all_ok,
+            readiness.is_ready,
             DeploymentReadinessSnapshot {
-                status: overall_status,
+                status: readiness.overall_status,
                 role,
                 startup_authority,
                 dependencies: DependencyStatusSet {
@@ -442,7 +334,7 @@ impl DeploymentDiagnosticsService {
                 },
                 storage,
                 topology,
-                message,
+                message: readiness.message,
                 checked_at: Utc::now().to_rfc3339(),
             },
         )
@@ -468,10 +360,14 @@ impl DeploymentDiagnosticsService {
     }
 
     async fn cached_startup_authority_status(&self) -> Option<StartupAuthorityStatus> {
-        let cached = self.startup_authority_cache.read().await;
-        let cached = cached.as_ref()?;
-        let ttl = startup_authority_status_cache_ttl(cached.status.state);
-        if cached.checked_at.elapsed() <= ttl { Some(cached.status.clone()) } else { None }
+        let cache = self.startup_authority_cache.read().await;
+        let status = {
+            let cached = cache.as_ref()?;
+            let ttl = startup_authority_status_cache_ttl(cached.status.state);
+            (cached.checked_at.elapsed() <= ttl).then(|| cached.status.clone())
+        };
+        drop(cache);
+        status
     }
 
     async fn compute_startup_authority_status(&self, state: &AppState) -> StartupAuthorityStatus {
@@ -528,9 +424,194 @@ impl DeploymentDiagnosticsService {
     }
 }
 
+async fn postgres_dependency_status(state: &AppState) -> DependencyStatus {
+    let postgres_ready = sqlx::query("select 1")
+        .fetch_one(&state.persistence.heartbeat_postgres)
+        .await
+        .is_ok_and(|row| row.get::<i32, _>(0) == 1);
+    dependency_status(
+        state.settings.dependency_mode(DependencyKind::Postgres),
+        postgres_ready,
+        "postgres unreachable".to_string(),
+    )
+}
+
+async fn redis_dependency_status(state: &AppState) -> DependencyStatus {
+    let redis_ready = match state.persistence.redis.get_multiplexed_async_connection().await {
+        Ok(mut connection) => redis::cmd("PING")
+            .query_async::<String>(&mut connection)
+            .await
+            .is_ok_and(|value| value == "PONG"),
+        Err(_) => false,
+    };
+    dependency_status(
+        state.settings.dependency_mode(DependencyKind::Redis),
+        redis_ready,
+        "redis unreachable".to_string(),
+    )
+}
+
+async fn knowledge_plane_dependency_status(state: &AppState) -> DependencyStatus {
+    match state.settings.knowledge_plane_backend.as_str() {
+        "postgres" => dependency_status(
+            state.settings.dependency_mode(DependencyKind::Postgres),
+            postgres_knowledge_plane_ready(state).await,
+            "postgres knowledge plane not ready".to_string(),
+        ),
+        backend => DependencyStatus {
+            mode: DEPENDENCY_MODE_MISCONFIGURED.to_string(),
+            status: DependencyHealth::Misconfigured,
+            message: Some(format!("unsupported knowledge_plane_backend `{backend}`")),
+        },
+    }
+}
+
+async fn storage_status(state: &AppState) -> StorageStatus {
+    let probe = state.content_storage.probe().await;
+    let diagnostics = state.content_storage.diagnostics();
+    StorageStatus {
+        provider: diagnostics.provider.as_str().to_string(),
+        status: storage_health(probe.status),
+        topology: diagnostics.topology.as_str().to_string(),
+        bucket: diagnostics.bucket.clone(),
+        root_path: diagnostics.root_path.as_ref().map(|path| path.display().to_string()),
+        endpoint: diagnostics.endpoint.clone(),
+        message: probe.message,
+    }
+}
+
+const fn storage_health(status: ContentStorageProbeStatus) -> StorageHealth {
+    match status {
+        ContentStorageProbeStatus::Ok => StorageHealth::Ok,
+        ContentStorageProbeStatus::Down => StorageHealth::Down,
+        ContentStorageProbeStatus::Unsupported => StorageHealth::Unsupported,
+        ContentStorageProbeStatus::Misconfigured => StorageHealth::Misconfigured,
+    }
+}
+
+fn topology_status(storage: &StorageStatus) -> TopologyStatus {
+    if storage.status == StorageHealth::Unsupported {
+        return TopologyStatus {
+            status: TopologySupport::NotSupported,
+            message: Some(
+                "deployment topology is incompatible with the configured content storage provider"
+                    .to_string(),
+            ),
+        };
+    }
+    TopologyStatus { status: TopologySupport::Supported, message: None }
+}
+
+fn configured_service_role(state: &AppState) -> String {
+    state
+        .settings
+        .service_role_kind()
+        .map_or_else(|_| state.settings.service_role.as_str(), |role| role.as_str())
+        .to_string()
+}
+
+fn log_dependency_statuses(dependencies: [(&str, &DependencyStatus); 3]) {
+    for (name, status) in dependencies {
+        tracing::debug!(stage = "readiness", dependency = %name, status = ?status.status, "health check completed");
+        if !matches!(status.status, DependencyHealth::Ok) {
+            tracing::warn!(stage = "readiness", dependency = %name, status = ?status.status, "dependency degraded");
+        }
+    }
+}
+
+struct ReadinessAssessment {
+    is_ready: bool,
+    overall_status: OverallReadiness,
+    message: Option<String>,
+}
+
+struct ReadinessInputs<'a> {
+    runs_ingestion_workers: bool,
+    postgres: &'a DependencyStatus,
+    redis: &'a DependencyStatus,
+    knowledge_plane: &'a DependencyStatus,
+    storage: &'a StorageStatus,
+    topology: &'a TopologyStatus,
+    startup_authority: &'a StartupAuthorityStatus,
+    worker: &'a WorkerRuntimeSnapshot,
+}
+
+impl ReadinessAssessment {
+    fn new(inputs: ReadinessInputs<'_>) -> Self {
+        let dependencies_ready =
+            [inputs.postgres.status, inputs.redis.status, inputs.knowledge_plane.status]
+                .into_iter()
+                .all(|status| matches!(status, DependencyHealth::Ok));
+        let storage_ready = inputs.storage.status == StorageHealth::Ok;
+        let topology_supported = inputs.topology.status == TopologySupport::Supported;
+        let startup_ready = matches!(
+            inputs.startup_authority.state,
+            StartupAuthorityState::Succeeded | StartupAuthorityState::NotRequired
+        );
+        let worker_ready =
+            !inputs.runs_ingestion_workers || inputs.worker.status != WORKER_STATUS_ERROR;
+        let is_ready = dependencies_ready
+            && storage_ready
+            && topology_supported
+            && startup_ready
+            && worker_ready;
+        let message = readiness_message(
+            dependencies_ready,
+            storage_ready,
+            topology_supported,
+            startup_ready,
+            worker_ready,
+            inputs.startup_authority,
+            inputs.worker,
+        );
+        let overall_status = overall_readiness_status(is_ready, topology_supported);
+
+        Self { is_ready, overall_status, message }
+    }
+}
+
+fn readiness_message(
+    dependencies_ready: bool,
+    storage_ready: bool,
+    topology_supported: bool,
+    startup_ready: bool,
+    worker_ready: bool,
+    startup_authority: &StartupAuthorityStatus,
+    worker: &WorkerRuntimeSnapshot,
+) -> Option<String> {
+    if !dependencies_ready {
+        return Some("one or more dependencies are unavailable".to_string());
+    }
+    if !storage_ready {
+        return Some("content storage provider is not ready".to_string());
+    }
+    if !topology_supported {
+        return Some(
+            "deployment topology is unsupported for the selected storage provider".to_string(),
+        );
+    }
+    if !startup_ready {
+        return startup_authority.message.clone();
+    }
+    if !worker_ready {
+        return worker.message.clone().or_else(|| Some("worker runtime is degraded".to_string()));
+    }
+    None
+}
+
+const fn overall_readiness_status(is_ready: bool, topology_supported: bool) -> OverallReadiness {
+    if is_ready {
+        OverallReadiness::Ready
+    } else if topology_supported {
+        OverallReadiness::Degraded
+    } else {
+        OverallReadiness::Blocked
+    }
+}
+
 async fn postgres_knowledge_plane_ready(state: &AppState) -> bool {
     sqlx::query_scalar::<_, bool>(
-        r#"
+        r"
         with ping as (select 1 as ok)
         select
             (select ok from ping) = 1
@@ -542,7 +623,7 @@ async fn postgres_knowledge_plane_ready(state: &AppState) -> bool {
                 where table_schema = 'public'
                   and table_name like 'knowledge\_%' escape '\'
             )
-        "#,
+        ",
     )
     .fetch_one(&state.persistence.heartbeat_postgres)
     .await

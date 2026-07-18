@@ -191,7 +191,7 @@ impl GraphReconciliationScopeService {
     }
 
     #[must_use]
-    pub fn prefer_targeted_reconciliation(
+    pub const fn prefer_targeted_reconciliation(
         &self,
         affected_node_count: usize,
         affected_relationship_count: usize,
@@ -226,13 +226,13 @@ impl GraphReconciliationScopeService {
         }
 
         let fallback_reason = fallback_reason.unwrap_or_else(|| {
-            if !state.retrieval_intelligence.targeted_reconciliation_enabled {
-                "Targeted graph reconciliation is disabled by runtime configuration.".to_string()
-            } else {
+            if state.retrieval_intelligence.targeted_reconciliation_enabled {
                 format!(
                     "The affected graph scope exceeds the safe targeted limit of {} targets, so reconciliation falls back to a broader refresh.",
                     state.retrieval_intelligence.targeted_reconciliation_max_targets
                 )
+            } else {
+                "Targeted graph reconciliation is disabled by runtime configuration.".to_string()
             }
         });
         MutationImpactScopeDetection::fallback_broad(
@@ -261,7 +261,7 @@ fn dedupe_ids(mut ids: Vec<Uuid>) -> Vec<Uuid> {
     ids
 }
 
-fn revision_scope_confidence(
+const fn revision_scope_confidence(
     source_evidence: &[RuntimeGraphEvidenceLifecycleRow],
     target_evidence: &[RuntimeGraphEvidenceLifecycleRow],
 ) -> &'static str {
@@ -274,7 +274,7 @@ fn revision_scope_confidence(
     }
 }
 
-fn delete_scope_confidence(
+const fn delete_scope_confidence(
     source_evidence: &[RuntimeGraphEvidenceLifecycleRow],
     surviving_node_ids: &[Uuid],
     surviving_edge_ids: &[Uuid],

@@ -1,17 +1,10 @@
 # Backend Audit Notes
 
-Last reviewed: 2026-05-08.
+Last reviewed: 2026-07-14.
 
 ## Accepted Advisories
 
-### RUSTSEC-2023-0071 - rsa 0.9.10
-
-- Severity: medium, CVSS 5.9.
-- Status: accepted temporarily and ignored by `make backend-audit`.
-- Path reported by `cargo audit`: `sqlx -> sqlx-mysql -> rsa`.
-- Rationale: IronRAG enables SQLx for Postgres only and has no MySQL runtime path or direct RSA use. `cargo audit` scans the lockfile and reports the optional SQLx MySQL dependency; root `cargo deny check advisories` evaluates the active cargo feature graph and does not include `rsa` for the backend build.
-- Upstream state: no patched `rsa` release exists in the RustSec advisory. Tracking remains upstream at https://github.com/RustCrypto/RSA/issues/626.
-- Revisit trigger: remove the ignore when RustSec lists a patched `rsa` version, when SQLx stops exposing the affected optional dependency, or if IronRAG adds any MySQL/RSA runtime path.
+None. `make backend-audit` runs `cargo audit` without advisory suppressions.
 
 ## License Exceptions
 

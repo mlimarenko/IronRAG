@@ -2,9 +2,6 @@ use reqwest::Url;
 use std::fmt;
 use std::net::IpAddr;
 
-const TRACKING_PARAM_PREFIXES: &[&str] = &["utm_", "mc_"];
-const TRACKING_PARAM_NAMES: &[&str] = &["fbclid", "gclid", "dclid", "msclkid", "ref", "source"];
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HostClassification {
     SameHost,
@@ -52,8 +49,8 @@ pub fn normalize_seed_url(seed_url: &str) -> Result<String, UrlIdentityError> {
     normalize_absolute_url(seed_url)
 }
 
-/// Normalizes an absolute HTTP or HTTPS URL by stripping tracking data and
-/// canonicalizing host and scheme details.
+/// Normalizes an absolute HTTP or HTTPS URL by removing its fragment and
+/// canonicalizing host and scheme details. Query parameters are preserved.
 ///
 /// # Errors
 ///
@@ -140,22 +137,6 @@ fn normalize_url(mut url: Url) -> Url {
         let lower = host.to_ascii_lowercase();
         let _ = url.set_host(Some(&lower));
     }
-    if let Some(query) = url.query() {
-        let retained = url
-            .query_pairs()
-            .filter(|(name, _)| !is_tracking_query_param(name.as_ref()))
-            .map(|(name, value)| (name.into_owned(), value.into_owned()))
-            .collect::<Vec<_>>();
-        if retained.is_empty() && !query.is_empty() {
-            url.set_query(None);
-        } else {
-            let mut pairs = url.query_pairs_mut();
-            pairs.clear();
-            for (name, value) in retained {
-                pairs.append_pair(&name, &value);
-            }
-        }
-    }
     if url.path().is_empty() {
         url.set_path("/");
     }
@@ -185,13 +166,6 @@ fn is_ip_host(host: &str) -> bool {
     host.parse::<IpAddr>().is_ok()
 }
 
-fn is_tracking_query_param(name: &str) -> bool {
-    TRACKING_PARAM_NAMES.iter().any(|candidate| candidate.eq_ignore_ascii_case(name))
-        || TRACKING_PARAM_PREFIXES
-            .iter()
-            .any(|prefix| name.to_ascii_lowercase().starts_with(prefix))
-}
-
 #[cfg(test)]
 mod tests {
     use super::{
@@ -200,14 +174,28 @@ mod tests {
     };
 
     #[test]
-    fn normalize_strips_tracking_query_and_fragment() {
+    fn normalize_preserves_query_parameters_and_strips_fragment() {
         let normalized = match normalize_absolute_url(
-            "https://Docs.Example.com:443/path?q=1&utm_source=test#heading",
+            "https://Docs.Example.com:443/path?q=1&utm_source=test&source=manual&ref=42#heading",
         ) {
             Ok(value) => value,
             Err(error) => panic!("normalize url: {error}"),
         };
-        assert_eq!(normalized, "https://docs.example.com/path?q=1");
+        assert_eq!(
+            normalized,
+            "https://docs.example.com/path?q=1&utm_source=test&source=manual&ref=42"
+        );
+    }
+
+    #[test]
+    fn resolve_preserves_arbitrary_query_names() {
+        let normalized = resolve_discovered_url(
+            "https://docs.example.com/guide/index.html",
+            "../api?veaction=edit&custom_flag=yes",
+        )
+        .expect("resolve discovered url");
+
+        assert_eq!(normalized, "https://docs.example.com/api?veaction=edit&custom_flag=yes");
     }
 
     #[test]

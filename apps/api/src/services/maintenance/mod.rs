@@ -12,10 +12,15 @@
 //! binaries.
 
 pub mod audit;
+pub mod credential_secrets;
 pub mod gc;
+pub mod knowledge_projection_metadata;
 pub mod lease;
 pub mod migrate;
+pub mod orphan_knowledge_documents;
 pub mod rebuild;
 pub mod repair;
 pub mod retention;
 pub mod scheduler;
+pub mod vector_profile_keys;
+pub mod webhook_outbox_ops;

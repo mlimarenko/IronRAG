@@ -3,15 +3,14 @@ use serde_json::{Value, json};
 use crate::{
     interfaces::http::router_support::ApiError,
     mcp_types::{
-        McpAuditActionKind, McpAuditScope, McpGetCommunitiesRequest, McpGetGraphTopologyRequest,
-        McpListRelationsRequest, McpSearchEntitiesRequest,
+        McpGetCommunitiesRequest, McpGetGraphTopologyRequest, McpListRelationsRequest,
+        McpSearchEntitiesRequest,
     },
 };
 
 use super::super::{
-    McpToolDescriptor, McpToolResult,
-    audit::{record_canonical_mcp_audit, record_error_audit, record_success_audit},
-    ok_tool_result, parse_tool_args, tool_error_result,
+    McpToolDescriptor, McpToolResult, audit::record_canonical_mcp_audit, ok_tool_result,
+    parse_tool_args, tool_error_result,
 };
 use super::ToolCallContext;
 
@@ -150,62 +149,14 @@ async fn search_entities(context: ToolCallContext<'_>, arguments: &Value) -> Mcp
                             Vec::new(),
                         )
                         .await;
-                        record_success_audit(
-                            context.auth,
-                            context.state,
-                            context.request_id,
-                            McpAuditActionKind::SearchEntities,
-                            McpAuditScope {
-                                workspace_id: Some(library.workspace_id),
-                                library_id: Some(library.id),
-                                document_id: None,
-                            },
-                            json!({
-                                "tool": "search_entities",
-                                "hitCount": entities.len(),
-                            }),
-                        )
-                        .await;
                         ok_tool_result("Entity search completed.", json!({ "entities": entities }))
                     }
                     Err(_) => tool_error_result(ApiError::Internal),
                 },
-                Err(error) => {
-                    record_error_audit(
-                        context.auth,
-                        context.state,
-                        context.request_id,
-                        McpAuditActionKind::SearchEntities,
-                        McpAuditScope {
-                            workspace_id: context.auth.workspace_id,
-                            library_id: None,
-                            document_id: None,
-                        },
-                        &error,
-                        json!({ "tool": "search_entities" }),
-                    )
-                    .await;
-                    tool_error_result(error)
-                }
+                Err(error) => tool_error_result(error),
             }
         }
-        Err(error) => {
-            record_error_audit(
-                context.auth,
-                context.state,
-                context.request_id,
-                McpAuditActionKind::SearchEntities,
-                McpAuditScope {
-                    workspace_id: context.auth.workspace_id,
-                    library_id: None,
-                    document_id: None,
-                },
-                &error,
-                json!({ "tool": "search_entities" }),
-            )
-            .await;
-            tool_error_result(error)
-        }
+        Err(error) => tool_error_result(error),
     }
 }
 
@@ -241,75 +192,14 @@ async fn get_graph_topology(context: ToolCallContext<'_>, arguments: &Value) -> 
                             Vec::new(),
                         )
                         .await;
-                        record_success_audit(
-                            context.auth,
-                            context.state,
-                            context.request_id,
-                            McpAuditActionKind::GetGraphTopology,
-                            McpAuditScope {
-                                workspace_id: Some(library.workspace_id),
-                                library_id: Some(library.id),
-                                document_id: None,
-                            },
-                            json!({ "tool": "get_graph_topology" }),
-                        )
-                        .await;
                         ok_tool_result("Graph topology loaded.", payload)
                     }
-                    Err(error) => {
-                        record_error_audit(
-                            context.auth,
-                            context.state,
-                            context.request_id,
-                            McpAuditActionKind::GetGraphTopology,
-                            McpAuditScope {
-                                workspace_id: Some(library.workspace_id),
-                                library_id: Some(library.id),
-                                document_id: None,
-                            },
-                            &error,
-                            json!({ "tool": "get_graph_topology" }),
-                        )
-                        .await;
-                        tool_error_result(error)
-                    }
+                    Err(error) => tool_error_result(error),
                 },
-                Err(error) => {
-                    record_error_audit(
-                        context.auth,
-                        context.state,
-                        context.request_id,
-                        McpAuditActionKind::GetGraphTopology,
-                        McpAuditScope {
-                            workspace_id: context.auth.workspace_id,
-                            library_id: None,
-                            document_id: None,
-                        },
-                        &error,
-                        json!({ "tool": "get_graph_topology" }),
-                    )
-                    .await;
-                    tool_error_result(error)
-                }
+                Err(error) => tool_error_result(error),
             }
         }
-        Err(error) => {
-            record_error_audit(
-                context.auth,
-                context.state,
-                context.request_id,
-                McpAuditActionKind::GetGraphTopology,
-                McpAuditScope {
-                    workspace_id: context.auth.workspace_id,
-                    library_id: None,
-                    document_id: None,
-                },
-                &error,
-                json!({ "tool": "get_graph_topology" }),
-            )
-            .await;
-            tool_error_result(error)
-        }
+        Err(error) => tool_error_result(error),
     }
 }
 
@@ -346,78 +236,14 @@ async fn list_relations(context: ToolCallContext<'_>, arguments: &Value) -> McpT
                             Vec::new(),
                         )
                         .await;
-                        record_success_audit(
-                            context.auth,
-                            context.state,
-                            context.request_id,
-                            McpAuditActionKind::ListRelations,
-                            McpAuditScope {
-                                workspace_id: Some(library.workspace_id),
-                                library_id: Some(library.id),
-                                document_id: None,
-                            },
-                            json!({
-                                "tool": "list_relations",
-                                "relationCount": payload.len(),
-                            }),
-                        )
-                        .await;
                         ok_tool_result("Relations loaded.", json!({ "relations": payload }))
                     }
-                    Err(error) => {
-                        record_error_audit(
-                            context.auth,
-                            context.state,
-                            context.request_id,
-                            McpAuditActionKind::ListRelations,
-                            McpAuditScope {
-                                workspace_id: Some(library.workspace_id),
-                                library_id: Some(library.id),
-                                document_id: None,
-                            },
-                            &error,
-                            json!({ "tool": "list_relations" }),
-                        )
-                        .await;
-                        tool_error_result(error)
-                    }
+                    Err(error) => tool_error_result(error),
                 },
-                Err(error) => {
-                    record_error_audit(
-                        context.auth,
-                        context.state,
-                        context.request_id,
-                        McpAuditActionKind::ListRelations,
-                        McpAuditScope {
-                            workspace_id: context.auth.workspace_id,
-                            library_id: None,
-                            document_id: None,
-                        },
-                        &error,
-                        json!({ "tool": "list_relations" }),
-                    )
-                    .await;
-                    tool_error_result(error)
-                }
+                Err(error) => tool_error_result(error),
             }
         }
-        Err(error) => {
-            record_error_audit(
-                context.auth,
-                context.state,
-                context.request_id,
-                McpAuditActionKind::ListRelations,
-                McpAuditScope {
-                    workspace_id: context.auth.workspace_id,
-                    library_id: None,
-                    document_id: None,
-                },
-                &error,
-                json!({ "tool": "list_relations" }),
-            )
-            .await;
-            tool_error_result(error)
-        }
+        Err(error) => tool_error_result(error),
     }
 }
 
@@ -440,77 +266,13 @@ async fn get_communities(context: ToolCallContext<'_>, arguments: &Value) -> Mcp
                 .await
                 {
                     Ok(payload) => {
-                        record_success_audit(
-                            context.auth,
-                            context.state,
-                            context.request_id,
-                            McpAuditActionKind::GetCommunities,
-                            McpAuditScope {
-                                workspace_id: Some(library.workspace_id),
-                                library_id: Some(library.id),
-                                document_id: None,
-                            },
-                            json!({
-                                "tool": "get_communities",
-                                "communityCount": payload.len(),
-                            }),
-                        )
-                        .await;
                         ok_tool_result("Communities loaded.", json!({ "communities": payload }))
                     }
-                    Err(error) => {
-                        record_error_audit(
-                            context.auth,
-                            context.state,
-                            context.request_id,
-                            McpAuditActionKind::GetCommunities,
-                            McpAuditScope {
-                                workspace_id: Some(library.workspace_id),
-                                library_id: Some(library.id),
-                                document_id: None,
-                            },
-                            &error,
-                            json!({ "tool": "get_communities" }),
-                        )
-                        .await;
-                        tool_error_result(error)
-                    }
+                    Err(error) => tool_error_result(error),
                 },
-                Err(error) => {
-                    record_error_audit(
-                        context.auth,
-                        context.state,
-                        context.request_id,
-                        McpAuditActionKind::GetCommunities,
-                        McpAuditScope {
-                            workspace_id: context.auth.workspace_id,
-                            library_id: None,
-                            document_id: None,
-                        },
-                        &error,
-                        json!({ "tool": "get_communities" }),
-                    )
-                    .await;
-                    tool_error_result(error)
-                }
+                Err(error) => tool_error_result(error),
             }
         }
-        Err(error) => {
-            record_error_audit(
-                context.auth,
-                context.state,
-                context.request_id,
-                McpAuditActionKind::GetCommunities,
-                McpAuditScope {
-                    workspace_id: context.auth.workspace_id,
-                    library_id: None,
-                    document_id: None,
-                },
-                &error,
-                json!({ "tool": "get_communities" }),
-            )
-            .await;
-            tool_error_result(error)
-        }
+        Err(error) => tool_error_result(error),
     }
 }

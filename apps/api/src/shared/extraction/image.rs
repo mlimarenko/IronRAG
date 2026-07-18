@@ -164,8 +164,7 @@ fn prepare_vision_image_payload(
         let target_height = height.max(MIN_DIMENSION);
         image = image.resize_exact(target_width, target_height, FilterType::Triangle);
         warnings.push(format!(
-            "upscaled image from {}x{} to {}x{} for provider compatibility",
-            width, height, target_width, target_height
+            "upscaled image from {width}x{height} to {target_width}x{target_height} for provider compatibility"
         ));
     }
 
@@ -208,7 +207,7 @@ fn flatten_to_white_rgb8(image: &DynamicImage) -> ImageBuffer<Rgb<u8>, Vec<u8>> 
         let composite = |channel: u8| -> u8 {
             let source = f32::from(channel);
             let white = 255.0;
-            ((source * alpha) + (white * (1.0 - alpha))).round() as u8
+            source.mul_add(alpha, white * (1.0 - alpha)).round() as u8
         };
         rgb.put_pixel(x, y, Rgb([composite(pixel[0]), composite(pixel[1]), composite(pixel[2])]));
     }
@@ -312,11 +311,12 @@ mod tests {
             unreachable!("embed_many is not used in image extraction tests")
         }
 
-        async fn vision_extract(&self, request: VisionRequest) -> Result<VisionResponse> {
+        async fn vision_extract(&self, mut request: VisionRequest) -> Result<VisionResponse> {
+            let mime_type = request.mime_type.clone();
             Ok(VisionResponse {
-                provider_kind: request.provider_kind,
-                model_name: request.model_name,
-                output_text: format!("diagram text and entities [{}]", request.mime_type),
+                provider_kind: std::mem::take(&mut request.provider_kind),
+                model_name: std::mem::take(&mut request.model_name),
+                output_text: format!("diagram text and entities [{mime_type}]"),
                 usage_json: serde_json::json!({}),
             })
         }
@@ -360,7 +360,7 @@ mod tests {
         .expect("image extraction");
 
         assert_eq!(output.source_map["mime_type"], serde_json::json!("image/png"));
-        assert!(output.warnings.len() >= 1);
+        assert!(!output.warnings.is_empty());
         assert!(output.content_text.contains("[image/png]"));
     }
 

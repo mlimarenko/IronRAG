@@ -1,23 +1,18 @@
 use axum::{
     Json,
-    extract::{Path, State},
+    extract::{Path, Query, State},
 };
 use serde::Serialize;
 use uuid::Uuid;
 
-use super::{
-    KnowledgeGraphEvidenceSummary, KnowledgeLibrarySummaryResponse,
-    KnowledgeTechnicalFactProvenanceSummary, summarize_graph_evidence,
-    summarize_typed_technical_facts,
-};
+use super::{KnowledgeLibrarySummaryResponse, KnowledgeListPageQuery, paginate_offset_slice};
 use crate::{
     app::state::AppState,
-    domains::knowledge::{KnowledgeLibraryGeneration, TypedTechnicalFact},
+    domains::knowledge::KnowledgeLibraryGeneration,
     infra::knowledge_rows::{
         KnowledgeBundleChunkReferenceRow, KnowledgeBundleEntityReferenceRow,
         KnowledgeBundleEvidenceReferenceRow, KnowledgeBundleRelationReferenceRow,
-        KnowledgeChunkRow, KnowledgeContextBundleRow, KnowledgeDocumentRow,
-        KnowledgeRetrievalTraceRow, KnowledgeRevisionRow,
+        KnowledgeContextBundleRow, KnowledgeRetrievalTraceRow,
     },
     interfaces::http::{
         auth::AuthContext,
@@ -39,14 +34,12 @@ pub struct KnowledgeContextBundleDetailResponse {
 
 #[derive(Debug, Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
-pub struct KnowledgeDocumentDetailResponse {
-    document: KnowledgeDocumentRow,
-    revisions: Vec<KnowledgeRevisionRow>,
-    latest_revision: Option<KnowledgeRevisionRow>,
-    latest_revision_chunks: Vec<KnowledgeChunkRow>,
-    latest_revision_typed_facts: Vec<TypedTechnicalFact>,
-    technical_fact_summary: KnowledgeTechnicalFactProvenanceSummary,
-    graph_evidence_summary: KnowledgeGraphEvidenceSummary,
+pub struct KnowledgeContextBundleListResponse {
+    items: Vec<KnowledgeContextBundleRow>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    next_cursor: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    total: Option<i64>,
 }
 
 #[utoipa::path(
@@ -54,9 +47,12 @@ pub struct KnowledgeDocumentDetailResponse {
     path = "/v1/knowledge/libraries/{libraryId}/context-bundles",
     tag = "knowledge",
     operation_id = "listKnowledgeContextBundles",
-    params(("libraryId" = uuid::Uuid, Path, description = "Library identifier")),
+    params(
+        ("libraryId" = uuid::Uuid, Path, description = "Library identifier"),
+        KnowledgeListPageQuery,
+    ),
     responses(
-        (status = 200, description = "Context bundles for the library", body = [KnowledgeContextBundleRow]),
+        (status = 200, description = "Context bundles for the library", body = KnowledgeContextBundleListResponse),
         (status = 401, description = "Caller is not authenticated"),
         (status = 403, description = "Caller is not authorized for the library"),
     ),
@@ -71,7 +67,8 @@ pub async fn list_context_bundles(
     auth: AuthContext,
     State(state): State<AppState>,
     Path(library_id): Path<Uuid>,
-) -> Result<Json<Vec<KnowledgeContextBundleRow>>, ApiError> {
+    Query(query): Query<KnowledgeListPageQuery>,
+) -> Result<Json<KnowledgeContextBundleListResponse>, ApiError> {
     let span = tracing::Span::current();
     let _ = load_library_and_authorize(&auth, &state, library_id, POLICY_KNOWLEDGE_READ).await?;
     let bundles = state
@@ -79,43 +76,9 @@ pub async fn list_context_bundles(
         .list_bundles_by_library(library_id)
         .await
         .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
-    span.record("item_count", bundles.len());
-    Ok(Json(bundles))
-}
-
-#[tracing::instrument(
-    level = "info",
-    name = "http.knowledge.list_documents",
-    skip_all,
-    fields(library_id = %library_id, item_count)
-)]
-#[utoipa::path(
-    get,
-    path = "/v1/knowledge/libraries/{libraryId}/documents",
-    tag = "knowledge",
-    operation_id = "listKnowledgeDocuments",
-    params(("libraryId" = uuid::Uuid, Path, description = "Library identifier")),
-    responses(
-        (status = 200, description = "Knowledge documents for the library", body = [KnowledgeDocumentRow]),
-        (status = 401, description = "Caller is not authenticated"),
-        (status = 403, description = "Caller is not authorized for the library"),
-    ),
-)]
-pub async fn list_documents(
-    auth: AuthContext,
-    State(state): State<AppState>,
-    Path(library_id): Path<Uuid>,
-) -> Result<Json<Vec<KnowledgeDocumentRow>>, ApiError> {
-    let span = tracing::Span::current();
-    let library =
-        load_library_and_authorize(&auth, &state, library_id, POLICY_KNOWLEDGE_READ).await?;
-    let documents = state
-        .document_store
-        .list_documents_by_library(library.workspace_id, library.id, false)
-        .await
-        .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
-    span.record("item_count", documents.len());
-    Ok(Json(documents))
+    let (items, next_cursor, total) = paginate_offset_slice(bundles, &query)?;
+    span.record("item_count", items.len());
+    Ok(Json(KnowledgeContextBundleListResponse { items, next_cursor, total: Some(total) }))
 }
 
 #[tracing::instrument(
@@ -155,87 +118,6 @@ pub async fn get_library_summary(
         typed_fact_document_count: summary.typed_fact_document_count,
         updated_at: summary.updated_at,
         latest_generation: summary.latest_generation,
-    }))
-}
-
-#[tracing::instrument(
-    level = "info",
-    name = "http.knowledge.get_document",
-    skip_all,
-    fields(library_id = %library_id, document_id = %document_id)
-)]
-#[utoipa::path(
-    get,
-    path = "/v1/knowledge/libraries/{libraryId}/documents/{documentId}",
-    tag = "knowledge",
-    operation_id = "getKnowledgeDocument",
-    params(
-        ("libraryId" = uuid::Uuid, Path, description = "Library identifier"),
-        ("documentId" = uuid::Uuid, Path, description = "Document identifier"),
-    ),
-    responses(
-        (status = 200, description = "Knowledge document detail", body = KnowledgeDocumentDetailResponse),
-        (status = 401, description = "Caller is not authenticated"),
-        (status = 403, description = "Caller is not authorized for the document"),
-        (status = 404, description = "Document not found"),
-    ),
-)]
-pub async fn get_document(
-    auth: AuthContext,
-    State(state): State<AppState>,
-    Path((library_id, document_id)): Path<(Uuid, Uuid)>,
-) -> Result<Json<KnowledgeDocumentDetailResponse>, ApiError> {
-    let library =
-        load_library_and_authorize(&auth, &state, library_id, POLICY_KNOWLEDGE_READ).await?;
-    let document = state
-        .document_store
-        .get_document(document_id)
-        .await
-        .map_err(|e| ApiError::internal_with_log(e, "internal"))?
-        .ok_or_else(|| ApiError::resource_not_found("knowledge_document", document_id))?;
-    if document.library_id != library.id {
-        return Err(ApiError::resource_not_found("knowledge_document", document_id));
-    }
-    let revisions = state
-        .document_store
-        .list_revisions_by_document(document_id)
-        .await
-        .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
-    let latest_revision = revisions.first().cloned();
-    let latest_revision_chunks = match latest_revision.as_ref() {
-        Some(revision) => state
-            .document_store
-            .list_chunks_by_revision(revision.revision_id)
-            .await
-            .map_err(|e| ApiError::internal_with_log(e, "internal"))?,
-        None => Vec::new(),
-    };
-    let latest_revision_typed_facts = match latest_revision.as_ref() {
-        Some(revision) => {
-            state
-                .canonical_services
-                .knowledge
-                .list_typed_technical_facts(&state, revision.revision_id)
-                .await?
-        }
-        None => Vec::new(),
-    };
-    let latest_revision_evidence = match latest_revision.as_ref() {
-        Some(revision) => state
-            .graph_store
-            .list_evidence_by_revision(revision.revision_id)
-            .await
-            .map_err(|e| ApiError::internal_with_log(e, "internal"))?,
-        None => Vec::new(),
-    };
-    Ok(Json(KnowledgeDocumentDetailResponse {
-        document,
-        revisions,
-        latest_revision,
-        latest_revision_chunks,
-        latest_revision_typed_facts: latest_revision_typed_facts.clone(),
-        technical_fact_summary: summarize_typed_technical_facts(&latest_revision_typed_facts),
-        graph_evidence_summary: summarize_graph_evidence(&latest_revision_evidence),
     }))
 }
 
@@ -291,6 +173,28 @@ pub async fn get_context_bundle(
     }))
 }
 
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct KnowledgeLibraryGenerationListResponse {
+    items: Vec<KnowledgeLibraryGeneration>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    next_cursor: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    total: Option<i64>,
+}
+
+/// Paginated history of graph-generation/build runs for the library,
+/// distinct from the single `latestGeneration` field on `/summary`.
+///
+/// The derivation this wraps (`derive_library_generation_rows`) currently
+/// synthesizes at most one row — the library's *current* readable
+/// generation state — because there is no build-history table with a
+/// writer in the ingest/graph pipeline yet. This endpoint is the correct,
+/// honest read surface for that state today; `nextCursor` is always
+/// `null` because there is never more than one page. Real multi-row build
+/// history (timings, degraded passes over time) requires a schema change
+/// plus a pipeline write-path and is out of scope for this read-surface
+/// restoration.
 #[tracing::instrument(
     level = "info",
     name = "http.list_library_generations",
@@ -304,7 +208,7 @@ pub async fn get_context_bundle(
     operation_id = "listKnowledgeLibraryGenerations",
     params(("libraryId" = uuid::Uuid, Path, description = "Library identifier")),
     responses(
-        (status = 200, description = "Knowledge generation history for the library", body = [KnowledgeLibraryGeneration]),
+        (status = 200, description = "Knowledge generation history for the library", body = KnowledgeLibraryGenerationListResponse),
         (status = 401, description = "Caller is not authenticated"),
         (status = 403, description = "Caller is not authorized for the library"),
         (status = 404, description = "Library not found"),
@@ -314,11 +218,16 @@ pub async fn list_library_generations(
     auth: AuthContext,
     State(state): State<AppState>,
     Path(library_id): Path<Uuid>,
-) -> Result<Json<Vec<KnowledgeLibraryGeneration>>, ApiError> {
+) -> Result<Json<KnowledgeLibraryGenerationListResponse>, ApiError> {
     let span = tracing::Span::current();
     let _ = load_library_and_authorize(&auth, &state, library_id, POLICY_KNOWLEDGE_READ).await?;
     let generations =
         state.canonical_services.knowledge.list_library_generations(&state, library_id).await?;
     span.record("item_count", generations.len());
-    Ok(Json(generations))
+    let total = generations.len() as i64;
+    Ok(Json(KnowledgeLibraryGenerationListResponse {
+        items: generations,
+        next_cursor: None,
+        total: Some(total),
+    }))
 }

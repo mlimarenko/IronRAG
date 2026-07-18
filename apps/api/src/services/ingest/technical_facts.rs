@@ -280,63 +280,54 @@ fn preferred_table_row_text(block: &StructuredBlockData) -> String {
                 && !segment.starts_with("Table: ")
                 && !segment.starts_with("Row ")
         })
-        .filter(|segment| {
-            !segment.split_once(": ").is_some_and(|(key, value)| {
-                normalize_table_row_key(key) == "index"
-                    && value.trim().chars().all(|character| character.is_ascii_digit())
-            })
-        })
         .collect::<Vec<_>>();
-    if !table_row_has_technical_signal(&segments) {
+    if !table_row_has_formal_technical_signal(&segments) {
         return String::new();
     }
     segments.join(" | ")
 }
 
-fn table_row_has_technical_signal(segments: &[&str]) -> bool {
-    let mut strong_key_hits = 0usize;
+fn table_row_has_formal_technical_signal(segments: &[&str]) -> bool {
+    let mut has_url = false;
+    let mut has_explicit_port = false;
+    let mut has_http_method = false;
+    let mut has_endpoint_path = false;
+    let mut has_protocol = false;
+    let mut has_prefixed_semver = false;
+
     for segment in segments {
-        let Some((key, value)) = segment.split_once(": ") else {
-            continue;
-        };
-        let normalized_key = normalize_table_row_key(key);
-        if is_strong_technical_table_key(&normalized_key) {
-            strong_key_hits += 1;
+        let value = segment.split_once(": ").map_or(*segment, |(_, value)| value);
+        if !extract_http_response_status_literals(value).is_empty() {
+            return true;
         }
-        let _ = value;
+
+        for token in technical_tokens(value) {
+            if let Some(url) = extract_url_like_token(&token) {
+                has_url = true;
+                has_explicit_port |= extract_port_from_url(&url).is_some();
+            }
+            has_http_method |= normalize_http_method(&token).is_some();
+            has_endpoint_path |= extract_path_like_token(&token).is_some();
+            has_protocol |=
+                PROTOCOLS.contains(&trim_technical_token(&token).to_ascii_lowercase().as_str());
+            has_prefixed_semver |= is_prefixed_semver_literal(trim_technical_token(&token));
+        }
     }
-    strong_key_hits > 0
-}
 
-fn normalize_table_row_key(key: &str) -> String {
-    key.to_ascii_lowercase()
-        .chars()
-        .map(|character| if character.is_ascii_alphanumeric() { character } else { ' ' })
-        .collect::<String>()
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
-}
-
-fn is_strong_technical_table_key(normalized_key: &str) -> bool {
-    normalized_key.contains("method")
-        || normalized_key.contains("endpoint")
-        || normalized_key == "path"
-        || normalized_key.ends_with(" path")
-        || normalized_key.contains("route")
-        || normalized_key.contains("status")
-        || normalized_key.contains("port")
-        || normalized_key.contains("parameter")
-        || normalized_key.contains("query")
-        || normalized_key.contains("header")
-        || normalized_key.contains("auth")
-        || normalized_key.contains("token")
-        || normalized_key.contains("request")
-        || normalized_key.contains("response")
-        || normalized_key.contains("payload")
-        || normalized_key.contains("env")
-        || normalized_key.contains("variable")
-        || normalized_key.contains("config")
+    // A lone URL in an arbitrary business table is not sufficient evidence.
+    // Require two independent formal grammars; otherwise abstain.
+    [
+        has_url,
+        has_explicit_port,
+        has_http_method,
+        has_endpoint_path,
+        has_protocol,
+        has_prefixed_semver,
+    ]
+    .into_iter()
+    .filter(|matched| *matched)
+    .count()
+        >= 2
 }
 
 fn logical_lines(block_text: &str) -> Vec<String> {
@@ -420,35 +411,13 @@ fn extract_endpoint_candidates(block: &StructuredBlockData, line: &str) -> Vec<F
 }
 
 fn extract_port_candidates(block: &StructuredBlockData, line: &str) -> Vec<FactCandidate> {
-    let tokens = technical_tokens(line);
     let mut ports = BTreeSet::<String>::new();
 
-    for token in &tokens {
-        if let Some(url) = extract_url_like_token(token)
+    for token in technical_tokens(line) {
+        if let Some(url) = extract_url_like_token(&token)
             && let Some(port_literal) = extract_port_from_url(&url)
         {
             ports.insert(port_literal);
-        }
-    }
-
-    for window in tokens.windows(2) {
-        if is_port_keyword(&window[0])
-            && let Some(port_literal) = extract_port_literal(&window[1])
-        {
-            ports.insert(port_literal);
-        }
-    }
-
-    let cleaned = strip_leading_marker(&collapse_literal_whitespace(line));
-    for separator in [":", "="] {
-        if let Some((left, right)) = cleaned.split_once(separator) {
-            let key = trim_technical_token(left);
-            let value = trim_technical_token(right);
-            if is_port_keyword(key)
-                && let Some(port_literal) = extract_port_literal(value)
-            {
-                ports.insert(port_literal);
-            }
         }
     }
 
@@ -461,24 +430,7 @@ fn extract_port_candidates(block: &StructuredBlockData, line: &str) -> Vec<FactC
 }
 
 fn extract_status_code_candidates(block: &StructuredBlockData, line: &str) -> Vec<FactCandidate> {
-    let lower = line.to_ascii_lowercase();
-    if !matches_any_substring(&lower, &["status", "response", "http"]) {
-        return Vec::new();
-    }
-
-    line_descriptors(line)
-        .into_iter()
-        .filter_map(|descriptor| {
-            let candidate = trim_technical_token(&descriptor.value);
-            if candidate.len() != 3
-                || !candidate.chars().all(|character| character.is_ascii_digit())
-            {
-                return None;
-            }
-            let parsed = candidate.parse::<u16>().ok()?;
-            ((100..=599).contains(&parsed)).then_some(candidate.to_string())
-        })
-        .collect::<BTreeSet<_>>()
+    extract_http_response_status_literals(line)
         .into_iter()
         .filter_map(|status| {
             build_candidate(
@@ -568,16 +520,19 @@ fn extract_parameter_candidates(block: &StructuredBlockData, line: &str) -> Vec<
 }
 
 fn extract_auth_rule_candidates(block: &StructuredBlockData, line: &str) -> Vec<FactCandidate> {
-    let lower = line.to_ascii_lowercase();
-    let literal = if matches_any_substring(&lower, &["bearer token", "authorization: bearer"]) {
-        Some("bearer_token")
-    } else if matches_any_substring(&lower, &["basic auth", "authorization: basic"]) {
-        Some("basic_auth")
-    } else if lower.contains("oauth") {
-        Some("oauth")
-    } else {
-        None
-    };
+    let literal = line
+        .split_once(':')
+        .filter(|(name, _)| name.trim().eq_ignore_ascii_case("authorization"))
+        .and_then(|(_, value)| value.split_ascii_whitespace().next())
+        .and_then(|scheme| {
+            if scheme.eq_ignore_ascii_case("bearer") {
+                Some("bearer_token")
+            } else if scheme.eq_ignore_ascii_case("basic") {
+                Some("basic_auth")
+            } else {
+                None
+            }
+        });
 
     literal
         .and_then(|value| {
@@ -807,7 +762,7 @@ fn qualifier_signature(qualifiers: &[TechnicalFactQualifier]) -> String {
         .join("|")
 }
 
-fn extraction_kind_prefix(block: &StructuredBlockData) -> &'static str {
+const fn extraction_kind_prefix(block: &StructuredBlockData) -> &'static str {
     match block.block_kind {
         StructuredBlockKind::EndpointBlock => "parser_endpoint_block",
         StructuredBlockKind::CodeBlock => "parser_code_block",
@@ -820,7 +775,7 @@ fn extraction_kind_prefix(block: &StructuredBlockData) -> &'static str {
     }
 }
 
-fn candidate_rank(block: &StructuredBlockData) -> u8 {
+const fn candidate_rank(block: &StructuredBlockData) -> u8 {
     match block.block_kind {
         StructuredBlockKind::EndpointBlock => 6,
         StructuredBlockKind::CodeBlock => 5,
@@ -949,16 +904,72 @@ fn extract_path_like_token(token: &str) -> Option<String> {
 }
 
 fn extract_port_from_url(url: &str) -> Option<String> {
+    url::Url::parse(url).ok()?;
     let (_, remainder) = url.split_once("://")?;
-    let authority = remainder.split('/').next().unwrap_or_default();
-    let (_, port) = authority.rsplit_once(':')?;
+    let authority = remainder.split(['/', '?', '#']).next().unwrap_or_default();
+    let host_and_port = authority.rsplit('@').next().unwrap_or_default();
+    let port = if host_and_port.starts_with('[') {
+        host_and_port.split_once("]:")?.1
+    } else {
+        host_and_port.rsplit_once(':')?.1
+    };
     extract_port_literal(port)
 }
 
 fn extract_port_literal(value: &str) -> Option<String> {
-    let digits = value.chars().filter(char::is_ascii_digit).collect::<String>();
-    let parsed = digits.parse::<u16>().ok()?;
+    if value.is_empty() || !value.chars().all(|character| character.is_ascii_digit()) {
+        return None;
+    }
+    let parsed = value.parse::<u16>().ok()?;
     ((1..=65535).contains(&parsed)).then_some(parsed.to_string())
+}
+
+fn extract_http_response_status_literals(line: &str) -> BTreeSet<String> {
+    technical_tokens(line)
+        .windows(2)
+        .filter_map(|window| {
+            is_http_version_literal(&window[0])
+                .then(|| trim_technical_token(&window[1]))
+                .filter(|candidate| {
+                    candidate.len() == 3
+                        && candidate.chars().all(|character| character.is_ascii_digit())
+                })
+                .and_then(|candidate| {
+                    candidate
+                        .parse::<u16>()
+                        .ok()
+                        .filter(|status| (100..=599).contains(status))
+                        .map(|_| candidate.to_string())
+                })
+        })
+        .collect()
+}
+
+fn is_http_version_literal(value: &str) -> bool {
+    let Some(version) = trim_technical_token(value).strip_prefix("HTTP/") else {
+        return false;
+    };
+    let mut segments = version.split('.');
+    let Some(major) = segments.next() else {
+        return false;
+    };
+    if major.is_empty() || !major.chars().all(|character| character.is_ascii_digit()) {
+        return false;
+    }
+    match (segments.next(), segments.next()) {
+        (None, None) => true,
+        (Some(minor), None) => {
+            !minor.is_empty() && minor.chars().all(|character| character.is_ascii_digit())
+        }
+        _ => false,
+    }
+}
+
+fn is_prefixed_semver_literal(value: &str) -> bool {
+    value
+        .strip_prefix('v')
+        .or_else(|| value.strip_prefix('V'))
+        .is_some_and(|version| semver::Version::parse(version).is_ok())
 }
 
 fn normalize_http_method(value: &str) -> Option<&'static str> {
@@ -988,17 +999,6 @@ fn is_parameter_name_like(candidate: &str) -> bool {
                 .any(|(a, b)| a.is_ascii_lowercase() && b.is_ascii_uppercase())
             || (compact.chars().next().is_some_and(|c| c.is_ascii_uppercase())
                 && compact.chars().skip(1).all(|c| c.is_ascii_lowercase())))
-}
-
-fn is_port_keyword(value: &str) -> bool {
-    matches!(
-        trim_technical_token(value).to_ascii_lowercase().as_str(),
-        "port" | "ports" | "tcp_port" | "udp_port"
-    )
-}
-
-fn matches_any_substring(value: &str, needles: &[&str]) -> bool {
-    needles.iter().any(|needle| value.contains(needle))
 }
 
 fn strip_leading_marker(value: &str) -> String {
@@ -1227,7 +1227,7 @@ mod tests {
     }
 
     #[test]
-    fn table_rows_keep_technical_endpoint_facts_when_headers_are_technical() {
+    fn table_rows_keep_formal_endpoint_facts_without_semantic_header_names() {
         let service = TechnicalFactService::new();
         let result = service.extract_from_blocks(ExtractTechnicalFactsCommand {
             revision_id: Uuid::now_v7(),
@@ -1239,7 +1239,7 @@ mod tests {
                 ordinal: 0,
                 block_kind: StructuredBlockKind::TableRow,
                 text: "| GET | /orders | https://api.example.test/orders | 200 |".to_string(),
-                normalized_text: "Sheet: API | Row 1 | Method: GET | Endpoint: /orders | Base URL: https://api.example.test/orders | Status Code: 200".to_string(),
+                normalized_text: "Sheet: API | Row 1 | A: GET | B: /orders | C: https://api.example.test/orders | D: 200".to_string(),
                 heading_trail: vec!["api".to_string()],
                 section_path: vec!["api".to_string()],
                 page_number: None,
@@ -1263,6 +1263,27 @@ mod tests {
             fact_kinds
                 .contains(&("url".to_string(), "https://api.example.test/orders".to_string()))
         );
+    }
+
+    #[test]
+    fn table_rows_abstain_when_only_semantic_headers_imply_technical_meaning() {
+        let facts = extract_facts(vec![StructuredBlockData {
+            block_id: Uuid::now_v7(),
+            ordinal: 0,
+            block_kind: StructuredBlockKind::TableRow,
+            text: "| 404 | 8080 |".to_string(),
+            normalized_text: "Sheet: Sample | Row 1 | Status: 404 | Port: 8080".to_string(),
+            heading_trail: Vec::new(),
+            section_path: Vec::new(),
+            page_number: None,
+            source_span: None,
+            parent_block_id: None,
+            table_coordinates: None,
+            code_language: None,
+            is_boilerplate: false,
+        }]);
+
+        assert!(facts.is_empty(), "ambiguous table values must not become technical facts");
     }
 
     fn make_test_block(
@@ -1325,6 +1346,17 @@ mod tests {
     }
 
     #[test]
+    fn environment_context_does_not_promote_bare_uppercase_tokens() {
+        let facts = extract_facts(vec![make_test_block(
+            StructuredBlockKind::Paragraph,
+            "environment DATABASE_URL",
+            None,
+        )]);
+
+        assert!(!facts.iter().any(|fact| fact.fact_kind.as_str() == "environment_variable"));
+    }
+
+    #[test]
     fn extracts_version_numbers() {
         let facts = extract_facts(vec![make_test_block(
             StructuredBlockKind::Paragraph,
@@ -1341,6 +1373,99 @@ mod tests {
             "expected a version containing '2.3.1', got: {:?}",
             versions.iter().map(|f| &f.display_value).collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    fn version_context_does_not_promote_bare_numeric_literals() {
+        let facts = extract_facts(vec![make_test_block(
+            StructuredBlockKind::Paragraph,
+            "version 2.3.1; release 2026.07",
+            None,
+        )]);
+
+        assert!(!facts.iter().any(|fact| fact.fact_kind.as_str() == "version_number"));
+    }
+
+    #[test]
+    fn error_context_does_not_promote_an_ambiguous_identifier() {
+        let facts = extract_facts(vec![make_test_block(
+            StructuredBlockKind::Paragraph,
+            "error E1234",
+            None,
+        )]);
+
+        assert!(!facts.iter().any(|fact| fact.fact_kind.as_str() == "error_code"));
+    }
+
+    #[test]
+    fn semantic_port_context_does_not_promote_a_bare_number() {
+        let facts =
+            extract_facts(vec![make_test_block(StructuredBlockKind::Paragraph, "port 8080", None)]);
+
+        assert!(!facts.iter().any(|fact| fact.fact_kind.as_str() == "port"));
+    }
+
+    #[test]
+    fn explicit_url_authority_keeps_its_port() {
+        let facts = extract_facts(vec![make_test_block(
+            StructuredBlockKind::Paragraph,
+            "https://api.example.test:8443/orders",
+            None,
+        )]);
+
+        assert!(
+            facts
+                .iter()
+                .any(|fact| { fact.fact_kind.as_str() == "port" && fact.display_value == "8443" })
+        );
+    }
+
+    #[test]
+    fn semantic_status_context_does_not_promote_a_bare_number() {
+        let facts = extract_facts(vec![make_test_block(
+            StructuredBlockKind::EndpointBlock,
+            "status 404",
+            None,
+        )]);
+
+        assert!(!facts.iter().any(|fact| fact.fact_kind.as_str() == "status_code"));
+    }
+
+    #[test]
+    fn http_response_grammar_keeps_its_status_code() {
+        let facts = extract_facts(vec![make_test_block(
+            StructuredBlockKind::EndpointBlock,
+            "HTTP/1.1 404",
+            None,
+        )]);
+
+        assert!(facts.iter().any(|fact| {
+            fact.fact_kind.as_str() == "status_code" && fact.display_value == "404"
+        }));
+    }
+
+    #[test]
+    fn auth_prose_does_not_create_protocol_facts() {
+        let facts = extract_facts(vec![make_test_block(
+            StructuredBlockKind::EndpointBlock,
+            "Bearer token, Basic auth, and OAuth are mentioned in prose",
+            None,
+        )]);
+
+        assert!(facts.iter().all(|fact| fact.fact_kind.as_str() != "auth_rule"));
+    }
+
+    #[test]
+    fn explicit_authorization_header_keeps_formal_auth_scheme() {
+        let facts = extract_facts(vec![make_test_block(
+            StructuredBlockKind::EndpointBlock,
+            "Authorization: Bearer opaque-credential",
+            None,
+        )]);
+
+        assert!(facts.iter().any(|fact| {
+            fact.fact_kind.as_str() == "auth_rule" && fact.display_value == "bearer_token"
+        }));
     }
 
     #[test]

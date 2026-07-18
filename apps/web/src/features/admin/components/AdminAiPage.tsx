@@ -1,21 +1,21 @@
-import { useSearchParams } from 'react-router-dom';
-import { useTranslation } from 'react-i18next';
+import { useSearchParams } from 'react-router-dom'
+import { useTranslation } from 'react-i18next'
 
-import type { AIScopeKind } from '@/shared/types';
-import { PageHeader } from '@/shared/components/layout/PageHeader';
-import { PageShell } from '@/shared/components/layout/PageShell';
-import AiConfigurationPanel from './AiConfigurationPanel';
-import type { AiConfigSection } from '@/features/admin/model/aiConfig';
+import type { AIScopeKind } from '@/shared/types'
+import { PageHeader } from '@/shared/components/layout/PageHeader'
+import { PageShell } from '@/shared/components/layout/PageShell'
+import AiConfigurationPanel from './AiConfigurationPanel'
+import type { AiConfigSection } from '@/features/admin/model/aiConfig'
 
-const SCOPE_VALUES: AIScopeKind[] = ['instance', 'workspace', 'library'];
-const SECTION_VALUES: AiConfigSection[] = ['bindings', 'accounts', 'catalog'];
+const SCOPE_VALUES = new Set<AIScopeKind>(['instance', 'workspace', 'library'])
+const SECTION_VALUES = new Set<AiConfigSection>(['bindings', 'accounts', 'catalog'])
 
 function parseScope(value: string | null): AIScopeKind | undefined {
-  return SCOPE_VALUES.includes(value as AIScopeKind) ? (value as AIScopeKind) : undefined;
+  return SCOPE_VALUES.has(value as AIScopeKind) ? (value as AIScopeKind) : undefined
 }
 
 function parseSection(value: string | null): AiConfigSection | undefined {
-  return SECTION_VALUES.includes(value as AiConfigSection) ? (value as AiConfigSection) : undefined;
+  return SECTION_VALUES.has(value as AiConfigSection) ? (value as AiConfigSection) : undefined
 }
 
 /**
@@ -25,8 +25,8 @@ function parseSection(value: string | null): AiConfigSection | undefined {
  * `?wizard=1` for the first-run / cold-start path.
  */
 export default function AdminAiPage() {
-  const { t } = useTranslation();
-  const [searchParams] = useSearchParams();
+  const { t } = useTranslation()
+  const [searchParams] = useSearchParams()
   return (
     <PageShell
       header={<PageHeader title={t('admin.nav.ai')} description={t('admin.nav.aiDesc')} />}
@@ -41,5 +41,5 @@ export default function AdminAiPage() {
         />
       </div>
     </PageShell>
-  );
+  )
 }

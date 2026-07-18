@@ -1,5 +1,5 @@
-import { useState, type FormEvent, type ReactNode } from 'react';
-import type { TFunction } from 'i18next';
+import { useState, type ReactNode, type SyntheticEvent } from 'react'
+import type { TFunction } from 'i18next'
 import {
   Clipboard,
   Eye,
@@ -13,21 +13,17 @@ import {
   Upload,
   X,
   XCircle,
-} from 'lucide-react';
-import { toast } from 'sonner';
+} from 'lucide-react'
+import { toast } from 'sonner'
 
-import { Button } from '@/shared/components/ui/button';
-import { Input } from '@/shared/components/ui/input';
-import {
-  Tooltip,
-  TooltipContent,
-  TooltipTrigger,
-} from '@/shared/components/ui/tooltip';
-import { StatusBadge } from '@/shared/components/StatusBadge';
-import { documentsApi, type DocumentLifecycleDetail } from '@/shared/api';
-import type { DocumentItem } from '@/shared/types';
-import { compactText, truncatedTitle } from '@/shared/lib/compactText';
-import { buildDocumentFailureNotice, humanizeDocumentStage } from '@/shared/lib/document-processing';
+import { Button } from '@/shared/components/ui/button'
+import { Input } from '@/shared/components/ui/input'
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/shared/components/ui/tooltip'
+import { StatusBadge } from '@/shared/components/StatusBadge'
+import { documentsApi, type DocumentLifecycleDetail } from '@/shared/api'
+import type { DocumentItem } from '@/shared/types'
+import { compactText, truncatedTitle } from '@/shared/lib/compactText'
+import { buildDocumentFailureNotice, humanizeDocumentStage } from '@/shared/lib/document-processing'
 
 import {
   buildDocumentStatusBadgeConfig,
@@ -35,74 +31,80 @@ import {
   formatDocumentTypeLabel,
   formatSize,
   isWebPageDocument,
-} from '@/features/documents/model/documentAdapter';
+} from '@/features/documents/model/documentAdapter'
 
-type DocumentsInspectorPanelProps = {
-  canEdit?: boolean | undefined;
-  canDelete?: boolean | undefined;
-  documentHintEditable?: boolean | undefined;
-  editorActionDisabledReason?: string | null | undefined;
-  editorActionEnabled: boolean;
-  editorActionReadOnly?: boolean | undefined;
-  formatErrorMessage?: ((error: unknown, fallback: string) => string) | undefined;
-  locale: string;
-  t: TFunction;
-  lifecycle: DocumentLifecycleDetail | null;
-  selectedDoc: DocumentItem;
-  selectionMode: boolean;
-  setDeleteDocOpen: (open: boolean) => void;
-  setReplaceFileOpen: (open: boolean) => void;
-  updateSearchParamState: (updates: Record<string, string | null>) => void;
-  onOpenEditor: () => void;
-  onDocumentHintUpdated?: ((documentId: string, documentHint: string | null) => void) | undefined;
-  onRetry: () => void;
-  onViewInGraph?: (() => void) | undefined;
-};
+type DocumentsInspectorPanelProps = Readonly<{
+  canEdit?: boolean | undefined
+  canDelete?: boolean | undefined
+  documentHintEditable?: boolean | undefined
+  editorActionDisabledReason?: string | null | undefined
+  editorActionEnabled: boolean
+  editorActionReadOnly?: boolean | undefined
+  formatErrorMessage?: ((error: unknown, fallback: string) => string) | undefined
+  locale: string
+  t: TFunction
+  lifecycle: DocumentLifecycleDetail | null
+  selectedDoc: DocumentItem
+  selectionMode: boolean
+  setDeleteDocOpen: (open: boolean) => void
+  setReplaceFileOpen: (open: boolean) => void
+  updateSearchParamState: (updates: Record<string, string | null>) => void
+  onOpenEditor: () => void
+  onDocumentHintUpdated?: ((documentId: string, documentHint: string | null) => void) | undefined
+  onRetry: () => void
+  onViewInGraph?: (() => void) | undefined
+}>
 
-const EMPTY_VALUE = '\u2014';
+const EMPTY_VALUE = '\u2014'
 
 type DocumentHintEditState = {
-  documentId: string;
-  draft: string;
-  editing: boolean;
-  saving: boolean;
-};
+  documentId: string
+  draft: string
+  editing: boolean
+  saving: boolean
+}
 
 type PipelineStageEvent = DocumentLifecycleDetail['attempts'][number]['stageEvents'][number] & {
-  details?: Record<string, unknown> | null;
-  providerCallCount?: number | null;
-};
+  details?: Record<string, unknown> | null
+  providerCallCount?: number | null
+}
 
 type PipelineDetailItem = {
-  key: string;
-  label: string;
-  value: string;
-};
+  key: string
+  label: string
+  value: string
+}
 
 type PipelineStageView = {
-  costLabel: string | null;
-  details: PipelineDetailItem[];
-  durationLabel: string;
-  event: PipelineStageEvent | null;
-  isActive: boolean;
-  isCompleted: boolean;
-  isFailed: boolean;
-  modelLabel: string | null;
-  showBilling: boolean;
-  stage: string;
-};
+  costLabel: string | null
+  details: PipelineDetailItem[]
+  durationLabel: string
+  event: PipelineStageEvent | null
+  isActive: boolean
+  isCompleted: boolean
+  isFailed: boolean
+  modelLabel: string | null
+  showBilling: boolean
+  stage: string
+}
 
-type InspectorActionButtonProps = {
-  label: string;
-  icon: ReactNode;
-  onClick: () => void;
-  disabled?: boolean | undefined;
-  disabledReason?: string | null | undefined;
-  variant?: 'default' | 'outline' | undefined;
-  className?: string | undefined;
-  wrapperClassName?: string | undefined;
-  tooltipAlign?: 'start' | 'center' | 'end' | undefined;
-};
+type InspectorActionButtonProps = Readonly<{
+  label: string
+  icon: ReactNode
+  onClick: () => void
+  disabled?: boolean | undefined
+  disabledReason?: string | null | undefined
+  variant?: 'default' | 'outline' | undefined
+  className?: string | undefined
+  wrapperClassName?: string | undefined
+  tooltipAlign?: 'start' | 'center' | 'end' | undefined
+}>
+
+function tooltipAlignmentClassName(align: 'start' | 'center' | 'end'): string {
+  if (align === 'start') return 'left-0'
+  if (align === 'end') return 'right-0'
+  return 'left-1/2 -translate-x-1/2'
+}
 
 function InspectorActionButton({
   label,
@@ -115,13 +117,8 @@ function InspectorActionButton({
   wrapperClassName = '',
   tooltipAlign = 'center',
 }: InspectorActionButtonProps) {
-  const tooltipLabel = disabled ? (disabledReason ?? label) : label;
-  const tooltipAlignmentClass =
-    tooltipAlign === 'start'
-      ? 'left-0'
-      : tooltipAlign === 'end'
-        ? 'right-0'
-        : 'left-1/2 -translate-x-1/2';
+  const tooltipLabel = disabled ? (disabledReason ?? label) : label
+  const tooltipAlignmentClass = tooltipAlignmentClassName(tooltipAlign)
 
   return (
     <span className={`group relative inline-flex ${wrapperClassName}`}>
@@ -143,7 +140,7 @@ function InspectorActionButton({
         {tooltipLabel}
       </span>
     </span>
-  );
+  )
 }
 
 const CANONICAL_PIPELINE_STAGES = [
@@ -154,19 +151,19 @@ const CANONICAL_PIPELINE_STAGES = [
   'embed_chunk',
   'extract_graph',
   'finalizing',
-] as const;
+] as const
 
 function formatPipelineDuration(elapsedMs?: number | null): string {
   if (elapsedMs == null) {
-    return EMPTY_VALUE;
+    return EMPTY_VALUE
   }
 
-  return `${(Math.max(0, elapsedMs) / 1000).toFixed(1)}s`;
+  return `${(Math.max(0, elapsedMs) / 1000).toFixed(1)}s`
 }
 
 function formatPipelineModel(modelName?: string | null): string | null {
-  const trimmed = modelName?.trim();
-  return trimmed && trimmed.length > 0 ? trimmed : null;
+  const trimmed = modelName?.trim()
+  return trimmed && trimmed.length > 0 ? trimmed : null
 }
 
 function formatPipelineMoney(
@@ -174,48 +171,48 @@ function formatPipelineMoney(
   currencyCode?: string | null,
 ): string | null {
   if (value == null || value === '') {
-    return null;
+    return null
   }
 
-  const amount = Number(value);
+  const amount = Number(value)
   if (!Number.isFinite(amount)) {
-    return null;
+    return null
   }
 
-  const fractionDigits = amount !== 0 && Math.abs(amount) < 0.0001 ? 8 : 4;
-  const formattedAmount = amount.toFixed(fractionDigits);
-  const currency = currencyCode?.trim().toUpperCase() || 'USD';
-  return currency === 'USD' ? `$${formattedAmount}` : `${formattedAmount} ${currency}`;
+  const fractionDigits = amount !== 0 && Math.abs(amount) < 0.0001 ? 8 : 4
+  const formattedAmount = amount.toFixed(fractionDigits)
+  const currency = currencyCode?.trim().toUpperCase() || 'USD'
+  return currency === 'USD' ? `$${formattedAmount}` : `${formattedAmount} ${currency}`
 }
 
 function parsePipelineMoney(value?: string | number | null): number | null {
   if (value == null || value === '') {
-    return null;
+    return null
   }
 
-  const amount = Number(value);
-  return Number.isFinite(amount) ? amount : null;
+  const amount = Number(value)
+  return Number.isFinite(amount) ? amount : null
 }
 
 function isCompletedStageStatus(status?: string | null): boolean {
-  return status === 'completed' || status === 'succeeded' || status === 'ready';
+  return status === 'completed' || status === 'succeeded' || status === 'ready'
 }
 
 function isFailedStageStatus(status?: string | null): boolean {
-  return status === 'failed' || status === 'error';
+  return status === 'failed' || status === 'error'
 }
 
 function asRecord(value: unknown): Record<string, unknown> | null {
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
-    return null;
+    return null
   }
 
-  return value as Record<string, unknown>;
+  return value as Record<string, unknown>
 }
 
 function stringDetail(details: Record<string, unknown> | null, key: string): string | null {
-  const value = details?.[key];
-  return typeof value === 'string' && value.trim().length > 0 ? value.trim() : null;
+  const value = details?.[key]
+  return typeof value === 'string' && value.trim().length > 0 ? value.trim() : null
 }
 
 function nestedStringDetail(
@@ -223,51 +220,51 @@ function nestedStringDetail(
   key: string,
   nestedKey: string,
 ): string | null {
-  return stringDetail(asRecord(details?.[key]), nestedKey);
+  return stringDetail(asRecord(details?.[key]), nestedKey)
 }
 
 function numberDetail(details: Record<string, unknown> | null, key: string): number | null {
-  const value = details?.[key];
+  const value = details?.[key]
   if (typeof value === 'number' && Number.isFinite(value)) {
-    return value;
+    return value
   }
 
   if (typeof value === 'string') {
-    const parsed = Number(value);
-    return Number.isFinite(parsed) ? parsed : null;
+    const parsed = Number(value)
+    return Number.isFinite(parsed) ? parsed : null
   }
 
-  return null;
+  return null
 }
 
 function formatIntegerDetail(value: number, locale: string): string {
-  return new Intl.NumberFormat(locale, { maximumFractionDigits: 0 }).format(value);
+  return new Intl.NumberFormat(locale, { maximumFractionDigits: 0 }).format(value)
 }
 
 function formatSourceKind(value: string | null, t: TFunction): string | null {
   if (!value) {
-    return null;
+    return null
   }
 
   switch (value.trim().toLowerCase()) {
     case 'pdf':
-      return 'PDF';
+      return 'PDF'
     case 'docx':
-      return 'DOCX';
+      return 'DOCX'
     case 'pptx':
-      return 'PPTX';
+      return 'PPTX'
     case 'image':
-      return t('documents.pipelineSourceImage');
+      return t('documents.pipelineSourceImage')
     case 'spreadsheet':
-      return t('documents.pipelineSourceSpreadsheet');
+      return t('documents.pipelineSourceSpreadsheet')
     case 'text_like':
-      return t('documents.pipelineSourceText');
+      return t('documents.pipelineSourceText')
     case 'content_storage':
-      return t('documents.pipelineSourceStorage');
+      return t('documents.pipelineSourceStorage')
     case 'knowledge_revision':
-      return t('documents.pipelineSourceRevision');
+      return t('documents.pipelineSourceRevision')
     default:
-      return value;
+      return value
   }
 }
 
@@ -279,16 +276,16 @@ function pushNumberDetail(
   t: TFunction,
   locale: string,
 ) {
-  const value = numberDetail(details, detailKey);
+  const value = numberDetail(details, detailKey)
   if (value == null) {
-    return;
+    return
   }
 
   items.push({
     key: detailKey,
     label: t(labelKey),
     value: formatIntegerDetail(value, locale),
-  });
+  })
 }
 
 function buildPipelineDetails(
@@ -296,24 +293,24 @@ function buildPipelineDetails(
   t: TFunction,
   locale: string,
 ): PipelineDetailItem[] {
-  const details = asRecord(stage.details);
-  const items: PipelineDetailItem[] = [];
+  const details = asRecord(stage.details)
+  const items: PipelineDetailItem[] = []
 
   if (stage.stage === 'extract_content') {
     const source = formatSourceKind(
       stringDetail(details, 'fileKind') ?? stringDetail(details, 'source'),
       t,
-    );
+    )
     if (source) {
-      items.push({ key: 'source', label: t('documents.pipelineSource'), value: source });
+      items.push({ key: 'source', label: t('documents.pipelineSource'), value: source })
     }
-    const engine = nestedStringDetail(details, 'recognition', 'engine');
+    const engine = nestedStringDetail(details, 'recognition', 'engine')
     if (engine) {
-      items.push({ key: 'engine', label: t('documents.pipelineEngine'), value: engine });
+      items.push({ key: 'engine', label: t('documents.pipelineEngine'), value: engine })
     }
-    pushNumberDetail(items, details, 'pageCount', 'documents.pipelinePages', t, locale);
-    pushNumberDetail(items, details, 'lineCount', 'documents.pipelineLines', t, locale);
-    pushNumberDetail(items, details, 'extractUnitCount', 'documents.pipelineUnits', t, locale);
+    pushNumberDetail(items, details, 'pageCount', 'documents.pipelinePages', t, locale)
+    pushNumberDetail(items, details, 'lineCount', 'documents.pipelineLines', t, locale)
+    pushNumberDetail(items, details, 'extractUnitCount', 'documents.pipelineUnits', t, locale)
     pushNumberDetail(
       items,
       details,
@@ -321,28 +318,21 @@ function buildPipelineDetails(
       'documents.pipelineReused',
       t,
       locale,
-    );
-    pushNumberDetail(items, details, 'contentLength', 'documents.pipelineCharacters', t, locale);
+    )
+    pushNumberDetail(items, details, 'contentLength', 'documents.pipelineCharacters', t, locale)
   }
 
   if (stage.stage === 'prepare_structure') {
-    pushNumberDetail(items, details, 'blockCount', 'documents.pipelineBlocks', t, locale);
-    pushNumberDetail(items, details, 'chunkCount', 'documents.pipelineChunks', t, locale);
+    pushNumberDetail(items, details, 'blockCount', 'documents.pipelineBlocks', t, locale)
+    pushNumberDetail(items, details, 'chunkCount', 'documents.pipelineChunks', t, locale)
   }
 
   if (stage.stage === 'chunk_content') {
-    pushNumberDetail(items, details, 'chunkCount', 'documents.pipelineChunks', t, locale);
+    pushNumberDetail(items, details, 'chunkCount', 'documents.pipelineChunks', t, locale)
   }
 
   if (stage.stage === 'extract_technical_facts') {
-    pushNumberDetail(
-      items,
-      details,
-      'technicalFactCount',
-      'documents.pipelineFacts',
-      t,
-      locale,
-    );
+    pushNumberDetail(items, details, 'technicalFactCount', 'documents.pipelineFacts', t, locale)
     pushNumberDetail(
       items,
       details,
@@ -350,24 +340,17 @@ function buildPipelineDetails(
       'documents.pipelineConflicts',
       t,
       locale,
-    );
+    )
   }
 
   if (stage.stage === 'embed_chunk') {
-    pushNumberDetail(items, details, 'chunksEmbedded', 'documents.pipelineEmbedded', t, locale);
-    pushNumberDetail(items, details, 'chunksReused', 'documents.pipelineReused', t, locale);
+    pushNumberDetail(items, details, 'chunksEmbedded', 'documents.pipelineEmbedded', t, locale)
+    pushNumberDetail(items, details, 'chunksReused', 'documents.pipelineReused', t, locale)
   }
 
   if (stage.stage === 'extract_graph') {
-    pushNumberDetail(items, details, 'chunksProcessed', 'documents.pipelineChunks', t, locale);
-    pushNumberDetail(
-      items,
-      details,
-      'graphChunksSelected',
-      'documents.pipelineSelected',
-      t,
-      locale,
-    );
+    pushNumberDetail(items, details, 'chunksProcessed', 'documents.pipelineChunks', t, locale)
+    pushNumberDetail(items, details, 'graphChunksSelected', 'documents.pipelineSelected', t, locale)
     pushNumberDetail(
       items,
       details,
@@ -375,7 +358,7 @@ function buildPipelineDetails(
       'documents.pipelineEntities',
       t,
       locale,
-    );
+    )
     pushNumberDetail(
       items,
       details,
@@ -383,10 +366,10 @@ function buildPipelineDetails(
       'documents.pipelineRelations',
       t,
       locale,
-    );
-    pushNumberDetail(items, details, 'projectedNodes', 'documents.pipelineNodes', t, locale);
-    pushNumberDetail(items, details, 'projectedEdges', 'documents.pipelineEdges', t, locale);
-    pushNumberDetail(items, details, 'reusedChunks', 'documents.pipelineReused', t, locale);
+    )
+    pushNumberDetail(items, details, 'projectedNodes', 'documents.pipelineNodes', t, locale)
+    pushNumberDetail(items, details, 'projectedEdges', 'documents.pipelineEdges', t, locale)
+    pushNumberDetail(items, details, 'reusedChunks', 'documents.pipelineReused', t, locale)
   }
 
   if (stage.providerCallCount != null && stage.providerCallCount > 0) {
@@ -394,10 +377,225 @@ function buildPipelineDetails(
       key: 'providerCallCount',
       label: t('documents.pipelineCalls'),
       value: formatIntegerDetail(stage.providerCallCount, locale),
-    });
+    })
   }
 
-  return items;
+  return items
+}
+
+function currentPipelineStage(
+  stages: PipelineStageView[],
+  status: DocumentItem['status'],
+): string | null {
+  const failed = stages.find((stage) => stage.isFailed)
+  if (failed) return failed.stage
+  const live = stages.find((stage) => stage.event && !stage.isCompleted)
+  if (live) return live.stage
+  if (status !== 'processing' && status !== 'queued') return null
+  const lastObserved = stages.reduce((last, stage, index) => (stage.event ? index : last), -1)
+  return stages[Math.min(Math.max(lastObserved + 1, 0), stages.length - 1)]?.stage ?? null
+}
+
+function pipelineRowTone(stage: PipelineStageView, selected: boolean): string {
+  if (stage.isFailed) return 'border-l-destructive bg-destructive/5 text-destructive'
+  if (stage.isActive) return 'border-l-primary bg-primary/[0.055] text-primary'
+  if (selected) return 'border-l-primary/45 bg-surface-sunken/55 text-foreground'
+  return 'border-l-transparent text-foreground hover:bg-surface-sunken/45'
+}
+
+function pipelineDotTone(stage: PipelineStageView): string {
+  if (stage.isFailed) return 'bg-destructive'
+  if (stage.isActive) return 'bg-primary'
+  if (stage.isCompleted) return 'bg-status-ready'
+  return 'bg-muted-foreground/35'
+}
+
+function pipelineDetailTone(stage: PipelineStageView): string {
+  if (stage.isFailed) return 'border-l-destructive border-t-destructive/15 bg-destructive/[0.035]'
+  if (stage.isActive) return 'border-l-primary border-t-primary/15 bg-primary/[0.035]'
+  return 'border-l-primary/35 border-t-border/55 bg-surface-sunken/35'
+}
+
+function visibleProgress(document: DocumentItem): number | null {
+  if (document.progressPercent != null) return document.progressPercent
+  return document.status === 'processing' ? 0 : null
+}
+
+type DocumentHintValueProps = Readonly<{
+  editable: boolean
+  display: string
+  value: string
+  isUrl: boolean
+  placeholder: string
+  onEdit: () => void
+}>
+
+function DocumentHintValue({
+  editable,
+  display,
+  value,
+  isUrl,
+  placeholder,
+  onEdit,
+}: DocumentHintValueProps) {
+  if (editable) {
+    return (
+      <button
+        type="button"
+        className="min-w-0 flex-1 truncate text-left font-mono text-xs font-semibold leading-4 text-foreground underline-offset-2 hover:text-primary hover:underline"
+        onClick={onEdit}
+        title={value || placeholder}
+      >
+        {value ? display : EMPTY_VALUE}
+      </button>
+    )
+  }
+  if (isUrl) {
+    return (
+      <a
+        className="min-w-0 truncate font-mono text-xs font-semibold leading-4 text-primary underline-offset-2 hover:underline"
+        href={value}
+        rel="noopener noreferrer"
+        target="_blank"
+        title={value}
+      >
+        {display}
+      </a>
+    )
+  }
+  return (
+    <div
+      className="min-w-0 truncate font-mono text-xs font-semibold leading-4 text-foreground"
+      title={value}
+    >
+      {display}
+    </div>
+  )
+}
+
+function pipelineCosts(
+  lifecycle: DocumentLifecycleDetail | null,
+  fallbackCurrency: string | null | undefined,
+): Map<string, { amount: number; currencyCode: string | null }> {
+  const costs = new Map<string, { amount: number; currencyCode: string | null }>()
+  for (const attempt of lifecycle?.attempts ?? []) {
+    for (const event of attempt.stageEvents ?? []) {
+      const amount = parsePipelineMoney(event.estimatedCost)
+      if (amount == null) continue
+      const existing = costs.get(event.stage)
+      costs.set(event.stage, {
+        amount: (existing?.amount ?? 0) + amount,
+        currencyCode:
+          existing?.currencyCode ??
+          event.currencyCode ??
+          attempt.currencyCode ??
+          fallbackCurrency ??
+          null,
+      })
+    }
+  }
+  return costs
+}
+
+function inspectorLabels(
+  document: DocumentItem,
+  isReadOnly: boolean,
+  selectionMode: boolean,
+  t: TFunction,
+) {
+  let editorLabel = t('documents.edit')
+  let editorIcon: ReactNode = <FilePenLine />
+  if (isReadOnly) {
+    editorLabel = t('documents.viewDocument')
+    editorIcon = <Eye />
+  }
+  const sourceLabel =
+    document.sourceAccess?.kind === 'stored_document'
+      ? t('documents.downloadDocument')
+      : t('documents.openSourceUrl')
+  return {
+    editorLabel,
+    editorIcon,
+    sourceLabel,
+    rootClassName: `h-full overflow-y-auto bg-card ${selectionMode ? 'opacity-40 pointer-events-none' : ''}`,
+  }
+}
+
+function failureNoticeForDocument(document: DocumentItem, t: TFunction) {
+  if (document.status !== 'failed') return undefined
+  return (
+    document.failureNotice ??
+    buildDocumentFailureNotice(
+      {
+        failureCode: document.failureCode,
+        failureMessage: document.failureMessage ?? document.statusReason,
+        stage: document.stage,
+      },
+      t,
+    )
+  )
+}
+
+function displayNameForDocument(document: DocumentItem, isWebPage: boolean): string {
+  if (isWebPage && document.sourceUri) return document.sourceUri
+  return document.fileName
+}
+
+function resolvedHintState(
+  state: DocumentHintEditState,
+  documentId: string,
+  documentHint: string,
+): DocumentHintEditState {
+  if (state.documentId === documentId) return state
+  return { documentId, draft: documentHint, editing: false, saving: false }
+}
+
+function resolveFocusedPipelineStage(
+  stages: PipelineStageView[],
+  selection: { documentId: string; stage: string | null },
+  documentId: string,
+  currentStage: string | null,
+): PipelineStageView | null {
+  const selectedStage = selection.documentId === documentId ? selection.stage : null
+  const stageName = selectedStage ?? currentStage
+  if (!stageName) return null
+  return stages.find((stage) => stage.stage === stageName) ?? null
+}
+
+function pipelineViews(
+  events: PipelineStageEvent[],
+  costs: Map<string, { amount: number; currencyCode: string | null }>,
+  currencyCode: string | null | undefined,
+  t: TFunction,
+  locale: string,
+): PipelineStageView[] {
+  const byName = new Map(events.map((event) => [event.stage, event]))
+  const names = [
+    ...CANONICAL_PIPELINE_STAGES,
+    ...events
+      .map((event) => event.stage)
+      .filter((stage) => !(CANONICAL_PIPELINE_STAGES as readonly string[]).includes(stage)),
+  ]
+  return names.map((stage) => {
+    const event = byName.get(stage) ?? null
+    const modelLabel = formatPipelineModel(event?.modelName)
+    const aggregate = costs.get(stage)
+    const costLabel = aggregate
+      ? formatPipelineMoney(aggregate.amount, aggregate.currencyCode)
+      : formatPipelineMoney(event?.estimatedCost, event?.currencyCode ?? currencyCode)
+    return {
+      costLabel,
+      details: event ? buildPipelineDetails(event, t, locale) : [],
+      durationLabel: formatPipelineDuration(event?.elapsedMs),
+      event,
+      isActive: false,
+      isCompleted: isCompletedStageStatus(event?.status),
+      isFailed: isFailedStageStatus(event?.status),
+      modelLabel,
+      showBilling: modelLabel != null || costLabel != null,
+      stage,
+    }
+  })
 }
 
 export function DocumentsInspectorPanel({
@@ -425,183 +623,100 @@ export function DocumentsInspectorPanel({
     selectedDoc.sourceKind,
     selectedDoc.sourceUri,
     selectedDoc.fileName,
-  );
-  const displayName =
-    isWebPage && selectedDoc.sourceUri ? selectedDoc.sourceUri : selectedDoc.fileName;
-  const documentHint = selectedDoc.documentHint?.trim() ?? '';
+  )
+  const displayName = displayNameForDocument(selectedDoc, isWebPage)
+  const documentHint = selectedDoc.documentHint?.trim() ?? ''
   const [nameExpansion, setNameExpansion] = useState({
     documentId: selectedDoc.id,
     expanded: false,
-  });
+  })
   const [documentHintEditState, setDocumentHintEditState] = useState<DocumentHintEditState>({
     documentId: selectedDoc.id,
     draft: documentHint,
     editing: false,
     saving: false,
-  });
+  })
   const [pipelineSelection, setPipelineSelection] = useState<{
-    documentId: string;
-    stage: string | null;
+    documentId: string
+    stage: string | null
   }>({
     documentId: selectedDoc.id,
     stage: null,
-  });
-  const activeDocumentHintEditState =
-    documentHintEditState.documentId === selectedDoc.id
-      ? documentHintEditState
-      : {
-          documentId: selectedDoc.id,
-          draft: documentHint,
-          editing: false,
-          saving: false,
-        };
-  const documentHintEditing = activeDocumentHintEditState.editing;
-  const documentHintDraft = activeDocumentHintEditState.draft;
-  const documentHintSaving = activeDocumentHintEditState.saving;
+  })
+  const activeDocumentHintEditState = resolvedHintState(
+    documentHintEditState,
+    selectedDoc.id,
+    documentHint,
+  )
+  const documentHintEditing = activeDocumentHintEditState.editing
+  const documentHintDraft = activeDocumentHintEditState.draft
+  const documentHintSaving = activeDocumentHintEditState.saving
 
-  const showFullName = nameExpansion.documentId === selectedDoc.id && nameExpansion.expanded;
-  const compactDisplayName = compactText(displayName, 96);
+  const showFullName = nameExpansion.documentId === selectedDoc.id && nameExpansion.expanded
+  const compactDisplayName = compactText(displayName, 96)
   const typeLabel = formatDocumentTypeLabel(selectedDoc.fileType, selectedDoc.sourceKind, t, {
     sourceUri: selectedDoc.sourceUri,
     fileName: selectedDoc.fileName,
-  });
-  const compactTypeLabel = compactText(typeLabel, 54);
-  const compactDocumentId = compactText(selectedDoc.id, 30);
-  const documentHintDisplay = documentHint.length > 80 ? documentHint.slice(0, 80) : documentHint;
+  })
+  const compactTypeLabel = compactText(typeLabel, 54)
+  const compactDocumentId = compactText(selectedDoc.id, 30)
+  const documentHintDisplay = documentHint.length > 80 ? documentHint.slice(0, 80) : documentHint
   const documentHintIsUrl =
-    documentHint.startsWith('http://') || documentHint.startsWith('https://');
+    documentHint.startsWith('http://') || documentHint.startsWith('https://')
   const showDocumentHintField =
-    documentHint.length > 0 || documentHintEditable || documentHintEditing;
-  const statusBadge = buildDocumentStatusBadgeConfig(t)[selectedDoc.status];
-  const latestLifecycleAttempt = lifecycle?.attempts?.[0];
-  const pipelineStageEvents =
-    (latestLifecycleAttempt?.stageEvents ?? []) as PipelineStageEvent[];
-  const pipelineTotalCost = lifecycle?.totalCost ?? latestLifecycleAttempt?.totalCost;
-  const pipelineCurrencyCode = lifecycle?.currencyCode ?? latestLifecycleAttempt?.currencyCode;
-  const pipelineTotalDuration = formatPipelineDuration(latestLifecycleAttempt?.totalElapsedMs);
-  const pipelineTotalCostLabel = formatPipelineMoney(pipelineTotalCost, pipelineCurrencyCode);
-  const showPipelineTotal =
-    pipelineTotalDuration !== EMPTY_VALUE || pipelineTotalCostLabel != null;
-  const pipelineStageCostByName = new Map<string, { amount: number; currencyCode: string | null }>();
-  for (const attempt of lifecycle?.attempts ?? []) {
-    for (const stageEvent of attempt.stageEvents ?? []) {
-      const amount = parsePipelineMoney(stageEvent.estimatedCost);
-      if (amount == null) {
-        continue;
-      }
-      const existing = pipelineStageCostByName.get(stageEvent.stage);
-      pipelineStageCostByName.set(stageEvent.stage, {
-        amount: (existing?.amount ?? 0) + amount,
-        currencyCode:
-          existing?.currencyCode ??
-          stageEvent.currencyCode ??
-          attempt.currencyCode ??
-          pipelineCurrencyCode ??
-          null,
-      });
-    }
-  }
-  const failureNotice =
-    selectedDoc.status === 'failed'
-      ? selectedDoc.failureNotice ??
-        buildDocumentFailureNotice(
-          {
-            failureCode: selectedDoc.failureCode,
-            failureMessage: selectedDoc.failureMessage ?? selectedDoc.statusReason,
-            stage: selectedDoc.stage,
-          },
-          t,
-        )
-      : undefined;
-  const visibleProgressPercent =
-    selectedDoc.progressPercent != null
-      ? selectedDoc.progressPercent
-      : selectedDoc.status === 'processing'
-        ? 0
-        : null;
-  const showInspectorProgress = visibleProgressPercent != null && selectedDoc.status !== 'ready';
-  const pipelineStageByName = new Map<string, PipelineStageEvent>();
-  for (const stageEvent of pipelineStageEvents) {
-    pipelineStageByName.set(stageEvent.stage, stageEvent);
-  }
-  const pipelineStageNames = [
-    ...CANONICAL_PIPELINE_STAGES,
-    ...pipelineStageEvents
-      .map((stageEvent) => stageEvent.stage)
-      .filter((stage) => !(CANONICAL_PIPELINE_STAGES as readonly string[]).includes(stage)),
-  ];
-  const rawPipelineStageViews = pipelineStageNames.map((stage) => {
-    const event = pipelineStageByName.get(stage) ?? null;
-    const modelLabel = formatPipelineModel(event?.modelName);
-    const stageCurrency = event?.currencyCode ?? lifecycle?.currencyCode;
-    const aggregateCost = pipelineStageCostByName.get(stage);
-    const costLabel = aggregateCost
-      ? formatPipelineMoney(aggregateCost.amount, aggregateCost.currencyCode)
-      : formatPipelineMoney(event?.estimatedCost, stageCurrency);
-    const durationLabel = formatPipelineDuration(event?.elapsedMs);
-    const details = event ? buildPipelineDetails(event, t, locale) : [];
-
-    return {
-      costLabel,
-      details,
-      durationLabel,
-      event,
-      isActive: false,
-      isCompleted: isCompletedStageStatus(event?.status),
-      isFailed: isFailedStageStatus(event?.status),
-      modelLabel,
-      showBilling: modelLabel != null || costLabel != null,
-      stage,
-    };
-  });
-  const failedPipelineStage = rawPipelineStageViews.find((stage) => stage.isFailed);
-  const livePipelineStage = rawPipelineStageViews.find(
-    (stage) => stage.event && !stage.isCompleted && !stage.isFailed,
-  );
-  const lastObservedPipelineStageIndex = rawPipelineStageViews.reduce(
-    (lastIndex, stage, index) => (stage.event ? index : lastIndex),
-    -1,
-  );
-  const currentPipelineStageName =
-    failedPipelineStage?.stage ??
-    livePipelineStage?.stage ??
-    (selectedDoc.status === 'processing' || selectedDoc.status === 'queued'
-      ? rawPipelineStageViews[
-          Math.min(Math.max(lastObservedPipelineStageIndex + 1, 0), rawPipelineStageViews.length - 1)
-        ]?.stage
-      : null);
+    documentHint.length > 0 || documentHintEditable || documentHintEditing
+  const statusBadge = buildDocumentStatusBadgeConfig(t)[selectedDoc.status]
+  const failureNotice = failureNoticeForDocument(selectedDoc, t)
+  const visibleProgressPercent = visibleProgress(selectedDoc)
+  const showInspectorProgress = visibleProgressPercent != null && selectedDoc.status !== 'ready'
+  const latestLifecycleAttempt = lifecycle?.attempts?.[0]
+  const pipelineStageEvents = (latestLifecycleAttempt?.stageEvents ?? []) as PipelineStageEvent[]
+  const pipelineTotalCost = lifecycle?.totalCost ?? latestLifecycleAttempt?.totalCost
+  const pipelineCurrencyCode = lifecycle?.currencyCode ?? latestLifecycleAttempt?.currencyCode
+  const pipelineTotalDuration = formatPipelineDuration(latestLifecycleAttempt?.totalElapsedMs)
+  const pipelineTotalCostLabel = formatPipelineMoney(pipelineTotalCost, pipelineCurrencyCode)
+  const showPipelineTotal = pipelineTotalDuration !== EMPTY_VALUE || pipelineTotalCostLabel != null
+  const pipelineStageCostByName = pipelineCosts(lifecycle, pipelineCurrencyCode)
+  const rawPipelineStageViews = pipelineViews(
+    pipelineStageEvents,
+    pipelineStageCostByName,
+    lifecycle?.currencyCode,
+    t,
+    locale,
+  )
+  const currentPipelineStageName = currentPipelineStage(rawPipelineStageViews, selectedDoc.status)
   const pipelineStageViews: PipelineStageView[] = rawPipelineStageViews.map((stage) => ({
     ...stage,
     isActive: stage.stage === currentPipelineStageName,
-  }));
-  const selectedPipelineStageName =
-    pipelineSelection.documentId === selectedDoc.id ? pipelineSelection.stage : null;
-  const focusedPipelineStageName = selectedPipelineStageName ?? currentPipelineStageName ?? null;
-  const focusedPipelineStage = focusedPipelineStageName
-    ? (pipelineStageViews.find((stage) => stage.stage === focusedPipelineStageName) ?? null)
-    : null;
-  const rootClassName = 'h-full overflow-y-auto bg-card';
+  }))
+  const focusedPipelineStage = resolveFocusedPipelineStage(
+    pipelineStageViews,
+    pipelineSelection,
+    selectedDoc.id,
+    currentPipelineStageName,
+  )
+  const labels = inspectorLabels(selectedDoc, editorActionReadOnly, selectionMode, t)
 
   const openSource = () => {
-    const href = selectedDoc.sourceAccess?.href ?? selectedDoc.sourceUri;
+    const href = selectedDoc.sourceAccess?.href ?? selectedDoc.sourceUri
     if (!href) {
-      return;
+      return
     }
 
-    window.open(href, '_blank', 'noopener,noreferrer');
-  };
+    window.open(href, '_blank', 'noopener,noreferrer')
+  }
 
   const openDocumentHintEditor = () => {
     if (!documentHintEditable) {
-      return;
+      return
     }
     setDocumentHintEditState({
       documentId: selectedDoc.id,
       draft: documentHint,
       editing: true,
       saving: false,
-    });
-  };
+    })
+  }
 
   const cancelDocumentHintEdit = () => {
     setDocumentHintEditState({
@@ -609,68 +724,56 @@ export function DocumentsInspectorPanel({
       draft: documentHint,
       editing: false,
       saving: false,
-    });
-  };
+    })
+  }
 
-  const saveDocumentHint = async (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
+  const saveDocumentHint = async (event: SyntheticEvent<HTMLFormElement>) => {
+    event.preventDefault()
     if (!documentHintEditable || documentHintSaving) {
-      return;
+      return
     }
 
-    const nextDocumentHint = documentHintDraft.trim();
-    const normalizedDocumentHint = nextDocumentHint.length > 0 ? nextDocumentHint : null;
+    const nextDocumentHint = documentHintDraft.trim()
+    const normalizedDocumentHint = nextDocumentHint.length > 0 ? nextDocumentHint : null
     setDocumentHintEditState({
       documentId: selectedDoc.id,
       draft: documentHintDraft,
       editing: true,
       saving: true,
-    });
+    })
     try {
       const savedDocumentHint = await documentsApi.updateDocumentHint(
         selectedDoc.id,
         normalizedDocumentHint,
-      );
-      onDocumentHintUpdated?.(selectedDoc.id, savedDocumentHint);
+      )
+      onDocumentHintUpdated?.(selectedDoc.id, savedDocumentHint)
       setDocumentHintEditState({
         documentId: selectedDoc.id,
         draft: savedDocumentHint ?? '',
         editing: false,
         saving: false,
-      });
-      toast.success(t('documents.documentHintUpdated'));
+      })
+      toast.success(t('documents.documentHintUpdated'))
     } catch (error) {
       toast.error(
         formatErrorMessage
           ? formatErrorMessage(error, t('documents.documentHintUpdateFailed'))
           : t('documents.documentHintUpdateFailed'),
-      );
+      )
     } finally {
       setDocumentHintEditState((state) =>
-        state.documentId === selectedDoc.id
-          ? { ...state, saving: false }
-          : state,
-      );
+        state.documentId === selectedDoc.id ? { ...state, saving: false } : state,
+      )
     }
-  };
+  }
 
-  const editorActionLabel = editorActionReadOnly ? t('documents.viewDocument') : t('documents.edit');
-  const editorActionIcon = editorActionReadOnly ? <Eye /> : <FilePenLine />;
-  const sourceActionLabel =
-    selectedDoc.sourceAccess?.kind === 'stored_document'
-      ? t('documents.downloadDocument')
-      : t('documents.openSourceUrl');
-  const retryActionLabel = t('documents.retryProcessing');
-  const replaceActionLabel = t('documents.replaceFile');
-  const deleteActionLabel = t('documents.delete');
-  const hasSourceAction = Boolean(selectedDoc.sourceAccess?.href || selectedDoc.sourceUri);
+  const retryActionLabel = t('documents.retryProcessing')
+  const replaceActionLabel = t('documents.replaceFile')
+  const deleteActionLabel = t('documents.delete')
+  const hasSourceAction = Boolean(selectedDoc.sourceAccess?.href || selectedDoc.sourceUri)
 
   return (
-    <div
-      className={`${rootClassName} ${
-        selectionMode ? 'opacity-40 pointer-events-none' : ''
-      }`}
-    >
+    <div className={labels.rootClassName}>
       <div className="border-b px-4 py-3 flex items-start justify-between gap-3">
         <div className="min-w-0 flex-1">
           <h3
@@ -708,7 +811,11 @@ export function DocumentsInspectorPanel({
         <div className={showInspectorProgress ? 'space-y-1' : undefined}>
           <div className="flex items-center justify-between gap-3">
             <div className="min-w-0">
-              <StatusBadge tone={statusBadge.tone} className="whitespace-nowrap" title={selectedDoc.statusReason}>
+              <StatusBadge
+                tone={statusBadge.tone}
+                className="whitespace-nowrap"
+                title={selectedDoc.statusReason}
+              >
                 {statusBadge.label}
               </StatusBadge>
               {selectedDoc.stage &&
@@ -717,7 +824,9 @@ export function DocumentsInspectorPanel({
                 )}
             </div>
             {showInspectorProgress && (
-              <span className="shrink-0 text-xs font-medium tabular-nums">{visibleProgressPercent}%</span>
+              <span className="shrink-0 text-xs font-medium tabular-nums">
+                {visibleProgressPercent}%
+              </span>
             )}
           </div>
           {showInspectorProgress && (
@@ -747,7 +856,9 @@ export function DocumentsInspectorPanel({
               </div>
             </div>
             <div className="mt-2 rounded-md bg-destructive/10 px-2 py-1.5 text-xs">
-              <div className="font-semibold text-foreground">{t('documents.failureActionLabel')}</div>
+              <div className="font-semibold text-foreground">
+                {t('documents.failureActionLabel')}
+              </div>
               <div className="mt-0.5 text-muted-foreground [overflow-wrap:anywhere]">
                 {failureNotice.action}
               </div>
@@ -772,7 +883,7 @@ export function DocumentsInspectorPanel({
                       onClick={() => {
                         void navigator.clipboard
                           .writeText(failureNotice.diagnosticCode ?? '')
-                          .then(() => toast.success(t('documents.failureCodeCopied')));
+                          .then(() => toast.success(t('documents.failureCodeCopied')))
                       }}
                     >
                       <Clipboard className="h-3.5 w-3.5" />
@@ -821,7 +932,9 @@ export function DocumentsInspectorPanel({
             ))}
             {/* Document ID with copy button */}
             <div className="col-span-2 min-w-0">
-              <div className="truncate leading-4 text-muted-foreground">{t('documents.documentId')}</div>
+              <div className="truncate leading-4 text-muted-foreground">
+                {t('documents.documentId')}
+              </div>
               <div className="flex items-center gap-1.5 min-w-0">
                 <span
                   className="truncate font-mono text-xs font-semibold leading-4 text-foreground"
@@ -834,9 +947,9 @@ export function DocumentsInspectorPanel({
                   className="shrink-0 p-0.5 rounded hover:bg-muted transition-colors text-muted-foreground hover:text-foreground"
                   aria-label={t('documents.copyDocumentId')}
                   onClick={() => {
-                    void navigator.clipboard.writeText(selectedDoc.id).then(() =>
-                      toast.success(t('documents.documentIdCopied')),
-                    );
+                    void navigator.clipboard
+                      .writeText(selectedDoc.id)
+                      .then(() => toast.success(t('documents.documentIdCopied')))
                   }}
                 >
                   <Clipboard className="h-3.5 w-3.5" />
@@ -865,7 +978,10 @@ export function DocumentsInspectorPanel({
                   </Tooltip>
                 </div>
                 {documentHintEditing ? (
-                  <form className="mt-1 flex min-w-0 items-center gap-1.5" onSubmit={saveDocumentHint}>
+                  <form
+                    className="mt-1 flex min-w-0 items-center gap-1.5"
+                    onSubmit={(event) => void saveDocumentHint(event)}
+                  >
                     <Input
                       aria-label={t('documents.documentHint')}
                       autoFocus
@@ -903,33 +1019,14 @@ export function DocumentsInspectorPanel({
                   </form>
                 ) : (
                   <div className="mt-0.5 flex min-w-0 items-center gap-1.5">
-                    {documentHintEditable ? (
-                      <button
-                        type="button"
-                        className="min-w-0 flex-1 truncate text-left font-mono text-xs font-semibold leading-4 text-foreground underline-offset-2 hover:text-primary hover:underline"
-                        onClick={openDocumentHintEditor}
-                        title={documentHint || t('documents.documentHintEditPlaceholder')}
-                      >
-                        {documentHint ? documentHintDisplay : EMPTY_VALUE}
-                      </button>
-                    ) : documentHintIsUrl ? (
-                      <a
-                        className="min-w-0 truncate font-mono text-xs font-semibold leading-4 text-primary underline-offset-2 hover:underline"
-                        href={documentHint}
-                        rel="noopener noreferrer"
-                        target="_blank"
-                        title={documentHint}
-                      >
-                        {documentHintDisplay}
-                      </a>
-                    ) : (
-                      <div
-                        className="min-w-0 truncate font-mono text-xs font-semibold leading-4 text-foreground"
-                        title={documentHint}
-                      >
-                        {documentHintDisplay}
-                      </div>
-                    )}
+                    <DocumentHintValue
+                      editable={documentHintEditable}
+                      display={documentHintDisplay}
+                      value={documentHint}
+                      isUrl={documentHintIsUrl}
+                      placeholder={t('documents.documentHintEditPlaceholder')}
+                      onEdit={openDocumentHintEditor}
+                    />
                     {documentHintEditable && (
                       <Button
                         aria-label={t('documents.documentHintEditAria')}
@@ -955,26 +1052,14 @@ export function DocumentsInspectorPanel({
             <div className="space-y-1.5" data-testid="document-pipeline">
               <div className="overflow-hidden rounded-md border border-border/70 bg-background">
                 {pipelineStageViews.map((stage) => {
-                  const isSelected = stage.stage === focusedPipelineStage?.stage;
-                  const rowTone = stage.isFailed
-                    ? 'border-l-destructive bg-destructive/5 text-destructive'
-                    : stage.isActive
-                      ? 'border-l-primary bg-primary/[0.055] text-primary'
-                      : isSelected
-                        ? 'border-l-primary/45 bg-surface-sunken/55 text-foreground'
-                        : 'border-l-transparent text-foreground hover:bg-surface-sunken/45';
-                  const dotTone = stage.isFailed
-                    ? 'bg-destructive'
-                    : stage.isActive
-                      ? 'bg-primary'
-                      : stage.isCompleted
-                        ? 'bg-status-ready'
-                        : 'bg-muted-foreground/35';
+                  const isSelected = stage.stage === focusedPipelineStage?.stage
+                  const rowTone = pipelineRowTone(stage, isSelected)
+                  const dotTone = pipelineDotTone(stage)
                   const showFocusedDetails =
                     isSelected &&
                     (stage.showBilling ||
                       stage.details.length > 0 ||
-                      stage.durationLabel !== EMPTY_VALUE);
+                      stage.durationLabel !== EMPTY_VALUE)
 
                   return (
                     <div key={stage.stage} className="border-t border-border/55 first:border-t-0">
@@ -1009,13 +1094,7 @@ export function DocumentsInspectorPanel({
                       {showFocusedDetails && (
                         <div
                           data-testid={`pipeline-stage-${stage.stage}`}
-                          className={`max-h-20 overflow-y-auto border-l-2 border-t px-3 py-1.5 ${
-                            stage.isFailed
-                              ? 'border-l-destructive border-t-destructive/15 bg-destructive/[0.035]'
-                              : stage.isActive
-                                ? 'border-l-primary border-t-primary/15 bg-primary/[0.035]'
-                                : 'border-l-primary/35 border-t-border/55 bg-surface-sunken/35'
-                          }`}
+                          className={`max-h-20 overflow-y-auto border-l-2 border-t px-3 py-1.5 ${pipelineDetailTone(stage)}`}
                         >
                           {stage.showBilling && (
                             <div className="flex min-w-0 items-center gap-2 rounded bg-background/75 px-2 py-1 text-2xs leading-4 ring-1 ring-border/45">
@@ -1035,7 +1114,9 @@ export function DocumentsInspectorPanel({
                             </div>
                           )}
                           {stage.details.length > 0 && (
-                            <div className={`${stage.showBilling ? 'mt-1.5' : ''} flex flex-wrap gap-1`}>
+                            <div
+                              className={`${stage.showBilling ? 'mt-1.5' : ''} flex flex-wrap gap-1`}
+                            >
                               {stage.details.map((item) => (
                                 <span
                                   key={item.key}
@@ -1052,7 +1133,7 @@ export function DocumentsInspectorPanel({
                         </div>
                       )}
                     </div>
-                  );
+                  )
                 })}
               </div>
 
@@ -1077,8 +1158,8 @@ export function DocumentsInspectorPanel({
 
         <div className="flex items-center gap-1.5 pt-0.5 flex-wrap">
           <InspectorActionButton
-            label={editorActionLabel}
-            icon={editorActionIcon}
+            label={labels.editorLabel}
+            icon={labels.editorIcon}
             onClick={onOpenEditor}
             disabled={!editorActionEnabled}
             disabledReason={editorActionDisabledReason}
@@ -1088,7 +1169,7 @@ export function DocumentsInspectorPanel({
           />
           {hasSourceAction && (
             <InspectorActionButton
-              label={sourceActionLabel}
+              label={labels.sourceLabel}
               icon={<Download />}
               onClick={openSource}
             />
@@ -1101,11 +1182,7 @@ export function DocumentsInspectorPanel({
             />
           )}
           {canEdit && (
-            <InspectorActionButton
-              label={retryActionLabel}
-              icon={<RotateCw />}
-              onClick={onRetry}
-            />
+            <InspectorActionButton label={retryActionLabel} icon={<RotateCw />} onClick={onRetry} />
           )}
           {canEdit && (
             <InspectorActionButton
@@ -1125,8 +1202,7 @@ export function DocumentsInspectorPanel({
             />
           )}
         </div>
-
       </div>
     </div>
-  );
+  )
 }

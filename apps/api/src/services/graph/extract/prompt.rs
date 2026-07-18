@@ -14,8 +14,7 @@ pub(crate) fn normalized_downgrade_level(request: &GraphExtractionRequest) -> us
     request
         .resume_hint
         .as_ref()
-        .map(|hint| hint.downgrade_level.min(GRAPH_EXTRACTION_MAX_DOWNGRADE_LEVEL))
-        .unwrap_or(0)
+        .map_or(0, |hint| hint.downgrade_level.min(GRAPH_EXTRACTION_MAX_DOWNGRADE_LEVEL))
 }
 
 pub(crate) fn downgraded_request_size_soft_limit_bytes(
@@ -39,7 +38,7 @@ pub(crate) fn downgraded_max_segments(downgrade_level: usize) -> usize {
 
 #[cfg(test)]
 #[must_use]
-pub fn build_graph_extraction_prompt(request: &GraphExtractionRequest) -> String {
+pub(crate) fn build_graph_extraction_prompt(request: &GraphExtractionRequest) -> String {
     build_graph_extraction_prompt_plan(
         request,
         GraphExtractionPromptVariant::Initial,
@@ -93,7 +92,7 @@ pub(crate) fn build_graph_extraction_prompt_plan(
         "You are a knowledge graph extraction expert. Your job is to extract structured entities and relationships from a document chunk to build a rich, queryable knowledge graph.\n\n\
 Extract ALL meaningful entities: named things (people, organizations, artifacts, natural phenomena), typed concepts (algorithms, patterns, paradigms), processes (methods, workflows), and measurable attributes (metrics, parameters, configuration values) that appear in the text.\n\n\
 For each entity, determine the single best type from the entity type reference below.\n\n\
-Extract ALL relationships between entities. Use the most specific relation type from the catalog. Use `mentions` only for tangential references where the source names an entity without stating a functional relationship.\n\n\
+Extract ALL relationships explicitly supported by the source. Choose a concise `relation_type` that captures the relationship meaning selected from the source evidence. Encode it as lowercase ASCII snake_case; the application validates its formal shape but does not supply or infer its meaning. Omit a relation when the evidence does not support a precise relationship.\n\n\
 Resolve coreferences only when the referenced entity is unambiguous in the same prepared chunk segment. Do not extract generic references, pronouns, articles, or abbreviations as separate entities.\n\n\
 SOURCE WRITING PRESERVATION (critical):\n\
 - Every `label`, `alias`, `source_label`, `target_label`, and textual `summary` MUST preserve the writing system and language used by the source chunk text.\n\
@@ -117,16 +116,10 @@ SOURCE WRITING PRESERVATION (critical):\n\
 - entity: Catch-all for named things that do not fit any other type. Always prefer a more specific type above.".to_string(),
     ));
     sections.push((
-        "example".to_string(),
-        "Example - symbolic chunk:\n\
-Input: \"component_alpha relation=uses target=library_beta; component_alpha relation=returns target=status_422; component_alpha relation=records target=audit_event_7.\"\n\
-Output: {\"entities\":[{\"label\":\"component_alpha\",\"node_type\":\"artifact\",\"sub_type\":\"component\",\"aliases\":[],\"summary\":\"component_alpha\"},{\"label\":\"library_beta\",\"node_type\":\"artifact\",\"sub_type\":\"library\",\"aliases\":[],\"summary\":\"library_beta\"},{\"label\":\"status_422\",\"node_type\":\"attribute\",\"sub_type\":\"status_code\",\"aliases\":[],\"summary\":\"status_422\"},{\"label\":\"audit_event_7\",\"node_type\":\"event\",\"sub_type\":null,\"aliases\":[],\"summary\":\"audit_event_7\"}],\"relations\":[{\"source_label\":\"component_alpha\",\"target_label\":\"library_beta\",\"relation_type\":\"uses\",\"summary\":\"relation=uses target=library_beta\"},{\"source_label\":\"component_alpha\",\"target_label\":\"status_422\",\"relation_type\":\"returns\",\"summary\":\"relation=returns target=status_422\"},{\"source_label\":\"component_alpha\",\"target_label\":\"audit_event_7\",\"relation_type\":\"records\",\"summary\":\"relation=records target=audit_event_7\"}]}".to_string(),
-    ));
-    sections.push((
         "schema".to_string(),
         format!(
-            "Return strict JSON with keys `entities` and `relations`. Each entity must include `label`, `node_type` (one of: `person`, `organization`, `location`, `event`, `artifact`, `natural`, `process`, `concept`, `attribute`, `entity`), `aliases`, `sub_type`, and `summary`. `sub_type` is a freeform specialization within the type (for example framework, database, algorithm, enzyme, microservice, protocol); use null when no concise specialization is available. Each relation must include `source_label`, `target_label`, `relation_type`, and `summary`. `relation_type` must be copied verbatim from this catalog: {}. Use lowercase ASCII snake_case only. Never translate, localize, paraphrase, or invent a new relation_type. If no concise summary is available, emit an empty string. If none fit exactly, omit the relation.",
-            crate::services::graph::identity::canonical_relation_type_catalog().join(", ")
+            "Return strict JSON with keys `entities` and `relations`. Each entity must include `label`, `node_type` (one of: `person`, `organization`, `location`, `event`, `artifact`, `natural`, `process`, `concept`, `attribute`, `entity`), `aliases`, `sub_type`, and `summary`. `sub_type` is a freeform specialization within the type (for example framework, database, algorithm, enzyme, microservice, protocol); use null when no concise specialization is available. Each relation must include `source_label`, `target_label`, `relation_type`, and `summary`. Choose a concise `relation_type` from the relationship meaning grounded in the source. It must be lowercase ASCII snake_case with at most {} characters. If no concise summary is available, emit an empty string. If the relationship meaning is not explicit, omit the relation.",
+            crate::services::graph::identity::RELATION_TYPE_MAX_LENGTH
         ),
     ));
     sections.push((
@@ -134,10 +127,10 @@ Output: {\"entities\":[{\"label\":\"component_alpha\",\"node_type\":\"artifact\"
         "Do not include markdown fences or prose. If no grounded graph evidence exists, return {\"entities\":[],\"relations\":[]}.\n\
 Critical rules:\n\
 1. ALWAYS provide a non-empty summary for every entity and relation.\n\
-2. NEVER use `mentions` when any specific catalog relation type fits the source evidence.\n\
-3. When the source sentence carries a concrete action whose normalized snake_case predicate exists in the relation catalog, use that catalog predicate and keep the sentence's relation-specific qualifiers in the summary.\n\
+2. Choose each relation type from the explicit relationship expressed by the source evidence.\n\
+3. Keep relation-specific qualifiers in the summary and use a consistent relation type for the same meaning within this response.\n\
 4. Extract the entity's PRIMARY role or purpose in the summary, not just its name.\n\
-5. When the text describes a capability, feature, or behavior, model it as a relation (enables, provides, supports) not just a mention.".to_string(),
+5. When the text explicitly relates two extracted entities, model that evidence as a relation rather than only as independent entity summaries.".to_string(),
     ));
     sections.push((
         "document".to_string(),
@@ -412,7 +405,8 @@ pub(crate) fn graph_extraction_response_format() -> serde_json::Value {
                                 "target_label": { "type": "string" },
                                 "relation_type": {
                                     "type": "string",
-                                    "enum": crate::services::graph::identity::canonical_relation_type_catalog()
+                                    "pattern": crate::services::graph::identity::RELATION_TYPE_JSON_SCHEMA_PATTERN,
+                                    "maxLength": crate::services::graph::identity::RELATION_TYPE_MAX_LENGTH
                                 },
                                 "summary": { "type": "string" }
                             },

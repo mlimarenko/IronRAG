@@ -1,6 +1,6 @@
-import type { ReactNode } from 'react';
-import type { TFunction } from 'i18next';
-import type { Editor } from '@tiptap/react';
+import type { ReactNode } from 'react'
+import type { TFunction } from 'i18next'
+import type { Editor } from '@tiptap/react'
 import {
   Bold,
   Code2,
@@ -20,32 +20,40 @@ import {
   TextWrap,
   Undo2,
   type LucideIcon,
-} from 'lucide-react';
+} from 'lucide-react'
 
-import { Badge } from '@/shared/components/ui/badge';
-import { Button } from '@/shared/components/ui/button';
+import { Badge } from '@/shared/components/ui/badge'
+import { Button } from '@/shared/components/ui/button'
 import {
   Tooltip,
   TooltipContent,
   TooltipProvider,
   TooltipTrigger,
-} from '@/shared/components/ui/tooltip';
-import { cn } from '@/shared/lib/utils';
+} from '@/shared/components/ui/tooltip'
+import { cn } from '@/shared/lib/utils'
 
-import type { EditorSurfaceMode } from './editorSurfaceMode';
+import type { EditorSurfaceMode } from './editorSurfaceMode'
 
-type DocumentEditorToolbarProps = {
-  editor: Editor | null;
-  isDirty: boolean;
-  lineWrapEnabled: boolean;
-  onLineWrapChange: (enabled: boolean) => void;
-  saving: boolean;
-  sourceFormat?: string | undefined;
-  statusLabel: string;
-  statusTone: 'neutral' | 'accent' | 'destructive';
-  surfaceMode: EditorSurfaceMode;
-  t: TFunction;
-};
+type DocumentEditorToolbarProps = Readonly<{
+  editor: Editor | null
+  isDirty: boolean
+  lineWrapEnabled: boolean
+  onLineWrapChange: (enabled: boolean) => void
+  saving: boolean
+  sourceFormat?: string | undefined
+  statusLabel: string
+  statusTone: 'neutral' | 'accent' | 'destructive'
+  surfaceMode: EditorSurfaceMode
+  t: TFunction
+}>
+
+function statusBadgeVariant(
+  statusTone: DocumentEditorToolbarProps['statusTone'],
+): 'default' | 'destructive' | 'outline' {
+  if (statusTone === 'accent') return 'default'
+  if (statusTone === 'destructive') return 'destructive'
+  return 'outline'
+}
 
 export function DocumentEditorToolbar({
   editor,
@@ -59,10 +67,12 @@ export function DocumentEditorToolbar({
   surfaceMode,
   t,
 }: DocumentEditorToolbarProps) {
-  const tableActionsDisabled = !editor || !editor.isActive('table');
-  const tableActionTitle = tableActionsDisabled ? t('documents.editor.tableSelectionHint') : undefined;
-  const historyDisabled = !editor || saving;
-  const showHistory = surfaceMode !== 'raw_text';
+  const tableActionsDisabled = !editor?.isActive('table')
+  const tableActionTitle = tableActionsDisabled
+    ? t('documents.editor.tableSelectionHint')
+    : undefined
+  const historyDisabled = !editor || saving
+  const showHistory = surfaceMode !== 'raw_text'
   const ribbonActions = actionItems({
     editor,
     lineWrapEnabled,
@@ -72,13 +82,10 @@ export function DocumentEditorToolbar({
     t,
     tableActionsDisabled,
     tableActionTitle,
-  });
-  const helperText = helperCopy(surfaceMode, t);
+  })
+  const helperText = helperCopy(surfaceMode, t)
   const showRibbon =
-    ribbonActions.primary.length > 0 ||
-    ribbonActions.secondary.length > 0 ||
-    showHistory ||
-    isDirty;
+    ribbonActions.primary.length > 0 || ribbonActions.secondary.length > 0 || showHistory || isDirty
 
   return (
     <div className="flex flex-col gap-3">
@@ -88,12 +95,15 @@ export function DocumentEditorToolbar({
             {modeLabel(surfaceMode, t)}
           </Badge>
           {sourceFormat ? (
-            <Badge variant="outline" className="rounded-full bg-background px-3 py-1 text-[11px] font-semibold uppercase">
+            <Badge
+              variant="outline"
+              className="rounded-full bg-background px-3 py-1 text-[11px] font-semibold uppercase"
+            >
               {sourceFormat}
             </Badge>
           ) : null}
           <Badge
-            variant={statusTone === 'accent' ? 'default' : statusTone === 'destructive' ? 'destructive' : 'outline'}
+            variant={statusBadgeVariant(statusTone)}
             className={cn(
               'rounded-full px-3 py-1 text-[11px] font-semibold',
               statusTone === 'neutral' && 'bg-background text-muted-foreground',
@@ -103,9 +113,7 @@ export function DocumentEditorToolbar({
           </Badge>
         </div>
         {helperText ? (
-          <p className="max-w-2xl text-xs text-muted-foreground">
-            {helperText}
-          </p>
+          <p className="max-w-2xl text-xs text-muted-foreground">{helperText}</p>
         ) : null}
       </div>
 
@@ -150,17 +158,17 @@ export function DocumentEditorToolbar({
         </TooltipProvider>
       ) : null}
     </div>
-  );
+  )
 }
 
-type ToolbarButtonProps = {
-  active?: boolean | undefined;
-  disabled?: boolean;
-  icon?: LucideIcon;
-  label: string;
-  onClick: () => void;
-  title?: string | undefined;
-};
+type ToolbarButtonProps = Readonly<{
+  active?: boolean | undefined
+  disabled?: boolean
+  icon?: LucideIcon
+  label: string
+  onClick: () => void
+  title?: string | undefined
+}>
 
 function ToolbarButton({
   active = false,
@@ -186,70 +194,66 @@ function ToolbarButton({
     >
       {Icon ? <Icon className="h-4 w-4" aria-hidden="true" /> : label}
     </Button>
-  );
+  )
 
   return (
     <Tooltip>
       <TooltipTrigger asChild>{button}</TooltipTrigger>
       <TooltipContent>{title ?? label}</TooltipContent>
     </Tooltip>
-  );
+  )
 }
 
-type ToolbarClusterProps = {
-  children: ReactNode;
-};
+type ToolbarClusterProps = Readonly<{
+  children: ReactNode
+}>
 
 function ToolbarCluster({ children }: ToolbarClusterProps) {
-  return (
-    <div className="flex flex-wrap items-center gap-2">
-      {children}
-    </div>
-  );
+  return <div className="flex flex-wrap items-center gap-2">{children}</div>
 }
 
 function ToolbarDivider() {
-  return <div className="hidden h-8 w-px bg-border lg:block" />;
+  return <div className="hidden h-8 w-px bg-border lg:block" />
 }
 
 function modeLabel(surfaceMode: EditorSurfaceMode, t: TFunction): string {
   switch (surfaceMode) {
     case 'table':
-      return t('documents.editor.tableMode');
+      return t('documents.editor.tableMode')
     case 'code':
-      return t('documents.editor.codeMode');
+      return t('documents.editor.codeMode')
     case 'raw_text':
-      return t('documents.editor.proseMode');
+      return t('documents.editor.proseMode')
     case 'prose':
     default:
-      return t('documents.editor.proseMode');
+      return t('documents.editor.proseMode')
   }
 }
 
 function helperCopy(surfaceMode: EditorSurfaceMode, t: TFunction): string {
   switch (surfaceMode) {
     case 'table':
-      return t('documents.editor.tableScrollHint');
+      return t('documents.editor.tableScrollHint')
     case 'code':
-      return t('documents.editor.codeModeHint');
+      return t('documents.editor.codeModeHint')
     case 'raw_text':
-      return '';
+      return ''
     case 'prose':
     default:
-      return t('documents.editor.description');
+      return t('documents.editor.description')
   }
 }
 
 type ActionItemsOptions = {
-  editor: Editor | null;
-  saving: boolean;
-  lineWrapEnabled: boolean;
-  onLineWrapChange: (enabled: boolean) => void;
-  surfaceMode: EditorSurfaceMode;
-  t: TFunction;
-  tableActionsDisabled: boolean;
-  tableActionTitle?: string | undefined;
-};
+  editor: Editor | null
+  saving: boolean
+  lineWrapEnabled: boolean
+  onLineWrapChange: (enabled: boolean) => void
+  surfaceMode: EditorSurfaceMode
+  t: TFunction
+  tableActionsDisabled: boolean
+  tableActionTitle?: string | undefined
+}
 
 function actionItems({
   editor,
@@ -261,7 +265,7 @@ function actionItems({
   tableActionsDisabled,
   tableActionTitle,
 }: ActionItemsOptions): { primary: ReactNode[]; secondary: ReactNode[] } {
-  const editableActionDisabled = !editor || saving;
+  const editableActionDisabled = !editor || saving
   const wrapAction = (
     <ToolbarButton
       key="line-wrap"
@@ -270,7 +274,7 @@ function actionItems({
       label={t('documents.editor.lineWrap')}
       onClick={() => onLineWrapChange(!lineWrapEnabled)}
     />
-  );
+  )
   const richTextActions = [
     <ToolbarButton
       key="h1"
@@ -336,7 +340,7 @@ function actionItems({
       label={t('documents.editor.code')}
       onClick={() => editor?.chain().focus().toggleCodeBlock().run()}
     />,
-  ];
+  ]
   const richInsertActions = [
     <ToolbarButton
       key="link"
@@ -360,14 +364,16 @@ function actionItems({
       label={t('documents.editor.image')}
       onClick={() => promptForImage(editor, t)}
     />,
-  ];
+  ]
   const commonTableActions = [
     <ToolbarButton
       key="insert-table"
       disabled={editableActionDisabled}
       icon={Table2}
       label={t('documents.editor.table')}
-      onClick={() => editor?.chain().focus().insertTable({ rows: 3, cols: 3, withHeaderRow: true }).run()}
+      onClick={() =>
+        editor?.chain().focus().insertTable({ rows: 3, cols: 3, withHeaderRow: true }).run()
+      }
     />,
     <ToolbarButton
       key="add-row"
@@ -385,19 +391,20 @@ function actionItems({
       onClick={() => editor?.chain().focus().addColumnAfter().run()}
       title={tableActionTitle}
     />,
-  ];
+  ]
 
   switch (surfaceMode) {
     case 'raw_text':
       return {
         primary: [wrapAction],
         secondary: [],
-      };
+      }
     case 'table':
+    case 'prose':
       return {
         primary: [wrapAction, ...richTextActions],
         secondary: [...richInsertActions, ...commonTableActions],
-      };
+      }
     case 'code':
       return {
         primary: [
@@ -412,66 +419,68 @@ function actionItems({
           />,
         ],
         secondary: [],
-      };
-    case 'prose':
+      }
     default:
       return {
-        primary: [wrapAction, ...richTextActions],
-        secondary: [...richInsertActions, ...commonTableActions],
-      };
+        primary: [],
+        secondary: [],
+      }
   }
 }
 
 function promptForLink(editor: Editor | null, t: TFunction) {
   if (!editor) {
-    return;
+    return
   }
 
-  const currentHref = typeof editor.getAttributes('link').href === 'string'
-    ? editor.getAttributes('link').href
-    : '';
-  const href = window.prompt(t('documents.editor.linkPrompt'), currentHref);
+  const linkAttributes = editor.getAttributes('link')
+  const currentHref = typeof linkAttributes.href === 'string' ? linkAttributes.href : ''
+  const href = window.prompt(t('documents.editor.linkPrompt'), currentHref)
   if (href === null) {
-    return;
+    return
   }
 
-  const normalizedHref = href.trim();
+  const normalizedHref = href.trim()
   if (!normalizedHref) {
-    editor.chain().focus().extendMarkRange('link').unsetLink().run();
-    return;
+    editor.chain().focus().extendMarkRange('link').unsetLink().run()
+    return
   }
 
   if (editor.state.selection.empty) {
-    editor.chain().focus().insertContent({
-      type: 'text',
-      text: normalizedHref,
-      marks: [
-        {
-          type: 'link',
-          attrs: { href: normalizedHref },
-        },
-      ],
-    }).run();
-    return;
+    editor
+      .chain()
+      .focus()
+      .insertContent({
+        type: 'text',
+        text: normalizedHref,
+        marks: [
+          {
+            type: 'link',
+            attrs: { href: normalizedHref },
+          },
+        ],
+      })
+      .run()
+    return
   }
 
-  editor.chain().focus().extendMarkRange('link').setLink({ href: normalizedHref }).run();
+  editor.chain().focus().extendMarkRange('link').setLink({ href: normalizedHref }).run()
 }
 
 function promptForImage(editor: Editor | null, t: TFunction) {
   if (!editor) {
-    return;
+    return
   }
 
-  const src = window.prompt(t('documents.editor.imagePrompt'));
+  const src = window.prompt(t('documents.editor.imagePrompt'))
   if (src === null) {
-    return;
+    return
   }
 
-  const normalizedSrc = src.trim();
+  const normalizedSrc = src.trim()
   if (!normalizedSrc) {
-    return;
+    return
   }
 
-  editor.chain().focus().setImage({ src: normalizedSrc }).run();
+  editor.chain().focus().setImage({ src: normalizedSrc }).run()
 }

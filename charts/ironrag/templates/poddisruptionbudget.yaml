@@ -1,0 +1,25 @@
+{{- if .Values.podDisruptionBudget.enabled }}
+{{- range $component := list "api" "worker" "web" }}
+{{- $settings := index $.Values.podDisruptionBudget $component }}
+{{- if $settings.enabled }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "ironrag.fullname" $ }}-{{ $component }}
+  labels:
+    {{- include "ironrag.labels" $ | nindent 4 }}
+    app.kubernetes.io/component: {{ $component }}
+spec:
+  {{- if ne (toString $settings.minAvailable) "" }}
+  minAvailable: {{ $settings.minAvailable }}
+  {{- else }}
+  maxUnavailable: {{ $settings.maxUnavailable }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "ironrag.selectorLabels" $ | nindent 6 }}
+      app.kubernetes.io/component: {{ $component }}
+---
+{{- end }}
+{{- end }}
+{{- end }}

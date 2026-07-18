@@ -246,15 +246,16 @@ pub struct ContentMutationAdmission {
 /// successful call does NOT necessarily create a new document - when
 /// the fetched body hashes to content that already lives in the
 /// library, the candidate is recorded as a duplicate and the existing
-/// document id is returned. Caller (web-ingest single_page) branches
-/// on the variant: `Ingested` -> candidate_state = processed,
-/// `DuplicateContent` -> candidate_state = duplicate with
-/// classification_reason = `duplicate_content`.
+/// document id is returned. Caller (web-ingest `single_page`) branches
+/// on the variant: `Ingested` -> `candidate_state` = materialized until
+/// the exact mutation item settles to processed, `DuplicateContent` ->
+/// `candidate_state` = duplicate with `classification_reason` =
+/// `duplicate_content`.
 #[derive(Debug, Clone)]
 pub enum MaterializedWebCapture {
     Ingested {
         document: ContentDocument,
-        revision: ContentRevision,
+        revision: Box<ContentRevision>,
         mutation_item: ContentMutationItem,
         job_id: Uuid,
     },

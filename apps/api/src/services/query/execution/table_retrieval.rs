@@ -6,14 +6,14 @@ use uuid::Uuid;
 
 use crate::{
     app::state::AppState,
-    domains::query_ir::{QueryAct, QueryIR, QueryScope, SourceSliceDirection},
+    domains::query_ir::{QueryAct, QueryIR, QueryScope, QueryTargetKind, SourceSliceDirection},
     infra::knowledge_rows::{KnowledgeChunkRow, KnowledgeDocumentRow},
     shared::extraction::table_summary::is_table_summary_text,
 };
 
 use super::{
     RuntimeChunkScoreKind, RuntimeMatchedChunk, canonical_document_revision_id, map_chunk_hit,
-    merge_chunks, question_asks_table_aggregation, question_intent::canonical_target_type_tag,
+    merge_chunks, question_asks_table_aggregation,
 };
 
 pub(crate) fn requested_initial_table_row_count(ir: Option<&QueryIR>) -> Option<usize> {
@@ -22,7 +22,7 @@ pub(crate) fn requested_initial_table_row_count(ir: Option<&QueryIR>) -> Option<
     if slice.direction != SourceSliceDirection::Head {
         return None;
     }
-    let targets_table_rows = ir.target_types.iter().any(|tag| tag == "table_row");
+    let targets_table_rows = ir.targets(QueryTargetKind::TableRow);
     targets_table_rows.then(|| usize::from(slice.count.unwrap_or(12)).clamp(1, 32))
 }
 
@@ -124,12 +124,7 @@ pub(crate) fn query_ir_requests_table_section_siblings(ir: &QueryIR) -> bool {
     {
         return false;
     }
-    let target_types = ir
-        .target_types
-        .iter()
-        .map(|target_type| canonical_target_type_tag(target_type))
-        .collect::<BTreeSet<_>>();
-    target_types.contains("table_row") && target_types.contains("table_summary")
+    ir.targets(QueryTargetKind::TableRow) && ir.targets(QueryTargetKind::TableSummary)
 }
 
 pub(crate) async fn load_table_section_sibling_chunks(
@@ -273,9 +268,10 @@ fn table_section_key(row: &KnowledgeChunkRow) -> (Uuid, Vec<String>) {
 }
 
 fn is_table_section_anchor_row(row: &KnowledgeChunkRow) -> bool {
-    matches!(row.chunk_kind.as_deref(), Some("table_row"))
-        || (matches!(row.chunk_kind.as_deref(), Some("heading"))
-            && row.content_text.lines().any(|line| line.to_ascii_lowercase().contains("table:")))
+    // The caller has already required typed table-inventory QueryIR. At this
+    // layer chunk kind is the only structural discriminator; heading wording
+    // must never become another language-specific intent classifier.
+    matches!(row.chunk_kind.as_deref(), Some("heading" | "table_row"))
 }
 
 fn table_section_sibling_row_is_visible(row: &KnowledgeChunkRow) -> bool {
@@ -415,7 +411,10 @@ mod tests {
             act: QueryAct::Enumerate,
             scope: QueryScope::SingleDocument,
             language: QueryLanguage::Auto,
-            target_types: vec!["table_row".to_string(), "table_summary".to_string()],
+            target_types: vec![
+                crate::domains::query_ir::QueryTargetKind::TableRow,
+                crate::domains::query_ir::QueryTargetKind::TableSummary,
+            ],
             target_entities: Vec::new(),
             literal_constraints: Vec::new(),
             temporal_constraints: Vec::new(),
@@ -439,7 +438,7 @@ mod tests {
                 revision_id,
                 0,
                 "heading",
-                "## Table: records",
+                "## records",
                 &["schema", "records"],
             ),
             section_row(
@@ -459,14 +458,7 @@ mod tests {
                 &["schema", "records"],
             ),
             section_row(document_id, revision_id, 3, "paragraph", "notes", &["schema", "records"]),
-            section_row(
-                document_id,
-                revision_id,
-                4,
-                "heading",
-                "## Table: events",
-                &["schema", "events"],
-            ),
+            section_row(document_id, revision_id, 4, "heading", "## events", &["schema", "events"]),
             section_row(
                 document_id,
                 revision_id,
@@ -484,11 +476,18 @@ mod tests {
     }
 
     #[test]
+    fn typed_table_section_accepts_arbitrary_heading_text_as_anchor() {
+        let row = table_row(Uuid::now_v7(), 0, "dataset_17", "## dataset_17", "heading");
+
+        assert!(is_table_section_anchor_row(&row));
+    }
+
+    #[test]
     fn table_section_siblings_require_typed_table_inventory_ir() {
         let mut ir = table_section_ir();
         assert!(query_ir_requests_table_section_siblings(&ir));
 
-        ir.target_types = vec!["table_row".to_string()];
+        ir.target_types = vec![crate::domains::query_ir::QueryTargetKind::TableRow];
         assert!(!query_ir_requests_table_section_siblings(&ir));
 
         ir = table_section_ir();

@@ -1,8 +1,4 @@
-import {
-  type ComponentProps,
-  type ReactNode,
-  useId,
-} from "react";
+import { type ComponentProps, type ReactNode, useId } from 'react'
 import {
   useController,
   type Control,
@@ -10,39 +6,34 @@ import {
   type FieldValues,
   type FormState,
   type UseFormRegisterReturn,
-} from "react-hook-form";
+} from 'react-hook-form'
 
-import { Input } from "@/shared/components/ui/input";
-import { Label } from "@/shared/components/ui/label";
-import {
-  Select,
-  SelectContent,
-  SelectTrigger,
-  SelectValue,
-} from "@/shared/components/ui/select";
-import { Textarea } from "@/shared/components/ui/textarea";
-import { cn } from "@/shared/lib/utils";
+import { Input } from '@/shared/components/ui/input'
+import { Label } from '@/shared/components/ui/label'
+import { Select, SelectContent, SelectTrigger, SelectValue } from '@/shared/components/ui/select'
+import { Textarea } from '@/shared/components/ui/textarea'
+import { cn } from '@/shared/lib/utils'
 
-import { fieldErrorMessage } from "./fieldError";
+import { fieldErrorMessage } from './fieldError'
 
 type FieldRenderState = {
-  describedBy: string | undefined;
-  errorMessage: string | undefined;
-  id: string;
-  invalid: boolean;
-};
+  describedBy: string | undefined
+  errorMessage: string | undefined
+  id: string
+  invalid: boolean
+}
 
-type FormFieldProps<TValues extends FieldValues> = {
-  children: (field: FieldRenderState) => ReactNode;
-  className?: string | undefined;
-  description?: ReactNode;
-  formState: Pick<FormState<TValues>, "errors">;
-  id?: string | undefined;
-  label: ReactNode;
-  name: FieldPath<TValues>;
-};
+type FormFieldProps<TValues extends FieldValues> = Readonly<{
+  children: (field: FieldRenderState) => ReactNode
+  className?: string | undefined
+  description?: ReactNode
+  formState: Pick<FormState<TValues>, 'errors'>
+  id?: string | undefined
+  label: ReactNode
+  name: FieldPath<TValues>
+}>
 
-export function FormField<TValues extends FieldValues>({
+function FormField<TValues extends FieldValues>({
   children,
   className,
   description,
@@ -51,17 +42,16 @@ export function FormField<TValues extends FieldValues>({
   label,
   name,
 }: FormFieldProps<TValues>) {
-  const generatedId = useId();
-  const id = explicitId ?? generatedId;
-  const descriptionId = description ? `${id}-description` : undefined;
-  const errorId = `${id}-error`;
-  const errorMessage = fieldErrorMessage(formState.errors, name);
-  const describedBy = [descriptionId, errorMessage ? errorId : undefined]
-    .filter(Boolean)
-    .join(" ") || undefined;
+  const generatedId = useId()
+  const id = explicitId ?? generatedId
+  const descriptionId = description ? `${id}-description` : undefined
+  const errorId = `${id}-error`
+  const errorMessage = fieldErrorMessage(formState.errors, name)
+  const describedBy =
+    [descriptionId, errorMessage ? errorId : undefined].filter(Boolean).join(' ') || undefined
 
   return (
-    <div className={cn("space-y-2", className)}>
+    <div className={cn('space-y-2', className)}>
       <Label htmlFor={id}>{label}</Label>
       {children({
         describedBy,
@@ -80,16 +70,17 @@ export function FormField<TValues extends FieldValues>({
         </p>
       )}
     </div>
-  );
+  )
 }
 
-type FormInputFieldProps<TValues extends FieldValues> =
-  Omit<ComponentProps<typeof Input>, "className" | "id" | "name"> &
-  Omit<FormFieldProps<TValues>, "children"> & {
-    inputClassName?: string;
-    onValueChange?: (value: string) => void;
-    registration: UseFormRegisterReturn<FieldPath<TValues>>;
-  };
+type FormInputFieldProps<TValues extends FieldValues> = Readonly<
+  Omit<ComponentProps<typeof Input>, 'className' | 'id' | 'name'> &
+    Omit<FormFieldProps<TValues>, 'children'> & {
+      inputClassName?: string
+      onValueChange?: (value: string) => void
+      registration: UseFormRegisterReturn<FieldPath<TValues>>
+    }
+>
 
 export function FormInputField<TValues extends FieldValues>({
   className,
@@ -103,7 +94,7 @@ export function FormInputField<TValues extends FieldValues>({
   registration,
   ...inputProps
 }: FormInputFieldProps<TValues>) {
-  const { onChange, ...registeredInput } = registration;
+  const { onChange, ...registeredInput } = registration
   return (
     <FormField
       className={className}
@@ -122,23 +113,24 @@ export function FormInputField<TValues extends FieldValues>({
           {...registeredInput}
           {...inputProps}
           onChange={(event) => {
-            void onChange(event);
-            inputProps.onChange?.(event);
-            onValueChange?.(event.target.value);
+            onChange(event).catch(() => undefined)
+            inputProps.onChange?.(event)
+            onValueChange?.(event.target.value)
           }}
         />
       )}
     </FormField>
-  );
+  )
 }
 
-type FormTextareaFieldProps<TValues extends FieldValues> =
-  Omit<ComponentProps<typeof Textarea>, "className" | "id" | "name"> &
-  Omit<FormFieldProps<TValues>, "children"> & {
-    onValueChange?: (value: string) => void;
-    registration: UseFormRegisterReturn<FieldPath<TValues>>;
-    textareaClassName?: string;
-  };
+type FormTextareaFieldProps<TValues extends FieldValues> = Readonly<
+  Omit<ComponentProps<typeof Textarea>, 'className' | 'id' | 'name'> &
+    Omit<FormFieldProps<TValues>, 'children'> & {
+      onValueChange?: (value: string) => void
+      registration: UseFormRegisterReturn<FieldPath<TValues>>
+      textareaClassName?: string
+    }
+>
 
 export function FormTextareaField<TValues extends FieldValues>({
   className,
@@ -152,7 +144,7 @@ export function FormTextareaField<TValues extends FieldValues>({
   textareaClassName,
   ...textareaProps
 }: FormTextareaFieldProps<TValues>) {
-  const { onChange, ...registeredTextarea } = registration;
+  const { onChange, ...registeredTextarea } = registration
   return (
     <FormField
       className={className}
@@ -171,19 +163,19 @@ export function FormTextareaField<TValues extends FieldValues>({
           {...registeredTextarea}
           {...textareaProps}
           onChange={(event) => {
-            void onChange(event);
-            textareaProps.onChange?.(event);
-            onValueChange?.(event.target.value);
+            onChange(event).catch(() => undefined)
+            textareaProps.onChange?.(event)
+            onValueChange?.(event.target.value)
           }}
         />
       )}
     </FormField>
-  );
+  )
 }
 
-type FormSelectFieldProps<TValues extends FieldValues> =
-  Omit<FormFieldProps<TValues>, "children"> & {
-    children: ReactNode;
+type FormSelectFieldProps<TValues extends FieldValues> = Readonly<
+  Omit<FormFieldProps<TValues>, 'children'> & {
+    children: ReactNode
     // The third (`TTransformedValues`) generic param only matters for
     // `handleSubmit` output typing; `useController` below only ever reads/
     // writes the untransformed field value, so accept `Control` regardless
@@ -191,12 +183,13 @@ type FormSelectFieldProps<TValues extends FieldValues> =
     // to a number on submit) — pinning it to `TValues` would reject a
     // `Control` from any resolver-backed form whose output differs from its
     // input.
-    control: Control<TValues, unknown, FieldValues>;
-    disabled?: boolean;
-    onValueChange?: (value: string) => void;
-    placeholder?: string;
-    triggerClassName?: string;
-  };
+    control: Control<TValues, unknown, FieldValues>
+    disabled?: boolean
+    onValueChange?: (value: string) => void
+    placeholder?: string
+    triggerClassName?: string
+  }
+>
 
 export function FormSelectField<TValues extends FieldValues>({
   children,
@@ -212,7 +205,7 @@ export function FormSelectField<TValues extends FieldValues>({
   placeholder,
   triggerClassName,
 }: FormSelectFieldProps<TValues>) {
-  const { field } = useController({ control, name });
+  const { field } = useController({ control, name })
 
   return (
     <FormField
@@ -226,10 +219,10 @@ export function FormSelectField<TValues extends FieldValues>({
       {({ describedBy, id, invalid }) => (
         <Select
           {...(disabled !== undefined ? { disabled } : {})}
-          value={typeof field.value === "string" ? field.value : ""}
+          value={typeof field.value === 'string' ? field.value : ''}
           onValueChange={(value) => {
-            field.onChange(value);
-            onValueChange?.(value);
+            field.onChange(value)
+            onValueChange?.(value)
           }}
         >
           <SelectTrigger
@@ -244,5 +237,5 @@ export function FormSelectField<TValues extends FieldValues>({
         </Select>
       )}
     </FormField>
-  );
+  )
 }

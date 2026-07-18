@@ -1,5 +1,5 @@
-import { test, expect } from '@playwright/test';
-import type { Page } from '@playwright/test';
+import { test, expect } from '@playwright/test'
+import type { Page } from '@playwright/test'
 
 /**
  * Visual QA pass for release 0.3.1 against the live backend. Every
@@ -16,31 +16,31 @@ import type { Page } from '@playwright/test';
  */
 
 type Scenario = {
-  name: string;
-  path: string;
+  name: string
+  path: string
   /** Optional text marker that must appear before we take the shot. */
-  marker?: RegExp | string;
-};
+  marker?: RegExp | string
+}
 
 function collectRuntimeErrors(page: Page) {
-  const runtimeErrors: string[] = [];
+  const runtimeErrors: string[] = []
 
   page.on('pageerror', (error) => {
-    runtimeErrors.push(error.stack ?? error.message);
-  });
+    runtimeErrors.push(error.stack ?? error.message)
+  })
 
   page.on('console', (message) => {
-    if (message.type() !== 'error') return;
-    const text = message.text();
-    if (text.includes('[vite] connecting') || text.includes('[vite] connected')) return;
-    runtimeErrors.push(text);
-  });
+    if (message.type() !== 'error') return
+    const text = message.text()
+    if (text.includes('[vite] connecting') || text.includes('[vite] connected')) return
+    runtimeErrors.push(text)
+  })
 
-  return runtimeErrors;
+  return runtimeErrors
 }
 
 async function expectAuthenticatedPage(page: Page) {
-  await expect(page.getByRole('heading', { name: /Вход|Login/i })).toHaveCount(0);
+  await expect(page.getByRole('heading', { name: /Вход|Login/i })).toHaveCount(0)
 }
 
 const scenarios: Scenario[] = [
@@ -54,69 +54,65 @@ const scenarios: Scenario[] = [
   { name: 'admin-access', path: '/admin/access', marker: /Access|Доступ|Token|Токен/i },
   { name: 'admin-users', path: '/admin/users', marker: /Users|Пользовател/i },
   { name: 'admin-system', path: '/admin/system', marker: /System|Систем/i },
-];
+]
 
 test.describe('wave-2 visual QA (live backend)', () => {
   for (const scenario of scenarios) {
     test(scenario.name, async ({ page }, testInfo) => {
-      const runtimeErrors = collectRuntimeErrors(page);
-      await page.goto(scenario.path, { waitUntil: 'domcontentloaded' });
-      await page
-        .waitForLoadState('networkidle', { timeout: 15_000 })
-        .catch(() => {});
+      const runtimeErrors = collectRuntimeErrors(page)
+      await page.goto(scenario.path, { waitUntil: 'domcontentloaded' })
+      await page.waitForLoadState('networkidle', { timeout: 15_000 }).catch(() => {})
       if (scenario.marker) {
         await page
           .getByText(scenario.marker)
           .first()
           .waitFor({ state: 'visible', timeout: 8_000 })
-          .catch(() => {});
+          .catch(() => {})
       }
-      // Extra settle frame for animations (evidence panel slide-in, etc.).
-      await page.waitForTimeout(250);
-      await expectAuthenticatedPage(page);
-      await expect(page.getByText(/failed to render|не удалось отрисовать/i)).toHaveCount(0);
-      expect(runtimeErrors).toEqual([]);
+      await expect(page.locator('body')).toBeVisible()
+      await expectAuthenticatedPage(page)
+      await expect(page.getByText(/failed to render|не удалось отрисовать/i)).toHaveCount(0)
+      expect(runtimeErrors).toEqual([])
 
-      const fileName = `${testInfo.project.name}-${scenario.name}.png`;
-      await page.screenshot({
+      const fileName = `${testInfo.project.name}-${scenario.name}.png`
+      const screenshot = await page.screenshot({
         path: `visual-qa/screenshots/${fileName}`,
         fullPage: true,
-      });
-      // The screenshot itself is the artifact; only assert the file was
-      // captured. Operators review the PNGs manually — that is the point
-      // of this suite.
-      expect(true).toBe(true);
-    });
+      })
+      expect(screenshot).not.toHaveLength(0)
+    })
   }
 
   test('admin-library-detail', async ({ page }, testInfo) => {
-    const runtimeErrors = collectRuntimeErrors(page);
-    await page.goto('/admin/libraries', { waitUntil: 'domcontentloaded' });
-    await page.waitForLoadState('networkidle', { timeout: 15_000 }).catch(() => {});
-    await expectAuthenticatedPage(page);
-    const firstActionsButton = page
-      .getByRole('button', { name: /Действия|Actions/i })
-      .first();
-    await firstActionsButton.waitFor({ state: 'visible', timeout: 10_000 });
-    await firstActionsButton.click();
+    const runtimeErrors = collectRuntimeErrors(page)
+    await page.goto('/admin/libraries', { waitUntil: 'domcontentloaded' })
+    await page.waitForLoadState('networkidle', { timeout: 15_000 }).catch(() => {})
+    await expectAuthenticatedPage(page)
+    const firstActionsButton = page.getByRole('button', { name: /Действия|Actions/i }).first()
+    await firstActionsButton.waitFor({ state: 'visible', timeout: 10_000 })
+    await firstActionsButton.click()
     const openLibraryAction = page
       .getByRole('menuitem', { name: /Открыть библиотеку|Open library/i })
-      .first();
-    await openLibraryAction.waitFor({ state: 'visible', timeout: 10_000 });
-    await openLibraryAction.click();
-    await page.waitForLoadState('networkidle', { timeout: 15_000 }).catch(() => {});
-    await page.getByText(/Overview|Обзор|Backup|Резерв/i).first().waitFor({
-      state: 'visible',
-      timeout: 8_000,
-    }).catch(() => {});
-    await page.waitForTimeout(250);
-    await expect(page.getByText(/failed to render|не удалось отрисовать/i)).toHaveCount(0);
-    expect(runtimeErrors).toEqual([]);
+      .first()
+    await openLibraryAction.waitFor({ state: 'visible', timeout: 10_000 })
+    await openLibraryAction.click()
+    await page.waitForLoadState('networkidle', { timeout: 15_000 }).catch(() => {})
+    await page
+      .getByText(/Overview|Обзор|Backup|Резерв/i)
+      .first()
+      .waitFor({
+        state: 'visible',
+        timeout: 8_000,
+      })
+      .catch(() => {})
+    await expect(page.locator('body')).toBeVisible()
+    await expect(page.getByText(/failed to render|не удалось отрисовать/i)).toHaveCount(0)
+    expect(runtimeErrors).toEqual([])
 
-    await page.screenshot({
+    const screenshot = await page.screenshot({
       path: `visual-qa/screenshots/${testInfo.project.name}-admin-library-detail.png`,
       fullPage: true,
-    });
-    expect(true).toBe(true);
-  });
-});
+    })
+    expect(screenshot).not.toHaveLength(0)
+  })
+})

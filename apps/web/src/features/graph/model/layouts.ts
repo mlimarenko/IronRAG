@@ -1,68 +1,68 @@
-import type Graph from 'graphology';
-import type { GraphLayoutType } from '@/features/graph/model/config';
+import type Graph from 'graphology'
+import type { GraphLayoutType } from '@/features/graph/model/config'
 
 type GroupedNodes = {
-  type: string;
-  nodes: string[];
-};
+  type: string
+  nodes: string[]
+}
 
 type PackedCircle = {
-  x: number;
-  y: number;
-  radius: number;
-};
+  x: number
+  y: number
+  radius: number
+}
 
 type GridMeasure = {
-  columns: number;
-  rows: number;
-  width: number;
-  height: number;
-};
+  columns: number
+  rows: number
+  width: number
+  height: number
+}
 
 function getNodeLabel(graph: Graph, node: string): string {
-  const label = graph.getNodeAttribute(node, 'label');
-  return typeof label === 'string' ? label : node;
+  const label = graph.getNodeAttribute(node, 'label')
+  return typeof label === 'string' ? label : node
 }
 
 function getNodeType(graph: Graph, node: string): string {
-  const type = graph.getNodeAttribute(node, 'nodeType');
-  return typeof type === 'string' && type.length > 0 ? type : 'entity';
+  const type = graph.getNodeAttribute(node, 'nodeType')
+  return typeof type === 'string' && type.length > 0 ? type : 'entity'
 }
 
 function getAllNodes(graph: Graph): string[] {
-  const nodes: string[] = [];
+  const nodes: string[] = []
   graph.forEachNode((node) => {
-    nodes.push(node);
-  });
-  return nodes;
+    nodes.push(node)
+  })
+  return nodes
 }
 
 function sortNodesByImportance(graph: Graph, nodes: string[]): string[] {
   return [...nodes].sort((left, right) => {
-    const degreeDelta = graph.degree(right) - graph.degree(left);
-    if (degreeDelta !== 0) return degreeDelta;
+    const degreeDelta = graph.degree(right) - graph.degree(left)
+    if (degreeDelta !== 0) return degreeDelta
 
     const sizeDelta =
       Number(graph.getNodeAttribute(right, 'size') ?? 0) -
-      Number(graph.getNodeAttribute(left, 'size') ?? 0);
-    if (sizeDelta !== 0) return sizeDelta;
+      Number(graph.getNodeAttribute(left, 'size') ?? 0)
+    if (sizeDelta !== 0) return sizeDelta
 
-    return getNodeLabel(graph, left).localeCompare(getNodeLabel(graph, right));
-  });
+    return getNodeLabel(graph, left).localeCompare(getNodeLabel(graph, right))
+  })
 }
 
 function groupNodesByType(graph: Graph): GroupedNodes[] {
-  const groups = new Map<string, string[]>();
+  const groups = new Map<string, string[]>()
 
   graph.forEachNode((node, attrs) => {
-    const type = typeof attrs.nodeType === 'string' ? attrs.nodeType : 'entity';
-    const nodes = groups.get(type);
+    const type = typeof attrs.nodeType === 'string' ? attrs.nodeType : 'entity'
+    const nodes = groups.get(type)
     if (nodes) {
-      nodes.push(node);
-      return;
+      nodes.push(node)
+      return
     }
-    groups.set(type, [node]);
-  });
+    groups.set(type, [node])
+  })
 
   return Array.from(groups.entries())
     .map(([type, nodes]) => ({
@@ -70,10 +70,10 @@ function groupNodesByType(graph: Graph): GroupedNodes[] {
       nodes: sortNodesByImportance(graph, nodes),
     }))
     .sort((left, right) => {
-      const sizeDelta = right.nodes.length - left.nodes.length;
-      if (sizeDelta !== 0) return sizeDelta;
-      return left.type.localeCompare(right.type);
-    });
+      const sizeDelta = right.nodes.length - left.nodes.length
+      if (sizeDelta !== 0) return sizeDelta
+      return left.type.localeCompare(right.type)
+    })
 }
 
 /**
@@ -81,29 +81,34 @@ function groupNodesByType(graph: Graph): GroupedNodes[] {
  * scale-dependent maths keys off this constant so a tweak here re-tunes
  * every layout consistently.
  */
-const NODE_VISUAL_GAP = 6;
+const NODE_VISUAL_GAP = 6
 
 function stableHash(value: string): number {
-  let hash = 2166136261;
+  let hash = 2166136261
   for (let index = 0; index < value.length; index += 1) {
-    hash ^= value.charCodeAt(index);
-    hash = Math.imul(hash, 16777619);
+    hash ^= value.codePointAt(index) ?? 0
+    hash = Math.imul(hash, 16777619)
   }
-  return hash >>> 0;
+  return hash >>> 0
 }
 
-function measureGrid(size: number, columns: number, rowGap: number, columnGap: number): GridMeasure {
+function measureGrid(
+  size: number,
+  columns: number,
+  rowGap: number,
+  columnGap: number,
+): GridMeasure {
   if (size === 0) {
-    return { columns: 1, rows: 0, width: 0, height: 0 };
+    return { columns: 1, rows: 0, width: 0, height: 0 }
   }
-  const safeColumns = Math.max(1, Math.min(size || 1, columns));
-  const rows = Math.max(1, Math.ceil(size / safeColumns));
+  const safeColumns = Math.max(1, Math.min(size || 1, columns))
+  const rows = Math.max(1, Math.ceil(size / safeColumns))
   return {
     columns: safeColumns,
     rows,
     width: Math.max(1, safeColumns - 1) * columnGap,
     height: Math.max(1, rows - 1) * rowGap,
-  };
+  }
 }
 
 function layoutNodeGrid(
@@ -115,25 +120,23 @@ function layoutNodeGrid(
   rowGap: number,
   columnGap: number,
 ): void {
-  if (nodes.length === 0) return;
+  if (nodes.length === 0) return
 
-  const measure = measureGrid(nodes.length, columns, rowGap, columnGap);
+  const measure = measureGrid(nodes.length, columns, rowGap, columnGap)
 
   for (let index = 0; index < nodes.length; index += 1) {
-    const row = Math.floor(index / measure.columns);
-    const column = index % measure.columns;
-    const rowStart = row * measure.columns;
-    const rowCount = Math.min(measure.columns, nodes.length - rowStart);
-    const rowWidth = Math.max(1, rowCount - 1) * columnGap;
-    const x =
-      centerX +
-      (rowCount === 1
-        ? 0
-        : column * columnGap - rowWidth / 2 + (row % 2 === 1 ? columnGap * 0.12 : 0));
-    const y = centerY + (row - (measure.rows - 1) / 2) * rowGap;
+    const row = Math.floor(index / measure.columns)
+    const column = index % measure.columns
+    const rowStart = row * measure.columns
+    const rowCount = Math.min(measure.columns, nodes.length - rowStart)
+    const rowWidth = Math.max(1, rowCount - 1) * columnGap
+    const stagger = row % 2 === 1 ? columnGap * 0.12 : 0
+    const rowX = rowCount === 1 ? 0 : column * columnGap - rowWidth / 2 + stagger
+    const x = centerX + rowX
+    const y = centerY + (row - (measure.rows - 1) / 2) * rowGap
 
-    graph.setNodeAttribute(nodes[index], 'x', x);
-    graph.setNodeAttribute(nodes[index], 'y', y);
+    graph.setNodeAttribute(nodes[index], 'x', x)
+    graph.setNodeAttribute(nodes[index], 'y', y)
   }
 }
 
@@ -141,7 +144,7 @@ function layoutNodeGrid(
  *  R, given the global node gap. The ring's circumference is `2πR`, and we
  *  reserve `NODE_VISUAL_GAP` of arc length per node. */
 function ringCapacity(radius: number): number {
-  return Math.max(8, Math.floor((2 * Math.PI * radius) / NODE_VISUAL_GAP));
+  return Math.max(8, Math.floor((2 * Math.PI * radius) / NODE_VISUAL_GAP))
 }
 
 function layoutNodesInSector(
@@ -153,69 +156,69 @@ function layoutNodesInSector(
   rowGap: number,
   arcGap: number,
 ): void {
-  if (nodes.length === 0) return;
+  if (nodes.length === 0) return
 
-  const sectorPadding = Math.min(0.14, (endAngle - startAngle) * 0.16);
-  const usableStart = startAngle + sectorPadding;
-  const usableEnd = endAngle - sectorPadding;
-  const sectorAngle = Math.max(usableEnd - usableStart, 0.3);
+  const sectorPadding = Math.min(0.14, (endAngle - startAngle) * 0.16)
+  const usableStart = startAngle + sectorPadding
+  const usableEnd = endAngle - sectorPadding
+  const sectorAngle = Math.max(usableEnd - usableStart, 0.3)
 
-  let index = 0;
-  let row = 0;
+  let index = 0
+  let row = 0
 
   while (index < nodes.length) {
-    const radius = innerRadius + row * rowGap;
-    const capacity = Math.max(1, Math.floor((sectorAngle * Math.max(radius, innerRadius)) / arcGap));
-    const count = Math.min(capacity, nodes.length - index);
+    const radius = innerRadius + row * rowGap
+    const capacity = Math.max(1, Math.floor((sectorAngle * Math.max(radius, innerRadius)) / arcGap))
+    const count = Math.min(capacity, nodes.length - index)
 
     for (let offset = 0; offset < count; offset += 1) {
-      const node = nodes[index + offset];
-      const ratio = count === 1 ? 0.5 : offset / (count - 1);
-      const angle = usableStart + sectorAngle * ratio;
+      const node = nodes[index + offset]
+      const ratio = count === 1 ? 0.5 : offset / (count - 1)
+      const angle = usableStart + sectorAngle * ratio
 
-      graph.setNodeAttribute(node, 'x', Math.cos(angle) * radius);
-      graph.setNodeAttribute(node, 'y', Math.sin(angle) * radius);
+      graph.setNodeAttribute(node, 'x', Math.cos(angle) * radius)
+      graph.setNodeAttribute(node, 'y', Math.sin(angle) * radius)
     }
 
-    index += count;
-    row += 1;
+    index += count
+    row += 1
   }
 }
 
 function layoutSectors(graph: Graph): void {
-  if (graph.order === 0) return;
+  if (graph.order === 0) return
 
-  const groups = groupNodesByType(graph);
-  const sectorGap = Math.min(0.18, (2 * Math.PI) / Math.max(18, groups.length * 3));
-  const usableAngle = 2 * Math.PI - groups.length * sectorGap;
-  const weights = groups.map((group) => Math.sqrt(group.nodes.length + 2));
-  const totalWeight = weights.reduce((sum, weight) => sum + weight, 0);
+  const groups = groupNodesByType(graph)
+  const sectorGap = Math.min(0.18, (2 * Math.PI) / Math.max(18, groups.length * 3))
+  const usableAngle = 2 * Math.PI - groups.length * sectorGap
+  const weights = groups.map((group) => Math.sqrt(group.nodes.length + 2))
+  const totalWeight = weights.reduce((sum, weight) => sum + weight, 0)
   // Spacing GROWS with graph size aggressively so Sigma's autoRescale
   // (which fits the entire layout into the viewport) still leaves enough
   // pixels between node centers for them to be visually distinct on dense
   // datasets. Previous factors collapsed at 5k+ nodes after rescale.
-  const orderRoot = Math.sqrt(graph.order);
-  const innerRadius = Math.max(40, orderRoot * 4);
-  const rowGap = Math.max(NODE_VISUAL_GAP * 2.5, orderRoot * 1.4);
-  const arcGap = Math.max(NODE_VISUAL_GAP * 2, rowGap);
+  const orderRoot = Math.sqrt(graph.order)
+  const innerRadius = Math.max(40, orderRoot * 4)
+  const rowGap = Math.max(NODE_VISUAL_GAP * 2.5, orderRoot * 1.4)
+  const arcGap = Math.max(NODE_VISUAL_GAP * 2, rowGap)
 
-  let cursor = -Math.PI / 2;
+  let cursor = -Math.PI / 2
 
   groups.forEach((group, index) => {
-    const weight = weights[index];
-    if (weight === undefined) return;
-    const sectorAngle = usableAngle * (weight / totalWeight);
-    const startAngle = cursor;
-    const endAngle = cursor + sectorAngle;
-    layoutNodesInSector(graph, group.nodes, startAngle, endAngle, innerRadius, rowGap, arcGap);
-    cursor = endAngle + sectorGap;
-  });
+    const weight = weights[index]
+    if (weight === undefined) return
+    const sectorAngle = usableAngle * (weight / totalWeight)
+    const startAngle = cursor
+    const endAngle = cursor + sectorAngle
+    layoutNodesInSector(graph, group.nodes, startAngle, endAngle, innerRadius, rowGap, arcGap)
+    cursor = endAngle + sectorGap
+  })
 }
 
 function layoutBands(graph: Graph): void {
-  if (graph.order === 0) return;
+  if (graph.order === 0) return
 
-  const groups = groupNodesByType(graph);
+  const groups = groupNodesByType(graph)
   // `cell` is the base unit of separation between adjacent nodes. We push
   // it aggressively higher than before so that even after Sigma's
   // `autoRescale` shrinks 25k+ nodes down to fit the viewport, the
@@ -226,394 +229,400 @@ function layoutBands(graph: Graph): void {
   // colored block. The new factor (1.4) reserves enough layout-space
   // headroom that even the worst rescaling still leaves ~6-8 px between
   // node centers at 25k nodes.
-  const orderRoot = Math.sqrt(graph.order);
-  const cell = Math.max(NODE_VISUAL_GAP * 2, orderRoot * 1.4);
-  const rowGap = cell * 1.5;
-  const columnGap = cell * 2;
-  const bandGap = cell * 4;
+  const orderRoot = Math.sqrt(graph.order)
+  const cell = Math.max(NODE_VISUAL_GAP * 2, orderRoot * 1.4)
+  const rowGap = cell * 1.5
+  const columnGap = cell * 2
+  const bandGap = cell * 4
 
   // Width of each band is bounded so that even the largest group does not
   // become an absurdly wide horizontal smear; instead it wraps onto more
   // rows. Aspect ratio stays close to "comfortable strip", not "string".
-  const maxColumns = Math.max(20, Math.min(96, Math.ceil(orderRoot * 1.6)));
+  const maxColumns = Math.max(20, Math.min(96, Math.ceil(orderRoot * 1.6)))
 
   const bandMeasurements = groups.map((group) => {
     const columns = Math.min(
       maxColumns,
       Math.max(10, Math.ceil(Math.sqrt(group.nodes.length) * 2.4)),
-    );
-    const rows = Math.max(1, Math.ceil(group.nodes.length / columns));
-    const bandHeight = rows * rowGap;
-    return { group, columns, rows, bandHeight };
-  });
+    )
+    const rows = Math.max(1, Math.ceil(group.nodes.length / columns))
+    const bandHeight = rows * rowGap
+    return { group, columns, rows, bandHeight }
+  })
 
   const totalHeight =
     bandMeasurements.reduce((sum, band) => sum + band.bandHeight, 0) +
-    Math.max(0, bandMeasurements.length - 1) * bandGap;
+    Math.max(0, bandMeasurements.length - 1) * bandGap
 
-  let currentY = -totalHeight / 2;
+  let currentY = -totalHeight / 2
 
   bandMeasurements.forEach(({ group, columns, bandHeight }) => {
     for (let index = 0; index < group.nodes.length; index += 1) {
-      const node = group.nodes[index];
-      const row = Math.floor(index / columns);
-      const column = index % columns;
-      const rowStart = row * columns;
-      const rowCount = Math.min(columns, group.nodes.length - rowStart);
-      const rowWidth = Math.max(1, rowCount - 1) * columnGap;
-      const x =
-        rowCount === 1
-          ? 0
-          : column * columnGap - rowWidth / 2 + (row % 2 === 1 ? columnGap * 0.15 : 0);
-      const rowOffset = row * rowGap;
-      const y = currentY + rowOffset + bandHeight / 2 - cell / 2;
+      const node = group.nodes[index]
+      const row = Math.floor(index / columns)
+      const column = index % columns
+      const rowStart = row * columns
+      const rowCount = Math.min(columns, group.nodes.length - rowStart)
+      const rowWidth = Math.max(1, rowCount - 1) * columnGap
+      const stagger = row % 2 === 1 ? columnGap * 0.15 : 0
+      const x = rowCount === 1 ? 0 : column * columnGap - rowWidth / 2 + stagger
+      const rowOffset = row * rowGap
+      const y = currentY + rowOffset + bandHeight / 2 - cell / 2
 
-      graph.setNodeAttribute(node, 'x', x);
-      graph.setNodeAttribute(node, 'y', y);
+      graph.setNodeAttribute(node, 'x', x)
+      graph.setNodeAttribute(node, 'y', y)
     }
 
-    currentY += bandHeight + bandGap;
-  });
+    currentY += bandHeight + bandGap
+  })
 }
 
 function layoutRings(graph: Graph): void {
-  if (graph.order === 0) return;
+  if (graph.order === 0) return
 
-  const groups = groupNodesByType(graph);
+  const groups = groupNodesByType(graph)
 
   // Each concentric ring is placed at a uniform additive gap from the
   // previous one. The gap GROWS with graph size so that on dense graphs,
   // after Sigma's autoRescale fits the layout into the viewport, the
   // physical pixel distance between rings is still large enough for the
   // rings to be visually distinct discs of nodes.
-  const orderRoot = Math.sqrt(graph.order);
-  const ringGap = Math.max(60, orderRoot * 1.6);
-  const innerRadius = Math.max(80, orderRoot * 2.2);
+  const orderRoot = Math.sqrt(graph.order)
+  const ringGap = Math.max(60, orderRoot * 1.6)
+  const innerRadius = Math.max(80, orderRoot * 2.2)
 
   // Big groups (e.g. 4000 entities) cannot fit on a single ring without
   // overlapping. Split them across multiple sub-rings so each sub-ring
   // stays at a comfortable density. The capacity of a ring grows with its
   // radius (more circumference = more nodes), so we figure out the radius
   // first, then partition the group into chunks small enough to fit.
-  type RingPlan = { type: string; nodes: string[]; radius: number };
-  const ringPlans: RingPlan[] = [];
+  type RingPlan = { type: string; nodes: string[]; radius: number }
+  const ringPlans: RingPlan[] = []
 
-  let currentRadius = innerRadius;
+  let currentRadius = innerRadius
   groups.forEach((group) => {
-    let remaining = group.nodes.length;
-    let pointer = 0;
+    let remaining = group.nodes.length
+    let pointer = 0
     while (remaining > 0) {
-      const capacity = ringCapacity(currentRadius);
-      const taken = Math.min(remaining, capacity);
+      const capacity = ringCapacity(currentRadius)
+      const taken = Math.min(remaining, capacity)
       ringPlans.push({
         type: group.type,
         nodes: group.nodes.slice(pointer, pointer + taken),
         radius: currentRadius,
-      });
-      pointer += taken;
-      remaining -= taken;
-      currentRadius += ringGap;
+      })
+      pointer += taken
+      remaining -= taken
+      currentRadius += ringGap
     }
-  });
+  })
 
   ringPlans.forEach((plan, ringIndex) => {
     // Stagger the angular start position per ring so neighbouring sub-rings
     // do not align their nodes on the same radial spoke (looks like spokes
     // instead of concentric circles).
-    const angularOffset = ringIndex * (Math.PI / 6);
-    const count = plan.nodes.length;
-    if (count === 0) return;
-    const step = (2 * Math.PI) / count;
+    const angularOffset = ringIndex * (Math.PI / 6)
+    const count = plan.nodes.length
+    if (count === 0) return
+    const step = (2 * Math.PI) / count
     for (let index = 0; index < count; index += 1) {
-      const angle = angularOffset + index * step;
-      graph.setNodeAttribute(plan.nodes[index], 'x', Math.cos(angle) * plan.radius);
-      graph.setNodeAttribute(plan.nodes[index], 'y', Math.sin(angle) * plan.radius);
+      const angle = angularOffset + index * step
+      graph.setNodeAttribute(plan.nodes[index], 'x', Math.cos(angle) * plan.radius)
+      graph.setNodeAttribute(plan.nodes[index], 'y', Math.sin(angle) * plan.radius)
     }
-  });
+  })
 }
 
 function layoutClusters(graph: Graph): void {
-  if (graph.order === 0) return;
+  if (graph.order === 0) return
 
-  const groups = groupNodesByType(graph);
-  const orbitRadius = Math.sqrt(graph.order) * 8;
-  const goldenAngle = Math.PI * (3 - Math.sqrt(5));
+  const groups = groupNodesByType(graph)
+  const orbitRadius = Math.sqrt(graph.order) * 8
+  const goldenAngle = Math.PI * (3 - Math.sqrt(5))
 
   groups.forEach((group, clusterIndex) => {
-    const centroidAngle = (2 * Math.PI * clusterIndex) / groups.length;
-    const centerX = Math.cos(centroidAngle) * orbitRadius;
-    const centerY = Math.sin(centroidAngle) * orbitRadius;
-    const clusterRadius = Math.sqrt(group.nodes.length) * 2.5;
+    const centroidAngle = (2 * Math.PI * clusterIndex) / groups.length
+    const centerX = Math.cos(centroidAngle) * orbitRadius
+    const centerY = Math.sin(centroidAngle) * orbitRadius
+    const clusterRadius = Math.sqrt(group.nodes.length) * 2.5
 
     for (let index = 0; index < group.nodes.length; index += 1) {
-      const distance = clusterRadius * Math.sqrt((index + 0.5) / group.nodes.length);
-      const angle = index * goldenAngle;
-      graph.setNodeAttribute(group.nodes[index], 'x', centerX + Math.cos(angle) * distance);
-      graph.setNodeAttribute(group.nodes[index], 'y', centerY + Math.sin(angle) * distance);
+      const distance = clusterRadius * Math.sqrt((index + 0.5) / group.nodes.length)
+      const angle = index * goldenAngle
+      graph.setNodeAttribute(group.nodes[index], 'x', centerX + Math.cos(angle) * distance)
+      graph.setNodeAttribute(group.nodes[index], 'y', centerY + Math.sin(angle) * distance)
     }
-  });
+  })
 }
 
 function layoutHubs(graph: Graph): void {
-  if (graph.order === 0) return;
+  if (graph.order === 0) return
 
-  const nodes = sortNodesByImportance(graph, getAllNodes(graph));
-  const orderRoot = Math.sqrt(graph.order);
+  const nodes = sortNodesByImportance(graph, getAllNodes(graph))
+  const orderRoot = Math.sqrt(graph.order)
   const hubCount = Math.min(
     24,
     Math.max(1, Math.ceil(orderRoot / (graph.order > 2500 ? 22 : 12))),
     nodes.length,
-  );
-  const hubs = nodes.slice(0, hubCount);
-  const hubSet = new Set(hubs);
-  const assignments = new Map<string, string[]>();
-  hubs.forEach((hub) => assignments.set(hub, []));
+  )
+  const hubs = nodes.slice(0, hubCount)
+  const hubSet = new Set(hubs)
+  const assignments = new Map<string, string[]>()
+  hubs.forEach((hub) => assignments.set(hub, []))
 
   for (const node of nodes) {
-    if (hubSet.has(node)) continue;
+    if (hubSet.has(node)) continue
 
-    let selectedHub: string | null = null;
-    let selectedScore = -1;
+    let selectedHub: string | null = null
+    let selectedScore = -1
     graph.forEachNeighbor(node, (neighbor) => {
-      if (!hubSet.has(neighbor)) return;
-      const score = graph.degree(neighbor);
+      if (!hubSet.has(neighbor)) return
+      const score = graph.degree(neighbor)
       if (
         score > selectedScore ||
-        (score === selectedScore && selectedHub !== null && hubs.indexOf(neighbor) < hubs.indexOf(selectedHub))
+        (score === selectedScore &&
+          selectedHub !== null &&
+          hubs.indexOf(neighbor) < hubs.indexOf(selectedHub))
       ) {
-        selectedHub = neighbor;
-        selectedScore = score;
+        selectedHub = neighbor
+        selectedScore = score
       }
-    });
+    })
 
-    const fallbackHub = hubs[stableHash(`${getNodeType(graph, node)}:${getNodeLabel(graph, node)}`) % hubCount];
-    if (fallbackHub === undefined) continue;
-    const owner = selectedHub ?? fallbackHub;
-    assignments.get(owner)?.push(node);
+    const fallbackHub =
+      hubs[stableHash(`${getNodeType(graph, node)}:${getNodeLabel(graph, node)}`) % hubCount]
+    if (fallbackHub === undefined) continue
+    const owner = selectedHub ?? fallbackHub
+    assignments.get(owner)?.push(node)
   }
 
-  const localGap = Math.max(NODE_VISUAL_GAP * 2.4, orderRoot * 0.9);
-  const maxAssigned = Math.max(...Array.from(assignments.values()).map((group) => group.length), 1);
+  const localGap = Math.max(NODE_VISUAL_GAP * 2.4, orderRoot * 0.9)
+  const maxAssigned = Math.max(...Array.from(assignments.values()).map((group) => group.length), 1)
   const orbitRadius =
-    hubCount === 1
-      ? 0
-      : Math.max(90, orderRoot * 7, Math.sqrt(maxAssigned) * localGap * 1.8);
-  const goldenAngle = Math.PI * (3 - Math.sqrt(5));
+    hubCount === 1 ? 0 : Math.max(90, orderRoot * 7, Math.sqrt(maxAssigned) * localGap * 1.8)
+  const goldenAngle = Math.PI * (3 - Math.sqrt(5))
 
   hubs.forEach((hub, hubIndex) => {
-    const centerAngle = hubCount === 1 ? 0 : (2 * Math.PI * hubIndex) / hubCount - Math.PI / 2;
-    const centerX = Math.cos(centerAngle) * orbitRadius;
-    const centerY = Math.sin(centerAngle) * orbitRadius;
-    graph.setNodeAttribute(hub, 'x', centerX);
-    graph.setNodeAttribute(hub, 'y', centerY);
+    const centerAngle = hubCount === 1 ? 0 : (2 * Math.PI * hubIndex) / hubCount - Math.PI / 2
+    const centerX = Math.cos(centerAngle) * orbitRadius
+    const centerY = Math.sin(centerAngle) * orbitRadius
+    graph.setNodeAttribute(hub, 'x', centerX)
+    graph.setNodeAttribute(hub, 'y', centerY)
 
-    const assigned = sortNodesByImportance(graph, assignments.get(hub) ?? []);
-    const radius = Math.max(localGap * 1.6, Math.sqrt(Math.max(assigned.length, 1)) * localGap * 0.72);
+    const assigned = sortNodesByImportance(graph, assignments.get(hub) ?? [])
+    const radius = Math.max(
+      localGap * 1.6,
+      Math.sqrt(Math.max(assigned.length, 1)) * localGap * 0.72,
+    )
     for (let index = 0; index < assigned.length; index += 1) {
-      const distance = localGap + radius * Math.sqrt((index + 0.5) / assigned.length);
-      const angle = index * goldenAngle + hubIndex * 0.37;
-      graph.setNodeAttribute(assigned[index], 'x', centerX + Math.cos(angle) * distance);
-      graph.setNodeAttribute(assigned[index], 'y', centerY + Math.sin(angle) * distance);
+      const distance = localGap + radius * Math.sqrt((index + 0.5) / assigned.length)
+      const angle = index * goldenAngle + hubIndex * 0.37
+      graph.setNodeAttribute(assigned[index], 'x', centerX + Math.cos(angle) * distance)
+      graph.setNodeAttribute(assigned[index], 'y', centerY + Math.sin(angle) * distance)
     }
-  });
+  })
 }
 
 function layoutSources(graph: Graph): void {
-  if (graph.order === 0) return;
+  if (graph.order === 0) return
 
-  const groups = groupNodesByType(graph);
+  const groups = groupNodesByType(graph)
   const documents = sortNodesByImportance(
     graph,
     groups.find((group) => group.type === 'document')?.nodes ?? [],
-  );
+  )
   if (documents.length === 0) {
-    layoutBands(graph);
-    return;
+    layoutBands(graph)
+    return
   }
 
-  const otherGroups = groups.filter((group) => group.type !== 'document');
-  const orderRoot = Math.sqrt(graph.order);
-  const cell = Math.max(NODE_VISUAL_GAP * 2.4, orderRoot * 1.2);
-  const rowGap = cell * 1.34;
-  const columnGap = cell * 1.48;
-  const sectionGap = cell * 5.6;
+  const otherGroups = groups.filter((group) => group.type !== 'document')
+  const orderRoot = Math.sqrt(graph.order)
+  const cell = Math.max(NODE_VISUAL_GAP * 2.4, orderRoot * 1.2)
+  const rowGap = cell * 1.34
+  const columnGap = cell * 1.48
+  const sectionGap = cell * 5.6
 
-  const documentColumns = Math.max(1, Math.min(26, Math.ceil(Math.sqrt(documents.length) * 1.35)));
-  const documentMeasure = measureGrid(documents.length, documentColumns, rowGap, columnGap);
+  const documentColumns = Math.max(1, Math.min(26, Math.ceil(Math.sqrt(documents.length) * 1.35)))
+  const documentMeasure = measureGrid(documents.length, documentColumns, rowGap, columnGap)
   const groupMeasurements = otherGroups.map((group) => {
-    const columns = Math.max(1, Math.min(44, Math.ceil(Math.sqrt(group.nodes.length) * 1.55)));
+    const columns = Math.max(1, Math.min(44, Math.ceil(Math.sqrt(group.nodes.length) * 1.55)))
     return {
       group,
       measure: measureGrid(group.nodes.length, columns, rowGap, columnGap),
-    };
-  });
+    }
+  })
 
   const rightHeight =
     groupMeasurements.reduce((sum, item) => sum + item.measure.height, 0) +
-    Math.max(0, groupMeasurements.length - 1) * sectionGap;
-  const totalHeight = Math.max(documentMeasure.height, rightHeight);
-  const rightWidth = Math.max(...groupMeasurements.map((item) => item.measure.width), 0);
-  const leftX = -(documentMeasure.width / 2 + sectionGap / 2);
-  const rightX = rightWidth === 0 ? 0 : rightWidth / 2 + sectionGap / 2;
+    Math.max(0, groupMeasurements.length - 1) * sectionGap
+  const totalHeight = Math.max(documentMeasure.height, rightHeight)
+  const rightWidth = Math.max(...groupMeasurements.map((item) => item.measure.width), 0)
+  const leftX = -(documentMeasure.width / 2 + sectionGap / 2)
+  const rightX = rightWidth === 0 ? 0 : rightWidth / 2 + sectionGap / 2
 
-  layoutNodeGrid(graph, documents, leftX, 0, documentMeasure.columns, rowGap, columnGap);
+  layoutNodeGrid(graph, documents, leftX, 0, documentMeasure.columns, rowGap, columnGap)
 
-  let cursorY = -totalHeight / 2;
+  let cursorY = -totalHeight / 2
   groupMeasurements.forEach(({ group, measure }) => {
-    const centerY = cursorY + measure.height / 2;
-    layoutNodeGrid(graph, group.nodes, rightX, centerY, measure.columns, rowGap, columnGap);
-    cursorY += measure.height + sectionGap;
-  });
+    const centerY = cursorY + measure.height / 2
+    layoutNodeGrid(graph, group.nodes, rightX, centerY, measure.columns, rowGap, columnGap)
+    cursorY += measure.height + sectionGap
+  })
 }
 
 function collectDepthLayers(graph: Graph, seeds: string[], maxDepth: number): string[][] {
-  const layers = Array.from({ length: maxDepth + 2 }, () => [] as string[]);
-  const depthByNode = new Map<string, number>();
-  const queue: string[] = [];
+  const layers = Array.from({ length: maxDepth + 2 }, () => [] as string[])
+  const depthByNode = new Map<string, number>()
+  const queue: string[] = []
 
   for (const seed of seeds) {
-    if (depthByNode.has(seed)) continue;
-    depthByNode.set(seed, 0);
-    queue.push(seed);
+    if (depthByNode.has(seed)) continue
+    depthByNode.set(seed, 0)
+    queue.push(seed)
   }
 
-  let head = 0;
+  let head = 0
   while (head < queue.length) {
-    const current = queue[head];
-    head += 1;
-    if (current === undefined) continue;
-    const currentDepth = depthByNode.get(current) ?? 0;
-    if (currentDepth >= maxDepth) continue;
+    const current = queue[head]
+    head += 1
+    if (current === undefined) continue
+    const currentDepth = depthByNode.get(current) ?? 0
+    if (currentDepth >= maxDepth) continue
     graph.forEachNeighbor(current, (neighbor) => {
-      if (depthByNode.has(neighbor)) return;
-      depthByNode.set(neighbor, currentDepth + 1);
-      queue.push(neighbor);
-    });
+      if (depthByNode.has(neighbor)) return
+      depthByNode.set(neighbor, currentDepth + 1)
+      queue.push(neighbor)
+    })
   }
 
   graph.forEachNode((node) => {
-    const depth = depthByNode.get(node);
-    layers[depth == null ? maxDepth + 1 : Math.min(depth, maxDepth)]?.push(node);
-  });
+    const depth = depthByNode.get(node)
+    layers[depth == null ? maxDepth + 1 : Math.min(depth, maxDepth)]?.push(node)
+  })
 
-  return layers.map((layer) => sortNodesByImportance(graph, layer));
+  return layers.map((layer) => sortNodesByImportance(graph, layer))
 }
 
 function layoutFlow(graph: Graph): void {
-  if (graph.order === 0) return;
+  if (graph.order === 0) return
 
-  const nodes = sortNodesByImportance(graph, getAllNodes(graph));
-  const documents = nodes.filter((node) => getNodeType(graph, node) === 'document');
-  const seedLimit = Math.max(1, Math.min(24, Math.ceil(Math.sqrt(graph.order) / 18)));
-  const seeds = (documents.length > 0 ? documents : nodes).slice(0, seedLimit);
-  const maxDepth = graph.order > 20000 ? 4 : 5;
-  const layers = collectDepthLayers(graph, seeds, maxDepth);
-  const orderRoot = Math.sqrt(graph.order);
-  const cell = Math.max(NODE_VISUAL_GAP * 2.3, orderRoot * 1.15);
-  const rowGap = cell * 1.32;
-  const columnGap = cell * 1.34;
-  const layerGap = cell * 4.8;
+  const nodes = sortNodesByImportance(graph, getAllNodes(graph))
+  const documents = nodes.filter((node) => getNodeType(graph, node) === 'document')
+  const seedLimit = Math.max(1, Math.min(24, Math.ceil(Math.sqrt(graph.order) / 18)))
+  const seeds = (documents.length > 0 ? documents : nodes).slice(0, seedLimit)
+  const maxDepth = graph.order > 20000 ? 4 : 5
+  const layers = collectDepthLayers(graph, seeds, maxDepth)
+  const orderRoot = Math.sqrt(graph.order)
+  const cell = Math.max(NODE_VISUAL_GAP * 2.3, orderRoot * 1.15)
+  const rowGap = cell * 1.32
+  const columnGap = cell * 1.34
+  const layerGap = cell * 4.8
 
   const measurements = layers.map((layer) => {
-    const columns = Math.max(1, Math.min(40, Math.ceil(Math.sqrt(layer.length || 1) * 1.45)));
+    const columns = Math.max(1, Math.min(40, Math.ceil(Math.sqrt(layer.length || 1) * 1.45)))
     return {
       nodes: layer,
       measure: measureGrid(layer.length, columns, rowGap, columnGap),
-    };
-  });
+    }
+  })
   const totalWidth =
     measurements.reduce((sum, item) => sum + item.measure.width, 0) +
-    Math.max(0, measurements.length - 1) * layerGap;
+    Math.max(0, measurements.length - 1) * layerGap
 
-  let cursorX = -totalWidth / 2;
+  let cursorX = -totalWidth / 2
   measurements.forEach(({ nodes: layerNodes, measure }) => {
-    const centerX = cursorX + measure.width / 2;
-    layoutNodeGrid(graph, layerNodes, centerX, 0, measure.columns, rowGap, columnGap);
-    cursorX += measure.width + layerGap;
-  });
+    const centerX = cursorX + measure.width / 2
+    layoutNodeGrid(graph, layerNodes, centerX, 0, measure.columns, rowGap, columnGap)
+    cursorX += measure.width + layerGap
+  })
 }
 
-function assignRadialSectors(graph: Graph, seeds: string[], maxDepth: number): Map<string, { seedIndex: number; depth: number }> {
-  const assignments = new Map<string, { seedIndex: number; depth: number }>();
-  const queue: string[] = [];
+function assignRadialSectors(
+  graph: Graph,
+  seeds: string[],
+  maxDepth: number,
+): Map<string, { seedIndex: number; depth: number }> {
+  const assignments = new Map<string, { seedIndex: number; depth: number }>()
+  const queue: string[] = []
 
   seeds.forEach((seed, seedIndex) => {
-    if (assignments.has(seed)) return;
-    assignments.set(seed, { seedIndex, depth: 0 });
-    queue.push(seed);
-  });
+    if (assignments.has(seed)) return
+    assignments.set(seed, { seedIndex, depth: 0 })
+    queue.push(seed)
+  })
 
-  let head = 0;
+  let head = 0
   while (head < queue.length) {
-    const current = queue[head];
-    head += 1;
-    if (current === undefined) continue;
-    const currentAssignment = assignments.get(current);
-    if (!currentAssignment || currentAssignment.depth >= maxDepth) continue;
+    const current = queue[head]
+    head += 1
+    if (current === undefined) continue
+    const currentAssignment = assignments.get(current)
+    if (!currentAssignment || currentAssignment.depth >= maxDepth) continue
     graph.forEachNeighbor(current, (neighbor) => {
-      if (assignments.has(neighbor)) return;
+      if (assignments.has(neighbor)) return
       assignments.set(neighbor, {
         seedIndex: currentAssignment.seedIndex,
         depth: currentAssignment.depth + 1,
-      });
-      queue.push(neighbor);
-    });
+      })
+      queue.push(neighbor)
+    })
   }
 
   graph.forEachNode((node) => {
-    if (assignments.has(node)) return;
+    if (assignments.has(node)) return
     assignments.set(node, {
       seedIndex: stableHash(`${getNodeType(graph, node)}:${node}`) % seeds.length,
       depth: maxDepth + 1,
-    });
-  });
+    })
+  })
 
-  return assignments;
+  return assignments
 }
 
 function layoutRadial(graph: Graph): void {
-  if (graph.order === 0) return;
+  if (graph.order === 0) return
 
-  const nodes = sortNodesByImportance(graph, getAllNodes(graph));
+  const nodes = sortNodesByImportance(graph, getAllNodes(graph))
   const seedCount = Math.min(
     12,
     Math.max(1, Math.ceil(Math.sqrt(graph.order) / (graph.order > 5000 ? 42 : 18))),
     nodes.length,
-  );
-  const seeds = nodes.slice(0, seedCount);
-  const maxDepth = graph.order > 20000 ? 4 : 5;
-  const assignments = assignRadialSectors(graph, seeds, maxDepth);
+  )
+  const seeds = nodes.slice(0, seedCount)
+  const maxDepth = graph.order > 20000 ? 4 : 5
+  const assignments = assignRadialSectors(graph, seeds, maxDepth)
   const groups = Array.from({ length: seedCount }, () =>
     Array.from({ length: maxDepth + 2 }, () => [] as string[]),
-  );
+  )
 
   graph.forEachNode((node) => {
-    const assignment = assignments.get(node);
-    if (!assignment) return;
-    groups[assignment.seedIndex]?.[Math.min(assignment.depth, maxDepth + 1)]?.push(node);
-  });
+    const assignment = assignments.get(node)
+    if (!assignment) return
+    groups[assignment.seedIndex]?.[Math.min(assignment.depth, maxDepth + 1)]?.push(node)
+  })
 
-  const orderRoot = Math.sqrt(graph.order);
-  const innerRadius = Math.max(55, orderRoot * 2.2);
-  const ringGap = Math.max(NODE_VISUAL_GAP * 5, orderRoot * 1.7);
-  const arcGap = Math.max(NODE_VISUAL_GAP * 2.2, orderRoot * 0.85);
-  const sectorGap = Math.min(0.16, (2 * Math.PI) / Math.max(24, seedCount * 4));
-  const sectorAngle = (2 * Math.PI - seedCount * sectorGap) / seedCount;
+  const orderRoot = Math.sqrt(graph.order)
+  const innerRadius = Math.max(55, orderRoot * 2.2)
+  const ringGap = Math.max(NODE_VISUAL_GAP * 5, orderRoot * 1.7)
+  const arcGap = Math.max(NODE_VISUAL_GAP * 2.2, orderRoot * 0.85)
+  const sectorGap = Math.min(0.16, (2 * Math.PI) / Math.max(24, seedCount * 4))
+  const sectorAngle = (2 * Math.PI - seedCount * sectorGap) / seedCount
 
   groups.forEach((depthGroups, seedIndex) => {
-    const startAngle = -Math.PI / 2 + seedIndex * (sectorAngle + sectorGap);
-    const endAngle = startAngle + sectorAngle;
-    const middleAngle = (startAngle + endAngle) / 2;
+    const startAngle = -Math.PI / 2 + seedIndex * (sectorAngle + sectorGap)
+    const endAngle = startAngle + sectorAngle
+    const middleAngle = (startAngle + endAngle) / 2
 
     depthGroups.forEach((depthNodes, depth) => {
-      const sorted = sortNodesByImportance(graph, depthNodes);
+      const sorted = sortNodesByImportance(graph, depthNodes)
       if (depth === 0) {
         sorted.forEach((node, index) => {
-          const radius = innerRadius + index * NODE_VISUAL_GAP;
-          graph.setNodeAttribute(node, 'x', Math.cos(middleAngle) * radius);
-          graph.setNodeAttribute(node, 'y', Math.sin(middleAngle) * radius);
-        });
-        return;
+          const radius = innerRadius + index * NODE_VISUAL_GAP
+          graph.setNodeAttribute(node, 'x', Math.cos(middleAngle) * radius)
+          graph.setNodeAttribute(node, 'y', Math.sin(middleAngle) * radius)
+        })
+        return
       }
       layoutNodesInSector(
         graph,
@@ -623,59 +632,59 @@ function layoutRadial(graph: Graph): void {
         innerRadius + depth * ringGap,
         ringGap * 0.34,
         arcGap,
-      );
-    });
-  });
+      )
+    })
+  })
 }
 
 function layoutCirclepack(graph: Graph): void {
-  if (graph.order === 0) return;
+  if (graph.order === 0) return
 
-  const groups = groupNodesByType(graph);
-  const orderRoot = Math.sqrt(graph.order);
-  const cell = Math.max(NODE_VISUAL_GAP * 1.5, orderRoot * 0.55);
-  const gap = Math.max(18, cell * 1.8);
+  const groups = groupNodesByType(graph)
+  const orderRoot = Math.sqrt(graph.order)
+  const cell = Math.max(NODE_VISUAL_GAP * 1.5, orderRoot * 0.55)
+  const gap = Math.max(18, cell * 1.8)
   const circles = groups.map((group) => ({
     group,
     radius: Math.max(18, Math.sqrt(group.nodes.length) * cell),
-  }));
+  }))
   const areaBudget = circles.reduce((sum, circle) => {
-    const side = circle.radius * 2 + gap;
-    return sum + side * side;
-  }, 0);
-  const targetRowWidth = Math.max(gap * 4, Math.sqrt(areaBudget * 1.15));
-  const placements: { group: GroupedNodes; radius: number; centerX: number; centerY: number }[] = [];
+    const side = circle.radius * 2 + gap
+    return sum + side * side
+  }, 0)
+  const targetRowWidth = Math.max(gap * 4, Math.sqrt(areaBudget * 1.15))
+  const placements: { group: GroupedNodes; radius: number; centerX: number; centerY: number }[] = []
 
-  let cursorX = 0;
-  let cursorY = 0;
-  let rowHeight = 0;
-  let minX = Number.POSITIVE_INFINITY;
-  let maxX = Number.NEGATIVE_INFINITY;
-  let minY = Number.POSITIVE_INFINITY;
-  let maxY = Number.NEGATIVE_INFINITY;
+  let cursorX = 0
+  let cursorY = 0
+  let rowHeight = 0
+  let minX = Number.POSITIVE_INFINITY
+  let maxX = Number.NEGATIVE_INFINITY
+  let minY = Number.POSITIVE_INFINITY
+  let maxY = Number.NEGATIVE_INFINITY
 
   circles.forEach((circle) => {
-    const side = circle.radius * 2 + gap;
+    const side = circle.radius * 2 + gap
     if (cursorX > 0 && cursorX + side > targetRowWidth) {
-      cursorX = 0;
-      cursorY += rowHeight;
-      rowHeight = 0;
+      cursorX = 0
+      cursorY += rowHeight
+      rowHeight = 0
     }
 
-    const centerX = cursorX + circle.radius;
-    const centerY = cursorY + circle.radius;
-    placements.push({ group: circle.group, radius: circle.radius, centerX, centerY });
+    const centerX = cursorX + circle.radius
+    const centerY = cursorY + circle.radius
+    placements.push({ group: circle.group, radius: circle.radius, centerX, centerY })
 
-    cursorX += side;
-    rowHeight = Math.max(rowHeight, side);
-    minX = Math.min(minX, centerX - circle.radius);
-    maxX = Math.max(maxX, centerX + circle.radius);
-    minY = Math.min(minY, centerY - circle.radius);
-    maxY = Math.max(maxY, centerY + circle.radius);
-  });
+    cursorX += side
+    rowHeight = Math.max(rowHeight, side)
+    minX = Math.min(minX, centerX - circle.radius)
+    maxX = Math.max(maxX, centerX + circle.radius)
+    minY = Math.min(minY, centerY - circle.radius)
+    maxY = Math.max(maxY, centerY + circle.radius)
+  })
 
-  const offsetX = (minX + maxX) / 2;
-  const offsetY = (minY + maxY) / 2;
+  const offsetX = (minX + maxX) / 2
+  const offsetY = (minY + maxY) / 2
   placements.forEach((placement) => {
     layoutComponentNodes(
       graph,
@@ -683,113 +692,222 @@ function layoutCirclepack(graph: Graph): void {
       placement.centerX - offsetX,
       placement.centerY - offsetY,
       placement.radius,
-    );
-  });
+    )
+  })
 }
 
 function findConnectedComponents(graph: Graph): string[][] {
-  const visited = new Set<string>();
-  const components: string[][] = [];
+  const visited = new Set<string>()
+  const components: string[][] = []
   // Reused across seeds to avoid reallocating a fresh queue for every
   // component. At 25k nodes this matters because V8 allocates a new
   // backing buffer per array.
-  const queue: string[] = [];
+  const queue: string[] = []
 
   graph.forEachNode((node) => {
-    if (visited.has(node)) return;
+    if (visited.has(node)) return
 
     // Head-pointer BFS. `queue.shift()` is O(n) per pop in V8, which
     // turned a 25k-node BFS into an O(N²) stall (minutes on the main
     // thread). Incrementing a head index is O(1).
-    queue.length = 0;
-    queue.push(node);
-    const component: string[] = [];
-    visited.add(node);
-    let head = 0;
+    queue.length = 0
+    queue.push(node)
+    const component: string[] = []
+    visited.add(node)
+    let head = 0
 
     while (head < queue.length) {
-      const current = queue[head];
-      head += 1;
-      if (current === undefined) continue;
-      component.push(current);
+      const current = queue[head]
+      head += 1
+      if (current === undefined) continue
+      component.push(current)
 
       graph.forEachNeighbor(current, (neighbor) => {
-        if (visited.has(neighbor)) return;
-        visited.add(neighbor);
-        queue.push(neighbor);
-      });
+        if (visited.has(neighbor)) return
+        visited.add(neighbor)
+        queue.push(neighbor)
+      })
     }
 
-    components.push(component);
-  });
+    components.push(component)
+  })
 
-  return components.sort((left, right) => right.length - left.length);
+  return components.sort((left, right) => right.length - left.length)
 }
 
 function componentRadius(size: number): number {
-  if (size <= 1) return 3;
-  if (size === 2) return 7;
-  return Math.max(11, Math.sqrt(size) * 5.6);
+  if (size <= 1) return 3
+  if (size === 2) return 7
+  return Math.max(11, Math.sqrt(size) * 5.6)
 }
 
 function packComponentCircle(placed: PackedCircle[], radius: number): PackedCircle {
   if (placed.length === 0) {
-    return { x: 0, y: 0, radius };
+    return { x: 0, y: 0, radius }
   }
 
-  const gap = 12;
+  const gap = 12
   for (let step = 0; step < 3200; step += 1) {
-    const angle = step * 0.58;
-    const distance = 14 + step * 0.92;
-    const x = Math.cos(angle) * distance;
-    const y = Math.sin(angle) * distance;
+    const angle = step * 0.58
+    const distance = 14 + step * 0.92
+    const x = Math.cos(angle) * distance
+    const y = Math.sin(angle) * distance
 
     const overlaps = placed.some((circle) => {
-      const minDistance = circle.radius + radius + gap;
-      return Math.hypot(x - circle.x, y - circle.y) < minDistance;
-    });
+      const minDistance = circle.radius + radius + gap
+      return Math.hypot(x - circle.x, y - circle.y) < minDistance
+    })
 
     if (!overlaps) {
-      return { x, y, radius };
+      return { x, y, radius }
     }
   }
 
-  const fallbackOffset = placed.length * (radius + gap);
-  return { x: fallbackOffset, y: fallbackOffset * 0.15, radius };
+  const fallbackOffset = placed.length * (radius + gap)
+  return { x: fallbackOffset, y: fallbackOffset * 0.15, radius }
 }
 
-function layoutComponentNodes(graph: Graph, nodes: string[], centerX: number, centerY: number, radius: number): void {
+function layoutComponentNodes(
+  graph: Graph,
+  nodes: string[],
+  centerX: number,
+  centerY: number,
+  radius: number,
+): void {
   if (nodes.length === 1) {
-    graph.setNodeAttribute(nodes[0], 'x', centerX);
-    graph.setNodeAttribute(nodes[0], 'y', centerY);
-    return;
+    graph.setNodeAttribute(nodes[0], 'x', centerX)
+    graph.setNodeAttribute(nodes[0], 'y', centerY)
+    return
   }
 
   if (nodes.length === 2) {
-    graph.setNodeAttribute(nodes[0], 'x', centerX - radius * 0.35);
-    graph.setNodeAttribute(nodes[0], 'y', centerY);
-    graph.setNodeAttribute(nodes[1], 'x', centerX + radius * 0.35);
-    graph.setNodeAttribute(nodes[1], 'y', centerY);
-    return;
+    graph.setNodeAttribute(nodes[0], 'x', centerX - radius * 0.35)
+    graph.setNodeAttribute(nodes[0], 'y', centerY)
+    graph.setNodeAttribute(nodes[1], 'x', centerX + radius * 0.35)
+    graph.setNodeAttribute(nodes[1], 'y', centerY)
+    return
   }
 
-  const sorted = sortNodesByImportance(graph, nodes);
-  const usableRadius = Math.max(4, radius - 4);
-  const goldenAngle = Math.PI * (3 - Math.sqrt(5));
+  const sorted = sortNodesByImportance(graph, nodes)
+  const usableRadius = Math.max(4, radius - 4)
+  const goldenAngle = Math.PI * (3 - Math.sqrt(5))
 
   for (let index = 0; index < sorted.length; index += 1) {
-    const node = sorted[index];
-    const ratio = Math.sqrt((index + 0.5) / sorted.length);
-    const distance = usableRadius * ratio;
-    const angle = index * goldenAngle;
+    const node = sorted[index]
+    const ratio = Math.sqrt((index + 0.5) / sorted.length)
+    const distance = usableRadius * ratio
+    const angle = index * goldenAngle
 
-    graph.setNodeAttribute(node, 'x', centerX + Math.cos(angle) * distance);
-    graph.setNodeAttribute(node, 'y', centerY + Math.sin(angle) * distance);
+    graph.setNodeAttribute(node, 'x', centerX + Math.cos(angle) * distance)
+    graph.setNodeAttribute(node, 'y', centerY + Math.sin(angle) * distance)
   }
 }
 
+type LayoutComponent = { nodes: string[]; radius: number }
+
+type ComponentPlacement = {
+  component: LayoutComponent
+  centerX: number
+  centerY: number
+}
+
+type ComponentPackBounds = {
+  minX: number
+  maxX: number
+  minY: number
+  maxY: number
+}
+
+function calculateComponentPackWidth(
+  components: LayoutComponent[],
+  gapBetweenCells: number,
+): number {
+  const areaBudget = components.reduce((sum, component) => {
+    const side = component.radius * 2 + gapBetweenCells
+    return sum + side * side
+  }, 0)
+  return Math.sqrt(areaBudget * 1.2)
+}
+
+function updateComponentPackBounds(
+  bounds: ComponentPackBounds,
+  centerX: number,
+  centerY: number,
+  radius: number,
+): ComponentPackBounds {
+  return {
+    minX: Math.min(bounds.minX, centerX - radius),
+    maxX: Math.max(bounds.maxX, centerX + radius),
+    minY: Math.min(bounds.minY, centerY - radius),
+    maxY: Math.max(bounds.maxY, centerY + radius),
+  }
+}
+
+function packComponentPlacements(
+  components: LayoutComponent[],
+  targetRowWidth: number,
+  gapBetweenCells: number,
+): { placements: ComponentPlacement[]; bounds: ComponentPackBounds } {
+  let cursorX = 0
+  let cursorY = 0
+  let rowHeight = 0
+  let bounds: ComponentPackBounds = {
+    minX: Number.POSITIVE_INFINITY,
+    maxX: Number.NEGATIVE_INFINITY,
+    minY: Number.POSITIVE_INFINITY,
+    maxY: Number.NEGATIVE_INFINITY,
+  }
+  const placements: ComponentPlacement[] = []
+
+  for (const component of components) {
+    const side = component.radius * 2 + gapBetweenCells
+    if (cursorX > 0 && cursorX + side > targetRowWidth) {
+      cursorX = 0
+      cursorY += rowHeight
+      rowHeight = 0
+    }
+    const centerX = cursorX + component.radius
+    const centerY = cursorY + component.radius
+    placements.push({ component, centerX, centerY })
+    cursorX += side
+    rowHeight = Math.max(rowHeight, side)
+    bounds = updateComponentPackBounds(bounds, centerX, centerY, component.radius)
+  }
+
+  return { placements, bounds }
+}
+
+function layoutPlacedComponents(
+  graph: Graph,
+  placements: ComponentPlacement[],
+  bounds: ComponentPackBounds,
+): void {
+  const offsetX = (bounds.minX + bounds.maxX) / 2
+  const offsetY = (bounds.minY + bounds.maxY) / 2
+  for (const placement of placements) {
+    layoutComponentNodes(
+      graph,
+      placement.component.nodes,
+      placement.centerX - offsetX,
+      placement.centerY - offsetY,
+      placement.component.radius,
+    )
+  }
+}
+
+function layoutLargeComponentSet(graph: Graph, components: LayoutComponent[]): void {
+  const gapBetweenCells = 18
+  const targetRowWidth = calculateComponentPackWidth(components, gapBetweenCells)
+  const { placements, bounds } = packComponentPlacements(
+    components,
+    targetRowWidth,
+    gapBetweenCells,
+  )
+  layoutPlacedComponents(graph, placements, bounds)
+}
+
 function layoutComponents(graph: Graph): void {
-  if (graph.order === 0) return;
+  if (graph.order === 0) return
 
   // `findConnectedComponents` already returns components sorted by size
   // desc. We only need to enrich them with radius. The downstream
@@ -798,7 +916,7 @@ function layoutComponents(graph: Graph): void {
   const components = findConnectedComponents(graph).map((nodes) => ({
     nodes,
     radius: componentRadius(nodes.length),
-  }));
+  }))
 
   // Two packing strategies by component count:
   //
@@ -819,109 +937,79 @@ function layoutComponents(graph: Graph): void {
   //   so the visually-anchoring ones land near the top-left and the
   //   tail of singletons flows out to the edges. O(C) time, no
   //   cascading fallback.
-  const LARGE_COMPONENT_COUNT = 200;
+  const LARGE_COMPONENT_COUNT = 200
   if (components.length > LARGE_COMPONENT_COUNT) {
-    const gapBetweenCells = 18;
-    // Aim for a square-ish aspect ratio. The total packed area (sum of
-    // bounding-box areas) gives a rough budget; rowWidth is the
-    // sqrt of that, plus padding for the largest cell.
-    const areaBudget = components.reduce((sum, component) => {
-      const side = component.radius * 2 + gapBetweenCells;
-      return sum + side * side;
-    }, 0);
-    const targetRowWidth = Math.sqrt(areaBudget * 1.2);
-
-    let cursorX = 0;
-    let cursorY = 0;
-    let rowHeight = 0;
-    let minX = Number.POSITIVE_INFINITY;
-    let maxX = Number.NEGATIVE_INFINITY;
-    let minY = Number.POSITIVE_INFINITY;
-    let maxY = Number.NEGATIVE_INFINITY;
-
-    // First pass: assign world-space centers without committing to the
-    // graph yet, so we can center the whole pack afterwards.
-    const placements: { component: typeof components[number]; centerX: number; centerY: number }[] =
-      new Array(components.length);
-    for (let index = 0; index < components.length; index += 1) {
-      const component = components[index];
-      if (!component) continue;
-      const side = component.radius * 2 + gapBetweenCells;
-      if (cursorX > 0 && cursorX + side > targetRowWidth) {
-        cursorX = 0;
-        cursorY += rowHeight;
-        rowHeight = 0;
-      }
-      const centerX = cursorX + component.radius;
-      const centerY = cursorY + component.radius;
-      placements[index] = { component, centerX, centerY };
-
-      cursorX += side;
-      if (side > rowHeight) rowHeight = side;
-
-      if (centerX - component.radius < minX) minX = centerX - component.radius;
-      if (centerX + component.radius > maxX) maxX = centerX + component.radius;
-      if (centerY - component.radius < minY) minY = centerY - component.radius;
-      if (centerY + component.radius > maxY) maxY = centerY + component.radius;
-    }
-
-    const offsetX = (minX + maxX) / 2;
-    const offsetY = (minY + maxY) / 2;
-
-    for (const placement of placements) {
-      layoutComponentNodes(
-        graph,
-        placement.component.nodes,
-        placement.centerX - offsetX,
-        placement.centerY - offsetY,
-        placement.component.radius,
-      );
-    }
-    return;
+    layoutLargeComponentSet(graph, components)
+    return
   }
 
-  const packedCircles: PackedCircle[] = [];
+  const packedCircles: PackedCircle[] = []
   components.forEach((component) => {
-    const packed = packComponentCircle(packedCircles, component.radius);
-    packedCircles.push(packed);
-    layoutComponentNodes(graph, component.nodes, packed.x, packed.y, packed.radius);
-  });
+    const packed = packComponentCircle(packedCircles, component.radius)
+    packedCircles.push(packed)
+    layoutComponentNodes(graph, component.nodes, packed.x, packed.y, packed.radius)
+  })
+}
+
+/**
+ * Deterministic non-degenerate SEED for the force simulation (FA2 runs after
+ * this in the worker). Two requirements:
+ *   1. NOT all-(0,0) — FA2 from a degenerate seed diverges to NaN.
+ *   2. Connectivity-NEUTRAL — a type-grouped seed (e.g. circle-pack) biases
+ *      FA2 into type blobs that the iteration budget can't undo (the "force
+ *      layout is just a ring of type-coloured clumps" symptom). A pseudo-random
+ *      scatter lets the simulation cluster purely by edges.
+ * Hash-based so repeated switches to 'force' start from the same seed (stable),
+ * and the spread scales with sqrt(order) to keep initial density sane.
+ */
+function layoutForceSeed(graph: Graph): void {
+  if (graph.order === 0) return
+  const spread = Math.max(60, Math.sqrt(graph.order) * 12)
+  graph.forEachNode((node) => {
+    const hx = stableHash(node)
+    const hy = stableHash(`${node}y`)
+    graph.setNodeAttribute(node, 'x', ((hx % 100000) / 100000 - 0.5) * 2 * spread)
+    graph.setNodeAttribute(node, 'y', ((hy % 100000) / 100000 - 0.5) * 2 * spread)
+  })
 }
 
 export function applyGraphLayout(graph: Graph, layout: GraphLayoutType): void {
   switch (layout) {
     case 'sectors':
-      layoutSectors(graph);
-      return;
+      layoutSectors(graph)
+      return
     case 'bands':
-      layoutBands(graph);
-      return;
+      layoutBands(graph)
+      return
     case 'components':
-      layoutComponents(graph);
-      return;
+      layoutComponents(graph)
+      return
     case 'rings':
-      layoutRings(graph);
-      return;
+      layoutRings(graph)
+      return
     case 'clusters':
-      layoutClusters(graph);
-      return;
+      layoutClusters(graph)
+      return
     case 'hubs':
-      layoutHubs(graph);
-      return;
+      layoutHubs(graph)
+      return
     case 'sources':
-      layoutSources(graph);
-      return;
+      layoutSources(graph)
+      return
     case 'flow':
-      layoutFlow(graph);
-      return;
+      layoutFlow(graph)
+      return
     case 'radial':
-      layoutRadial(graph);
-      return;
+      layoutRadial(graph)
+      return
     case 'circlepack':
-      layoutCirclepack(graph);
-      return;
+      layoutCirclepack(graph)
+      return
+    case 'force':
+      layoutForceSeed(graph)
+      return
   }
 
-  const unreachable: never = layout;
-  throw new Error(`Unsupported graph layout: ${unreachable}`);
+  const unreachable: never = layout
+  throw new Error(`Unsupported graph layout: ${unreachable}`)
 }

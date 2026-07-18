@@ -1,7 +1,11 @@
-use std::{fs, net::Ipv4Addr};
+use std::{
+    fs,
+    net::{IpAddr, Ipv4Addr},
+};
 
 use reqwest::Url;
 
+#[must_use]
 pub fn provider_base_url_candidates(allow_private_network: bool, base_url: &str) -> Vec<String> {
     let normalized = base_url.trim().trim_end_matches('/').to_string();
     if normalized.is_empty() {
@@ -18,11 +22,45 @@ pub fn provider_base_url_candidates(allow_private_network: bool, base_url: &str)
     candidates
 }
 
+#[must_use]
 pub fn resolve_runtime_provider_base_url(allow_private_network: bool, base_url: &str) -> String {
     provider_base_url_candidates(allow_private_network, base_url)
         .into_iter()
         .last()
         .unwrap_or_else(|| base_url.trim().trim_end_matches('/').to_string())
+}
+
+/// Returns whether a parsed provider URL names a private, loopback,
+/// link-local, documentation, broadcast, or unspecified address directly.
+/// DNS-resolved addresses are validated independently by the pinned provider
+/// transport before a request is sent.
+#[must_use]
+pub(crate) fn is_private_provider_url(url: &Url) -> bool {
+    match url.host() {
+        Some(url::Host::Domain(host)) => host.eq_ignore_ascii_case("localhost"),
+        Some(url::Host::Ipv4(host)) => is_private_provider_ip(IpAddr::V4(host)),
+        Some(url::Host::Ipv6(host)) => is_private_provider_ip(IpAddr::V6(host)),
+        None => false,
+    }
+}
+
+const fn is_private_provider_ip(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(value) => {
+            value.is_private()
+                || value.is_loopback()
+                || value.is_link_local()
+                || value.is_broadcast()
+                || value.is_documentation()
+                || value.is_unspecified()
+        }
+        IpAddr::V6(value) => {
+            value.is_loopback()
+                || value.is_unique_local()
+                || value.is_unicast_link_local()
+                || value.is_unspecified()
+        }
+    }
 }
 
 fn docker_host_gateway_candidate(allow_private_network: bool, base_url: &str) -> Option<String> {

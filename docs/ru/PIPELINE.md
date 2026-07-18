@@ -28,7 +28,7 @@ Query pipeline начинается с:
 - Text-like файлы: markdown, text, source code
 - Structured-record файлы — JSON (объект или массив), YAML (один документ, `---` поток или последовательность mapping'ов), JSONL/NDJSON и TOML — через один key-agnostic record-экстрактор. Каждое поле на любой глубине вложенности разворачивается в searchable-текст, гетерогенные схемы (разные ключи в разных записях) профилируются, а любое значение, по виду похожее на timestamp (RFC3339 или epoch, под любым именем ключа), проставляет временную метку записи для temporal-retrieval. Никакого per-format или per-field спец-кейсинга: произвольный экспорт, лог событий, дамп конфига или транскрипт сессии идут через один общий путь.
 - PDF через Docling-backed document-layout extraction с durable page-range checkpoints для stored revisions
-- Статические raster images через Docling OCR по умолчанию или через активный `vision` binding, если recognition policy библиотеки выбирает `vision`
+- Статические raster images через Docling OCR по умолчанию или через активный мультимодальный профиль `extract_text`, если recognition policy библиотеки выбирает `vision`
 - DOCX и PPTX через Docling-backed structured block extraction
 - Таблицы (`csv`, `tsv`, `xls`, `xlsx`, `xlsb`, `ods`) через native row-oriented extraction
 - Web pages через HTML main-content extraction

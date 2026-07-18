@@ -1,7 +1,7 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { useTranslation } from 'react-i18next';
-import { useNavigate } from 'react-router-dom';
-import * as DialogPrimitive from '@radix-ui/react-dialog';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useTranslation } from 'react-i18next'
+import { useNavigate } from 'react-router-dom'
+import * as DialogPrimitive from '@radix-ui/react-dialog'
 import {
   Building2,
   Code2,
@@ -16,30 +16,30 @@ import {
   Settings,
   Share2,
   Sun,
-} from 'lucide-react';
+} from 'lucide-react'
 
-import { cn } from '@/shared/lib/utils';
-import { useApp } from '@/shared/contexts/app-context';
-import { useCan } from '@/shared/auth/useCan';
-import { usePreferences } from '@/shared/contexts/preferences-context';
-import { fuzzyMatch } from './fuzzy';
+import { cn } from '@/shared/lib/utils'
+import { useApp } from '@/shared/contexts/app-context'
+import { useCan } from '@/shared/auth/useCan'
+import { usePreferences } from '@/shared/contexts/preferences-context'
+import { fuzzyMatch } from './fuzzy'
 
-type CommandGroup = 'navigation' | 'actions' | 'library' | 'workspace';
+type CommandGroup = 'navigation' | 'actions' | 'library' | 'workspace'
 
 interface Command {
-  id: string;
-  group: CommandGroup;
+  id: string
+  group: CommandGroup
   /** Pre-translated visible label, used both for display and fuzzy matching. */
-  label: string;
+  label: string
   /** Extra keywords folded into the match haystack (also translated). */
-  keywords: string;
-  icon: LucideIcon;
+  keywords: string
+  icon: LucideIcon
   /** Optional trailing hint (e.g. current theme). */
-  hint?: string;
-  run: () => void;
+  hint?: string
+  run: () => void
 }
 
-const GROUP_ORDER: CommandGroup[] = ['navigation', 'actions', 'library', 'workspace'];
+const GROUP_ORDER: CommandGroup[] = ['navigation', 'actions', 'library', 'workspace']
 
 /**
  * Global ⌘K / Ctrl-K command palette. Keyboard-first navigation hub: fuzzy
@@ -52,15 +52,14 @@ const GROUP_ORDER: CommandGroup[] = ['navigation', 'actions', 'library', 'worksp
  * Open/close is owned by the AppShell (it wires the keyboard shortcut and the
  * `open-command-palette` shell intent), keeping the mount surgical.
  */
-export function CommandPalette({
-  open,
-  onOpenChange,
-}: {
-  open: boolean;
-  onOpenChange: (open: boolean) => void;
-}) {
-  const { t } = useTranslation();
-  const navigate = useNavigate();
+type CommandPaletteProps = Readonly<{
+  open: boolean
+  onOpenChange: (open: boolean) => void
+}>
+
+export function CommandPalette({ open, onOpenChange }: CommandPaletteProps) {
+  const { t } = useTranslation()
+  const navigate = useNavigate()
   const {
     workspaces,
     activeWorkspace,
@@ -68,25 +67,27 @@ export function CommandPalette({
     activeLibrary,
     setActiveWorkspace,
     setActiveLibrary,
-  } = useApp();
-  const { can } = useCan();
-  const { resolvedTheme, cycleTheme, developerMode, toggleDeveloperMode } = usePreferences();
+  } = useApp()
+  const { can } = useCan()
+  const { resolvedTheme, cycleTheme, developerMode, toggleDeveloperMode } = usePreferences()
 
-  const [query, setQuery] = useState('');
-  const [activeIndex, setActiveIndex] = useState(0);
-  const listRef = useRef<HTMLDivElement>(null);
-  const inputRef = useRef<HTMLInputElement>(null);
+  const [query, setQuery] = useState('')
+  const [activeIndex, setActiveIndex] = useState(0)
+  const listRef = useRef<HTMLDivElement>(null)
+  const inputRef = useRef<HTMLInputElement>(null)
 
-  const close = useCallback(() => onOpenChange(false), [onOpenChange]);
+  const close = useCallback(() => onOpenChange(false), [onOpenChange])
+  const navigateAndClose = useCallback(
+    (path: string) => {
+      navigate(path).catch(() => undefined)
+      close()
+    },
+    [close, navigate],
+  )
 
   // Build the full command set. Memoized on the inputs that change its
   // contents so typing (which only changes `query`) never rebuilds it.
   const commands = useMemo<Command[]>(() => {
-    const go = (path: string) => () => {
-      void navigate(path);
-      close();
-    };
-
     const list: Command[] = [
       {
         id: 'nav-home',
@@ -94,7 +95,7 @@ export function CommandPalette({
         label: t('nav.home'),
         keywords: t('command.kw.home'),
         icon: Home,
-        run: go('/dashboard'),
+        run: () => navigateAndClose('/dashboard'),
       },
       {
         id: 'nav-documents',
@@ -102,7 +103,7 @@ export function CommandPalette({
         label: t('nav.documents'),
         keywords: t('command.kw.documents'),
         icon: FileText,
-        run: go('/documents'),
+        run: () => navigateAndClose('/documents'),
       },
       {
         id: 'nav-graph',
@@ -110,7 +111,7 @@ export function CommandPalette({
         label: t('nav.graph'),
         keywords: t('command.kw.graph'),
         icon: Share2,
-        run: go('/graph'),
+        run: () => navigateAndClose('/graph'),
       },
       {
         id: 'nav-assistant',
@@ -118,9 +119,9 @@ export function CommandPalette({
         label: t('nav.assistant'),
         keywords: t('command.kw.assistant'),
         icon: MessageSquare,
-        run: go('/assistant'),
+        run: () => navigateAndClose('/assistant'),
       },
-    ];
+    ]
 
     if (can('admin.access')) {
       list.push({
@@ -129,8 +130,8 @@ export function CommandPalette({
         label: t('nav.admin'),
         keywords: t('command.kw.admin'),
         icon: Settings,
-        run: go('/admin'),
-      });
+        run: () => navigateAndClose('/admin'),
+      })
     }
 
     // Quick actions.
@@ -141,8 +142,8 @@ export function CommandPalette({
         label: t('command.action.newQuestion'),
         keywords: t('command.kw.ask'),
         icon: MessageSquare,
-        run: go('/assistant'),
-      });
+        run: () => navigateAndClose('/assistant'),
+      })
     }
     if (can('content.upload')) {
       list.push({
@@ -151,8 +152,8 @@ export function CommandPalette({
         label: t('command.action.addContent'),
         keywords: t('command.kw.addContent'),
         icon: FileText,
-        run: go('/documents'),
-      });
+        run: () => navigateAndClose('/documents'),
+      })
     }
     list.push({
       id: 'action-toggle-theme',
@@ -162,10 +163,10 @@ export function CommandPalette({
       icon: resolvedTheme === 'dark' ? Sun : Moon,
       hint: t(`shell.theme${resolvedTheme === 'dark' ? 'Dark' : 'Light'}`),
       run: () => {
-        cycleTheme();
-        close();
+        cycleTheme()
+        close()
       },
-    });
+    })
     if (can('devmode.toggle')) {
       list.push({
         id: 'action-toggle-devmode',
@@ -175,15 +176,15 @@ export function CommandPalette({
         icon: Code2,
         hint: developerMode ? t('command.on') : t('command.off'),
         run: () => {
-          toggleDeveloperMode();
-          close();
+          toggleDeveloperMode()
+          close()
         },
-      });
+      })
     }
 
     // Library switching (other libraries in the active workspace).
     for (const library of libraries) {
-      if (library.id === activeLibrary?.id) continue;
+      if (library.id === activeLibrary?.id) continue
       list.push({
         id: `library-${library.id}`,
         group: 'library',
@@ -191,15 +192,15 @@ export function CommandPalette({
         keywords: t('command.kw.switchLibrary'),
         icon: LibraryIcon,
         run: () => {
-          setActiveLibrary(library);
-          close();
+          setActiveLibrary(library)
+          close()
         },
-      });
+      })
     }
 
     // Workspace switching (other workspaces).
     for (const workspace of workspaces) {
-      if (workspace.id === activeWorkspace?.id) continue;
+      if (workspace.id === activeWorkspace?.id) continue
       list.push({
         id: `workspace-${workspace.id}`,
         group: 'workspace',
@@ -207,17 +208,17 @@ export function CommandPalette({
         keywords: t('command.kw.switchWorkspace'),
         icon: Building2,
         run: () => {
-          setActiveWorkspace(workspace);
-          close();
+          setActiveWorkspace(workspace)
+          close()
         },
-      });
+      })
     }
 
-    return list;
+    return list
   }, [
     t,
-    navigate,
     close,
+    navigateAndClose,
     can,
     activeLibrary,
     libraries,
@@ -229,95 +230,87 @@ export function CommandPalette({
     toggleDeveloperMode,
     setActiveLibrary,
     setActiveWorkspace,
-  ]);
+  ])
 
   // Filter + rank. With no query, show everything in declared order.
   const filtered = useMemo(() => {
-    const trimmed = query.trim();
-    if (!trimmed) return commands;
-    const scored: { command: Command; score: number }[] = [];
+    const trimmed = query.trim()
+    if (!trimmed) return commands
+    const scored: { command: Command; score: number }[] = []
     for (const command of commands) {
-      const haystack = `${command.label} ${command.keywords}`;
-      const result = fuzzyMatch(trimmed, haystack);
-      if (result) scored.push({ command, score: result.score });
+      const haystack = `${command.label} ${command.keywords}`
+      const result = fuzzyMatch(trimmed, haystack)
+      if (result) scored.push({ command, score: result.score })
     }
-    scored.sort((a, b) => b.score - a.score);
-    return scored.map((entry) => entry.command);
-  }, [commands, query]);
+    scored.sort((a, b) => b.score - a.score)
+    return scored.map((entry) => entry.command)
+  }, [commands, query])
 
   // Group while preserving the ranked order within each group.
   const grouped = useMemo(() => {
-    const buckets = new Map<CommandGroup, Command[]>();
+    const buckets = new Map<CommandGroup, Command[]>()
     for (const command of filtered) {
-      const bucket = buckets.get(command.group) ?? [];
-      bucket.push(command);
-      buckets.set(command.group, bucket);
+      const bucket = buckets.get(command.group) ?? []
+      bucket.push(command)
+      buckets.set(command.group, bucket)
     }
-    const ordered: { group: CommandGroup; commands: Command[] }[] = [];
+    const ordered: { group: CommandGroup; commands: Command[] }[] = []
     for (const group of GROUP_ORDER) {
-      const bucket = buckets.get(group);
-      if (bucket && bucket.length > 0) ordered.push({ group, commands: bucket });
+      const bucket = buckets.get(group)
+      if (bucket && bucket.length > 0) ordered.push({ group, commands: bucket })
     }
-    return ordered;
-  }, [filtered]);
+    return ordered
+  }, [filtered])
 
   // Flat order matches what the eye sees, so arrow-key index maps 1:1.
-  const flatCommands = useMemo(
-    () => grouped.flatMap((section) => section.commands),
-    [grouped],
-  );
+  const flatCommands = useMemo(() => grouped.flatMap((section) => section.commands), [grouped])
 
   // Clamp during render rather than via an effect: deriving the safe index
   // avoids a synchronous setState-in-effect cascade when the filtered list
   // shrinks under the cursor. `activeIndex` is the user's *intent*; this is
   // what actually highlights.
-  const safeIndex =
-    flatCommands.length === 0 ? 0 : Math.min(activeIndex, flatCommands.length - 1);
+  const safeIndex = flatCommands.length === 0 ? 0 : Math.min(activeIndex, flatCommands.length - 1)
 
   // Focus the search field when the palette opens (Radix returns focus to the
   // trigger on close). A managed focus avoids the autoFocus attribute.
   useEffect(() => {
-    if (!open) return;
-    const id = window.requestAnimationFrame(() => inputRef.current?.focus());
-    return () => window.cancelAnimationFrame(id);
-  }, [open]);
+    if (!open) return
+    const id = window.requestAnimationFrame(() => inputRef.current?.focus())
+    return () => window.cancelAnimationFrame(id)
+  }, [open])
 
   // Scroll the active row into view as the user arrows through. (Reading +
   // calling a DOM method is exactly what an effect is for — no setState here.)
   useEffect(() => {
-    if (!open) return;
-    const node = listRef.current?.querySelector<HTMLElement>(
-      `[data-command-index="${safeIndex}"]`,
-    );
-    node?.scrollIntoView({ block: 'nearest' });
-  }, [safeIndex, open]);
+    if (!open) return
+    const node = listRef.current?.querySelector<HTMLElement>(`[data-command-index="${safeIndex}"]`)
+    node?.scrollIntoView({ block: 'nearest' })
+  }, [safeIndex, open])
 
   const runActive = useCallback(() => {
-    const command = flatCommands[safeIndex];
-    command?.run();
-  }, [flatCommands, safeIndex]);
+    const command = flatCommands[safeIndex]
+    command?.run()
+  }, [flatCommands, safeIndex])
 
   const handleKeyDown = useCallback(
     (event: React.KeyboardEvent) => {
       if (event.key === 'ArrowDown') {
-        event.preventDefault();
+        event.preventDefault()
         setActiveIndex((index) =>
           flatCommands.length === 0 ? 0 : (index + 1) % flatCommands.length,
-        );
+        )
       } else if (event.key === 'ArrowUp') {
-        event.preventDefault();
+        event.preventDefault()
         setActiveIndex((index) =>
-          flatCommands.length === 0
-            ? 0
-            : (index - 1 + flatCommands.length) % flatCommands.length,
-        );
+          flatCommands.length === 0 ? 0 : (index - 1 + flatCommands.length) % flatCommands.length,
+        )
       } else if (event.key === 'Enter') {
-        event.preventDefault();
-        runActive();
+        event.preventDefault()
+        runActive()
       }
     },
     [flatCommands.length, runActive],
-  );
+  )
 
   // Reset transient state on every open/close transition. Doing this in the
   // change handler (an event, not an effect) keeps the reset off the render
@@ -325,13 +318,13 @@ export function CommandPalette({
   const handleOpenChange = useCallback(
     (next: boolean) => {
       if (next) {
-        setQuery('');
-        setActiveIndex(0);
+        setQuery('')
+        setActiveIndex(0)
       }
-      onOpenChange(next);
+      onOpenChange(next)
     },
     [onOpenChange],
-  );
+  )
 
   return (
     <DialogPrimitive.Root open={open} onOpenChange={handleOpenChange}>
@@ -369,12 +362,30 @@ export function CommandPalette({
           </div>
 
           {/* Results */}
-          <div
-            ref={listRef}
+          <select
             id="command-palette-list"
-            role="listbox"
-            className="max-h-[min(24rem,60vh)] overflow-y-auto p-2"
+            className="sr-only"
+            size={Math.max(2, Math.min(flatCommands.length, 12))}
+            value={flatCommands[safeIndex]?.id ?? ''}
+            aria-label={t('command.title')}
+            onChange={(event) => {
+              const commandIndex = flatCommands.findIndex(
+                (command) => command.id === event.currentTarget.value,
+              )
+              if (commandIndex >= 0) setActiveIndex(commandIndex)
+            }}
           >
+            {grouped.map((section) => (
+              <optgroup key={section.group} label={t(`command.groups.${section.group}`)}>
+                {section.commands.map((command) => (
+                  <option key={command.id} value={command.id}>
+                    {command.label}
+                  </option>
+                ))}
+              </optgroup>
+            ))}
+          </select>
+          <div ref={listRef} className="max-h-[min(24rem,60vh)] overflow-y-auto p-2">
             {flatCommands.length === 0 ? (
               <div className="px-3 py-8 text-center text-sm text-muted-foreground">
                 {t('command.noResults')}
@@ -386,16 +397,14 @@ export function CommandPalette({
                     {t(`command.groups.${section.group}`)}
                   </div>
                   {section.commands.map((command) => {
-                    const index = flatCommands.indexOf(command);
-                    const isActive = index === safeIndex;
-                    const Icon = command.icon;
+                    const index = flatCommands.indexOf(command)
+                    const isActive = index === safeIndex
+                    const Icon = command.icon
                     return (
                       <button
                         key={command.id}
                         id={`command-${command.id}`}
                         type="button"
-                        role="option"
-                        aria-selected={isActive}
                         data-command-index={index}
                         onMouseMove={() => setActiveIndex(index)}
                         onClick={() => command.run()}
@@ -417,7 +426,7 @@ export function CommandPalette({
                           <CornerDownLeft className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
                         )}
                       </button>
-                    );
+                    )
                   })}
                 </div>
               ))
@@ -453,5 +462,5 @@ export function CommandPalette({
         </DialogPrimitive.Content>
       </DialogPrimitive.Portal>
     </DialogPrimitive.Root>
-  );
+  )
 }

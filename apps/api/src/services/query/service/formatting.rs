@@ -5,7 +5,8 @@ use uuid::Uuid;
 
 use crate::{
     domains::agent_runtime::{
-        RuntimeExecutionSummary, RuntimePolicyDecision, RuntimePolicySummary, RuntimeStageKind,
+        RuntimeDecisionKind, RuntimeExecutionSummary, RuntimePolicyDecision, RuntimePolicySummary,
+        RuntimeStageKind,
     },
     domains::query::{
         PreparedSegmentReference, QueryChunkReference, QueryGraphEdgeReference,
@@ -32,14 +33,19 @@ use super::{
     MAX_DETAIL_GRAPH_EDGE_REFERENCES, MAX_DETAIL_GRAPH_NODE_REFERENCES,
     MAX_DETAIL_PREPARED_SEGMENT_REFERENCES, MAX_DETAIL_PREPARED_SEGMENT_REFERENCES_PER_REVISION,
     PREPARED_SEGMENT_FOCUS_MIN_TOKEN_LEN, PreparedSegmentRevisionInfo, RankedBundleReference,
-    turn::query_runtime_stage_label,
+    bounded_runtime_policy_summary, is_runtime_policy_failure_code,
+    runtime_failure_summary_from_typed_code, turn::query_runtime_stage_label,
 };
 
-fn execution_id_of(bundle: &KnowledgeContextBundleReferenceSetRow) -> Uuid {
-    bundle
-        .bundle
-        .query_execution_id
-        .expect("invariant: context bundle always carries query_execution_id")
+fn execution_id_of(bundle: &KnowledgeContextBundleReferenceSetRow) -> Option<Uuid> {
+    let execution_id = bundle.bundle.query_execution_id;
+    if execution_id.is_none() {
+        warn!(
+            bundle_id = %bundle.bundle.bundle_id,
+            "context bundle is missing its query execution identifier"
+        );
+    }
+    execution_id
 }
 
 pub(crate) fn build_prepared_segment_references(
@@ -53,7 +59,9 @@ pub(crate) fn build_prepared_segment_references(
     let Some(bundle) = bundle else {
         return Vec::new();
     };
-    let execution_id = execution_id_of(bundle);
+    let Some(execution_id) = execution_id_of(bundle) else {
+        return Vec::new();
+    };
     let query_focus_tokens = prepared_segment_focus_tokens(query_text);
     let answer_focus_tokens = answer_text.map(prepared_segment_focus_tokens).unwrap_or_default();
     let explicit_document_literals = explicit_document_reference_literals(query_text);
@@ -214,9 +222,11 @@ pub(crate) fn build_assistant_document_references(
                 rank: reference.rank,
                 score: 1.0,
                 heading_trail: Vec::new(),
-                section_path: (!reference.excerpt.is_empty())
-                    .then(|| vec![reference.excerpt.clone()])
-                    .unwrap_or_default(),
+                section_path: if !reference.excerpt.is_empty() {
+                    vec![reference.excerpt.clone()]
+                } else {
+                    Default::default()
+                },
                 document_id: Some(reference.document_id),
                 document_title: Some(reference.document_title.clone()),
                 source_uri: reference.source_uri.clone(),
@@ -427,7 +437,9 @@ pub(crate) fn build_technical_fact_references(
     let Some(bundle) = bundle else {
         return Vec::new();
     };
-    let execution_id = execution_id_of(bundle);
+    let Some(execution_id) = execution_id_of(bundle) else {
+        return Vec::new();
+    };
     let mut items = facts
         .iter()
         .filter_map(|fact| {
@@ -473,7 +485,9 @@ pub(crate) fn parse_query_verification_warnings(
 pub(crate) fn map_chunk_references(
     bundle: &KnowledgeContextBundleReferenceSetRow,
 ) -> Vec<QueryChunkReference> {
-    let execution_id = execution_id_of(bundle);
+    let Some(execution_id) = execution_id_of(bundle) else {
+        return Vec::new();
+    };
     bundle
         .chunk_references
         .iter()
@@ -489,7 +503,9 @@ pub(crate) fn map_chunk_references(
 pub(crate) fn map_entity_references(
     bundle: &KnowledgeContextBundleReferenceSetRow,
 ) -> Vec<QueryGraphNodeReference> {
-    let execution_id = execution_id_of(bundle);
+    let Some(execution_id) = execution_id_of(bundle) else {
+        return Vec::new();
+    };
     let mut references = bundle
         .entity_references
         .iter()
@@ -593,7 +609,9 @@ pub(crate) async fn search_runtime_graph_entity_references(
 pub(crate) fn map_relation_references(
     bundle: &KnowledgeContextBundleReferenceSetRow,
 ) -> Vec<QueryGraphEdgeReference> {
-    let execution_id = execution_id_of(bundle);
+    let Some(execution_id) = execution_id_of(bundle) else {
+        return Vec::new();
+    };
     let mut references = bundle
         .relation_references
         .iter()
@@ -682,14 +700,31 @@ pub(crate) fn map_execution_runtime_summary(
         turn_count: row.turn_count,
         parallel_action_limit: row.parallel_action_limit,
         failure_code: row.failure_code.clone(),
-        failure_summary_redacted: row
-            .failure_summary_redacted
-            .clone()
-            .or_else(|| row.failure_code.clone()),
+        failure_summary_redacted: runtime_failure_summary_for_view(row, runtime_policy_rows),
         policy_summary: map_runtime_policy_summary(runtime_policy_rows),
         accepted_at: row.started_at,
         completed_at: row.completed_at,
     }
+}
+
+fn runtime_failure_summary_for_view(
+    row: &query_repository::QueryExecutionRow,
+    runtime_policy_rows: &[runtime_repository::RuntimePolicyDecisionRow],
+) -> Option<String> {
+    let failure_code = row.failure_code.as_deref()?;
+    let policy_summary = runtime_policy_rows.iter().rev().find_map(|decision| {
+        let is_terminal_policy_decision = matches!(
+            decision.decision_kind,
+            RuntimeDecisionKind::Reject | RuntimeDecisionKind::Terminate
+        );
+        let owns_failure =
+            decision.reason_code == failure_code || is_runtime_policy_failure_code(failure_code);
+        (is_terminal_policy_decision && owns_failure)
+            .then(|| bounded_runtime_policy_summary(&decision.reason_summary_redacted))
+            .flatten()
+    });
+
+    policy_summary.or_else(|| runtime_failure_summary_from_typed_code(failure_code))
 }
 
 fn map_runtime_policy_summary(

@@ -4,7 +4,7 @@ import type {
   OpsLibraryStateResponse,
   PriceCatalogEntryResponse,
   TokenResponse,
-} from '@/shared/api/generated';
+} from '@/shared/api/generated'
 import type {
   AIModelOption,
   AIProvider,
@@ -14,13 +14,13 @@ import type {
   OperationsSnapshot,
   OperationsWarning,
   PricingRule,
-} from '@/shared/types';
+} from '@/shared/types'
 
 function tokenStatus(value: string): APIToken['status'] {
   if (value === 'active' || value === 'expired' || value === 'revoked') {
-    return value;
+    return value
   }
-  throw new Error(`Token response has invalid status: ${value}`);
+  throw new Error(`Token response has invalid status: ${value}`)
 }
 
 function operationsStatus(value: string): OperationsSnapshot['status'] {
@@ -30,32 +30,32 @@ function operationsStatus(value: string): OperationsSnapshot['status'] {
     value === 'degraded' ||
     value === 'healthy'
   ) {
-    return value;
+    return value
   }
-  throw new Error(`Operations response has invalid degradedState: ${value}`);
+  throw new Error(`Operations response has invalid degradedState: ${value}`)
 }
 
 function auditResultKind(value: string): AuditEvent['resultKind'] {
   if (value === 'succeeded' || value === 'rejected' || value === 'failed') {
-    return value;
+    return value
   }
-  throw new Error(`Audit event response has invalid resultKind: ${value}`);
+  throw new Error(`Audit event response has invalid resultKind: ${value}`)
 }
 
 function auditActorLabel(raw: AuditEventResponse): string {
-  const actor = raw.actorPrincipal;
+  const actor = raw.actorPrincipal
   if (!actor) {
-    return raw.actorPrincipalId ?? 'system';
+    return raw.actorPrincipalId ?? 'system'
   }
 
-  const displayLabel = actor.displayLabel.trim();
-  const displayName = actor.displayName?.trim();
-  const login = actor.login?.trim();
-  const primary = displayLabel || displayName || login || actor.id;
+  const displayLabel = actor.displayLabel.trim()
+  const displayName = actor.displayName?.trim()
+  const login = actor.login?.trim()
+  const primary = displayLabel || displayName || login || actor.id
   if (login && login !== primary) {
-    return `${primary} (${login})`;
+    return `${primary} (${login})`
   }
-  return primary;
+  return primary
 }
 
 export function mapToken(raw: TokenResponse): APIToken {
@@ -66,12 +66,12 @@ export function mapToken(raw: TokenResponse): APIToken {
       workspaceId: library.workspaceId,
       displayName: library.displayName,
     })),
-  };
+  }
   if (raw.scope.workspace) {
     scope.workspace = {
       id: raw.scope.workspace.id,
       displayName: raw.scope.workspace.displayName,
-    };
+    }
   }
 
   const token: APIToken = {
@@ -85,39 +85,39 @@ export function mapToken(raw: TokenResponse): APIToken {
         resourceKind: grant.resourceKind,
         resourceId: grant.resourceId,
         permission: grant.permissionKind,
-      };
+      }
       if (grant.workspace) {
         mappedGrant.workspace = {
           id: grant.workspace.id,
           displayName: grant.workspace.displayName,
-        };
+        }
       }
       if (grant.library) {
         mappedGrant.library = {
           id: grant.library.id,
           workspaceId: grant.library.workspaceId,
           displayName: grant.library.displayName,
-        };
+        }
       }
-      return mappedGrant;
+      return mappedGrant
     }),
-  };
+  }
   if (raw.expiresAt) {
-    token.expiresAt = raw.expiresAt;
+    token.expiresAt = raw.expiresAt
   }
   if (raw.revokedAt) {
-    token.revokedAt = raw.revokedAt;
+    token.revokedAt = raw.revokedAt
   }
   if (raw.issuer) {
     token.issuedBy = {
       id: raw.issuer.principalId,
       displayLabel: raw.issuer.displayLabel,
-    };
+    }
   }
   if (raw.lastUsedAt) {
-    token.lastUsedAt = raw.lastUsedAt;
+    token.lastUsedAt = raw.lastUsedAt
   }
-  return token;
+  return token
 }
 
 export function mapPricing(
@@ -125,32 +125,30 @@ export function mapPricing(
   providers: AIProvider[],
   models: AIModelOption[],
 ): PricingRule {
-  const model = models.find((m) => m.id === raw.modelCatalogId);
-  const provider = model ? providers.find((p) => p.id === model.providerCatalogId) : undefined;
+  const model = models.find((m) => m.id === raw.modelCatalogId)
+  const provider = model ? providers.find((p) => p.id === model.providerCatalogId) : undefined
   const pricing: PricingRule = {
     id: raw.id,
     modelCatalogId: raw.modelCatalogId ?? '',
     provider: provider?.displayName ?? '',
     model: model?.modelName ?? raw.modelCatalogId ?? '',
     billingUnit: raw.billingUnit ?? '',
-    unitPrice: parseFloat(raw.unitPrice ?? '') || 0,
+    unitPrice: Number.parseFloat(raw.unitPrice ?? '') || 0,
     currency: raw.currencyCode ?? 'USD',
-    effectiveFrom: raw.effectiveFrom
-      ? new Date(raw.effectiveFrom).toISOString().slice(0, 10)
-      : '',
+    effectiveFrom: raw.effectiveFrom ? new Date(raw.effectiveFrom).toISOString().slice(0, 10) : '',
     sourceOrigin: raw.catalogScope ?? 'catalog',
-  };
+  }
   if (raw.workspaceId) {
-    pricing.workspaceId = raw.workspaceId;
+    pricing.workspaceId = raw.workspaceId
   }
   if (raw.effectiveTo) {
-    pricing.effectiveTo = new Date(raw.effectiveTo).toISOString().slice(0, 10);
+    pricing.effectiveTo = new Date(raw.effectiveTo).toISOString().slice(0, 10)
   }
-  return pricing;
+  return pricing
 }
 
 export function mapOps(raw: OpsLibraryStateResponse): OperationsSnapshot {
-  const state = raw.state;
+  const state = raw.state
   return {
     queueDepth: state.queueDepth,
     runningAttempts: state.runningAttempts,
@@ -165,17 +163,17 @@ export function mapOps(raw: OpsLibraryStateResponse): OperationsSnapshot {
         warningKind: warning.warningKind,
         severity: warning.severity,
         createdAt: warning.createdAt,
-      };
-      if (warning.resolvedAt) {
-        mappedWarning.resolvedAt = warning.resolvedAt;
       }
-      return mappedWarning;
+      if (warning.resolvedAt) {
+        mappedWarning.resolvedAt = warning.resolvedAt
+      }
+      return mappedWarning
     }),
-  };
+  }
 }
 
 export function mapAudit(raw: AuditEventResponse): AuditEvent {
-  const resultKind = auditResultKind(raw.resultKind);
+  const resultKind = auditResultKind(raw.resultKind)
   const assistantCall = raw.assistantCall
     ? (() => {
         const mappedCall: NonNullable<AuditEvent['assistantCall']> = {
@@ -187,16 +185,16 @@ export function mapAudit(raw: AuditEventResponse): AuditEvent {
           totalCost: raw.assistantCall.totalCost ?? null,
           currencyCode: raw.assistantCall.currencyCode ?? null,
           providerCallCount: raw.assistantCall.providerCallCount,
-        };
+        }
         if (raw.assistantCall.conversationId) {
-          mappedCall.conversationId = raw.assistantCall.conversationId;
+          mappedCall.conversationId = raw.assistantCall.conversationId
         }
         if (raw.assistantCall.runtimeExecutionId) {
-          mappedCall.runtimeExecutionId = raw.assistantCall.runtimeExecutionId;
+          mappedCall.runtimeExecutionId = raw.assistantCall.runtimeExecutionId
         }
-        return mappedCall;
+        return mappedCall
       })()
-    : undefined;
+    : undefined
   const event: AuditEvent = {
     id: raw.id,
     action: raw.actionKind,
@@ -204,14 +202,13 @@ export function mapAudit(raw: AuditEventResponse): AuditEvent {
     surfaceKind: raw.surfaceKind,
     timestamp: raw.createdAt,
     message: raw.redactedMessage ?? raw.actionKind,
-    subjectSummary:
-      raw.subjects.map((s) => `${s.subjectKind}:${s.subjectId}`).join(', ') || '',
+    subjectSummary: raw.subjects.map((s) => `${s.subjectKind}:${s.subjectId}`).join(', ') || '',
     actor: auditActorLabel(raw),
-  };
-  if (assistantCall) {
-    event.assistantCall = assistantCall;
   }
-  return event;
+  if (assistantCall) {
+    event.assistantCall = assistantCall
+  }
+  return event
 }
 
 export function mapAuditPage(raw: AuditEventPageResponse): AuditEventPage {
@@ -220,5 +217,5 @@ export function mapAuditPage(raw: AuditEventPageResponse): AuditEventPage {
     total: raw.total,
     limit: raw.limit,
     offset: raw.offset,
-  };
+  }
 }

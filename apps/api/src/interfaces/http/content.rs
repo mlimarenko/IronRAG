@@ -7,7 +7,8 @@ pub mod web_runs;
 
 use axum::{
     Json, Router,
-    extract::{Path, Query, State, multipart::Multipart},
+    extract::{FromRequest, Path, Query, State, multipart::Multipart},
+    response::IntoResponse,
     routing::{get, post},
 };
 use ironrag_contracts::documents::DocumentStatus;
@@ -18,11 +19,10 @@ use self::{
     multipart::{parse_replace_multipart, parse_upload_multipart, resolve_upload_external_key},
     source_download::download_document_source,
     types::{
-        AppendDocumentBodyRequest, ChunkSummary, ChunksQuery, ContentDocumentDetailResponse,
-        ContentDocumentListItem, ContentMutationDetailResponse, CreateDocumentRequest,
-        CreateDocumentResponse, CreateMutationRequest, DocumentListCursor,
-        DocumentListPageResponse, DocumentListSortKey, DocumentListSortOrder,
-        DocumentListStatusCounts, EditDocumentRequest, ListDocumentsQuery, ListMutationsQuery,
+        ChunkSummary, ChunksQuery, ContentDocumentDetailResponse, ContentDocumentListItem,
+        ContentMutationDetailResponse, CreateDocumentRequest, CreateDocumentResponse,
+        CreateRevisionRequest, DocumentListCursor, DocumentListPageResponse, DocumentListSortKey,
+        DocumentListSortOrder, DocumentListStatusCounts, ListDocumentsQuery,
         PatchDocumentMetadataRequest, PreparedDataQuery, PreparedSegmentsPageResponse,
         ReprocessDocumentRequest, TechnicalFactsPageResponse, build_revision_metadata,
         decode_document_list_cursor, encode_document_list_cursor, map_document_summary,
@@ -64,16 +64,15 @@ pub fn router() -> Router<AppState> {
         .route("/content/documents/batch-delete", post(batch_delete_documents))
         .route("/content/documents/batch-cancel", post(batch_cancel_documents))
         .route("/content/documents/batch-reprocess", post(batch_reprocess_documents))
-        .route("/content/documents", get(list_documents).post(create_document))
-        .route("/content/documents/upload", axum::routing::post(upload_document))
+        .route(
+            "/content/libraries/{library_id}/documents",
+            get(list_documents).post(create_document),
+        )
         .route(
             "/content/documents/{document_id}",
             get(get_document).patch(patch_document_metadata).delete(delete_document),
         )
         .route("/content/documents/{document_id}/source", get(download_document_source))
-        .route("/content/documents/{document_id}/append", axum::routing::post(append_document))
-        .route("/content/documents/{document_id}/edit", axum::routing::post(edit_document))
-        .route("/content/documents/{document_id}/replace", axum::routing::post(replace_document))
         .route("/content/documents/{document_id}/head", get(get_document_head))
         .route(
             "/content/documents/{document_id}/prepared-segments",
@@ -84,9 +83,10 @@ pub fn router() -> Router<AppState> {
             get(get_document_technical_facts),
         )
         .route("/content/documents/{document_id}/reprocess", post(reprocess_document))
-        .route("/content/documents/{document_id}/revisions", get(list_revisions))
-        .route("/content/mutations", get(list_mutations).post(create_mutation))
-        .route("/content/mutations/{mutation_id}", get(get_mutation))
+        .route(
+            "/content/documents/{document_id}/revisions",
+            get(list_revisions).post(create_revision),
+        )
         .merge(snapshot::routes())
 }
 
@@ -100,14 +100,17 @@ pub fn router() -> Router<AppState> {
     level = "info",
     name = "http.list_documents",
     skip_all,
-    fields(library_id = ?query.library_id, include_deleted, limit, document_count, elapsed_ms)
+    fields(library_id = %library_id, include_deleted, limit, document_count, elapsed_ms)
 )]
 #[utoipa::path(
     get,
-    path = "/v1/content/documents",
+    path = "/v1/content/libraries/{libraryId}/documents",
     tag = "content",
     operation_id = "listContentDocuments",
-    params(crate::interfaces::http::content::types::ListDocumentsQuery),
+    params(
+        ("libraryId" = uuid::Uuid, Path, description = "Library that owns the document collection"),
+        crate::interfaces::http::content::types::ListDocumentsQuery,
+    ),
     responses(
         (status = 200, description = "Document list page", body = DocumentListPageResponse),
         (status = 401, description = "Caller is not authenticated"),
@@ -117,6 +120,7 @@ pub fn router() -> Router<AppState> {
 pub async fn list_documents(
     auth: AuthContext,
     State(state): State<AppState>,
+    Path(library_id): Path<Uuid>,
     Query(query): Query<ListDocumentsQuery>,
 ) -> Result<Json<DocumentListPageResponse>, ApiError> {
     const DEFAULT_LIMIT: u32 = 50;
@@ -132,9 +136,6 @@ pub async fn list_documents(
 
     let started_at = std::time::Instant::now();
     let span = tracing::Span::current();
-    let library_id = query
-        .library_id
-        .ok_or_else(|| ApiError::BadRequest("libraryId is required".to_string()))?;
     let library =
         load_library_and_authorize(&auth, &state, library_id, POLICY_LIBRARY_READ).await?;
     let include_deleted = query.include_deleted.unwrap_or(false);
@@ -361,116 +362,121 @@ pub async fn list_chunks(
     Ok(Json(summaries))
 }
 
-#[tracing::instrument(
-    level = "info",
-    name = "http.create_document",
-    skip_all,
-    fields(library_id = ?payload.library_id)
-)]
+/// Creates a document in the target library. Content-negotiated on
+/// `Content-Type`: `application/json` admits metadata/inline-text documents
+/// (former `POST /v1/content/documents`); `multipart/form-data` admits a
+/// file upload (former `POST /v1/content/documents/upload`). Both bodies
+/// converge on the same `CreateDocumentAdmission` result and the same
+/// 201 + Location response — there is one creation door, not two.
+#[tracing::instrument(level = "info", name = "http.create_document", skip_all, fields(library_id = %library_id))]
 #[utoipa::path(
     post,
-    path = "/v1/content/documents",
+    path = "/v1/content/libraries/{libraryId}/documents",
     tag = "content",
     operation_id = "createContentDocument",
-    request_body = CreateDocumentRequest,
+    params(("libraryId" = uuid::Uuid, Path, description = "Library that owns the new document")),
+    request_body(
+        content = CreateDocumentRequest,
+        content_type = "application/json",
+        description = "JSON body for a metadata/inline-text document, OR multipart/form-data for a file upload",
+    ),
     responses(
-        (status = 200, description = "Newly created document", body = CreateDocumentResponse),
+        (status = 201, description = "Newly created document", body = CreateDocumentResponse),
         (status = 400, description = "Invalid request payload"),
         (status = 401, description = "Caller is not authenticated"),
         (status = 403, description = "Caller is not authorized for the library"),
+        (status = 409, description = "An active document with this external key already exists"),
+        (status = 415, description = "Content-Type is neither application/json nor multipart/form-data"),
     ),
 )]
 pub async fn create_document(
     auth: AuthContext,
     State(state): State<AppState>,
-    Json(payload): Json<CreateDocumentRequest>,
-) -> Result<Json<CreateDocumentResponse>, ApiError> {
+    Path(library_id): Path<Uuid>,
+    headers: axum::http::HeaderMap,
+    request: axum::extract::Request,
+) -> Result<axum::response::Response, ApiError> {
     let library =
-        load_library_and_authorize(&auth, &state, payload.library_id, POLICY_LIBRARY_WRITE).await?;
-    if library.workspace_id != payload.workspace_id {
-        return Err(ApiError::BadRequest(
-            "workspaceId does not match the target library".to_string(),
-        ));
+        load_library_and_authorize(&auth, &state, library_id, POLICY_LIBRARY_WRITE).await?;
+    let content_type = headers
+        .get(axum::http::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default();
+
+    let CreateDocumentAdmission { document, mutation } = if content_type
+        .starts_with("multipart/form-data")
+    {
+        let multipart = Multipart::from_request(request, &state)
+            .await
+            .map_err(|error| ApiError::BadRequest(format!("invalid multipart body: {error}")))?;
+        let payload = parse_upload_multipart(&state, multipart).await?;
+        state
+            .canonical_services
+            .content
+            .upload_inline_document(
+                &state,
+                UploadInlineDocumentCommand {
+                    workspace_id: library.workspace_id,
+                    library_id: library.id,
+                    external_key: resolve_upload_external_key(
+                        payload.external_key.clone(),
+                        &payload.file_name,
+                    ),
+                    idempotency_key: payload.idempotency_key.clone(),
+                    requested_by_principal_id: Some(auth.principal_id),
+                    request_surface: "rest".to_string(),
+                    source_identity: None,
+                    title: payload.title.or_else(|| Some(payload.file_name.clone())),
+                    document_hint: payload.document_hint,
+                    file_name: payload.file_name,
+                    mime_type: payload.mime_type,
+                    file_bytes: payload.file_bytes,
+                    parent_external_key: payload.parent_external_key,
+                },
+            )
+            .await?
+    } else if content_type.starts_with("application/json") {
+        const MAX_JSON_BODY_BYTES: usize = 25 * 1024 * 1024;
+        let bytes = axum::body::to_bytes(request.into_body(), MAX_JSON_BODY_BYTES).await.map_err(
+            |error| ApiError::BadRequest(format!("failed to read request body: {error}")),
+        )?;
+        let payload: CreateDocumentRequest = serde_json::from_slice(&bytes)
+            .map_err(|error| ApiError::BadRequest(format!("invalid JSON body: {error}")))?;
+        state
+            .canonical_services
+            .content
+            .admit_document(
+                &state,
+                AdmitDocumentCommand {
+                    workspace_id: library.workspace_id,
+                    library_id: library.id,
+                    external_key: payload.external_key.clone(),
+                    file_name: None,
+                    idempotency_key: payload.idempotency_key.clone(),
+                    created_by_principal_id: Some(auth.principal_id),
+                    request_surface: "rest".to_string(),
+                    source_identity: None,
+                    revision: build_revision_metadata(&payload)?,
+                    parent_external_key: payload.parent_external_key.clone(),
+                },
+            )
+            .await?
+    } else {
+        return Err(ApiError::unsupported_media_type(format!(
+            "Content-Type must be application/json or multipart/form-data, got `{content_type}`"
+        )));
+    };
+
+    let location = format!("/v1/content/documents/{}", document.document.id);
+    let body = CreateDocumentResponse {
+        document: map_document_summary(document),
+        mutation: map_mutation_admission(mutation),
+    };
+    let mut response = (axum::http::StatusCode::CREATED, Json(body)).into_response();
+    if let Ok(value) = axum::http::HeaderValue::from_str(&location) {
+        response.headers_mut().insert(axum::http::header::LOCATION, value);
     }
-
-    let admission = state
-        .canonical_services
-        .content
-        .admit_document(
-            &state,
-            AdmitDocumentCommand {
-                workspace_id: payload.workspace_id,
-                library_id: payload.library_id,
-                external_key: payload.external_key.clone(),
-                file_name: None,
-                idempotency_key: payload.idempotency_key.clone(),
-                created_by_principal_id: Some(auth.principal_id),
-                request_surface: "rest".to_string(),
-                source_identity: None,
-                revision: build_revision_metadata(&payload)?,
-                parent_external_key: payload.parent_external_key.clone(),
-            },
-        )
-        .await?;
-    let CreateDocumentAdmission { document, mutation } = admission;
-    Ok(Json(CreateDocumentResponse {
-        document: map_document_summary(document),
-        mutation: map_mutation_admission(mutation),
-    }))
-}
-
-#[tracing::instrument(level = "info", name = "http.upload_document", skip_all)]
-#[utoipa::path(
-    post,
-    path = "/v1/content/documents/upload",
-    tag = "content",
-    operation_id = "uploadContentDocument",
-    request_body(content_type = "multipart/form-data", description = "Multipart upload with metadata + file part"),
-    responses(
-        (status = 200, description = "Document accepted for ingest", body = CreateDocumentResponse),
-        (status = 401, description = "Caller is not authenticated"),
-        (status = 403, description = "Caller is not authorized for the library"),
-    ),
-)]
-pub async fn upload_document(
-    auth: AuthContext,
-    State(state): State<AppState>,
-    multipart: Multipart,
-) -> Result<Json<CreateDocumentResponse>, ApiError> {
-    auth.require_any_scope(POLICY_DOCUMENTS_WRITE)?;
-    let payload = parse_upload_multipart(&state, multipart).await?;
-    let library =
-        load_library_and_authorize(&auth, &state, payload.library_id, POLICY_LIBRARY_WRITE).await?;
-    let response = state
-        .canonical_services
-        .content
-        .upload_inline_document(
-            &state,
-            UploadInlineDocumentCommand {
-                workspace_id: library.workspace_id,
-                library_id: library.id,
-                external_key: resolve_upload_external_key(
-                    payload.external_key.clone(),
-                    &payload.file_name,
-                ),
-                idempotency_key: payload.idempotency_key.clone(),
-                requested_by_principal_id: Some(auth.principal_id),
-                request_surface: "rest".to_string(),
-                source_identity: None,
-                title: payload.title.or(Some(payload.file_name.clone())),
-                document_hint: payload.document_hint,
-                file_name: payload.file_name,
-                mime_type: payload.mime_type,
-                file_bytes: payload.file_bytes,
-                parent_external_key: payload.parent_external_key,
-            },
-        )
-        .await?;
-    let CreateDocumentAdmission { document, mutation } = response;
-    Ok(Json(CreateDocumentResponse {
-        document: map_document_summary(document),
-        mutation: map_mutation_admission(mutation),
-    }))
+    Ok(response)
 }
 
 #[tracing::instrument(
@@ -747,32 +753,41 @@ pub async fn delete_document(
     Ok(Json(map_mutation_admission(admission)))
 }
 
-#[tracing::instrument(
-    level = "info",
-    name = "http.append_document",
-    skip_all,
-    fields(document_id = %document_id)
-)]
+/// Creates a new revision of a document. Content-negotiated on
+/// `Content-Type`, mirroring `create_document`'s pattern: `application/json`
+/// with `{mode:"append"|"replace", appendedText|markdown}` covers text
+/// changes (former `.../append` and `.../edit`); `multipart/form-data`
+/// replaces the underlying file bytes (former `.../replace`). One creation
+/// door for revisions, async (202 + Location to the canonical operation),
+/// not three verb-named endpoints.
+#[tracing::instrument(level = "info", name = "http.create_revision", skip_all, fields(document_id = %document_id))]
 #[utoipa::path(
     post,
-    path = "/v1/content/documents/{documentId}/append",
+    path = "/v1/content/documents/{documentId}/revisions",
     tag = "content",
-    operation_id = "appendContentDocument",
+    operation_id = "createContentRevision",
     params(("documentId" = uuid::Uuid, Path, description = "Document identifier")),
-    request_body = AppendDocumentBodyRequest,
+    request_body(
+        content = CreateRevisionRequest,
+        content_type = "application/json",
+        description = "JSON body for a text append/replace, OR multipart/form-data to replace the file",
+    ),
     responses(
-        (status = 200, description = "Mutation describing the append", body = ContentMutationDetailResponse),
+        (status = 202, description = "Revision admitted for async processing", body = ContentMutationDetailResponse),
+        (status = 400, description = "Invalid request payload"),
         (status = 401, description = "Caller is not authenticated"),
         (status = 403, description = "Caller is not authorized for the document"),
         (status = 404, description = "Document not found"),
+        (status = 415, description = "Content-Type is neither application/json nor multipart/form-data"),
     ),
 )]
-pub async fn append_document(
+pub async fn create_revision(
     auth: AuthContext,
     State(state): State<AppState>,
     Path(document_id): Path<Uuid>,
-    Json(payload): Json<AppendDocumentBodyRequest>,
-) -> Result<Json<ContentMutationDetailResponse>, ApiError> {
+    headers: axum::http::HeaderMap,
+    request: axum::extract::Request,
+) -> Result<axum::response::Response, ApiError> {
     let document = load_canonical_content_document_and_authorize(
         &auth,
         &state,
@@ -780,134 +795,105 @@ pub async fn append_document(
         POLICY_DOCUMENTS_WRITE,
     )
     .await?;
-    let admission = state
-        .canonical_services
-        .content
-        .append_inline_mutation(
-            &state,
-            AppendInlineMutationCommand {
-                workspace_id: document.workspace_id,
-                library_id: document.library_id,
-                document_id,
-                idempotency_key: payload.idempotency_key,
-                requested_by_principal_id: Some(auth.principal_id),
-                request_surface: "rest".to_string(),
-                source_identity: None,
-                appended_text: payload.appended_text,
-            },
-        )
-        .await?;
-    Ok(Json(map_mutation_admission(admission)))
-}
+    let content_type = headers
+        .get(axum::http::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default();
 
-#[tracing::instrument(
-    level = "info",
-    name = "http.edit_document",
-    skip_all,
-    fields(document_id = %document_id)
-)]
-#[utoipa::path(
-    post,
-    path = "/v1/content/documents/{documentId}/edit",
-    tag = "content",
-    operation_id = "editContentDocument",
-    params(("documentId" = uuid::Uuid, Path, description = "Document identifier")),
-    request_body = EditDocumentRequest,
-    responses(
-        (status = 200, description = "Mutation describing the edit", body = ContentMutationDetailResponse),
-        (status = 401, description = "Caller is not authenticated"),
-        (status = 403, description = "Caller is not authorized for the document"),
-        (status = 404, description = "Document not found"),
-    ),
-)]
-pub async fn edit_document(
-    auth: AuthContext,
-    State(state): State<AppState>,
-    Path(document_id): Path<Uuid>,
-    Json(payload): Json<EditDocumentRequest>,
-) -> Result<Json<ContentMutationDetailResponse>, ApiError> {
-    let document = load_canonical_content_document_and_authorize(
-        &auth,
-        &state,
-        document_id,
-        POLICY_DOCUMENTS_WRITE,
-    )
-    .await?;
-    let admission = state
-        .canonical_services
-        .content
-        .edit_inline_mutation(
-            &state,
-            EditInlineMutationCommand {
-                workspace_id: document.workspace_id,
-                library_id: document.library_id,
-                document_id,
-                idempotency_key: payload.idempotency_key,
-                requested_by_principal_id: Some(auth.principal_id),
-                request_surface: "rest".to_string(),
-                source_identity: None,
-                markdown: payload.markdown,
-            },
-        )
-        .await?;
-    Ok(Json(map_mutation_admission(admission)))
-}
+    let admission = if content_type.starts_with("multipart/form-data") {
+        let multipart = Multipart::from_request(request, &state)
+            .await
+            .map_err(|error| ApiError::BadRequest(format!("invalid multipart body: {error}")))?;
+        let payload = parse_replace_multipart(&state, multipart).await?;
+        state
+            .canonical_services
+            .content
+            .replace_inline_mutation(
+                &state,
+                ReplaceInlineMutationCommand {
+                    workspace_id: document.workspace_id,
+                    library_id: document.library_id,
+                    document_id,
+                    idempotency_key: payload.idempotency_key,
+                    requested_by_principal_id: Some(auth.principal_id),
+                    request_surface: "rest".to_string(),
+                    source_identity: None,
+                    file_name: payload.file_name,
+                    document_hint: payload.document_hint,
+                    mime_type: payload.mime_type,
+                    file_bytes: payload.file_bytes,
+                },
+            )
+            .await?
+    } else if content_type.starts_with("application/json") {
+        const MAX_JSON_BODY_BYTES: usize = 25 * 1024 * 1024;
+        let bytes = axum::body::to_bytes(request.into_body(), MAX_JSON_BODY_BYTES).await.map_err(
+            |error| ApiError::BadRequest(format!("failed to read request body: {error}")),
+        )?;
+        let payload: CreateRevisionRequest = serde_json::from_slice(&bytes)
+            .map_err(|error| ApiError::BadRequest(format!("invalid JSON body: {error}")))?;
+        match payload.mode {
+            types::RevisionMode::Append => {
+                let appended_text = payload.appended_text.ok_or_else(|| {
+                    ApiError::BadRequest("appendedText is required when mode is append".to_string())
+                })?;
+                state
+                    .canonical_services
+                    .content
+                    .append_inline_mutation(
+                        &state,
+                        AppendInlineMutationCommand {
+                            workspace_id: document.workspace_id,
+                            library_id: document.library_id,
+                            document_id,
+                            idempotency_key: payload.idempotency_key,
+                            requested_by_principal_id: Some(auth.principal_id),
+                            request_surface: "rest".to_string(),
+                            source_identity: None,
+                            appended_text,
+                        },
+                    )
+                    .await?
+            }
+            types::RevisionMode::Replace => {
+                let markdown = payload.markdown.ok_or_else(|| {
+                    ApiError::BadRequest("markdown is required when mode is replace".to_string())
+                })?;
+                state
+                    .canonical_services
+                    .content
+                    .edit_inline_mutation(
+                        &state,
+                        EditInlineMutationCommand {
+                            workspace_id: document.workspace_id,
+                            library_id: document.library_id,
+                            document_id,
+                            idempotency_key: payload.idempotency_key,
+                            requested_by_principal_id: Some(auth.principal_id),
+                            request_surface: "rest".to_string(),
+                            source_identity: None,
+                            markdown,
+                        },
+                    )
+                    .await?
+            }
+        }
+    } else {
+        return Err(ApiError::unsupported_media_type(format!(
+            "Content-Type must be application/json or multipart/form-data, got `{content_type}`"
+        )));
+    };
 
-#[tracing::instrument(
-    level = "info",
-    name = "http.replace_document",
-    skip_all,
-    fields(document_id = %document_id)
-)]
-#[utoipa::path(
-    post,
-    path = "/v1/content/documents/{documentId}/replace",
-    tag = "content",
-    operation_id = "replaceContentDocument",
-    params(("documentId" = uuid::Uuid, Path, description = "Document identifier")),
-    request_body(content_type = "multipart/form-data", description = "Multipart payload that replaces the latest revision"),
-    responses(
-        (status = 200, description = "Mutation describing the replacement", body = ContentMutationDetailResponse),
-        (status = 401, description = "Caller is not authenticated"),
-        (status = 403, description = "Caller is not authorized for the document"),
-        (status = 404, description = "Document not found"),
-    ),
-)]
-pub async fn replace_document(
-    auth: AuthContext,
-    State(state): State<AppState>,
-    Path(document_id): Path<Uuid>,
-    multipart: Multipart,
-) -> Result<Json<ContentMutationDetailResponse>, ApiError> {
-    let document = load_canonical_content_document_and_authorize(
-        &auth,
-        &state,
-        document_id,
-        POLICY_DOCUMENTS_WRITE,
-    )
-    .await?;
-    let payload = parse_replace_multipart(&state, multipart).await?;
-    let admission = state
-        .canonical_services
-        .content
-        .replace_inline_mutation(
-            &state,
-            ReplaceInlineMutationCommand {
-                workspace_id: document.workspace_id,
-                library_id: document.library_id,
-                document_id,
-                idempotency_key: payload.idempotency_key,
-                requested_by_principal_id: Some(auth.principal_id),
-                request_surface: "rest".to_string(),
-                source_identity: None,
-                file_name: payload.file_name,
-                document_hint: payload.document_hint,
-                mime_type: payload.mime_type,
-                file_bytes: payload.file_bytes,
-            },
-        )
-        .await?;
-    Ok(Json(map_mutation_admission(admission)))
+    let body = map_mutation_admission(admission);
+    let async_operation_id = body.async_operation_id;
+    let mut response = (axum::http::StatusCode::ACCEPTED, Json(body)).into_response();
+    if let Some(operation_id) = async_operation_id {
+        let location = format!("/v1/ops/operations/{operation_id}");
+        if let Ok(value) = axum::http::HeaderValue::from_str(&location) {
+            response.headers_mut().insert(axum::http::header::LOCATION, value);
+        }
+    }
+    Ok(response)
 }
 
 #[tracing::instrument(
@@ -941,152 +927,10 @@ pub async fn list_revisions(
     Ok(Json(revisions))
 }
 
-#[tracing::instrument(
-    level = "info",
-    name = "http.create_mutation",
-    skip_all,
-    fields(document_id = ?payload.document_id, library_id = ?payload.library_id)
-)]
-#[utoipa::path(
-    post,
-    path = "/v1/content/mutations",
-    tag = "content",
-    operation_id = "createContentMutation",
-    request_body = CreateMutationRequest,
-    responses(
-        (status = 200, description = "Newly created mutation", body = ContentMutationDetailResponse),
-        (status = 401, description = "Caller is not authenticated"),
-        (status = 403, description = "Caller is not authorized for the document"),
-    ),
-)]
-pub async fn create_mutation(
-    auth: AuthContext,
-    State(state): State<AppState>,
-    Json(payload): Json<CreateMutationRequest>,
-) -> Result<Json<ContentMutationDetailResponse>, ApiError> {
-    let document = load_canonical_content_document_and_authorize(
-        &auth,
-        &state,
-        payload.document_id,
-        POLICY_DOCUMENTS_WRITE,
-    )
-    .await?;
-    if document.workspace_id != payload.workspace_id || document.library_id != payload.library_id {
-        return Err(ApiError::BadRequest(
-            "workspaceId or libraryId does not match the target document".to_string(),
-        ));
-    }
-
-    let admission = state
-        .canonical_services
-        .content
-        .admit_mutation(
-            &state,
-            AdmitMutationCommand {
-                workspace_id: payload.workspace_id,
-                library_id: payload.library_id,
-                document_id: document.id,
-                operation_kind: payload.operation_kind.clone(),
-                idempotency_key: payload.idempotency_key.clone(),
-                requested_by_principal_id: Some(auth.principal_id),
-                request_surface: "rest".to_string(),
-                source_identity: None,
-                revision: build_revision_metadata(&CreateDocumentRequest {
-                    workspace_id: payload.workspace_id,
-                    library_id: payload.library_id,
-                    external_key: None,
-                    parent_external_key: None,
-                    idempotency_key: payload.idempotency_key.clone(),
-                    content_source_kind: payload.content_source_kind.clone(),
-                    checksum: payload.checksum.clone(),
-                    mime_type: payload.mime_type.clone(),
-                    byte_size: payload.byte_size,
-                    title: payload.title.clone(),
-                    language_code: payload.language_code.clone(),
-                    source_uri: payload.source_uri.clone(),
-                    document_hint: payload.document_hint.clone(),
-                    storage_key: payload.storage_key.clone(),
-                })?,
-                parent_async_operation_id: None,
-            },
-        )
-        .await?;
-    Ok(Json(map_mutation_admission(admission)))
-}
-
-#[tracing::instrument(
-    level = "info",
-    name = "http.list_mutations",
-    skip_all,
-    fields(library_id = ?query.library_id, item_count)
-)]
-#[utoipa::path(
-    get,
-    path = "/v1/content/mutations",
-    tag = "content",
-    operation_id = "listContentMutations",
-    params(crate::interfaces::http::content::types::ListMutationsQuery),
-    responses(
-        (status = 200, description = "Mutations visible to the caller", body = [ContentMutationDetailResponse]),
-        (status = 401, description = "Caller is not authenticated"),
-        (status = 403, description = "Caller is not authorized"),
-    ),
-)]
-pub async fn list_mutations(
-    auth: AuthContext,
-    State(state): State<AppState>,
-    Query(query): Query<ListMutationsQuery>,
-) -> Result<Json<Vec<ContentMutationDetailResponse>>, ApiError> {
-    let span = tracing::Span::current();
-    let library_id = query
-        .library_id
-        .ok_or_else(|| ApiError::BadRequest("libraryId is required".to_string()))?;
-    let library =
-        load_library_and_authorize(&auth, &state, library_id, POLICY_LIBRARY_READ).await?;
-    let admissions = state
-        .canonical_services
-        .content
-        .list_mutation_admissions(&state, library.workspace_id, library.id)
-        .await?;
-    let items: Vec<_> = admissions.into_iter().map(map_mutation_admission).collect();
-    span.record("item_count", items.len());
-    Ok(Json(items))
-}
-
-#[tracing::instrument(
-    level = "info",
-    name = "http.get_mutation",
-    skip_all,
-    fields(mutation_id = %mutation_id)
-)]
-#[utoipa::path(
-    get,
-    path = "/v1/content/mutations/{mutationId}",
-    tag = "content",
-    operation_id = "getContentMutation",
-    params(("mutationId" = uuid::Uuid, Path, description = "Mutation identifier")),
-    responses(
-        (status = 200, description = "Mutation detail", body = ContentMutationDetailResponse),
-        (status = 401, description = "Caller is not authenticated"),
-        (status = 403, description = "Caller is not authorized for the mutation"),
-        (status = 404, description = "Mutation not found"),
-    ),
-)]
-pub async fn get_mutation(
-    auth: AuthContext,
-    State(state): State<AppState>,
-    Path(mutation_id): Path<Uuid>,
-) -> Result<Json<ContentMutationDetailResponse>, ApiError> {
-    let admission =
-        state.canonical_services.content.get_mutation_admission(&state, mutation_id).await?;
-    let mutation = &admission.mutation;
-    let library =
-        load_library_and_authorize(&auth, &state, mutation.library_id, POLICY_LIBRARY_READ).await?;
-    if library.workspace_id != mutation.workspace_id {
-        return Err(ApiError::Unauthorized);
-    }
-    Ok(Json(map_mutation_admission(admission)))
-}
+// POST/GET /content/mutations (+ /{mutationId}) were removed here — a
+// duplicate write/read surface superseded by the typed create/revisions
+// endpoints above and by GET/QUERY /v1/audit/events for the admission
+// trail. Keeping both would have violated "one write model per resource".
 
 #[tracing::instrument(
     level = "info",

@@ -1,47 +1,22 @@
-#![allow(
-    clippy::doc_markdown,
-    clippy::missing_const_for_fn,
-    clippy::missing_errors_doc,
-    clippy::too_many_arguments,
-    clippy::too_many_lines
-)]
-
-#[allow(
-    clippy::bool_to_int_with_if,
-    clippy::missing_errors_doc,
-    clippy::option_if_let_else,
-    clippy::too_many_arguments,
-    clippy::too_many_lines
-)]
+pub mod admission_repository;
 pub mod ai_repository;
-#[allow(clippy::missing_errors_doc)]
 pub mod audit_repository;
-#[allow(clippy::missing_errors_doc)]
 pub mod billing_repository;
-#[allow(clippy::missing_errors_doc)]
 pub mod catalog_repository;
-#[allow(clippy::missing_errors_doc)]
 pub mod content_repository;
 mod document_runtime_repository;
-#[allow(clippy::missing_errors_doc)]
 pub mod extract_repository;
-#[allow(clippy::missing_errors_doc)]
 pub mod iam_repository;
-#[allow(clippy::missing_errors_doc, clippy::too_many_lines)]
 pub mod ingest_repository;
-#[allow(clippy::missing_errors_doc)]
 pub mod ops_repository;
-#[allow(clippy::missing_errors_doc)]
 pub mod query_ir_cache_repository;
-#[allow(clippy::missing_errors_doc)]
 pub mod query_repository;
-#[allow(clippy::missing_errors_doc)]
 pub mod query_result_cache_repository;
 mod runtime_graph_repository;
 mod runtime_graph_summary_repository;
 pub mod runtime_provider_repository;
 pub mod runtime_repository;
-#[allow(clippy::missing_errors_doc)]
+pub mod webhook_outbox_repository;
 pub mod webhook_repository;
 
 pub use self::catalog_repository::{
@@ -62,56 +37,7 @@ use crate::shared::text_encoding::{
     repair_json_string_values, repair_utf8_latin1_mojibake,
 };
 
-#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
-pub struct IngestionExecutionPayload {
-    #[serde(alias = "project_id")]
-    pub library_id: Uuid,
-    #[serde(default)]
-    pub upload_batch_id: Option<Uuid>,
-    #[serde(default)]
-    pub logical_document_id: Option<Uuid>,
-    #[serde(default)]
-    pub target_revision_id: Option<Uuid>,
-    #[serde(default)]
-    pub content_mutation_id: Option<Uuid>,
-    #[serde(default)]
-    pub stale_guard_revision_no: Option<i32>,
-    #[serde(default)]
-    pub attempt_kind: Option<String>,
-    #[serde(default)]
-    pub mutation_kind: Option<String>,
-    pub source_id: Option<Uuid>,
-    pub external_key: String,
-    pub title: Option<String>,
-    pub mime_type: Option<String>,
-    pub text: Option<String>,
-    pub file_kind: Option<String>,
-    pub file_size_bytes: Option<u64>,
-    pub adapter_status: Option<String>,
-    pub extraction_error: Option<String>,
-    #[serde(default)]
-    pub extraction_kind: Option<String>,
-    #[serde(default)]
-    pub page_count: Option<u32>,
-    #[serde(default)]
-    pub extraction_warnings: Vec<String>,
-    #[serde(default = "default_json_object")]
-    pub source_map: serde_json::Value,
-    #[serde(default)]
-    pub extraction_provider_kind: Option<String>,
-    #[serde(default)]
-    pub extraction_model_name: Option<String>,
-    #[serde(default)]
-    pub extraction_version: Option<String>,
-    pub ingest_mode: String,
-    pub extra_metadata: serde_json::Value,
-}
-
-fn default_json_object() -> serde_json::Value {
-    serde_json::json!({})
-}
-
-/// PostgreSQL JSONB rejects lone surrogate code points (`\uD800`–`\uDFFF`)
+/// `PostgreSQL` JSONB rejects lone surrogate code points (`\uD800`–`\uDFFF`)
 /// and other invalid Unicode escapes that some LLM providers emit.
 ///
 /// Strategy: serialize the value to a JSON string, walk through it
@@ -160,8 +86,8 @@ fn sanitized_json_for_postgres_text(value: serde_json::Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        replace_surrogate_unicode_escapes, sanitize_json_for_postgres,
-        sanitize_runtime_graph_normalized_json,
+        is_unicode_escape_error, is_unicode_escape_sqlstate, replace_surrogate_unicode_escapes,
+        sanitize_json_for_postgres, sanitize_runtime_graph_normalized_json,
     };
     use crate::shared::text_encoding::repair_json_string_values;
 
@@ -203,6 +129,17 @@ mod tests {
 
         assert_eq!(value["label"], "😀");
     }
+
+    #[test]
+    fn unicode_escape_retry_uses_sqlstate_and_ignores_misleading_prose() {
+        assert!(is_unicode_escape_sqlstate("22P05"));
+        assert!(!is_unicode_escape_sqlstate("22021"));
+
+        let misleading = sqlx::Error::Protocol(
+            "unsupported Unicode escape sequence with no database code".to_string(),
+        );
+        assert!(!is_unicode_escape_error(&misleading));
+    }
 }
 
 /// Replace `\uXXXX` escape sequences for surrogate code points
@@ -210,36 +147,43 @@ mod tests {
 fn replace_surrogate_unicode_escapes(json: &str) -> String {
     let bytes = json.as_bytes();
     let mut out = String::with_capacity(json.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        // Look for \uXXXX pattern
-        if i + 6 <= bytes.len() && bytes[i] == b'\\' && bytes[i + 1] == b'u' {
-            let hex = &bytes[i + 2..i + 6];
-            if let Some(cp) = decode_hex_u16(hex) {
-                if is_high_surrogate(cp)
-                    && i + 12 <= bytes.len()
-                    && bytes[i + 6] == b'\\'
-                    && bytes[i + 7] == b'u'
-                    && decode_hex_u16(&bytes[i + 8..i + 12]).is_some_and(is_low_surrogate)
-                {
-                    out.push_str(&json[i..i + 12]);
-                    i += 12;
-                    continue;
-                }
-                if is_surrogate_or_noncharacter(cp) {
-                    out.push_str(r"\uFFFD");
-                    i += 6;
-                    continue;
-                }
-            }
+    let mut index = 0;
+    while index < bytes.len() {
+        if let Some(consumed) = copy_unicode_escape(json, bytes, index, &mut out) {
+            index += consumed;
+        } else {
+            index += copy_next_character(json, index, &mut out);
         }
-        let Some(character) = json[i..].chars().next() else {
-            break;
-        };
-        out.push(character);
-        i += character.len_utf8();
     }
     out
+}
+
+fn copy_unicode_escape(json: &str, bytes: &[u8], index: usize, out: &mut String) -> Option<usize> {
+    let code_point = unicode_escape_at(bytes, index)?;
+    if is_high_surrogate(code_point)
+        && unicode_escape_at(bytes, index + 6).is_some_and(is_low_surrogate)
+    {
+        out.push_str(&json[index..index + 12]);
+        return Some(12);
+    }
+    if is_surrogate_or_noncharacter(code_point) {
+        out.push_str(r"\uFFFD");
+        return Some(6);
+    }
+    None
+}
+
+fn unicode_escape_at(bytes: &[u8], index: usize) -> Option<u16> {
+    let escape = bytes.get(index..index.saturating_add(6))?;
+    (escape[0] == b'\\' && escape[1] == b'u').then(|| decode_hex_u16(&escape[2..6])).flatten()
+}
+
+fn copy_next_character(json: &str, index: usize, out: &mut String) -> usize {
+    let Some(character) = json[index..].chars().next() else {
+        return 0;
+    };
+    out.push(character);
+    character.len_utf8()
 }
 
 fn decode_hex_u16(hex: &[u8]) -> Option<u16> {
@@ -258,15 +202,15 @@ fn decode_hex_u16(hex: &[u8]) -> Option<u16> {
     Some(val)
 }
 
-fn is_surrogate_or_noncharacter(cp: u16) -> bool {
+const fn is_surrogate_or_noncharacter(cp: u16) -> bool {
     matches!(cp, 0xD800..=0xDFFF | 0xFFFE | 0xFFFF)
 }
 
-fn is_high_surrogate(cp: u16) -> bool {
+const fn is_high_surrogate(cp: u16) -> bool {
     matches!(cp, 0xD800..=0xDBFF)
 }
 
-fn is_low_surrogate(cp: u16) -> bool {
+const fn is_low_surrogate(cp: u16) -> bool {
     matches!(cp, 0xDC00..=0xDFFF)
 }
 
@@ -661,10 +605,18 @@ pub async fn update_runtime_graph_extraction_record(
     .await
 }
 
-/// Returns `true` when `error` is a PostgreSQL Unicode escape rejection (22P05).
+const PG_SQLSTATE_UNTRANSLATABLE_CHARACTER: &str = "22P05";
+
+/// Returns `true` when `error` is a `PostgreSQL` Unicode escape rejection (22P05).
 fn is_unicode_escape_error(error: &sqlx::Error) -> bool {
-    let msg = error.to_string();
-    msg.contains("unsupported Unicode escape sequence") || msg.contains("invalid Unicode escape")
+    error
+        .as_database_error()
+        .and_then(sqlx::error::DatabaseError::code)
+        .is_some_and(|code| is_unicode_escape_sqlstate(code.as_ref()))
+}
+
+fn is_unicode_escape_sqlstate(code: &str) -> bool {
+    code == PG_SQLSTATE_UNTRANSLATABLE_CHARACTER
 }
 
 /// Same as [`update_runtime_graph_extraction_record`] but when the primary

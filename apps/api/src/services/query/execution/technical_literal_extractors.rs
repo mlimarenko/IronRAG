@@ -3,7 +3,7 @@ use std::{collections::HashSet, sync::LazyLock};
 use super::technical_literals::trim_literal_token;
 
 static CONFIG_ASSIGNMENT_LITERAL_REGEX: LazyLock<regex::Regex> = LazyLock::new(|| {
-    #[allow(clippy::expect_used)]
+    #[allow(clippy::expect_used, reason = "the static regex literal is compile-time owned")]
     regex::RegexBuilder::new(
         r"(?m)(?:^|[`;\r\n])\s*[#;]?\s*([A-Za-z][A-Za-z0-9_.-]{1,160})\s*=\s*([^`;\r\n]{1,220})",
     )
@@ -29,17 +29,17 @@ pub(super) fn extract_url_literals(text: &str, limit: usize) -> Vec<String> {
     let mut urls = Vec::new();
     let mut seen = HashSet::new();
     for token in text.split_whitespace() {
-        let cleaned =
-            trim_literal_token(token).trim_end_matches(|ch: char| matches!(ch, '.' | ':' | ';'));
+        let cleaned = trim_literal_token(token).trim_end_matches(['.', ':', ';']);
         let trailing_open_placeholder = cleaned.rfind('<').is_some_and(|left_index| {
             cleaned.rfind('>').is_none_or(|right_index| left_index > right_index)
         });
         let has_unbalanced_angle_brackets = (cleaned.contains('<') && !cleaned.contains('>'))
             || (cleaned.contains('>') && !cleaned.contains('<'));
-        if cleaned.starts_with("http://") || cleaned.starts_with("https://") {
-            if !has_unbalanced_angle_brackets && !trailing_open_placeholder {
-                push_unique_limited(&mut urls, &mut seen, cleaned.to_string(), limit);
-            }
+        if (cleaned.starts_with("http://") || cleaned.starts_with("https://"))
+            && !has_unbalanced_angle_brackets
+            && !trailing_open_placeholder
+        {
+            push_unique_limited(&mut urls, &mut seen, cleaned.to_string(), limit);
         }
     }
     urls
@@ -75,8 +75,7 @@ pub(super) fn extract_explicit_path_literals(text: &str, limit: usize) -> Vec<St
     let mut seen = HashSet::new();
 
     for token in text.split_whitespace() {
-        let cleaned =
-            trim_literal_token(token).trim_end_matches(|ch: char| matches!(ch, '.' | ':' | ';'));
+        let cleaned = trim_literal_token(token).trim_end_matches(['.', ':', ';']);
         if cleaned.starts_with('/') && cleaned.matches('/').count() >= 1 {
             push_unique_limited(&mut paths, &mut seen, cleaned.to_string(), limit);
         }
@@ -98,10 +97,21 @@ pub(super) fn extract_package_command_literals(text: &str, limit: usize) -> Vec<
     let mut seen = HashSet::new();
     let mut matches = Vec::<(usize, String)>::new();
     let mut offset = 0usize;
+    let mut inside_fenced_block = false;
     for line in text.lines() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
+            inside_fenced_block = !inside_fenced_block;
+            offset = offset.saturating_add(line.len()).saturating_add(1);
+            continue;
+        }
+        let formal_line_context =
+            inside_fenced_block || command_line_has_explicit_syntax_context(line);
         let tokens = command_literal_tokens(line, offset);
         for index in 0..tokens.len() {
-            if let Some((position, value)) = command_object_literal_from_tokens(&tokens, index) {
+            if let Some((position, value)) =
+                command_object_literal_from_tokens(&tokens, index, formal_line_context)
+            {
                 matches.push((position, value));
             }
         }
@@ -112,6 +122,15 @@ pub(super) fn extract_package_command_literals(text: &str, limit: usize) -> Vec<
         push_unique_limited(&mut command_objects, &mut seen, value, limit);
     }
     command_objects
+}
+
+fn command_line_has_explicit_syntax_context(line: &str) -> bool {
+    let trimmed = line.trim_start();
+    let has_shell_prompt =
+        trimmed.chars().next().is_some_and(|first| matches!(first, '$' | '#' | '%' | '>'))
+            && trimmed.chars().nth(1).is_some_and(char::is_whitespace);
+    let has_inline_code_span = line.matches('`').count() >= 2;
+    has_shell_prompt || has_inline_code_span
 }
 
 fn command_literal_tokens(line: &str, line_offset: usize) -> Vec<(usize, String)> {
@@ -134,45 +153,40 @@ fn command_literal_tokens(line: &str, line_offset: usize) -> Vec<(usize, String)
 fn command_object_literal_from_tokens(
     tokens: &[(usize, String)],
     index: usize,
+    formal_line_context: bool,
 ) -> Option<(usize, String)> {
     let head = tokens.get(index)?.1.as_str();
     if !command_literal_head_is_candidate(head) {
         return None;
     }
-    let tail = &tokens[index.saturating_add(1)..];
-    let boundary = tail
-        .iter()
-        .position(|(_, token)| command_literal_token_is_sentence_function_word(token))
-        .unwrap_or(tail.len());
-    let args = &tail[..boundary];
-    if !command_literal_window_has_command_shape(head, args) {
+    let args = &tokens[index.saturating_add(1)..];
+    let candidate = args.iter().take(8).enumerate().find_map(|(candidate_index, value)| {
+        command_object_literal_candidate(&value.1)
+            .map(|literal| (candidate_index, value.0, literal))
+    })?;
+    if !command_literal_window_has_command_shape(head, args, candidate.0, formal_line_context) {
         return None;
     }
-    args.iter().take(8).find_map(|(position, token)| {
-        command_object_literal_candidate(token).map(|value| (*position, value))
-    })
+    Some((candidate.1, candidate.2))
 }
 
-fn command_literal_window_has_command_shape(head: &str, args: &[(usize, String)]) -> bool {
-    if args.is_empty() {
-        return false;
+fn command_literal_window_has_command_shape(
+    head: &str,
+    args: &[(usize, String)],
+    object_index: usize,
+    formal_line_context: bool,
+) -> bool {
+    let prefix = &args[..object_index];
+    if command_literal_token_has_executable_shape(head) {
+        return prefix.iter().all(|(_, token)| command_literal_token_is_syntax_argument(token));
     }
-    let head_has_executable_shape = command_literal_token_has_executable_shape(head);
-    let has_structural_argument =
-        args.iter().take(8).any(|(_, token)| command_literal_token_is_structural_argument(token));
-    if head_has_executable_shape && has_structural_argument {
-        return true;
-    }
-    if command_literal_token_is_plain_word(head)
-        && let Some((_, subcommand)) = args.first()
-        && command_literal_token_is_plain_word(subcommand)
-    {
-        return args.iter().skip(1).take(6).any(|(_, token)| {
-            command_object_literal_candidate(token).is_some()
-                || command_literal_token_is_structural_argument(token)
-        });
-    }
-    false
+    formal_line_context
+        && command_literal_token_is_plain_word(head)
+        && args.first().is_some_and(|(_, token)| command_literal_token_is_plain_word(token))
+        && object_index >= 1
+        && args[1..object_index]
+            .iter()
+            .all(|(_, token)| command_literal_token_is_syntax_argument(token))
 }
 
 fn command_literal_head_is_candidate(token: &str) -> bool {
@@ -184,7 +198,6 @@ fn command_literal_head_is_candidate(token: &str) -> bool {
         && token.chars().all(|ch| {
             ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-' | '+' | '/' | '\\')
         })
-        && !command_literal_token_is_sentence_function_word(token)
 }
 
 fn command_object_literal_candidate(token: &str) -> Option<String> {
@@ -214,13 +227,12 @@ fn command_object_literal_candidate(token: &str) -> Option<String> {
     has_identity_shape.then(|| token.to_string())
 }
 
-fn command_literal_token_is_structural_argument(token: &str) -> bool {
+fn command_literal_token_is_syntax_argument(token: &str) -> bool {
     token.starts_with('-')
         || token.starts_with('+')
         || token.contains('=')
         || token.contains("://")
         || command_literal_token_is_path_like(token)
-        || command_object_literal_candidate(token).is_some()
 }
 
 fn command_literal_token_has_executable_shape(token: &str) -> bool {
@@ -242,32 +254,7 @@ fn command_literal_token_is_path_like(token: &str) -> bool {
 
 fn command_literal_token_is_plain_word(token: &str) -> bool {
     let len = token.chars().count();
-    (2..=32).contains(&len)
-        && token.chars().all(|ch| ch.is_ascii_alphabetic())
-        && !command_literal_token_is_sentence_function_word(token)
-}
-
-fn command_literal_token_is_sentence_function_word(token: &str) -> bool {
-    matches!(
-        token.to_ascii_lowercase().as_str(),
-        "a" | "an"
-            | "and"
-            | "as"
-            | "before"
-            | "by"
-            | "for"
-            | "from"
-            | "if"
-            | "in"
-            | "of"
-            | "on"
-            | "or"
-            | "the"
-            | "then"
-            | "to"
-            | "with"
-            | "without"
-    )
+    (2..=32).contains(&len) && token.chars().all(|ch| ch.is_ascii_alphabetic())
 }
 
 fn trim_command_object_boundary(token: &str) -> &str {
@@ -278,7 +265,7 @@ fn trim_command_object_boundary(token: &str) -> &str {
                 '`' | '\'' | '"' | '(' | ')' | '[' | ']' | '{' | '}' | '<' | '>' | ';' | ',' | ':'
             )
         })
-        .trim_end_matches(|ch: char| matches!(ch, '.' | ',' | ';' | ':' | ')'))
+        .trim_end_matches(['.', ',', ';', ':', ')'])
 }
 
 pub(super) fn extract_prefix_literals(text: &str, limit: usize) -> Vec<String> {
@@ -296,35 +283,12 @@ pub(super) fn extract_prefix_literals(text: &str, limit: usize) -> Vec<String> {
     prefixes
 }
 
-#[cfg(test)]
-pub(super) fn extract_protocol_literals(text: &str, limit: usize) -> Vec<String> {
-    let mut protocols = Vec::new();
-    let mut seen = HashSet::new();
-    let lowered = text.to_lowercase();
-
-    if lowered.contains("graphql") {
-        push_unique_limited(&mut protocols, &mut seen, "GraphQL".to_string(), limit);
-    }
-    if lowered.contains("soap") {
-        push_unique_limited(&mut protocols, &mut seen, "SOAP".to_string(), limit);
-    }
-    if lowered.contains("rest")
-        || lowered.contains("restful api")
-        || lowered.contains("rest interface")
-    {
-        push_unique_limited(&mut protocols, &mut seen, "REST".to_string(), limit);
-    }
-
-    protocols
-}
-
 pub(super) fn extract_http_methods(text: &str, limit: usize) -> Vec<String> {
     let mut methods = Vec::new();
     let mut seen = HashSet::new();
 
     for token in text.split_whitespace() {
-        let cleaned =
-            trim_literal_token(token).trim_end_matches(|ch: char| matches!(ch, '.' | ':' | ';'));
+        let cleaned = trim_literal_token(token).trim_end_matches(['.', ':', ';']);
         if matches!(cleaned, "GET" | "POST" | "PUT" | "PATCH" | "DELETE") {
             push_unique_limited(&mut methods, &mut seen, cleaned.to_string(), limit);
         }
@@ -396,47 +360,71 @@ fn clean_parameter_candidate(candidate: &str) -> &str {
 pub(super) fn extract_parameter_literals(text: &str, limit: usize) -> Vec<String> {
     let mut parameters = Vec::new();
     let mut seen = HashSet::new();
+    extract_assignment_parameter_names(text, limit, &mut parameters, &mut seen);
+    for token in text.split_whitespace() {
+        extract_parameter_token(token, limit, &mut parameters, &mut seen);
+    }
+    parameters
+}
 
+fn extract_assignment_parameter_names(
+    text: &str,
+    limit: usize,
+    parameters: &mut Vec<String>,
+    seen: &mut HashSet<String>,
+) {
     for capture in CONFIG_ASSIGNMENT_LITERAL_REGEX.captures_iter(text) {
         let Some(name) = capture.get(1).map(|value| clean_parameter_candidate(value.as_str()))
         else {
             continue;
         };
         if looks_like_parameter_assignment_name(name) {
-            push_unique_limited(&mut parameters, &mut seen, name.to_string(), limit);
+            push_unique_limited(parameters, seen, name.to_string(), limit);
         }
     }
+}
 
-    for token in text.split_whitespace() {
-        let has_literal_marker =
-            token.contains('`') || token.starts_with('?') || token.contains('=');
-        if looks_like_config_section_literal(clean_config_section_candidate(token)) {
-            continue;
-        }
-        let literal_candidate = trim_literal_token(token);
-        let cleaned = literal_candidate.trim_end_matches(|ch: char| {
-            matches!(ch, '.' | ':' | ';' | '?' | '!' | ',' | ')' | ']' | '}')
-        });
-        if let Some((name, value)) = cleaned.split_once('=') {
-            let name = clean_parameter_candidate(name);
-            if looks_like_parameter_assignment_name(name) {
-                push_unique_limited(&mut parameters, &mut seen, name.to_string(), limit);
-            }
-            let value = clean_parameter_candidate(value);
-            if looks_like_parameter_identifier(value) {
-                push_unique_limited(&mut parameters, &mut seen, value.to_string(), limit);
-            }
-            continue;
-        }
-        let cleaned = clean_parameter_candidate(cleaned);
-        if looks_like_parameter_identifier(cleaned)
-            || (has_literal_marker && looks_like_parameter_assignment_name(cleaned))
-        {
-            push_unique_limited(&mut parameters, &mut seen, cleaned.to_string(), limit);
-        }
+fn extract_parameter_token(
+    token: &str,
+    limit: usize,
+    parameters: &mut Vec<String>,
+    seen: &mut HashSet<String>,
+) {
+    let has_literal_marker = token.contains('`') || token.starts_with('?') || token.contains('=');
+    if looks_like_config_section_literal(clean_config_section_candidate(token)) {
+        return;
     }
+    let literal_candidate = trim_literal_token(token);
+    let cleaned = literal_candidate.trim_end_matches(|ch: char| {
+        matches!(ch, '.' | ':' | ';' | '?' | '!' | ',' | ')' | ']' | '}')
+    });
+    if let Some((name, value)) = cleaned.split_once('=') {
+        push_parameter_assignment_parts(name, value, limit, parameters, seen);
+        return;
+    }
+    let cleaned = clean_parameter_candidate(cleaned);
+    if looks_like_parameter_identifier(cleaned)
+        || (has_literal_marker && looks_like_parameter_assignment_name(cleaned))
+    {
+        push_unique_limited(parameters, seen, cleaned.to_string(), limit);
+    }
+}
 
-    parameters
+fn push_parameter_assignment_parts(
+    name: &str,
+    value: &str,
+    limit: usize,
+    parameters: &mut Vec<String>,
+    seen: &mut HashSet<String>,
+) {
+    let name = clean_parameter_candidate(name);
+    if looks_like_parameter_assignment_name(name) {
+        push_unique_limited(parameters, seen, name.to_string(), limit);
+    }
+    let value = clean_parameter_candidate(value);
+    if looks_like_parameter_identifier(value) {
+        push_unique_limited(parameters, seen, value.to_string(), limit);
+    }
 }
 
 pub(super) fn extract_config_assignment_literals(text: &str, limit: usize) -> Vec<String> {
@@ -495,4 +483,24 @@ pub(super) fn extract_config_section_literals(text: &str, limit: usize) -> Vec<S
     }
 
     sections
+}
+
+#[cfg(test)]
+mod tests {
+    use super::extract_package_command_literals;
+
+    #[test]
+    fn package_command_extraction_abstains_from_unstructured_hyphenated_prose() {
+        let text =
+            "A report-like source references beta-agent while another field uses gamma-agent.";
+
+        assert!(extract_package_command_literals(text, 4).is_empty());
+    }
+
+    #[test]
+    fn package_command_extraction_accepts_adjacent_formal_command_shape() {
+        let text = "A note embeds sample-install alpha-connector in the surrounding prose.";
+
+        assert_eq!(extract_package_command_literals(text, 4), ["alpha-connector"]);
+    }
 }

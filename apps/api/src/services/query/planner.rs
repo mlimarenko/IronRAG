@@ -6,41 +6,46 @@ use crate::domains::query::{
     DEFAULT_TOP_K, IntentKeywords, MAX_TOP_K, QueryPlanningMetadata, RuntimeQueryMode,
 };
 use crate::domains::query_ir::{
-    EntityRole, QueryIR, SourceSliceDirection, SourceSliceFilter,
-    literal_kind_has_exact_technical_shape, literal_text_is_identifier_shaped,
+    EntityRole, QueryAct, QueryIR, literal_kind_has_exact_technical_shape,
 };
 const DEFAULT_CONTEXT_BUDGET_CHARS: usize = 22_000;
 /// Minimum token length after stripping punctuation. Tokens shorter than
 /// this mostly carry no retrieval signal; a length cutoff avoids a
 /// language-specific lexicon.
 const TOKEN_MIN_LEN: usize = 3;
-pub const QUERY_IR_LEXICAL_LANE_MIN_CONFIDENCE: f32 = 0.6;
+pub(crate) const QUERY_IR_LEXICAL_LANE_MIN_CONFIDENCE: f32 = 0.6;
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct QueryIntentProfile {
     pub exact_literal_technical: bool,
     pub multi_document_technical: bool,
+    #[serde(default)]
+    pub act: Option<QueryAct>,
+    #[serde(default)]
+    pub broad_procedure_variant_coverage: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct QueryPlanTaskInput {
     pub question: String,
     pub top_k: Option<usize>,
     pub explicit_mode: Option<RuntimeQueryMode>,
     pub metadata: Option<QueryPlanningMetadata>,
+    #[serde(default)]
+    pub query_ir: Option<QueryIR>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
-pub enum QueryPlanFailureCode {
+pub(crate) enum QueryPlanFailureCode {
     InvalidTopK,
 }
 
 impl QueryPlanFailureCode {
     #[must_use]
-    pub const fn as_str(self) -> &'static str {
+    pub(crate) const fn as_str(self) -> &'static str {
         match self {
             Self::InvalidTopK => "invalid_top_k",
         }
@@ -70,7 +75,7 @@ pub struct RuntimeQueryPlan {
     pub hyde_recommended: bool,
 }
 
-pub fn build_task_query_plan(
+pub(crate) fn build_task_query_plan(
     input: &QueryPlanTaskInput,
 ) -> Result<RuntimeQueryPlan, QueryPlanFailure> {
     if matches!(input.top_k, Some(0)) {
@@ -80,11 +85,17 @@ pub fn build_task_query_plan(
         });
     }
 
-    Ok(build_query_plan(&input.question, input.explicit_mode, input.top_k, input.metadata.as_ref()))
+    Ok(build_query_plan_with_query_ir(
+        &input.question,
+        input.explicit_mode,
+        input.top_k,
+        input.metadata.as_ref(),
+        input.query_ir.as_ref(),
+    ))
 }
 
 #[must_use]
-pub fn extract_keywords(question: &str) -> Vec<String> {
+pub(crate) fn extract_keywords(question: &str) -> Vec<String> {
     let mut seen = BTreeSet::new();
     strip_leading_question_marker(question)
         .split_whitespace()
@@ -96,17 +107,16 @@ pub fn extract_keywords(question: &str) -> Vec<String> {
 }
 
 #[must_use]
-pub fn strip_leading_question_marker(question: &str) -> &str {
+pub(crate) fn strip_leading_question_marker(question: &str) -> &str {
     let trimmed = question.trim_start();
     let Some((marker, rest)) = trimmed.split_once(char::is_whitespace) else {
         return trimmed;
     };
     let marker = marker.trim_matches(|ch: char| matches!(ch, '(' | '[' | '{'));
-    if !marker.ends_with(|ch: char| matches!(ch, '.' | ')' | ']' | '}' | ':' | '-')) {
+    if !marker.ends_with(['.', ')', ']', '}', ':', '-']) {
         return trimmed;
     }
-    let marker =
-        marker.trim_end_matches(|ch: char| matches!(ch, '.' | ')' | ']' | '}' | ':' | '-'));
+    let marker = marker.trim_end_matches(['.', ')', ']', '}', ':', '-']);
     if is_leading_question_marker(marker) { rest.trim_start() } else { trimmed }
 }
 
@@ -126,20 +136,11 @@ fn is_leading_question_marker(marker: &str) -> bool {
             && chars.last().is_some_and(|ch| ch.is_ascii_alphabetic());
     }
 
-    if chars.first().is_some_and(|ch| ch.eq_ignore_ascii_case(&'q')) {
-        let tail = &chars[1..];
-        let digit_len = tail.iter().take_while(|ch| ch.is_ascii_digit()).count();
-        return digit_len >= 2
-            && (digit_len == tail.len()
-                || (digit_len + 1 == tail.len()
-                    && tail.last().is_some_and(|ch| ch.is_ascii_alphabetic())));
-    }
-
     false
 }
 
 #[must_use]
-pub fn choose_mode(explicit: Option<RuntimeQueryMode>, question: &str) -> RuntimeQueryMode {
+pub(crate) fn choose_mode(explicit: Option<RuntimeQueryMode>, question: &str) -> RuntimeQueryMode {
     if let Some(explicit) = explicit {
         return explicit;
     }
@@ -148,24 +149,33 @@ pub fn choose_mode(explicit: Option<RuntimeQueryMode>, question: &str) -> Runtim
 }
 
 #[must_use]
-pub fn build_query_plan(
+#[cfg(test)]
+pub(crate) fn build_query_plan(
     question: &str,
     explicit: Option<RuntimeQueryMode>,
     top_k: Option<usize>,
     metadata: Option<&QueryPlanningMetadata>,
 ) -> RuntimeQueryPlan {
+    build_query_plan_with_query_ir(question, explicit, top_k, metadata, None)
+}
+
+fn build_query_plan_with_query_ir(
+    question: &str,
+    explicit: Option<RuntimeQueryMode>,
+    top_k: Option<usize>,
+    metadata: Option<&QueryPlanningMetadata>,
+    query_ir: Option<&QueryIR>,
+) -> RuntimeQueryPlan {
     if let Some(metadata) = metadata {
-        return build_query_plan_from_metadata(question, metadata, top_k);
+        return build_query_plan_from_metadata_with_query_ir(question, metadata, top_k, query_ir);
     }
 
     let requested_mode = explicit.unwrap_or_else(|| choose_mode(None, question));
     let planned_mode = choose_mode(explicit, question);
     let keywords = extract_keywords(question);
-    let lane_keywords = derive_lexical_lane_keywords(&keywords, None);
-    let case_preserving = extract_keywords_preserving_case(question);
-    let (entity_keywords, concept_keywords) = classify_keyword_levels(&case_preserving);
-
-    let intent_profile = classify_query_intent_profile(question, &case_preserving);
+    let lane_keywords = derive_lexical_lane_keywords(&keywords, query_ir);
+    let semantic_lanes = lane_keywords.clone();
+    let intent_profile = query_intent_profile_from_query_ir(query_ir);
     let hyde_recommended =
         intent_profile.multi_document_technical && !intent_profile.exact_literal_technical;
 
@@ -176,8 +186,8 @@ pub fn build_query_plan(
         keywords,
         high_level_keywords: lane_keywords.high_level,
         low_level_keywords: lane_keywords.low_level,
-        entity_keywords,
-        concept_keywords,
+        entity_keywords: semantic_lanes.high_level,
+        concept_keywords: semantic_lanes.low_level,
         top_k: planned_top_k(question, top_k),
         context_budget_chars: DEFAULT_CONTEXT_BUDGET_CHARS,
         hyde_recommended,
@@ -185,10 +195,20 @@ pub fn build_query_plan(
 }
 
 #[must_use]
-pub fn build_query_plan_from_metadata(
+#[cfg(test)]
+pub(crate) fn build_query_plan_from_metadata(
     question: &str,
     metadata: &QueryPlanningMetadata,
     top_k: Option<usize>,
+) -> RuntimeQueryPlan {
+    build_query_plan_from_metadata_with_query_ir(question, metadata, top_k, None)
+}
+
+fn build_query_plan_from_metadata_with_query_ir(
+    question: &str,
+    metadata: &QueryPlanningMetadata,
+    top_k: Option<usize>,
+    query_ir: Option<&QueryIR>,
 ) -> RuntimeQueryPlan {
     let mut keywords = metadata.keywords.high_level.clone();
     for keyword in &metadata.keywords.low_level {
@@ -197,10 +217,9 @@ pub fn build_query_plan_from_metadata(
         }
     }
 
-    let case_preserving = extract_keywords_preserving_case(question);
-    let (entity_keywords, concept_keywords) = classify_keyword_levels(&case_preserving);
-
-    let intent_profile = classify_query_intent_profile(question, &case_preserving);
+    let semantic_lanes =
+        typed_semantic_keyword_lanes(&keywords, Some(&metadata.keywords), query_ir);
+    let intent_profile = query_intent_profile_from_query_ir(query_ir);
     let hyde_recommended =
         intent_profile.multi_document_technical && !intent_profile.exact_literal_technical;
 
@@ -211,21 +230,21 @@ pub fn build_query_plan_from_metadata(
         keywords,
         high_level_keywords: metadata.keywords.high_level.clone(),
         low_level_keywords: metadata.keywords.low_level.clone(),
-        entity_keywords,
-        concept_keywords,
+        entity_keywords: semantic_lanes.high_level,
+        concept_keywords: semantic_lanes.low_level,
         top_k: planned_top_k(question, top_k),
         context_budget_chars: DEFAULT_CONTEXT_BUDGET_CHARS,
         hyde_recommended,
     }
 }
 
-fn classify_query_intent_profile(question: &str, keywords: &[String]) -> QueryIntentProfile {
-    let lowered = question.trim().to_lowercase();
-    let exact_literal_technical = is_exact_literal_technical_question(&lowered, keywords);
+pub(crate) fn query_intent_profile_from_query_ir(query_ir: Option<&QueryIR>) -> QueryIntentProfile {
     QueryIntentProfile {
-        exact_literal_technical,
-        multi_document_technical: exact_literal_technical
-            && is_multi_document_technical_question(&lowered),
+        exact_literal_technical: query_ir.is_some_and(QueryIR::is_exact_literal_technical),
+        multi_document_technical: query_ir.is_some_and(QueryIR::is_multi_document),
+        act: query_ir.map(|query_ir| query_ir.act),
+        broad_procedure_variant_coverage: query_ir
+            .is_some_and(QueryIR::requests_broad_procedure_variant_coverage),
     }
 }
 
@@ -234,22 +253,10 @@ fn planned_top_k(question: &str, top_k: Option<usize>) -> usize {
     top_k.unwrap_or(DEFAULT_TOP_K).clamp(1, MAX_TOP_K)
 }
 
-fn is_exact_literal_technical_question(question: &str, keywords: &[String]) -> bool {
-    question.contains("http://")
-        || question.contains("https://")
-        || question.contains('/')
-        || keywords.iter().any(|keyword| literal_text_is_identifier_shaped(keyword))
-}
-
-fn is_multi_document_technical_question(question: &str) -> bool {
-    let _ = question;
-    false
-}
-
 /// Extracts keywords from a question preserving original case.
-/// Used for entity-vs-concept classification where case matters.
+/// This is lexical extraction only; semantic routing belongs to canonical QueryIR.
 #[must_use]
-pub fn extract_keywords_preserving_case(question: &str) -> Vec<String> {
+pub(crate) fn extract_keywords_preserving_case(question: &str) -> Vec<String> {
     let mut seen = BTreeSet::new();
     strip_leading_question_marker(question)
         .split_whitespace()
@@ -260,26 +267,8 @@ pub fn extract_keywords_preserving_case(question: &str) -> Vec<String> {
         .collect()
 }
 
-/// Splits keywords into entity-level (specific names, technologies, functions)
-/// and concept-level (abstract themes, topics, patterns).
 #[must_use]
-pub fn classify_keyword_levels(keywords: &[String]) -> (Vec<String>, Vec<String>) {
-    let mut entity_keywords = Vec::new();
-    let mut concept_keywords = Vec::new();
-
-    for keyword in keywords {
-        if is_entity_keyword(keyword) {
-            entity_keywords.push(keyword.to_ascii_lowercase());
-        } else {
-            concept_keywords.push(keyword.to_ascii_lowercase());
-        }
-    }
-
-    (entity_keywords, concept_keywords)
-}
-
-#[must_use]
-pub fn derive_lexical_lane_keywords(
+pub(crate) fn derive_lexical_lane_keywords(
     keywords: &[String],
     query_ir: Option<&QueryIR>,
 ) -> IntentKeywords {
@@ -312,6 +301,39 @@ fn full_keyword_lanes(keywords: &[String]) -> IntentKeywords {
     IntentKeywords { high_level: keywords.to_vec(), low_level: keywords.to_vec() }
 }
 
+fn typed_semantic_keyword_lanes(
+    keywords: &[String],
+    metadata_lanes: Option<&IntentKeywords>,
+    query_ir: Option<&QueryIR>,
+) -> IntentKeywords {
+    let Some(query_ir) = query_ir else {
+        return full_keyword_lanes(keywords);
+    };
+    if query_ir.confidence < QUERY_IR_LEXICAL_LANE_MIN_CONFIDENCE {
+        return full_keyword_lanes(keywords);
+    }
+
+    let Some(metadata_lanes) = metadata_lanes else {
+        return derive_lexical_lane_keywords(keywords, Some(query_ir));
+    };
+    if metadata_lanes.high_level.is_empty() && metadata_lanes.low_level.is_empty() {
+        return derive_lexical_lane_keywords(keywords, Some(query_ir));
+    }
+
+    IntentKeywords {
+        high_level: if metadata_lanes.high_level.is_empty() {
+            keywords.to_vec()
+        } else {
+            metadata_lanes.high_level.clone()
+        },
+        low_level: if metadata_lanes.low_level.is_empty() {
+            keywords.to_vec()
+        } else {
+            metadata_lanes.low_level.clone()
+        },
+    }
+}
+
 #[derive(Default)]
 struct LexicalLaneSeeds {
     high: Vec<String>,
@@ -325,9 +347,6 @@ fn collect_query_ir_lexical_lane_seeds(query_ir: &QueryIR) -> LexicalLaneSeeds {
             EntityRole::Subject | EntityRole::Object => push_seed(&mut seeds.high, &entity.label),
             EntityRole::Modifier => push_seed(&mut seeds.low, &entity.label),
         }
-    }
-    for target_type in &query_ir.target_types {
-        push_seed(&mut seeds.high, target_type);
     }
     if let Some(document_focus) = &query_ir.document_focus {
         push_seed(&mut seeds.high, &document_focus.hint);
@@ -351,28 +370,7 @@ fn collect_query_ir_lexical_lane_seeds(query_ir: &QueryIR) -> LexicalLaneSeeds {
     for temporal in &query_ir.temporal_constraints {
         push_seed(&mut seeds.low, &temporal.surface);
     }
-    if let Some(source_slice) = &query_ir.source_slice {
-        push_seed(&mut seeds.low, source_slice_direction_seed(source_slice.direction));
-        if let Some(filter_seed) = source_slice_filter_seed(source_slice.filter) {
-            push_seed(&mut seeds.low, filter_seed);
-        }
-    }
     seeds
-}
-
-const fn source_slice_direction_seed(direction: SourceSliceDirection) -> &'static str {
-    match direction {
-        SourceSliceDirection::Head => "head",
-        SourceSliceDirection::Tail => "tail",
-        SourceSliceDirection::All => "all",
-    }
-}
-
-const fn source_slice_filter_seed(filter: SourceSliceFilter) -> Option<&'static str> {
-    match filter {
-        SourceSliceFilter::None => None,
-        SourceSliceFilter::ReleaseMarker => Some("release_marker"),
-    }
 }
 
 fn push_seed(seeds: &mut Vec<String>, value: &str) {
@@ -415,31 +413,12 @@ fn normalize_lane_text(value: &str) -> String {
     normalized.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-fn is_entity_keyword(keyword: &str) -> bool {
-    // Entity keywords: proper nouns, technical names, specific identifiers
-    // 1. Contains uppercase (likely proper noun): "PostgreSQL", "FastAPI", "OAuth"
-    let has_upper = keyword.chars().any(|c| c.is_ascii_uppercase());
-    // 2. Contains underscore/dot (technical identifier): "build_router", "app.config"
-    let has_technical_chars = keyword.contains('_') || keyword.contains('.');
-    // 3. Contains digits (version, port, ID): "v2.3", "8080", "HTTP2"
-    let has_digits = keyword.chars().any(|c| c.is_ascii_digit());
-    // 4. Starts with / (URL path): "/api/users"
-    let is_path = keyword.starts_with('/');
-    // 5. All caps with 2+ chars (acronym): "JWT", "API", "SQL"
-    let is_acronym =
-        keyword.len() >= 2 && keyword.chars().all(|c| c.is_ascii_uppercase() || c == '_');
-    // 6. CamelCase: "ClassificationPipeline", "UserRole"
-    let is_camel = keyword.len() > 2
-        && keyword.chars().next().is_some_and(|c| c.is_ascii_uppercase())
-        && keyword.chars().skip(1).any(|c| c.is_ascii_lowercase());
-
-    has_upper || has_technical_chars || has_digits || is_path || is_acronym || is_camel
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domains::query_ir::{EntityMention, QueryAct, QueryLanguage, QueryScope};
+    use crate::domains::query_ir::{
+        EntityMention, LiteralKind, LiteralSpan, QueryAct, QueryLanguage, QueryScope,
+    };
 
     fn query_ir_with_subject(label: &str, confidence: f32) -> QueryIR {
         QueryIR {
@@ -463,6 +442,28 @@ mod tests {
         }
     }
 
+    fn query_plan_task_input(question: &str, query_ir: Option<QueryIR>) -> QueryPlanTaskInput {
+        QueryPlanTaskInput {
+            question: question.to_string(),
+            top_k: None,
+            explicit_mode: None,
+            metadata: None,
+            query_ir,
+        }
+    }
+
+    #[test]
+    fn legacy_intent_profile_without_act_deserializes_conservatively() {
+        let profile: QueryIntentProfile = serde_json::from_value(serde_json::json!({
+            "exactLiteralTechnical": true,
+            "multiDocumentTechnical": false
+        }))
+        .expect("legacy profile");
+
+        assert!(profile.exact_literal_technical);
+        assert_eq!(profile.act, None);
+    }
+
     #[test]
     fn extract_keywords_deduplicates_and_filters_short_tokens() {
         // Keyword extraction is intentionally language-agnostic: the IR
@@ -484,9 +485,9 @@ mod tests {
     }
 
     #[test]
-    fn extract_keywords_strips_leading_question_markers() {
+    fn extract_keywords_strips_only_formal_numeric_question_markers() {
         let keywords = extract_keywords("Q16. Which ports should a terminal use?");
-        assert!(!keywords.contains(&"q16".to_string()));
+        assert!(keywords.contains(&"q16".to_string()));
         assert!(keywords.contains(&"which".to_string()));
         assert!(keywords.contains(&"ports".to_string()));
 
@@ -514,10 +515,10 @@ mod tests {
     }
 
     #[test]
-    fn leading_question_marker_strip_preserves_short_structural_prefixes() {
+    fn leading_question_marker_strip_preserves_non_numeric_prefixes() {
         assert_eq!(
             strip_leading_question_marker("Q16. Which ports should a terminal use?"),
-            "Which ports should a terminal use?"
+            "Q16. Which ports should a terminal use?"
         );
         assert_eq!(
             strip_leading_question_marker("10b) Which ports should a terminal use?"),
@@ -570,18 +571,24 @@ mod tests {
     }
 
     #[test]
-    fn exact_literal_profile_uses_structural_token_shape() {
-        let plain = build_query_plan("Explain Alpha Suite settings", None, None, None);
-        assert!(!plain.intent_profile.exact_literal_technical);
+    fn provider_free_plan_does_not_infer_semantics_from_prose_case() {
+        let lowercase = build_task_query_plan(&query_plan_task_input(
+            "explain callbackurl and database_url",
+            None,
+        ))
+        .expect("provider-free plan should build");
+        let mixed_case = build_task_query_plan(&query_plan_task_input(
+            "Explain callbackUrl and DATABASE_URL",
+            None,
+        ))
+        .expect("provider-free plan should build");
 
-        let camel = build_query_plan("What does callbackUrl configure?", None, None, None);
-        assert!(camel.intent_profile.exact_literal_technical);
-
-        let acronym = build_query_plan("Where is DATABASE_URL documented?", None, None, None);
-        assert!(acronym.intent_profile.exact_literal_technical);
-
-        let separated = build_query_plan("Explain Настройка_2", None, None, None);
-        assert!(separated.intent_profile.exact_literal_technical);
+        assert_eq!(lowercase.intent_profile, QueryIntentProfile::default());
+        assert_eq!(mixed_case.intent_profile, QueryIntentProfile::default());
+        assert_eq!(lowercase.entity_keywords, lowercase.keywords);
+        assert_eq!(lowercase.concept_keywords, lowercase.keywords);
+        assert_eq!(mixed_case.entity_keywords, mixed_case.keywords);
+        assert_eq!(mixed_case.concept_keywords, mixed_case.keywords);
     }
 
     #[test]
@@ -657,52 +664,88 @@ mod tests {
     }
 
     #[test]
-    fn metadata_query_plan_uses_question_shape_for_exact_literal_profile() {
-        let metadata = QueryPlanningMetadata {
-            requested_mode: RuntimeQueryMode::Hybrid,
-            planned_mode: RuntimeQueryMode::Hybrid,
-            intent_cache_status: crate::domains::query::QueryIntentCacheStatus::Miss,
-            keywords: crate::domains::query::IntentKeywords {
-                high_level: vec!["plain".to_string()],
-                low_level: vec!["topic".to_string()],
-            },
-            warnings: Vec::new(),
+    fn canonical_query_ir_controls_intent_and_keyword_lanes() {
+        let query_ir = QueryIR {
+            act: QueryAct::RetrieveValue,
+            scope: QueryScope::MultiDocument,
+            target_entities: vec![
+                EntityMention { label: "Alpha".to_string(), role: EntityRole::Subject },
+                EntityMention { label: "Gamma".to_string(), role: EntityRole::Modifier },
+            ],
+            literal_constraints: vec![LiteralSpan {
+                text: "callbackUrl".to_string(),
+                kind: LiteralKind::Identifier,
+            }],
+            ..query_ir_with_subject("unused", 0.9)
         };
 
-        let plain = build_query_plan_from_metadata("Explain Alpha Suite settings", &metadata, None);
-        assert!(!plain.intent_profile.exact_literal_technical);
+        let plan = build_task_query_plan(&query_plan_task_input(
+            "Common prefix Alpha Gamma callbackUrl",
+            Some(query_ir),
+        ))
+        .expect("typed query plan should build");
 
-        let structural =
-            build_query_plan_from_metadata("What does callbackUrl configure?", &metadata, None);
-        assert!(structural.intent_profile.exact_literal_technical);
+        assert!(plan.intent_profile.exact_literal_technical);
+        assert!(plan.intent_profile.multi_document_technical);
+        assert!(plan.entity_keywords.contains(&"alpha".to_string()));
+        assert!(plan.entity_keywords.contains(&"callbackurl".to_string()));
+        assert_eq!(plan.concept_keywords, vec!["gamma".to_string()]);
     }
 
     #[test]
-    fn classifies_entity_vs_concept_keywords() {
-        let (entities, concepts) = classify_keyword_levels(&[
-            "PostgreSQL".to_string(),
-            "authentication".to_string(),
-            "JWT".to_string(),
-            "security".to_string(),
-            "build_router".to_string(),
-            "performance".to_string(),
-        ]);
-        assert!(entities.contains(&"postgresql".to_string()));
-        assert!(entities.contains(&"jwt".to_string()));
-        assert!(entities.contains(&"build_router".to_string()));
-        assert!(concepts.contains(&"authentication".to_string()));
-        assert!(concepts.contains(&"security".to_string()));
-        assert!(concepts.contains(&"performance".to_string()));
+    fn typed_enum_labels_never_become_language_specific_lexical_seeds() {
+        let query_ir = QueryIR {
+            act: QueryAct::Enumerate,
+            scope: QueryScope::MultiDocument,
+            target_types: vec![crate::domains::query_ir::QueryTargetKind::Release],
+            source_slice: Some(crate::domains::query_ir::SourceSliceSpec {
+                direction: crate::domains::query_ir::SourceSliceDirection::Tail,
+                count: Some(5),
+                filter: crate::domains::query_ir::SourceSliceFilter::ReleaseMarker,
+            }),
+            confidence: 0.9,
+            ..query_ir_with_subject("Actual Product", 0.9)
+        };
+
+        let plan = build_task_query_plan(&query_plan_task_input(
+            "Actual Product release marker tail",
+            Some(query_ir),
+        ))
+        .expect("typed query plan should build");
+
+        assert_eq!(plan.entity_keywords, vec!["actual".to_string(), "product".to_string()]);
+        assert_eq!(plan.concept_keywords, plan.keywords);
     }
 
     #[test]
-    fn query_plan_populates_entity_and_concept_keywords() {
-        let plan =
-            build_query_plan("How does PostgreSQL handle JWT authentication?", None, None, None);
+    fn low_confidence_query_ir_keeps_entity_and_concept_lanes_neutral() {
+        let query_ir = query_ir_with_subject("Alpha", QUERY_IR_LEXICAL_LANE_MIN_CONFIDENCE - 0.01);
+        let plan = build_task_query_plan(&query_plan_task_input(
+            "Common prefix Alpha Gamma",
+            Some(query_ir),
+        ))
+        .expect("low-confidence typed plan should build");
 
-        assert!(plan.entity_keywords.contains(&"postgresql".to_string()));
-        assert!(plan.entity_keywords.contains(&"jwt".to_string()));
-        assert!(plan.concept_keywords.contains(&"authentication".to_string()));
-        assert!(plan.concept_keywords.contains(&"handle".to_string()));
+        assert_eq!(plan.entity_keywords, plan.keywords);
+        assert_eq!(plan.concept_keywords, plan.keywords);
+    }
+
+    #[test]
+    fn invalid_typed_identifier_literal_does_not_enable_exact_profile() {
+        let query_ir = QueryIR {
+            act: QueryAct::RetrieveValue,
+            literal_constraints: vec![LiteralSpan {
+                text: "ordinary".to_string(),
+                kind: LiteralKind::Identifier,
+            }],
+            ..query_ir_with_subject("Alpha", 0.9)
+        };
+        let plan = build_task_query_plan(&query_plan_task_input(
+            "Explain ordinary Alpha settings",
+            Some(query_ir),
+        ))
+        .expect("typed query plan should build");
+
+        assert!(!plan.intent_profile.exact_literal_technical);
     }
 }

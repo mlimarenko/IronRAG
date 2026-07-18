@@ -1,30 +1,30 @@
-import type { TFunction } from "i18next";
+import type { TFunction } from 'i18next'
 
-import { TablePaginationFooter } from "@/shared/components/TablePaginationFooter";
+import { TablePaginationFooter } from '@/shared/components/TablePaginationFooter'
 
 import {
   DEFAULT_PAGE_SIZE,
   PAGE_SIZE_OPTIONS,
   type PageSizeOption,
   type UpdateSearchParamState,
-} from "./documentsPageState";
+} from './documentsPageState'
 
 type DocumentsPaginationFooterProps = {
-  canGoNext: boolean;
-  canGoPrevious: boolean;
-  currentPageNumber: number;
-  filteredTotal: number | null;
-  goToNextPage: () => void;
-  goToPreviousPage: () => void;
-  goToPage: (target: number) => void;
-  itemCount: number;
-  pageSize: PageSizeOption;
-  t: TFunction;
-  totalPages: number | null;
-  updateSearchParamState: UpdateSearchParamState;
-  visibleRangeEnd: number;
-  visibleRangeStart: number;
-};
+  canGoNext: boolean
+  canGoPrevious: boolean
+  currentPageNumber: number
+  filteredTotal: number | null
+  goToNextPage: () => void
+  goToPreviousPage: () => void
+  goToPage: (target: number) => void
+  itemCount: number
+  pageSize: PageSizeOption
+  t: TFunction
+  totalPages: number | null
+  updateSearchParamState: UpdateSearchParamState
+  visibleRangeEnd: number
+  visibleRangeStart: number
+}
 
 export function DocumentsPaginationFooter({
   canGoNext,
@@ -41,7 +41,7 @@ export function DocumentsPaginationFooter({
   updateSearchParamState,
   visibleRangeEnd,
   visibleRangeStart,
-}: DocumentsPaginationFooterProps) {
+}: Readonly<DocumentsPaginationFooterProps>) {
   return (
     <TablePaginationFooter
       canGoNext={canGoNext}
@@ -50,7 +50,7 @@ export function DocumentsPaginationFooter({
       goToNextPage={goToNextPage}
       goToPage={goToPage}
       goToPreviousPage={goToPreviousPage}
-      nextLabel={t("documents.next")}
+      nextLabel={t('documents.next')}
       onPageSizeChange={(value) =>
         updateSearchParamState({
           pageSize: value === DEFAULT_PAGE_SIZE ? null : String(value),
@@ -58,15 +58,15 @@ export function DocumentsPaginationFooter({
         })
       }
       pageSize={pageSize}
-      pageSizeLabel={t("documents.pageSize")}
+      pageSizeLabel={t('documents.pageSize')}
       pageSizeOptions={PAGE_SIZE_OPTIONS}
-      previousLabel={t("documents.previous")}
-      summary={t("documents.paginationSummary", {
+      previousLabel={t('documents.previous')}
+      summary={t('documents.paginationSummary', {
         from: visibleRangeStart,
         to: visibleRangeEnd,
         total: filteredTotal ?? itemCount,
       })}
       totalPages={totalPages}
     />
-  );
+  )
 }

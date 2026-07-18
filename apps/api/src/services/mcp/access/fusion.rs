@@ -35,7 +35,7 @@ pub(crate) enum SearchLane {
     Metadata,
     /// Postgres lexical chunk match.
     LexicalChunk,
-    /// PostgreSQL pgvector (cosine) chunk match.
+    /// `PostgreSQL` pgvector (cosine) chunk match.
     VectorChunk,
 }
 
@@ -44,7 +44,7 @@ pub(crate) enum SearchLane {
 /// `rank` is clamped to `>= 1` so a caller passing a 0-based index by
 /// mistake cannot produce an outsized contribution.
 pub(crate) fn rrf_contribution(rank: i32) -> f64 {
-    let rank = rank.max(1) as f64;
+    let rank = f64::from(rank.max(1));
     1.0 / (RRF_K + rank)
 }
 

@@ -5,6 +5,7 @@ use argon2::{
 use chrono::{Duration, Utc};
 use tracing::warn;
 use uuid::Uuid;
+use zeroize::{Zeroize as _, Zeroizing};
 
 use crate::{
     app::{bootstrap, state::AppState},
@@ -31,14 +32,33 @@ pub struct BootstrapStatusOutcome {
     pub ai_setup: Option<BootstrapAiSetupDescriptor>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct BootstrapSetupAiCommand {
     pub provider_kind: String,
     pub api_key: Option<String>,
     pub base_url: Option<String>,
 }
 
-#[derive(Debug, Clone)]
+impl Drop for BootstrapSetupAiCommand {
+    fn drop(&mut self) {
+        if let Some(api_key) = self.api_key.as_mut() {
+            api_key.zeroize();
+        }
+    }
+}
+
+impl std::fmt::Debug for BootstrapSetupAiCommand {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("BootstrapSetupAiCommand")
+            .field("provider_kind", &self.provider_kind)
+            .field("api_key", &self.api_key.as_ref().map(|_| "<redacted>"))
+            .field("base_url", &self.base_url.as_ref().map(|_| "<redacted>"))
+            .finish()
+    }
+}
+
+#[derive(Clone)]
 pub struct BootstrapSetupCommand {
     pub login: String,
     pub display_name: Option<String>,
@@ -46,6 +66,26 @@ pub struct BootstrapSetupCommand {
     pub ai_setup: Option<BootstrapSetupAiCommand>,
     pub ttl_hours: u64,
     pub request_id: String,
+}
+
+impl std::fmt::Debug for BootstrapSetupCommand {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("BootstrapSetupCommand")
+            .field("login", &self.login)
+            .field("display_name", &self.display_name)
+            .field("password", &"<redacted>")
+            .field("ai_setup", &self.ai_setup)
+            .field("ttl_hours", &self.ttl_hours)
+            .field("request_id", &self.request_id)
+            .finish()
+    }
+}
+
+impl Drop for BootstrapSetupCommand {
+    fn drop(&mut self) {
+        self.password.zeroize();
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -57,27 +97,77 @@ pub struct MintApiTokenCommand {
     pub issued_by_principal_id: Option<Uuid>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct MintApiTokenOutcome {
     pub token: String,
     pub api_token: ApiToken,
 }
 
-#[derive(Debug, Clone)]
+impl std::fmt::Debug for MintApiTokenOutcome {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("MintApiTokenOutcome")
+            .field("token", &"<redacted>")
+            .field("api_token", &self.api_token)
+            .finish()
+    }
+}
+
+impl Drop for MintApiTokenOutcome {
+    fn drop(&mut self) {
+        self.token.zeroize();
+    }
+}
+
+#[derive(Clone)]
 pub struct RotateApiTokenOutcome {
     pub token: String,
     pub api_token: ApiToken,
     pub revoked_secret_versions: usize,
 }
 
-#[derive(Debug, Clone)]
+impl std::fmt::Debug for RotateApiTokenOutcome {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("RotateApiTokenOutcome")
+            .field("token", &"<redacted>")
+            .field("api_token", &self.api_token)
+            .field("revoked_secret_versions", &self.revoked_secret_versions)
+            .finish()
+    }
+}
+
+impl Drop for RotateApiTokenOutcome {
+    fn drop(&mut self) {
+        self.token.zeroize();
+    }
+}
+
+#[derive(Clone)]
 pub struct AuthenticateSessionCommand {
     pub login: String,
     pub password: String,
     pub ttl_hours: u64,
 }
 
-#[derive(Debug, Clone)]
+impl std::fmt::Debug for AuthenticateSessionCommand {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("AuthenticateSessionCommand")
+            .field("login", &self.login)
+            .field("password", &"<redacted>")
+            .field("ttl_hours", &self.ttl_hours)
+            .finish()
+    }
+}
+
+impl Drop for AuthenticateSessionCommand {
+    fn drop(&mut self) {
+        self.password.zeroize();
+    }
+}
+
+#[derive(Clone)]
 pub struct AuthenticateSessionOutcome {
     pub session_id: Uuid,
     pub session_secret: String,
@@ -86,6 +176,27 @@ pub struct AuthenticateSessionOutcome {
     pub email: String,
     pub display_name: String,
     pub expires_at: chrono::DateTime<chrono::Utc>,
+}
+
+impl std::fmt::Debug for AuthenticateSessionOutcome {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("AuthenticateSessionOutcome")
+            .field("session_id", &self.session_id)
+            .field("session_secret", &"<redacted>")
+            .field("principal_id", &self.principal_id)
+            .field("login", &self.login)
+            .field("email", &self.email)
+            .field("display_name", &self.display_name)
+            .field("expires_at", &self.expires_at)
+            .finish()
+    }
+}
+
+impl Drop for AuthenticateSessionOutcome {
+    fn drop(&mut self) {
+        self.session_secret.zeroize();
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -205,7 +316,7 @@ impl IamService {
             iam_repository::count_active_user_principals(&state.persistence.postgres)
                 .await
                 .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
-        let setup_required = active_users == 0 && !state.settings.has_explicit_ui_bootstrap_admin();
+        let setup_required = active_users == 0 && !state.bootstrap_admin_configured;
         let ai_setup = if setup_required {
             Some(state.canonical_services.ai_catalog.describe_bootstrap_ai_setup(state).await?)
         } else {
@@ -217,9 +328,9 @@ impl IamService {
     pub async fn setup_bootstrap_admin(
         &self,
         state: &AppState,
-        command: BootstrapSetupCommand,
+        mut command: BootstrapSetupCommand,
     ) -> Result<AuthenticateSessionOutcome, ApiError> {
-        if state.settings.has_explicit_ui_bootstrap_admin() {
+        if state.bootstrap_admin_configured {
             return Err(ApiError::forbidden(
                 "interactive bootstrap setup is disabled when admin credentials are configured via environment",
             ));
@@ -245,9 +356,8 @@ impl IamService {
             .as_deref()
             .map(str::trim)
             .filter(|value| !value.is_empty())
-            .map(std::string::ToString::to_string)
-            .unwrap_or_else(|| login.clone());
-        let password = command.password.trim().to_string();
+            .map_or_else(|| login.clone(), std::string::ToString::to_string);
+        let password = Zeroizing::new(command.password.trim().to_string());
         if password.len() < 8 {
             return Err(ApiError::BadRequest("password must be at least 8 characters long".into()));
         }
@@ -274,16 +384,16 @@ impl IamService {
             let catalog_bootstrap =
                 bootstrap::ensure_default_catalog_workspace_and_library(state, claimed.principal_id)
                     .await?;
-            if let Some(ai_setup) = command.ai_setup {
+            if let Some(mut ai_setup) = command.ai_setup.take() {
                 state
                     .canonical_services
                     .ai_catalog
                     .apply_bootstrap_provider_binding_bundle(
                         state,
                         ApplyBootstrapProviderBindingBundleCommand {
-                            provider_kind: ai_setup.provider_kind,
-                            api_key: ai_setup.api_key,
-                            base_url: ai_setup.base_url,
+                            provider_kind: std::mem::take(&mut ai_setup.provider_kind),
+                            api_key: ai_setup.api_key.take(),
+                            base_url: ai_setup.base_url.take(),
                             updated_by_principal_id: None,
                         },
                     )
@@ -344,7 +454,7 @@ impl IamService {
                 .await
                 .map_err(|e| ApiError::internal_with_log(e, "internal"))?
                 .ok_or_else(|| ApiError::resource_not_found("principal", principal_id))?;
-        Ok(map_principal(principal)?)
+        map_principal(principal)
     }
 
     pub async fn mint_api_token(
@@ -362,7 +472,7 @@ impl IamService {
             }
         }
 
-        let plaintext = mint_plaintext_api_token();
+        let plaintext = Zeroizing::new(mint_plaintext_api_token());
         let mut transaction = state
             .persistence
             .postgres
@@ -408,7 +518,7 @@ impl IamService {
                 grant.resource_id,
                 &grant.permission_kind,
                 command.issued_by_principal_id,
-                grant.expires_at.clone(),
+                grant.expires_at,
             )
             .await
             .map_err(|e| {
@@ -429,7 +539,10 @@ impl IamService {
             .await
             .map_err(|error| ApiError::internal_with_log(error, "internal"))?;
 
-        Ok(MintApiTokenOutcome { token: plaintext, api_token: map_api_token(token_row) })
+        Ok(MintApiTokenOutcome {
+            token: plaintext.to_string(),
+            api_token: map_api_token(token_row),
+        })
     }
 
     pub async fn revoke_api_token(
@@ -509,7 +622,7 @@ impl IamService {
         )
         .await
         .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
-        let plaintext = mint_plaintext_api_token();
+        let plaintext = Zeroizing::new(mint_plaintext_api_token());
         iam_repository::create_api_token_secret(
             &state.persistence.postgres,
             token_principal_id,
@@ -518,7 +631,7 @@ impl IamService {
         .await
         .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
         Ok(RotateApiTokenOutcome {
-            token: plaintext,
+            token: plaintext.to_string(),
             api_token: map_api_token(token_row),
             revoked_secret_versions: revoked.len(),
         })
@@ -614,7 +727,7 @@ impl IamService {
         )
         .await
         .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
-        Ok(map_grant(row)?)
+        map_grant(row)
     }
 
     pub async fn revoke_grant(&self, state: &AppState, grant_id: Uuid) -> Result<Grant, ApiError> {
@@ -622,7 +735,7 @@ impl IamService {
             .await
             .map_err(|e| ApiError::internal_with_log(e, "internal"))?
             .ok_or_else(|| ApiError::resource_not_found("grant", grant_id))?;
-        Ok(map_grant(row)?)
+        map_grant(row)
     }
 }
 
@@ -714,7 +827,7 @@ async fn issue_session_for_user(
     ttl_hours: u64,
 ) -> Result<AuthenticateSessionOutcome, ApiError> {
     let expires_at = Utc::now() + Duration::hours(i64::try_from(ttl_hours.max(1)).unwrap_or(24));
-    let session_secret = mint_plaintext_session_secret();
+    let session_secret = Zeroizing::new(mint_plaintext_session_secret());
     let session = iam_repository::create_session(
         &state.persistence.postgres,
         principal_id,
@@ -726,7 +839,7 @@ async fn issue_session_for_user(
 
     Ok(AuthenticateSessionOutcome {
         session_id: session.id,
-        session_secret,
+        session_secret: session_secret.to_string(),
         principal_id,
         login: login.to_string(),
         email: email.to_string(),
@@ -777,7 +890,7 @@ fn map_workspace_membership(row: iam_repository::IamWorkspaceMembershipRow) -> W
     }
 }
 
-fn grant_resource_kind_as_str(value: &GrantResourceKind) -> &'static str {
+const fn grant_resource_kind_as_str(value: &GrantResourceKind) -> &'static str {
     match value {
         GrantResourceKind::System => "system",
         GrantResourceKind::Workspace => "workspace",
@@ -813,5 +926,71 @@ fn parse_grant_resource_kind(value: &str) -> Result<GrantResourceKind, ApiError>
         "provider_credential" => Ok(GrantResourceKind::ProviderCredential),
         "library_binding" => Ok(GrantResourceKind::LibraryBinding),
         _ => Err(ApiError::Internal),
+    }
+}
+
+#[cfg(test)]
+mod secret_debug_tests {
+    use chrono::Utc;
+    use uuid::Uuid;
+
+    use super::{
+        AuthenticateSessionCommand, AuthenticateSessionOutcome, BootstrapSetupAiCommand,
+        BootstrapSetupCommand, MintApiTokenOutcome,
+    };
+    use crate::domains::iam::ApiToken;
+
+    #[test]
+    fn iam_commands_and_outcomes_redact_all_plaintext_credentials() {
+        let bootstrap = BootstrapSetupCommand {
+            login: "owner".into(),
+            display_name: None,
+            password: "bootstrap-password-regression".into(),
+            ai_setup: Some(BootstrapSetupAiCommand {
+                provider_kind: "synthetic".into(),
+                api_key: Some("provider-key-regression".into()),
+                base_url: Some("https://user:url-secret@host.example/?token=query-secret".into()),
+            }),
+            ttl_hours: 1,
+            request_id: "request".into(),
+        };
+        let login = AuthenticateSessionCommand {
+            login: "owner".into(),
+            password: "login-password-regression".into(),
+            ttl_hours: 1,
+        };
+        let session = AuthenticateSessionOutcome {
+            session_id: Uuid::now_v7(),
+            session_secret: "session-secret-regression".into(),
+            principal_id: Uuid::now_v7(),
+            login: "owner".into(),
+            email: "owner@example.com".into(),
+            display_name: "Owner".into(),
+            expires_at: Utc::now(),
+        };
+        let token = MintApiTokenOutcome {
+            token: "raw-api-token-regression".into(),
+            api_token: ApiToken {
+                principal_id: Uuid::now_v7(),
+                workspace_id: None,
+                label: "synthetic".into(),
+                token_prefix: "prefix".into(),
+                status: "active".into(),
+                expires_at: None,
+            },
+        };
+
+        let debug = format!("{bootstrap:?} {login:?} {session:?} {token:?}");
+        for secret in [
+            "bootstrap-password-regression",
+            "provider-key-regression",
+            "url-secret",
+            "query-secret",
+            "login-password-regression",
+            "session-secret-regression",
+            "raw-api-token-regression",
+        ] {
+            assert!(!debug.contains(secret), "Debug exposed {secret}");
+        }
     }
 }

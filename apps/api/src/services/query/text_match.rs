@@ -142,6 +142,48 @@ pub(crate) fn label_term_sequence(label: &str, min_token_chars: usize) -> Vec<St
     tokens
 }
 
+pub(crate) fn short_acronym_identity_tokens(value: &str) -> BTreeSet<String> {
+    let mut tokens = BTreeSet::new();
+    let mut current = String::new();
+    for ch in value.nfkc() {
+        if ch.is_alphanumeric() {
+            current.push(ch);
+        } else {
+            push_short_acronym_identity_token(&mut tokens, &mut current);
+        }
+    }
+    push_short_acronym_identity_token(&mut tokens, &mut current);
+    tokens
+}
+
+fn push_short_acronym_identity_token(tokens: &mut BTreeSet<String>, current: &mut String) {
+    let token = current.trim();
+    if token_is_short_acronym_identity(token) {
+        tokens.extend(normalized_alnum_tokens(token, 1));
+    }
+    current.clear();
+}
+
+fn token_is_short_acronym_identity(token: &str) -> bool {
+    let len = token.chars().count();
+    if !(2..=4).contains(&len) {
+        return false;
+    }
+    let mut has_uppercase_letter = false;
+    for ch in token.chars() {
+        if !ch.is_alphabetic() {
+            continue;
+        }
+        if ch.is_lowercase() {
+            return false;
+        }
+        if ch.is_uppercase() {
+            has_uppercase_letter = true;
+        }
+    }
+    has_uppercase_letter
+}
+
 fn compact_identifier_split_terms(label: &str, min_token_chars: usize) -> Vec<String> {
     let mut terms = Vec::new();
     for segment in raw_alnum_segments(label) {
@@ -275,35 +317,17 @@ pub(crate) fn select_related_overlap_tokens_from_candidates(
         .collect::<HashMap<_, _>>();
 
     for candidate in candidates {
-        if token_sequence_contains_tokens(&candidate.token_sequence, &target_sequence)
-            || token_sequence_contains_tokens(&target_sequence, &candidate.token_sequence)
-        {
+        if candidate_contains_target_sequence(candidate, &target_sequence) {
             continue;
         }
-        for target_token in &target_tokens {
-            if candidate.tokens.contains(target_token) {
-                *exact_frequencies.entry(target_token.clone()).or_insert(0) += 1;
-            } else if candidate
-                .tokens
-                .iter()
-                .any(|label_token| near_token_match(target_token, label_token))
-            {
-                *near_frequencies.entry(target_token.clone()).or_insert(0) += 1;
-            } else {
-                let matching_label_tokens = candidate
-                    .tokens
-                    .iter()
-                    .filter(|label_token| related_prefix_token_match(target_token, label_token))
-                    .cloned()
-                    .collect::<Vec<_>>();
-                if !matching_label_tokens.is_empty() {
-                    *prefix_frequencies.entry(target_token.clone()).or_insert(0) += 1;
-                    let label_tokens =
-                        prefix_match_label_tokens.entry(target_token.clone()).or_default();
-                    label_tokens.extend(matching_label_tokens);
-                }
-            }
-        }
+        update_related_token_frequencies(
+            candidate,
+            &target_tokens,
+            &mut exact_frequencies,
+            &mut near_frequencies,
+            &mut prefix_frequencies,
+            &mut prefix_match_label_tokens,
+        );
     }
 
     if let Some(tokens) = select_min_frequency_tokens(&exact_frequencies, &target_sequence) {
@@ -328,6 +352,66 @@ pub(crate) fn select_related_overlap_tokens_from_candidates(
     RelatedTokenSelection::empty()
 }
 
+fn candidate_contains_target_sequence(
+    candidate: &RelatedTokenCandidate,
+    target_sequence: &[String],
+) -> bool {
+    token_sequence_contains_tokens(&candidate.token_sequence, target_sequence)
+        || token_sequence_contains_tokens(target_sequence, &candidate.token_sequence)
+}
+
+fn update_related_token_frequencies(
+    candidate: &RelatedTokenCandidate,
+    target_tokens: &BTreeSet<String>,
+    exact_frequencies: &mut HashMap<String, usize>,
+    near_frequencies: &mut HashMap<String, usize>,
+    prefix_frequencies: &mut HashMap<String, usize>,
+    prefix_match_label_tokens: &mut HashMap<String, BTreeSet<String>>,
+) {
+    for target_token in target_tokens {
+        if candidate.tokens.contains(target_token) {
+            increment_token_frequency(exact_frequencies, target_token);
+            continue;
+        }
+        if candidate.tokens.iter().any(|label_token| near_token_match(target_token, label_token)) {
+            increment_token_frequency(near_frequencies, target_token);
+            continue;
+        }
+        update_prefix_token_frequency(
+            candidate,
+            target_token,
+            prefix_frequencies,
+            prefix_match_label_tokens,
+        );
+    }
+}
+
+fn increment_token_frequency(frequencies: &mut HashMap<String, usize>, token: &str) {
+    *frequencies.entry(token.to_string()).or_insert(0) += 1;
+}
+
+fn update_prefix_token_frequency(
+    candidate: &RelatedTokenCandidate,
+    target_token: &str,
+    prefix_frequencies: &mut HashMap<String, usize>,
+    prefix_match_label_tokens: &mut HashMap<String, BTreeSet<String>>,
+) {
+    let matching_label_tokens = candidate
+        .tokens
+        .iter()
+        .filter(|label_token| related_prefix_token_match(target_token, label_token))
+        .cloned()
+        .collect::<Vec<_>>();
+    if matching_label_tokens.is_empty() {
+        return;
+    }
+    increment_token_frequency(prefix_frequencies, target_token);
+    prefix_match_label_tokens
+        .entry(target_token.to_string())
+        .or_default()
+        .extend(matching_label_tokens);
+}
+
 fn prefix_match_label_tokens_are_coherent(label_tokens: &BTreeSet<String>) -> bool {
     match label_tokens.len() {
         0 => false,
@@ -350,6 +434,24 @@ pub(crate) fn token_sequence_contains_tokens(
         return false;
     }
     haystack_tokens.windows(needle_tokens.len()).any(|window| window == needle_tokens)
+}
+
+pub(crate) fn prefix_token_sequence_contains_tokens(
+    haystack_tokens: &[String],
+    needle_tokens: &[String],
+    min_prefix_chars: usize,
+) -> bool {
+    if needle_tokens.is_empty() || haystack_tokens.len() < needle_tokens.len() {
+        return false;
+    }
+    haystack_tokens.windows(needle_tokens.len()).any(|window| {
+        window.iter().zip(needle_tokens).all(|(haystack, needle)| {
+            haystack == needle
+                || (haystack.chars().count() >= min_prefix_chars
+                    && needle.chars().count() >= min_prefix_chars
+                    && common_prefix_char_count(haystack, needle) >= min_prefix_chars)
+        })
+    })
 }
 
 fn select_min_frequency_tokens(
@@ -455,6 +557,14 @@ mod tests {
         assert!(label_acronym_terms("Alpha Service").contains("as"));
         assert!(label_acronym_terms("Blue Module").contains("bm"));
         assert!(label_acronym_terms("Alpha 22 Service").is_empty());
+    }
+
+    #[test]
+    fn short_acronym_identity_tokens_accept_unicode_uppercase_only() {
+        assert_eq!(short_acronym_identity_tokens("СУП"), BTreeSet::from(["суп".to_string()]));
+        assert!(short_acronym_identity_tokens("service").is_empty());
+        assert!(short_acronym_identity_tokens("Суп").is_empty());
+        assert!(short_acronym_identity_tokens("СУПЕР").is_empty());
     }
 
     #[test]

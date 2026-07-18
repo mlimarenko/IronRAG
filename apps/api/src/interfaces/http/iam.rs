@@ -6,9 +6,11 @@ use std::collections::{BTreeMap, BTreeSet};
 use axum::{
     Json, Router,
     extract::{Path, Query, State},
-    http::StatusCode,
+    http::{HeaderMap, HeaderValue, StatusCode, header},
+    response::IntoResponse,
     routing::{delete, get, patch, post},
 };
+use sha2::{Digest, Sha256};
 use tracing::{error, info, warn};
 use uuid::Uuid;
 
@@ -18,21 +20,19 @@ use self::{
         setup_bootstrap_admin,
     },
     types::{
-        CreateGrantRequest, CreateUserRequest, GrantResponse, IamGrantResourceKind,
-        IamPermissionKind, IamPrincipalKind, ListGrantsQuery, ListTokensQuery, MeResponse,
-        MintTokenRequest, MintTokenResponse, PrincipalResponse, SetUserAccessRequest,
-        SetUserRoleRequest, SystemRole, TokenGrantSummaryResponse, TokenIssuerResponse,
-        TokenLibrarySummaryResponse, TokenResponse, TokenScopeKind, TokenScopeResponse,
-        TokenWorkspaceSummaryResponse, UserAccessResponse, UserLibraryAccessResponse, UserResponse,
-        UserWorkspaceAccessResponse, WorkspaceMembershipResponse,
+        CreateUserRequest, GrantResponse, IamGrantResourceKind, IamPermissionKind,
+        IamPrincipalKind, ListTokensQuery, MeResponse, MintTokenRequest, MintTokenResponse,
+        PatchTokenRequest, PrincipalResponse, SetUserAccessRequest, SetUserRoleRequest, SystemRole,
+        TokenGrantSummaryResponse, TokenIssuerResponse, TokenLibrarySummaryResponse, TokenResponse,
+        TokenScopeKind, TokenScopeResponse, TokenWorkspaceSummaryResponse, UserAccessResponse,
+        UserLibraryAccessResponse, UserResponse, UserWorkspaceAccessResponse,
+        WorkspaceMembershipResponse,
     },
 };
 use crate::{
     app::state::AppState,
     domains::iam::{Grant, GrantResourceKind, WorkspaceMembership},
-    infra::repositories::{
-        ai_repository, catalog_repository, iam_repository, ops_repository, query_repository,
-    },
+    infra::repositories::{catalog_repository, iam_repository},
     interfaces::http::{
         auth::AuthContext,
         authorization::POLICY_IAM_ADMIN,
@@ -54,13 +54,12 @@ pub fn router() -> Router<AppState> {
         .route("/iam/session/logout", post(logout_session))
         .route("/iam/me", get(get_me))
         .route("/iam/users", get(list_users).post(create_user))
-        .route("/iam/users/{principal_id}/role", patch(set_user_role))
-        .route("/iam/users/{principal_id}/access", get(get_user_access).put(set_user_access))
+        .route("/iam/users/{userId}", delete(delete_user))
+        .route("/iam/users/{userId}/role", patch(set_user_role))
+        .route("/iam/users/{userId}/access", get(get_user_access).put(set_user_access))
         .route("/iam/tokens", get(list_tokens).post(mint_token))
-        .route("/iam/tokens/{token_principal_id}", delete(delete_token))
-        .route("/iam/tokens/{token_principal_id}/revoke", post(revoke_token))
-        .route("/iam/grants", get(list_grants).post(create_grant))
-        .route("/iam/grants/{grant_id}", delete(revoke_grant))
+        .route("/iam/tokens/{tokenId}", get(get_token).patch(patch_token).delete(delete_token))
+        .route("/iam/tokens/{tokenId}/revoke", post(revoke_token))
 }
 
 #[utoipa::path(
@@ -234,7 +233,7 @@ pub async fn create_user(
         let trimmed = payload.display_name.trim();
         if trimmed.is_empty() { login.clone() } else { trimmed.to_string() }
     };
-    let password = payload.password.trim().to_string();
+    let password = zeroize::Zeroizing::new(payload.password.trim().to_string());
     if password.len() < 8 {
         return Err(ApiError::BadRequest("password must be at least 8 characters long".into()));
     }
@@ -300,12 +299,98 @@ pub async fn create_user(
     Ok(Json(map_user_row(row)))
 }
 
+#[tracing::instrument(
+    level = "info",
+    name = "http.delete_user",
+    skip_all,
+    fields(principal_id = %principal_id)
+)]
+#[utoipa::path(
+    delete,
+    path = "/v1/iam/users/{userId}",
+    tag = "iam",
+    operation_id = "deleteIamUser",
+    params(("userId" = uuid::Uuid, Path, description = "User principal id to delete")),
+    responses(
+        (status = 204, description = "User deleted (sessions and grants revoked, principal disabled)"),
+        (status = 401, description = "Caller is not authenticated"),
+        (status = 403, description = "Caller is not a system administrator"),
+        (status = 404, description = "User not found"),
+        (status = 409, description = "Would delete the last remaining administrator"),
+    ),
+)]
+pub async fn delete_user(
+    auth: AuthContext,
+    State(state): State<AppState>,
+    request_id: Option<axum::Extension<RequestId>>,
+    Path(principal_id): Path<Uuid>,
+) -> Result<StatusCode, ApiError> {
+    require_system_admin(&state, &auth).await?;
+    let request_id = request_id.map(|value| value.0.0);
+
+    let target =
+        iam_repository::get_user_by_principal_id(&state.persistence.postgres, principal_id)
+            .await
+            .map_err(|error| {
+                error!(auth_principal_id = %auth.principal_id, %principal_id, ?error, "failed to load user for delete");
+                ApiError::Internal
+            })?
+            .ok_or_else(|| ApiError::resource_not_found("user", principal_id))?;
+
+    // Last-admin guard, mirroring `set_user_role` below: counting active
+    // admins before the delete keeps the check accurate even though this
+    // isn't a no-op-tolerant update.
+    if target.system_role() == iam_repository::SystemRole::Admin {
+        let admin_count = iam_repository::count_admin_users(&state.persistence.postgres)
+            .await
+            .map_err(|error| {
+                error!(auth_principal_id = %auth.principal_id, ?error, "failed to count admins");
+                ApiError::Internal
+            })?;
+        if admin_count <= 1 {
+            return Err(ApiError::Conflict(
+                "cannot delete the last remaining administrator".to_string(),
+            ));
+        }
+    }
+
+    let deleted = iam_repository::delete_user(&state.persistence.postgres, principal_id)
+        .await
+        .map_err(|error| {
+            error!(auth_principal_id = %auth.principal_id, %principal_id, ?error, "failed to delete user");
+            ApiError::Internal
+        })?;
+    if deleted.is_none() {
+        return Err(ApiError::resource_not_found("user", principal_id));
+    }
+
+    record_iam_audit_event(
+        &state,
+        &auth,
+        request_id,
+        "iam.user.delete",
+        "succeeded",
+        Some(format!("user {} deleted", target.login)),
+        Some(format!("principal {} deleted user {}", auth.principal_id, principal_id)),
+        vec![AppendAuditEventSubjectCommand {
+            subject_kind: "principal".to_string(),
+            subject_id: principal_id,
+            workspace_id: None,
+            library_id: None,
+            document_id: None,
+        }],
+    )
+    .await;
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
 #[utoipa::path(
     patch,
-    path = "/v1/iam/users/{principalId}/role",
+    path = "/v1/iam/users/{userId}/role",
     tag = "iam",
     operation_id = "setIamUserRole",
-    params(("principalId" = uuid::Uuid, Path, description = "User principal id whose role changes")),
+    params(("userId" = uuid::Uuid, Path, description = "User principal id whose role changes")),
     request_body = crate::interfaces::http::iam::types::SetUserRoleRequest,
     responses(
         (status = 200, description = "Updated user", body = UserResponse),
@@ -393,12 +478,12 @@ pub async fn set_user_role(
 
 #[utoipa::path(
     get,
-    path = "/v1/iam/users/{principalId}/access",
+    path = "/v1/iam/users/{userId}/access",
     tag = "iam",
     operation_id = "getIamUserAccess",
-    params(("principalId" = uuid::Uuid, Path, description = "User principal id whose access is read")),
+    params(("userId" = uuid::Uuid, Path, description = "User principal id whose access is read")),
     responses(
-        (status = 200, description = "The user's workspace and library access grants", body = UserAccessResponse),
+        (status = 200, description = "The user's workspace and library access grants. Carries an `ETag` header (a hash of the current grant set) for optimistic concurrency on the paired PUT.", body = UserAccessResponse),
         (status = 401, description = "Caller is not authenticated"),
         (status = 403, description = "Caller is not a system administrator"),
         (status = 404, description = "User not found"),
@@ -414,7 +499,7 @@ pub async fn get_user_access(
     auth: AuthContext,
     State(state): State<AppState>,
     Path(principal_id): Path<Uuid>,
-) -> Result<Json<UserAccessResponse>, ApiError> {
+) -> Result<axum::response::Response, ApiError> {
     require_system_admin(&state, &auth).await?;
 
     // Confirm the target principal is a real user so callers get a clean 404
@@ -428,22 +513,23 @@ pub async fn get_user_access(
         .ok_or_else(|| ApiError::resource_not_found("user", principal_id))?;
 
     let access = load_user_access(&state, principal_id).await?;
-    Ok(Json(access))
+    Ok(with_access_etag(access))
 }
 
 #[utoipa::path(
     put,
-    path = "/v1/iam/users/{principalId}/access",
+    path = "/v1/iam/users/{userId}/access",
     tag = "iam",
     operation_id = "setIamUserAccess",
-    params(("principalId" = uuid::Uuid, Path, description = "User principal id whose access is set")),
+    params(("userId" = uuid::Uuid, Path, description = "User principal id whose access is set")),
     request_body = crate::interfaces::http::iam::types::SetUserAccessRequest,
     responses(
-        (status = 200, description = "The user's access after reconciliation", body = UserAccessResponse),
+        (status = 200, description = "The user's access after reconciliation. Carries a fresh `ETag` header.", body = UserAccessResponse),
         (status = 400, description = "Invalid permission kind for a resource"),
         (status = 401, description = "Caller is not authenticated"),
         (status = 403, description = "Caller is not a system administrator"),
         (status = 404, description = "User, workspace or library not found"),
+        (status = 409, description = "The optional `If-Match` header did not match the current access ETag; re-fetch with GET and retry"),
     ),
 )]
 #[tracing::instrument(
@@ -457,8 +543,9 @@ pub async fn set_user_access(
     State(state): State<AppState>,
     request_id: Option<axum::Extension<RequestId>>,
     Path(principal_id): Path<Uuid>,
+    headers: HeaderMap,
     Json(payload): Json<SetUserAccessRequest>,
-) -> Result<Json<UserAccessResponse>, ApiError> {
+) -> Result<axum::response::Response, ApiError> {
     require_system_admin(&state, &auth).await?;
     let request_id = request_id.map(|value| value.0.0);
 
@@ -469,6 +556,24 @@ pub async fn set_user_access(
             ApiError::Internal
         })?
         .ok_or_else(|| ApiError::resource_not_found("user", principal_id))?;
+
+    // Optional optimistic-concurrency check: if the caller sent `If-Match`,
+    // the access set must not have changed since they last read it via GET.
+    // `*` always passes (the resource is known to exist by this point). This
+    // is the single write model's race guard (plan §5.2) — no parallel
+    // grants write path is needed to close it.
+    if let Some(if_match) = headers.get(header::IF_MATCH).and_then(|value| value.to_str().ok()) {
+        let if_match = if_match.trim();
+        if if_match != "*" {
+            let current_access = load_user_access(&state, principal_id).await?;
+            let current_etag = compute_access_etag(&current_access);
+            if if_match != current_etag {
+                return Err(ApiError::StaleRevision(format!(
+                    "user access ETag is stale for principal {principal_id}; GET the latest access and retry the PUT with the current If-Match value"
+                )));
+            }
+        }
+    }
 
     // Build the desired (resource_kind, resource_id, permission_kind) set,
     // validating each permission against its resource kind and that each
@@ -584,7 +689,51 @@ pub async fn set_user_access(
     .await;
 
     let access = load_user_access(&state, principal_id).await?;
-    Ok(Json(access))
+    Ok(with_access_etag(access))
+}
+
+/// Wraps a `UserAccessResponse` body with an `ETag` header computed from its
+/// current grant set. Shared by the GET and PUT handlers so the header a
+/// client reads always matches what `compute_access_etag` would recompute
+/// from that exact body.
+fn with_access_etag(access: UserAccessResponse) -> axum::response::Response {
+    let etag = compute_access_etag(&access);
+    let mut response = Json(access).into_response();
+    if let Ok(value) = HeaderValue::from_str(&etag) {
+        response.headers_mut().insert(header::ETAG, value);
+    }
+    response
+}
+
+/// Computes a stable ETag for a user's declarative access set (workspace and
+/// library grants), independent of iteration order and of `grantId` (an
+/// internal correlation id, not semantically part of "access"). Two calls
+/// with the same effective grant set always produce the same ETag.
+fn compute_access_etag(access: &UserAccessResponse) -> String {
+    let mut entries: Vec<(&'static str, Uuid, &str)> = access
+        .workspaces
+        .iter()
+        .map(|entry| ("workspace", entry.workspace_id, entry.permission_kind.as_str()))
+        .chain(
+            access
+                .libraries
+                .iter()
+                .map(|entry| ("library", entry.library_id, entry.permission_kind.as_str())),
+        )
+        .collect();
+    entries.sort();
+
+    let mut hasher = Sha256::new();
+    hasher.update(access.principal_id.as_bytes());
+    for (kind, resource_id, permission_kind) in entries {
+        hasher.update(kind.as_bytes());
+        hasher.update(b"|");
+        hasher.update(resource_id.as_bytes());
+        hasher.update(b"|");
+        hasher.update(permission_kind.as_bytes());
+        hasher.update(b"\n");
+    }
+    format!("\"{}\"", hex::encode(hasher.finalize()))
 }
 
 /// Loads a user's workspace- and library-scoped grants, joined with display
@@ -634,10 +783,9 @@ async fn load_user_access(
             }
             "library" => {
                 let (workspace_id, display_name) =
-                    library_names.get(&grant.resource_id).cloned().unwrap_or((
-                        grant.workspace_id.unwrap_or_default(),
-                        grant.resource_id.to_string(),
-                    ));
+                    library_names.get(&grant.resource_id).cloned().unwrap_or_else(|| {
+                        (grant.workspace_id.unwrap_or_default(), grant.resource_id.to_string())
+                    });
                 libraries.push(UserLibraryAccessResponse {
                     grant_id: grant.id,
                     library_id: grant.resource_id,
@@ -793,13 +941,13 @@ pub async fn mint_token(
                     })?
                     .ok_or_else(|| ApiError::resource_not_found("library", library_id))?;
 
-            if let Some(requested_workspace_id) = workspace_id {
-                if library.workspace_id != requested_workspace_id {
-                    return Err(ApiError::BadRequest(format!(
-                        "library {} does not belong to workspace {}",
-                        library.id, requested_workspace_id
-                    )));
-                }
+            if let Some(requested_workspace_id) = workspace_id
+                && library.workspace_id != requested_workspace_id
+            {
+                return Err(ApiError::BadRequest(format!(
+                    "library {} does not belong to workspace {}",
+                    library.id, requested_workspace_id
+                )));
             }
             library_workspace_ids.insert(library.workspace_id);
         }
@@ -811,11 +959,7 @@ pub async fn mint_token(
     let grants = if permission_kinds.is_empty() {
         Vec::new()
     } else if !library_ids.is_empty() {
-        build_mint_grants(
-            MintGrantScope::Libraries(library_ids),
-            &permission_kinds,
-            expires_at.clone(),
-        )?
+        build_mint_grants(MintGrantScope::Libraries(library_ids), &permission_kinds, expires_at)?
     } else {
         let workspace_id = workspace_id.ok_or_else(|| {
             ApiError::BadRequest(
@@ -823,14 +967,10 @@ pub async fn mint_token(
                     .to_string(),
             )
         })?;
-        build_mint_grants(
-            MintGrantScope::Workspace(workspace_id),
-            &permission_kinds,
-            expires_at.clone(),
-        )?
+        build_mint_grants(MintGrantScope::Workspace(workspace_id), &permission_kinds, expires_at)?
     };
 
-    let outcome = state
+    let mut outcome = state
         .canonical_services
         .iam
         .mint_api_token(
@@ -896,84 +1036,184 @@ pub async fn mint_token(
         load_token_response_lookups(&state, std::slice::from_ref(&row), &grant_rows).await?;
     let api_token = build_token_response(row, grant_rows, &lookups)?;
 
-    Ok(Json(MintTokenResponse { token: outcome.token, api_token }))
+    Ok(Json(MintTokenResponse { token: std::mem::take(&mut outcome.token), api_token }))
 }
 
 #[tracing::instrument(
     level = "info",
-    name = "http.list_grants",
+    name = "http.get_token",
     skip_all,
-    fields(principal_id = ?query.principal_id, item_count)
+    fields(token_principal_id = %token_principal_id)
 )]
 #[utoipa::path(
     get,
-    path = "/v1/iam/grants",
+    path = "/v1/iam/tokens/{tokenId}",
     tag = "iam",
-    operation_id = "listIamGrants",
-    params(crate::interfaces::http::iam::types::ListGrantsQuery),
+    operation_id = "getIamToken",
+    params(("tokenId" = uuid::Uuid, Path, description = "API token principal id")),
     responses(
-        (status = 200, description = "Grants visible to the IAM administrator", body = [GrantResponse]),
+        (status = 200, description = "API token detail (the plaintext secret is never returned)", body = TokenResponse),
         (status = 401, description = "Caller is not authenticated"),
         (status = 403, description = "Caller is not an IAM administrator"),
+        (status = 404, description = "Token not found"),
     ),
 )]
-pub async fn list_grants(
+pub async fn get_token(
     auth: AuthContext,
     State(state): State<AppState>,
-    Query(query): Query<ListGrantsQuery>,
-) -> Result<Json<Vec<GrantResponse>>, ApiError> {
-    let span = tracing::Span::current();
+    Path(token_principal_id): Path<Uuid>,
+) -> Result<Json<TokenResponse>, ApiError> {
     auth.require_any_scope(POLICY_IAM_ADMIN)?;
-    let principal_id = query.principal_id.unwrap_or(auth.principal_id);
-    let rows = iam_repository::list_resolved_grants_by_principal(
+
+    let row = iam_repository::get_api_token_by_principal_id(
         &state.persistence.postgres,
-        principal_id,
+        token_principal_id,
     )
     .await
     .map_err(|error| {
         error!(
             auth_principal_id = %auth.principal_id,
-            principal_id = %principal_id,
+            token_principal_id = %token_principal_id,
             ?error,
-            "failed to list grants",
+            "failed to load api token",
+        );
+        ApiError::Internal
+    })?
+    .ok_or_else(|| ApiError::resource_not_found("api_token", token_principal_id))?;
+
+    authorize_workspace_scope_for_row(&auth, row.workspace_id)?;
+
+    let grant_rows = iam_repository::list_resolved_grants_by_principal(
+        &state.persistence.postgres,
+        token_principal_id,
+    )
+    .await
+    .map_err(|error| {
+        error!(
+            auth_principal_id = %auth.principal_id,
+            token_principal_id = %token_principal_id,
+            ?error,
+            "failed to resolve api token grants",
         );
         ApiError::Internal
     })?;
+    let lookups =
+        load_token_response_lookups(&state, std::slice::from_ref(&row), &grant_rows).await?;
+    Ok(Json(build_token_response(row, grant_rows, &lookups)?))
+}
 
-    if !auth.is_system_admin && principal_id != auth.principal_id {
-        if let Some(token_row) =
-            iam_repository::get_api_token_by_principal_id(&state.persistence.postgres, principal_id)
-                .await
-                .map_err(|error| {
-                    error!(
-                        auth_principal_id = %auth.principal_id,
-                        principal_id = %principal_id,
-                        ?error,
-                        "failed to load token scope while listing grants",
-                    );
-                    ApiError::Internal
-                })?
-        {
-            authorize_workspace_scope_for_row(&auth, token_row.workspace_id)?;
-        } else if rows.is_empty() {
-            return Err(ApiError::Unauthorized);
-        }
+#[tracing::instrument(
+    level = "info",
+    name = "http.patch_token",
+    skip_all,
+    fields(token_principal_id = %token_principal_id)
+)]
+#[utoipa::path(
+    patch,
+    path = "/v1/iam/tokens/{tokenId}",
+    tag = "iam",
+    operation_id = "patchIamToken",
+    params(("tokenId" = uuid::Uuid, Path, description = "API token principal id")),
+    request_body = crate::interfaces::http::iam::types::PatchTokenRequest,
+    responses(
+        (status = 200, description = "Updated API token detail", body = TokenResponse),
+        (status = 400, description = "Invalid request payload"),
+        (status = 401, description = "Caller is not authenticated"),
+        (status = 403, description = "Caller is not an IAM administrator"),
+        (status = 404, description = "Token not found"),
+    ),
+)]
+pub async fn patch_token(
+    auth: AuthContext,
+    State(state): State<AppState>,
+    request_id: Option<axum::Extension<RequestId>>,
+    Path(token_principal_id): Path<Uuid>,
+    Json(payload): Json<PatchTokenRequest>,
+) -> Result<Json<TokenResponse>, ApiError> {
+    auth.require_any_scope(POLICY_IAM_ADMIN)?;
+    let request_id = request_id.map(|value| value.0.0);
 
-        let all_visible = rows.iter().all(|row| match row.resource_kind.as_str() {
-            "system" => false,
-            _ => {
-                row.workspace_id.is_some_and(|workspace_id| auth.can_access_workspace(workspace_id))
+    let existing = iam_repository::get_api_token_by_principal_id(
+        &state.persistence.postgres,
+        token_principal_id,
+    )
+    .await
+    .map_err(|error| {
+        error!(
+            auth_principal_id = %auth.principal_id,
+            token_principal_id = %token_principal_id,
+            ?error,
+            "failed to load api token for patch",
+        );
+        ApiError::Internal
+    })?
+    .ok_or_else(|| ApiError::resource_not_found("api_token", token_principal_id))?;
+    authorize_workspace_scope_for_row(&auth, existing.workspace_id)?;
+
+    let label = match payload.label {
+        Some(label) => {
+            let trimmed = label.trim();
+            if trimmed.is_empty() {
+                return Err(ApiError::BadRequest("label must not be empty".into()));
             }
-        });
-        if !all_visible {
-            return Err(ApiError::Unauthorized);
+            Some(trimmed.to_string())
         }
-    }
+        None => None,
+    };
 
-    let items: Vec<_> =
-        rows.into_iter().map(map_resolved_grant_row).collect::<Result<Vec<_>, _>>()?;
-    span.record("item_count", items.len());
-    Ok(Json(items))
+    let row = iam_repository::update_api_token(
+        &state.persistence.postgres,
+        token_principal_id,
+        label.as_deref(),
+        payload.expires_at,
+    )
+    .await
+    .map_err(|error| {
+        error!(
+            auth_principal_id = %auth.principal_id,
+            token_principal_id = %token_principal_id,
+            ?error,
+            "failed to update api token",
+        );
+        ApiError::Internal
+    })?
+    .ok_or_else(|| ApiError::resource_not_found("api_token", token_principal_id))?;
+
+    record_iam_audit_event(
+        &state,
+        &auth,
+        request_id,
+        "iam.api_token.patch",
+        "succeeded",
+        Some(format!("api token {} updated", row.label)),
+        Some(format!("principal {} updated api token {}", auth.principal_id, token_principal_id)),
+        vec![AppendAuditEventSubjectCommand {
+            subject_kind: "api_token".to_string(),
+            subject_id: token_principal_id,
+            workspace_id: row.workspace_id,
+            library_id: None,
+            document_id: None,
+        }],
+    )
+    .await;
+
+    let grant_rows = iam_repository::list_resolved_grants_by_principal(
+        &state.persistence.postgres,
+        token_principal_id,
+    )
+    .await
+    .map_err(|error| {
+        error!(
+            auth_principal_id = %auth.principal_id,
+            token_principal_id = %token_principal_id,
+            ?error,
+            "failed to resolve api token grants after patch",
+        );
+        ApiError::Internal
+    })?;
+    let lookups =
+        load_token_response_lookups(&state, std::slice::from_ref(&row), &grant_rows).await?;
+    Ok(Json(build_token_response(row, grant_rows, &lookups)?))
 }
 
 #[tracing::instrument(
@@ -984,10 +1224,10 @@ pub async fn list_grants(
 )]
 #[utoipa::path(
     post,
-    path = "/v1/iam/tokens/{tokenPrincipalId}/revoke",
+    path = "/v1/iam/tokens/{tokenId}/revoke",
     tag = "iam",
     operation_id = "revokeIamToken",
-    params(("tokenPrincipalId" = uuid::Uuid, Path, description = "Principal id whose tokens are revoked")),
+    params(("tokenId" = uuid::Uuid, Path, description = "Principal id whose tokens are revoked")),
     responses(
         (status = 204, description = "Token revoked"),
         (status = 401, description = "Caller is not authenticated"),
@@ -1074,10 +1314,10 @@ pub async fn revoke_token(
 )]
 #[utoipa::path(
     delete,
-    path = "/v1/iam/tokens/{tokenPrincipalId}",
+    path = "/v1/iam/tokens/{tokenId}",
     tag = "iam",
     operation_id = "deleteIamToken",
-    params(("tokenPrincipalId" = uuid::Uuid, Path, description = "Revoked API token principal id to delete")),
+    params(("tokenId" = uuid::Uuid, Path, description = "Revoked API token principal id to delete")),
     responses(
         (status = 204, description = "Revoked token deleted"),
         (status = 401, description = "Caller is not authenticated"),
@@ -1181,121 +1421,6 @@ pub async fn delete_token(
     Ok(StatusCode::NO_CONTENT)
 }
 
-#[tracing::instrument(
-    level = "info",
-    name = "http.create_grant",
-    skip_all,
-    fields(principal_id = %payload.principal_id)
-)]
-#[utoipa::path(
-    post,
-    path = "/v1/iam/grants",
-    tag = "iam",
-    operation_id = "createIamGrant",
-    request_body = crate::interfaces::http::iam::types::CreateGrantRequest,
-    responses(
-        (status = 200, description = "Newly created grant", body = GrantResponse),
-        (status = 400, description = "Invalid request payload"),
-        (status = 401, description = "Caller is not authenticated"),
-        (status = 403, description = "Caller is not an IAM administrator"),
-    ),
-)]
-pub async fn create_grant(
-    auth: AuthContext,
-    State(state): State<AppState>,
-    Json(payload): Json<CreateGrantRequest>,
-) -> Result<Json<GrantResponse>, ApiError> {
-    auth.require_any_scope(POLICY_IAM_ADMIN)?;
-
-    let workspace_id =
-        resolve_grant_workspace_id(&state, payload.resource_kind.clone(), payload.resource_id)
-            .await?;
-    authorize_workspace_scope_for_id(&auth, workspace_id)?;
-    validate_permission_kind_for_resource(
-        payload.resource_kind.clone(),
-        payload.permission_kind.clone(),
-    )?;
-
-    state.canonical_services.iam.get_principal(&state, payload.principal_id).await?;
-
-    let grant = state
-        .canonical_services
-        .iam
-        .create_grant(
-            &state,
-            CreateGrantCommand {
-                principal_id: payload.principal_id,
-                resource_kind: map_route_grant_resource_kind(payload.resource_kind.clone()),
-                resource_id: payload.resource_id,
-                permission_kind: payload.permission_kind.as_str().to_string(),
-                granted_by_principal_id: Some(auth.principal_id),
-                expires_at: payload.expires_at,
-            },
-        )
-        .await
-        .map_err(|error| {
-            error!(
-                auth_principal_id = %auth.principal_id,
-                principal_id = %payload.principal_id,
-                resource_kind = %payload.resource_kind.as_str(),
-                resource_id = %payload.resource_id,
-                ?error,
-                "failed to create grant",
-            );
-            ApiError::Internal
-        })?;
-
-    Ok(Json(map_grant_domain(grant)?))
-}
-
-#[tracing::instrument(
-    level = "info",
-    name = "http.revoke_grant",
-    skip_all,
-    fields(grant_id = %grant_id)
-)]
-#[utoipa::path(
-    delete,
-    path = "/v1/iam/grants/{grantId}",
-    tag = "iam",
-    operation_id = "revokeIamGrant",
-    params(("grantId" = uuid::Uuid, Path, description = "Grant identifier")),
-    responses(
-        (status = 204, description = "Grant revoked"),
-        (status = 401, description = "Caller is not authenticated"),
-        (status = 403, description = "Caller is not an IAM administrator"),
-        (status = 404, description = "Grant not found"),
-    ),
-)]
-pub async fn revoke_grant(
-    auth: AuthContext,
-    State(state): State<AppState>,
-    Path(grant_id): Path<Uuid>,
-) -> Result<StatusCode, ApiError> {
-    auth.require_any_scope(POLICY_IAM_ADMIN)?;
-
-    let row = load_grant_row(&state, grant_id).await?;
-    let workspace_id = resolve_grant_workspace_id(
-        &state,
-        map_grant_resource_kind(&row.resource_kind)?,
-        row.resource_id,
-    )
-    .await?;
-    authorize_workspace_scope_for_id(&auth, workspace_id)?;
-
-    state.canonical_services.iam.revoke_grant(&state, grant_id).await.map_err(|error| {
-        error!(
-            auth_principal_id = %auth.principal_id,
-            grant_id = %grant_id,
-            ?error,
-            "failed to revoke grant",
-        );
-        error
-    })?;
-
-    Ok(StatusCode::NO_CONTENT)
-}
-
 fn resolve_workspace_filter(
     auth: &AuthContext,
     requested: Option<Uuid>,
@@ -1374,111 +1499,6 @@ fn resolve_mint_workspace(
         }
         None => Err(ApiError::Unauthorized),
     }
-}
-
-async fn resolve_grant_workspace_id(
-    state: &AppState,
-    resource_kind: IamGrantResourceKind,
-    resource_id: Uuid,
-) -> Result<Uuid, ApiError> {
-    match resource_kind {
-        IamGrantResourceKind::System => Ok(Uuid::nil()),
-        IamGrantResourceKind::Workspace => {
-            catalog_repository::get_workspace_by_id(&state.persistence.postgres, resource_id)
-                .await
-                .map_err(|error| {
-                    error!(resource_id = %resource_id, ?error, "failed to load workspace for grant");
-                    ApiError::Internal
-                })?
-                .ok_or_else(|| ApiError::resource_not_found("workspace", resource_id))
-                .map(|row| row.id)
-        }
-        IamGrantResourceKind::Library => {
-            catalog_repository::get_library_by_id(&state.persistence.postgres, resource_id)
-                .await
-                .map_err(|error| {
-                    error!(resource_id = %resource_id, ?error, "failed to load library for grant");
-                    ApiError::Internal
-                })?
-                .ok_or_else(|| ApiError::resource_not_found("library", resource_id))
-                .map(|row| row.workspace_id)
-        }
-        IamGrantResourceKind::Document => {
-            state
-                .document_store
-                .get_document(resource_id)
-                .await
-                .map_err(|error| {
-                    error!(resource_id = %resource_id, ?error, "failed to load document for grant");
-                    ApiError::Internal
-                })?
-                .ok_or_else(|| ApiError::resource_not_found("document", resource_id))
-                .map(|row| row.workspace_id)
-        }
-        IamGrantResourceKind::QuerySession => {
-            query_repository::get_conversation_by_id(&state.persistence.postgres, resource_id)
-                .await
-                .map_err(|error| {
-                    error!(resource_id = %resource_id, ?error, "failed to load query session for grant");
-                    ApiError::Internal
-                })?
-                .ok_or_else(|| ApiError::resource_not_found("query_session", resource_id))
-                .map(|row| row.workspace_id)
-        }
-        IamGrantResourceKind::AsyncOperation => {
-            ops_repository::get_async_operation_by_id(&state.persistence.postgres, resource_id)
-                .await
-                .map_err(|error| {
-                    error!(resource_id = %resource_id, ?error, "failed to load async operation for grant");
-                    ApiError::Internal
-                })?
-                .ok_or_else(|| ApiError::resource_not_found("async_operation", resource_id))
-                .map(|row| row.workspace_id)
-        }
-        IamGrantResourceKind::Connector => {
-            catalog_repository::get_connector_by_id(&state.persistence.postgres, resource_id)
-                .await
-                .map_err(|error| {
-                    error!(resource_id = %resource_id, ?error, "failed to load connector for grant");
-                    ApiError::Internal
-                })?
-                .ok_or_else(|| ApiError::resource_not_found("connector", resource_id))
-                .map(|row| row.workspace_id)
-        }
-        IamGrantResourceKind::ProviderCredential => {
-            ai_repository::get_account_by_id(&state.persistence.postgres, resource_id)
-                .await
-                .map_err(|error| {
-                    error!(resource_id = %resource_id, ?error, "failed to load provider credential for grant");
-                    ApiError::Internal
-                })?
-                .ok_or_else(|| ApiError::resource_not_found("provider_credential", resource_id))
-                .and_then(|row| row.workspace_id.ok_or_else(|| ApiError::BadRequest("provider credential is not scoped to a workspace".to_string())))
-        }
-        IamGrantResourceKind::LibraryBinding => {
-            ai_repository::get_binding_by_id(&state.persistence.postgres, resource_id)
-                .await
-                .map_err(|error| {
-                    error!(resource_id = %resource_id, ?error, "failed to load library binding for grant");
-                    ApiError::Internal
-                })?
-                .ok_or_else(|| ApiError::resource_not_found("library_binding", resource_id))
-                .and_then(|row| row.workspace_id.ok_or_else(|| ApiError::BadRequest("binding assignment is not scoped to a workspace".to_string())))
-        }
-    }
-}
-
-async fn load_grant_row(
-    state: &AppState,
-    grant_id: Uuid,
-) -> Result<iam_repository::IamGrantRow, ApiError> {
-    iam_repository::get_grant_by_id(&state.persistence.postgres, grant_id)
-        .await
-        .map_err(|error| {
-            error!(grant_id = %grant_id, ?error, "failed to load grant");
-            ApiError::Internal
-        })?
-        .ok_or_else(|| ApiError::resource_not_found("grant", grant_id))
 }
 
 fn authorize_workspace_scope_for_id(
@@ -1615,7 +1635,7 @@ fn build_mint_grants(
                         resource_kind: GrantResourceKind::Library,
                         resource_id: library_id,
                         permission_kind: permission_kind.as_str().to_string(),
-                        expires_at: expires_at.clone(),
+                        expires_at,
                     });
                 }
             }
@@ -1718,7 +1738,7 @@ fn map_user_row(row: iam_repository::IamUserRow) -> UserResponse {
     }
 }
 
-fn map_route_system_role_from_repo(role: iam_repository::SystemRole) -> SystemRole {
+const fn map_route_system_role_from_repo(role: iam_repository::SystemRole) -> SystemRole {
     match role {
         iam_repository::SystemRole::Viewer => SystemRole::Viewer,
         iam_repository::SystemRole::Operator => SystemRole::Operator,
@@ -1726,7 +1746,7 @@ fn map_route_system_role_from_repo(role: iam_repository::SystemRole) -> SystemRo
     }
 }
 
-fn map_route_system_role_to_repo(role: SystemRole) -> iam_repository::SystemRole {
+const fn map_route_system_role_to_repo(role: SystemRole) -> iam_repository::SystemRole {
     match role {
         SystemRole::Viewer => iam_repository::SystemRole::Viewer,
         SystemRole::Operator => iam_repository::SystemRole::Operator,
@@ -1815,9 +1835,8 @@ fn workspace_summary(
     workspace_id: Uuid,
     lookups: &TokenResponseLookups,
 ) -> TokenWorkspaceSummaryResponse {
-    lookups.workspaces.get(&workspace_id).cloned().unwrap_or(TokenWorkspaceSummaryResponse {
-        id: workspace_id,
-        display_name: workspace_id.to_string(),
+    lookups.workspaces.get(&workspace_id).cloned().unwrap_or_else(|| {
+        TokenWorkspaceSummaryResponse { id: workspace_id, display_name: workspace_id.to_string() }
     })
 }
 
@@ -1826,7 +1845,7 @@ fn library_summary(
     workspace_id: Option<Uuid>,
     lookups: &TokenResponseLookups,
 ) -> TokenLibrarySummaryResponse {
-    lookups.libraries.get(&library_id).cloned().unwrap_or(TokenLibrarySummaryResponse {
+    lookups.libraries.get(&library_id).cloned().unwrap_or_else(|| TokenLibrarySummaryResponse {
         id: library_id,
         workspace_id: workspace_id.unwrap_or(Uuid::nil()),
         display_name: library_id.to_string(),
@@ -1877,7 +1896,7 @@ fn build_token_response(
         .map(|workspace_id| workspace_summary(workspace_id, lookups))
         .or_else(|| grants.iter().find_map(|grant| grant.workspace.clone()));
     let issuer = row.issued_by_principal_id.map(|principal_id| {
-        lookups.issuers.get(&principal_id).cloned().unwrap_or(TokenIssuerResponse {
+        lookups.issuers.get(&principal_id).cloned().unwrap_or_else(|| TokenIssuerResponse {
             principal_id,
             display_label: principal_id.to_string(),
         })
@@ -1931,7 +1950,7 @@ fn map_user_row_contract(row: iam_repository::IamUserRow) -> ironrag_contracts::
     }
 }
 
-pub(crate) fn map_system_role_contract(
+pub(crate) const fn map_system_role_contract(
     role: iam_repository::SystemRole,
 ) -> ironrag_contracts::auth::SystemRole {
     match role {
@@ -1978,21 +1997,6 @@ fn map_grant_domain_contract(row: Grant) -> Result<ironrag_contracts::auth::Toke
     })
 }
 
-fn map_resolved_grant_row(
-    row: iam_repository::ResolvedIamGrantScopeRow,
-) -> Result<GrantResponse, ApiError> {
-    Ok(GrantResponse {
-        id: row.id,
-        principal_id: row.principal_id,
-        resource_kind: map_grant_resource_kind(&row.resource_kind)?,
-        resource_id: row.resource_id,
-        permission_kind: map_permission_kind(&row.permission_kind)?,
-        granted_by_principal_id: row.granted_by_principal_id,
-        granted_at: row.granted_at,
-        expires_at: row.expires_at,
-    })
-}
-
 fn map_principal_kind(value: &str) -> Result<IamPrincipalKind, ApiError> {
     match value {
         "user" => Ok(IamPrincipalKind::User),
@@ -2024,7 +2028,7 @@ fn map_grant_resource_kind(value: &str) -> Result<IamGrantResourceKind, ApiError
     }
 }
 
-fn map_domain_grant_resource_kind_contract(
+const fn map_domain_grant_resource_kind_contract(
     value: GrantResourceKind,
 ) -> ironrag_contracts::auth::GrantResourceKind {
     match value {
@@ -2070,7 +2074,7 @@ fn map_permission_kind_contract(
     })
 }
 
-fn map_domain_grant_resource_kind(
+const fn map_domain_grant_resource_kind(
     value: GrantResourceKind,
 ) -> Result<IamGrantResourceKind, ApiError> {
     match value {
@@ -2105,20 +2109,6 @@ fn map_permission_kind(value: &str) -> Result<IamPermissionKind, ApiError> {
             warn!(permission_kind = %other, "encountered unknown grant permission kind");
             Err(ApiError::Internal)
         }
-    }
-}
-
-fn map_route_grant_resource_kind(value: IamGrantResourceKind) -> GrantResourceKind {
-    match value {
-        IamGrantResourceKind::System => GrantResourceKind::System,
-        IamGrantResourceKind::Workspace => GrantResourceKind::Workspace,
-        IamGrantResourceKind::Library => GrantResourceKind::Library,
-        IamGrantResourceKind::Document => GrantResourceKind::Document,
-        IamGrantResourceKind::QuerySession => GrantResourceKind::QuerySession,
-        IamGrantResourceKind::AsyncOperation => GrantResourceKind::AsyncOperation,
-        IamGrantResourceKind::Connector => GrantResourceKind::Connector,
-        IamGrantResourceKind::ProviderCredential => GrantResourceKind::ProviderCredential,
-        IamGrantResourceKind::LibraryBinding => GrantResourceKind::LibraryBinding,
     }
 }
 
@@ -2174,9 +2164,9 @@ mod tests {
             iam_repository::SystemRole::Operator,
             iam_repository::SystemRole::Admin,
         ] {
-            assert_eq!(iam_repository::SystemRole::from_str(repo.as_str()), Some(repo));
+            assert_eq!(iam_repository::SystemRole::parse_wire(repo.as_str()), Some(repo));
         }
-        assert_eq!(iam_repository::SystemRole::from_str("unknown"), None);
+        assert_eq!(iam_repository::SystemRole::parse_wire("unknown"), None);
     }
 
     #[test]

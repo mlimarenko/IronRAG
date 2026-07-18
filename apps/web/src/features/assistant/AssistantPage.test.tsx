@@ -1,12 +1,12 @@
-import { act } from 'react';
-import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { waitFor } from '@testing-library/react';
-import { createRoot, type Root } from 'react-dom/client';
-import { MemoryRouter } from 'react-router-dom';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { act } from 'react'
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
+import { fireEvent, waitFor } from '@testing-library/react'
+import { createRoot, type Root } from 'react-dom/client'
+import { MemoryRouter } from 'react-router-dom'
+import { afterEach, assert, beforeEach, describe, expect, it, vi } from 'vitest'
 
-import AssistantPage from '@/features/assistant/AssistantPage';
-import { ApiError } from '@/shared/api/runtime';
+import AssistantPage from '@/features/assistant/AssistantPage'
+import { ApiError } from '@/shared/api/runtime'
 
 const { useAppMock, queryApiMock, toastErrorMock } = vi.hoisted(() => ({
   useAppMock: vi.fn(),
@@ -15,58 +15,58 @@ const { useAppMock, queryApiMock, toastErrorMock } = vi.hoisted(() => ({
     listSessions: vi.fn(),
     getSession: vi.fn(),
     createSession: vi.fn(),
+    renameSession: vi.fn(),
+    deleteSession: vi.fn(),
     createTurn: vi.fn(),
     createTurnStream: vi.fn(),
     getExecution: vi.fn(),
     getExecutionLlmContext: vi.fn(),
   },
-}));
+}))
 
 vi.mock('@/shared/contexts/app-context', () => ({
   useApp: () => useAppMock(),
-}));
+}))
 
 vi.mock('sonner', () => ({
   toast: {
     error: toastErrorMock,
     success: vi.fn(),
   },
-}));
+}))
 
 vi.mock('@/shared/api', () => ({
   queryApi: queryApiMock,
   queries: {
-    listQuerySessionsOptions: (input?: { query?: { libraryId?: string } }) => ({
-      queryKey: ['mockedListQuerySessions', input?.query?.libraryId ?? null],
+    listQuerySessionsOptions: (input: { path: { libraryId: string } }) => ({
+      queryKey: ['mockedListQuerySessions', input.path.libraryId || null],
       queryFn: async () =>
-        queryApiMock.listSessions({ workspaceId: 'ws-1', libraryId: input?.query?.libraryId }),
+        queryApiMock.listSessions({ workspaceId: 'ws-1', libraryId: input.path.libraryId }),
     }),
     getQuerySessionOptions: (input: { path: { sessionId: string } }) => ({
       queryKey: ['mockedGetQuerySession', input.path.sessionId],
       queryFn: async () => queryApiMock.getSession(input.path.sessionId),
     }),
   },
-}));
+}))
 
 // ReactMarkdown is heavy to import in a jsdom environment and its output is
 // not what these integration tests are validating — they check message plumbing,
 // turn completion, and evidence panel wiring. Replace it with a plain `<div>`.
 vi.mock('react-markdown', () => ({
-  default: ({ children }: { children?: React.ReactNode }) => (
-    <div data-testid="md">{children}</div>
-  ),
-}));
+  default: ({ children }: { children?: React.ReactNode }) => <div data-testid="md">{children}</div>,
+}))
 
 describe('AssistantPage integration', () => {
-  let container: HTMLDivElement;
-  let root: Root | null;
+  let container: HTMLDivElement
+  let root: Root | null
 
   beforeEach(() => {
-    vi.clearAllMocks();
-    window.localStorage.clear();
-    container = document.createElement('div');
-    document.body.appendChild(container);
-    root = null;
+    vi.clearAllMocks()
+    window.localStorage.clear()
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    root = null
 
     useAppMock.mockReturnValue({
       activeLibrary: {
@@ -76,11 +76,17 @@ describe('AssistantPage integration', () => {
       },
       activeWorkspace: { id: 'ws-1' },
       locale: 'en',
-    });
+    })
 
     queryApiMock.listSessions.mockResolvedValue([
-      { id: 'session-1', libraryId: 'library-1', title: 'Deployment notes', updatedAt: '2026-04-10T10:00:00Z', turnCount: 2 },
-    ]);
+      {
+        id: 'session-1',
+        libraryId: 'library-1',
+        title: 'Deployment notes',
+        updatedAt: '2026-04-10T10:00:00Z',
+        turnCount: 2,
+      },
+    ])
     queryApiMock.getSession.mockResolvedValue({
       session: {
         id: 'session-1',
@@ -90,14 +96,25 @@ describe('AssistantPage integration', () => {
         turnCount: 2,
       },
       messages: [],
-    });
+    })
     queryApiMock.createSession.mockResolvedValue({
       id: 'session-new',
       libraryId: 'library-1',
       title: '',
       updatedAt: '2026-04-10T11:00:00Z',
       turnCount: 0,
-    });
+    })
+    queryApiMock.renameSession.mockResolvedValue({
+      conversation_state: 'active',
+      created_at: '2026-04-10T10:00:00Z',
+      created_by_principal_id: 'principal-1',
+      id: 'session-1',
+      library_id: 'library-1',
+      title: 'Renamed session',
+      updated_at: '2026-04-10T11:00:00Z',
+      workspace_id: 'ws-1',
+    })
+    queryApiMock.deleteSession.mockResolvedValue(undefined)
     queryApiMock.createTurnStream.mockResolvedValue({
       responseTurn: {
         id: 'turn-default',
@@ -112,50 +129,50 @@ describe('AssistantPage integration', () => {
       verificationState: 'verified',
       verificationWarnings: [],
       runtimeStageSummaries: [],
-    });
-  });
+    })
+  })
 
   afterEach(async () => {
     if (root) {
       await act(async () => {
-        root?.unmount();
-      });
+        root?.unmount()
+      })
     }
-    window.localStorage.clear();
-    container.remove();
-  });
+    window.localStorage.clear()
+    container.remove()
+  })
 
   async function flushUi() {
     await act(async () => {
-      await new Promise((resolve) => setTimeout(resolve, 0));
-    });
+      await new Promise((resolve) => setTimeout(resolve, 0))
+    })
   }
 
   function makeQueryClient() {
     return new QueryClient({
       defaultOptions: { queries: { retry: false, staleTime: 0, refetchOnWindowFocus: false } },
-    });
+    })
   }
 
   async function renderPage() {
-    const queryClient = makeQueryClient();
+    const queryClient = makeQueryClient()
     await act(async () => {
-      root = createRoot(container);
+      root = createRoot(container)
       root.render(
         <QueryClientProvider client={queryClient}>
           <MemoryRouter initialEntries={['/assistant']}>
             <AssistantPage />
           </MemoryRouter>
         </QueryClientProvider>,
-      );
-    });
-    await flushUi();
-    await flushUi();
-    return queryClient;
+      )
+    })
+    await flushUi()
+    await flushUi()
+    return queryClient
   }
 
   async function rerenderPage() {
-    const queryClient = makeQueryClient();
+    const queryClient = makeQueryClient()
     await act(async () => {
       root?.render(
         <QueryClientProvider client={queryClient}>
@@ -163,43 +180,129 @@ describe('AssistantPage integration', () => {
             <AssistantPage />
           </MemoryRouter>
         </QueryClientProvider>,
-      );
-    });
-    await flushUi();
-    await flushUi();
+      )
+    })
+    await flushUi()
+    await flushUi()
   }
 
   function findButton(text: string) {
     return Array.from(container.querySelectorAll('button')).find((b) =>
       b.textContent?.includes(text),
-    );
+    )
   }
 
-  function setTextareaValue(value: string) {
-    const textarea = container.querySelector('textarea');
-    expect(textarea).toBeTruthy();
-    const descriptor = Object.getOwnPropertyDescriptor(
-      window.HTMLTextAreaElement.prototype,
-      'value',
-    );
-    descriptor?.set?.call(textarea, value);
-    textarea?.dispatchEvent(new Event('input', { bubbles: true }));
+  async function setTextareaValue(value: string) {
+    await act(async () => {
+      const textarea = container.querySelector('textarea')
+      expect(textarea).toBeTruthy()
+      const descriptor = Object.getOwnPropertyDescriptor(
+        window.HTMLTextAreaElement.prototype,
+        'value',
+      )
+      descriptor?.set?.call(textarea, value)
+      textarea?.dispatchEvent(new Event('input', { bubbles: true }))
+    })
   }
 
   function visibleTextOccurrences(text: string) {
-    const content = container.textContent ?? '';
-    return content.split(text).length - 1;
+    const content = container.textContent ?? ''
+    return content.split(text).length - 1
   }
 
   it('loads the session rail on mount and renders session titles', async () => {
-    await renderPage();
+    await renderPage()
 
     expect(queryApiMock.listSessions).toHaveBeenCalledWith({
       workspaceId: 'ws-1',
       libraryId: 'library-1',
-    });
-    expect(container.textContent).toContain('Deployment notes');
-  });
+    })
+    expect(container.textContent).toContain('Deployment notes')
+  })
+
+  it('renames a session through the durable server mutation', async () => {
+    queryApiMock.renameSession.mockImplementation(async () => {
+      queryApiMock.listSessions.mockResolvedValue([
+        {
+          id: 'session-1',
+          libraryId: 'library-1',
+          title: 'Renamed session',
+          updatedAt: '2026-04-10T11:00:00Z',
+          turnCount: 2,
+        },
+      ])
+      return {
+        conversation_state: 'active',
+        created_at: '2026-04-10T10:00:00Z',
+        created_by_principal_id: 'principal-1',
+        id: 'session-1',
+        library_id: 'library-1',
+        title: 'Renamed session',
+        updated_at: '2026-04-10T11:00:00Z',
+        workspace_id: 'ws-1',
+      }
+    })
+    await renderPage()
+
+    const actions = container.querySelector('button[aria-label="Session actions"]')
+    expect(actions).toBeTruthy()
+    await act(async () => {
+      fireEvent.pointerDown(actions as HTMLButtonElement)
+      fireEvent.click(actions as HTMLButtonElement)
+    })
+    await flushUi()
+    const renameItem = Array.from(document.body.querySelectorAll('[role="menuitem"]')).find(
+      (item) => item.textContent?.includes('Rename'),
+    )
+    expect(renameItem).toBeTruthy()
+    await act(async () => {
+      fireEvent.click(renameItem as HTMLElement)
+    })
+    await flushUi()
+
+    const titleInput = container.querySelector<HTMLInputElement>('input[aria-label="Rename"]')
+    assert(titleInput)
+    await act(async () => {
+      fireEvent.change(titleInput, { target: { value: 'Renamed session' } })
+      fireEvent.keyDown(titleInput, { key: 'Enter' })
+    })
+
+    await waitFor(() => {
+      expect(queryApiMock.renameSession).toHaveBeenCalledWith('session-1', 'Renamed session')
+    })
+    await waitFor(() => {
+      expect(container.textContent).toContain('Renamed session')
+    })
+  })
+
+  it('deletes a session through the durable server mutation', async () => {
+    queryApiMock.deleteSession.mockImplementation(async () => {
+      queryApiMock.listSessions.mockResolvedValue([])
+    })
+    await renderPage()
+
+    const actions = container.querySelector('button[aria-label="Session actions"]')
+    expect(actions).toBeTruthy()
+    await act(async () => {
+      fireEvent.pointerDown(actions as HTMLButtonElement)
+      fireEvent.click(actions as HTMLButtonElement)
+    })
+    await flushUi()
+    const deleteItem = Array.from(document.body.querySelectorAll('[role="menuitem"]')).find(
+      (item) => item.textContent?.includes('Delete'),
+    )
+    expect(deleteItem).toBeTruthy()
+    await act(async () => {
+      fireEvent.click(deleteItem as HTMLElement)
+    })
+
+    await waitFor(() => {
+      expect(queryApiMock.deleteSession).toHaveBeenCalledWith('session-1')
+    })
+    await waitFor(() => {
+      expect(container.textContent).not.toContain('Deployment notes')
+    })
+  })
 
   it('does not render the composer debug button for admin users', async () => {
     useAppMock.mockReturnValue({
@@ -211,12 +314,12 @@ describe('AssistantPage integration', () => {
       activeWorkspace: { id: 'ws-1' },
       locale: 'en',
       user: { role: 'admin' },
-    });
+    })
 
-    await renderPage();
+    await renderPage()
 
-    expect(container.querySelector('button[aria-label="Debug"]')).toBeNull();
-  });
+    expect(container.querySelector('button[aria-label="Debug"]')).toBeNull()
+  })
 
   it('posts a turn and replaces the placeholder with the final answer + evidence', async () => {
     queryApiMock.createTurnStream.mockResolvedValue({
@@ -246,103 +349,95 @@ describe('AssistantPage integration', () => {
       verificationState: 'verified',
       verificationWarnings: [],
       runtimeStageSummaries: [],
-    });
+    })
 
-    await renderPage();
+    await renderPage()
 
-    setTextareaValue('Where is the docs page?');
-    await flushUi();
+    await setTextareaValue('Where is the docs page?')
+    await flushUi()
 
-    const textarea = container.querySelector('textarea') as HTMLTextAreaElement;
-    const sendButton = textarea.parentElement?.querySelector('button');
+    const textarea = container.querySelector('textarea') as HTMLTextAreaElement
+    const sendButton = textarea.parentElement?.querySelector('button')
     // The send button is the icon button at the end of the composer — fall
     // back to pressing Enter if we cannot uniquely identify it.
     if (sendButton && sendButton.getAttribute('disabled') === null) {
       await act(async () => {
-        sendButton.dispatchEvent(new MouseEvent('click', { bubbles: true }));
-      });
+        sendButton.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+      })
     } else {
       await act(async () => {
-        textarea.dispatchEvent(
-          new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }),
-        );
-      });
+        textarea.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }))
+      })
     }
 
-    await flushUi();
-    await flushUi();
-    await flushUi();
+    await flushUi()
+    await flushUi()
+    await flushUi()
 
-    expect(queryApiMock.createSession).toHaveBeenCalledWith('ws-1', 'library-1');
+    expect(queryApiMock.createSession).toHaveBeenCalledWith('ws-1', 'library-1')
     expect(queryApiMock.createTurnStream).toHaveBeenCalledWith(
       'session-new',
       'Where is the docs page?',
       0,
       expect.any(Function),
-    );
-    expect(container.textContent).toContain('Hello world');
-  });
+    )
+    expect(container.textContent).toContain('Hello world')
+  })
 
   it('keeps a failed stream turn inline with the pending question and retry affordance', async () => {
-    queryApiMock.createTurnStream.mockRejectedValue(new Error('Failed to fetch'));
+    queryApiMock.createTurnStream.mockRejectedValue(new Error('Failed to fetch'))
 
-    await renderPage();
+    await renderPage()
 
-    setTextareaValue('Where is the docs page?');
-    await flushUi();
+    await setTextareaValue('Where is the docs page?')
+    await flushUi()
 
-    const textarea = container.querySelector('textarea') as HTMLTextAreaElement;
+    const textarea = container.querySelector('textarea') as HTMLTextAreaElement
     await act(async () => {
-      textarea.dispatchEvent(
-        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }),
-      );
-    });
+      textarea.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }))
+    })
 
-    await flushUi();
-    await flushUi();
+    await flushUi()
+    await flushUi()
 
-    expect(queryApiMock.createTurnStream).toHaveBeenCalledTimes(1);
-    expect(container.textContent).toContain('Where is the docs page?');
-    expect(container.textContent).toContain('The request did not complete');
-    expect(container.textContent).toContain("Request didn't go through");
-  });
+    expect(queryApiMock.createTurnStream).toHaveBeenCalledTimes(1)
+    expect(container.textContent).toContain('Where is the docs page?')
+    expect(container.textContent).toContain('The request did not complete')
+    expect(container.textContent).toContain("Request didn't go through")
+  })
 
   it('keeps a first-turn session creation failure visible with an inline error', async () => {
-    let rejectSession!: (reason: Error) => void;
+    let rejectSession!: (reason: Error) => void
     queryApiMock.createSession.mockReturnValue(
       new Promise((_resolve, reject) => {
-        rejectSession = reject;
+        rejectSession = reject
       }),
-    );
+    )
 
-    await renderPage();
+    await renderPage()
 
-    setTextareaValue('Will this rollback?');
-    await flushUi();
+    await setTextareaValue('Will this rollback?')
+    await flushUi()
 
-    const textarea = container.querySelector('textarea') as HTMLTextAreaElement;
+    const textarea = container.querySelector('textarea') as HTMLTextAreaElement
     await act(async () => {
-      textarea.dispatchEvent(
-        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }),
-      );
-    });
-    await flushUi();
+      textarea.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }))
+    })
+    await flushUi()
 
-    expect(container.textContent).toContain('Will this rollback?');
+    expect(container.textContent).toContain('Will this rollback?')
 
     await act(async () => {
-      rejectSession(new Error('session unavailable'));
-    });
-    await flushUi();
-    await flushUi();
+      rejectSession(new Error('session unavailable'))
+    })
+    await flushUi()
+    await flushUi()
 
-    expect(container.textContent).toContain('Will this rollback?');
-    expect(container.textContent).toContain('The request did not complete');
-    expect(container.textContent).toContain("Request didn't go through");
-    expect(toastErrorMock).toHaveBeenCalledWith(
-      expect.stringContaining('session unavailable'),
-    );
-  });
+    expect(container.textContent).toContain('Will this rollback?')
+    expect(container.textContent).toContain('The request did not complete')
+    expect(container.textContent).toContain("Request didn't go through")
+    expect(toastErrorMock).toHaveBeenCalledWith(expect.stringContaining('session unavailable'))
+  })
 
   it('shows the query-not-configured empty state when the active library lacks the binding', async () => {
     useAppMock.mockReturnValue({
@@ -353,15 +448,15 @@ describe('AssistantPage integration', () => {
       },
       activeWorkspace: { id: 'ws-1' },
       locale: 'en',
-    });
+    })
 
-    await renderPage();
+    await renderPage()
 
     // The page shows the "query not configured" empty state; the composer
     // textarea is absent because the main thread never mounts.
-    expect(container.querySelector('textarea')).toBeNull();
-    expect(container.textContent?.toLowerCase()).toContain('query');
-  });
+    expect(container.querySelector('textarea')).toBeNull()
+    expect(container.textContent?.toLowerCase()).toContain('query')
+  })
 
   it('opens a selected session and hydrates its messages into the thread', async () => {
     queryApiMock.getSession.mockResolvedValue({
@@ -409,33 +504,31 @@ describe('AssistantPage integration', () => {
           },
         },
       ],
-    });
+    })
 
-    await renderPage();
+    await renderPage()
 
-    const sessionButton = findButton('Deployment notes');
-    expect(sessionButton).toBeTruthy();
+    const sessionButton = findButton('Deployment notes')
+    expect(sessionButton).toBeTruthy()
 
     await act(async () => {
-      sessionButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
-    });
-    await flushUi();
-    await flushUi();
+      sessionButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    })
+    await flushUi()
+    await flushUi()
 
-    expect(queryApiMock.getSession).toHaveBeenCalledWith('session-1');
-    expect(container.textContent).toContain('We moved to keyset pagination');
-    expect(
-      window.localStorage.getItem(
-        'ironrag_assistant_active_session:ws-1:library-1',
-      ),
-    ).toBe(JSON.stringify('session-1'));
-  });
+    expect(queryApiMock.getSession).toHaveBeenCalledWith('session-1')
+    expect(container.textContent).toContain('We moved to keyset pagination')
+    expect(window.localStorage.getItem('ironrag_assistant_active_session:ws-1:library-1')).toBe(
+      JSON.stringify('session-1'),
+    )
+  })
 
   it('restores the active session after a page reload', async () => {
     window.localStorage.setItem(
       'ironrag_assistant_active_session:ws-1:library-1',
       JSON.stringify('session-1'),
-    );
+    )
     queryApiMock.getSession.mockResolvedValue({
       session: {
         id: 'session-1',
@@ -475,22 +568,22 @@ describe('AssistantPage integration', () => {
           },
         },
       ],
-    });
+    })
 
-    await renderPage();
+    await renderPage()
 
     await waitFor(() => {
-      expect(queryApiMock.getSession).toHaveBeenCalledWith('session-1');
-    });
-    expect(container.textContent).toContain('We moved to keyset pagination');
-    expect(container.textContent).toContain('See 1 source');
-  });
+      expect(queryApiMock.getSession).toHaveBeenCalledWith('session-1')
+    })
+    expect(container.textContent).toContain('We moved to keyset pagination')
+    expect(container.textContent).toContain('See 1 source')
+  })
 
   it('renders a server-hydrated pending assistant turn after returning mid-execution', async () => {
     window.localStorage.setItem(
       'ironrag_assistant_active_session:ws-1:library-1',
       JSON.stringify('session-1'),
-    );
+    )
     queryApiMock.getSession.mockResolvedValue({
       session: {
         id: 'session-1',
@@ -514,26 +607,26 @@ describe('AssistantPage integration', () => {
           executionId: 'exec-running',
         },
       ],
-    });
+    })
 
-    await renderPage();
+    await renderPage()
 
     await waitFor(() => {
-      expect(queryApiMock.getSession).toHaveBeenCalledWith('session-1');
-    });
-    expect(container.textContent).toContain('Question still running?');
-    expect(container.textContent).toContain('Agent turn started');
-    expect(container.textContent).toContain('Agent turn is running');
-  });
+      expect(queryApiMock.getSession).toHaveBeenCalledWith('session-1')
+    })
+    expect(container.textContent).toContain('Question still running?')
+    expect(container.textContent).toContain('Agent turn started')
+    expect(container.textContent).toContain('Agent turn is running')
+  })
 
   it('keeps polling a restored pending turn until the durable answer appears', async () => {
     window.localStorage.setItem(
       'ironrag_assistant_active_session:ws-1:library-1',
       JSON.stringify('session-1'),
-    );
-    let getSessionCalls = 0;
+    )
+    let getSessionCalls = 0
     queryApiMock.getSession.mockImplementation(async () => {
-      getSessionCalls += 1;
+      getSessionCalls += 1
       return {
         session: {
           id: 'session-1',
@@ -542,76 +635,77 @@ describe('AssistantPage integration', () => {
           updatedAt: '2026-04-10T10:00:00Z',
           turnCount: getSessionCalls === 1 ? 1 : 2,
         },
-        messages: getSessionCalls === 1
-          ? [
-              {
-                id: 'msg-user',
-                role: 'user',
-                content: 'Question still running?',
-                timestamp: '2026-04-10T10:00:01Z',
-              },
-              {
-                id: 'exec-running',
-                role: 'assistant',
-                content: '',
-                timestamp: '2026-04-10T10:00:02Z',
-                executionId: 'exec-running',
-              },
-            ]
-          : [
-              {
-                id: 'msg-user',
-                role: 'user',
-                content: 'Question still running?',
-                timestamp: '2026-04-10T10:00:01Z',
-              },
-              {
-                id: 'msg-assistant',
-                role: 'assistant',
-                content: 'Recovered durable answer',
-                timestamp: '2026-04-10T10:00:08Z',
-                executionId: 'exec-running',
-                evidence: {
-                  preparedSegmentReferences: [],
-                  technicalFactReferences: [],
-                  entityReferences: [],
-                  relationReferences: [],
-                  verificationState: 'verified',
-                  verificationWarnings: [],
-                  runtimeStageSummaries: [],
+        messages:
+          getSessionCalls === 1
+            ? [
+                {
+                  id: 'msg-user',
+                  role: 'user',
+                  content: 'Question still running?',
+                  timestamp: '2026-04-10T10:00:01Z',
                 },
-              },
-            ],
-      };
-    });
+                {
+                  id: 'exec-running',
+                  role: 'assistant',
+                  content: '',
+                  timestamp: '2026-04-10T10:00:02Z',
+                  executionId: 'exec-running',
+                },
+              ]
+            : [
+                {
+                  id: 'msg-user',
+                  role: 'user',
+                  content: 'Question still running?',
+                  timestamp: '2026-04-10T10:00:01Z',
+                },
+                {
+                  id: 'msg-assistant',
+                  role: 'assistant',
+                  content: 'Recovered durable answer',
+                  timestamp: '2026-04-10T10:00:08Z',
+                  executionId: 'exec-running',
+                  evidence: {
+                    preparedSegmentReferences: [],
+                    technicalFactReferences: [],
+                    entityReferences: [],
+                    relationReferences: [],
+                    verificationState: 'verified',
+                    verificationWarnings: [],
+                    runtimeStageSummaries: [],
+                  },
+                },
+              ],
+      }
+    })
 
-    await renderPage();
+    await renderPage()
 
     await waitFor(() => {
-      expect(container.textContent).toContain('Agent turn is running');
-    });
+      expect(container.textContent).toContain('Agent turn is running')
+    })
     await waitFor(
       () => {
-        expect(queryApiMock.getSession).toHaveBeenCalledTimes(2);
+        expect(queryApiMock.getSession).toHaveBeenCalledTimes(2)
       },
       { timeout: 2500 },
-    );
+    )
     await waitFor(() => {
-      expect(container.textContent).toContain('Recovered durable answer');
-    });
-    expect(container.textContent).not.toContain('Agent turn is running');
-  });
+      expect(container.textContent).toContain('Recovered durable answer')
+    })
+    expect(container.textContent).not.toContain('Agent turn is running')
+  })
 
   it('does not retry a missing debug snapshot after a restored pending turn completes', async () => {
     window.localStorage.setItem(
       'ironrag_assistant_active_session:ws-1:library-1',
       JSON.stringify('session-1'),
-    );
-    window.localStorage.setItem('ironrag_assistant_debug_open', JSON.stringify(true));
-    let getSessionCalls = 0;
+    )
+    window.localStorage.setItem('ironrag_assistant_debug_open', JSON.stringify(true))
+    let getSessionCalls = 0
     queryApiMock.getSession.mockImplementation(async () => {
-      getSessionCalls += 1;
-      const pending = getSessionCalls === 1;
+      getSessionCalls += 1
+      const pending = getSessionCalls === 1
       return {
         session: {
           id: 'session-1',
@@ -652,42 +746,42 @@ describe('AssistantPage integration', () => {
                 },
               },
         ],
-      };
-    });
+      }
+    })
     queryApiMock.getExecutionLlmContext.mockRejectedValue(
       Object.assign(new Error('optional context snapshot is unavailable'), {
         status: 404,
       }),
-    );
+    )
 
-    await renderPage();
+    await renderPage()
 
     await waitFor(() => {
-      expect(container.textContent).toContain('Agent turn is running');
-    });
+      expect(container.textContent).toContain('Agent turn is running')
+    })
     await waitFor(
       () => {
-        expect(container.textContent).toContain('Recovered durable answer');
+        expect(container.textContent).toContain('Recovered durable answer')
       },
       { timeout: 2500 },
-    );
+    )
     await waitFor(() => {
-      expect(queryApiMock.getExecutionLlmContext).toHaveBeenCalledTimes(1);
-    });
-    await rerenderPage();
-    await flushUi();
+      expect(queryApiMock.getExecutionLlmContext).toHaveBeenCalledTimes(1)
+    })
+    await rerenderPage()
+    await flushUi()
 
-    expect(queryApiMock.getExecutionLlmContext).toHaveBeenCalledTimes(1);
-    expect(toastErrorMock).not.toHaveBeenCalled();
-    expect(container.textContent).toContain('LLM context was not recorded');
-  });
+    expect(queryApiMock.getExecutionLlmContext).toHaveBeenCalledTimes(1)
+    expect(toastErrorMock).not.toHaveBeenCalled()
+    expect(container.textContent).toContain('LLM context was not recorded')
+  })
 
   it('does not loop global notifications when the optional debug context is missing', async () => {
     window.localStorage.setItem(
       'ironrag_assistant_active_session:ws-1:library-1',
       JSON.stringify('session-1'),
-    );
-    window.localStorage.setItem('ironrag_assistant_debug_open', JSON.stringify(true));
+    )
+    window.localStorage.setItem('ironrag_assistant_debug_open', JSON.stringify(true))
     queryApiMock.getSession.mockResolvedValue({
       session: {
         id: 'session-1',
@@ -711,32 +805,32 @@ describe('AssistantPage integration', () => {
           executionId: 'exec-no-context',
         },
       ],
-    });
+    })
     queryApiMock.getExecutionLlmContext.mockRejectedValue(
       Object.assign(new Error('not found: optional context snapshot'), {
         status: 404,
       }),
-    );
+    )
 
-    await renderPage();
+    await renderPage()
 
     await waitFor(() => {
-      expect(queryApiMock.getExecutionLlmContext).toHaveBeenCalledTimes(1);
-    });
-    await flushUi();
-    await flushUi();
+      expect(queryApiMock.getExecutionLlmContext).toHaveBeenCalledTimes(1)
+    })
+    await flushUi()
+    await flushUi()
 
-    expect(queryApiMock.getExecutionLlmContext).toHaveBeenCalledTimes(1);
-    expect(toastErrorMock).not.toHaveBeenCalled();
-    expect(container.textContent).toContain('LLM context was not recorded');
-  });
+    expect(queryApiMock.getExecutionLlmContext).toHaveBeenCalledTimes(1)
+    expect(toastErrorMock).not.toHaveBeenCalled()
+    expect(container.textContent).toContain('LLM context was not recorded')
+  })
 
   it('clears stale debug-context errors while a new assistant turn is pending', async () => {
     window.localStorage.setItem(
       'ironrag_assistant_active_session:ws-1:library-1',
       JSON.stringify('session-1'),
-    );
-    window.localStorage.setItem('ironrag_assistant_debug_open', JSON.stringify(true));
+    )
+    window.localStorage.setItem('ironrag_assistant_debug_open', JSON.stringify(true))
     queryApiMock.getSession.mockResolvedValue({
       session: {
         id: 'session-1',
@@ -760,38 +854,34 @@ describe('AssistantPage integration', () => {
           executionId: 'exec-no-context',
         },
       ],
-    });
-    queryApiMock.getExecutionLlmContext.mockRejectedValue(
-      new ApiError(404, { error: 'not found' }),
-    );
+    })
+    queryApiMock.getExecutionLlmContext.mockRejectedValue(new ApiError(404, { error: 'not found' }))
 
-    let resolveTurn!: (value: unknown) => void;
+    let resolveTurn!: (value: unknown) => void
     queryApiMock.createTurnStream.mockReturnValue(
       new Promise((resolve) => {
-        resolveTurn = resolve;
+        resolveTurn = resolve
       }),
-    );
+    )
 
-    await renderPage();
+    await renderPage()
 
     await waitFor(() => {
-      expect(container.textContent).toContain('LLM context was not recorded');
-    });
+      expect(container.textContent).toContain('LLM context was not recorded')
+    })
 
-    setTextareaValue('Why does this take time?');
-    await flushUi();
+    await setTextareaValue('Why does this take time?')
+    await flushUi()
 
-    const textarea = container.querySelector('textarea') as HTMLTextAreaElement;
+    const textarea = container.querySelector('textarea') as HTMLTextAreaElement
     await act(async () => {
-      textarea.dispatchEvent(
-        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }),
-      );
-    });
+      textarea.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }))
+    })
 
     await waitFor(() => {
-      expect(container.textContent).toContain('Agent turn is running');
-    });
-    expect(container.textContent).not.toContain('LLM context was not recorded');
+      expect(container.textContent).toContain('Agent turn is running')
+    })
+    expect(container.textContent).not.toContain('LLM context was not recorded')
 
     resolveTurn({
       responseTurn: {
@@ -807,19 +897,19 @@ describe('AssistantPage integration', () => {
       verificationState: 'verified',
       verificationWarnings: [],
       runtimeStageSummaries: [],
-    });
+    })
 
     await waitFor(() => {
-      expect(container.textContent).toContain('Done after debug cleared.');
-    });
-  });
+      expect(container.textContent).toContain('Done after debug cleared.')
+    })
+  })
 
   it('does not open debug context for a pending assistant execution with an id', async () => {
     window.localStorage.setItem(
       'ironrag_assistant_active_session:ws-1:library-1',
       JSON.stringify('session-1'),
-    );
-    window.localStorage.setItem('ironrag_assistant_debug_open', JSON.stringify(true));
+    )
+    window.localStorage.setItem('ironrag_assistant_debug_open', JSON.stringify(true))
     queryApiMock.getSession.mockResolvedValue({
       session: {
         id: 'session-1',
@@ -843,18 +933,18 @@ describe('AssistantPage integration', () => {
           executionId: 'exec-running',
         },
       ],
-    });
+    })
 
-    await renderPage();
+    await renderPage()
     await waitFor(() => {
-      expect(container.textContent).toContain('Agent turn is running');
-    });
-    await flushUi();
-    await flushUi();
+      expect(container.textContent).toContain('Agent turn is running')
+    })
+    await flushUi()
+    await flushUi()
 
-    expect(queryApiMock.getExecutionLlmContext).not.toHaveBeenCalled();
-    expect(container.textContent).not.toContain('LLM context was not recorded');
-  });
+    expect(queryApiMock.getExecutionLlmContext).not.toHaveBeenCalled()
+    expect(container.textContent).not.toContain('LLM context was not recorded')
+  })
 
   it('keeps the active thread fixed while a turn is pending', async () => {
     queryApiMock.listSessions.mockResolvedValue([
@@ -872,7 +962,7 @@ describe('AssistantPage integration', () => {
         updatedAt: '2026-04-11T10:00:00Z',
         turnCount: 1,
       },
-    ]);
+    ])
     queryApiMock.getSession.mockImplementation(async (sessionId: string) => ({
       session: {
         id: sessionId,
@@ -882,34 +972,32 @@ describe('AssistantPage integration', () => {
         turnCount: 1,
       },
       messages: [],
-    }));
+    }))
 
-    let resolveTurn!: (value: unknown) => void;
+    let resolveTurn!: (value: unknown) => void
     queryApiMock.createTurnStream.mockReturnValue(
       new Promise((resolve) => {
-        resolveTurn = resolve;
+        resolveTurn = resolve
       }),
-    );
+    )
 
-    await renderPage();
+    await renderPage()
 
-    const deploymentSession = findButton('Deployment notes') as HTMLButtonElement;
-    expect(deploymentSession).toBeTruthy();
+    const deploymentSession = findButton('Deployment notes') as HTMLButtonElement
+    expect(deploymentSession).toBeTruthy()
     await act(async () => {
-      deploymentSession.dispatchEvent(new MouseEvent('click', { bubbles: true }));
-    });
-    await flushUi();
-    await flushUi();
+      deploymentSession.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    })
+    await flushUi()
+    await flushUi()
 
-    setTextareaValue('What is pending?');
-    await flushUi();
+    await setTextareaValue('What is pending?')
+    await flushUi()
 
-    const textarea = container.querySelector('textarea') as HTMLTextAreaElement;
+    const textarea = container.querySelector('textarea') as HTMLTextAreaElement
     await act(async () => {
-      textarea.dispatchEvent(
-        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }),
-      );
-    });
+      textarea.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }))
+    })
 
     await waitFor(() => {
       expect(queryApiMock.createTurnStream).toHaveBeenCalledWith(
@@ -917,11 +1005,11 @@ describe('AssistantPage integration', () => {
         'What is pending?',
         0,
         expect.any(Function),
-      );
-    });
+      )
+    })
 
-    const releaseSession = findButton('Release notes') as HTMLButtonElement;
-    expect(releaseSession.disabled).toBe(true);
+    const releaseSession = findButton('Release notes') as HTMLButtonElement
+    expect(releaseSession.disabled).toBe(true)
 
     resolveTurn({
       responseTurn: {
@@ -937,15 +1025,15 @@ describe('AssistantPage integration', () => {
       verificationState: 'verified',
       verificationWarnings: [],
       runtimeStageSummaries: [],
-    });
+    })
 
-    await flushUi();
-    await flushUi();
+    await flushUi()
+    await flushUi()
 
-    expect(container.textContent).toContain('Pending answer landed');
-    expect(visibleTextOccurrences('What is pending?')).toBe(1);
-    expect(releaseSession.disabled).toBe(false);
-  });
+    expect(container.textContent).toContain('Pending answer landed')
+    expect(visibleTextOccurrences('What is pending?')).toBe(1)
+    expect(releaseSession.disabled).toBe(false)
+  })
 
   it('keeps the immediate pending indicator when server hydration lags behind execution creation', async () => {
     queryApiMock.getSession.mockResolvedValue({
@@ -957,39 +1045,37 @@ describe('AssistantPage integration', () => {
         turnCount: 1,
       },
       messages: [],
-    });
+    })
 
-    let resolveTurn!: (value: unknown) => void;
+    let resolveTurn!: (value: unknown) => void
     queryApiMock.createTurnStream.mockReturnValue(
       new Promise((resolve) => {
-        resolveTurn = resolve;
+        resolveTurn = resolve
       }),
-    );
+    )
 
-    const queryClient = await renderPage();
+    const queryClient = await renderPage()
 
-    const deploymentSession = findButton('Deployment notes') as HTMLButtonElement;
-    expect(deploymentSession).toBeTruthy();
+    const deploymentSession = findButton('Deployment notes') as HTMLButtonElement
+    expect(deploymentSession).toBeTruthy()
     await act(async () => {
-      deploymentSession.dispatchEvent(new MouseEvent('click', { bubbles: true }));
-    });
-    await flushUi();
-    await flushUi();
+      deploymentSession.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    })
+    await flushUi()
+    await flushUi()
 
-    setTextareaValue('Why is this slow?');
-    await flushUi();
+    await setTextareaValue('Why is this slow?')
+    await flushUi()
 
-    const textarea = container.querySelector('textarea') as HTMLTextAreaElement;
+    const textarea = container.querySelector('textarea') as HTMLTextAreaElement
     await act(async () => {
-      textarea.dispatchEvent(
-        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }),
-      );
-    });
+      textarea.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }))
+    })
 
     await waitFor(() => {
-      expect(container.textContent).toContain('Why is this slow?');
-      expect(container.textContent).toContain('Agent turn is running');
-    });
+      expect(container.textContent).toContain('Why is this slow?')
+      expect(container.textContent).toContain('Agent turn is running')
+    })
 
     await act(async () => {
       queryClient.setQueryData(['mockedGetQuerySession', 'session-1'], {
@@ -1008,12 +1094,12 @@ describe('AssistantPage integration', () => {
             timestamp: '2026-04-10T10:00:01Z',
           },
         ],
-      });
-    });
-    await flushUi();
+      })
+    })
+    await flushUi()
 
-    expect(container.textContent).toContain('Why is this slow?');
-    expect(container.textContent).toContain('Agent turn is running');
+    expect(container.textContent).toContain('Why is this slow?')
+    expect(container.textContent).toContain('Agent turn is running')
 
     resolveTurn({
       responseTurn: {
@@ -1029,14 +1115,14 @@ describe('AssistantPage integration', () => {
       verificationState: 'verified',
       verificationWarnings: [],
       runtimeStageSummaries: [],
-    });
+    })
 
     await waitFor(() => {
       expect(container.textContent).toContain(
         'The request is still visibly running while the provider works.',
-      );
-    });
-  });
+      )
+    })
+  })
 
   it('resets the selected thread and sends new turns to the current library after a library switch', async () => {
     queryApiMock.listSessions.mockImplementation(async ({ libraryId }) => {
@@ -1049,7 +1135,7 @@ describe('AssistantPage integration', () => {
             updatedAt: '2026-04-11T10:00:00Z',
             turnCount: 1,
           },
-        ];
+        ]
       }
       return [
         {
@@ -1059,8 +1145,8 @@ describe('AssistantPage integration', () => {
           updatedAt: '2026-04-10T10:00:00Z',
           turnCount: 2,
         },
-      ];
-    });
+      ]
+    })
     queryApiMock.getSession.mockResolvedValue({
       session: {
         id: 'session-1',
@@ -1077,14 +1163,14 @@ describe('AssistantPage integration', () => {
           timestamp: '2026-04-10T10:00:02Z',
         },
       ],
-    });
+    })
     queryApiMock.createSession.mockImplementation(async (_workspaceId, libraryId) => ({
       id: `session-new-${libraryId}`,
       libraryId,
       title: '',
       updatedAt: '2026-04-11T11:00:00Z',
       turnCount: 0,
-    }));
+    }))
     queryApiMock.createTurnStream.mockResolvedValue({
       responseTurn: {
         id: 'turn-2',
@@ -1099,18 +1185,18 @@ describe('AssistantPage integration', () => {
       verificationState: 'verified',
       verificationWarnings: [],
       runtimeStageSummaries: [],
-    });
+    })
 
-    await renderPage();
+    await renderPage()
 
-    const sessionButton = findButton('Deployment notes');
-    expect(sessionButton).toBeTruthy();
+    const sessionButton = findButton('Deployment notes')
+    expect(sessionButton).toBeTruthy()
     await act(async () => {
-      sessionButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
-    });
-    await flushUi();
-    await flushUi();
-    expect(container.textContent).toContain('Library one answer');
+      sessionButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    })
+    await flushUi()
+    await flushUi()
+    expect(container.textContent).toContain('Library one answer')
 
     useAppMock.mockReturnValue({
       activeLibrary: {
@@ -1120,47 +1206,45 @@ describe('AssistantPage integration', () => {
       },
       activeWorkspace: { id: 'ws-1' },
       locale: 'en',
-    });
+    })
 
-    await rerenderPage();
+    await rerenderPage()
 
     expect(queryApiMock.listSessions).toHaveBeenCalledWith({
       workspaceId: 'ws-1',
       libraryId: 'library-2',
-    });
-    expect(container.textContent).not.toContain('Deployment notes');
-    expect(container.textContent).not.toContain('Library one answer');
-    expect(container.textContent).toContain('Release notes');
+    })
+    expect(container.textContent).not.toContain('Deployment notes')
+    expect(container.textContent).not.toContain('Library one answer')
+    expect(container.textContent).toContain('Release notes')
 
-    setTextareaValue('What changed?');
-    await flushUi();
+    await setTextareaValue('What changed?')
+    await flushUi()
 
-    const textarea = container.querySelector('textarea') as HTMLTextAreaElement;
+    const textarea = container.querySelector('textarea') as HTMLTextAreaElement
     await act(async () => {
-      textarea.dispatchEvent(
-        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }),
-      );
-    });
+      textarea.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }))
+    })
 
-    await flushUi();
-    await flushUi();
-    await flushUi();
+    await flushUi()
+    await flushUi()
+    await flushUi()
 
-    expect(queryApiMock.createSession).toHaveBeenCalledWith('ws-1', 'library-2');
+    expect(queryApiMock.createSession).toHaveBeenCalledWith('ws-1', 'library-2')
     expect(queryApiMock.createTurnStream).toHaveBeenCalledWith(
       'session-new-library-2',
       'What changed?',
       0,
       expect.any(Function),
-    );
+    )
     expect(queryApiMock.createTurnStream).not.toHaveBeenCalledWith(
       'session-1',
       expect.any(String),
       expect.any(Number),
       expect.any(Function),
-    );
+    )
     await waitFor(() => {
-      expect(container.textContent).toContain('Library two answer');
-    });
-  });
-});
+      expect(container.textContent).toContain('Library two answer')
+    })
+  })
+})

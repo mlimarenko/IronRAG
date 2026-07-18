@@ -235,6 +235,8 @@ pub struct KnowledgeChunkVectorRow {
     pub library_id: Uuid,
     pub chunk_id: Uuid,
     pub revision_id: Uuid,
+    /// Legacy column name; the value is the exact embedding execution-profile
+    /// key, never a bare model-catalog UUID.
     pub embedding_model_key: String,
     pub vector_kind: String,
     pub dimensions: i32,
@@ -258,6 +260,8 @@ pub struct KnowledgeEntityVectorRow {
     pub workspace_id: Uuid,
     pub library_id: Uuid,
     pub entity_id: Uuid,
+    /// Legacy column name; stores the same execution-profile identity as
+    /// chunk vectors so entity and chunk spaces cannot drift independently.
     pub embedding_model_key: String,
     pub vector_kind: String,
     pub dimensions: i32,

@@ -16,6 +16,13 @@ SPEC.loader.exec_module(MODULE)
 
 
 class AgentTurnP95Tests(unittest.TestCase):
+    def test_percentile_uses_conservative_nearest_rank(self) -> None:
+        samples = [100.0, 200.0, 300.0, 400.0, 500.0]
+
+        self.assertEqual(MODULE.percentile(samples, 50), 300.0)
+        self.assertEqual(MODULE.percentile(samples, 95), 500.0)
+        self.assertEqual(MODULE.percentile(samples, 99), 500.0)
+
     def test_validate_turn_quality_accepts_grounded_verified_answer(self) -> None:
         quality, error = MODULE.validate_turn_quality(
             {
@@ -270,6 +277,96 @@ class AgentTurnP95Tests(unittest.TestCase):
                 "assistantMinReferences must be non-negative",
             ):
                 MODULE.load_questions(fh.name)
+
+    def test_read_expectation_values_uses_first_configured_value(self) -> None:
+        case = {"requireAll": None, "assistantRequireAll": ["Alpha", " ", "Beta"]}
+
+        values = MODULE.read_expectation_values(case, "requireAll", "assistantRequireAll")
+
+        self.assertEqual(values, ["Alpha", "Beta"])
+
+    def test_run_benchmark_uses_case_quality_overrides(self) -> None:
+        original_run_turn = MODULE.run_turn
+        captured_calls: list[tuple[object, ...]] = []
+
+        def fake_run_turn(*args: object) -> tuple[float, object, None]:
+            captured_calls.append(args)
+            return 12.0, MODULE.TurnQuality(24, "verified", 2), None
+
+        MODULE.run_turn = fake_run_turn
+        try:
+            result = MODULE.run_benchmark(
+                base_url="http://127.0.0.1",
+                auth_headers={},
+                library_id="library-id",
+                questions=[
+                    MODULE.BenchmarkQuestion(
+                        question="Question?",
+                        expected_verification="verified",
+                        min_references=2,
+                        min_answer_chars=20,
+                        require_all=("Alpha",),
+                        forbid_any=("Beta",),
+                    )
+                ],
+                concurrency=1,
+                top_k=3,
+                expected_verification=None,
+                min_references=1,
+                min_answer_chars=1,
+                require_all=["Global"],
+                forbid_any=["Forbidden"],
+            )
+        finally:
+            MODULE.run_turn = original_run_turn
+
+        self.assertEqual(result["successes"], 1)
+        self.assertEqual(
+            captured_calls,
+            [
+                (
+                    "http://127.0.0.1",
+                    {},
+                    "library-id",
+                    "Question?",
+                    3,
+                    "verified",
+                    2,
+                    20,
+                    ["Global", "Alpha"],
+                    ["Forbidden", "Beta"],
+                )
+            ],
+        )
+
+    def test_run_benchmark_records_empty_failures(self) -> None:
+        original_run_turn = MODULE.run_turn
+
+        def fake_run_turn(*_args: object) -> tuple[float, None, str]:
+            return 10.0, None, "network failure"
+
+        MODULE.run_turn = fake_run_turn
+        try:
+            result = MODULE.run_benchmark(
+                base_url="http://127.0.0.1",
+                auth_headers={},
+                library_id="library-id",
+                questions=[MODULE.BenchmarkQuestion(question="Question?")],
+                concurrency=1,
+                top_k=None,
+                expected_verification=None,
+                min_references=1,
+                min_answer_chars=1,
+                require_all=[],
+                forbid_any=[],
+            )
+        finally:
+            MODULE.run_turn = original_run_turn
+
+        self.assertEqual(result["successes"], 0)
+        self.assertEqual(result["failures"], 1)
+        self.assertIsNone(result["p95_ms"])
+        self.assertEqual(result["per_question"][0]["error"], "network failure")
 
     def test_run_benchmark_includes_case_id_in_question_result(self) -> None:
         original_run_turn = MODULE.run_turn

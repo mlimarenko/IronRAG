@@ -4,10 +4,10 @@ use chrono::Utc;
 use serde_json::json;
 use uuid::Uuid;
 
+use super::super::graph_retrieval::graph_target_entity_profiles;
 use super::super::{
-    graph_target_entity_profiles, is_table_analytics_chunk,
-    merge_canonical_table_aggregation_chunks, requested_initial_table_row_count,
-    source_slice_context_top_k,
+    is_table_analytics_chunk, merge_canonical_table_aggregation_chunks,
+    requested_initial_table_row_count, source_slice_context_top_k,
 };
 use super::{
     DOCUMENT_IDENTITY_SCORE_FLOOR, RetrievalContentAnchorModel, RuntimeChunkScoreKind,
@@ -15,18 +15,19 @@ use super::{
     chunk_answer_source_text, combine_chunk_retrieval_lanes, combine_lexical_query_results,
     combine_query_ir_focus_search_results, command_dense_excerpt_for, content_anchor_revision_ids,
     content_anchor_row_score, document_identity_chunk_score, document_identity_focus_terms,
-    entity_bio_chunk_score, graph_evidence_chunk_hits_from_rows, graph_evidence_chunk_score,
-    graph_evidence_context_line, graph_evidence_source_document_ids,
+    entity_bio_chunk_score, entity_bio_target_mentions, graph_evidence_chunk_hits_from_rows,
+    graph_evidence_chunk_score, graph_evidence_context_line, graph_evidence_source_document_ids,
     graph_evidence_source_document_ids_from_scored_targets,
     graph_evidence_source_document_ids_with_priority, graph_evidence_targets,
     graph_evidence_targets_for_query, graph_evidence_text_search_document_scope,
     is_answer_driving_search_chunk_row, latest_version_documents, linked_anchor_focus_queries,
     linked_anchor_hydration_target_filter, map_chunk_hit, merge_chunks, merge_entity_bio_chunks,
-    merge_graph_evidence_chunks, merge_query_ir_focus_chunks, query_ir_focus_chunk_score,
+    merge_graph_evidence_chunks, merge_query_ir_focus_chunks,
+    ordered_step_looks_like_sequential_record, query_ir_focus_chunk_score,
     query_ir_focus_search_queries, query_ir_lexical_focus_queries,
     query_ir_promotes_graph_evidence, rank_graph_evidence_context_rows,
     retain_canonical_document_head_chunks, retain_entity_bio_candidates, retain_scoped_documents,
-    truncate_bundle,
+    should_skip_vector_search, truncate_bundle, truncate_bundle_with_semantic_chunk_ranks,
 };
 use crate::domains::query_ir::{
     ComparisonSpec, DocumentHint, EntityMention, EntityRole, LiteralKind, LiteralSpan, QueryAct,
@@ -41,37 +42,44 @@ use crate::services::query::{
     execution::{
         QueryGraphIndex, RetrievalBundle, RuntimeMatchedChunk, RuntimeMatchedEntity,
         RuntimeMatchedRelationship, normalized_document_target_candidates,
-        should_skip_vector_search,
     },
     latest_versions::{
         compare_version_desc, extract_semver_like_version, latest_version_chunk_score,
-        latest_version_context_top_k, latest_version_family_key, latest_version_scope_terms,
-        query_requests_latest_versions, requested_latest_version_count,
-        text_has_release_version_marker,
+        latest_version_context_top_k, latest_version_scope_terms, query_requests_latest_versions,
+        requested_latest_version_count, text_has_release_version_marker,
     },
     planner::{QueryIntentProfile, RuntimeQueryPlan, build_query_plan},
 };
+
+#[test]
+fn sequential_record_detection_requires_semver_in_the_first_field() {
+    assert!(ordered_step_looks_like_sequential_record("1. 2.4.0 | change summary"));
+    assert!(ordered_step_looks_like_sequential_record("1. v2.4.0 | change summary"));
+    assert!(!ordered_step_looks_like_sequential_record("1. 2..4 | change summary"));
+    assert!(!ordered_step_looks_like_sequential_record("1. Label 2.4.0 | change summary"));
+    assert!(!ordered_step_looks_like_sequential_record("1. Version 2.4.0 | change summary"));
+}
 
 #[test]
 fn command_dense_excerpt_preserves_multiline_shell_procedure() {
     let excerpt = command_dense_excerpt_for(
         concat!(
             "Procedure\n",
-            "1. sudo su\n",
-            "2. sample-transfer https://example.invalid/alpha/runner.sh -o /tmp/sample-runner.sh\n",
-            "3. sample-prepare +x /tmp/sample-runner.sh\n",
-            "4. /tmp/sample-runner.sh\n"
+            "1. runner-shell --scope=elevated\n",
+            "2. sample-transfer https://example.invalid/alpha/runner.sh --output=/work/sample-runner.sh\n",
+            "3. sample-prepare +x /work/sample-runner.sh\n",
+            "4. /work/sample-runner.sh\n"
         ),
         4_000,
     )
     .expect("command-dense excerpt");
 
-    assert!(excerpt.contains("sudo su\n"));
+    assert!(excerpt.contains("runner-shell --scope=elevated\n"));
     assert!(excerpt.contains(
-        "sample-transfer https://example.invalid/alpha/runner.sh -o /tmp/sample-runner.sh\n"
+        "sample-transfer https://example.invalid/alpha/runner.sh --output=/work/sample-runner.sh\n"
     ));
-    assert!(excerpt.contains("sample-prepare +x /tmp/sample-runner.sh\n"));
-    assert!(excerpt.contains("/tmp/sample-runner.sh"));
+    assert!(excerpt.contains("sample-prepare +x /work/sample-runner.sh\n"));
+    assert!(excerpt.contains("/work/sample-runner.sh"));
 }
 
 fn release_query_ir(count: Option<&str>, entity: Option<&str>) -> QueryIR {
@@ -79,7 +87,7 @@ fn release_query_ir(count: Option<&str>, entity: Option<&str>) -> QueryIR {
         act: QueryAct::Enumerate,
         scope: QueryScope::MultiDocument,
         language: QueryLanguage::Auto,
-        target_types: vec!["version".to_string()],
+        target_types: vec![crate::domains::query_ir::QueryTargetKind::Version],
         target_entities: entity
             .map(|label| {
                 vec![EntityMention { label: label.to_string(), role: EntityRole::Subject }]
@@ -120,7 +128,7 @@ fn target_entities_query_ir(target_labels: &[&str]) -> QueryIR {
         act: QueryAct::RetrieveValue,
         scope: QueryScope::SingleDocument,
         language: QueryLanguage::Auto,
-        target_types: vec!["event".to_string()],
+        target_types: vec![crate::domains::query_ir::QueryTargetKind::Event],
         target_entities: target_labels
             .iter()
             .map(|label| EntityMention { label: (*label).to_string(), role: EntityRole::Subject })
@@ -190,6 +198,30 @@ fn content_anchor_row_score_prefers_body_section_over_navigation_overlap() {
 }
 
 #[test]
+fn content_anchor_row_score_preserves_order_for_inflected_action_target_phrases() {
+    let document = sample_document_row("runbook.md", "Operations handbook");
+    let ordered = knowledge_chunk_row(
+        &document,
+        0,
+        Some("paragraph"),
+        "Updating Sample Servers requires a backup and a release bundle.",
+    );
+    let reversed = knowledge_chunk_row(
+        &document,
+        1,
+        Some("paragraph"),
+        "Sample Servers have a maintenance note about updating integrations.",
+    );
+    let model = RetrievalContentAnchorModel::new("How do I update Sample Server?", None);
+
+    let ordered_score = content_anchor_row_score(&ordered, &model);
+    let reversed_score = content_anchor_row_score(&reversed, &model);
+
+    assert!(ordered_score > reversed_score, "ordered={ordered_score}, reversed={reversed_score}");
+    assert!(ordered_score >= 1024, "an ordered inflected phrase must earn a phrase hit");
+}
+
+#[test]
 fn content_anchor_revision_ids_respect_target_scope() {
     let first = sample_document_row("first.md", "First");
     let second = sample_document_row("second.md", "Second");
@@ -209,7 +241,7 @@ fn exact_error_code_query_ir() -> QueryIR {
         act: QueryAct::RetrieveValue,
         scope: QueryScope::SingleDocument,
         language: QueryLanguage::Auto,
-        target_types: vec!["error_code".to_string()],
+        target_types: vec![crate::domains::query_ir::QueryTargetKind::ErrorCode],
         target_entities: Vec::new(),
         literal_constraints: Vec::new(),
         temporal_constraints: Vec::new(),
@@ -228,7 +260,11 @@ fn transport_inventory_query_ir() -> QueryIR {
         act: QueryAct::RetrieveValue,
         scope: QueryScope::SingleDocument,
         language: QueryLanguage::Auto,
-        target_types: vec!["port".to_string(), "protocol".to_string(), "connection".to_string()],
+        target_types: vec![
+            crate::domains::query_ir::QueryTargetKind::Port,
+            crate::domains::query_ir::QueryTargetKind::Protocol,
+            crate::domains::query_ir::QueryTargetKind::Connection,
+        ],
         target_entities: Vec::new(),
         literal_constraints: Vec::new(),
         temporal_constraints: Vec::new(),
@@ -514,7 +550,7 @@ fn requested_initial_table_row_count_uses_typed_source_slice() {
         act: QueryAct::Enumerate,
         scope: QueryScope::SingleDocument,
         language: QueryLanguage::Auto,
-        target_types: vec!["table_row".to_string()],
+        target_types: vec![crate::domains::query_ir::QueryTargetKind::TableRow],
         target_entities: Vec::new(),
         literal_constraints: Vec::new(),
         temporal_constraints: Vec::new(),
@@ -533,16 +569,16 @@ fn requested_initial_table_row_count_uses_typed_source_slice() {
 
     assert_eq!(requested_initial_table_row_count(Some(&ir)), Some(7));
 
-    ir.target_types = vec!["document".to_string()];
+    ir.target_types = vec![crate::domains::query_ir::QueryTargetKind::Document];
     assert_eq!(requested_initial_table_row_count(Some(&ir)), None);
 }
 
 #[test]
 fn latest_version_question_detection_uses_query_ir() {
-    assert!(query_requests_latest_versions(&release_query_ir(Some("5"), None)));
+    assert!(!query_requests_latest_versions(&release_query_ir(Some("5"), None)));
     assert!(query_requests_latest_versions(&release_query_ir_with_source_slice_count(Some(5))));
     let mut release_target_ir = release_query_ir_with_source_slice_count(Some(10));
-    release_target_ir.target_types = vec!["release".to_string()];
+    release_target_ir.target_types = vec![crate::domains::query_ir::QueryTargetKind::Release];
     assert!(query_requests_latest_versions(&release_target_ir));
     assert!(!query_requests_latest_versions(&release_query_ir_with_source_slice(
         SourceSliceDirection::Head,
@@ -571,7 +607,7 @@ fn latest_version_question_detection_uses_query_ir() {
 fn requested_latest_version_count_defaults_and_caps() {
     assert_eq!(requested_latest_version_count(&release_query_ir(None, None)), 10);
     assert_eq!(requested_latest_version_count(&release_query_ir(Some("3"), None)), 3);
-    assert_eq!(requested_latest_version_count(&release_query_ir(Some("100"), None)), 10);
+    assert_eq!(requested_latest_version_count(&release_query_ir(Some("100"), None)), 20);
     assert_eq!(requested_latest_version_count(&release_query_ir(Some("2024"), None)), 10);
     assert_eq!(
         requested_latest_version_count(&release_query_ir_with_source_slice_count(Some(10))),
@@ -579,7 +615,7 @@ fn requested_latest_version_count_defaults_and_caps() {
     );
     assert_eq!(
         requested_latest_version_count(&release_query_ir_with_source_slice_count(Some(42))),
-        10
+        20
     );
     assert_eq!(
         requested_latest_version_count(&release_query_ir_with_source_slice_count(Some(0))),
@@ -613,7 +649,7 @@ fn latest_version_scope_terms_keep_digit_bearing_subject_tokens() {
 
 #[test]
 fn latest_version_chunk_merge_limit_preserves_requested_document_coverage() {
-    assert_eq!(latest_version_context_top_k(&release_query_ir(Some("10"), None), 8), 40);
+    assert_eq!(latest_version_context_top_k(&release_query_ir(Some("10"), None), 8), 8);
     assert_eq!(
         latest_version_context_top_k(&release_query_ir_with_source_slice_count(Some(10)), 8),
         40
@@ -639,7 +675,7 @@ fn latest_version_chunk_score_keeps_first_chunk_for_each_version_before_second_c
 #[test]
 fn extract_semver_like_version_reads_title_versions() {
     assert_eq!(extract_semver_like_version("Version 9.8.765 - Product"), Some(vec![9, 8, 765]));
-    assert_eq!(extract_semver_like_version("Version 5.302 - Product"), Some(vec![5, 302]));
+    assert_eq!(extract_semver_like_version("Version 12.402 - Product"), Some(vec![12, 402]));
     assert_eq!(extract_semver_like_version("No release number"), None);
     assert_eq!(extract_semver_like_version("Screenshot 2026.05.10"), None);
     assert_eq!(extract_semver_like_version("Screenshot 2026.05"), None);
@@ -671,6 +707,44 @@ fn latest_version_documents_select_newest_distinct_versions() {
 }
 
 #[test]
+fn latest_version_documents_rank_compound_release_titles_by_newest_direct_version() {
+    let docs = [
+        sample_document_row("release-12.406.html", "Version 7.8 | 12.406"),
+        sample_document_row("release-12.407.html", "Version 7.8 | 12.407"),
+        sample_document_row("release-12.402.html", "Version 12.402"),
+    ];
+    let index = docs
+        .into_iter()
+        .map(|document| (document.document_id, document))
+        .collect::<HashMap<_, _>>();
+
+    let selected = latest_version_documents(&index, 2, &[]);
+    let versions = selected.into_iter().map(|document| document.version).collect::<Vec<_>>();
+
+    assert_eq!(versions, vec![vec![12, 407], vec![12, 406]]);
+}
+
+#[test]
+fn latest_version_documents_reject_formal_directional_version_transition_guides() {
+    let docs = [
+        sample_document_row("database-migration.html", "Sample Database 9.5 -> 15.3"),
+        sample_document_row("platform-update.html", "Sample Platform 8.4 => 12.1"),
+        sample_document_row("service-migration.html", "Sample Service migration 3.2 → 4.0"),
+        sample_document_row("release-12.407.html", "Version 7.8 | 12.407"),
+        sample_document_row("release-12.406.html", "Release 12.406"),
+    ];
+    let index = docs
+        .into_iter()
+        .map(|document| (document.document_id, document))
+        .collect::<HashMap<_, _>>();
+
+    let selected = latest_version_documents(&index, 10, &[]);
+    let titles = selected.into_iter().map(|document| document.title).collect::<Vec<_>>();
+
+    assert_eq!(titles, vec!["Version 7.8 | 12.407".to_string(), "Release 12.406".to_string()]);
+}
+
+#[test]
 fn latest_version_documents_require_release_marker_and_respect_scope_terms() {
     let docs = [
         sample_document_row("alpha-release-9.8.765.html", "Alpha Version 9.8.765"),
@@ -691,6 +765,54 @@ fn latest_version_documents_require_release_marker_and_respect_scope_terms() {
 
     assert_eq!(titles, vec!["Alpha Version 9.8.765".to_string()]);
     assert!(!text_has_release_version_marker("OAuth Guide"));
+}
+
+#[test]
+fn latest_version_documents_exclude_attached_context_from_inventory_slots() {
+    let primary_new = sample_document_row("sample-5.md", "Sample Version 5.0");
+    let primary_mid_1 = sample_document_row("sample-4.md", "Sample Version 4.0");
+    let primary_mid_2 = sample_document_row("sample-3.md", "Sample Version 3.0");
+    let primary_old = sample_document_row("sample-2.md", "Sample Version 2.0");
+    let mut attached =
+        sample_document_row("sample-5-notes.md", "Sample Version 5.0: attached notes");
+    attached.document_role = crate::domains::content::DOCUMENT_ROLE_ATTACHED_CONTEXT.to_string();
+    attached.parent_document_id = Some(primary_new.document_id);
+    let unrelated = sample_document_row("other-1.md", "Other Version 1.0");
+    let document_index =
+        [primary_new, primary_mid_1, primary_mid_2, primary_old, attached.clone(), unrelated]
+            .into_iter()
+            .map(|document| (document.document_id, document))
+            .collect::<HashMap<_, _>>();
+
+    let selected = latest_version_documents(&document_index, 5, &["sample".to_string()]);
+
+    assert_eq!(selected.len(), 4, "{selected:#?}");
+    assert!(
+        selected.iter().all(|document| document.document_id != attached.document_id),
+        "{selected:#?}"
+    );
+}
+
+#[test]
+fn latest_version_documents_exclude_primary_image_source_uri_with_query_and_fragment() {
+    let mut primary_image = sample_document_row("sample-5.md", "Sample Version 5.0");
+    primary_image.source_uri =
+        Some("https://example.invalid/releases/sample-5.PNG?download=1#preview".to_string());
+    let primary_document = sample_document_row("sample-4.md", "Sample Version 4.0");
+    let image_document_id = primary_image.document_id;
+    let document_index = [primary_image, primary_document]
+        .into_iter()
+        .map(|document| (document.document_id, document))
+        .collect::<HashMap<_, _>>();
+
+    let selected = latest_version_documents(&document_index, 5, &["sample".to_string()]);
+
+    assert_eq!(selected.len(), 1, "{selected:#?}");
+    assert!(
+        selected.iter().all(|document| document.document_id != image_document_id),
+        "{selected:#?}"
+    );
+    assert_eq!(selected[0].version, vec![4, 0]);
 }
 
 #[test]
@@ -730,7 +852,7 @@ fn latest_version_documents_do_not_collapse_same_version_across_titles() {
 }
 
 #[test]
-fn latest_version_documents_deduplicate_before_family_selection() {
+fn latest_version_documents_keep_exact_titles_from_distinct_documents() {
     let docs = [
         sample_document_row("alpha-1.2.12-a.html", "Version 1.2.12 - Sample Subject"),
         sample_document_row("alpha-1.2.12-b.html", "Version 1.2.12 - Sample Subject"),
@@ -750,13 +872,13 @@ fn latest_version_documents_deduplicate_before_family_selection() {
         vec![
             "Version 9.9.999 - Beta Suite".to_string(),
             "Version 1.2.12 - Sample Subject".to_string(),
-            "Version 1.2.11 - Sample Subject".to_string(),
+            "Version 1.2.12 - Sample Subject".to_string(),
         ]
     );
 }
 
 #[test]
-fn latest_version_documents_choose_dominant_release_family_for_multi_release_queries() {
+fn latest_version_documents_do_not_infer_dominance_from_titles() {
     let docs = [
         sample_document_row("alpha-1.2.12.html", "Version 1.2.12 - Sample Subject"),
         sample_document_row("alpha-1.2.11.html", "Version 1.2.11 - Sample Subject"),
@@ -774,22 +896,39 @@ fn latest_version_documents_choose_dominant_release_family_for_multi_release_que
     assert_eq!(
         titles,
         vec![
+            "Version 9.9.999 - Beta Suite".to_string(),
             "Version 1.2.12 - Sample Subject".to_string(),
             "Version 1.2.11 - Sample Subject".to_string(),
-            "Version 1.2.10 - Sample Subject".to_string(),
         ]
     );
 }
 
 #[test]
-fn latest_version_family_key_normalizes_only_the_version_literal() {
+fn latest_version_documents_rank_compound_versions_without_title_family_inference() {
+    let docs = [
+        sample_document_row("current-12.407.html", "Version 7.8 | 12.407"),
+        sample_document_row("current-12.406.html", "Version 7.8 | 12.406"),
+        sample_document_row("current-12.404.html", "Version 7.8 | 12.404"),
+        sample_document_row("current-12.403.html", "Version 7.8 | 12.403"),
+        sample_document_row("bridge-12.402.html", "Version 12.402"),
+        sample_document_row("legacy-7.8.702.html", "Version 7.8.702"),
+        sample_document_row("legacy-7.8.701.html", "Version 7.8.701"),
+        sample_document_row("legacy-7.8.700.html", "Version 7.8.700"),
+        sample_document_row("legacy-7.8.699.html", "Version 7.8.699"),
+        sample_document_row("legacy-7.8.698.html", "Version 7.8.698"),
+        sample_document_row("legacy-7.8.697.html", "Version 7.8.697"),
+    ];
+    let index = docs
+        .into_iter()
+        .map(|document| (document.document_id, document))
+        .collect::<HashMap<_, _>>();
+
+    let selected = latest_version_documents(&index, 5, &[]);
+    let versions = selected.into_iter().map(|document| document.version).collect::<Vec<_>>();
+
     assert_eq!(
-        latest_version_family_key("Version 1.2.12 - Sample Subject"),
-        latest_version_family_key("Version 1.2.11 - Sample Subject")
-    );
-    assert_ne!(
-        latest_version_family_key("Version 1.2.12 - Sample Subject"),
-        latest_version_family_key("Version 1.2.12 - Beta Suite")
+        versions,
+        vec![vec![12, 407], vec![12, 406], vec![12, 404], vec![12, 403], vec![12, 402],],
     );
 }
 
@@ -878,6 +1017,44 @@ fn map_chunk_hit_drops_orphan_raptor_chunks_without_heads() {
     };
 
     assert!(map_chunk_hit(chunk, 1.0, &document_index, &[]).is_none());
+}
+
+#[test]
+fn map_chunk_hit_quarantines_legacy_raptor_chunk_with_active_document() {
+    let document = sample_document_row("summary-source.md", "summary-source.md");
+    let revision_id = document.readable_revision_id.expect("fixture readable revision");
+    let document_index = HashMap::from([(document.document_id, document.clone())]);
+    let chunk = KnowledgeChunkRow {
+        chunk_id: Uuid::now_v7(),
+        workspace_id: document.workspace_id,
+        library_id: document.library_id,
+        document_id: document.document_id,
+        revision_id,
+        chunk_index: 0,
+        chunk_kind: Some("raptor_summary".to_string()),
+        content_text: "generated summary without source lineage".to_string(),
+        normalized_text: "generated summary without source lineage".to_string(),
+        span_start: None,
+        span_end: None,
+        token_count: Some(5),
+        support_block_ids: Vec::new(),
+        section_path: Vec::new(),
+        heading_trail: Vec::new(),
+        literal_digest: None,
+        chunk_state: "ready".to_string(),
+        text_generation: Some(1),
+        vector_generation: None,
+        quality_score: None,
+        window_text: None,
+        raptor_level: Some(1),
+        occurred_at: None,
+        occurred_until: None,
+    };
+
+    assert!(
+        map_chunk_hit(chunk, 1.0, &document_index, &[]).is_none(),
+        "legacy generated summaries must not become canonical answer evidence"
+    );
 }
 
 #[test]
@@ -1089,6 +1266,18 @@ fn entity_bio_chunks_use_explicit_merge_lane_priority() {
 }
 
 #[test]
+fn entity_bio_uses_every_typed_nonempty_entity_without_casing_routing() {
+    let query_ir = target_entities_query_ir(&["Alpha Node", "lowercase node", "节点"]);
+
+    let labels = entity_bio_target_mentions(&query_ir)
+        .into_iter()
+        .map(|mention| mention.label.as_str())
+        .collect::<Vec<_>>();
+
+    assert_eq!(labels, ["Alpha Node", "lowercase node", "节点"]);
+}
+
+#[test]
 fn graph_evidence_chunks_use_explicit_merge_lane_priority() {
     let ordinary = runtime_chunk("ordinary", 10_000.0);
     let graph_evidence = runtime_chunk("graph evidence", graph_evidence_chunk_score(0));
@@ -1102,7 +1291,7 @@ fn graph_evidence_chunks_use_explicit_merge_lane_priority() {
 #[test]
 fn graph_evidence_promotes_for_structural_relationship_ir() {
     let mut query_ir = target_entities_query_ir(&["Alpha Node", "Beta Endpoint"]);
-    query_ir.target_types = vec!["relationship".to_string()];
+    query_ir.target_types = vec![crate::domains::query_ir::QueryTargetKind::Relationship];
 
     assert!(query_ir_promotes_graph_evidence(&query_ir));
 }
@@ -1117,7 +1306,7 @@ fn graph_evidence_promotes_for_relation_like_event_ir() {
 #[test]
 fn graph_evidence_promotes_for_artifact_selection_ir() {
     let mut query_ir = target_entities_query_ir(&["Router Hub"]);
-    query_ir.target_types = vec!["artifact".to_string()];
+    query_ir.target_types = vec![crate::domains::query_ir::QueryTargetKind::Artifact];
 
     assert!(query_ir_promotes_graph_evidence(&query_ir));
 }
@@ -1126,7 +1315,7 @@ fn graph_evidence_promotes_for_artifact_selection_ir() {
 fn graph_evidence_does_not_promote_for_single_document_concept_ir() {
     let mut query_ir = target_entities_query_ir(&["Transition Hooks"]);
     query_ir.act = QueryAct::Describe;
-    query_ir.target_types = vec!["concept".to_string()];
+    query_ir.target_types = vec![crate::domains::query_ir::QueryTargetKind::Concept];
 
     assert!(!query_ir_promotes_graph_evidence(&query_ir));
 }
@@ -1135,7 +1324,7 @@ fn graph_evidence_does_not_promote_for_single_document_concept_ir() {
 fn graph_evidence_promotes_for_fact_value_ir() {
     let mut query_ir = target_entities_query_ir(&["Transition Hooks"]);
     query_ir.act = QueryAct::RetrieveValue;
-    query_ir.target_types = vec!["concept".to_string()];
+    query_ir.target_types = vec![crate::domains::query_ir::QueryTargetKind::Concept];
 
     assert!(query_ir_promotes_graph_evidence(&query_ir));
 }
@@ -1144,7 +1333,7 @@ fn graph_evidence_promotes_for_fact_value_ir() {
 fn graph_evidence_promotes_for_fact_inventory_ir() {
     let mut query_ir = target_entities_query_ir(&["Transition Hooks"]);
     query_ir.act = QueryAct::Enumerate;
-    query_ir.target_types = vec!["concept".to_string()];
+    query_ir.target_types = vec![crate::domains::query_ir::QueryTargetKind::Concept];
 
     assert!(query_ir_promotes_graph_evidence(&query_ir));
 }
@@ -1152,7 +1341,7 @@ fn graph_evidence_promotes_for_fact_inventory_ir() {
 #[test]
 fn graph_evidence_does_not_promote_for_exact_technical_ir() {
     let mut query_ir = target_entities_query_ir(&["Alpha Node", "Beta Endpoint"]);
-    query_ir.target_types = vec!["relationship".to_string()];
+    query_ir.target_types = vec![crate::domains::query_ir::QueryTargetKind::Relationship];
     query_ir.literal_constraints =
         vec![LiteralSpan { text: "/v1/alpha".to_string(), kind: LiteralKind::Path }];
 
@@ -1232,6 +1421,64 @@ fn truncate_bundle_orders_same_lane_by_score_before_insertion_order() {
     truncate_bundle(&mut bundle, 4, None, &std::collections::HashSet::new());
 
     assert_eq!(bundle.chunks[0].chunk_id, focused_id);
+}
+
+#[test]
+fn truncate_bundle_uses_semantic_rank_before_raw_score_within_the_same_safe_lane() {
+    let mut raw_score_winner = runtime_chunk("raw-score winner", 100.0);
+    raw_score_winner.score_kind = RuntimeChunkScoreKind::Relevance;
+    let raw_score_winner_id = raw_score_winner.chunk_id;
+    let mut semantic_winner = runtime_chunk("semantic winner", 0.1);
+    semantic_winner.score_kind = RuntimeChunkScoreKind::Relevance;
+    let semantic_winner_id = semantic_winner.chunk_id;
+    let mut bundle = RetrievalBundle {
+        entities: Vec::new(),
+        relationships: Vec::new(),
+        chunks: vec![raw_score_winner, semantic_winner],
+    };
+    let semantic_ranks = HashMap::from([(semantic_winner_id, 0), (raw_score_winner_id, 1)]);
+
+    truncate_bundle_with_semantic_chunk_ranks(
+        &mut bundle,
+        1,
+        None,
+        &HashSet::new(),
+        &semantic_ranks,
+    );
+
+    assert_eq!(bundle.chunks.len(), 1);
+    assert_eq!(bundle.chunks[0].chunk_id, semantic_winner_id);
+    assert_eq!(
+        bundle.chunks[0].score,
+        Some(0.1),
+        "semantic rank must not rewrite provenance score"
+    );
+}
+
+#[test]
+fn truncate_bundle_keeps_safety_lane_priority_ahead_of_semantic_rank() {
+    let mut graph_evidence = runtime_chunk("mandatory graph evidence", 0.1);
+    graph_evidence.score_kind = RuntimeChunkScoreKind::GraphEvidence;
+    let graph_evidence_id = graph_evidence.chunk_id;
+    let mut semantic_winner = runtime_chunk("ordinary semantic winner", 100.0);
+    semantic_winner.score_kind = RuntimeChunkScoreKind::Relevance;
+    let semantic_winner_id = semantic_winner.chunk_id;
+    let mut bundle = RetrievalBundle {
+        entities: Vec::new(),
+        relationships: Vec::new(),
+        chunks: vec![semantic_winner, graph_evidence],
+    };
+    let semantic_ranks = HashMap::from([(semantic_winner_id, 0)]);
+
+    truncate_bundle_with_semantic_chunk_ranks(
+        &mut bundle,
+        1,
+        None,
+        &HashSet::new(),
+        &semantic_ranks,
+    );
+
+    assert_eq!(bundle.chunks[0].chunk_id, graph_evidence_id);
 }
 
 #[test]
@@ -1341,7 +1588,7 @@ fn configure_how_focus_query_ir(focus: &str) -> QueryIR {
         act: QueryAct::ConfigureHow,
         scope: QueryScope::SingleDocument,
         language: QueryLanguage::Auto,
-        target_types: vec!["procedure".to_string()],
+        target_types: vec![crate::domains::query_ir::QueryTargetKind::Procedure],
         target_entities: Vec::new(),
         literal_constraints: Vec::new(),
         temporal_constraints: Vec::new(),
@@ -1411,7 +1658,10 @@ fn truncate_bundle_reserves_versioned_update_procedure_body() {
     chunks.push(procedure);
     let mut query_ir = target_entities_query_ir(&["Sample Target"]);
     query_ir.act = QueryAct::ConfigureHow;
-    query_ir.target_types = vec!["artifact".to_string(), "procedure".to_string()];
+    query_ir.target_types = vec![
+        crate::domains::query_ir::QueryTargetKind::Procedure,
+        crate::domains::query_ir::QueryTargetKind::Version,
+    ];
     query_ir.retrieval_query = Some("how to update Sample Target?".to_string());
     let mut bundle = RetrievalBundle { entities: Vec::new(), relationships: Vec::new(), chunks };
 
@@ -1463,7 +1713,10 @@ fn truncate_bundle_prefers_exact_versioned_update_runbook_over_short_title_ancho
 
     let mut query_ir = target_entities_query_ir(&["Sample Target"]);
     query_ir.act = QueryAct::ConfigureHow;
-    query_ir.target_types = vec!["artifact".to_string(), "procedure".to_string()];
+    query_ir.target_types = vec![
+        crate::domains::query_ir::QueryTargetKind::Procedure,
+        crate::domains::query_ir::QueryTargetKind::Version,
+    ];
     query_ir.retrieval_query = Some("how to update Sample Target?".to_string());
     let mut bundle = RetrievalBundle { entities: Vec::new(), relationships: Vec::new(), chunks };
 
@@ -1477,6 +1730,46 @@ fn truncate_bundle_prefers_exact_versioned_update_runbook_over_short_title_ancho
             .iter()
             .map(|chunk| (&chunk.document_label, &chunk.source_text))
             .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn truncate_bundle_does_not_reserve_acronym_collision_without_full_subject_body() {
+    let collision_document_id = Uuid::now_v7();
+    let mut collision_identity =
+        runtime_chunk_for_document(collision_document_id, "SCS update guide", 1.0);
+    collision_identity.source_text =
+        "SCS is the short name of an unrelated sampling component.".to_string();
+    collision_identity.excerpt = collision_identity.source_text.clone();
+    let mut collision_procedure =
+        runtime_chunk_for_document(collision_document_id, "SCS update guide", 0.5);
+    collision_procedure.chunk_index = 1;
+    collision_procedure.source_text = concat!(
+        "SCS update procedure\n",
+        "1. Back up the sampling component.\n",
+        "2. Run unrelatedctl refresh.\n",
+        "3. Restart the sampling component."
+    )
+    .to_string();
+    collision_procedure.excerpt = collision_procedure.source_text.clone();
+
+    let mut chunks = (0..13)
+        .map(|index| runtime_chunk(&format!("Noise Suite {index}"), 50_000.0 - index as f32))
+        .collect::<Vec<_>>();
+    chunks.extend([collision_identity, collision_procedure]);
+    let mut bundle = RetrievalBundle { entities: Vec::new(), relationships: Vec::new(), chunks };
+    let mut query_ir = configure_how_focus_query_ir("Sample Control Service");
+    query_ir.target_entities = vec![EntityMention {
+        label: "Sample Control Service".to_string(),
+        role: EntityRole::Subject,
+    }];
+    query_ir.retrieval_query = Some("how to update Sample Control Service?".to_string());
+
+    truncate_bundle(&mut bundle, 12, Some(&query_ir), &HashSet::new());
+
+    assert!(
+        bundle.chunks.iter().all(|chunk| chunk.document_id != collision_document_id),
+        "an acronym collision without the full subject in the same document must not receive a reserved slot"
     );
 }
 
@@ -2366,7 +2659,7 @@ fn configure_focus_queries_do_not_inject_low_idf_configuration_markers() {
     ir.act = QueryAct::ConfigureHow;
     ir.scope = QueryScope::SingleDocument;
     ir.document_focus = Some(DocumentHint { hint: "Payment Gateway".to_string() });
-    ir.target_types = vec!["procedure".to_string()];
+    ir.target_types = vec![crate::domains::query_ir::QueryTargetKind::Procedure];
     ir.target_entities =
         vec![EntityMention { label: "settlement connector".to_string(), role: EntityRole::Object }];
 
@@ -2380,14 +2673,17 @@ fn configure_focus_queries_do_not_inject_low_idf_configuration_markers() {
 }
 
 #[test]
-fn lexical_queries_strip_leading_question_markers() {
+fn lexical_queries_preserve_ambiguous_alphanumeric_prefixes() {
     let plan = build_query_plan("Q16. Which ports should a terminal use?", None, None, None);
     let queries =
         build_lexical_queries("Q16. Which ports should a terminal use?", &plan, &[], None);
 
-    assert_eq!(queries.first().map(String::as_str), Some("Which ports should a terminal use?"));
-    assert!(!queries.iter().any(|query| query.split_whitespace().any(|term| term == "Q16.")));
-    assert!(!plan.keywords.contains(&"q16".to_string()));
+    assert_eq!(
+        queries.first().map(String::as_str),
+        Some("Q16. Which ports should a terminal use?")
+    );
+    assert!(queries.iter().any(|query| query.split_whitespace().any(|term| term == "Q16.")));
+    assert!(plan.keywords.contains(&"q16".to_string()));
 }
 
 #[test]

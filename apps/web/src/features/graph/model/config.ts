@@ -1,5 +1,5 @@
-import type { GraphNode } from '@/shared/types';
-import { compactText } from '@/shared/lib/compactText';
+import type { GraphNode } from '@/shared/types'
+import { compactText } from '@/shared/lib/compactText'
 
 export const GRAPH_NODE_COLORS: Record<string, string> = {
   document: '#3b82f6',
@@ -13,7 +13,7 @@ export const GRAPH_NODE_COLORS: Record<string, string> = {
   concept: '#f59e0b',
   attribute: '#0ea5e9',
   entity: '#78716c',
-};
+}
 
 export const GRAPH_EDGE_COLORS = {
   dense: 'rgba(148, 163, 184, 0.38)',
@@ -21,27 +21,33 @@ export const GRAPH_EDGE_COLORS = {
   regular: 'rgba(100, 116, 139, 0.72)',
   muted: 'rgba(100, 116, 139, 0.42)',
   highlight: 'rgba(245, 158, 11, 0.9)',
-} as const;
+} as const
 
 /// Above this rendered-edge count the graph view draws a stride-sampled
 /// subset of edges instead of every edge (rasterising every edge is the
 /// large-graph render bottleneck). Shared between SigmaGraph (which applies
 /// it) and GraphPage (which shows the edge-density toggle).
-export const GRAPH_EDGE_RENDER_CAP = 70000;
+export const GRAPH_EDGE_RENDER_CAP = 70000
 
 /// Denser overview cap used when the user asks for more visual edge context.
 /// This intentionally remains capped: the full topology stays available to
 /// selection, neighbors, and inspectors, but the canvas never attempts to draw
 /// hundreds of thousands of lines on every Firefox frame.
-export const GRAPH_EDGE_DENSE_RENDER_CAP = 110000;
+export const GRAPH_EDGE_DENSE_RENDER_CAP = 110000
 
 /// Above this raw edge count, changing the rendered edge density is itself a
 /// visible Sigma repaint spike in Firefox. The full topology remains available
 /// to adjacency, selection, and inspectors; the canvas keeps the safe overview
 /// sample instead of exposing a janky toolbar action.
-export const GRAPH_EDGE_DENSITY_TOGGLE_MAX_EDGES = 120000;
+export const GRAPH_EDGE_DENSITY_TOGGLE_MAX_EDGES = 120000
 
 export const GRAPH_LAYOUT_OPTIONS = [
+  {
+    id: 'force',
+    iconKey: 'force',
+    labelKey: 'graph.layouts.force',
+    descriptionKey: 'graph.layoutDescriptions.force',
+  },
   {
     id: 'hubs',
     iconKey: 'hubs',
@@ -102,56 +108,65 @@ export const GRAPH_LAYOUT_OPTIONS = [
     labelKey: 'graph.layouts.clusters',
     descriptionKey: 'graph.layoutDescriptions.clusters',
   },
-] as const;
+] as const
 
-export type GraphLayoutType = (typeof GRAPH_LAYOUT_OPTIONS)[number]['id'];
+export type GraphLayoutType = (typeof GRAPH_LAYOUT_OPTIONS)[number]['id']
 
-export const DEFAULT_GRAPH_LAYOUT: GraphLayoutType = 'hubs';
+export const DEFAULT_GRAPH_LAYOUT: GraphLayoutType = 'hubs'
 
 export function isGraphLayoutType(value: string | undefined | null): value is GraphLayoutType {
-  return GRAPH_LAYOUT_OPTIONS.some((layout) => layout.id === value);
+  return GRAPH_LAYOUT_OPTIONS.some((layout) => layout.id === value)
+}
+
+/**
+ * Iterative (force-directed) layouts must ALWAYS be computed off the main
+ * thread: FA2 runs hundreds of passes, so a synchronous compute would stall
+ * the UI. SigmaGraph routes these through the layout worker at every graph
+ * size, not only past the node-count worker threshold.
+ */
+export function isIterativeLayout(layout: GraphLayoutType): boolean {
+  return layout === 'force'
 }
 
 export function normalizeRecommendedGraphLayout(
   value: string | undefined | null,
 ): GraphLayoutType | null {
-  if (!isGraphLayoutType(value)) return null;
-  return value === 'bands' ? DEFAULT_GRAPH_LAYOUT : value;
+  if (!isGraphLayoutType(value)) return null
+  return value === 'bands' ? DEFAULT_GRAPH_LAYOUT : value
 }
 
-
 function graphLabelBudget(nodeCount: number): number {
-  if (nodeCount > 1200) return 6;
-  if (nodeCount > 700) return 8;
-  if (nodeCount > 350) return 10;
-  if (nodeCount > 180) return 14;
-  return 20;
+  if (nodeCount > 1200) return 6
+  if (nodeCount > 700) return 8
+  if (nodeCount > 350) return 10
+  if (nodeCount > 180) return 14
+  return 20
 }
 
 function graphCanvasLabelLimit(nodeCount: number): number {
-  if (nodeCount > 900) return 16;
-  if (nodeCount > 450) return 18;
-  return 22;
+  if (nodeCount > 900) return 16
+  if (nodeCount > 450) return 18
+  return 22
 }
 
 export function selectProminentGraphLabelIds(nodes: GraphNode[]): Set<string> {
   const ranked = [...nodes].sort((left, right) => {
-    const edgeCountDelta = right.edgeCount - left.edgeCount;
-    if (edgeCountDelta !== 0) return edgeCountDelta;
+    const edgeCountDelta = right.edgeCount - left.edgeCount
+    if (edgeCountDelta !== 0) return edgeCountDelta
 
-    const typeDelta = left.type.localeCompare(right.type);
-    if (typeDelta !== 0) return typeDelta;
+    const typeDelta = left.type.localeCompare(right.type)
+    if (typeDelta !== 0) return typeDelta
 
-    return left.label.localeCompare(right.label);
-  });
+    return left.label.localeCompare(right.label)
+  })
 
-  return new Set(ranked.slice(0, graphLabelBudget(nodes.length)).map((node) => node.id));
+  return new Set(ranked.slice(0, graphLabelBudget(nodes.length)).map((node) => node.id))
 }
 
 export function buildGraphCanvasLabel(label: string, nodeCount: number): string {
-  return compactText(label, graphCanvasLabelLimit(nodeCount)).text;
+  return compactText(label, graphCanvasLabelLimit(nodeCount)).text
 }
 
 export function buildGraphFocusLabel(label: string): string {
-  return compactText(label, 30).text;
+  return compactText(label, 30).text
 }

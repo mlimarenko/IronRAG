@@ -46,8 +46,7 @@ pub struct DefaultRuntimePolicy {
 
 impl DefaultRuntimePolicy {
     #[must_use]
-    #[allow(clippy::missing_const_for_fn)]
-    pub fn new(reason_budget_chars: usize, rules: DefaultRuntimePolicyRules) -> Self {
+    pub const fn new(reason_budget_chars: usize, rules: DefaultRuntimePolicyRules) -> Self {
         Self { reason_budget_chars, rules }
     }
 

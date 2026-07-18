@@ -1,5 +1,6 @@
 use std::{collections::HashMap, sync::Arc};
 
+use anyhow::Context as _;
 use chrono::Utc;
 use futures::{StreamExt, stream};
 use sha2::{Digest, Sha256};
@@ -224,6 +225,97 @@ fn pdf_extract_stream_window_pages(batch_size: u32) -> u32 {
         .max(batch_size.max(1))
 }
 
+type PdfExtractUnitOutput = (i32, PdfExtractUnitMergeFragment);
+type PdfExtractUnitPartition = (Vec<PdfExtractUnitOutput>, Vec<PdfExtractUnit>, i32);
+
+fn collect_pdf_extract_units(
+    completed_rows: &HashMap<i32, ingest_repository::ContentRevisionIngestUnitRow>,
+    page_count: u32,
+    batch_size: u32,
+) -> Result<PdfExtractUnitPartition, CanonicalExtractContentError> {
+    let mut output_units = Vec::new();
+    let mut missing_units = Vec::new();
+    let mut reused_unit_count = 0_i32;
+    for batch_idx in 0..page_count.div_ceil(batch_size) {
+        let unit_ordinal = i32::try_from(batch_idx).unwrap_or(i32::MAX) + 1;
+        let start_page = batch_idx * batch_size + 1;
+        let end_page = ((batch_idx + 1) * batch_size).min(page_count);
+        let range_start = i32::try_from(start_page).unwrap_or(i32::MAX);
+        let range_end = i32::try_from(end_page).unwrap_or(i32::MAX);
+        if let Some(row) = completed_rows
+            .get(&unit_ordinal)
+            .filter(|row| row.range_start == range_start && row.range_end == range_end)
+        {
+            output_units.push((unit_ordinal, merge_fragment_from_unit(row)?));
+            reused_unit_count += 1;
+        } else {
+            missing_units.push(PdfExtractUnit {
+                unit_ordinal,
+                start_page,
+                end_page,
+                range_start,
+                range_end,
+            });
+        }
+    }
+    Ok((output_units, missing_units, reused_unit_count))
+}
+
+async fn extract_missing_pdf_units(
+    state: &AppState,
+    attempt_id: Uuid,
+    revision: &KnowledgeRevisionRow,
+    file_name: &str,
+    stored_bytes: &[u8],
+    page_count: u32,
+    batch_size: u32,
+    stream_window_pages: u32,
+    missing_units: &[PdfExtractUnit],
+) -> Result<(Vec<(i32, PdfExtractUnitMergeFragment)>, usize), CanonicalExtractContentError> {
+    let shared_output_units = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+    let expected_units: Arc<HashMap<u32, PdfExtractUnit>> =
+        Arc::new(missing_units.iter().cloned().map(|unit| (unit.start_page, unit)).collect());
+    let runs = contiguous_pdf_extract_unit_runs(missing_units, stream_window_pages);
+    let run_parallelism = runs.len().max(1).min(docling::configured_max_concurrency());
+    let mut run_results = stream::iter(runs.into_iter().map(|run| {
+        extract_pdf_run_streamed(
+            state.clone(),
+            attempt_id,
+            revision.revision_id,
+            revision.library_id,
+            file_name.to_string(),
+            revision.mime_type.clone(),
+            stored_bytes,
+            page_count,
+            batch_size,
+            run,
+            Arc::clone(&expected_units),
+            Arc::clone(&shared_output_units),
+        )
+    }))
+    .buffer_unordered(run_parallelism);
+
+    let mut first_error = None;
+    while let Some(result) = run_results.next().await {
+        if let Err(error) = result {
+            first_error.get_or_insert(error);
+        }
+    }
+    drop(run_results);
+    if let Some(error) = first_error {
+        return Err(error);
+    }
+    let output_units = Arc::try_unwrap(shared_output_units)
+        .map_err(|_| {
+            CanonicalExtractContentError::extraction_failed(
+                "extract_unit_collect_failed",
+                format!("failed to collect extract units for revision {}", revision.revision_id),
+            )
+        })?
+        .into_inner();
+    Ok((output_units, run_parallelism))
+}
+
 async fn resolve_resumable_pdf_extract_content(
     state: &AppState,
     attempt_id: Uuid,
@@ -276,35 +368,9 @@ async fn resolve_resumable_pdf_extract_content(
             .filter(|row| row.unit_state == "completed" && row.unit_kind == "pdf_page_range")
             .map(|row| (row.unit_ordinal, row))
             .collect();
-    let mut output_units: Vec<(i32, PdfExtractUnitMergeFragment)> = Vec::new();
-    let mut missing_units: Vec<PdfExtractUnit> = Vec::new();
-    let mut reused_unit_count = 0_i32;
     let batch_count = page_count.div_ceil(batch_size);
-
-    for batch_idx in 0..batch_count {
-        let unit_ordinal = i32::try_from(batch_idx).unwrap_or(i32::MAX) + 1;
-        let start_page = batch_idx * batch_size + 1;
-        let end_page = ((batch_idx + 1) * batch_size).min(page_count);
-        let range_start = i32::try_from(start_page).unwrap_or(i32::MAX);
-        let range_end = i32::try_from(end_page).unwrap_or(i32::MAX);
-
-        if let Some(row) = completed_rows
-            .get(&unit_ordinal)
-            .filter(|row| row.range_start == range_start && row.range_end == range_end)
-        {
-            output_units.push((unit_ordinal, merge_fragment_from_unit(row)?));
-            reused_unit_count += 1;
-            continue;
-        }
-
-        missing_units.push(PdfExtractUnit {
-            unit_ordinal,
-            start_page,
-            end_page,
-            range_start,
-            range_end,
-        });
-    }
+    let (mut output_units, missing_units, reused_unit_count) =
+        collect_pdf_extract_units(&completed_rows, page_count, batch_size)?;
     sync_pdf_extract_stage_progress(state, attempt_id, revision.revision_id, page_count)
         .await
         .map_err(|error| {
@@ -319,60 +385,24 @@ async fn resolve_resumable_pdf_extract_content(
 
     let extracted_unit_count = i32::try_from(missing_units.len()).unwrap_or(i32::MAX);
     let stream_window_pages = pdf_extract_stream_window_pages(batch_size);
-    let mut run_parallelism = 0_usize;
-    if !missing_units.is_empty() {
-        let shared_output_units = Arc::new(tokio::sync::Mutex::new(output_units));
-        let expected_units: Arc<HashMap<u32, PdfExtractUnit>> =
-            Arc::new(missing_units.iter().cloned().map(|unit| (unit.start_page, unit)).collect());
-        let revision_id = revision.revision_id;
-        let library_id = revision.library_id;
-        let mime_type = revision.mime_type.clone();
-        let file_name = file_name.to_string();
-
-        let runs = contiguous_pdf_extract_unit_runs(&missing_units, stream_window_pages);
-        let run_count = runs.len();
-        run_parallelism = run_count.max(1).min(docling::configured_max_concurrency());
-        let mut run_results = stream::iter(runs.into_iter().map(|run| {
-            extract_pdf_run_streamed(
-                state.clone(),
-                attempt_id,
-                revision_id,
-                library_id,
-                file_name.clone(),
-                mime_type.clone(),
-                stored_bytes,
-                page_count,
-                batch_size,
-                run,
-                Arc::clone(&expected_units),
-                Arc::clone(&shared_output_units),
-            )
-        }))
-        .buffer_unordered(run_parallelism);
-
-        let mut first_error = None;
-        while let Some(result) = run_results.next().await {
-            if let Err(error) = result {
-                first_error.get_or_insert(error);
-            }
-        }
-        drop(run_results);
-        if let Some(error) = first_error {
-            return Err(error);
-        }
-
-        output_units = Arc::try_unwrap(shared_output_units)
-            .map_err(|_| {
-                CanonicalExtractContentError::extraction_failed(
-                    "extract_unit_collect_failed",
-                    format!(
-                        "failed to collect extract units for revision {}",
-                        revision.revision_id
-                    ),
-                )
-            })?
-            .into_inner();
-    }
+    let run_parallelism = if missing_units.is_empty() {
+        0
+    } else {
+        let (extracted_outputs, parallelism) = extract_missing_pdf_units(
+            state,
+            attempt_id,
+            revision,
+            file_name,
+            stored_bytes,
+            page_count,
+            batch_size,
+            stream_window_pages,
+            &missing_units,
+        )
+        .await?;
+        output_units.extend(extracted_outputs);
+        parallelism
+    };
 
     output_units.sort_by_key(|(unit_ordinal, _)| *unit_ordinal);
     let outputs = output_units.into_iter().map(|(_, output)| output).collect();
@@ -432,7 +462,7 @@ async fn extract_pdf_run_streamed(
     expected_units: Arc<HashMap<u32, PdfExtractUnit>>,
     shared_output_units: Arc<tokio::sync::Mutex<Vec<(i32, PdfExtractUnitMergeFragment)>>>,
 ) -> Result<(), CanonicalExtractContentError> {
-    docling::extract_pdf_page_ranges_streamed(
+    Box::pin(docling::extract_pdf_page_ranges_streamed(
         Some(&file_name),
         Some(mime_type.as_str()),
         "pdf",
@@ -465,8 +495,7 @@ async fn extract_pdf_run_streamed(
                     .await
                     .map_err(|error| {
                         anyhow::anyhow!(
-                            "failed to augment docling output for revision {}: {error}",
-                            revision_id
+                            "failed to augment docling output for revision {revision_id}: {error}"
                         )
                     })?;
                 let content_checksum = sha256_text(&output.content_text);
@@ -480,10 +509,16 @@ async fn extract_pdf_run_streamed(
                         range_start: unit.range_start,
                         range_end: unit.range_end,
                         content_text: Some(output.content_text.clone()),
-                        structure_hints_json: Some(json_or_null(&output.structure_hints)),
-                        source_metadata_json: Some(json_or_null(&output.source_metadata)),
+                        structure_hints_json: Some(serialize_json(
+                            &output.structure_hints,
+                            "extraction structure hints",
+                        )?),
+                        source_metadata_json: Some(serialize_json(
+                            &output.source_metadata,
+                            "extraction source metadata",
+                        )?),
                         source_map_json: Some(output.source_map.clone()),
-                        warnings_json: json_or_null(&output.warnings),
+                        warnings_json: serialize_json(&output.warnings, "extraction warnings")?,
                         usage_json: output.usage_json.clone(),
                         provider_kind: output.provider_kind.clone(),
                         model_name: output.model_name.clone(),
@@ -515,7 +550,7 @@ async fn extract_pdf_run_streamed(
                 Ok(())
             }
         },
-    )
+    ))
     .await
     .map_err(|error| {
         let message = format!(
@@ -704,8 +739,11 @@ fn merge_pdf_unit_usage_json(usages: Vec<serde_json::Value>) -> serde_json::Valu
     standalone_usages.into_iter().next().unwrap_or_else(|| serde_json::json!({}))
 }
 
-fn json_or_null<T: serde::Serialize>(value: &T) -> serde_json::Value {
-    serde_json::to_value(value).unwrap_or(serde_json::Value::Null)
+fn serialize_json<T: serde::Serialize>(
+    value: &T,
+    description: &'static str,
+) -> anyhow::Result<serde_json::Value> {
+    serde_json::to_value(value).with_context(|| format!("failed to serialize {description}"))
 }
 
 fn sha256_text(value: &str) -> String {
@@ -720,7 +758,7 @@ pub(super) async fn generate_document_summary_from_blocks(
         .document_store
         .list_structured_blocks_by_revision(revision_id)
         .await
-        .unwrap_or_default();
+        .context("failed to load structured blocks for document summary generation")?;
 
     if blocks.is_empty() {
         return Ok(String::new());

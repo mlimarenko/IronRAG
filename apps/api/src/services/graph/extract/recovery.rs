@@ -1,6 +1,9 @@
 use crate::{
     agent_runtime::executor::{RuntimeExecutionError, RuntimeExecutionSession},
-    agent_runtime::response::{RuntimeFailureSummary, RuntimeTerminalOutcome},
+    agent_runtime::response::{
+        RuntimeFailureSummary, RuntimeTerminalOutcome, canonical_runtime_failure_summary,
+        public_runtime_failure_summary,
+    },
     domains::{
         agent_runtime::{RuntimeDecisionKind, RuntimeStageKind, RuntimeStageState},
         graph_quality::{ExtractionOutcomeStatus, ExtractionRecoverySummary},
@@ -10,26 +13,11 @@ use crate::{
 };
 
 use super::prompt::{GRAPH_EXTRACTION_VERSION, normalized_downgrade_level};
-use super::types::*;
-
-pub(crate) fn unconfigured_graph_extraction_failure(
-    _request: &GraphExtractionRequest,
-    error_message: impl Into<String>,
-) -> GraphExtractionFailureOutcome {
-    GraphExtractionFailureOutcome {
-        request_shape_key: format!("{GRAPH_EXTRACTION_VERSION}:unconfigured"),
-        request_size_bytes: 0,
-        error_message: error_message.into(),
-        provider_failure: None,
-        recovery_summary: ExtractionRecoverySummary {
-            status: ExtractionOutcomeStatus::Failed,
-            second_pass_applied: false,
-            warning: None,
-        },
-        recovery_attempts: Vec::new(),
-        cancelled: false,
-    }
-}
+use super::types::{
+    GraphExtractionCandidateSet, GraphExtractionExecutionError, GraphExtractionFailureOutcome,
+    GraphExtractionLifecycle, GraphExtractionRecoveryRecord, GraphExtractionRequest,
+    GraphExtractionResumeState, GraphExtractionTaskFailure, GraphExtractionTaskFailureCode,
+};
 
 pub(crate) fn map_graph_runtime_execution_error(
     request: &GraphExtractionRequest,
@@ -77,7 +65,7 @@ pub(crate) fn graph_extraction_execution_error(
         recovery_attempts,
         resume_state: GraphExtractionResumeState {
             resumed_from_checkpoint: false,
-            replay_count: request.resume_hint.as_ref().map(|hint| hint.replay_count).unwrap_or(0),
+            replay_count: request.resume_hint.as_ref().map_or(0, |hint| hint.replay_count),
             downgrade_level: normalized_downgrade_level(request),
         },
         cancelled: false,
@@ -102,7 +90,7 @@ pub(crate) fn graph_extraction_cancelled_error(
         recovery_attempts: Vec::new(),
         resume_state: GraphExtractionResumeState {
             resumed_from_checkpoint: false,
-            replay_count: request.resume_hint.as_ref().map(|hint| hint.replay_count).unwrap_or(0),
+            replay_count: request.resume_hint.as_ref().map_or(0, |hint| hint.replay_count),
             downgrade_level: normalized_downgrade_level(request),
         },
         cancelled: true,
@@ -112,7 +100,7 @@ pub(crate) fn graph_extraction_cancelled_error(
 pub(crate) fn make_graph_terminal_failure_outcome(
     failure: GraphExtractionTaskFailure,
 ) -> RuntimeTerminalOutcome<GraphExtractionCandidateSet, GraphExtractionTaskFailure> {
-    let summary = make_graph_runtime_failure_summary(&failure.code, &failure.summary);
+    let summary = make_graph_runtime_failure_summary(&failure.code);
     if matches!(
         failure.code.as_str(),
         "runtime_policy_rejected"
@@ -126,7 +114,7 @@ pub(crate) fn make_graph_terminal_failure_outcome(
     }
 }
 
-pub(crate) fn graph_async_operation_status(
+pub(crate) const fn graph_async_operation_status(
     outcome: &RuntimeTerminalOutcome<GraphExtractionCandidateSet, GraphExtractionTaskFailure>,
 ) -> &'static str {
     match outcome {
@@ -152,26 +140,11 @@ pub(crate) fn graph_failure_code_from_outcome(
     }
 }
 
-pub(crate) fn make_graph_runtime_failure_summary(
-    code: &str,
-    summary: &str,
-) -> RuntimeFailureSummary {
+pub(crate) fn make_graph_runtime_failure_summary(code: &str) -> RuntimeFailureSummary {
     RuntimeFailureSummary {
         code: code.to_string(),
-        summary_redacted: Some(truncate_failure_code(summary).to_string()),
+        summary_redacted: canonical_runtime_failure_summary(code),
     }
-}
-
-pub(crate) fn truncate_failure_code(message: &str) -> &str {
-    const MAX_LEN: usize = 160;
-    if message.len() <= MAX_LEN {
-        return message;
-    }
-    let mut end = MAX_LEN;
-    while !message.is_char_boundary(end) {
-        end -= 1;
-    }
-    &message[..end]
 }
 
 fn graph_policy_action_kind(failure_code: &str) -> Option<&'static str> {
@@ -197,6 +170,9 @@ pub(crate) async fn append_graph_runtime_policy_audit(
     let Some(action_kind) = graph_policy_action_kind(&summary.code) else {
         return;
     };
+    let typed_policy_summary = crate::agent_runtime::trace::policy_summary(&runtime_result.trace);
+    let redacted_message =
+        public_runtime_failure_summary(Some(&summary.code), &typed_policy_summary);
     if let Err(error) = state
         .canonical_services
         .audit
@@ -209,7 +185,7 @@ pub(crate) async fn append_graph_runtime_policy_audit(
                 request_id: None,
                 trace_id: None,
                 result_kind: "rejected".to_string(),
-                redacted_message: summary.summary_redacted.clone(),
+                redacted_message,
                 internal_message: Some(format!(
                     "runtime policy canceled graph extraction {} for document {} via runtime execution {} with code {}",
                     graph_extraction_id, request.document.id, runtime_result.execution.id, summary.code
@@ -276,13 +252,13 @@ pub(crate) fn record_graph_runtime_stage(
         stage_state,
         deterministic,
         failure.map(|value| value.code.clone()),
-        failure.map(|value| truncate_failure_code(&value.summary).to_string()),
+        failure.and_then(|value| make_graph_runtime_failure_summary(&value.code).summary_redacted),
         resolved_started_at,
     );
 }
 
 #[must_use]
-pub fn extraction_lifecycle_from_record(
+pub(crate) fn extraction_lifecycle_from_record(
     record: &RuntimeGraphExtractionRecordRow,
 ) -> GraphExtractionLifecycle {
     record
@@ -293,7 +269,7 @@ pub fn extraction_lifecycle_from_record(
 }
 
 #[must_use]
-pub fn extraction_recovery_summary_from_record(
+pub(crate) fn extraction_recovery_summary_from_record(
     record: &RuntimeGraphExtractionRecordRow,
 ) -> Option<ExtractionRecoverySummary> {
     record

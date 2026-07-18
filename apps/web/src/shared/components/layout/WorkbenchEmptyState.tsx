@@ -1,14 +1,14 @@
-import type { ReactNode } from "react";
+import type { ReactNode } from 'react'
 
-import { cn } from "@/shared/lib/utils";
+import { cn } from '@/shared/lib/utils'
 
-type WorkbenchEmptyStateProps = {
-  icon?: ReactNode;
-  title: ReactNode;
-  description?: ReactNode;
-  action?: ReactNode;
-  className?: string;
-};
+type WorkbenchEmptyStateProps = Readonly<{
+  icon?: ReactNode
+  title: ReactNode
+  description?: ReactNode
+  action?: ReactNode
+  className?: string
+}>
 
 export function WorkbenchEmptyState({
   icon,
@@ -18,7 +18,7 @@ export function WorkbenchEmptyState({
   className,
 }: WorkbenchEmptyStateProps) {
   return (
-    <div className={cn("empty-state px-6 py-12", className)}>
+    <div className={cn('empty-state px-6 py-12', className)}>
       {icon ? (
         <div className="mb-4 flex h-14 w-14 items-center justify-center rounded-lg bg-muted">
           {icon}
@@ -30,5 +30,5 @@ export function WorkbenchEmptyState({
       ) : null}
       {action ? <div className="mt-4">{action}</div> : null}
     </div>
-  );
+  )
 }

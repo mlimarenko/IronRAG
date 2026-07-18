@@ -3,7 +3,7 @@
 // and `vi.spyOn(Tag, 'method')` overrides keep winning — MSW only intercepts
 // requests that actually hit the network layer.
 
-import { setupServer } from "msw/node";
-import { handlers } from "./handlers";
+import { setupServer } from 'msw/node'
+import { handlers } from './handlers'
 
-export const server = setupServer(...handlers);
+export const server = setupServer(...handlers)

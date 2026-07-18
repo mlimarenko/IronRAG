@@ -9,9 +9,12 @@ use crate::{
         McpChunkReference, McpEntityReference, McpEvidenceReference, McpLibraryDescriptor,
         McpReadabilityState, McpRelationReference, McpTechnicalFactReference,
     },
-    services::mcp::{
-        access::fusion::{LaneRankFusion, SearchLane},
-        support::preview_hit,
+    services::{
+        mcp::{
+            access::fusion::{LaneRankFusion, SearchLane},
+            search_excerpt::preview_hit,
+        },
+        query::vector_dimensions::EmbeddingProfileInventoryVersion,
     },
 };
 
@@ -46,6 +49,9 @@ pub(crate) struct ResolvedDocumentState {
 #[derive(Debug, Clone)]
 pub(crate) struct McpSearchEmbeddingContext {
     pub(crate) model_catalog_id: Uuid,
+    pub(crate) embedding_profile_key: String,
+    pub(crate) inventory_version: EmbeddingProfileInventoryVersion,
+    pub(crate) dimensions: u64,
     pub(crate) query_vector: Vec<f32>,
 }
 

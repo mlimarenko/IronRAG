@@ -2,16 +2,15 @@ use serde_json::{Value, json};
 
 use crate::{
     mcp_types::{
-        McpAuditActionKind, McpAuditScope, McpCreateLibraryRequest, McpCreateWorkspaceRequest,
-        McpListLibrariesRequest,
+        McpCreateLibraryRequest, McpCreateWorkspaceRequest, McpListLibrariesRequest,
+        McpUpdateLibraryRequest, McpUpdateWorkspaceRequest,
     },
     services::iam::audit::AppendAuditEventSubjectCommand,
 };
 
 use super::super::{
-    McpToolDescriptor, McpToolResult,
-    audit::{record_canonical_mcp_audit, record_error_audit, record_success_audit},
-    ok_tool_result, parse_tool_args, tool_error_result,
+    McpToolDescriptor, McpToolResult, audit::record_canonical_mcp_audit, ok_tool_result,
+    parse_tool_args, tool_error_result,
 };
 use super::ToolCallContext;
 
@@ -64,13 +63,63 @@ pub(crate) fn descriptor(name: &str) -> Option<McpToolDescriptor> {
         }),
         "list_libraries" => Some(McpToolDescriptor {
             name: "list_libraries",
-            description: "List visible libraries, optionally filtered to one visible workspace. Each library descriptor includes ingestionReadiness so agents can detect missing upload prerequisites before calling upload_documents.",
+            description: "List visible libraries, optionally filtered to one visible workspace. Each library descriptor includes ingestionReadiness so agents can detect missing upload prerequisites before calling create_documents.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
                     "workspace": {
                         "type": "string",
                         "description": "Optional canonical workspace ref from list_workspaces."
+                    }
+                }
+            }),
+        }),
+        "update_workspace" => Some(McpToolDescriptor {
+            name: "update_workspace",
+            description: "Update a workspace's display name and/or lifecycle state when the current token has system-admin rights. Fields left unset keep their current value — you do not have to restate the lifecycle state just to rename a workspace.",
+            input_schema: json!({
+                "type": "object",
+                "required": ["workspace"],
+                "properties": {
+                    "workspace": {
+                        "type": "string",
+                        "description": "Canonical workspace ref from list_workspaces."
+                    },
+                    "title": {
+                        "type": "string",
+                        "description": "Optional new display name. Omit to keep the current display name."
+                    },
+                    "lifecycleState": {
+                        "type": "string",
+                        "enum": ["active", "archived"],
+                        "description": "Optional new lifecycle state. Omit to keep the current lifecycle state."
+                    }
+                }
+            }),
+        }),
+        "update_library" => Some(McpToolDescriptor {
+            name: "update_library",
+            description: "Update a library's display name, description, and/or lifecycle state. Fields left unset keep their current value. Knobs not exposed here (extraction prompt, includeDocumentHintInMcpAnswers) are always preserved unchanged.",
+            input_schema: json!({
+                "type": "object",
+                "required": ["library"],
+                "properties": {
+                    "library": {
+                        "type": "string",
+                        "description": "Canonical fully-qualified library ref in the form '<workspace>/<library>'."
+                    },
+                    "title": {
+                        "type": "string",
+                        "description": "Optional new display name. Omit to keep the current display name."
+                    },
+                    "description": {
+                        "type": "string",
+                        "description": "Optional new operator-facing description. Omit to keep the current description; pass an empty string to clear it."
+                    },
+                    "lifecycleState": {
+                        "type": "string",
+                        "enum": ["active", "archived"],
+                        "description": "Optional new lifecycle state. Omit to keep the current lifecycle state."
                     }
                 }
             }),
@@ -89,6 +138,8 @@ pub(crate) async fn call_tool(
         "create_library" => create_library(context, arguments).await,
         "list_workspaces" => list_workspaces(context).await,
         "list_libraries" => list_libraries(context, arguments).await,
+        "update_workspace" => update_workspace(context, arguments).await,
+        "update_library" => update_library(context, arguments).await,
         _ => return None,
     };
     Some(result)
@@ -121,19 +172,6 @@ async fn create_workspace(context: ToolCallContext<'_>, arguments: &Value) -> Mc
                         }],
                     )
                     .await;
-                    record_success_audit(
-                        context.auth,
-                        context.state,
-                        context.request_id,
-                        McpAuditActionKind::CreateWorkspace,
-                        McpAuditScope {
-                            workspace_id: Some(payload.workspace_id),
-                            library_id: None,
-                            document_id: None,
-                        },
-                        json!({ "tool": "create_workspace" }),
-                    )
-                    .await;
                     ok_tool_result("Workspace created.", json!({ "workspace": payload }))
                 }
                 Err(error) => {
@@ -149,16 +187,6 @@ async fn create_workspace(context: ToolCallContext<'_>, arguments: &Value) -> Mc
                             context.auth.principal_id
                         )),
                         Vec::new(),
-                    )
-                    .await;
-                    record_error_audit(
-                        context.auth,
-                        context.state,
-                        context.request_id,
-                        McpAuditActionKind::CreateWorkspace,
-                        McpAuditScope::default(),
-                        &error,
-                        json!({ "tool": "create_workspace" }),
                     )
                     .await;
                     tool_error_result(error)
@@ -178,16 +206,6 @@ async fn create_workspace(context: ToolCallContext<'_>, arguments: &Value) -> Mc
                     context.auth.principal_id
                 )),
                 Vec::new(),
-            )
-            .await;
-            record_error_audit(
-                context.auth,
-                context.state,
-                context.request_id,
-                McpAuditActionKind::CreateWorkspace,
-                McpAuditScope::default(),
-                &error,
-                json!({ "tool": "create_workspace" }),
             )
             .await;
             tool_error_result(error)
@@ -225,19 +243,6 @@ async fn create_library(context: ToolCallContext<'_>, arguments: &Value) -> McpT
                     }],
                 )
                 .await;
-                record_success_audit(
-                    context.auth,
-                    context.state,
-                    context.request_id,
-                    McpAuditActionKind::CreateLibrary,
-                    McpAuditScope {
-                        workspace_id: Some(payload.workspace_id),
-                        library_id: Some(payload.library_id),
-                        document_id: None,
-                    },
-                    json!({ "tool": "create_library" }),
-                )
-                .await;
                 ok_tool_result("Library created.", json!({ "library": payload }))
             }
             Err(error) => {
@@ -273,20 +278,6 @@ async fn create_library(context: ToolCallContext<'_>, arguments: &Value) -> McpT
                         .collect(),
                 )
                 .await;
-                record_error_audit(
-                    context.auth,
-                    context.state,
-                    context.request_id,
-                    McpAuditActionKind::CreateLibrary,
-                    McpAuditScope {
-                        workspace_id: workspace_scope.as_ref().map(|workspace| workspace.id),
-                        library_id: None,
-                        document_id: None,
-                    },
-                    &error,
-                    json!({ "tool": "create_library" }),
-                )
-                .await;
                 tool_error_result(error)
             }
         },
@@ -305,16 +296,6 @@ async fn create_library(context: ToolCallContext<'_>, arguments: &Value) -> McpT
                 Vec::new(),
             )
             .await;
-            record_error_audit(
-                context.auth,
-                context.state,
-                context.request_id,
-                McpAuditActionKind::CreateLibrary,
-                McpAuditScope::default(),
-                &error,
-                json!({ "tool": "create_library" }),
-            )
-            .await;
             tool_error_result(error)
         }
     }
@@ -323,78 +304,98 @@ async fn create_library(context: ToolCallContext<'_>, arguments: &Value) -> McpT
 async fn list_workspaces(context: ToolCallContext<'_>) -> McpToolResult {
     match crate::services::mcp::access::visible_workspaces(context.auth, context.state).await {
         Ok(payload) => {
-            record_success_audit(
-                context.auth,
-                context.state,
-                context.request_id,
-                McpAuditActionKind::ListWorkspaces,
-                McpAuditScope {
-                    workspace_id: context.auth.workspace_id,
-                    library_id: None,
-                    document_id: None,
-                },
-                json!({
-                    "tool": "list_workspaces",
-                    "workspaceCount": payload.len(),
-                }),
-            )
-            .await;
             ok_tool_result("Visible workspaces loaded.", json!({ "workspaces": payload }))
         }
-        Err(error) => {
-            record_error_audit(
-                context.auth,
-                context.state,
-                context.request_id,
-                McpAuditActionKind::ListWorkspaces,
-                McpAuditScope {
-                    workspace_id: context.auth.workspace_id,
-                    library_id: None,
-                    document_id: None,
-                },
-                &error,
-                json!({ "tool": "list_workspaces" }),
-            )
-            .await;
-            tool_error_result(error)
+        Err(error) => tool_error_result(error),
+    }
+}
+
+async fn update_workspace(context: ToolCallContext<'_>, arguments: &Value) -> McpToolResult {
+    match parse_tool_args::<McpUpdateWorkspaceRequest>(arguments.clone()) {
+        Ok(args) => {
+            match crate::services::mcp::access::update_workspace(context.auth, context.state, args)
+                .await
+            {
+                Ok(payload) => {
+                    record_canonical_mcp_audit(
+                        context.state,
+                        context.auth,
+                        context.request_id,
+                        "catalog.workspace.update",
+                        "succeeded",
+                        Some(format!("workspace {} updated", payload.name)),
+                        Some(format!(
+                            "principal {} updated workspace {} via MCP",
+                            context.auth.principal_id, payload.workspace_id
+                        )),
+                        vec![AppendAuditEventSubjectCommand {
+                            subject_kind: "workspace".to_string(),
+                            subject_id: payload.workspace_id,
+                            workspace_id: Some(payload.workspace_id),
+                            library_id: None,
+                            document_id: None,
+                        }],
+                    )
+                    .await;
+                    ok_tool_result("Workspace updated.", json!({ "workspace": payload }))
+                }
+                Err(error) => tool_error_result(error),
+            }
         }
+        Err(error) => tool_error_result(error),
+    }
+}
+
+async fn update_library(context: ToolCallContext<'_>, arguments: &Value) -> McpToolResult {
+    match parse_tool_args::<McpUpdateLibraryRequest>(arguments.clone()) {
+        Ok(args) => {
+            match crate::services::mcp::access::update_library(context.auth, context.state, args)
+                .await
+            {
+                Ok(payload) => {
+                    record_canonical_mcp_audit(
+                        context.state,
+                        context.auth,
+                        context.request_id,
+                        "catalog.library.update",
+                        "succeeded",
+                        Some(format!("library {} updated", payload.name)),
+                        Some(format!(
+                            "principal {} updated library {} via MCP",
+                            context.auth.principal_id, payload.library_id
+                        )),
+                        vec![AppendAuditEventSubjectCommand {
+                            subject_kind: "library".to_string(),
+                            subject_id: payload.library_id,
+                            workspace_id: Some(payload.workspace_id),
+                            library_id: Some(payload.library_id),
+                            document_id: None,
+                        }],
+                    )
+                    .await;
+                    ok_tool_result("Library updated.", json!({ "library": payload }))
+                }
+                Err(error) => tool_error_result(error),
+            }
+        }
+        Err(error) => tool_error_result(error),
     }
 }
 
 async fn list_libraries(context: ToolCallContext<'_>, arguments: &Value) -> McpToolResult {
     match parse_tool_args::<McpListLibrariesRequest>(arguments.clone()) {
         Ok(args) => {
-            let workspace_scope = match args.workspace.as_deref() {
-                Some(workspace_ref) => {
-                    match crate::services::mcp::access::load_workspace_by_catalog_ref_for_discovery(
+            if let Some(workspace_ref) = args.workspace.as_deref()
+                && let Err(error) =
+                    crate::services::mcp::access::load_workspace_by_catalog_ref_for_discovery(
                         context.auth,
                         context.state,
                         workspace_ref,
                     )
                     .await
-                    {
-                        Ok(workspace) => Some(workspace.id),
-                        Err(error) => {
-                            record_error_audit(
-                                context.auth,
-                                context.state,
-                                context.request_id,
-                                McpAuditActionKind::ListLibraries,
-                                McpAuditScope {
-                                    workspace_id: context.auth.workspace_id,
-                                    library_id: None,
-                                    document_id: None,
-                                },
-                                &error,
-                                json!({ "tool": "list_libraries" }),
-                            )
-                            .await;
-                            return tool_error_result(error);
-                        }
-                    }
-                }
-                None => context.auth.workspace_id,
-            };
+            {
+                return tool_error_result(error);
+            }
             match crate::services::mcp::access::visible_libraries(
                 context.auth,
                 context.state,
@@ -403,59 +404,11 @@ async fn list_libraries(context: ToolCallContext<'_>, arguments: &Value) -> McpT
             .await
             {
                 Ok(payload) => {
-                    record_success_audit(
-                        context.auth,
-                        context.state,
-                        context.request_id,
-                        McpAuditActionKind::ListLibraries,
-                        McpAuditScope {
-                            workspace_id: workspace_scope,
-                            library_id: None,
-                            document_id: None,
-                        },
-                        json!({
-                            "tool": "list_libraries",
-                            "libraryCount": payload.len(),
-                        }),
-                    )
-                    .await;
                     ok_tool_result("Visible libraries loaded.", json!({ "libraries": payload }))
                 }
-                Err(error) => {
-                    record_error_audit(
-                        context.auth,
-                        context.state,
-                        context.request_id,
-                        McpAuditActionKind::ListLibraries,
-                        McpAuditScope {
-                            workspace_id: workspace_scope,
-                            library_id: None,
-                            document_id: None,
-                        },
-                        &error,
-                        json!({ "tool": "list_libraries" }),
-                    )
-                    .await;
-                    tool_error_result(error)
-                }
+                Err(error) => tool_error_result(error),
             }
         }
-        Err(error) => {
-            record_error_audit(
-                context.auth,
-                context.state,
-                context.request_id,
-                McpAuditActionKind::ListLibraries,
-                McpAuditScope {
-                    workspace_id: context.auth.workspace_id,
-                    library_id: None,
-                    document_id: None,
-                },
-                &error,
-                json!({ "tool": "list_libraries" }),
-            )
-            .await;
-            tool_error_result(error)
-        }
+        Err(error) => tool_error_result(error),
     }
 }

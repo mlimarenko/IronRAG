@@ -88,6 +88,32 @@ Vector index rebuilds are the main memory spike. If you switch an embedding
 binding to a different dimension or rebuild a high-dimensional shard, run it in
 a maintenance window and raise the memory caps for million-row shards.
 
+## Filtered HNSW query bounds
+
+Vector relations are shared by dimension; library, embedding profile, and
+vector kind are logical filters inside the relation. pgvector therefore runs
+filtered HNSW searches with strict iterative scanning and explicit bounds:
+
+```text
+IRONRAG_PG_HNSW_EF_SEARCH=400
+IRONRAG_PG_HNSW_MAX_SCAN_TUPLES=50000
+IRONRAG_PG_HNSW_SCAN_MEM_MULTIPLIER=2
+IRONRAG_PG_HNSW_EXACT_FALLBACK_MAX_ROWS=10000
+```
+
+The runtime clamps these values to `1..10000`, `1..1000000`, `1..64`, and
+`0..100000` respectively. If an approximate scan returns fewer rows than the
+requested limit even though the logical-lane manifest contains enough rows,
+IronRAG emits a structured warning. Lanes no larger than the exact-fallback
+threshold receive one exact retry; `0` disables that retry. Larger lanes remain
+bounded and report the underfill instead of risking an unbounded sequential
+distance sort.
+
+Raise scan tuples or the memory multiplier only after comparing answer quality,
+query p95, and PostgreSQL memory. The scan-memory multiplier scales pgvector's
+use of `work_mem`, so increasing it across many concurrent searches can consume
+substantial database memory.
+
 ## Scaling ingest workers
 
 Ingest — extraction, chunking, embedding, and graph build — runs in a separate
@@ -121,6 +147,19 @@ IRONRAG_INGESTION_MAX_PARALLEL_JOBS_GLOBAL=4
 IRONRAG_INGESTION_MAX_PARALLEL_JOBS_PER_WORKSPACE=2
 IRONRAG_INGESTION_MAX_PARALLEL_JOBS_PER_LIBRARY=1
 ```
+
+The provider gateway applies a second, endpoint-scoped backpressure layer:
+
+```text
+IRONRAG_PROVIDER_CONCURRENCY_MAX_OUTBOUND=16
+IRONRAG_PROVIDER_CONCURRENCY_QUERY_RESERVED=4
+IRONRAG_PROVIDER_CONCURRENCY_ACQUIRE_TIMEOUT_MS=30000
+```
+
+Ingest can use only the shared 12 permits, so it cannot starve interactive
+queries. Permit waits are bounded and fail closed. `0`/`0` is the only valid
+unlimited configuration; a reserve equal to the maximum is rejected at
+startup because it would deadlock ingest.
 
 Each worker also applies a memory-derived local claim cap from its cgroup soft
 limit before it asks Postgres for more canonical ingest jobs. This keeps

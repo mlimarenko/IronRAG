@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-pub const OPENAI_COMPATIBLE_RUNTIME_KIND: &str = "openai_compatible";
+pub(crate) const OPENAI_COMPATIBLE_RUNTIME_KIND: &str = "openai_compatible";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
@@ -23,6 +23,55 @@ pub enum ProviderStructuredOutputMode {
     JsonObject,
     PromptOnlyJsonObject,
     Unsupported,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderSamplingPolicy {
+    #[default]
+    Forward,
+    Omit,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderToolChoicePolicy {
+    #[default]
+    RequiredCapable,
+    AutoOnly,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ProviderRequestPolicy {
+    #[serde(default)]
+    pub sampling: ProviderSamplingPolicy,
+    #[serde(default)]
+    pub tool_choice: ProviderToolChoicePolicy,
+    #[serde(default)]
+    pub default_tool_max_output_tokens: Option<i32>,
+}
+
+impl ProviderRequestPolicy {
+    #[must_use]
+    pub const fn is_valid(self) -> bool {
+        match self.default_tool_max_output_tokens {
+            Some(value) => value > 0,
+            None => true,
+        }
+    }
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderUsagePolicy {
+    /// Select token accounting only from formal usage-payload fields.
+    #[default]
+    AutoDetect,
+    /// Cached input is reported as a subset of total request input.
+    CachedSubsetOfInput,
+    /// Cache-read and cache-write counters are disjoint from ordinary input.
+    DisjointCacheCounters,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
@@ -120,7 +169,7 @@ pub struct ProviderCapabilities {
     pub model_discovery: ProviderCapabilityState,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ProviderProfile {
     pub runtime: ProviderRuntimeProfile,
@@ -129,44 +178,15 @@ pub struct ProviderProfile {
     pub model_discovery: ProviderModelDiscovery,
     pub capabilities: ProviderCapabilities,
     #[serde(default)]
+    pub request_policy: ProviderRequestPolicy,
+    #[serde(default)]
+    pub usage_policy: ProviderUsagePolicy,
+    #[serde(default)]
     pub ui_hints: serde_json::Value,
 }
-
-use crate::domains::ai::AiBindingPurpose;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct ProviderModelSelection {
     pub provider_kind: String,
     pub model_name: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
-pub struct EffectiveProviderProfile {
-    pub indexing: ProviderModelSelection,
-    pub embedding: ProviderModelSelection,
-    pub query_retrieve: ProviderModelSelection,
-    pub query_compile: ProviderModelSelection,
-    pub answer: ProviderModelSelection,
-    /// Optional: vision binding is only exercised for multimodal
-    /// ingest paths (PDFs with embedded images, screenshots). Text-only
-    /// libraries and local-Ollama setups without a vision-capable
-    /// model must stay operational.
-    pub vision: Option<ProviderModelSelection>,
-}
-
-impl EffectiveProviderProfile {
-    #[must_use]
-    pub const fn selection_for_binding_purpose(
-        &self,
-        binding_purpose: AiBindingPurpose,
-    ) -> Option<&ProviderModelSelection> {
-        match binding_purpose {
-            AiBindingPurpose::ExtractText | AiBindingPurpose::ExtractGraph => Some(&self.indexing),
-            AiBindingPurpose::EmbedChunk => Some(&self.embedding),
-            AiBindingPurpose::QueryRetrieve => Some(&self.query_retrieve),
-            AiBindingPurpose::QueryCompile => Some(&self.query_compile),
-            AiBindingPurpose::QueryAnswer | AiBindingPurpose::Agent => Some(&self.answer),
-            AiBindingPurpose::Vision => self.vision.as_ref(),
-        }
-    }
 }

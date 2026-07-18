@@ -74,102 +74,140 @@ pub(super) fn collect_technical_literal_groups(
         max_total_chunks,
         max_chunks_per_document,
     ) {
-        let group_index = groups
-            .iter()
-            .position(|group| group.document_label == chunk.document_label)
-            .unwrap_or_else(|| {
-                groups.push(TechnicalLiteralDocumentGroup::new(chunk.document_label.clone()));
-                groups.len() - 1
-            });
-        let group = &mut groups[group_index];
-        let focused_source_text =
-            focused_excerpt_for(&chunk.source_text, &literal_focus_keywords, 900);
-        let literal_source_text = if focused_source_text.trim().is_empty() {
-            chunk.source_text.as_str()
-        } else {
-            focused_source_text.as_str()
-        };
-        if group.matched_excerpt.is_none() {
-            let excerpt = chunk.excerpt.trim();
-            let focused = focused_source_text.trim();
-            if !excerpt.is_empty() {
-                let mut matched = excerpt.to_string();
-                if !focused.is_empty() && focused != excerpt {
-                    matched.push_str(" Focused literal excerpt: ");
-                    matched.push_str(focused);
-                }
-                group.matched_excerpt = Some(matched);
-            } else if !focused.is_empty() {
-                group.matched_excerpt = Some(focused.to_string());
-            }
-        }
-
-        if intent.wants_urls {
-            for value in extract_url_literals(literal_source_text, 6) {
-                push_unique_limited(&mut group.urls, &mut group.url_seen, value, 6);
-            }
-            if group.urls.len() < 6 {
-                for value in extract_url_literals(&chunk.source_text, 6) {
-                    push_unique_limited(&mut group.urls, &mut group.url_seen, value, 6);
-                }
-            }
-        }
-        if intent.wants_prefixes {
-            for value in extract_prefix_literals(literal_source_text, 6) {
-                push_unique_limited(&mut group.prefixes, &mut group.prefix_seen, value, 6);
-            }
-            if group.prefixes.len() < 6 {
-                for value in extract_prefix_literals(&chunk.source_text, 6) {
-                    push_unique_limited(&mut group.prefixes, &mut group.prefix_seen, value, 6);
-                }
-            }
-        }
-        if intent.wants_paths {
-            for value in extract_explicit_path_literals(literal_source_text, 10) {
-                push_unique_limited(&mut group.paths, &mut group.path_seen, value, 10);
-            }
-            if group.paths.len() < 10 {
-                for value in extract_explicit_path_literals(&chunk.source_text, 10) {
-                    push_unique_limited(&mut group.paths, &mut group.path_seen, value, 10);
-                }
-            }
-        }
-        if intent.wants_methods {
-            for value in extract_http_methods(literal_source_text, 5) {
-                push_unique_limited(&mut group.methods, &mut group.method_seen, value, 5);
-            }
-            if group.methods.len() < 5 {
-                for value in extract_http_methods(&chunk.source_text, 5) {
-                    push_unique_limited(&mut group.methods, &mut group.method_seen, value, 5);
-                }
-            }
-        }
-        if intent.wants_parameters {
-            for value in extract_config_section_literals(literal_source_text, 12) {
-                push_unique_limited(&mut group.sections, &mut group.section_seen, value, 12);
-            }
-            if group.sections.len() < 12 {
-                for value in extract_config_section_literals(&chunk.source_text, 12) {
-                    push_unique_limited(&mut group.sections, &mut group.section_seen, value, 12);
-                }
-            }
-            for value in extract_parameter_literals(literal_source_text, 24) {
-                push_unique_limited(&mut group.parameters, &mut group.parameter_seen, value, 24);
-            }
-            if group.parameters.len() < 24 {
-                for value in extract_parameter_literals(&chunk.source_text, 24) {
-                    push_unique_limited(
-                        &mut group.parameters,
-                        &mut group.parameter_seen,
-                        value,
-                        24,
-                    );
-                }
-            }
-        }
+        collect_technical_literals_from_chunk(&mut groups, chunk, &literal_focus_keywords, intent);
     }
 
     groups.into_iter().filter(|group| group.has_any()).collect()
+}
+
+fn collect_technical_literals_from_chunk(
+    groups: &mut Vec<TechnicalLiteralDocumentGroup>,
+    chunk: &RuntimeMatchedChunk,
+    literal_focus_keywords: &[String],
+    intent: TechnicalLiteralIntent,
+) {
+    let group_index = groups
+        .iter()
+        .position(|group| group.document_label == chunk.document_label)
+        .unwrap_or_else(|| {
+            groups.push(TechnicalLiteralDocumentGroup::new(chunk.document_label.clone()));
+            groups.len() - 1
+        });
+    let group = &mut groups[group_index];
+    let focused_source_text = focused_excerpt_for(&chunk.source_text, literal_focus_keywords, 900);
+    let literal_source_text = if focused_source_text.trim().is_empty() {
+        chunk.source_text.as_str()
+    } else {
+        focused_source_text.as_str()
+    };
+    populate_matched_literal_excerpt(group, chunk, &focused_source_text);
+    if intent.wants_urls {
+        collect_literal_values(
+            extract_url_literals,
+            literal_source_text,
+            &chunk.source_text,
+            &mut group.urls,
+            &mut group.url_seen,
+            6,
+        );
+    }
+    if intent.wants_prefixes {
+        collect_literal_values(
+            extract_prefix_literals,
+            literal_source_text,
+            &chunk.source_text,
+            &mut group.prefixes,
+            &mut group.prefix_seen,
+            6,
+        );
+    }
+    if intent.wants_paths {
+        collect_literal_values(
+            extract_explicit_path_literals,
+            literal_source_text,
+            &chunk.source_text,
+            &mut group.paths,
+            &mut group.path_seen,
+            10,
+        );
+    }
+    if intent.wants_methods {
+        collect_literal_values(
+            extract_http_methods,
+            literal_source_text,
+            &chunk.source_text,
+            &mut group.methods,
+            &mut group.method_seen,
+            5,
+        );
+    }
+    if intent.wants_parameters {
+        collect_parameter_literals(group, literal_source_text, &chunk.source_text);
+    }
+}
+
+fn populate_matched_literal_excerpt(
+    group: &mut TechnicalLiteralDocumentGroup,
+    chunk: &RuntimeMatchedChunk,
+    focused_source_text: &str,
+) {
+    if group.matched_excerpt.is_some() {
+        return;
+    }
+    let excerpt = chunk.excerpt.trim();
+    let focused = focused_source_text.trim();
+    if excerpt.is_empty() {
+        group.matched_excerpt = (!focused.is_empty()).then(|| focused.to_string());
+        return;
+    }
+    let mut matched = excerpt.to_string();
+    if !focused.is_empty() && focused != excerpt {
+        matched.push_str(" Focused literal excerpt: ");
+        matched.push_str(focused);
+    }
+    group.matched_excerpt = Some(matched);
+}
+
+fn collect_literal_values(
+    extractor: fn(&str, usize) -> Vec<String>,
+    primary_text: &str,
+    fallback_text: &str,
+    values: &mut Vec<String>,
+    seen: &mut HashSet<String>,
+    limit: usize,
+) {
+    for value in extractor(primary_text, limit) {
+        push_unique_limited(values, seen, value, limit);
+    }
+    if values.len() >= limit {
+        return;
+    }
+    for value in extractor(fallback_text, limit) {
+        push_unique_limited(values, seen, value, limit);
+    }
+}
+
+fn collect_parameter_literals(
+    group: &mut TechnicalLiteralDocumentGroup,
+    primary_text: &str,
+    fallback_text: &str,
+) {
+    collect_literal_values(
+        extract_config_section_literals,
+        primary_text,
+        fallback_text,
+        &mut group.sections,
+        &mut group.section_seen,
+        12,
+    );
+    collect_literal_values(
+        extract_parameter_literals,
+        primary_text,
+        fallback_text,
+        &mut group.parameters,
+        &mut group.parameter_seen,
+        24,
+    );
 }
 
 fn technical_literal_group_chunks_per_document(
@@ -321,7 +359,10 @@ mod tests {
             "[Main]\nalphaMerchantId = 10\nsecretKey = value\npollInterval = 30",
         ));
         let mut query_ir = test_query_ir();
-        query_ir.target_types = vec!["config_key".to_string(), "configuration_file".to_string()];
+        query_ir.target_types = vec![
+            crate::domains::query_ir::QueryTargetKind::ConfigKey,
+            crate::domains::query_ir::QueryTargetKind::ConfigurationFile,
+        ];
 
         let section = build_exact_technical_literals_section(
             "Alpha Connector configuration parameters",

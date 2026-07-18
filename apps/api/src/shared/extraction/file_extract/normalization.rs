@@ -3,7 +3,11 @@ use crate::shared::extraction::{
     text_render::normalize_for_structured_preparation,
 };
 
-use super::*;
+use super::{
+    EXTRACTION_QUALITY_KEY, ExtractionNormalizationStatus, ExtractionStructureHints,
+    RecognitionCapability, RecognitionEngine, RecognitionProfile, UploadFileKind,
+    recognition_engine_ocr_source, with_recognition_source_map,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct NormalizedExtractedContent {
@@ -213,7 +217,7 @@ fn unescape_markdown_punctuation(content_text: &str) -> String {
     output
 }
 
-fn is_markdown_escaped_punctuation(ch: char) -> bool {
+const fn is_markdown_escaped_punctuation(ch: char) -> bool {
     matches!(
         ch,
         '\\' | '`'
@@ -247,75 +251,8 @@ fn decode_common_text_entities(content_text: &str) -> String {
 
 fn normalize_image_ocr_text(content_text: &str) -> String {
     let normalized_newlines = content_text.replace("\r\n", "\n").replace('\r', "\n");
-    let lines = normalized_newlines.lines().map(str::trim).collect::<Vec<_>>();
-    if lines.is_empty() {
-        return String::new();
-    }
-
-    let mut start = 0usize;
-    while start < lines.len() {
-        let line = lines[start];
-        if line.is_empty() {
-            start += 1;
-            continue;
-        }
-        if is_ocr_wrapper_line(line) {
-            start += 1;
-            continue;
-        }
-        break;
-    }
-
-    let cleaned = lines[start..]
-        .iter()
-        .map(|line| strip_wrapper_label_prefix(line))
-        .collect::<Vec<_>>()
-        .join("\n");
-    let cleaned = cleaned.trim().trim_matches('`').trim().to_string();
-    if cleaned.is_empty() { content_text.trim().to_string() } else { cleaned }
-}
-
-fn is_ocr_wrapper_line(line: &str) -> bool {
-    let normalized = line.trim().trim_matches(':').to_ascii_lowercase();
-    matches!(
-        normalized.as_str(),
-        "transcription"
-            | "ocr"
-            | "ocr text"
-            | "recognized text"
-            | "recognized text from the image"
-            | "extracted text"
-            | "extracted text from the image"
-            | "text from the image"
-            | "visible text"
-    ) || (normalized.contains("image")
-        && (normalized.contains("extracted")
-            || normalized.contains("transcription")
-            || normalized.contains("recognized")
-            || normalized.contains("visible text")
-            || normalized.contains("readable text")
-            || normalized.contains("ocr")))
-}
-
-fn strip_wrapper_label_prefix(line: &str) -> String {
-    let trimmed = line.trim();
-    let lowercase = trimmed.to_ascii_lowercase();
-    for prefix in [
-        "transcription:",
-        "ocr:",
-        "ocr text:",
-        "recognized text:",
-        "recognized text from the image:",
-        "extracted text:",
-        "extracted text from the image:",
-        "text from the image:",
-        "visible text:",
-    ] {
-        if lowercase.starts_with(prefix) {
-            return trimmed[prefix.len()..].trim().to_string();
-        }
-    }
-    trimmed.to_string()
+    let lines = normalized_newlines.lines().map(|line| line.trim_end().to_string()).collect();
+    collapse_excess_blank_lines(lines).trim().to_string()
 }
 
 #[cfg(test)]
@@ -374,7 +311,7 @@ mod tests {
     }
 
     #[test]
-    fn image_normalization_rebuilds_hints_after_ocr_wrapper_cleanup() {
+    fn image_normalization_preserves_untyped_ocr_wrapper_text() {
         let content = "OCR text:\n\nVisible marker 42 ALPHA\\_TIMEOUT\\_MS\n\n<!-- image -->";
         let hints = build_text_layout_from_content(content).structure_hints;
 
@@ -385,10 +322,11 @@ mod tests {
             &hints,
         );
 
-        assert_eq!(normalized.source_text, "Visible marker 42 ALPHA_TIMEOUT_MS");
-        assert_eq!(normalized.normalized_text, "Visible marker 42 ALPHA_TIMEOUT_MS");
-        assert_eq!(normalized.structure_hints.lines.len(), 1);
-        assert_eq!(normalized.structure_hints.lines[0].text, "Visible marker 42 ALPHA_TIMEOUT_MS");
+        assert_eq!(normalized.source_text, "OCR text:\n\nVisible marker 42 ALPHA_TIMEOUT_MS");
+        assert_eq!(normalized.normalized_text, "OCR text:\n\nVisible marker 42 ALPHA_TIMEOUT_MS");
+        assert_eq!(normalized.structure_hints.lines.len(), 3);
+        assert_eq!(normalized.structure_hints.lines[0].text, "OCR text:");
+        assert_eq!(normalized.structure_hints.lines[2].text, "Visible marker 42 ALPHA_TIMEOUT_MS");
     }
 
     #[test]

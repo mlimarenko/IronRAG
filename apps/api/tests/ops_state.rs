@@ -203,7 +203,7 @@ impl OpsStateFixture {
                             .to_string(),
                     ),
                     text_checksum: Some(format!("text-checksum-{revision_id}")),
-                    text_state: "readable".to_string(),
+                    text_state: "text_readable".to_string(),
                     vector_state: "pending".to_string(),
                     graph_state: "pending".to_string(),
                     text_readable_at: Some(Utc::now()),
@@ -236,6 +236,7 @@ impl OpsStateFixture {
                 workspace_id: workspace.id,
                 library_id: library.id,
                 mutation_id: None,
+                mutation_item_id: None,
                 connector_id: None,
                 async_operation_id: None,
                 knowledge_document_id: Some(document_id),
@@ -257,6 +258,7 @@ impl OpsStateFixture {
                 workspace_id: workspace.id,
                 library_id: library.id,
                 mutation_id: None,
+                mutation_item_id: None,
                 connector_id: None,
                 async_operation_id: None,
                 knowledge_document_id: Some(document_id),
@@ -313,6 +315,7 @@ impl OpsStateFixture {
                 workspace_id: self.workspace_id,
                 library_id: self.library_id,
                 mutation_id: None,
+                mutation_item_id: None,
                 connector_id: None,
                 async_operation_id: None,
                 knowledge_document_id: None,
@@ -822,11 +825,11 @@ fn sample_document_summary(
         readiness: Some(ContentRevisionReadiness {
             revision_id,
             text_state: "text_readable".to_string(),
-            vector_state: "vector_ready".to_string(),
+            vector_state: "ready".to_string(),
             graph_state: if graph_coverage_kind == "graph_ready" {
-                "graph_ready".to_string()
+                "ready".to_string()
             } else {
-                "pending".to_string()
+                "processing".to_string()
             },
             text_readable_at: Some(Utc::now()),
             vector_ready_at: Some(Utc::now()),
@@ -888,7 +891,7 @@ fn canonical_document_knowledge_state_classifies_all_five_readiness_kinds() {
     assert_eq!(graph_sparse.graph_coverage_kind, "graph_sparse");
 
     let graph_ready = service.classify_document_knowledge_state(
-        Some(&sample_revision_row("text_readable", "vector_ready", "graph_ready")),
+        Some(&sample_revision_row("text_readable", "vector_ready", "ready")),
         Some(&sample_prepared_revision("prepared", 10, 3)),
         None,
         None,
@@ -897,7 +900,7 @@ fn canonical_document_knowledge_state_classifies_all_five_readiness_kinds() {
     assert_eq!(graph_ready.graph_coverage_kind, "graph_ready");
 
     let legacy_ready_without_prepared_revision = service.classify_document_knowledge_state(
-        Some(&sample_revision_row("text_readable", "vector_ready", "graph_ready")),
+        Some(&sample_revision_row("text_readable", "vector_ready", "ready")),
         None,
         None,
         None,

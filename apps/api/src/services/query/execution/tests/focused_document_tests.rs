@@ -217,7 +217,7 @@ fn build_focused_document_answer_abstains_for_procedural_config_ir() {
 }
 
 #[test]
-fn build_focused_document_answer_extracts_formats_under_test() {
+fn build_focused_document_answer_abstains_from_formats_without_typed_evidence() {
     let document_id = Uuid::now_v7();
     let answer = build_focused_document_answer(
             "Which formats are explicitly listed under test in the PDF smoke fixture?",
@@ -235,7 +235,70 @@ fn build_focused_document_answer_extracts_formats_under_test() {
                 source_text: "IronRAG PDF smoke fixture\n\nExpected formats under test: PDF, DOCX, PPTX, PNG, JPG.".to_string(),
             }],
         );
-    assert_eq!(answer.as_deref(), Some("PDF, DOCX, PPTX, PNG, JPG."));
+    assert!(answer.is_none());
+}
+
+#[test]
+fn build_focused_document_answer_does_not_classify_untyped_headings_by_english_prefix() {
+    for heading in ["Source: visible heading", "Source type: visible heading"] {
+        let document_id = Uuid::now_v7();
+        let answer = build_focused_document_answer(
+            "What is the primary heading?",
+            &query_ir_with_scope_and_target_types(QueryScope::SingleDocument, ["primary_heading"]),
+            &[RuntimeMatchedChunk {
+                chunk_id: Uuid::now_v7(),
+                revision_id: Uuid::now_v7(),
+                chunk_index: 0,
+                chunk_kind: None,
+                document_id,
+                document_label: "neutral-document.md".to_string(),
+                excerpt: heading.to_string(),
+                score_kind: crate::services::query::execution::RuntimeChunkScoreKind::Relevance,
+                score: Some(1.0),
+                source_text: format!("{heading}\nFallback heading"),
+            }],
+        );
+
+        assert_eq!(answer.as_deref(), Some(heading));
+    }
+}
+
+#[test]
+fn build_focused_document_answer_excludes_typed_metadata_blocks_from_headings() {
+    let document_id = Uuid::now_v7();
+    let revision_id = Uuid::now_v7();
+    let answer = build_focused_document_answer(
+        "What is the primary heading?",
+        &query_ir_with_scope_and_target_types(QueryScope::SingleDocument, ["primary_heading"]),
+        &[
+            RuntimeMatchedChunk {
+                chunk_id: Uuid::now_v7(),
+                revision_id,
+                chunk_index: 0,
+                chunk_kind: Some("metadata_block".to_string()),
+                document_id,
+                document_label: "neutral-document.md".to_string(),
+                excerpt: "Opaque provenance record".to_string(),
+                score_kind: crate::services::query::execution::RuntimeChunkScoreKind::Relevance,
+                score: Some(1.0),
+                source_text: "Opaque provenance record".to_string(),
+            },
+            RuntimeMatchedChunk {
+                chunk_id: Uuid::now_v7(),
+                revision_id,
+                chunk_index: 1,
+                chunk_kind: Some("heading".to_string()),
+                document_id,
+                document_label: "neutral-document.md".to_string(),
+                excerpt: "Canonical heading".to_string(),
+                score_kind: crate::services::query::execution::RuntimeChunkScoreKind::Relevance,
+                score: Some(0.9),
+                source_text: "# Canonical heading".to_string(),
+            },
+        ],
+    );
+
+    assert_eq!(answer.as_deref(), Some("Canonical heading"));
 }
 
 #[test]
@@ -366,6 +429,75 @@ fn build_canonical_answer_context_does_not_filter_on_weak_document_focus() {
     assert!(context.contains("LLMs generate, summarize, translate, and reason over text."));
     assert!(context.contains("capability: `translate`"));
     assert!(!context.contains("Focused grounded document"));
+}
+
+#[test]
+fn build_canonical_answer_context_keeps_unfocused_procedure_variants_across_documents() {
+    let primary_document_id = Uuid::now_v7();
+    let secondary_document_id = Uuid::now_v7();
+    let mut query_ir = query_ir_with_act_scope_and_target_types(
+        QueryAct::ConfigureHow,
+        QueryScope::SingleDocument,
+        ["concept", "procedure"],
+    );
+    query_ir.target_entities =
+        vec![EntityMention { label: "Sample Connector".to_string(), role: EntityRole::Subject }];
+    query_ir.document_focus = None;
+
+    let context = build_canonical_answer_context(
+        "How do I configure Sample Connector?",
+        &query_ir,
+        None,
+        &CanonicalAnswerEvidence {
+            bundle: None,
+            chunk_rows: Vec::new(),
+            structured_blocks: Vec::new(),
+            technical_facts: Vec::new(),
+        },
+        &[
+            RuntimeMatchedChunk {
+                chunk_id: Uuid::now_v7(),
+                revision_id: Uuid::now_v7(),
+                chunk_index: 0,
+                chunk_kind: Some("paragraph".to_string()),
+                document_id: primary_document_id,
+                document_label: "Sample Connector Atlas setup".to_string(),
+                excerpt: "1. Install atlas-adapter.pkg.\n2. Set atlasMode=true.".to_string(),
+                score_kind: RuntimeChunkScoreKind::Relevance,
+                score: Some(10.0),
+                source_text: "1. Install atlas-adapter.pkg.\n2. Set atlasMode=true.".to_string(),
+            },
+            RuntimeMatchedChunk {
+                chunk_id: Uuid::now_v7(),
+                revision_id: Uuid::now_v7(),
+                chunk_index: 1,
+                chunk_kind: Some("paragraph".to_string()),
+                document_id: primary_document_id,
+                document_label: "Sample Connector Atlas setup".to_string(),
+                excerpt: "3. Run atlas-check --strict.".to_string(),
+                score_kind: RuntimeChunkScoreKind::Relevance,
+                score: Some(9.0),
+                source_text: "3. Run atlas-check --strict.".to_string(),
+            },
+            RuntimeMatchedChunk {
+                chunk_id: Uuid::now_v7(),
+                revision_id: Uuid::now_v7(),
+                chunk_index: 0,
+                chunk_kind: Some("paragraph".to_string()),
+                document_id: secondary_document_id,
+                document_label: "Sample Connector Boreal setup".to_string(),
+                excerpt: "1. Install boreal-adapter.pkg.\n2. Set borealMode=true.".to_string(),
+                score_kind: RuntimeChunkScoreKind::Relevance,
+                score: Some(1.0),
+                source_text: "1. Install boreal-adapter.pkg.\n2. Set borealMode=true.".to_string(),
+            },
+        ],
+        &[],
+    );
+
+    assert!(!context.contains("Focused grounded document"), "{context}");
+    assert!(context.contains("atlas-adapter.pkg"), "{context}");
+    assert!(context.contains("boreal-adapter.pkg"), "{context}");
 }
 
 #[test]

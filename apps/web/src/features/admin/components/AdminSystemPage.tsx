@@ -1,28 +1,28 @@
-import { useTranslation } from 'react-i18next';
-import { Link } from 'react-router-dom';
-import { Code2, Languages, MonitorCog, Moon, Sun, Terminal } from 'lucide-react';
+import { useTranslation } from 'react-i18next'
+import { Link } from 'react-router-dom'
+import { Code2, Languages, MonitorCog, Moon, Sun, Terminal } from 'lucide-react'
 
-import { Button } from '@/shared/components/ui/button';
-import { Label } from '@/shared/components/ui/label';
-import { PageHeader } from '@/shared/components/layout/PageHeader';
-import { PageShell } from '@/shared/components/layout/PageShell';
+import { Button } from '@/shared/components/ui/button'
+import { Label } from '@/shared/components/ui/label'
+import { PageHeader } from '@/shared/components/layout/PageHeader'
+import { PageShell } from '@/shared/components/layout/PageShell'
 import {
   Select,
   SelectContent,
   SelectItem,
   SelectTrigger,
   SelectValue,
-} from '@/shared/components/ui/select';
-import { useApp } from '@/shared/contexts/app-context';
-import { usePreferences, type ThemePreference } from '@/shared/contexts/preferences-context';
-import { AVAILABLE_LOCALES } from '@/shared/types';
-import { McpConnectGuide } from './McpTab';
+} from '@/shared/components/ui/select'
+import { useApp } from '@/shared/contexts/app-context'
+import { usePreferences, type ThemePreference } from '@/shared/contexts/preferences-context'
+import { AVAILABLE_LOCALES } from '@/shared/types'
+import { McpConnectGuide } from './McpTab'
 
 const THEME_OPTIONS: { value: ThemePreference; icon: typeof Sun }[] = [
   { value: 'light', icon: Sun },
   { value: 'dark', icon: Moon },
   { value: 'system', icon: MonitorCog },
-];
+]
 
 /**
  * `/admin/system` (NAV-08) — instance settings home. Absorbs the dissolved
@@ -30,17 +30,14 @@ const THEME_OPTIONS: { value: ThemePreference; icon: typeof Sun }[] = [
  * theme + locale controls, the API explorer entry, and the build/version line.
  */
 export default function AdminSystemPage() {
-  const { t } = useTranslation();
-  const { locale, setLocale } = useApp();
-  const { theme, setTheme } = usePreferences();
+  const { t } = useTranslation()
+  const { locale, setLocale } = useApp()
+  const { theme, setTheme } = usePreferences()
 
   return (
     <PageShell
       header={
-        <PageHeader
-          title={t('admin.nav.system')}
-          description={t('admin.systemPage.subtitle')}
-        />
+        <PageHeader title={t('admin.nav.system')} description={t('admin.systemPage.subtitle')} />
       }
       bodyScroll="auto"
       bodyClassName="p-3 animate-fade-in sm:p-4"
@@ -76,8 +73,8 @@ export default function AdminSystemPage() {
           <p className="mb-2 text-xs text-muted-foreground">{t('admin.systemPage.themeDesc')}</p>
           <div className="inline-flex gap-1 rounded-md border bg-background p-0.5">
             {THEME_OPTIONS.map((option) => {
-              const Icon = option.icon;
-              const active = theme === option.value;
+              const Icon = option.icon
+              const active = theme === option.value
               return (
                 <button
                   key={option.value}
@@ -93,7 +90,7 @@ export default function AdminSystemPage() {
                   <Icon className="h-3.5 w-3.5" />
                   {t(`admin.systemPage.theme.${option.value}`)}
                 </button>
-              );
+              )
             })}
           </div>
         </div>
@@ -104,7 +101,9 @@ export default function AdminSystemPage() {
             <Code2 className="h-4 w-4 text-muted-foreground" />
             <Label className="text-sm font-bold">{t('admin.systemPage.developerTitle')}</Label>
           </div>
-          <p className="mb-3 text-xs text-muted-foreground">{t('admin.systemPage.developerDesc')}</p>
+          <p className="mb-3 text-xs text-muted-foreground">
+            {t('admin.systemPage.developerDesc')}
+          </p>
           <Button asChild size="sm" variant="outline">
             <Link to="/swagger">
               <Code2 className="mr-1.5 h-3.5 w-3.5" />
@@ -123,8 +122,7 @@ export default function AdminSystemPage() {
           <p className="mb-3 text-xs text-muted-foreground">{t('admin.systemPage.mcpDesc')}</p>
           <McpConnectGuide t={t} />
         </div>
-
       </div>
     </PageShell>
-  );
+  )
 }

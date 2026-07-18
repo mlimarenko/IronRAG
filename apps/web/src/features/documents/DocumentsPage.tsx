@@ -1,15 +1,15 @@
-import { useTranslation } from "react-i18next";
+import { useTranslation } from 'react-i18next'
 
-import { FeatureErrorBoundary } from "@/shared/components/FeatureErrorBoundary";
+import { FeatureErrorBoundary } from '@/shared/components/FeatureErrorBoundary'
 
-import { DocumentsPage as DocumentsPageShell } from "./components/documents-page/DocumentsPage";
+import { DocumentsPage as DocumentsPageShell } from './components/documents-page/DocumentsPage'
 
 export default function DocumentsPage() {
-  const { t } = useTranslation();
+  const { t } = useTranslation()
 
   return (
-    <FeatureErrorBoundary feature={t("documents.title")}>
+    <FeatureErrorBoundary feature={t('documents.title')}>
       <DocumentsPageShell />
     </FeatureErrorBoundary>
-  );
+  )
 }

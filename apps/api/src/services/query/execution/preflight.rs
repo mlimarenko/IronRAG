@@ -1,13 +1,27 @@
 use std::collections::{HashMap, HashSet};
 
-use anyhow::Context;
 use uuid::Uuid;
 
+#[path = "preflight_setup_structured_stage.rs"]
+pub(super) mod setup_structured_stage;
+
+use setup_structured_stage::augment_setup_preflight_structured_blocks;
+
+use super::answer::{
+    augment_deterministic_grounded_answer_with_evidence,
+    build_setup_configuration_anchor_candidate, build_update_procedure_sequence_answer,
+};
 use super::answer_kind::AnswerKind;
+pub(super) use super::preflight_context::{
+    extend_setup_preflight_chunks_from_setup_lanes,
+    extend_setup_preflight_chunks_from_structured_context,
+};
 use crate::{
     app::state::AppState,
-    domains::query_ir::{QueryAct, QueryIR, QueryScope, literal_text_is_identifier_shaped},
-    infra::knowledge_rows::{KnowledgeDocumentRow, KnowledgeStructuredBlockRow},
+    domains::query_ir::{
+        QueryAct, QueryIR, QueryScope, QueryTargetKind, literal_text_is_identifier_shaped,
+    },
+    infra::knowledge_rows::KnowledgeDocumentRow,
     services::query::{
         effective_query::{current_question_segment, structured_current_question_segment},
         planner::QueryIntentProfile,
@@ -17,18 +31,16 @@ use crate::{
 
 use super::{
     CanonicalAnswerEvidence, PreparedAnswerQueryResult, RuntimeChunkScoreKind, RuntimeMatchedChunk,
-    augment_deterministic_grounded_answer_with_evidence, build_canonical_answer_context,
-    build_deterministic_grounded_answer, build_missing_explicit_document_answer,
-    build_setup_configuration_anchor_candidate, build_update_procedure_sequence_answer,
-    load_canonical_answer_chunks, load_canonical_answer_evidence,
-    load_direct_targeted_table_answer, load_document_index,
+    build_canonical_answer_context, build_deterministic_grounded_answer,
+    build_missing_explicit_document_answer, load_canonical_answer_chunks,
+    load_canonical_answer_evidence, load_direct_targeted_table_answer, load_document_index,
     question_intent::{QuestionIntent, classify_query_ir_intents, has_question_intent},
     question_intent::{
-        canonical_target_type_tag, query_ir_has_focused_document_answer_intent,
+        query_ir_has_focused_document_answer_intent,
         query_ir_targets_graph_entities_or_relationships,
     },
     question_requests_multi_document_scope,
-    retrieve::{canonical_document_revision_id, merge_chunks, score_value},
+    retrieve::{merge_chunks, score_value},
     technical_literals::{
         TechnicalLiteralIntent, document_local_focus_keywords, extract_explicit_path_literals,
         extract_package_command_literals, extract_parameter_literals,
@@ -36,8 +48,6 @@ use super::{
         technical_literal_candidate_limit, technical_literal_focus_keywords,
     },
 };
-
-const SETUP_PREFLIGHT_STRUCTURED_BLOCK_LIMIT: usize = 96;
 
 #[derive(Debug, Clone)]
 pub(super) struct CanonicalAnswerPreflight {
@@ -99,7 +109,6 @@ pub(super) async fn prepare_canonical_answer_preflight(
             scoped_document_ids.as_ref(),
         );
     } else if query_ir_requests_low_confidence_setup_preflight(
-        question,
         &prepared.query_ir,
         &prepared.structured.context_chunks,
     ) || query_ir_requests_structured_inventory_preflight(
@@ -111,6 +120,13 @@ pub(super) async fn prepare_canonical_answer_preflight(
             &mut preflight_answer_chunks,
             &prepared.structured.context_chunks,
             None,
+        );
+    } else if matches!(prepared.query_ir.act, QueryAct::ConfigureHow)
+        && preflight_answer_chunks.is_empty()
+    {
+        extend_setup_preflight_chunks_from_setup_lanes(
+            &mut preflight_answer_chunks,
+            &prepared.structured.context_chunks,
         );
     }
     let mut preflight_evidence = build_preflight_canonical_evidence_for_scope(
@@ -150,22 +166,28 @@ pub(super) async fn prepare_canonical_answer_preflight(
         &document_index,
         direct_targeted_table_answer.as_deref(),
     );
-    let answer_override = primary_answer_override
-        .or_else(|| {
-            build_update_procedure_sequence_answer(
+    let broad_procedure_requires_synthesis = broad_procedure_preflight_requires_synthesis(
+        question,
+        &prepared.query_ir,
+        &preflight_answer_chunks,
+    );
+    let answer_override = primary_answer_override.or_else(|| {
+        if broad_procedure_requires_synthesis {
+            return None;
+        }
+        build_update_procedure_sequence_answer(
+            question,
+            &prepared.query_ir,
+            &preflight_answer_chunks,
+        )
+        .map(|answer| {
+            let answer = augment_deterministic_grounded_answer_with_evidence(
+                answer,
                 question,
                 &prepared.query_ir,
                 &preflight_answer_chunks,
-            )
-            .map(|answer| {
-                let answer = augment_deterministic_grounded_answer_with_evidence(
-                    answer,
-                    question,
-                    &prepared.query_ir,
-                    &preflight_answer_chunks,
-                );
-                CanonicalAnswerOverride { answer, answer_kind: AnswerKind::UpdateProcedureSequence }
-            })
+            );
+            CanonicalAnswerOverride { answer, answer_kind: AnswerKind::UpdateProcedureSequence }
         })
         .or_else(|| {
             build_setup_configuration_anchor_answer_override(
@@ -188,13 +210,26 @@ pub(super) async fn prepare_canonical_answer_preflight(
                 &preflight_evidence,
                 &preflight_answer_chunks,
             )
-        });
+        })
+    });
     Ok(CanonicalAnswerPreflight {
         canonical_answer_chunks: preflight_answer_chunks,
         canonical_evidence: preflight_evidence,
         prompt_context,
         answer_override,
     })
+}
+
+fn broad_procedure_preflight_requires_synthesis(
+    question: &str,
+    query_ir: &QueryIR,
+    chunks: &[RuntimeMatchedChunk],
+) -> bool {
+    if !query_ir.requests_broad_procedure_variant_coverage() {
+        return false;
+    }
+    build_setup_configuration_anchor_candidate(question, query_ir, chunks)
+        .is_some_and(|candidate| candidate.is_multi_variant())
 }
 
 fn build_setup_configuration_anchor_answer_override(
@@ -276,9 +311,58 @@ fn prepend_preflight_source_title_inventory(
 mod tests {
     use super::*;
     use crate::domains::query_ir::{
-        ConversationRefKind, DocumentHint, EntityMention, EntityRole, QueryLanguage, UnresolvedRef,
+        ConversationRefKind, DocumentHint, EntityMention, EntityRole, QueryLanguage,
+        QueryTargetKind, UnresolvedRef,
     };
     use crate::services::query::execution::consolidation::query_has_multi_document_setup_anchors;
+
+    #[test]
+    fn broad_multi_variant_procedure_requires_synthesis() {
+        let mut query_ir = query_ir(
+            QueryAct::ConfigureHow,
+            QueryScope::SingleDocument,
+            &["configuration_file", "config_key", "procedure"],
+        );
+        query_ir
+            .target_entities
+            .push(EntityMention { label: "Subject".to_string(), role: EntityRole::Subject });
+        let chunks = vec![
+            chunk(
+                "Subject Alpha setup",
+                "Install artifact-alpha in /opt/subject/alpha/alpha.ini and set primaryKey=true.",
+            ),
+            chunk(
+                "Subject Beta setup",
+                "Install artifact-beta in /opt/subject/beta/beta.conf and set secondaryKey=true.",
+            ),
+        ];
+
+        assert!(broad_procedure_preflight_requires_synthesis(
+            "how to configure Subject?",
+            &query_ir,
+            &chunks,
+        ));
+    }
+
+    #[test]
+    fn focused_procedure_keeps_deterministic_preflight_candidate() {
+        let mut query_ir = query_ir(
+            QueryAct::ConfigureHow,
+            QueryScope::SingleDocument,
+            &["configuration_file", "config_key", "procedure"],
+        );
+        query_ir.document_focus = Some(DocumentHint { hint: "Subject Alpha setup".to_string() });
+        let chunks = vec![chunk(
+            "Subject Alpha setup",
+            "Install artifact-alpha in /opt/subject/alpha/alpha.ini and set primaryKey=true.",
+        )];
+
+        assert!(!broad_procedure_preflight_requires_synthesis(
+            "how to configure Subject Alpha?",
+            &query_ir,
+            &chunks,
+        ));
+    }
 
     #[test]
     fn setup_configuration_anchor_override_skips_single_value_query() {
@@ -329,7 +413,7 @@ mod tests {
     }
 
     #[test]
-    fn setup_configuration_anchor_override_allows_multi_document_setup() {
+    fn setup_configuration_anchor_override_yields_multi_document_setup_to_synthesis() {
         let mut query_ir =
             query_ir(QueryAct::ConfigureHow, QueryScope::MultiDocument, &["package"]);
         query_ir
@@ -350,19 +434,18 @@ mod tests {
             ),
         ];
 
-        let answer = build_setup_configuration_anchor_answer_override(
-            "how to configure Subject?",
-            &query_ir,
-            &chunks,
-        )
-        .expect("multi-document setup override");
-
-        assert!(answer.contains("Subject Alpha setup"));
-        assert!(answer.contains("Subject Beta setup"));
+        assert!(
+            build_setup_configuration_anchor_answer_override(
+                "how to configure Subject?",
+                &query_ir,
+                &chunks,
+            )
+            .is_none()
+        );
     }
 
     #[test]
-    fn setup_configuration_anchor_override_allows_soft_multi_variant_setup() {
+    fn setup_configuration_anchor_override_yields_soft_multi_variant_setup_to_synthesis() {
         let mut query_ir =
             query_ir(QueryAct::ConfigureHow, QueryScope::MultiDocument, &["parameter"]);
         query_ir
@@ -384,16 +467,14 @@ mod tests {
         ];
 
         assert!(!query_has_multi_document_setup_anchors(&query_ir, &chunks));
-        let answer = build_setup_configuration_anchor_answer_override(
-            "how to configure Subject?",
-            &query_ir,
-            &chunks,
-        )
-        .expect("soft multi-variant setup override");
-
-        assert!(answer.contains("**Setup variants:**"));
-        assert!(answer.contains("Subject Alpha setup"));
-        assert!(answer.contains("Subject Beta setup"));
+        assert!(
+            build_setup_configuration_anchor_answer_override(
+                "how to configure Subject?",
+                &query_ir,
+                &chunks,
+            )
+            .is_none()
+        );
     }
 
     #[test]
@@ -512,7 +593,13 @@ mod tests {
             act,
             scope,
             language: QueryLanguage::Auto,
-            target_types: target_types.iter().map(|value| (*value).to_string()).collect(),
+            target_types: target_types
+                .iter()
+                .map(|value| {
+                    QueryTargetKind::from_wire(value)
+                        .expect("test target kind must use the wire enum")
+                })
+                .collect(),
             target_entities: Vec::new(),
             literal_constraints: Vec::new(),
             temporal_constraints: Vec::new(),
@@ -714,6 +801,7 @@ pub(super) fn select_technical_literal_chunks(
     };
     let focused_chunks = if technical_literal_intent.any()
         && question_prefers_single_exact_literal_scope(question, query_ir)
+        && !query_ir_requests_broad_procedure_variant_coverage(query_ir, chunks)
     {
         let focused_document_id = if setup_literal_context {
             select_setup_literal_document_id(question, query_ir, chunks)
@@ -775,15 +863,10 @@ pub(super) fn query_ir_requests_setup_literal_context(query_ir: &QueryIR) -> boo
         || !query_ir.target_entities.is_empty()
         || !query_ir.literal_constraints.is_empty()
         || !query_ir.conversation_refs.is_empty();
-    let requests_configuration = query_ir.target_types.iter().any(|target_type| {
-        matches!(
-            canonical_target_type_tag(target_type).as_str(),
-            "configuration_file" | "config_key"
-        )
-    });
-    let requests_module_or_parameter = query_ir.target_types.iter().any(|target_type| {
-        matches!(canonical_target_type_tag(target_type).as_str(), "package" | "parameter")
-    });
+    let requests_configuration =
+        query_ir.targets_any(&[QueryTargetKind::ConfigurationFile, QueryTargetKind::ConfigKey]);
+    let requests_module_or_parameter =
+        query_ir.targets_any(&[QueryTargetKind::Package, QueryTargetKind::Parameter]);
     if requests_configuration && requests_module_or_parameter {
         return true;
     }
@@ -796,15 +879,12 @@ pub(super) fn query_ir_requests_setup_literal_context(query_ir: &QueryIR) -> boo
 }
 
 pub(super) fn query_ir_requests_low_confidence_setup_preflight(
-    question: &str,
     query_ir: &QueryIR,
     context_chunks: &[RuntimeMatchedChunk],
 ) -> bool {
     (query_ir_low_confidence_unfocused_descriptive_setup(query_ir)
         || query_ir_low_confidence_structural_descriptive_setup(query_ir))
-        && context_chunks.iter().any(|chunk| {
-            low_confidence_context_chunk_requests_setup_bridge(question, query_ir, chunk)
-        })
+        && context_chunks.iter().any(low_confidence_context_chunk_requests_setup_bridge)
 }
 
 fn query_ir_requests_structured_inventory_preflight(
@@ -853,10 +933,7 @@ fn structured_inventory_preflight_focus_terms(
     query_ir: &QueryIR,
 ) -> HashSet<String> {
     let mut terms =
-        label_terms(&current_question_segment(question), 3).into_iter().collect::<HashSet<_>>();
-    for target_type in &query_ir.target_types {
-        terms.extend(label_terms(target_type, 2));
-    }
+        label_terms(current_question_segment(question), 3).into_iter().collect::<HashSet<_>>();
     for entity in &query_ir.target_entities {
         terms.extend(label_terms(&entity.label, 2));
     }
@@ -903,21 +980,23 @@ fn query_ir_low_confidence_structural_descriptive_setup(query_ir: &QueryIR) -> b
         && (!query_ir.target_entities.is_empty() || !query_ir.literal_constraints.is_empty())
 }
 
-fn low_confidence_context_chunk_requests_setup_bridge(
-    question: &str,
-    query_ir: &QueryIR,
-    chunk: &RuntimeMatchedChunk,
-) -> bool {
+fn low_confidence_context_chunk_requests_setup_bridge(chunk: &RuntimeMatchedChunk) -> bool {
     let text = format!("{}\n{}", chunk.excerpt, chunk.source_text);
     let setup_score = setup_literal_chunk_score(&text);
     setup_score.anchor_score > 0
         || (setup_score.total_score >= 3
             && chunk.score_kind == RuntimeChunkScoreKind::SourceContext)
-        || (chunk.score_kind == RuntimeChunkScoreKind::SourceContext
-            && technical_literal_focus_keywords(question, Some(query_ir))
-                .iter()
-                .any(|keyword| keyword.chars().count() < 4)
-            && !extract_parameter_literals(&text, 2).is_empty())
+}
+
+#[derive(Debug)]
+struct SetupLiteralDocumentCandidate {
+    document_id: Uuid,
+    label_score: usize,
+    setup_anchor_score: usize,
+    setup_score: usize,
+    best_chunk_signal: isize,
+    retrieval_score_sum: f32,
+    first_rank: usize,
 }
 
 fn select_setup_literal_document_id(
@@ -925,19 +1004,31 @@ fn select_setup_literal_document_id(
     query_ir: &QueryIR,
     chunks: &[RuntimeMatchedChunk],
 ) -> Option<Uuid> {
-    if chunks.is_empty() {
-        return None;
-    }
+    setup_literal_document_candidates(question, query_ir, chunks)
+        .first()
+        .map(|candidate| candidate.document_id)
+}
 
-    #[derive(Debug)]
-    struct SetupLiteralDocumentCandidate {
-        document_id: Uuid,
-        label_score: usize,
-        setup_anchor_score: usize,
-        setup_score: usize,
-        best_chunk_signal: isize,
-        retrieval_score_sum: f32,
-        first_rank: usize,
+fn select_setup_literal_document_ids(
+    question: &str,
+    query_ir: &QueryIR,
+    chunks: &[RuntimeMatchedChunk],
+    limit: usize,
+) -> Vec<Uuid> {
+    setup_literal_document_candidates(question, query_ir, chunks)
+        .into_iter()
+        .take(limit)
+        .map(|candidate| candidate.document_id)
+        .collect()
+}
+
+fn setup_literal_document_candidates(
+    question: &str,
+    query_ir: &QueryIR,
+    chunks: &[RuntimeMatchedChunk],
+) -> Vec<SetupLiteralDocumentCandidate> {
+    if chunks.is_empty() {
+        return Vec::new();
     }
 
     let label_keywords = preflight_target_label_keywords(query_ir);
@@ -996,9 +1087,6 @@ fn select_setup_literal_document_id(
             })
         })
         .collect::<Vec<_>>();
-    if candidates.is_empty() {
-        return None;
-    }
     if candidates.iter().any(|candidate| candidate.setup_anchor_score > 0) {
         candidates.retain(|candidate| candidate.setup_anchor_score > 0);
     } else if candidates.iter().any(|candidate| candidate.setup_score > 0) {
@@ -1016,8 +1104,7 @@ fn select_setup_literal_document_id(
             .then_with(|| left.first_rank.cmp(&right.first_rank))
             .then_with(|| left.document_id.cmp(&right.document_id))
     });
-
-    Some(candidates[0].document_id)
+    candidates
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -1192,12 +1279,23 @@ fn preflight_allows_empty_scope_fallback(_question: &str, query_ir: &QueryIR) ->
     query_ir.is_follow_up()
 }
 
+pub(super) fn query_ir_requests_broad_procedure_variant_coverage(
+    query_ir: &QueryIR,
+    chunks: &[RuntimeMatchedChunk],
+) -> bool {
+    query_ir.requests_broad_procedure_variant_coverage()
+        && chunks.iter().map(|chunk| chunk.document_id).collect::<HashSet<_>>().len() >= 2
+}
+
 pub(super) fn preflight_exact_literal_document_scope(
     question: &str,
     query_ir: &QueryIR,
     intent_profile: &QueryIntentProfile,
     technical_literal_chunks: &[RuntimeMatchedChunk],
 ) -> Option<HashSet<Uuid>> {
+    if query_ir_requests_broad_procedure_variant_coverage(query_ir, technical_literal_chunks) {
+        return None;
+    }
     if query_ir_has_focused_document_answer_intent(query_ir) {
         return None;
     }
@@ -1244,10 +1342,7 @@ fn query_ir_requests_transport_inventory_scope(query_ir: &QueryIR) -> bool {
     let intents = classify_query_ir_intents(query_ir);
     (has_question_intent(&intents, QuestionIntent::Port)
         && has_question_intent(&intents, QuestionIntent::Protocol))
-        || query_ir
-            .target_types
-            .iter()
-            .any(|target_type| target_type.trim().eq_ignore_ascii_case("connection"))
+        || query_ir.targets(QueryTargetKind::Connection)
 }
 
 fn query_ir_requests_open_descriptive_context(query_ir: &QueryIR) -> bool {
@@ -1346,8 +1441,8 @@ fn token_has_exact_preflight_scope_surface(token: &str) -> bool {
 
 fn query_ir_targets_multiple_technical_literal_families(query_ir: &QueryIR) -> bool {
     let mut families = HashSet::new();
-    for target_type in query_ir.target_types.iter().map(|value| value.trim().to_ascii_lowercase()) {
-        let Some(family) = technical_literal_target_family(&target_type) else {
+    for target_type in &query_ir.target_types {
+        let Some(family) = technical_literal_target_family(*target_type) else {
             continue;
         };
         families.insert(family);
@@ -1358,15 +1453,32 @@ fn query_ir_targets_multiple_technical_literal_families(query_ir: &QueryIR) -> b
     false
 }
 
-fn technical_literal_target_family(target_type: &str) -> Option<&'static str> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum TechnicalLiteralTargetFamily {
+    Interface,
+    Configuration,
+    Module,
+}
+
+const fn technical_literal_target_family(
+    target_type: QueryTargetKind,
+) -> Option<TechnicalLiteralTargetFamily> {
     match target_type {
-        "endpoint" | "url" | "path" | "wsdl" | "base_url" | "http_method" | "protocol" => {
-            Some("interface")
+        QueryTargetKind::Endpoint
+        | QueryTargetKind::Url
+        | QueryTargetKind::Path
+        | QueryTargetKind::Wsdl
+        | QueryTargetKind::BaseUrl
+        | QueryTargetKind::HttpMethod
+        | QueryTargetKind::Protocol => Some(TechnicalLiteralTargetFamily::Interface),
+        QueryTargetKind::ConfigurationFile
+        | QueryTargetKind::FilesystemPath
+        | QueryTargetKind::ConfigKey
+        | QueryTargetKind::Parameter
+        | QueryTargetKind::EnvVar => Some(TechnicalLiteralTargetFamily::Configuration),
+        QueryTargetKind::SoftwareModule | QueryTargetKind::Package => {
+            Some(TechnicalLiteralTargetFamily::Module)
         }
-        "configuration_file" | "filesystem_path" | "config_key" | "parameter" | "env_var" => {
-            Some("configuration")
-        }
-        "software_module" | "package" => Some("module"),
         _ => None,
     }
 }
@@ -1571,192 +1683,6 @@ fn build_preflight_answer_chunks_for_scope(
         }
         None => merged,
     }
-}
-
-pub(super) fn extend_setup_preflight_chunks_from_structured_context(
-    preflight_answer_chunks: &mut Vec<RuntimeMatchedChunk>,
-    structured_context_chunks: &[RuntimeMatchedChunk],
-    scoped_document_ids: Option<&HashSet<Uuid>>,
-) {
-    if structured_context_chunks.is_empty() {
-        return;
-    }
-    let mut seen_chunk_ids =
-        preflight_answer_chunks.iter().map(|chunk| chunk.chunk_id).collect::<HashSet<_>>();
-    let mut context_chunks = structured_context_chunks
-        .iter()
-        .filter(|chunk| {
-            scoped_document_ids
-                .map(|document_ids| document_ids.contains(&chunk.document_id))
-                .unwrap_or(true)
-        })
-        .filter(|chunk| seen_chunk_ids.insert(chunk.chunk_id))
-        .cloned()
-        .collect::<Vec<_>>();
-    context_chunks.sort_by(|left, right| {
-        left.document_label
-            .cmp(&right.document_label)
-            .then_with(|| left.chunk_index.cmp(&right.chunk_index))
-            .then_with(|| left.chunk_id.cmp(&right.chunk_id))
-    });
-    preflight_answer_chunks.extend(context_chunks);
-}
-
-async fn augment_setup_preflight_structured_blocks(
-    state: &AppState,
-    question: &str,
-    query_ir: &QueryIR,
-    document_index: &HashMap<Uuid, KnowledgeDocumentRow>,
-    preflight_answer_chunks: &[RuntimeMatchedChunk],
-    scoped_document_ids: Option<&HashSet<Uuid>>,
-    preflight_evidence: &mut CanonicalAnswerEvidence,
-) -> anyhow::Result<()> {
-    if !query_ir_requests_setup_literal_context(query_ir)
-        && !query_ir_requests_low_confidence_setup_preflight(
-            question,
-            query_ir,
-            preflight_answer_chunks,
-        )
-    {
-        return Ok(());
-    }
-    let Some(document_id) = setup_preflight_focused_document_id(
-        question,
-        query_ir,
-        preflight_answer_chunks,
-        scoped_document_ids,
-    ) else {
-        return Ok(());
-    };
-    let Some(revision_id) =
-        setup_preflight_revision_id(document_id, preflight_answer_chunks, document_index)
-    else {
-        return Ok(());
-    };
-
-    let revision_blocks = state
-        .document_store
-        .list_structured_blocks_by_revision(revision_id)
-        .await
-        .context("failed to load focused setup structured blocks for canonical preflight")?;
-    let loaded_block_count = revision_blocks.len();
-    let added_block_count = merge_setup_preflight_structured_blocks(
-        preflight_evidence,
-        document_id,
-        revision_blocks,
-        SETUP_PREFLIGHT_STRUCTURED_BLOCK_LIMIT,
-    );
-    if added_block_count > 0 {
-        tracing::info!(
-            stage = "answer.preflight.setup_structured_blocks",
-            %document_id,
-            %revision_id,
-            loaded_block_count,
-            added_block_count,
-            structured_block_count = preflight_evidence.structured_blocks.len(),
-            "focused setup structured blocks added to canonical preflight evidence"
-        );
-    }
-    Ok(())
-}
-
-fn setup_preflight_focused_document_id(
-    question: &str,
-    query_ir: &QueryIR,
-    preflight_answer_chunks: &[RuntimeMatchedChunk],
-    scoped_document_ids: Option<&HashSet<Uuid>>,
-) -> Option<Uuid> {
-    if let Some(document_ids) = scoped_document_ids
-        && document_ids.len() == 1
-    {
-        return document_ids.iter().next().copied();
-    }
-    select_setup_literal_document_id(question, query_ir, preflight_answer_chunks)
-}
-
-fn setup_preflight_revision_id(
-    document_id: Uuid,
-    preflight_answer_chunks: &[RuntimeMatchedChunk],
-    document_index: &HashMap<Uuid, KnowledgeDocumentRow>,
-) -> Option<Uuid> {
-    preflight_answer_chunks
-        .iter()
-        .find(|chunk| chunk.document_id == document_id)
-        .map(|chunk| chunk.revision_id)
-        .or_else(|| document_index.get(&document_id).and_then(canonical_document_revision_id))
-}
-
-pub(super) fn merge_setup_preflight_structured_blocks(
-    preflight_evidence: &mut CanonicalAnswerEvidence,
-    document_id: Uuid,
-    revision_blocks: Vec<KnowledgeStructuredBlockRow>,
-    limit: usize,
-) -> usize {
-    if limit == 0 {
-        return 0;
-    }
-    let mut selected = revision_blocks
-        .into_iter()
-        .filter(|block| block.document_id == document_id)
-        .filter_map(|block| {
-            let score = setup_preflight_structured_block_score(&block);
-            (score > 0).then_some((score, block.ordinal, block.block_id, block))
-        })
-        .collect::<Vec<_>>();
-    selected.sort_by(|left, right| {
-        right.0.cmp(&left.0).then_with(|| left.1.cmp(&right.1)).then_with(|| left.2.cmp(&right.2))
-    });
-    selected.truncate(limit);
-    selected.sort_by(|left, right| left.1.cmp(&right.1).then_with(|| left.2.cmp(&right.2)));
-
-    let mut seen_block_ids = preflight_evidence
-        .structured_blocks
-        .iter()
-        .map(|block| block.block_id)
-        .collect::<HashSet<_>>();
-    let before = preflight_evidence.structured_blocks.len();
-    preflight_evidence.structured_blocks.extend(
-        selected
-            .into_iter()
-            .map(|(_, _, _, block)| block)
-            .filter(|block| seen_block_ids.insert(block.block_id)),
-    );
-    preflight_evidence.structured_blocks.len().saturating_sub(before)
-}
-
-fn setup_preflight_structured_block_score(block: &KnowledgeStructuredBlockRow) -> usize {
-    let text = if block.normalized_text == block.text {
-        block.text.clone()
-    } else {
-        format!("{}\n{}", block.text, block.normalized_text)
-    };
-    let package_count = extract_package_command_literals(&text, 4).len();
-    let path_count = setup_literal_configuration_path_count(&text);
-    let assignment_count = setup_literal_assignment_count(&text);
-    let section_count = setup_literal_section_count(&text);
-    let parameter_count = extract_parameter_literals(&text, 32).len();
-    let block_kind = block.block_kind.as_str();
-    let kind_score: usize = if block_kind.contains("table_row") {
-        32
-    } else if block_kind.contains("table") {
-        18
-    } else if block_kind.contains("code") {
-        24
-    } else {
-        0
-    };
-    let has_structured_parameter = parameter_count > 0 && kind_score > 0;
-    let has_setup_signal =
-        package_count > 0 || path_count > 0 || assignment_count > 0 || section_count > 0;
-    if !has_setup_signal && !has_structured_parameter {
-        return 0;
-    }
-    kind_score
-        .saturating_add(package_count.saturating_mul(16))
-        .saturating_add(path_count.saturating_mul(24))
-        .saturating_add(assignment_count.saturating_mul(10))
-        .saturating_add(section_count.saturating_mul(8))
-        .saturating_add(parameter_count.saturating_mul(3))
 }
 
 fn build_preflight_canonical_evidence_for_scope(

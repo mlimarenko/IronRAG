@@ -112,13 +112,13 @@ fn parse_toml_keys(text: &str) -> Option<Vec<String>> {
 
 fn walk_toml(item: &toml_edit::Item, out: &mut Vec<String>) {
     if let Some(table) = item.as_table() {
-        for (k, v) in table.iter() {
+        for (k, v) in table {
             out.push(k.to_string());
             walk_toml(v, out);
         }
     } else if let Some(arr) = item.as_array_of_tables() {
-        for table in arr.iter() {
-            for (k, v) in table.iter() {
+        for table in arr {
+            for (k, v) in table {
                 out.push(k.to_string());
                 walk_toml(v, out);
             }

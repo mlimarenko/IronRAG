@@ -1,18 +1,18 @@
-import type { Meta, StoryObj } from "@storybook/react";
-import { Badge } from "./badge";
+import type { Meta, StoryObj } from '@storybook/react'
+import { Badge } from './badge'
 
 const meta = {
-  title: "UI/Badge",
+  title: 'UI/Badge',
   component: Badge,
   args: {
-    children: "Badge",
+    children: 'Badge',
   },
-} satisfies Meta<typeof Badge>;
+} satisfies Meta<typeof Badge>
 
-export default meta;
-type Story = StoryObj<typeof meta>;
+export default meta
+type Story = StoryObj<typeof meta>
 
-export const Default: Story = {};
+export const Default: Story = {}
 
 export const Variants: Story = {
   render: () => (
@@ -23,4 +23,4 @@ export const Variants: Story = {
       <Badge variant="outline">Outline</Badge>
     </div>
   ),
-};
+}

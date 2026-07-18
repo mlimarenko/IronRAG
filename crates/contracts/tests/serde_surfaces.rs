@@ -1,34 +1,49 @@
-#![allow(missing_docs)]
+use std::io;
 
-use chrono::{TimeZone, Utc};
+use chrono::{DateTime, TimeZone, Utc};
 use rust_decimal as _;
 use serde as _;
 use utoipa as _;
 use uuid::Uuid;
 
-type JsonResult = serde_json::Result<()>;
+type TestResult = Result<(), Box<dyn std::error::Error>>;
+
+fn utc_datetime(
+    year: i32,
+    month: u32,
+    day: u32,
+    hour: u32,
+    minute: u32,
+    second: u32,
+) -> Result<DateTime<Utc>, io::Error> {
+    Utc.with_ymd_and_hms(year, month, day, hour, minute, second)
+        .single()
+        .ok_or_else(|| io::Error::other("test fixture contains an invalid UTC date-time"))
+}
 
 use ironrag_contracts::{
     admin::{
         AdminCapabilityState, AdminSection, AdminSectionSummary, AdminSurface, AdminViewerSummary,
         CapabilityGate,
     },
+    ai::AiBindingPurpose,
     apiref::{ApiReferenceFormat, ApiReferenceStatus, ApiReferenceSurface},
     assistant::{
-        AssistantComposerState, AssistantEvidenceGroup, AssistantEvidenceItem,
-        AssistantSessionListItem, AssistantStageItem, AssistantWorkspaceSurface,
+        AssistantAnswerDisposition, AssistantComposerState, AssistantEvidenceGroup,
+        AssistantEvidenceItem, AssistantSessionListItem, AssistantStageItem,
+        AssistantWorkspaceSurface,
     },
     auth::{
-        AuthenticatedSession, BootstrapBindingPurpose, BootstrapStatus, LoginResponse, SessionMode,
-        SessionResolveResponse, SessionUser, UiLocale,
+        AuthenticatedSession, BootstrapStatus, LoginResponse, SessionMode, SessionResolveResponse,
+        SessionUser, UiLocale,
     },
     diagnostics::{
         DegradedState, DiagnosticCounter, MessageLevel, OperatorWarning, SurfaceDiagnostics,
         SurfaceHealth,
     },
     documents::{
-        DashboardAttentionItem, DashboardMetric, DashboardSurface, DocumentFilterState,
-        DocumentReadiness, DocumentStatus, DocumentSummary, DocumentsOverview, DocumentsSurface,
+        DashboardAttentionItem, DashboardSurface, DocumentFilterState, DocumentReadiness,
+        DocumentStatus, DocumentSummary, DocumentsOverview, DocumentsSurface,
         LibraryDocumentMetrics, WebIngestRunState, WebIngestRunSummary, WebRunCounts,
     },
     graph::{
@@ -42,10 +57,25 @@ use ironrag_contracts::{
 };
 
 #[test]
-fn session_resolve_response_uses_canonical_casing() -> JsonResult {
+fn assistant_answer_disposition_uses_additive_stable_vocabulary() -> TestResult {
+    for (disposition, expected) in [
+        (AssistantAnswerDisposition::NonTerminal, "non_terminal"),
+        (AssistantAnswerDisposition::FactualReady, "factual_ready"),
+        (AssistantAnswerDisposition::SafeFallback, "safe_fallback"),
+        (AssistantAnswerDisposition::Clarification, "clarification"),
+    ] {
+        let value = serde_json::to_value(disposition)?;
+        assert_eq!(value, expected);
+        assert_eq!(serde_json::from_value::<AssistantAnswerDisposition>(value)?, disposition);
+    }
+    Ok(())
+}
+
+#[test]
+fn session_resolve_response_uses_canonical_casing() -> TestResult {
     let session = AuthenticatedSession {
         session_id: Uuid::from_u128(1),
-        expires_at: Utc.with_ymd_and_hms(2026, 4, 4, 10, 0, 0).unwrap(),
+        expires_at: utc_datetime(2026, 4, 4, 10, 0, 0)?,
         user: SessionUser {
             principal_id: Uuid::from_u128(2),
             login: "operator".to_string(),
@@ -75,6 +105,22 @@ fn session_resolve_response_uses_canonical_casing() -> JsonResult {
 }
 
 #[test]
+fn query_compile_ai_binding_purpose_uses_canonical_vocabulary() -> TestResult {
+    let value = serde_json::to_value(AiBindingPurpose::QueryCompile)?;
+    assert_eq!(value, "query_compile");
+    assert_eq!(serde_json::from_value::<AiBindingPurpose>(value)?, AiBindingPurpose::QueryCompile,);
+    Ok(())
+}
+
+#[test]
+fn ai_binding_purpose_from_str_rejects_case_and_whitespace_aliases() {
+    for alias in ["Agent", " agent", "agent "] {
+        assert!(alias.parse::<AiBindingPurpose>().is_err(), "accepted alias {alias:?}");
+    }
+    assert_eq!("agent".parse::<AiBindingPurpose>(), Ok(AiBindingPurpose::Agent));
+}
+
+#[test]
 fn provider_runtime_profile_requires_structured_output() {
     let result = serde_json::from_value::<ProviderRuntimeProfile>(serde_json::json!({
         "kind": "openai_compatible",
@@ -91,8 +137,11 @@ fn provider_runtime_profile_requires_structured_output() {
 }
 
 #[test]
-#[allow(clippy::too_many_lines)]
-fn shell_and_feature_surfaces_roundtrip() -> JsonResult {
+#[allow(
+    clippy::too_many_lines,
+    reason = "one roundtrip scenario intentionally assembles the complete shell contract surface"
+)]
+fn shell_and_feature_surfaces_roundtrip() -> TestResult {
     let workspace_id = Uuid::from_u128(10);
     let library_id = Uuid::from_u128(11);
     let viewer_id = Uuid::from_u128(12);
@@ -123,9 +172,9 @@ fn shell_and_feature_surfaces_roundtrip() -> JsonResult {
             lifecycle_state: "ready".to_string(),
             ingestion_ready: true,
             missing_binding_purposes: vec![
-                BootstrapBindingPurpose::QueryRetrieve,
-                BootstrapBindingPurpose::QueryAnswer,
-                BootstrapBindingPurpose::ExtractText,
+                AiBindingPurpose::EmbedChunk,
+                AiBindingPurpose::QueryAnswer,
+                AiBindingPurpose::ExtractText,
             ],
             query_ready: Some(true),
         }],
@@ -145,7 +194,7 @@ fn shell_and_feature_surfaces_roundtrip() -> JsonResult {
     assert!(shell_value.get("effectiveGrants").is_some());
     assert_eq!(
         shell_value["libraries"][0]["missingBindingPurposes"],
-        serde_json::json!(["query_retrieve", "query_answer", "extract_text"]),
+        serde_json::json!(["embed_chunk", "query_answer", "extract_text"]),
     );
 
     let graph = GraphSurface {
@@ -195,7 +244,7 @@ fn shell_and_feature_surfaces_roundtrip() -> JsonResult {
             file_name: "cutover.md".to_string(),
             file_type: "text/markdown".to_string(),
             file_size: 1024,
-            uploaded_at: Utc.with_ymd_and_hms(2026, 4, 4, 10, 0, 0).unwrap(),
+            uploaded_at: utc_datetime(2026, 4, 4, 10, 0, 0)?,
             status: DocumentStatus::Ready,
             readiness: DocumentReadiness::GraphReady,
             stage_label: Some("ready".to_string()),
@@ -244,13 +293,6 @@ fn shell_and_feature_surfaces_roundtrip() -> JsonResult {
     };
 
     let dashboard = DashboardSurface {
-        overview: documents.overview.clone(),
-        metrics: vec![DashboardMetric {
-            key: "documents".to_string(),
-            label: "Documents".to_string(),
-            value: "2".to_string(),
-            level: MessageLevel::Info,
-        }],
         document_metrics: LibraryDocumentMetrics {
             total: 2,
             ready: 2,
@@ -260,7 +302,7 @@ fn shell_and_feature_surfaces_roundtrip() -> JsonResult {
             canceled: 0,
             graph_ready: 2,
             graph_sparse: 0,
-            recomputed_at: Utc.with_ymd_and_hms(2025, 1, 1, 0, 0, 0).unwrap(),
+            recomputed_at: utc_datetime(2025, 1, 1, 0, 0, 0)?,
         },
         recent_documents: documents.documents.clone(),
         recent_web_runs: documents.web_runs,
@@ -276,7 +318,9 @@ fn shell_and_feature_surfaces_roundtrip() -> JsonResult {
     };
 
     let dashboard_value = serde_json::to_value(&dashboard)?;
-    assert_eq!(dashboard_value["metrics"][0]["level"], "info");
+    assert_eq!(dashboard_value["documentMetrics"]["total"], 2);
+    assert!(dashboard_value.get("overview").is_none());
+    assert!(dashboard_value.get("metrics").is_none());
     assert_eq!(dashboard_value["graph"]["status"], "partial");
 
     let workbench = GraphWorkbenchSurface {
@@ -296,16 +340,19 @@ fn shell_and_feature_surfaces_roundtrip() -> JsonResult {
 }
 
 #[test]
-#[allow(clippy::too_many_lines)]
-fn assistant_admin_api_and_diagnostics_surfaces_serialize() -> JsonResult {
+#[allow(
+    clippy::too_many_lines,
+    reason = "one serialization scenario intentionally assembles the complete cross-surface payload"
+)]
+fn assistant_admin_api_and_diagnostics_surfaces_serialize() -> TestResult {
     let assistant = AssistantWorkspaceSurface {
         sessions: vec![AssistantSessionListItem {
             id: Uuid::from_u128(40),
             workspace_id: Uuid::from_u128(41),
             library_id: Uuid::from_u128(42),
             title: "Release blockers".to_string(),
-            updated_at: Utc.with_ymd_and_hms(2026, 4, 4, 10, 0, 0).unwrap(),
-            created_at: Utc.with_ymd_and_hms(2026, 4, 4, 9, 0, 0).unwrap(),
+            updated_at: utc_datetime(2026, 4, 4, 10, 0, 0)?,
+            created_at: utc_datetime(2026, 4, 4, 9, 0, 0)?,
             conversation_state: "ready".to_string(),
             turn_count: 2,
         }],

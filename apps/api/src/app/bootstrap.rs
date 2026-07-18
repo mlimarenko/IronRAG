@@ -1,5 +1,3 @@
-#![allow(clippy::result_large_err)]
-
 use argon2::{
     Argon2,
     password_hash::{PasswordHasher, SaltString, rand_core::OsRng},
@@ -84,7 +82,7 @@ pub(crate) async fn apply_configured_default_catalog_ai_setup(
     state: &AppState,
     catalog: &DefaultCatalogBootstrapOutcome,
 ) -> Result<bool, ApiError> {
-    // Ensure every IRONRAG_<PROVIDER>_API_KEY env value has a matching
+    // Ensure every credential in IRONRAG_AI_PROVIDER_API_KEYS_JSON_B64 has a matching
     // instance-scope account. Independent of binding selection so newly
     // added provider keys appear in the admin UI on the next restart even
     // if the chosen pipeline provider doesn't cover all purposes.
@@ -92,9 +90,11 @@ pub(crate) async fn apply_configured_default_catalog_ai_setup(
 
     // Best-effort: bind the canonical workspace/library to the primary
     // bootstrap provider's binding bundle. This requires the provider to
-    // cover all five binding purposes with a self-consistent embed/retrieve
-    // model pair; if it doesn't (e.g. multi-provider env where the chosen
-    // primary lacks an embedding model) we log and continue so the
+    // cover all five required purposes; optional `extract_text` is included
+    // only when explicitly available. The same embedding model serves stored
+    // and query vectors. If the provider cannot satisfy that contract (e.g. a
+    // multi-provider env where the chosen primary lacks an embedding model),
+    // we log and continue so the
     // env-keyed credentials we just created stay visible in the admin UI.
     match state
         .canonical_services
@@ -183,7 +183,7 @@ async fn ensure_bootstrap_api_token(
 /// Returns an error when the canonical bootstrap principal, catalog workspace, library, or
 /// bootstrap API token cannot be provisioned.
 pub async fn ensure_canonical_bootstrap_admin(state: &AppState) -> Result<(), ApiError> {
-    let Some(bootstrap_admin) = state.ui_bootstrap_admin.clone() else {
+    let Some(bootstrap_admin) = state.ui_bootstrap_admin.as_ref() else {
         return Ok(());
     };
 

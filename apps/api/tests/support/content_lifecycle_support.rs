@@ -61,19 +61,31 @@ impl TempDatabase {
     }
 }
 
-pub struct ContentLifecycleFixture {
-    pub state: AppState,
+pub(crate) struct ContentLifecycleFixture {
+    pub(crate) state: AppState,
     temp_database: TempDatabase,
-    pub workspace_id: Uuid,
-    pub library_id: Uuid,
+    _content_storage_root: tempfile::TempDir,
+    pub(crate) workspace_id: Uuid,
+    pub(crate) library_id: Uuid,
 }
 
 impl ContentLifecycleFixture {
-    pub async fn create() -> Result<Self> {
+    pub(crate) async fn create() -> Result<Self> {
         let mut settings =
             Settings::from_env().context("failed to load settings for content lifecycle test")?;
         let temp_database = TempDatabase::create(&settings.database_url).await?;
         settings.database_url = temp_database.database_url.clone();
+        // Lifecycle tests must never inherit an operator's S3 endpoint or
+        // shared storage prefix from `.env`. A unique filesystem backend makes
+        // upload/edit/reprocess cases hermetic and lets TempDir remove every
+        // source object after the fixture is dropped.
+        let content_storage_root =
+            tempfile::tempdir().context("failed to create content lifecycle storage root")?;
+        settings.dependency_object_storage_mode = "disabled".to_string();
+        settings.content_storage_provider = "filesystem".to_string();
+        settings.content_storage_topology = "single_node".to_string();
+        settings.content_storage_key_prefix.clear();
+        settings.content_storage_root = content_storage_root.path().to_string_lossy().into_owned();
         let postgres = PgPoolOptions::new()
             .max_connections(4)
             .connect(&settings.database_url)
@@ -118,10 +130,16 @@ impl ContentLifecycleFixture {
             .await
             .context("failed to create content lifecycle library")?;
 
-        Ok(Self { state, temp_database, workspace_id: workspace.id, library_id: library.id })
+        Ok(Self {
+            state,
+            temp_database,
+            _content_storage_root: content_storage_root,
+            workspace_id: workspace.id,
+            library_id: library.id,
+        })
     }
 
-    pub async fn cleanup(self) -> Result<()> {
+    pub(crate) async fn cleanup(self) -> Result<()> {
         self.state.persistence.postgres.close().await;
         self.temp_database.drop().await
     }
@@ -156,7 +174,11 @@ async fn terminate_database_connections(postgres: &PgPool, database_name: &str) 
     Ok(())
 }
 
-pub fn revision_command(
+#[allow(
+    dead_code,
+    reason = "shared lifecycle fixture helper is not used by every integration-test binary"
+)]
+pub(crate) fn revision_command(
     document_id: Uuid,
     source_kind: &str,
     checksum: &str,

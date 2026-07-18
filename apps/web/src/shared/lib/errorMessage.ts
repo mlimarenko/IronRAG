@@ -4,13 +4,13 @@
  * same regardless of which surface raised them.
  */
 export function errorMessage(err: unknown, fallback: string): string {
-  if (typeof err === 'string' && err.trim()) return err;
-  if (err instanceof Error) return err.message;
+  if (typeof err === 'string' && err.trim()) return err
+  if (err instanceof Error) return err.message
   if (typeof err === 'object' && err !== null && 'message' in err) {
-    const msg = (err as { message?: unknown }).message;
-    if (typeof msg === 'string') return msg;
+    const msg = (err as { message?: unknown }).message
+    if (typeof msg === 'string') return msg
   }
-  return fallback;
+  return fallback
 }
 
 /**
@@ -19,5 +19,5 @@ export function errorMessage(err: unknown, fallback: string): string {
  * user-facing copy chosen by the caller.
  */
 export function safeErrorMessage(_err: unknown, fallback: string): string {
-  return fallback;
+  return fallback
 }

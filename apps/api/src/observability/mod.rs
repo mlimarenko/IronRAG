@@ -54,15 +54,9 @@ const IRONRAG_DEPLOYMENT_ID: &str = "IRONRAG_DEPLOYMENT_ID";
 const HOSTNAME_ENV: &str = "HOSTNAME";
 const IRONRAG_LOG_FILTER: &str = "IRONRAG_LOG_FILTER";
 
-/// Compiled-in diagnostics defaults. The owner telemetry endpoint lives in a
-/// TOML config rather than Rust source so the shipped default sink is
-/// configuration, not logic, and operators can override it via the standard
-/// OTLP env vars or disable it with `IRONRAG_OTEL_ENABLED=false`.
-const OWNER_TELEMETRY_DEFAULTS_TOML: &str = include_str!("../../observability.toml");
-
 /// Resolved per-deployment telemetry identity, set once during `init_tracing`.
 static DEPLOYMENT_ID: OnceLock<Option<String>> = OnceLock::new();
-/// Namespace UUID for IronRAG deployment identities (fixed, telemetry-only).
+/// Namespace UUID for `IronRAG` deployment identities (fixed, telemetry-only).
 const DEPLOYMENT_ID_NAMESPACE: Uuid = Uuid::from_u128(0xa3f1_c2b4_5d6e_4f80_9a1b_2c3d_4e5f_6071);
 
 static TRACER_PROVIDER: OnceLock<Mutex<Option<SdkTracerProvider>>> = OnceLock::new();
@@ -111,22 +105,25 @@ impl OtlpSignal {
 
 /// Initializes canonical process tracing.
 ///
-/// With no OTLP endpoint this installs only the existing formatted tracing subscriber. With an
-/// endpoint it adds OpenTelemetry trace, log and metric export layers to the same subscriber.
+/// Without the explicit flag-plus-endpoint opt-in this installs only the existing formatted
+/// tracing subscriber. After opt-in it adds the configured OpenTelemetry export layers to the
+/// same subscriber; log export still requires its signal-specific opt-in.
 ///
 /// # Errors
 /// Returns an error when the subscriber or OTLP exporter cannot be installed.
 pub fn init_tracing(deployment_id: Option<String>) -> anyhow::Result<()> {
-    global::set_text_map_propagator(TraceContextPropagator::new());
-    // The env override always wins; otherwise use the database-derived id passed
-    // in by the caller. Stored once so every signal's Resource carries it.
-    let _ = DEPLOYMENT_ID.set(env_string(IRONRAG_DEPLOYMENT_ID).or(deployment_id));
-
     let filter = env_string(IRONRAG_LOG_FILTER).unwrap_or_else(|| DEFAULT_LOG_FILTER.to_string());
     let env_filter = crate::shared::telemetry::compose_env_filter(&filter);
-    let endpoint = env_string(OTEL_EXPORTER_OTLP_ENDPOINT)
-        .or_else(|| owner_telemetry_defaults().endpoint.clone());
-    let enabled = env_bool(IRONRAG_OTEL_ENABLED, true);
+    let endpoint = env_string(OTEL_EXPORTER_OTLP_ENDPOINT);
+    let enabled = env_bool(IRONRAG_OTEL_ENABLED, false);
+    let export_requested = is_otel_export_requested(enabled, endpoint.as_deref());
+
+    // A stable deployment identifier exists only inside explicitly enabled
+    // exports. Local formatted logs do not need a cross-process identifier,
+    // and fresh installs must not derive one merely by starting the service.
+    let deployment_id =
+        export_requested.then(|| env_string(IRONRAG_DEPLOYMENT_ID).or(deployment_id)).flatten();
+    let _ = DEPLOYMENT_ID.set(deployment_id);
 
     let Some(endpoint) = endpoint.filter(|_| enabled) else {
         tracing_subscriber::registry()
@@ -142,6 +139,10 @@ pub fn init_tracing(deployment_id: Option<String>) -> anyhow::Result<()> {
         return Ok(());
     };
 
+    // Trace-context extraction and propagation are part of the explicit OTLP
+    // opt-in as well. Without export, outbound requests carry no telemetry
+    // headers added by IronRAG.
+    global::set_text_map_propagator(TraceContextPropagator::new());
     let protocol = resolve_otlp_protocol();
     let traces_enabled = signal_enabled(OtlpSignal::Traces);
     let metrics_enabled = signal_enabled(OtlpSignal::Metrics);
@@ -185,7 +186,7 @@ pub fn init_tracing(deployment_id: Option<String>) -> anyhow::Result<()> {
 
     info!(
         monotonic_counter.ironrag.telemetry.events = 1_u64,
-        endpoint,
+        endpoint_configured = true,
         protocol = ?protocol,
         traces = traces_enabled,
         metrics = metrics_enabled,
@@ -422,33 +423,8 @@ fn env_bool(name: &str, default: bool) -> bool {
     }
 }
 
-struct OwnerTelemetryDefaults {
-    endpoint: Option<String>,
-    protocol: Option<String>,
-}
-
-fn owner_telemetry_defaults() -> &'static OwnerTelemetryDefaults {
-    static DEFAULTS: OnceLock<OwnerTelemetryDefaults> = OnceLock::new();
-    DEFAULTS.get_or_init(|| parse_owner_telemetry_defaults(OWNER_TELEMETRY_DEFAULTS_TOML))
-}
-
-fn parse_owner_telemetry_defaults(raw: &str) -> OwnerTelemetryDefaults {
-    let document = raw.parse::<toml_edit::DocumentMut>().unwrap_or_default();
-    let read = |key: &str| {
-        document
-            .get(key)
-            .and_then(toml_edit::Item::as_str)
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .map(str::to_string)
-    };
-    OwnerTelemetryDefaults { endpoint: read("endpoint"), protocol: read("protocol") }
-}
-
 fn resolve_otlp_protocol() -> OtlpProtocol {
-    let Some(raw_value) = env_string(OTEL_EXPORTER_OTLP_PROTOCOL)
-        .or_else(|| owner_telemetry_defaults().protocol.clone())
-    else {
+    let Some(raw_value) = env_string(OTEL_EXPORTER_OTLP_PROTOCOL) else {
         return OtlpProtocol::Grpc;
     };
     let value = raw_value.to_ascii_lowercase();
@@ -485,21 +461,40 @@ fn resolve_metrics_temporality() -> Temporality {
 }
 
 fn signal_enabled(signal: OtlpSignal) -> bool {
-    let Some(raw_value) = env_string(signal.exporter_env()) else {
-        return true;
+    let raw_value = env_string(signal.exporter_env());
+    let Some(raw_value) = raw_value.as_deref() else {
+        // Traces and metrics carry operational data. Logs may contain query or
+        // document content, so exporting them always requires a second,
+        // signal-specific opt-in even after OTLP itself has been enabled.
+        return signal_enabled_by_default(signal);
+    };
+    let enabled = resolve_signal_exporter(signal, Some(raw_value));
+    if !matches!(raw_value.to_ascii_lowercase().as_str(), "otlp" | "none") {
+        warn!(
+            exporter = %raw_value,
+            signal = ?signal,
+            "observability: unsupported OTEL exporter; signal disabled",
+        );
+    }
+    enabled
+}
+
+fn resolve_signal_exporter(signal: OtlpSignal, raw_value: Option<&str>) -> bool {
+    let Some(raw_value) = raw_value else {
+        return signal_enabled_by_default(signal);
     };
     match raw_value.to_ascii_lowercase().as_str() {
         "otlp" => true,
         "none" => false,
-        _ => {
-            warn!(
-                exporter = %raw_value,
-                signal = ?signal,
-                "observability: unsupported OTEL exporter, using otlp",
-            );
-            true
-        }
+        // Never turn a typo into data export. This matters most for logs,
+        // which can contain user content, and is a safer policy for every
+        // signal.
+        _ => false,
     }
+}
+
+const fn signal_enabled_by_default(signal: OtlpSignal) -> bool {
+    !matches!(signal, OtlpSignal::Logs)
 }
 
 fn resolved_signal_endpoint(endpoint: &str, protocol: OtlpProtocol, signal: OtlpSignal) -> String {
@@ -579,14 +574,14 @@ fn resolved_deployment_environment() -> String {
 
 /// Resolves the stable per-deployment telemetry identity before `init_tracing`.
 ///
-/// Resolution order: the `IRONRAG_DEPLOYMENT_ID` operator override, else a
-/// UUIDv5 derived from the Postgres cluster `system_identifier` — unique per
-/// database data directory, stable across container recreation, and identical
-/// for every service role (api/worker/startup) that points at the same
-/// database. Two deployments only collide if they deliberately share one
-/// database; operators split those with the override. Fails soft to `None` so a
-/// slow or restricted database never blocks or fails process startup.
+/// Returns immediately when OTLP export has not been explicitly enabled with
+/// an endpoint. After opt-in, resolution uses the `IRONRAG_DEPLOYMENT_ID`
+/// operator override or a `UUIDv5` derived from the Postgres cluster
+/// `system_identifier`. Database failures remain non-fatal.
 pub async fn resolve_deployment_id(database_url: &str) -> Option<String> {
+    if !otel_export_requested() {
+        return None;
+    }
     if let Some(override_id) = env_string(IRONRAG_DEPLOYMENT_ID) {
         return Some(override_id);
     }
@@ -606,6 +601,15 @@ pub async fn resolve_deployment_id(database_url: &str) -> Option<String> {
             None
         }
     }
+}
+
+fn otel_export_requested() -> bool {
+    let endpoint = env_string(OTEL_EXPORTER_OTLP_ENDPOINT);
+    is_otel_export_requested(env_bool(IRONRAG_OTEL_ENABLED, false), endpoint.as_deref())
+}
+
+const fn is_otel_export_requested(enabled: bool, endpoint: Option<&str>) -> bool {
+    enabled && endpoint.is_some()
 }
 
 async fn read_pg_system_identifier(database_url: &str) -> anyhow::Result<String> {
@@ -709,6 +713,7 @@ fn store_tracer_provider(provider: SdkTracerProvider) -> anyhow::Result<()> {
         anyhow::bail!("observability tracer provider already initialized");
     }
     *guard = Some(provider);
+    drop(guard);
     Ok(())
 }
 
@@ -720,6 +725,7 @@ fn store_meter_provider(provider: SdkMeterProvider) -> anyhow::Result<()> {
         anyhow::bail!("observability meter provider already initialized");
     }
     *guard = Some(provider);
+    drop(guard);
     Ok(())
 }
 
@@ -731,6 +737,7 @@ fn store_logger_provider(provider: SdkLoggerProvider) -> anyhow::Result<()> {
         anyhow::bail!("observability logger provider already initialized");
     }
     *guard = Some(provider);
+    drop(guard);
     Ok(())
 }
 
@@ -783,39 +790,21 @@ mod tests {
     }
 
     #[test]
-    fn parses_owner_telemetry_defaults_from_toml() {
-        let parsed = parse_owner_telemetry_defaults(
-            "endpoint = \"https://collector.example:4318\"\nprotocol = \"grpc\"\n",
-        );
-        assert_eq!(parsed.endpoint.as_deref(), Some("https://collector.example:4318"));
-        assert_eq!(parsed.protocol.as_deref(), Some("grpc"));
+    fn log_export_requires_signal_specific_opt_in() {
+        assert!(signal_enabled_by_default(OtlpSignal::Traces));
+        assert!(signal_enabled_by_default(OtlpSignal::Metrics));
+        assert!(!signal_enabled_by_default(OtlpSignal::Logs));
+        assert!(resolve_signal_exporter(OtlpSignal::Logs, Some("otlp")));
+        assert!(!resolve_signal_exporter(OtlpSignal::Logs, Some("none")));
+        assert!(!resolve_signal_exporter(OtlpSignal::Logs, Some("typo")));
+        assert!(!resolve_signal_exporter(OtlpSignal::Traces, Some("typo")));
     }
 
     #[test]
-    fn empty_owner_telemetry_keys_resolve_to_none() {
-        let parsed = parse_owner_telemetry_defaults("endpoint = \"\"\nprotocol = \"   \"\n");
-        assert!(parsed.endpoint.is_none());
-        assert!(parsed.protocol.is_none());
-    }
-
-    #[test]
-    fn compiled_in_defaults_are_usable() {
-        let defaults = owner_telemetry_defaults();
-        let endpoint =
-            defaults.endpoint.as_deref().expect("shipped default endpoint must be present");
-        assert!(
-            endpoint.starts_with("http://") || endpoint.starts_with("https://"),
-            "shipped default endpoint must be an absolute OTLP URL, got {endpoint}",
-        );
-        // The shipped protocol must be one the resolver recognizes.
-        let protocol =
-            defaults.protocol.as_deref().expect("shipped default protocol must be present");
-        assert!(
-            matches!(
-                protocol,
-                "grpc" | "http/protobuf" | "http/proto" | "protobuf" | "http/json" | "json"
-            ),
-            "shipped default protocol must be resolvable, got {protocol}",
-        );
+    fn otlp_export_requires_flag_and_endpoint() {
+        assert!(!is_otel_export_requested(false, None));
+        assert!(!is_otel_export_requested(true, None));
+        assert!(!is_otel_export_requested(false, Some("http://collector:4317")));
+        assert!(is_otel_export_requested(true, Some("http://collector:4317")));
     }
 }

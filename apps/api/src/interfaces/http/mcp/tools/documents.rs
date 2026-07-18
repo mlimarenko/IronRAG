@@ -2,19 +2,14 @@ use serde_json::{Value, json};
 
 use crate::interfaces::http::router_support::ApiError;
 use crate::mcp_types::{
-    McpAuditActionKind, McpAuditScope, McpDeleteDocumentRequest, McpGetMutationStatusRequest,
-    McpListDocumentsRequest, McpReadDocumentRequest, McpReadDocumentResponse,
-    McpSearchDocumentsRequest, McpSearchDocumentsResponse, McpUpdateDocumentRequest,
-    McpUploadDocumentsRequest,
+    McpDeleteDocumentRequest, McpGetOperationRequest, McpListDocumentsRequest,
+    McpReadDocumentRequest, McpReadDocumentResponse, McpSearchDocumentsRequest,
+    McpSearchDocumentsResponse, McpUpdateDocumentRequest, McpUploadDocumentsRequest,
 };
 
 use super::super::{
     McpToolDescriptor, McpToolResult,
-    audit::{
-        build_mcp_mutation_subjects, build_mcp_search_subjects, mutation_scope_from_receipts,
-        record_canonical_mcp_audit, record_error_audit, record_success_audit,
-        search_scope_from_response,
-    },
+    audit::{build_mcp_mutation_subjects, build_mcp_search_subjects, record_canonical_mcp_audit},
     ok_tool_result, parse_tool_args, tool_error_result,
 };
 use super::ToolCallContext;
@@ -71,7 +66,7 @@ pub(crate) fn descriptor(name: &str) -> Option<McpToolDescriptor> {
                     "documentId": {
                         "type": "string",
                         "format": "uuid",
-                        "description": "Document UUID from search_documents, upload_documents, or another trusted source."
+                        "description": "Document UUID from search_documents, create_documents, or another trusted source."
                     },
                     "mode": {
                         "type": "string",
@@ -123,9 +118,9 @@ pub(crate) fn descriptor(name: &str) -> Option<McpToolDescriptor> {
                 }
             }),
         }),
-        "upload_documents" => Some(McpToolDescriptor {
-            name: "upload_documents",
-            description: "Create one or more new logical documents in an authorized library. PREFER `fetchUrl` for any file larger than a couple of kilobytes — the LLM tool-call output is capped at a few thousand tokens, so a 20 kB file's base64 payload gets silently truncated inside your `tool_calls.arguments_json` and the upload fails. `fetchUrl` makes the backend download the file directly, which bypasses that limit entirely. Use `body` for short agent-authored text notes, `contentBase64` only for files smaller than ~4 kB. Always poll `get_mutation_status` before treating ingestion as complete.",
+        "create_documents" => Some(McpToolDescriptor {
+            name: "create_documents",
+            description: "Create one or more new logical documents in an authorized library. PREFER `fetchUrl` for any file larger than a couple of kilobytes — the LLM tool-call output is capped at a few thousand tokens, so a 20 kB file's base64 payload gets silently truncated inside your `tool_calls.arguments_json` and the upload fails. `fetchUrl` makes the backend download the file directly, which bypasses that limit entirely. Use `body` for short agent-authored text notes, `contentBase64` only for files smaller than ~4 kB. Always poll `get_operation` before treating ingestion as complete.",
             input_schema: json!({
                 "type": "object",
                 "required": ["library", "documents"],
@@ -187,12 +182,12 @@ pub(crate) fn descriptor(name: &str) -> Option<McpToolDescriptor> {
                 }
             }),
         }),
-        "update_document" => Some(McpToolDescriptor {
-            name: "update_document",
-            description: "Append to or replace one logical document while preserving document identity. The call returns mutation receipts; poll get_mutation_status until a terminal state before depending on the new revision. For operationKind=append pass appendedText; for operationKind=replace pass replacementFileName together with replacementContentBase64. The handler validates these pairings server-side and rejects malformed combinations — the schema itself must stay a flat object because OpenAI-compatible structured-output tool schemas forbid top-level `allOf`/`oneOf`/`anyOf`/`if`/`then`.",
+        "create_document_revision" => Some(McpToolDescriptor {
+            name: "create_document_revision",
+            description: "Append to or replace one logical document while preserving document identity. The call returns an operation receipt; poll get_operation until a terminal state before depending on the new revision. For mode=append pass appendedText; for mode=replace pass replacementFileName together with replacementContentBase64. The handler validates these pairings server-side and rejects malformed combinations — the schema itself must stay a flat object because OpenAI-compatible structured-output tool schemas forbid top-level `allOf`/`oneOf`/`anyOf`/`if`/`then`.",
             input_schema: json!({
                 "type": "object",
-                "required": ["library", "documentId", "operationKind"],
+                "required": ["library", "documentId", "mode"],
                 "properties": {
                     "library": {
                         "type": "string",
@@ -203,10 +198,10 @@ pub(crate) fn descriptor(name: &str) -> Option<McpToolDescriptor> {
                         "format": "uuid",
                         "description": "Target document UUID from search_documents, read_document, or a prior mutation receipt."
                     },
-                    "operationKind": {
+                    "mode": {
                         "type": "string",
                         "enum": ["append", "replace"],
-                        "description": "Mutation kind."
+                        "description": "Revision kind."
                     },
                     "idempotencyKey": {
                         "type": "string",
@@ -214,19 +209,19 @@ pub(crate) fn descriptor(name: &str) -> Option<McpToolDescriptor> {
                     },
                     "appendedText": {
                         "type": "string",
-                        "description": "Required when operationKind=append. Good for small incremental notes."
+                        "description": "Required when mode=append. Good for small incremental notes."
                     },
                     "replacementFileName": {
                         "type": "string",
-                        "description": "Required when operationKind=replace."
+                        "description": "Required when mode=replace."
                     },
                     "replacementContentBase64": {
                         "type": "string",
-                        "description": "Required when operationKind=replace."
+                        "description": "Required when mode=replace."
                     },
                     "replacementMimeType": {
                         "type": "string",
-                        "description": "Optional when operationKind=replace."
+                        "description": "Optional when mode=replace."
                     }
                 }
             }),
@@ -246,17 +241,17 @@ pub(crate) fn descriptor(name: &str) -> Option<McpToolDescriptor> {
                 }
             }),
         }),
-        "get_mutation_status" => Some(McpToolDescriptor {
-            name: "get_mutation_status",
-            description: "Check the lifecycle of a previously accepted upload_documents or update_document receipt. Use this to confirm backend completion; read/search visibility can arrive slightly before or after the terminal receipt state.",
+        "get_operation" => Some(McpToolDescriptor {
+            name: "get_operation",
+            description: "Check the lifecycle of a previously accepted create_documents or create_document_revision operation. Reads the same canonical async-operation store as GET /v1/ops/operations/{operationId}. Use this to confirm backend completion; read/search visibility can arrive slightly before or after the terminal operation state.",
             input_schema: json!({
                 "type": "object",
-                "required": ["receiptId"],
+                "required": ["operationId"],
                 "properties": {
-                    "receiptId": {
+                    "operationId": {
                         "type": "string",
                         "format": "uuid",
-                        "description": "Mutation receipt UUID."
+                        "description": "Async operation UUID returned as operationId by create_documents/create_document_revision."
                     }
                 }
             }),
@@ -274,10 +269,10 @@ pub(crate) async fn call_tool(
         SEARCH_DOCUMENTS_TOOL_NAME => search_documents(context, arguments).await,
         READ_DOCUMENT_TOOL_NAME => read_document(context, arguments).await,
         "list_documents" => list_documents(context, arguments).await,
-        "upload_documents" => upload_documents(context, arguments).await,
-        "update_document" => update_document(context, arguments).await,
+        "create_documents" => create_documents(context, arguments).await,
+        "create_document_revision" => create_document_revision(context, arguments).await,
         "delete_document" => delete_document(context, arguments).await,
-        "get_mutation_status" => get_mutation_status(context, arguments).await,
+        "get_operation" => get_operation(context, arguments).await,
         _ => return None,
     };
     Some(result)
@@ -311,15 +306,13 @@ fn search_documents_result_text(payload: &McpSearchDocumentsResponse) -> String 
             hit.readability_state, hit.readiness_kind, hit.graph_coverage_kind
         ));
         if let Some(offset) = hit.suggested_start_offset {
-            lines.push(format!(
-                "suggestedStartOffset: {} (use as read_document.startOffset)",
-                offset
-            ));
+            lines
+                .push(format!("suggestedStartOffset: {offset} (use as read_document.startOffset)"));
         }
         if let Some(start) = hit.excerpt_start_offset {
             let end =
                 hit.excerpt_end_offset.map_or_else(|| "?".to_string(), |value| value.to_string());
-            lines.push(format!("excerptOffsets: {}..{}", start, end));
+            lines.push(format!("excerptOffsets: {start}..{end}"));
         }
         if let Some(excerpt) = hit.excerpt.as_deref() {
             lines.push("excerpt:".to_string());
@@ -357,7 +350,7 @@ fn read_document_result_text(payload: &McpReadDocumentResponse) -> String {
         payload.slice_start_offset, payload.slice_end_offset
     ));
     if let Some(total) = payload.total_content_length {
-        lines.push(format!("totalContentLength: {}", total));
+        lines.push(format!("totalContentLength: {total}"));
     }
     lines.push(format!("hasMore: {}", payload.has_more));
     if let Some(token) = payload.continuation_token.as_deref() {
@@ -449,59 +442,11 @@ async fn search_documents(context: ToolCallContext<'_>, arguments: &Value) -> Mc
                     build_mcp_search_subjects(context.state, &payload),
                 )
                 .await;
-                record_success_audit(
-                    context.auth,
-                    context.state,
-                    context.request_id,
-                    McpAuditActionKind::SearchDocuments,
-                    search_scope_from_response(context.auth, &payload),
-                    json!({
-                        "tool": "search_documents",
-                        "query": payload.query,
-                        "hitCount": payload.hits.len(),
-                    }),
-                )
-                .await;
                 ok_tool_result(&search_documents_result_text(&payload), json!(payload))
             }
-            Err(error) => {
-                record_error_audit(
-                    context.auth,
-                    context.state,
-                    context.request_id,
-                    McpAuditActionKind::SearchDocuments,
-                    McpAuditScope {
-                        workspace_id: context.auth.workspace_id,
-                        library_id: None,
-                        document_id: None,
-                    },
-                    &error,
-                    json!({
-                        "tool": "search_documents",
-                        "query": args.query,
-                    }),
-                )
-                .await;
-                tool_error_result(error)
-            }
+            Err(error) => tool_error_result(error),
         },
-        Err(error) => {
-            record_error_audit(
-                context.auth,
-                context.state,
-                context.request_id,
-                McpAuditActionKind::SearchDocuments,
-                McpAuditScope {
-                    workspace_id: context.auth.workspace_id,
-                    library_id: None,
-                    document_id: None,
-                },
-                &error,
-                json!({ "tool": "search_documents" }),
-            )
-            .await;
-            tool_error_result(error)
-        }
+        Err(error) => tool_error_result(error),
     }
 }
 
@@ -533,61 +478,11 @@ async fn read_document(context: ToolCallContext<'_>, arguments: &Value) -> McpTo
                     )],
                 )
                 .await;
-                record_success_audit(
-                    context.auth,
-                    context.state,
-                    context.request_id,
-                    McpAuditActionKind::ReadDocument,
-                    McpAuditScope {
-                        workspace_id: Some(payload.workspace_id),
-                        library_id: Some(payload.library_id),
-                        document_id: Some(payload.document_id),
-                    },
-                    json!({
-                        "tool": "read_document",
-                        "readMode": payload.read_mode,
-                        "readabilityState": payload.readability_state,
-                        "hasMore": payload.has_more,
-                    }),
-                )
-                .await;
                 ok_tool_result(&read_document_result_text(&payload), json!(payload))
             }
-            Err(error) => {
-                record_error_audit(
-                    context.auth,
-                    context.state,
-                    context.request_id,
-                    McpAuditActionKind::ReadDocument,
-                    McpAuditScope {
-                        workspace_id: context.auth.workspace_id,
-                        library_id: None,
-                        document_id: args.document_id,
-                    },
-                    &error,
-                    json!({ "tool": "read_document" }),
-                )
-                .await;
-                tool_error_result(error)
-            }
+            Err(error) => tool_error_result(error),
         },
-        Err(error) => {
-            record_error_audit(
-                context.auth,
-                context.state,
-                context.request_id,
-                McpAuditActionKind::ReadDocument,
-                McpAuditScope {
-                    workspace_id: context.auth.workspace_id,
-                    library_id: None,
-                    document_id: None,
-                },
-                &error,
-                json!({ "tool": "read_document" }),
-            )
-            .await;
-            tool_error_result(error)
-        }
+        Err(error) => tool_error_result(error),
     }
 }
 
@@ -644,61 +539,16 @@ async fn list_documents(context: ToolCallContext<'_>, arguments: &Value) -> McpT
                         Vec::new(),
                     )
                     .await;
-                    record_success_audit(
-                        context.auth,
-                        context.state,
-                        context.request_id,
-                        McpAuditActionKind::ListDocuments,
-                        McpAuditScope {
-                            workspace_id: context.auth.workspace_id,
-                            library_id: Some(library_id),
-                            document_id: None,
-                        },
-                        json!({ "tool": "list_documents" }),
-                    )
-                    .await;
                     ok_tool_result("Documents listed.", payload)
                 }
-                Err(error) => {
-                    record_error_audit(
-                        context.auth,
-                        context.state,
-                        context.request_id,
-                        McpAuditActionKind::ListDocuments,
-                        McpAuditScope {
-                            workspace_id: context.auth.workspace_id,
-                            library_id: Some(library_id),
-                            document_id: None,
-                        },
-                        &error,
-                        json!({ "tool": "list_documents" }),
-                    )
-                    .await;
-                    tool_error_result(error)
-                }
+                Err(error) => tool_error_result(error),
             }
         }
-        Err(error) => {
-            record_error_audit(
-                context.auth,
-                context.state,
-                context.request_id,
-                McpAuditActionKind::ListDocuments,
-                McpAuditScope {
-                    workspace_id: context.auth.workspace_id,
-                    library_id: None,
-                    document_id: None,
-                },
-                &error,
-                json!({ "tool": "list_documents" }),
-            )
-            .await;
-            tool_error_result(error)
-        }
+        Err(error) => tool_error_result(error),
     }
 }
 
-async fn upload_documents(context: ToolCallContext<'_>, arguments: &Value) -> McpToolResult {
+async fn create_documents(context: ToolCallContext<'_>, arguments: &Value) -> McpToolResult {
     match parse_tool_args::<McpUploadDocumentsRequest>(arguments.clone()) {
         Ok(args) => match crate::services::mcp::mutations::upload_documents(
             context.auth,
@@ -708,7 +558,7 @@ async fn upload_documents(context: ToolCallContext<'_>, arguments: &Value) -> Mc
         .await
         {
             Ok(payload) => {
-                let canonical_subjects = build_mcp_mutation_subjects(context.state, &payload).await;
+                let canonical_subjects = build_mcp_mutation_subjects(context.state, &payload);
                 record_canonical_mcp_audit(
                     context.state,
                     context.auth,
@@ -725,63 +575,18 @@ async fn upload_documents(context: ToolCallContext<'_>, arguments: &Value) -> Mc
                     canonical_subjects,
                 )
                 .await;
-                record_success_audit(
-                    context.auth,
-                    context.state,
-                    context.request_id,
-                    McpAuditActionKind::UploadDocuments,
-                    mutation_scope_from_receipts(&payload).unwrap_or(McpAuditScope {
-                        workspace_id: context.auth.workspace_id,
-                        library_id: None,
-                        document_id: None,
-                    }),
-                    json!({
-                        "tool": "upload_documents",
-                        "receiptCount": payload.len(),
-                    }),
-                )
-                .await;
                 ok_tool_result("Document uploads accepted.", json!({ "receipts": payload }))
             }
-            Err(error) => {
-                record_error_audit(
-                    context.auth,
-                    context.state,
-                    context.request_id,
-                    McpAuditActionKind::UploadDocuments,
-                    McpAuditScope {
-                        workspace_id: context.auth.workspace_id,
-                        library_id: None,
-                        document_id: None,
-                    },
-                    &error,
-                    json!({ "tool": "upload_documents" }),
-                )
-                .await;
-                tool_error_result(error)
-            }
+            Err(error) => tool_error_result(error),
         },
-        Err(error) => {
-            record_error_audit(
-                context.auth,
-                context.state,
-                context.request_id,
-                McpAuditActionKind::UploadDocuments,
-                McpAuditScope {
-                    workspace_id: context.auth.workspace_id,
-                    library_id: None,
-                    document_id: None,
-                },
-                &error,
-                json!({ "tool": "upload_documents" }),
-            )
-            .await;
-            tool_error_result(error)
-        }
+        Err(error) => tool_error_result(error),
     }
 }
 
-async fn update_document(context: ToolCallContext<'_>, arguments: &Value) -> McpToolResult {
+async fn create_document_revision(
+    context: ToolCallContext<'_>,
+    arguments: &Value,
+) -> McpToolResult {
     match parse_tool_args::<McpUpdateDocumentRequest>(arguments.clone()) {
         Ok(args) => match crate::services::mcp::mutations::update_document(
             context.auth,
@@ -792,8 +597,7 @@ async fn update_document(context: ToolCallContext<'_>, arguments: &Value) -> Mcp
         {
             Ok(payload) => {
                 let canonical_subjects =
-                    build_mcp_mutation_subjects(context.state, std::slice::from_ref(&payload))
-                        .await;
+                    build_mcp_mutation_subjects(context.state, std::slice::from_ref(&payload));
                 record_canonical_mcp_audit(
                     context.state,
                     context.auth,
@@ -802,65 +606,17 @@ async fn update_document(context: ToolCallContext<'_>, arguments: &Value) -> Mcp
                     "succeeded",
                     Some(format!("accepted MCP document {:?} mutation", payload.operation_kind)),
                     Some(format!(
-                        "principal {} accepted MCP mutation {} for document {:?}",
-                        context.auth.principal_id, payload.receipt_id, payload.document_id
+                        "principal {} accepted MCP operation {} for document {:?}",
+                        context.auth.principal_id, payload.operation_id, payload.document_id
                     )),
                     canonical_subjects,
                 )
                 .await;
-                record_success_audit(
-                    context.auth,
-                    context.state,
-                    context.request_id,
-                    McpAuditActionKind::UpdateDocument,
-                    McpAuditScope {
-                        workspace_id: Some(payload.workspace_id),
-                        library_id: Some(payload.library_id),
-                        document_id: payload.document_id,
-                    },
-                    json!({
-                        "tool": "update_document",
-                        "operationKind": payload.operation_kind,
-                    }),
-                )
-                .await;
                 ok_tool_result("Document mutation accepted.", json!(payload))
             }
-            Err(error) => {
-                record_error_audit(
-                    context.auth,
-                    context.state,
-                    context.request_id,
-                    McpAuditActionKind::UpdateDocument,
-                    McpAuditScope {
-                        workspace_id: context.auth.workspace_id,
-                        library_id: None,
-                        document_id: Some(args.document_id),
-                    },
-                    &error,
-                    json!({ "tool": "update_document" }),
-                )
-                .await;
-                tool_error_result(error)
-            }
+            Err(error) => tool_error_result(error),
         },
-        Err(error) => {
-            record_error_audit(
-                context.auth,
-                context.state,
-                context.request_id,
-                McpAuditActionKind::UpdateDocument,
-                McpAuditScope {
-                    workspace_id: context.auth.workspace_id,
-                    library_id: None,
-                    document_id: None,
-                },
-                &error,
-                json!({ "tool": "update_document" }),
-            )
-            .await;
-            tool_error_result(error)
-        }
+        Err(error) => tool_error_result(error),
     }
 }
 
@@ -890,123 +646,28 @@ async fn delete_document(context: ToolCallContext<'_>, arguments: &Value) -> Mcp
                         Vec::new(),
                     )
                     .await;
-                    record_success_audit(
-                        context.auth,
-                        context.state,
-                        context.request_id,
-                        McpAuditActionKind::DeleteDocument,
-                        McpAuditScope {
-                            workspace_id: context.auth.workspace_id,
-                            library_id: None,
-                            document_id: Some(document_id),
-                        },
-                        json!({ "tool": "delete_document" }),
-                    )
-                    .await;
                     ok_tool_result("Document deletion accepted.", payload)
                 }
-                Err(error) => {
-                    record_error_audit(
-                        context.auth,
-                        context.state,
-                        context.request_id,
-                        McpAuditActionKind::DeleteDocument,
-                        McpAuditScope {
-                            workspace_id: context.auth.workspace_id,
-                            library_id: None,
-                            document_id: Some(document_id),
-                        },
-                        &error,
-                        json!({ "tool": "delete_document" }),
-                    )
-                    .await;
-                    tool_error_result(error)
-                }
+                Err(error) => tool_error_result(error),
             }
         }
-        Err(error) => {
-            record_error_audit(
-                context.auth,
-                context.state,
-                context.request_id,
-                McpAuditActionKind::DeleteDocument,
-                McpAuditScope {
-                    workspace_id: context.auth.workspace_id,
-                    library_id: None,
-                    document_id: None,
-                },
-                &error,
-                json!({ "tool": "delete_document" }),
-            )
-            .await;
-            tool_error_result(error)
-        }
+        Err(error) => tool_error_result(error),
     }
 }
 
-async fn get_mutation_status(context: ToolCallContext<'_>, arguments: &Value) -> McpToolResult {
-    match parse_tool_args::<McpGetMutationStatusRequest>(arguments.clone()) {
-        Ok(args) => match crate::services::mcp::mutations::get_mutation_status(
+async fn get_operation(context: ToolCallContext<'_>, arguments: &Value) -> McpToolResult {
+    match parse_tool_args::<McpGetOperationRequest>(arguments.clone()) {
+        Ok(args) => match crate::services::mcp::mutations::get_operation(
             context.auth,
             context.state,
-            args,
+            args.operation_id,
         )
         .await
         {
-            Ok(payload) => {
-                record_success_audit(
-                    context.auth,
-                    context.state,
-                    context.request_id,
-                    McpAuditActionKind::GetMutationStatus,
-                    McpAuditScope {
-                        workspace_id: Some(payload.workspace_id),
-                        library_id: Some(payload.library_id),
-                        document_id: payload.document_id,
-                    },
-                    json!({
-                        "tool": "get_mutation_status",
-                        "status": payload.status,
-                    }),
-                )
-                .await;
-                ok_tool_result("Mutation status loaded.", json!(payload))
-            }
-            Err(error) => {
-                record_error_audit(
-                    context.auth,
-                    context.state,
-                    context.request_id,
-                    McpAuditActionKind::GetMutationStatus,
-                    McpAuditScope {
-                        workspace_id: context.auth.workspace_id,
-                        library_id: None,
-                        document_id: None,
-                    },
-                    &error,
-                    json!({ "tool": "get_mutation_status" }),
-                )
-                .await;
-                tool_error_result(error)
-            }
+            Ok(payload) => ok_tool_result("Operation status loaded.", json!(payload)),
+            Err(error) => tool_error_result(error),
         },
-        Err(error) => {
-            record_error_audit(
-                context.auth,
-                context.state,
-                context.request_id,
-                McpAuditActionKind::GetMutationStatus,
-                McpAuditScope {
-                    workspace_id: context.auth.workspace_id,
-                    library_id: None,
-                    document_id: None,
-                },
-                &error,
-                json!({ "tool": "get_mutation_status" }),
-            )
-            .await;
-            tool_error_result(error)
-        }
+        Err(error) => tool_error_result(error),
     }
 }
 

@@ -20,7 +20,7 @@ use uuid::Uuid;
 
 use crate::app::state::AppState;
 use crate::{
-    domains::query_ir::{EntityRole, QueryAct, QueryIR},
+    domains::query_ir::{EntityRole, QueryAct, QueryIR, QueryTargetKind},
     services::query::{
         planner::extract_keywords,
         text_match::{
@@ -33,7 +33,6 @@ use super::{RetrievalBundle, RuntimeMatchedChunk};
 use super::{
     RuntimeChunkScoreKind,
     document_target::query_ir_allows_document_focus_scope,
-    question_intent::canonical_target_type_tag,
     source_anchor_window,
     source_profile::{is_source_profile_chunk_row, is_source_profile_runtime_chunk},
 };
@@ -628,7 +627,6 @@ fn winner_from_query_focus_evidence<'agg>(
 #[derive(Debug, Default)]
 struct QueryFocusEvidenceTerms {
     subject_tokens: BTreeSet<String>,
-    subject_acronym_terms: BTreeSet<String>,
     literal_tokens: BTreeSet<String>,
     document_tokens: BTreeSet<String>,
 }
@@ -638,9 +636,7 @@ impl QueryFocusEvidenceTerms {
         let mut terms = Self::default();
         for entity in ir.target_entities.iter().filter(|entity| entity.role == EntityRole::Subject)
         {
-            let label_terms = label_overlap_terms(&entity.label, 2);
-            terms.subject_tokens.extend(label_terms.tokens);
-            terms.subject_acronym_terms.extend(label_terms.acronym_terms);
+            terms.subject_tokens.extend(normalized_alnum_tokens(&entity.label, 2));
         }
         if let Some(document_focus) = ir.document_focus.as_ref() {
             terms.document_tokens.extend(normalized_alnum_tokens(&document_focus.hint, 2));
@@ -653,10 +649,13 @@ impl QueryFocusEvidenceTerms {
 
     fn is_empty(&self) -> bool {
         self.subject_tokens.is_empty()
-            && self.subject_acronym_terms.is_empty()
             && self.literal_tokens.is_empty()
             && self.document_tokens.is_empty()
     }
+}
+
+fn exact_token_overlap_count(expected: &BTreeSet<String>, observed: &BTreeSet<String>) -> usize {
+    expected.intersection(observed).count()
 }
 
 fn query_focus_evidence_document_score(
@@ -676,14 +675,12 @@ fn query_focus_evidence_document_score(
     if title_tokens.is_empty() && evidence_tokens.is_empty() {
         return 0;
     }
-    let subject_title_overlap = near_token_overlap_count(&focus.subject_tokens, &title_tokens)
-        + near_token_overlap_count(&focus.subject_acronym_terms, &title_tokens) * 3;
+    let subject_title_overlap = exact_token_overlap_count(&focus.subject_tokens, &title_tokens);
     let subject_evidence_overlap =
-        near_token_overlap_count(&focus.subject_tokens, &evidence_tokens)
-            + near_token_overlap_count(&focus.subject_acronym_terms, &evidence_tokens) * 3;
-    let literal_overlap = near_token_overlap_count(&focus.literal_tokens, &evidence_tokens);
-    let document_overlap = near_token_overlap_count(&focus.document_tokens, &title_tokens)
-        + near_token_overlap_count(&focus.document_tokens, &evidence_tokens);
+        exact_token_overlap_count(&focus.subject_tokens, &evidence_tokens);
+    let literal_overlap = exact_token_overlap_count(&focus.literal_tokens, &evidence_tokens);
+    let document_overlap = exact_token_overlap_count(&focus.document_tokens, &title_tokens)
+        + exact_token_overlap_count(&focus.document_tokens, &evidence_tokens);
 
     if !focus.subject_tokens.is_empty()
         && subject_title_overlap == 0
@@ -706,11 +703,7 @@ fn query_focus_evidence_document_score(
 }
 
 fn query_ir_subject_can_pin_document(ir: &QueryIR) -> bool {
-    if ir
-        .target_types
-        .iter()
-        .any(|target_type| canonical_target_type_tag(target_type) == "document")
-    {
+    if ir.targets(QueryTargetKind::Document) {
         return true;
     }
     ir.target_entities.iter().filter(|entity| entity.role == EntityRole::Subject).any(|entity| {
@@ -722,9 +715,7 @@ fn query_ir_subject_can_pin_document(ir: &QueryIR) -> bool {
 /// Soft signal: one document clearly dominates by evidence count and
 /// also has the best score. Only fires when there is no explicit IR
 /// pin (hint / subject), so it does not override an explicit decision.
-fn winner_from_evidence_dominance<'agg>(
-    aggregates: &'agg [DocumentAggregate],
-) -> Option<&'agg DocumentAggregate> {
+fn winner_from_evidence_dominance(aggregates: &[DocumentAggregate]) -> Option<&DocumentAggregate> {
     let top = aggregates.first()?;
     let runner_up = aggregates.get(1);
     if top.evidence_count < 2 {
@@ -748,9 +739,7 @@ fn winner_from_evidence_dominance<'agg>(
     Some(top)
 }
 
-fn winner_from_score_dominance<'agg>(
-    aggregates: &'agg [DocumentAggregate],
-) -> Option<&'agg DocumentAggregate> {
+fn winner_from_score_dominance(aggregates: &[DocumentAggregate]) -> Option<&DocumentAggregate> {
     let mut by_score: Vec<&DocumentAggregate> = aggregates
         .iter()
         .filter(|aggregate| aggregate.best_score.is_finite() && aggregate.best_score > 0.0)
@@ -1006,6 +995,15 @@ pub(crate) fn decide_focus(
             explicit_focus_budget(top_k),
         ));
     }
+    if query_has_multi_document_versioned_procedure_anchors(query_ir, question, &bundle.chunks) {
+        return None;
+    }
+    if super::retrieve::query_ir_requests_versioned_update_procedure_context(question, query_ir) {
+        return None;
+    }
+    if broad_unfocused_procedure_has_multiple_documents(query_ir, &aggregates) {
+        return None;
+    }
     if let Some(winner) = winner_from_subject(query_ir, &bundle.chunks, &aggregates) {
         return Some((
             winner.clone(),
@@ -1019,12 +1017,6 @@ pub(crate) fn decide_focus(
             FocusReason::QueryFocusEvidence,
             explicit_focus_budget(top_k),
         ));
-    }
-    if query_has_multi_document_versioned_procedure_anchors(query_ir, question, &bundle.chunks) {
-        return None;
-    }
-    if super::retrieve::query_ir_requests_versioned_update_procedure_context(question, query_ir) {
-        return None;
     }
     if aggregates.len() == 1 {
         return aggregates.first().cloned().map(|winner| {
@@ -1044,6 +1036,13 @@ pub(crate) fn decide_focus(
     None
 }
 
+fn broad_unfocused_procedure_has_multiple_documents(
+    query_ir: &QueryIR,
+    aggregates: &[DocumentAggregate],
+) -> bool {
+    query_ir.requests_broad_procedure_variant_coverage() && aggregates.len() >= 2
+}
+
 pub(super) fn query_has_multi_document_setup_anchors(
     query_ir: &QueryIR,
     chunks: &[RuntimeMatchedChunk],
@@ -1053,10 +1052,7 @@ pub(super) fn query_has_multi_document_setup_anchors(
         || query_ir.source_slice.is_some()
         || !query_ir.literal_constraints.is_empty()
         || super::retrieve::query_ir_requests_versioned_update_procedure_context("", query_ir)
-        || query_ir
-            .target_types
-            .iter()
-            .any(|target_type| canonical_target_type_tag(target_type).as_str() == "document")
+        || query_ir.targets(QueryTargetKind::Document)
     {
         return false;
     }
@@ -1204,7 +1200,7 @@ pub(crate) async fn focused_document_consolidation(
     let windows = winner_anchor_windows(&winner, budget);
     if windows.is_empty() {
         return ConsolidationDiagnostics::noop();
-    };
+    }
 
     let fetched = match state
         .document_store
@@ -1280,6 +1276,10 @@ pub(crate) mod test_support {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "consolidation_broad_procedure_tests.rs"]
+mod broad_procedure_tests;
 
 #[cfg(test)]
 mod tests {
@@ -1559,7 +1559,7 @@ mod tests {
 
         let mut query_ir = ir(QueryScope::SingleDocument);
         query_ir.act = QueryAct::Compare;
-        query_ir.target_types = vec!["concept".to_string()];
+        query_ir.target_types = vec![QueryTargetKind::Concept];
         query_ir.document_focus = Some(DocumentHint { hint: "Alpha Suite".to_string() });
         query_ir.target_entities = vec![
             EntityMention { label: "provider catalog".to_string(), role: EntityRole::Object },
@@ -1626,7 +1626,7 @@ mod tests {
 
         let mut query_ir = ir(QueryScope::SingleDocument);
         query_ir.act = QueryAct::Enumerate;
-        query_ir.target_types = vec!["document".to_string()];
+        query_ir.target_types = vec![QueryTargetKind::Document];
         query_ir.document_focus = Some(DocumentHint { hint: "Alpha Suite overview".to_string() });
 
         let revision_rows: Vec<_> = (0..4)
@@ -1868,7 +1868,7 @@ mod tests {
         };
 
         let mut query_ir = ir(QueryScope::SingleDocument);
-        query_ir.target_types = vec!["concept".to_string(), "procedure".to_string()];
+        query_ir.target_types = vec![QueryTargetKind::Concept, QueryTargetKind::Procedure];
         query_ir.target_entities =
             vec![EntityMention { label: "QRP".to_string(), role: EntityRole::Subject }];
 
@@ -1938,7 +1938,7 @@ mod tests {
         assert_eq!(generic_reason, FocusReason::EvidenceDominance);
 
         let mut procedure_ir = ir(QueryScope::SingleDocument);
-        procedure_ir.target_types = vec!["artifact".to_string(), "procedure".to_string()];
+        procedure_ir.target_types = vec![QueryTargetKind::Procedure, QueryTargetKind::Version];
         procedure_ir.target_entities =
             vec![EntityMention { label: "Alpha Service".to_string(), role: EntityRole::Subject }];
 
@@ -1974,7 +1974,7 @@ mod tests {
         };
 
         let mut procedure_ir = ir(QueryScope::SingleDocument);
-        procedure_ir.target_types = vec!["artifact".to_string(), "procedure".to_string()];
+        procedure_ir.target_types = vec![QueryTargetKind::Procedure, QueryTargetKind::Version];
         procedure_ir.target_entities = vec![EntityMention {
             label: "Alpha subject server".to_string(),
             role: EntityRole::Subject,
@@ -2019,7 +2019,7 @@ mod tests {
         };
         let mut query_ir = ir(QueryScope::SingleDocument);
         query_ir.target_types =
-            vec!["artifact".to_string(), "procedure".to_string(), "version".to_string()];
+            vec![QueryTargetKind::Artifact, QueryTargetKind::Procedure, QueryTargetKind::Version];
         query_ir.target_entities =
             vec![EntityMention { label: "Alpha Console".to_string(), role: EntityRole::Subject }];
 
@@ -2099,7 +2099,7 @@ mod tests {
             ],
         };
         let mut query_ir = ir(QueryScope::SingleDocument);
-        query_ir.target_types = vec!["procedure".to_string(), "concept".to_string()];
+        query_ir.target_types = vec![QueryTargetKind::Procedure, QueryTargetKind::Version];
         query_ir.target_entities =
             vec![EntityMention { label: "Support Node".to_string(), role: EntityRole::Subject }];
         query_ir.retrieval_query = Some("how to update Support Node".to_string());
@@ -2161,7 +2161,7 @@ mod tests {
         };
         let mut query_ir = ir(QueryScope::SingleDocument);
         query_ir.target_types =
-            vec!["artifact".to_string(), "procedure".to_string(), "version".to_string()];
+            vec![QueryTargetKind::Artifact, QueryTargetKind::Procedure, QueryTargetKind::Version];
         query_ir.target_entities =
             vec![EntityMention { label: "Alpha Console".to_string(), role: EntityRole::Subject }];
 
@@ -2224,70 +2224,6 @@ mod tests {
         let query_ir = ir(QueryScope::SingleDocument);
 
         assert!(decide_focus(&bundle, &query_ir, DEFAULT_TEST_QUESTION, 8).is_none());
-    }
-
-    #[test]
-    fn test_consolidation_subject_acronym_pin_beats_focused_evidence_dominance() {
-        let dominant_doc = Uuid::now_v7();
-        let dominant_rev = Uuid::now_v7();
-        let procedure_doc = Uuid::now_v7();
-        let procedure_rev = Uuid::now_v7();
-
-        let bundle = RetrievalBundle {
-            entities: Vec::new(),
-            relationships: Vec::new(),
-            chunks: vec![
-                focused_chunk(
-                    dominant_doc,
-                    dominant_rev,
-                    0,
-                    "Alpha Service support guide",
-                    10_000.0,
-                ),
-                focused_chunk(
-                    dominant_doc,
-                    dominant_rev,
-                    1,
-                    "Alpha Service support guide",
-                    9_999.0,
-                ),
-                focused_chunk(
-                    dominant_doc,
-                    dominant_rev,
-                    2,
-                    "Alpha Service support guide",
-                    9_998.0,
-                ),
-                focused_chunk(
-                    dominant_doc,
-                    dominant_rev,
-                    3,
-                    "Alpha Service support guide",
-                    9_997.0,
-                ),
-                focused_chunk(procedure_doc, procedure_rev, 0, "AS update guide", 9_900.0),
-            ],
-        };
-        let generic_ir = ir(QueryScope::SingleDocument);
-        let Some((_, generic_reason, _)) =
-            decide_focus(&bundle, &generic_ir, "how to update Alpha Service?", 8)
-        else {
-            panic!("generic evidence dominance should still consolidate this shape");
-        };
-        assert_eq!(generic_reason, FocusReason::EvidenceDominance);
-
-        let mut query_ir = ir(QueryScope::SingleDocument);
-        query_ir.target_types = vec!["artifact".to_string(), "procedure".to_string()];
-        query_ir.target_entities =
-            vec![EntityMention { label: "Alpha Service".to_string(), role: EntityRole::Subject }];
-
-        let Some((winner, reason, _)) =
-            decide_focus(&bundle, &query_ir, "how to update Alpha Service?", 8)
-        else {
-            panic!("subject acronym pin should select the procedure document");
-        };
-        assert_eq!(reason, FocusReason::SingleDocumentSubject);
-        assert_eq!(winner.document_id, procedure_doc);
     }
 
     #[test]
@@ -2793,7 +2729,7 @@ mod tests {
             ],
         };
         let mut query_ir = ir(QueryScope::SingleDocument);
-        query_ir.target_types = vec!["artifact".to_string(), "procedure".to_string()];
+        query_ir.target_types = vec![QueryTargetKind::Procedure, QueryTargetKind::Version];
         query_ir.target_entities = vec![EntityMention {
             label: "Alpha Control Service".to_string(),
             role: EntityRole::Subject,

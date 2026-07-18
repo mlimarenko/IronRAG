@@ -1,7 +1,7 @@
-#![allow(clippy::unwrap_used, clippy::expect_used)]
-
 #[path = "support/iam_token_support.rs"]
 mod iam_token_support;
+#[path = "support/mcp_tool_call_support.rs"]
+mod mcp_tool_call_support;
 
 use axum::response::IntoResponse;
 use chrono::Utc;
@@ -30,7 +30,7 @@ use axum::{
 use tower::ServiceExt;
 
 #[test]
-fn capability_snapshot_omits_absent_workspace_scope_and_keeps_tool_list() {
+fn capability_snapshot_omits_absent_workspace_scope_and_keeps_tool_list() -> anyhow::Result<()> {
     let value = serde_json::to_value(McpCapabilitySnapshot {
         token_id: Some(Uuid::nil()),
         token_kind: "instance_admin".to_string(),
@@ -38,16 +38,20 @@ fn capability_snapshot_omits_absent_workspace_scope_and_keeps_tool_list() {
         visible_workspace_count: 2,
         visible_library_count: 4,
         tools: vec!["list_workspaces".to_string(), "search_documents".to_string()],
+        tool_contract_version: 1,
+        tool_contract_hash: "sha256:synthetic".to_string(),
         generated_at: Some(Utc::now()),
-    })
-    .unwrap();
+    })?;
 
     assert!(value.get("workspaceScope").is_none());
     assert_eq!(value.get("tools"), Some(&json!(["list_workspaces", "search_documents"])));
+    assert_eq!(value.get("toolContractVersion"), Some(&json!(1)));
+    assert_eq!(value.get("toolContractHash"), Some(&json!("sha256:synthetic")));
+    Ok(())
 }
 
 #[test]
-fn read_response_preserves_nullability_for_unreadable_payloads() {
+fn read_response_preserves_nullability_for_unreadable_payloads() -> anyhow::Result<()> {
     let value = serde_json::to_value(McpReadDocumentResponse {
         document_id: Uuid::nil(),
         document_title: "Unreadable memory".to_string(),
@@ -74,20 +78,20 @@ fn read_response_preserves_nullability_for_unreadable_payloads() {
         entity_references: Vec::new(),
         relation_references: Vec::new(),
         evidence_references: Vec::new(),
-    })
-    .unwrap();
+    })?;
 
     assert!(value.get("latestRevisionId").is_none());
     assert!(value.get("content").is_none());
     assert!(value.get("totalContentLength").is_none());
     assert!(value.get("continuationToken").is_none());
     assert_eq!(value.get("readabilityState"), Some(&json!("processing")));
+    Ok(())
 }
 
 #[test]
-fn mutation_receipt_serializes_optional_runtime_and_failure_fields() {
+fn mutation_receipt_serializes_optional_runtime_and_failure_fields() -> anyhow::Result<()> {
     let value = serde_json::to_value(McpMutationReceipt {
-        receipt_id: Uuid::nil(),
+        operation_id: Uuid::nil(),
         token_id: Uuid::nil(),
         workspace_id: Uuid::nil(),
         library_id: Uuid::nil(),
@@ -98,17 +102,18 @@ fn mutation_receipt_serializes_optional_runtime_and_failure_fields() {
         accepted_at: Utc::now(),
         last_status_at: Utc::now(),
         failure_kind: None,
-    })
-    .unwrap();
+    })?;
 
     assert!(value.get("documentId").is_some_and(serde_json::Value::is_null));
     assert!(value.get("failureKind").is_some_and(serde_json::Value::is_null));
     assert_eq!(value.get("operationKind"), Some(&json!("upload")));
     assert_eq!(value.get("status"), Some(&json!("accepted")));
+    Ok(())
 }
 
 #[test]
-fn search_responses_preserve_hit_order_and_nullability_for_unavailable_hits() {
+fn search_responses_preserve_hit_order_and_nullability_for_unavailable_hits() -> anyhow::Result<()>
+{
     let readable_document_id = Uuid::now_v7();
     let unavailable_document_id = Uuid::now_v7();
     let value = serde_json::to_value(McpSearchDocumentsResponse {
@@ -161,10 +166,12 @@ fn search_responses_preserve_hit_order_and_nullability_for_unavailable_hits() {
                 evidence_references: Vec::new(),
             },
         ],
-    })
-    .unwrap();
+    })?;
 
-    let hits = value.get("hits").and_then(serde_json::Value::as_array).unwrap();
+    let hits = value
+        .get("hits")
+        .and_then(serde_json::Value::as_array)
+        .context("serialized search response is missing the hits array")?;
     assert_eq!(hits[0].get("documentId"), Some(&json!(readable_document_id)));
     assert_eq!(hits[1].get("documentId"), Some(&json!(unavailable_document_id)));
     assert!(hits[1].get("latestRevisionId").is_none());
@@ -172,10 +179,11 @@ fn search_responses_preserve_hit_order_and_nullability_for_unavailable_hits() {
     assert!(hits[1].get("excerptStartOffset").is_none());
     assert!(hits[1].get("excerptEndOffset").is_none());
     assert_eq!(hits[1].get("readabilityState"), Some(&json!("unavailable")));
+    Ok(())
 }
 
 #[tokio::test]
-async fn mcp_specific_api_errors_emit_contract_error_kinds() {
+async fn mcp_specific_api_errors_emit_contract_error_kinds() -> anyhow::Result<()> {
     let scenarios = [
         (ApiError::invalid_mcp_tool_call("unsupported MCP tool"), "invalid_mcp_tool_call"),
         (
@@ -191,10 +199,17 @@ async fn mcp_specific_api_errors_emit_contract_error_kinds() {
 
     for (error, expected_kind) in scenarios {
         let response = error.into_response();
-        let body = response.into_body().collect().await.unwrap().to_bytes();
-        let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(value.get("errorKind"), Some(&json!(expected_kind)));
+        let body = response
+            .into_body()
+            .collect()
+            .await
+            .context("failed to collect MCP error response")?
+            .to_bytes();
+        let value: serde_json::Value =
+            serde_json::from_slice(&body).context("failed to decode MCP error response")?;
+        assert_eq!(value.get("code"), Some(&json!(expected_kind)));
     }
+    Ok(())
 }
 
 struct McpDiscoveryContractFixture {
@@ -274,7 +289,7 @@ impl McpDiscoveryContractFixture {
                     .uri(uri)
                     .header(header::AUTHORIZATION, format!("Bearer {token}"))
                     .body(Body::empty())
-                    .expect("build mcp contracts capabilities request"),
+                    .context("failed to build MCP contracts capabilities request")?,
             )
             .await
             .context("mcp contracts capabilities request failed")?;
@@ -317,42 +332,15 @@ impl McpDiscoveryContractFixture {
         tool_name: &str,
         arguments: serde_json::Value,
     ) -> anyhow::Result<serde_json::Value> {
-        let response = self
-            .app()
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri(uri)
-                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
-                    .header(header::CONTENT_TYPE, "application/json")
-                    .body(Body::from(
-                        json!({
-                            "jsonrpc": "2.0",
-                            "id": "contracts-empty-discovery",
-                            "method": "tools/call",
-                            "params": {
-                                "name": tool_name,
-                                "arguments": arguments,
-                            },
-                        })
-                        .to_string(),
-                    ))
-                    .expect("build mcp contracts tools/call request"),
-            )
-            .await
-            .with_context(|| format!("mcp contracts tool call {tool_name} failed"))?;
-
-        if response.status() != StatusCode::OK {
-            anyhow::bail!("unexpected status {} for tool {tool_name}", response.status());
-        }
-
-        let bytes = response
-            .into_body()
-            .collect()
-            .await
-            .context("failed to collect tools/call body")?
-            .to_bytes();
-        serde_json::from_slice(&bytes).context("failed to decode tools/call json")
+        mcp_tool_call_support::call_tool(
+            self.app(),
+            uri,
+            token,
+            "contracts-empty-discovery",
+            tool_name,
+            arguments,
+        )
+        .await
     }
 
     async fn rpc_call(
@@ -380,35 +368,26 @@ impl McpDiscoveryContractFixture {
         method: &str,
         params: serde_json::Value,
     ) -> anyhow::Result<serde_json::Value> {
-        let response = self
-            .app()
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri(uri)
-                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
-                    .header(header::CONTENT_TYPE, "application/json")
-                    .body(Body::from(
-                        json!({
-                            "jsonrpc": "2.0",
-                            "id": "contracts-rpc-call",
-                            "method": method,
-                            "params": params,
-                        })
-                        .to_string(),
-                    ))
-                    .expect("build mcp contracts rpc request"),
+        if method == "initialize" {
+            let session = mcp_tool_call_support::initialize_session(
+                self.app(),
+                uri,
+                token,
+                "contracts-rpc-call",
             )
-            .await
-            .with_context(|| format!("mcp contracts rpc call {method} failed"))?;
-
-        if response.status() != StatusCode::OK {
-            anyhow::bail!("unexpected status {} for method {method}", response.status());
+            .await?;
+            mcp_tool_call_support::terminate_session(self.app(), uri, token, &session.id).await?;
+            return Ok(session.payload);
         }
-
-        let bytes =
-            response.into_body().collect().await.context("failed to collect rpc body")?.to_bytes();
-        serde_json::from_slice(&bytes).context("failed to decode rpc json")
+        mcp_tool_call_support::call_rpc(
+            self.app(),
+            uri,
+            token,
+            "contracts-rpc-call",
+            method,
+            params,
+        )
+        .await
     }
 
     async fn notification(
@@ -417,26 +396,26 @@ impl McpDiscoveryContractFixture {
         method: &str,
         params: serde_json::Value,
     ) -> anyhow::Result<(StatusCode, Vec<u8>)> {
-        let response = self
-            .app()
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/v1/mcp")
-                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
-                    .header(header::CONTENT_TYPE, "application/json")
-                    .body(Body::from(
-                        json!({
-                            "jsonrpc": "2.0",
-                            "method": method,
-                            "params": params,
-                        })
-                        .to_string(),
-                    ))
-                    .expect("build mcp contracts notification request"),
-            )
-            .await
-            .with_context(|| format!("mcp contracts notification {method} failed"))?;
+        let session = mcp_tool_call_support::initialize_session(
+            self.app(),
+            "/v1/mcp",
+            token,
+            "contracts-notification-initialize",
+        )
+        .await?;
+        let response = mcp_tool_call_support::post_session_json(
+            self.app(),
+            "/v1/mcp",
+            token,
+            &session.id,
+            json!({
+                "jsonrpc": "2.0",
+                "method": method,
+                "params": params,
+            }),
+        )
+        .await
+        .with_context(|| format!("mcp contracts notification {method} failed"))?;
 
         let status = response.status();
         let bytes = response
@@ -446,6 +425,7 @@ impl McpDiscoveryContractFixture {
             .context("failed to collect notification body")?
             .to_bytes()
             .to_vec();
+        mcp_tool_call_support::terminate_session(self.app(), "/v1/mcp", token, &session.id).await?;
         Ok((status, bytes))
     }
 }
@@ -477,6 +457,40 @@ async fn no_access_discovery_returns_explicit_zero_counts_and_empty_arrays() -> 
             .as_array()
             .context("libraries payload must be an array")?;
         assert!(library_items.is_empty());
+
+        Ok(())
+    }
+    .await;
+
+    fixture.cleanup().await?;
+    result
+}
+
+#[tokio::test]
+#[ignore = "requires local postgres and redis services"]
+async fn capability_and_tools_list_publish_the_same_contract_hash() -> anyhow::Result<()> {
+    let settings =
+        Settings::from_env().context("failed to load settings for MCP parity contract test")?;
+    let fixture = McpDiscoveryContractFixture::create(settings).await?;
+
+    let result = async {
+        let token = fixture.token(&["documents:read"], "tool-contract-parity").await?;
+        let capabilities = fixture.capabilities(&token).await?;
+        let tools_list = fixture.rpc_call(&token, "tools/list", json!({})).await?;
+
+        assert_eq!(
+            capabilities["toolContractVersion"],
+            tools_list["result"]["_meta"]["ironrag/toolContractVersion"]
+        );
+        assert_eq!(
+            capabilities["toolContractHash"],
+            tools_list["result"]["_meta"]["ironrag/toolContractHash"]
+        );
+        assert!(
+            capabilities["toolContractHash"]
+                .as_str()
+                .is_some_and(|hash| hash.starts_with("sha256:") && hash.len() == 71)
+        );
 
         Ok(())
     }
@@ -521,7 +535,7 @@ async fn resource_discovery_methods_are_not_supported() -> anyhow::Result<()> {
         let token = fixture.token(&["documents:read"], "resource-discovery").await?;
 
         let initialize = fixture.rpc_call(&token, "initialize", json!({})).await?;
-        assert_eq!(initialize["result"]["protocolVersion"], json!("2025-06-18"));
+        assert_eq!(initialize["result"]["protocolVersion"], json!("2025-11-25"));
         assert_eq!(initialize["result"]["capabilities"]["tools"], json!({ "listChanged": false }));
         assert!(
             initialize["result"]["capabilities"].get("resources").is_none(),
@@ -663,10 +677,10 @@ async fn web_ingest_tools_advertise_recursive_defaults_and_page_listing_contract
         let capabilities = fixture.diagnostics_capabilities(&token).await?;
         let tools =
             capabilities["tools"].as_array().context("capabilities tools must be an array")?;
-        assert!(tools.iter().any(|tool| tool == "submit_web_ingest_run"));
-        assert!(tools.iter().any(|tool| tool == "get_web_ingest_run"));
-        assert!(tools.iter().any(|tool| tool == "list_web_ingest_run_pages"));
-        assert!(tools.iter().any(|tool| tool == "cancel_web_ingest_run"));
+        assert!(tools.iter().any(|tool| tool == "submit_web_run"));
+        assert!(tools.iter().any(|tool| tool == "get_web_run"));
+        assert!(tools.iter().any(|tool| tool == "list_web_run_pages"));
+        assert!(tools.iter().any(|tool| tool == "cancel_web_run"));
         assert!(tools.iter().any(|tool| tool == "get_runtime_execution"));
         assert!(tools.iter().any(|tool| tool == "get_runtime_execution_trace"));
 
@@ -677,8 +691,8 @@ async fn web_ingest_tools_advertise_recursive_defaults_and_page_listing_contract
 
         let submit_tool = tool_items
             .iter()
-            .find(|tool| tool["name"] == json!("submit_web_ingest_run"))
-            .context("submit_web_ingest_run tool missing from tools/list")?;
+            .find(|tool| tool["name"] == json!("submit_web_run"))
+            .context("submit_web_run tool missing from tools/list")?;
         assert_eq!(submit_tool["inputSchema"]["required"], json!(["library", "seedUrl", "mode"]));
         assert_eq!(
             submit_tool["inputSchema"]["properties"]["mode"]["enum"],
@@ -703,14 +717,14 @@ async fn web_ingest_tools_advertise_recursive_defaults_and_page_listing_contract
 
         let get_tool = tool_items
             .iter()
-            .find(|tool| tool["name"] == json!("get_web_ingest_run"))
-            .context("get_web_ingest_run tool missing from tools/list")?;
+            .find(|tool| tool["name"] == json!("get_web_run"))
+            .context("get_web_run tool missing from tools/list")?;
         assert_eq!(get_tool["inputSchema"]["required"], json!(["runId"]));
 
         let pages_tool = tool_items
             .iter()
-            .find(|tool| tool["name"] == json!("list_web_ingest_run_pages"))
-            .context("list_web_ingest_run_pages tool missing from tools/list")?;
+            .find(|tool| tool["name"] == json!("list_web_run_pages"))
+            .context("list_web_run_pages tool missing from tools/list")?;
         assert_eq!(pages_tool["inputSchema"]["required"], json!(["runId"]));
         assert!(
             pages_tool["description"]
@@ -721,8 +735,8 @@ async fn web_ingest_tools_advertise_recursive_defaults_and_page_listing_contract
 
         let cancel_tool = tool_items
             .iter()
-            .find(|tool| tool["name"] == json!("cancel_web_ingest_run"))
-            .context("cancel_web_ingest_run tool missing from tools/list")?;
+            .find(|tool| tool["name"] == json!("cancel_web_run"))
+            .context("cancel_web_run tool missing from tools/list")?;
         assert_eq!(cancel_tool["inputSchema"]["required"], json!(["runId"]));
 
         let runtime_tool = tool_items

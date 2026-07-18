@@ -63,9 +63,7 @@ type KeyMap = Map<
 >;
 
 function buildKeyMap(fields: FieldsConfig, map?: KeyMap): KeyMap {
-  if (!map) {
-    map = new Map();
-  }
+  map ??= new Map();
 
   for (const config of fields) {
     if ('in' in config) {
@@ -88,31 +86,62 @@ function buildKeyMap(fields: FieldsConfig, map?: KeyMap): KeyMap {
 }
 
 interface Params {
-  body: unknown;
+  body?: unknown;
   headers: Record<string, unknown>;
   path: Record<string, unknown>;
   query: Record<string, unknown>;
 }
 
-type ParamsSlotMap = Record<Slot, unknown>;
-
-function stripEmptySlots(params: ParamsSlotMap): void {
+function stripEmptySlots(params: Params): void {
   for (const [slot, value] of Object.entries(params)) {
+    if (slot === 'body') continue;
     if (value && typeof value === 'object' && !Array.isArray(value) && !Object.keys(value).length) {
       delete params[slot as Slot];
     }
   }
 }
 
+function writeExtraParam(params: Params, config: FieldsConfig[number], key: string, value: unknown): void {
+  const extra = extraPrefixes.find(([prefix]) => key.startsWith(prefix));
+  if (extra) { ensureSlot(params, extra[1])[key.slice(extra[0].length)] = value; return; }
+  if ('allowExtra' in config && config.allowExtra) {
+    const slot = (Object.entries(config.allowExtra) as Array<[Slot, boolean]>).find(([, allowed]) => allowed)?.[0];
+    if (slot) ensureSlot(params, slot)[key] = value;
+  }
+}
+
+function ensureSlot(params: Params, slot: Slot): Record<string, unknown> {
+  const record = params[slot] as Record<string, unknown> | undefined;
+  if (record) return record;
+  const created = Object.create(null) as Record<string, unknown>;
+  params[slot] = created;
+  return created;
+}
+
+function writeMappedParam(params: Params, map: KeyMap, config: FieldsConfig[number], arg: unknown): void {
+  if ('in' in config) {
+    if (!config.key) { params.body = arg; return; }
+    const field = map.get(config.key);
+    if (field?.in) ensureSlot(params, field.in)[field.map || config.key] = arg;
+    return;
+  }
+  for (const [key, value] of Object.entries(arg ?? {})) {
+    const field = map.get(key);
+    if (field?.in) { ensureSlot(params, field.in)[field.map || key] = value; continue; }
+    if (field) { params[field.map] = value; continue; }
+    writeExtraParam(params, config, key, value);
+  }
+}
+
 export function buildClientParams(args: ReadonlyArray<unknown>, fields: FieldsConfig): Params {
-  const params: ParamsSlotMap = {
-    body: Object.create(null),
+  const params: Params = {
     headers: Object.create(null),
     path: Object.create(null),
     query: Object.create(null),
   };
 
   const map = buildKeyMap(fields);
+
 
   let config: FieldsConfig[number] | undefined;
 
@@ -125,47 +154,10 @@ export function buildClientParams(args: ReadonlyArray<unknown>, fields: FieldsCo
       continue;
     }
 
-    if ('in' in config) {
-      if (config.key) {
-        const field = map.get(config.key)!;
-        const name = field.map || config.key;
-        if (field.in) {
-          (params[field.in] as Record<string, unknown>)[name] = arg;
-        }
-      } else {
-        params.body = arg;
-      }
-    } else {
-      for (const [key, value] of Object.entries(arg ?? {})) {
-        const field = map.get(key);
-
-        if (field) {
-          if (field.in) {
-            const name = field.map || key;
-            (params[field.in] as Record<string, unknown>)[name] = value;
-          } else {
-            params[field.map] = value;
-          }
-        } else {
-          const extra = extraPrefixes.find(([prefix]) => key.startsWith(prefix));
-
-          if (extra) {
-            const [prefix, slot] = extra;
-            (params[slot] as Record<string, unknown>)[key.slice(prefix.length)] = value;
-          } else if ('allowExtra' in config && config.allowExtra) {
-            for (const [slot, allowed] of Object.entries(config.allowExtra)) {
-              if (allowed) {
-                (params[slot as Slot] as Record<string, unknown>)[key] = value;
-                break;
-              }
-            }
-          }
-        }
-      }
-    }
+    writeMappedParam(params, map, config, arg);
   }
 
   stripEmptySlots(params);
 
-  return params as Params;
+  return params;
 }

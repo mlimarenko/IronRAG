@@ -1,9 +1,9 @@
 //! Knowledge-plane storage ports (trait surfaces).
 //!
 //! These traits are the boundary between query/ingest services and the concrete
-//! PostgreSQL knowledge-plane adapter. The traits stay as domain ports so the
+//! `PostgreSQL` knowledge-plane adapter. The traits stay as domain ports so the
 //! services do not depend on table layout details, but runtime backend selection
-//! has been removed: PostgreSQL is the single implementation.
+//! has been removed: `PostgreSQL` is the single implementation.
 //!
 //! ## Surface split
 //!
@@ -25,15 +25,16 @@
 //! 2. **Write-count returns.** Methods returning a mutation count return the
 //!    number of rows actually written/removed (`cmd_tuples`/`RETURNING`), not a request count. See the `delete_*`/`u64`
 //!    methods on [`SearchStore`], [`GraphStore`], and [`ContextStore`].
-//! 3. **Vector write-routing is hidden.** Callers never name a per-`(library,
-//!    dim)` shard. [`SearchStore::upsert_chunk_vectors_bulk`] (and its singular
-//!    sibling) own the routing to typed-by-dim tables.
+//! 3. **Vector write-routing is hidden.** Callers never name a physical
+//!    dimension relation. [`SearchStore::upsert_chunk_vectors_bulk`] (and its
+//!    singular sibling) own routing into a shared typed-by-dimension table;
+//!    library, profile, and vector kind identify logical lanes inside it.
 //!
 //! ## Canonical edge direction
 //!
 //! `evidence_source_edge` is written EVIDENCE→REVISION by
 //! [`GraphStore::upsert_evidence_source_edge`]. The canonical direction is
-//! **EVIDENCE→REVISION** and the PostgreSQL adapter enforces it with an FK.
+//! **EVIDENCE→REVISION** and the `PostgreSQL` adapter enforces it with an FK.
 
 use std::sync::Arc;
 
@@ -57,6 +58,56 @@ use crate::infra::knowledge_rows::{
     NewKnowledgeEntityCandidate, NewKnowledgeEvidence, NewKnowledgeRelation,
     NewKnowledgeRelationCandidate, StructuredRevisionCounts,
 };
+
+/// Formal identifier protocol for an unpromoted vector rebuild lane. The
+/// suffix is a SHA-256 digest, not an operator/model alias.
+pub const VECTOR_REBUILD_STAGING_PROFILE_PREFIX: &str = "embedding-rebuild:v1:";
+pub const VECTOR_REBUILD_STAGING_PROFILE_DIGEST_LEN: usize = 64;
+/// Cross-process serializer namespace for canonical vector-plane writes.
+///
+/// Ordinary writes take a transaction-scoped shared lock; destructive purge
+/// and promotion take the exclusive form of the same per-library lock.
+pub const VECTOR_PLANE_DATA_ADVISORY_LOCK_PREFIX: &str = "query.vector_plane.data.library";
+
+/// Source/profile fence for a canonical vector write.
+///
+/// AI binding, account, model, and provider changes advance the library source
+/// generation in the same database transaction. Capturing this version before
+/// resolving the embedding binding therefore lets the storage transaction
+/// reject both source drift and profile drift without reconstructing provider
+/// configuration inside the storage adapter.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CanonicalVectorWriteFence {
+    pub expected_source_truth_version: i64,
+    pub embedding_profile_key: String,
+    /// Ordinary ingest writes are additionally authorized by the latest
+    /// leased attempt for the exact revision. Direct operator writes do not
+    /// have an ingest lifecycle and leave this unset.
+    pub ingest_attempt: Option<CanonicalIngestVectorWriteFence>,
+    /// Direct operator/API writes advance the cross-replica cache fence.
+    /// Ingest batches preserve it because one ingest attempt writes several
+    /// batches under the same pre-provider source/profile snapshot.
+    pub advance_source_truth_version: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CanonicalIngestVectorWriteFence {
+    pub attempt_id: Uuid,
+    pub revision_id: Uuid,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VectorPlaneDeleteOutcome {
+    pub deleted: u64,
+    pub source_truth_version: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChunkVectorProfileInventory {
+    pub dimensions: Vec<u64>,
+    pub active_vector_count: u64,
+}
+
 /// Shared handle for a [`DocumentStore`] adapter.
 pub type DocumentStoreRef = Arc<dyn DocumentStore>;
 /// Shared handle for a [`SearchStore`] adapter.
@@ -166,15 +217,28 @@ pub trait DocumentStore: Send + Sync {
     ) -> anyhow::Result<Option<KnowledgeRevisionRow>>;
 
     // --- chunks ---
+    // Canonical chunk read/count/search methods MUST exclude rows with a
+    // non-null `raptor_level`. The retired summary format has no revision-safe
+    // leaf lineage and is not valid answer, preview, MCP, or embedding input.
+    // Write/delete methods still accept those rows so maintenance can remove
+    // legacy data without a separate unsafe read surface.
     async fn upsert_chunk(&self, row: &KnowledgeChunkRow) -> anyhow::Result<KnowledgeChunkRow>;
     async fn insert_chunks(
         &self,
         rows: &[KnowledgeChunkRow],
     ) -> anyhow::Result<Vec<KnowledgeChunkRow>>;
-    async fn list_chunks_by_library(
+    /// Read one keyset page of ready, canonical chunks on active documents'
+    /// readable revisions. Maintenance rebuilds must page through this
+    /// inventory instead of applying a silent global row cap.
+    async fn list_active_chunks_by_library_page(
         &self,
         library_id: Uuid,
+        after: Option<(i32, Uuid)>,
+        limit: usize,
     ) -> anyhow::Result<Vec<KnowledgeChunkRow>>;
+    /// Count ready, canonical chunks on active documents' readable revisions.
+    /// This is the expected inventory for a complete library vector profile.
+    async fn count_active_chunks_by_library(&self, library_id: Uuid) -> anyhow::Result<u64>;
     /// Source-profile chunks for the given revisions, ordered by the **input
     /// rank** of `revision_ids` then `chunk_index` (`unnest(...) WITH
     /// ORDINALITY`). The adapter MUST preserve input-rank
@@ -249,15 +313,23 @@ pub trait DocumentStore: Send + Sync {
         &self,
         chunk_ids: &[Uuid],
     ) -> anyhow::Result<Vec<KnowledgeChunkRow>>;
+    /// Searches only the bounded candidate set selected by primary retrieval.
+    /// An empty candidate set MUST return no rows and MUST NOT fall back to a
+    /// library-wide scan.
     async fn search_code_pattern_chunks_by_terms(
         &self,
         library_id: Uuid,
+        candidate_document_ids: &[Uuid],
         terms: &[String],
         limit: usize,
     ) -> anyhow::Result<Vec<KnowledgeChunkRow>>;
+    /// Searches only the bounded candidate set selected by primary retrieval.
+    /// An empty candidate set MUST return no rows and MUST NOT fall back to a
+    /// library-wide scan.
     async fn search_transport_pattern_chunks_by_terms(
         &self,
         library_id: Uuid,
+        candidate_document_ids: &[Uuid],
         terms: &[String],
         limit: usize,
     ) -> anyhow::Result<Vec<KnowledgeChunkRow>>;
@@ -295,6 +367,12 @@ pub trait DocumentStore: Send + Sync {
     async fn list_structured_blocks_by_revision(
         &self,
         revision_id: Uuid,
+    ) -> anyhow::Result<Vec<KnowledgeStructuredBlockRow>>;
+    async fn list_setup_structured_blocks_by_revision(
+        &self,
+        revision_id: Uuid,
+        sample_limit: usize,
+        structured_limit: usize,
     ) -> anyhow::Result<Vec<KnowledgeStructuredBlockRow>>;
     async fn list_structured_blocks_page_by_revision(
         &self,
@@ -343,29 +421,65 @@ pub trait DocumentStore: Send + Sync {
 
 /// Lexical (FTS/trigram) search lanes and the vector ANN lane.
 ///
-/// Owns the `knowledge_search_view` reads and the per-`(library, dim)` chunk /
-/// entity vector shards.
+/// Owns the `knowledge_search_view` reads and shared per-dimension chunk/entity
+/// vector relations. Libraries and embedding profiles are filtered logical
+/// lanes, not physically isolated shards.
 #[async_trait]
 pub trait SearchStore: Send + Sync {
     async fn ensure_chunk_vector_shard(&self, dim: u64) -> anyhow::Result<()>;
-    async fn ensure_chunk_vector_shard_for_library(
+    async fn ensure_chunk_vector_lane_for_library(
         &self,
         dim: u64,
         library_id: Uuid,
     ) -> anyhow::Result<()>;
     async fn ensure_entity_vector_shard(&self, dim: u64) -> anyhow::Result<()>;
-    /// Upsert one chunk vector. Vector write-routing is hidden behind this method
-    /// (leaky contract §14.4(c)): the adapter resolves the per-`(library, dim)`
-    /// physical destination from the row — callers never name a shard/table.
+    /// Unconditional adapter-level upsert used by storage fixtures and scoped
+    /// repair tooling. Product canonical writes must use the fenced bulk method
+    /// below. Vector write-routing remains hidden (leaky contract §14.4(c)):
+    /// callers never name a relation/table.
     async fn upsert_chunk_vector(
         &self,
         row: &KnowledgeChunkVectorRow,
     ) -> anyhow::Result<KnowledgeChunkVectorRow>;
-    /// Bulk variant of [`SearchStore::upsert_chunk_vector`]; same hidden routing
-    /// contract (§14.4(c)).
+    /// Unconditional bulk variant of [`SearchStore::upsert_chunk_vector`]; same
+    /// fixture/repair boundary and hidden-routing contract (§14.4(c)).
     async fn upsert_chunk_vectors_bulk(
         &self,
         rows: &[KnowledgeChunkVectorRow],
+    ) -> anyhow::Result<()>;
+    /// Atomically validates one canonical source/profile fence, writes the
+    /// manifest and vectors, and reconciles the manifest count. The database
+    /// lock is acquired only for this short transaction, never for provider
+    /// I/O. Returns the source version visible after the commit.
+    async fn upsert_chunk_vectors_bulk_fenced(
+        &self,
+        rows: &[KnowledgeChunkVectorRow],
+        fence: &CanonicalVectorWriteFence,
+    ) -> anyhow::Result<i64>;
+    /// Prepare the exact canonical lane once before a chunk-vector rebuild.
+    /// This is deliberately separate from deferred bulk writes so relation /
+    /// index setup (including any sizing scan) cannot repeat per provider
+    /// batch.
+    async fn prepare_chunk_vector_rebuild_lane(
+        &self,
+        library_id: Uuid,
+        dimensions: u64,
+        embedding_model_key: &str,
+    ) -> anyhow::Result<()>;
+    /// Rebuild-only bulk write into a lane prepared by
+    /// [`Self::prepare_chunk_vector_rebuild_lane`]. The adapter deliberately
+    /// defers its expensive exact `COUNT(*)`. The caller must invoke
+    /// [`Self::reconcile_chunk_vector_manifest_count`] exactly once on both
+    /// success and partial failure before releasing its rebuild fence.
+    async fn upsert_chunk_vectors_bulk_deferred_manifest(
+        &self,
+        rows: &[KnowledgeChunkVectorRow],
+    ) -> anyhow::Result<()>;
+    async fn reconcile_chunk_vector_manifest_count(
+        &self,
+        library_id: Uuid,
+        dimensions: u64,
+        embedding_model_key: &str,
     ) -> anyhow::Result<()>;
     async fn delete_chunk_vector(
         &self,
@@ -373,8 +487,39 @@ pub trait SearchStore: Send + Sync {
         embedding_model_key: &str,
         freshness_generation: i64,
     ) -> anyhow::Result<Option<KnowledgeChunkVectorRow>>;
+    /// Low-level fixture/repair primitive. Production revision cleanup must use
+    /// [`Self::delete_chunk_vectors_by_revision_fenced`].
     /// Returns the number of vector rows removed.
     async fn delete_chunk_vectors_by_revision(&self, revision_id: Uuid) -> anyhow::Result<u64>;
+    /// Low-level exact-identity fixture/repair primitive. Ordinary ingest
+    /// failure cleanup must also prove that its attempt still owns the lease
+    /// through [`Self::delete_attempt_owned_chunk_vectors_by_ids_fenced`].
+    async fn delete_chunk_vectors_by_ids_fenced(
+        &self,
+        library_id: Uuid,
+        vector_ids: &[Uuid],
+        expected_source_truth_version: i64,
+    ) -> anyhow::Result<VectorPlaneDeleteOutcome>;
+    /// Delete vector rows created by a failed ingest attempt only while that
+    /// exact attempt remains the latest leased authority for the revision.
+    /// `None` means authority moved to a retry, so every listed row was
+    /// deliberately preserved.
+    async fn delete_attempt_owned_chunk_vectors_by_ids_fenced(
+        &self,
+        library_id: Uuid,
+        vector_ids: &[Uuid],
+        expected_source_truth_version: i64,
+        ingest_attempt: CanonicalIngestVectorWriteFence,
+    ) -> anyhow::Result<Option<VectorPlaneDeleteOutcome>>;
+    /// Revision-wide destructive operation for explicit readiness/content
+    /// mutations. Delete, manifest reconciliation, and source-fence advance
+    /// commit atomically behind the exclusive per-library data lock.
+    async fn delete_chunk_vectors_by_revision_fenced(
+        &self,
+        library_id: Uuid,
+        revision_id: Uuid,
+        expected_source_truth_version: i64,
+    ) -> anyhow::Result<VectorPlaneDeleteOutcome>;
     /// Returns the number of vector rows removed (§14.4(b)).
     async fn delete_chunk_vectors_by_library(&self, library_id: Uuid) -> anyhow::Result<u64>;
     /// Delete this library's chunk and entity vector rows from every physical
@@ -404,25 +549,108 @@ pub trait SearchStore: Send + Sync {
         vector_kind: &str,
         freshness_generation: i64,
     ) -> anyhow::Result<usize>;
-    /// List persisted chunk-vector dimensions for a library/model/kind tuple,
-    /// ordered by the implementation's strongest evidence first.
-    async fn list_chunk_vector_dimensions(
+    /// Read the durable dimension claim for one exact execution profile from
+    /// vector-relation metadata only. The claim remains observable when its
+    /// row count is zero; implementations must not infer it by scanning vector
+    /// rows or by falling back to another profile/model identifier.
+    async fn read_vector_profile_dimension_claim(
         &self,
         library_id: Uuid,
         embedding_model_key: &str,
         vector_kind: &str,
-    ) -> anyhow::Result<Vec<u64>>;
+    ) -> anyhow::Result<Option<u64>>;
+    /// Inspect visible canonical chunk vectors for an exact embedding
+    /// execution profile in one adapter call. Dimensions are ordered by the
+    /// implementation's strongest evidence first.
+    async fn inspect_chunk_vector_profile(
+        &self,
+        library_id: Uuid,
+        embedding_model_key: &str,
+        vector_kind: &str,
+    ) -> anyhow::Result<ChunkVectorProfileInventory>;
+    /// Unconditional fixture/repair write. Product canonical writes use
+    /// [`Self::upsert_entity_vectors_bulk_fenced`].
     async fn upsert_entity_vector(
         &self,
         row: &KnowledgeEntityVectorRow,
     ) -> anyhow::Result<KnowledgeEntityVectorRow>;
+    /// Entity-vector counterpart of
+    /// [`Self::upsert_chunk_vectors_bulk_fenced`].
+    async fn upsert_entity_vectors_bulk_fenced(
+        &self,
+        rows: &[KnowledgeEntityVectorRow],
+        fence: &CanonicalVectorWriteFence,
+    ) -> anyhow::Result<i64>;
+    /// Entity-lane counterpart of
+    /// [`Self::prepare_chunk_vector_rebuild_lane`].
+    async fn prepare_entity_vector_rebuild_lane(
+        &self,
+        library_id: Uuid,
+        dimensions: u64,
+        embedding_model_key: &str,
+    ) -> anyhow::Result<()>;
+    /// Entity-lane counterpart of
+    /// [`Self::upsert_chunk_vectors_bulk_deferred_manifest`].
+    async fn upsert_entity_vectors_bulk_deferred_manifest(
+        &self,
+        rows: &[KnowledgeEntityVectorRow],
+    ) -> anyhow::Result<()>;
+    async fn reconcile_entity_vector_manifest_count(
+        &self,
+        library_id: Uuid,
+        dimensions: u64,
+        embedding_model_key: &str,
+    ) -> anyhow::Result<()>;
+    /// Atomically purge every chunk/entity vector row and manifest for a
+    /// library only if its source fence still matches and its canonical active
+    /// chunk inventory is empty. No dimension is required or invented.
+    async fn purge_empty_library_vector_plane(
+        &self,
+        library_id: Uuid,
+        expected_source_truth_version: i64,
+    ) -> anyhow::Result<u64>;
+    /// Atomically replaces the selected canonical vector lanes with rows that
+    /// were built under an opaque staging profile. Implementations must verify
+    /// the exact staged row counts, switch chunk/entity lanes in one
+    /// transaction, and advance the library source fence in that transaction.
+    async fn promote_staged_vector_rebuild(
+        &self,
+        library_id: Uuid,
+        dimensions: u64,
+        canonical_embedding_model_key: &str,
+        staging_embedding_model_key: &str,
+        expected_source_truth_version: i64,
+        expected_chunk_count: Option<u64>,
+        expected_entity_count: Option<u64>,
+    ) -> anyhow::Result<()>;
+    /// Removes only rows/manifests owned by an unpromoted staging profile.
+    async fn discard_staged_vector_rebuild(
+        &self,
+        library_id: Uuid,
+        dimensions: u64,
+        staging_embedding_model_key: &str,
+    ) -> anyhow::Result<()>;
+    /// Recovers durable staging residue left by a cancelled process. Only
+    /// validated, unpromoted rebuild-profile manifests may be removed; the
+    /// scan must be bounded and canonical profiles must remain untouched.
+    async fn discard_abandoned_staged_vector_rebuilds(
+        &self,
+        library_id: Uuid,
+    ) -> anyhow::Result<u64>;
     async fn delete_entity_vector(
         &self,
         entity_id: Uuid,
         embedding_model_key: &str,
         freshness_generation: i64,
     ) -> anyhow::Result<Option<KnowledgeEntityVectorRow>>;
+    /// Low-level fixture/repair primitive. Production library cleanup must use
+    /// [`Self::delete_entity_vectors_by_library_fenced`].
     async fn delete_entity_vectors_by_library(&self, library_id: Uuid) -> anyhow::Result<()>;
+    async fn delete_entity_vectors_by_library_fenced(
+        &self,
+        library_id: Uuid,
+        expected_source_truth_version: i64,
+    ) -> anyhow::Result<VectorPlaneDeleteOutcome>;
     /// Returns the number of vector rows removed (§14.4(b)).
     async fn delete_all_entity_vectors(&self) -> anyhow::Result<u64>;
     async fn list_entity_vectors_by_entity(
@@ -437,7 +665,7 @@ pub trait SearchStore: Send + Sync {
         temporal_start: Option<DateTime<Utc>>,
         temporal_end: Option<DateTime<Utc>>,
     ) -> anyhow::Result<Vec<KnowledgeChunkSearchRow>>;
-    /// Config-aware variant of [`search_chunks`] that allows the caller to
+    /// Config-aware variant of [`Self::search_chunks`] that allows the caller to
     /// supply the Postgres FTS text-search config name sourced from the
     /// library's [`RetrievalConfig`].  The default implementation delegates
     /// to `search_chunks` so that test doubles satisfy the trait for free.

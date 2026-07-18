@@ -1,4 +1,6 @@
-use crate::domains::query_ir::{LiteralKind, QueryIR, literal_text_is_identifier_shaped};
+use crate::domains::query_ir::{
+    LiteralKind, QueryIR, QueryTargetKind, literal_text_is_identifier_shaped,
+};
 
 use super::question_intent::query_ir_has_focused_document_answer_intent;
 pub(super) use super::technical_literal_extractors::{
@@ -77,63 +79,85 @@ fn detect_technical_literal_intent_from_query_ir_inner(
         return TechnicalLiteralIntent::default();
     }
 
-    let mut intent = TechnicalLiteralIntent::default();
-    if include_configure_setup
-        && matches!(query_ir.act, crate::domains::query_ir::QueryAct::ConfigureHow)
-        && (!query_ir.is_follow_up() || configure_follow_up_has_evidence_anchor(query_ir))
-    {
-        intent.wants_paths = true;
-        intent.wants_parameters = true;
-    }
-    for tag in query_ir.target_types.iter().map(|value| value.trim().to_ascii_lowercase()) {
-        match tag.as_str() {
-            "endpoint" | "path" | "url" | "wsdl" => {
-                intent.wants_urls = true;
-                intent.wants_paths = true;
-                intent.wants_methods = true;
-                if tag == "path" {
-                    intent.wants_parameters = true;
-                }
-            }
-            "base_url" => {
-                intent.wants_urls = true;
-                intent.wants_prefixes = true;
-            }
-            "parameter" | "config_key" | "software_module" | "package" => {
-                intent.wants_parameters = true;
-                if tag == "software_module" || tag == "package" {
-                    intent.wants_paths = true;
-                }
-            }
-            "configuration_file" | "filesystem_path" => {
-                intent.wants_paths = true;
-                intent.wants_parameters = true;
-            }
-            "http_method" => intent.wants_methods = true,
-            "port" | "protocol" | "connection" => {
-                intent.wants_urls = true;
-                intent.wants_parameters = true;
-            }
-            _ => {}
-        }
+    let mut intent = configure_setup_intent(query_ir, include_configure_setup);
+    for target in &query_ir.target_types {
+        apply_target_literal_intent(&mut intent, *target);
     }
     for literal in &query_ir.literal_constraints {
-        match literal.kind {
-            LiteralKind::Url => intent.wants_urls = true,
-            LiteralKind::Path => intent.wants_paths = true,
-            LiteralKind::Identifier if literal_text_is_identifier_shaped(&literal.text) => {
-                intent.wants_parameters = true;
-            }
-            LiteralKind::Identifier
-            | LiteralKind::Version
-            | LiteralKind::NumericCode
-            | LiteralKind::Other => {}
-        }
+        apply_literal_constraint_intent(&mut intent, literal.kind, &literal.text);
     }
     if !intent.any() && query_ir.is_exact_literal_technical() {
         intent.wants_parameters = true;
     }
     intent
+}
+
+fn configure_setup_intent(
+    query_ir: &QueryIR,
+    include_configure_setup: bool,
+) -> TechnicalLiteralIntent {
+    let wants_setup = include_configure_setup
+        && matches!(query_ir.act, crate::domains::query_ir::QueryAct::ConfigureHow)
+        && (!query_ir.is_follow_up() || configure_follow_up_has_evidence_anchor(query_ir));
+    TechnicalLiteralIntent {
+        wants_paths: wants_setup,
+        wants_parameters: wants_setup,
+        ..TechnicalLiteralIntent::default()
+    }
+}
+
+fn apply_target_literal_intent(intent: &mut TechnicalLiteralIntent, target: QueryTargetKind) {
+    match target {
+        QueryTargetKind::Endpoint
+        | QueryTargetKind::Path
+        | QueryTargetKind::Url
+        | QueryTargetKind::Wsdl => {
+            intent.wants_urls = true;
+            intent.wants_paths = true;
+            intent.wants_methods = true;
+            intent.wants_parameters |= matches!(target, QueryTargetKind::Path);
+        }
+        QueryTargetKind::BaseUrl => {
+            intent.wants_urls = true;
+            intent.wants_prefixes = true;
+        }
+        QueryTargetKind::Parameter
+        | QueryTargetKind::ConfigKey
+        | QueryTargetKind::SoftwareModule
+        | QueryTargetKind::Package => {
+            intent.wants_parameters = true;
+            intent.wants_paths |=
+                matches!(target, QueryTargetKind::SoftwareModule | QueryTargetKind::Package);
+        }
+        QueryTargetKind::ConfigurationFile | QueryTargetKind::FilesystemPath => {
+            intent.wants_paths = true;
+            intent.wants_parameters = true;
+        }
+        QueryTargetKind::HttpMethod => intent.wants_methods = true,
+        QueryTargetKind::Port | QueryTargetKind::Protocol | QueryTargetKind::Connection => {
+            intent.wants_urls = true;
+            intent.wants_parameters = true;
+        }
+        _ => {}
+    }
+}
+
+fn apply_literal_constraint_intent(
+    intent: &mut TechnicalLiteralIntent,
+    kind: LiteralKind,
+    text: &str,
+) {
+    match kind {
+        LiteralKind::Url => intent.wants_urls = true,
+        LiteralKind::Path => intent.wants_paths = true,
+        LiteralKind::Identifier if literal_text_is_identifier_shaped(text) => {
+            intent.wants_parameters = true;
+        }
+        LiteralKind::Identifier
+        | LiteralKind::Version
+        | LiteralKind::NumericCode
+        | LiteralKind::Other => {}
+    }
 }
 
 fn configure_follow_up_has_evidence_anchor(query_ir: &QueryIR) -> bool {

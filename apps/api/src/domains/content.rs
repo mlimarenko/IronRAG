@@ -141,11 +141,9 @@ pub struct ContentMutationItem {
     pub message: Option<String>,
 }
 
-pub const READABLE_TEXT_STATES: &[&str] = &["readable", "ready", "text_readable"];
-
 #[must_use]
 pub fn revision_text_state_is_readable(text_state: &str) -> bool {
-    READABLE_TEXT_STATES.contains(&text_state.trim())
+    text_state == "text_readable"
 }
 
 /// A document that carries its own evidence and competes as a peer in
@@ -189,7 +187,7 @@ pub fn effective_document_id(
 /// - parent + raster-image media class -> `attached_context` (subordinate)
 /// - parent + any other / unknown media class -> `attachment` (peer child)
 #[must_use]
-pub fn derive_document_role(has_parent: bool, is_raster_image: bool) -> &'static str {
+pub const fn derive_document_role(has_parent: bool, is_raster_image: bool) -> &'static str {
     if !has_parent {
         DOCUMENT_ROLE_PRIMARY
     } else if is_raster_image {
@@ -372,10 +370,10 @@ mod tests {
     };
 
     #[test]
-    fn revision_text_state_is_readable_accepts_canonical_ready_states() {
-        assert!(revision_text_state_is_readable("readable"));
-        assert!(revision_text_state_is_readable("ready"));
+    fn revision_text_state_is_readable_accepts_only_the_canonical_state() {
         assert!(revision_text_state_is_readable("text_readable"));
+        assert!(!revision_text_state_is_readable("readable"));
+        assert!(!revision_text_state_is_readable("ready"));
         assert!(!revision_text_state_is_readable("vector_ready"));
         assert!(!revision_text_state_is_readable("graph_ready"));
         assert!(!revision_text_state_is_readable("processing"));

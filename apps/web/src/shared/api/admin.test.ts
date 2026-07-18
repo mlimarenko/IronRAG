@@ -1,8 +1,8 @@
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest'
 
-import { adminApi } from './admin';
-import { Catalog } from './generated';
-import type { CatalogLibraryResponse } from './generated';
+import { adminApi } from './admin'
+import { Catalog } from './generated'
+import type { CatalogLibraryResponse } from './generated'
 
 const baseLibrary = {
   id: 'library-1',
@@ -30,32 +30,32 @@ const baseLibrary = {
       exclude: [],
     },
   },
-} as unknown as CatalogLibraryResponse;
+} as unknown as CatalogLibraryResponse
 
 describe('adminApi', () => {
   afterEach(() => {
-    vi.restoreAllMocks();
-  });
+    vi.restoreAllMocks()
+  })
 
   it('updates MCP document hints through the catalog library endpoint', async () => {
     const updatedLibrary = {
       ...baseLibrary,
       includeDocumentHintInMcpAnswers: true,
-    };
+    }
     const getLibrary = vi
       .spyOn(Catalog, 'getCatalogLibrary')
-      .mockResolvedValueOnce({ data: baseLibrary, error: undefined });
+      .mockResolvedValueOnce({ data: baseLibrary, error: undefined })
     const updateLibrary = vi
       .spyOn(Catalog, 'updateCatalogLibrary')
-      .mockResolvedValueOnce({ data: updatedLibrary, error: undefined });
+      .mockResolvedValueOnce({ data: updatedLibrary, error: undefined })
 
     await expect(
       adminApi.updateLibraryMcpSettings('library-1', {
         includeDocumentHintInMcpAnswers: true,
       }),
-    ).resolves.toBe(updatedLibrary);
+    ).resolves.toBe(updatedLibrary)
 
-    expect(getLibrary).toHaveBeenCalledWith({ path: { libraryId: 'library-1' } });
+    expect(getLibrary).toHaveBeenCalledWith({ path: { libraryId: 'library-1' } })
     expect(updateLibrary).toHaveBeenCalledWith({
       path: { libraryId: 'library-1' },
       body: {
@@ -66,6 +66,6 @@ describe('adminApi', () => {
         lifecycleState: 'active',
         includeDocumentHintInMcpAnswers: true,
       },
-    });
-  });
-});
+    })
+  })
+})

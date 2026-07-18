@@ -1,17 +1,11 @@
-#![allow(clippy::unwrap_used, clippy::expect_used)]
-
 #[path = "support/iam_token_support.rs"]
 mod iam_token_support;
+#[path = "support/mcp_tool_call_support.rs"]
+mod mcp_tool_call_support;
 
 use anyhow::Context;
-use axum::{
-    Router,
-    body::Body,
-    http::{Request, StatusCode, header},
-};
-use http_body_util::BodyExt;
+use axum::Router;
 use serde_json::{Value, json};
-use tower::ServiceExt;
 use uuid::Uuid;
 
 use ironrag_backend::{
@@ -128,42 +122,15 @@ impl McpSearchFixture {
         tool_name: &str,
         arguments: Value,
     ) -> anyhow::Result<Value> {
-        let response = self
-            .app()
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/v1/mcp")
-                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
-                    .header(header::CONTENT_TYPE, "application/json")
-                    .body(Body::from(
-                        json!({
-                            "jsonrpc": "2.0",
-                            "id": "search-test",
-                            "method": "tools/call",
-                            "params": {
-                                "name": tool_name,
-                                "arguments": arguments,
-                            },
-                        })
-                        .to_string(),
-                    ))
-                    .expect("build mcp search request"),
-            )
-            .await
-            .with_context(|| format!("MCP search tool call {tool_name} failed"))?;
-
-        if response.status() != StatusCode::OK {
-            anyhow::bail!("unexpected status {} for tool {tool_name}", response.status());
-        }
-
-        let bytes = response
-            .into_body()
-            .collect()
-            .await
-            .context("failed to collect mcp search response body")?
-            .to_bytes();
-        serde_json::from_slice(&bytes).context("failed to decode mcp search response json")
+        mcp_tool_call_support::call_tool(
+            self.app(),
+            "/v1/mcp",
+            token,
+            "search-test",
+            tool_name,
+            arguments,
+        )
+        .await
     }
 
     async fn create_document_state(

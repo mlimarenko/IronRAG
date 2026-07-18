@@ -1,5 +1,3 @@
-#![allow(clippy::print_stdout, clippy::print_stderr)]
-
 use anyhow::{Context, Result, bail};
 use argon2::{
     Argon2,
@@ -9,7 +7,6 @@ use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use chrono::{DateTime, Utc};
 use clap::{Parser, Subcommand};
 use ironrag_backend::app::config::Settings;
-use ironrag_backend::app::state::AppState;
 use rand::RngExt;
 use sha2::{Digest, Sha256};
 use sqlx::{FromRow, PgPool};
@@ -72,8 +69,8 @@ enum Commands {
         /// audit_read, credential_admin, binding_admin
         #[arg(short, long)]
         permission: Vec<String>,
-        /// Resource scope for permission grants: 'system', 'workspace:<slug>', 'library:<slug>'
-        /// Default: 'system' (global). Only used with non-iam_admin permissions.
+        /// Resource scope for permission grants: `system`, `workspace:<slug>`, `library:<slug>`.
+        /// Default: `system` (global). Only used with non-iam_admin permissions.
         #[arg(long)]
         scope: Option<String>,
     },
@@ -115,23 +112,6 @@ enum Commands {
         /// Description
         #[arg(short, long)]
         description: Option<String>,
-    },
-
-    // ── RAPTOR tree builder ─────────────────────────────────────────
-    /// Build a RAPTOR hierarchical summary tree for a library.
-    ///
-    /// Loads all leaf chunks for the library, partitions them into clusters,
-    /// generates an LLM summary per cluster, and inserts synthetic
-    /// `raptor_summary` chunks at the requested level.
-    BuildRaptor {
-        /// Library slug or UUID
-        library: String,
-        /// Maximum summary level to build (1 = first layer over raw chunks)
-        #[arg(short, long, default_value = "1")]
-        max_level: u32,
-        /// Target number of source chunks per cluster
-        #[arg(short, long, default_value = "10")]
-        cluster_size: usize,
     },
 
     /// Backfill corpus-gloss acronym aliases for a library's graph nodes.
@@ -214,10 +194,10 @@ struct LibraryListRow {
     pub created_at: DateTime<Utc>,
 }
 
-async fn connect(settings: &Settings) -> Result<PgPool> {
+async fn connect(database_url: &str) -> Result<PgPool> {
     sqlx::postgres::PgPoolOptions::new()
         .max_connections(2)
-        .connect(&settings.database_url)
+        .connect(database_url)
         .await
         .context("failed to connect to database")
 }
@@ -367,6 +347,11 @@ async fn insert_grants(
 
 // ── User commands ───────────────────────────────────────────────────
 
+#[allow(
+    clippy::print_stdout,
+    clippy::print_stderr,
+    reason = "operator CLI commands intentionally report results on the terminal"
+)]
 async fn cmd_reset_password(pool: &PgPool, login: &str, password: &str) -> Result<()> {
     validate_password(password)?;
     let password_hash = hash_password(password)?;
@@ -398,6 +383,11 @@ async fn cmd_reset_password(pool: &PgPool, login: &str, password: &str) -> Resul
     Ok(())
 }
 
+#[allow(
+    clippy::print_stdout,
+    clippy::print_stderr,
+    reason = "operator CLI commands intentionally report results on the terminal"
+)]
 async fn cmd_create_user(
     pool: &PgPool,
     login: &str,
@@ -483,6 +473,11 @@ async fn cmd_create_user(
     Ok(())
 }
 
+#[allow(
+    clippy::print_stdout,
+    clippy::print_stderr,
+    reason = "operator CLI commands intentionally report results on the terminal"
+)]
 async fn cmd_delete_user(pool: &PgPool, login: &str) -> Result<()> {
     let principal_id = sqlx::query_scalar::<_, Uuid>(
         "select principal_id from iam_user where lower(login) = lower($1)",
@@ -526,6 +521,11 @@ async fn cmd_delete_user(pool: &PgPool, login: &str) -> Result<()> {
     Ok(())
 }
 
+#[allow(
+    clippy::print_stdout,
+    clippy::print_stderr,
+    reason = "operator CLI commands intentionally report results on the terminal"
+)]
 async fn cmd_list_users(pool: &PgPool) -> Result<()> {
     let users = sqlx::query_as::<_, UserListRow>(
         "select u.login, u.display_name, p.status::text as status, p.created_at
@@ -560,6 +560,11 @@ async fn cmd_list_users(pool: &PgPool) -> Result<()> {
 
 // ── Token commands ──────────────────────────────────────────────────
 
+#[allow(
+    clippy::print_stdout,
+    clippy::print_stderr,
+    reason = "operator CLI commands intentionally report results on the terminal"
+)]
 async fn cmd_create_token(
     pool: &PgPool,
     login: &str,
@@ -666,6 +671,11 @@ async fn cmd_create_token(
     Ok(())
 }
 
+#[allow(
+    clippy::print_stdout,
+    clippy::print_stderr,
+    reason = "operator CLI commands intentionally report results on the terminal"
+)]
 async fn cmd_list_tokens(pool: &PgPool) -> Result<()> {
     let tokens = sqlx::query_as::<_, TokenListRow>(
         "select t.principal_id, t.label, t.token_prefix, t.status::text as status,
@@ -714,6 +724,11 @@ async fn cmd_list_tokens(pool: &PgPool) -> Result<()> {
     Ok(())
 }
 
+#[allow(
+    clippy::print_stdout,
+    clippy::print_stderr,
+    reason = "operator CLI commands intentionally report results on the terminal"
+)]
 async fn cmd_revoke_token(pool: &PgPool, token_id: &str) -> Result<()> {
     let principal_id: Uuid = token_id.parse().context("invalid UUID for token_id")?;
 
@@ -745,6 +760,11 @@ async fn cmd_revoke_token(pool: &PgPool, token_id: &str) -> Result<()> {
 
 // ── Workspace commands ──────────────────────────────────────────────
 
+#[allow(
+    clippy::print_stdout,
+    clippy::print_stderr,
+    reason = "operator CLI commands intentionally report results on the terminal"
+)]
 async fn cmd_list_workspaces(pool: &PgPool) -> Result<()> {
     let rows = sqlx::query_as::<_, WorkspaceListRow>(
         "select id, slug, display_name, lifecycle_state::text as lifecycle_state, created_at
@@ -777,6 +797,11 @@ async fn cmd_list_workspaces(pool: &PgPool) -> Result<()> {
     Ok(())
 }
 
+#[allow(
+    clippy::print_stdout,
+    clippy::print_stderr,
+    reason = "operator CLI commands intentionally report results on the terminal"
+)]
 async fn cmd_create_workspace(pool: &PgPool, slug: &str, name: Option<&str>) -> Result<()> {
     let display_name = name.unwrap_or(slug);
     let id = Uuid::now_v7();
@@ -795,6 +820,11 @@ async fn cmd_create_workspace(pool: &PgPool, slug: &str, name: Option<&str>) -> 
 
 // ── Library commands ────────────────────────────────────────────────
 
+#[allow(
+    clippy::print_stdout,
+    clippy::print_stderr,
+    reason = "operator CLI commands intentionally report results on the terminal"
+)]
 async fn cmd_list_libraries(pool: &PgPool, workspace: &str) -> Result<()> {
     let workspace_id = resolve_workspace_id(pool, workspace).await?;
 
@@ -831,6 +861,11 @@ async fn cmd_list_libraries(pool: &PgPool, workspace: &str) -> Result<()> {
     Ok(())
 }
 
+#[allow(
+    clippy::print_stdout,
+    clippy::print_stderr,
+    reason = "operator CLI commands intentionally report results on the terminal"
+)]
 async fn cmd_create_library(
     pool: &PgPool,
     workspace: &str,
@@ -858,43 +893,13 @@ async fn cmd_create_library(
     Ok(())
 }
 
-// ── RAPTOR commands ─────────────────────────────────────────────────
-
-async fn cmd_build_raptor(
-    pool: &PgPool,
-    settings: Settings,
-    library: &str,
-    max_level: u32,
-    cluster_size: usize,
-) -> Result<()> {
-    let library_id = resolve_library_id(pool, library).await?;
-
-    println!(
-        "Building RAPTOR tree for library '{library}' (id: {library_id}), max_level={max_level}, cluster_size={cluster_size}"
-    );
-
-    let state =
-        AppState::new(settings).await.context("failed to initialise AppState for RAPTOR")?;
-
-    for level in 1..=max_level {
-        println!("  Building level {level}...");
-        let result = ironrag_backend::services::graph::raptor::build_raptor_tree(
-            &state,
-            library_id,
-            level,
-            cluster_size,
-        )
-        .await
-        .with_context(|| format!("RAPTOR level {level} failed"))?;
-        println!("  Level {}: {} summaries inserted", result.level, result.summaries_inserted);
-    }
-
-    println!("RAPTOR tree build complete.");
-    Ok(())
-}
-
 // ── Graph maintenance commands ──────────────────────────────────────
 
+#[allow(
+    clippy::print_stdout,
+    clippy::print_stderr,
+    reason = "operator CLI commands intentionally report results on the terminal"
+)]
 async fn cmd_backfill_acronym_aliases(pool: &PgPool, library: &str) -> Result<()> {
     let library_id = resolve_library_id(pool, library).await?;
     println!("Backfilling acronym aliases for library '{library}' (id: {library_id})...");
@@ -918,6 +923,11 @@ async fn cmd_backfill_acronym_aliases(pool: &PgPool, library: &str) -> Result<()
     Ok(())
 }
 
+#[allow(
+    clippy::print_stdout,
+    clippy::print_stderr,
+    reason = "operator CLI commands intentionally report results on the terminal"
+)]
 async fn cmd_backfill_document_parents(pool: &PgPool, library: &str) -> Result<()> {
     let library_id = resolve_library_id(pool, library).await?;
     println!("Backfilling document parentage for library '{library}' (id: {library_id})...");
@@ -949,6 +959,11 @@ async fn cmd_backfill_document_parents(pool: &PgPool, library: &str) -> Result<(
 // ── Main ────────────────────────────────────────────────────────────
 
 #[tokio::main]
+#[allow(
+    clippy::print_stdout,
+    clippy::print_stderr,
+    reason = "operator CLI commands intentionally report results on the terminal"
+)]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
 
@@ -958,8 +973,9 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
-    let settings = Settings::from_env().context("failed to load settings")?;
-    let pool = connect(&settings).await?;
+    let mut settings = Settings::from_env().context("failed to load settings")?;
+    settings.discard_credential_master_key();
+    let pool = connect(&settings.database_url).await?;
 
     match cli.command {
         Commands::ResetPassword { login, password } => {
@@ -994,10 +1010,6 @@ async fn main() -> Result<()> {
         Commands::CreateLibrary { workspace, slug, name, description } => {
             cmd_create_library(&pool, &workspace, &slug, name.as_deref(), description.as_deref())
                 .await
-        }
-
-        Commands::BuildRaptor { library, max_level, cluster_size } => {
-            cmd_build_raptor(&pool, settings, &library, max_level, cluster_size).await
         }
 
         Commands::BackfillAcronymAliases { library } => {

@@ -33,7 +33,7 @@ impl ChunkingTemplate {
     }
 
     #[must_use]
-    pub fn as_db_str(self) -> &'static str {
+    pub const fn as_db_str(self) -> &'static str {
         match self {
             Self::Naive => "naive",
             Self::Structured => "structured",
@@ -44,7 +44,7 @@ impl ChunkingTemplate {
         }
     }
 
-    /// Returns (max_chars, overlap_chars) for the chunking profile of this template.
+    /// Returns (`max_chars`, `overlap_chars`) for the chunking profile of this template.
     #[must_use]
     pub const fn chunking_params(self) -> (usize, usize) {
         match self {

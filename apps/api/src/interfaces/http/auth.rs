@@ -101,7 +101,7 @@ impl AuthContext {
     /// User principals must hold at least the `operator` role; a `viewer` can
     /// never write even if a stray resource grant would otherwise match.
     #[must_use]
-    pub fn role_permits_write(&self) -> bool {
+    pub const fn role_permits_write(&self) -> bool {
         match self.system_role {
             Some(SystemRole::Admin | SystemRole::Operator) => true,
             Some(SystemRole::Viewer) => false,
@@ -408,6 +408,7 @@ pub fn build_session_cookie_value(session_id: Uuid, secret: &str) -> String {
     auth_tokens::build_session_cookie_value(session_id, secret)
 }
 
+#[must_use]
 pub fn parse_session_cookie_value(raw: &str) -> Option<(Uuid, String)> {
     auth_tokens::parse_session_cookie_value(raw)
 }
@@ -646,6 +647,29 @@ fn collect_permission_kinds(grants: &[iam_repository::ResolvedIamGrantScopeRow])
         permissions.insert(grant.permission_kind.clone());
     }
     permissions.into_iter().collect()
+}
+
+impl FromRequestParts<AppState> for AuthContext {
+    type Rejection = ApiError;
+
+    fn from_request_parts(
+        parts: &mut Parts,
+        state: &AppState,
+    ) -> impl std::future::Future<Output = Result<Self, Self::Rejection>> + Send {
+        let request_auth = parts.extensions.get::<super::middleware::auth::RequestAuth>().cloned();
+        let headers = parts.headers.clone();
+        let state = state.clone();
+
+        async move {
+            if let Some(request_auth) = request_auth {
+                return request_auth.required_context();
+            }
+
+            resolve_optional_auth_context_from_headers(&state, &headers)
+                .await?
+                .ok_or(ApiError::Unauthorized)
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1030,28 +1054,5 @@ mod tests {
         let now = Utc.timestamp_opt(1_700_000_000, 0).single().expect("valid timestamp");
 
         assert!(auth_activity_refresh_due(None, now));
-    }
-}
-
-impl FromRequestParts<AppState> for AuthContext {
-    type Rejection = ApiError;
-
-    fn from_request_parts(
-        parts: &mut Parts,
-        state: &AppState,
-    ) -> impl std::future::Future<Output = Result<Self, Self::Rejection>> + Send {
-        let request_auth = parts.extensions.get::<super::middleware::auth::RequestAuth>().cloned();
-        let headers = parts.headers.clone();
-        let state = state.clone();
-
-        async move {
-            if let Some(request_auth) = request_auth {
-                return request_auth.required_context();
-            }
-
-            resolve_optional_auth_context_from_headers(&state, &headers)
-                .await?
-                .ok_or(ApiError::Unauthorized)
-        }
     }
 }

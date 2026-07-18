@@ -40,7 +40,6 @@ use ironrag_contracts::documents::{DocumentReadiness, DocumentStatus};
 #[derive(utoipa::IntoParams)]
 #[into_params(parameter_in = Query)]
 pub struct ListDocumentsQuery {
-    pub library_id: Option<Uuid>,
     pub include_deleted: Option<bool>,
     pub cursor: Option<String>,
     pub limit: Option<u32>,
@@ -184,8 +183,6 @@ pub struct PreparedDataQuery {
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct CreateDocumentRequest {
-    pub workspace_id: Uuid,
-    pub library_id: Uuid,
     pub external_key: Option<String>,
     /// Optional connector-declared structural parent identity
     /// (`content_document.external_key` of the parent document). When the
@@ -223,17 +220,29 @@ pub struct CreateMutationRequest {
     pub storage_key: Option<String>,
 }
 
-#[derive(Debug, Deserialize, utoipa::ToSchema)]
-#[serde(rename_all = "camelCase")]
-pub struct AppendDocumentBodyRequest {
-    pub appended_text: String,
-    pub idempotency_key: Option<String>,
+/// Discriminates the two JSON revision shapes on `POST .../revisions`. File
+/// replacement is a third, mutually exclusive shape carried over
+/// `multipart/form-data` instead — see `create_revision`'s content
+/// negotiation, mirroring `create_document`'s pattern.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum RevisionMode {
+    Append,
+    Replace,
 }
 
+/// JSON body for `POST /v1/content/documents/{documentId}/revisions`.
+/// `mode = "append"` requires `appendedText`; `mode = "replace"` requires
+/// `markdown`. Replacing the underlying file bytes instead of markdown text
+/// uses `multipart/form-data` on the same endpoint, not this shape.
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
-pub struct EditDocumentRequest {
-    pub markdown: String,
+pub struct CreateRevisionRequest {
+    pub mode: RevisionMode,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub appended_text: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub markdown: Option<String>,
     pub idempotency_key: Option<String>,
 }
 
@@ -402,7 +411,7 @@ pub(super) fn build_reprocess_revision_metadata(
 /// re-fetched the source URL and wants the new mutation to reference the
 /// fresh blob instead of the previous capture. `checksum`, `byte_size`,
 /// `storage_key` and `mime_type` come from the live fetch; the rest (title,
-/// language, and the source_uri itself) is carried forward from the previous
+/// language, and the `source_uri` itself) is carried forward from the previous
 /// revision so downstream identity normalization stays stable across retries.
 pub(super) fn build_web_refetch_revision_metadata(
     active_revision: &ContentRevision,

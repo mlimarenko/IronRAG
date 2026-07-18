@@ -41,7 +41,7 @@ impl GraphProjectionRepositoryFixture {
     }
 
     async fn cleanup(&self, pool: &PgPool) -> anyhow::Result<()> {
-        sqlx::query("delete from workspace where id = $1")
+        sqlx::query("delete from catalog_workspace where id = $1")
             .bind(self.workspace.id)
             .execute(pool)
             .await

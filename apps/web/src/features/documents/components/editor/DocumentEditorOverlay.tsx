@@ -1,4 +1,4 @@
-import type { ReactNode } from 'react';
+import type { ReactNode } from 'react'
 
 import {
   Dialog,
@@ -7,7 +7,7 @@ import {
   DialogFooter,
   DialogHeader,
   DialogTitle,
-} from '@/shared/components/ui/dialog';
+} from '@/shared/components/ui/dialog'
 import {
   Drawer,
   DrawerContent,
@@ -15,18 +15,18 @@ import {
   DrawerFooter,
   DrawerHeader,
   DrawerTitle,
-} from '@/shared/components/ui/drawer';
-import { useIsMobile } from '@/shared/hooks/use-mobile';
+} from '@/shared/components/ui/drawer'
+import { useIsMobile } from '@/shared/hooks/use-mobile'
 
 type DocumentEditorOverlayProps = {
-  actions: ReactNode;
-  children: ReactNode;
-  description: string;
-  helperText: string;
-  onOpenChange: (open: boolean) => void;
-  open: boolean;
-  title: string;
-};
+  actions: ReactNode
+  children: ReactNode
+  description: string
+  helperText: string
+  onOpenChange: (open: boolean) => void
+  open: boolean
+  title: string
+}
 
 export function DocumentEditorOverlay({
   actions,
@@ -36,8 +36,8 @@ export function DocumentEditorOverlay({
   onOpenChange,
   open,
   title,
-}: DocumentEditorOverlayProps) {
-  const isMobile = useIsMobile();
+}: Readonly<DocumentEditorOverlayProps>) {
+  const isMobile = useIsMobile()
 
   if (isMobile) {
     return (
@@ -49,12 +49,10 @@ export function DocumentEditorOverlay({
             <p className="text-xs text-muted-foreground">{helperText}</p>
           </DrawerHeader>
           {children}
-          <DrawerFooter className="border-t bg-background/95 px-4 py-4">
-            {actions}
-          </DrawerFooter>
+          <DrawerFooter className="border-t bg-background/95 px-4 py-4">{actions}</DrawerFooter>
         </DrawerContent>
       </Drawer>
-    );
+    )
   }
 
   return (
@@ -73,5 +71,5 @@ export function DocumentEditorOverlay({
         </DialogFooter>
       </DialogContent>
     </Dialog>
-  );
+  )
 }

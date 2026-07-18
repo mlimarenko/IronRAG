@@ -1,12 +1,12 @@
-import { useMemo, useState } from 'react';
-import { useTranslation } from 'react-i18next';
-import { Loader2, Pencil, Plus, Server, Trash2 } from 'lucide-react';
-import { toast } from 'sonner';
-import { z } from 'zod';
+import { useMemo, useState } from 'react'
+import { useTranslation } from 'react-i18next'
+import { Loader2, Pencil, Plus, Server, Trash2 } from 'lucide-react'
+import { toast } from 'sonner'
+import { z } from 'zod'
 
-import { adminApi } from '@/shared/api';
-import { Badge } from '@/shared/components/ui/badge';
-import { Button } from '@/shared/components/ui/button';
+import { adminApi } from '@/shared/api'
+import { Badge } from '@/shared/components/ui/badge'
+import { Button } from '@/shared/components/ui/button'
 import {
   Dialog,
   DialogContent,
@@ -14,40 +14,40 @@ import {
   DialogFooter,
   DialogHeader,
   DialogTitle,
-} from '@/shared/components/ui/dialog';
-import { SelectItem } from '@/shared/components/ui/select';
-import { StatusBadge } from '@/shared/components/StatusBadge';
-import { errorMessage } from '@/shared/lib/errorMessage';
-import type { AIAccount, AIModelOption, AIProvider } from '@/shared/types';
-import { matchesFilter, type AiConfigDataState } from '@/features/admin/model/aiConfig';
+} from '@/shared/components/ui/dialog'
+import { SelectItem } from '@/shared/components/ui/select'
+import { StatusBadge } from '@/shared/components/StatusBadge'
+import { errorMessage } from '@/shared/lib/errorMessage'
+import type { AIAccount, AIModelOption, AIProvider } from '@/shared/types'
+import { matchesFilter, type AiConfigDataState } from '@/features/admin/model/aiConfig'
 import {
   FormInputField,
   FormSelectField,
   FormTextareaField,
   nonEmptyString,
   useTypedForm,
-} from '@/shared/forms';
+} from '@/shared/forms'
 
-import { EntityWorkbench, InspectorField, InspectorSection } from './EntityWorkbench';
+import { EntityWorkbench, InspectorField, InspectorSection } from './EntityWorkbench'
 
-type ProvidersSectionProps = {
-  providersState: AiConfigDataState<AIProvider[]>;
-  models: AIModelOption[];
-  accounts: AIAccount[];
-  invalidateAll: () => void;
-};
+type ProvidersSectionProps = Readonly<{
+  providersState: AiConfigDataState<AIProvider[]>
+  models: AIModelOption[]
+  accounts: AIAccount[]
+  invalidateAll: () => Promise<void>
+}>
 
 type ProviderEditorValues = {
-  apiStyle: string;
-  defaultBaseUrl: string;
-  displayName: string;
-  kind: string;
-  lifecycleState: AIProvider['lifecycleState'];
-  profileJson: string;
-};
+  apiStyle: string
+  defaultBaseUrl: string
+  displayName: string
+  kind: string
+  lifecycleState: AIProvider['lifecycleState']
+  profileJson: string
+}
 
-const PROVIDER_API_STYLE = 'openai_compatible';
-const PROVIDER_LIFECYCLE_STATES = ['active', 'preview', 'deprecated', 'disabled'] as const;
+const PROVIDER_API_STYLE = 'openai_compatible'
+const PROVIDER_LIFECYCLE_STATES = ['active', 'preview', 'deprecated', 'disabled'] as const
 
 const DEFAULT_PROVIDER_PROFILE = {
   runtime: {
@@ -87,26 +87,24 @@ const DEFAULT_PROVIDER_PROFILE = {
     modelDiscovery: 'supported',
   },
   uiHints: {},
-};
+}
 
 function lifecycleTone(state: AIProvider['lifecycleState']) {
-  return state === 'active'
-    ? 'ready'
-    : state === 'deprecated' || state === 'disabled'
-      ? 'failed'
-      : 'warning';
+  if (state === 'active') return 'ready'
+  if (state === 'deprecated' || state === 'disabled') return 'failed'
+  return 'warning'
 }
 
 function stringifyJson(value: unknown) {
-  return JSON.stringify(value, null, 2);
+  return JSON.stringify(value, null, 2)
 }
 
 function parseJsonObject(value: string) {
-  const parsed = JSON.parse(value) as unknown;
+  const parsed = JSON.parse(value) as unknown
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-    throw new Error('json');
+    throw new Error('json')
   }
-  return parsed as Record<string, unknown>;
+  return parsed as Record<string, unknown>
 }
 
 function profileFromProvider(provider: AIProvider) {
@@ -117,11 +115,46 @@ function profileFromProvider(provider: AIProvider) {
     modelDiscovery: provider.modelDiscovery,
     capabilities: provider.capabilities,
     uiHints: provider.uiHints ?? {},
-  };
+  }
 }
 
 function iconButtonLabel(action: string, title: string) {
-  return `${action}: ${title}`;
+  return `${action}: ${title}`
+}
+
+type ProviderRow = AIProvider & Readonly<{ lifecycleLabel: string }>
+
+function renderProviderNameCell(provider: ProviderRow) {
+  return (
+    <div className="min-w-0">
+      <div className="truncate text-sm font-semibold">{provider.displayName}</div>
+      <div className="truncate text-2xs text-muted-foreground">
+        {provider.kind}
+        {provider.apiStyle ? ` · ${provider.apiStyle}` : ''}
+      </div>
+    </div>
+  )
+}
+
+function renderProviderModelCount(provider: ProviderRow) {
+  return <span className="tabular-nums text-xs text-muted-foreground">{provider.modelCount}</span>
+}
+
+function renderProviderCredentialCount(provider: ProviderRow) {
+  return (
+    <span className="tabular-nums text-xs text-muted-foreground">{provider.credentialCount}</span>
+  )
+}
+
+function renderProviderState(provider: ProviderRow) {
+  const tone = lifecycleTone(provider.lifecycleState)
+  let className = 'text-status-warning'
+  if (tone === 'ready') {
+    className = 'text-muted-foreground'
+  } else if (tone === 'failed') {
+    className = 'text-status-failed'
+  }
+  return <span className={`text-xs ${className}`}>{provider.lifecycleLabel}</span>
 }
 
 export function ProvidersSection({
@@ -130,33 +163,34 @@ export function ProvidersSection({
   accounts,
   invalidateAll,
 }: ProvidersSectionProps) {
-  const { t } = useTranslation();
-  const [editorOpen, setEditorOpen] = useState(false);
-  const [editingProvider, setEditingProvider] = useState<AIProvider | null>(null);
-  const [deleteTarget, setDeleteTarget] = useState<AIProvider | null>(null);
-  const [deleting, setDeleting] = useState(false);
+  const { t } = useTranslation()
+  const [editorOpen, setEditorOpen] = useState(false)
+  const [editingProvider, setEditingProvider] = useState<AIProvider | null>(null)
+  const [deleteTarget, setDeleteTarget] = useState<AIProvider | null>(null)
+  const [deleting, setDeleting] = useState(false)
 
   const providerSchema = useMemo(
     () =>
       z.object({
         apiStyle: nonEmptyString(t('admin.aiPanel.fields.apiStyle')),
-        defaultBaseUrl: z.string().transform(value => value.trim()),
+        defaultBaseUrl: z.string().transform((value) => value.trim()),
         displayName: nonEmptyString(t('admin.aiPanel.fields.displayName')),
         kind: nonEmptyString(t('admin.aiPanel.fields.providerKind')),
         lifecycleState: z.enum(PROVIDER_LIFECYCLE_STATES),
         profileJson: z.string().superRefine((value, context) => {
           try {
-            parseJsonObject(value);
+            parseJsonObject(value)
           } catch {
+            // Invalid JSON is a user-correctable validation error, not an operation failure.
             context.addIssue({
               code: 'custom',
               message: t('admin.aiPanel.messages.invalidJson'),
-            });
+            })
           }
         }),
       }),
     [t],
-  );
+  )
 
   const providerForm = useTypedForm({
     schema: providerSchema,
@@ -169,20 +203,21 @@ export function ProvidersSection({
       profileJson: stringifyJson(DEFAULT_PROVIDER_PROFILE),
     },
     mode: 'onChange',
-  });
+  })
 
   const providers = useMemo(() => {
-    const base = providersState.data ?? [];
-    return base.map(provider => ({
+    const base = providersState.data ?? []
+    return base.map((provider) => ({
       ...provider,
-      modelCount: models.filter(model => model.providerCatalogId === provider.id).length,
-      credentialCount: accounts.filter(account => account.providerId === provider.id).length,
-    }));
-  }, [accounts, models, providersState.data]);
+      modelCount: models.filter((model) => model.providerCatalogId === provider.id).length,
+      credentialCount: accounts.filter((account) => account.providerId === provider.id).length,
+      lifecycleLabel: t(`admin.aiPanel.lifecycleLabels.${provider.lifecycleState}`),
+    }))
+  }, [accounts, models, providersState.data, t])
 
   const resetEditor = () => {
-    setEditorOpen(false);
-    setEditingProvider(null);
+    setEditorOpen(false)
+    setEditingProvider(null)
     providerForm.reset({
       apiStyle: PROVIDER_API_STYLE,
       defaultBaseUrl: '',
@@ -190,11 +225,11 @@ export function ProvidersSection({
       kind: '',
       lifecycleState: 'active',
       profileJson: stringifyJson(DEFAULT_PROVIDER_PROFILE),
-    });
-  };
+    })
+  }
 
   const openNewProviderEditor = () => {
-    setEditingProvider(null);
+    setEditingProvider(null)
     providerForm.reset({
       apiStyle: PROVIDER_API_STYLE,
       defaultBaseUrl: '',
@@ -202,12 +237,12 @@ export function ProvidersSection({
       kind: '',
       lifecycleState: 'active',
       profileJson: stringifyJson(DEFAULT_PROVIDER_PROFILE),
-    });
-    setEditorOpen(true);
-  };
+    })
+    setEditorOpen(true)
+  }
 
   const openProviderEditor = (provider: AIProvider) => {
-    setEditingProvider(provider);
+    setEditingProvider(provider)
     providerForm.reset({
       apiStyle: provider.apiStyle || PROVIDER_API_STYLE,
       defaultBaseUrl: provider.defaultBaseUrl ?? '',
@@ -215,9 +250,9 @@ export function ProvidersSection({
       kind: provider.kind,
       lifecycleState: provider.lifecycleState,
       profileJson: stringifyJson(profileFromProvider(provider)),
-    });
-    setEditorOpen(true);
-  };
+    })
+    setEditorOpen(true)
+  }
 
   const saveProvider = providerForm.submitWithMutation(
     {
@@ -229,42 +264,42 @@ export function ProvidersSection({
           lifecycleState: values.lifecycleState,
           providerKind: values.kind.trim(),
           capabilityFlagsJson: parseJsonObject(values.profileJson),
-        };
-        if (editingProvider) {
-          await adminApi.updateProvider(editingProvider.id, body);
-        } else {
-          await adminApi.createProvider(body);
         }
-        resetEditor();
-        invalidateAll();
-        toast.success(t('admin.aiPanel.messages.providerSaved'));
+        if (editingProvider) {
+          await adminApi.updateProvider(editingProvider.id, body)
+        } else {
+          await adminApi.createProvider(body)
+        }
+        resetEditor()
+        await invalidateAll()
+        toast.success(t('admin.aiPanel.messages.providerSaved'))
       },
     },
     {
       errorMessage: t('admin.aiPanel.messages.providerSaveFailed'),
     },
-  );
+  )
 
   const disableProvider = async () => {
-    if (!deleteTarget || deleting) return;
-    setDeleting(true);
+    if (!deleteTarget || deleting) return
+    setDeleting(true)
     try {
-      await adminApi.deleteProvider(deleteTarget.id);
-      setDeleteTarget(null);
-      invalidateAll();
-      toast.success(t('admin.aiPanel.messages.providerDisabled'));
+      await adminApi.deleteProvider(deleteTarget.id)
+      setDeleteTarget(null)
+      await invalidateAll()
+      toast.success(t('admin.aiPanel.messages.providerDisabled'))
     } catch (err) {
-      toast.error(errorMessage(err, t('admin.aiPanel.messages.providerDisableFailed')));
+      toast.error(errorMessage(err, t('admin.aiPanel.messages.providerDisableFailed')))
     } finally {
-      setDeleting(false);
+      setDeleting(false)
     }
-  };
+  }
 
   const toolbar = (
     <Button size="sm" onClick={openNewProviderEditor}>
       <Plus className="mr-1.5 h-3.5 w-3.5" /> {t('admin.aiPanel.actions.addProvider')}
     </Button>
-  );
+  )
 
   const providerActions = (provider: AIProvider) => (
     <>
@@ -283,13 +318,16 @@ export function ProvidersSection({
         size="icon"
         variant="ghost"
         className="h-8 w-8 text-status-failed hover:text-status-failed"
-        aria-label={iconButtonLabel(t('admin.aiPanel.actions.disableProvider'), provider.displayName)}
+        aria-label={iconButtonLabel(
+          t('admin.aiPanel.actions.disableProvider'),
+          provider.displayName,
+        )}
         onClick={() => setDeleteTarget(provider)}
       >
         <Trash2 className="h-3.5 w-3.5" />
       </Button>
     </>
-  );
+  )
 
   return (
     <div className="flex flex-1 min-h-0 flex-col">
@@ -299,7 +337,7 @@ export function ProvidersSection({
         count={providers.length}
         state={providersState}
         rows={providers}
-        rowKey={provider => provider.id}
+        rowKey={(provider) => provider.id}
         emptyMessage={t('admin.noProviders')}
         searchPlaceholder={t('admin.aiPanel.filters.providersSearch')}
         toolbar={toolbar}
@@ -311,54 +349,34 @@ export function ProvidersSection({
           {
             key: 'name',
             header: t('admin.providers'),
-            sortValue: provider => provider.displayName,
-            cell: provider => (
-              <div className="min-w-0">
-                <div className="truncate text-sm font-semibold">{provider.displayName}</div>
-                <div className="truncate text-2xs text-muted-foreground">
-                  {provider.kind}
-                  {provider.apiStyle ? ` · ${provider.apiStyle}` : ''}
-                </div>
-              </div>
-            ),
+            sortValue: (provider) => provider.displayName,
+            cell: renderProviderNameCell,
           },
           {
             key: 'models',
             header: t('admin.aiPanel.metrics.visibleModels'),
             width: 'w-28',
             align: 'right',
-            sortValue: provider => provider.modelCount,
-            cell: provider => (
-              <span className="tabular-nums text-xs text-muted-foreground">{provider.modelCount}</span>
-            ),
+            sortValue: (provider) => provider.modelCount,
+            cell: renderProviderModelCount,
           },
           {
             key: 'accounts',
             header: t('admin.accounts'),
             width: 'w-28',
             align: 'right',
-            sortValue: provider => provider.credentialCount,
-            cell: provider => (
-              <span className="tabular-nums text-xs text-muted-foreground">{provider.credentialCount}</span>
-            ),
+            sortValue: (provider) => provider.credentialCount,
+            cell: renderProviderCredentialCount,
           },
           {
             key: 'state',
             header: t('admin.status'),
             width: 'w-32',
-            sortValue: provider => provider.lifecycleState,
-            cell: provider => {
-              const tone = lifecycleTone(provider.lifecycleState);
-              const cls = tone === 'ready'
-                ? 'text-muted-foreground'
-                : tone === 'failed'
-                  ? 'text-status-failed'
-                  : 'text-status-warning';
-              return <span className={`text-xs ${cls}`}>{t(`admin.aiPanel.lifecycleLabels.${provider.lifecycleState}`)}</span>;
-            },
+            sortValue: (provider) => provider.lifecycleState,
+            cell: renderProviderState,
           },
         ]}
-        renderInspector={provider => ({
+        renderInspector={(provider) => ({
           row: provider,
           title: provider.displayName,
           subtitle: provider.kind,
@@ -379,10 +397,7 @@ export function ProvidersSection({
                   label={t('admin.aiPanel.metrics.visibleModels')}
                   value={provider.modelCount}
                 />
-                <InspectorField
-                  label={t('admin.accounts')}
-                  value={provider.credentialCount}
-                />
+                <InspectorField label={t('admin.accounts')} value={provider.credentialCount} />
               </InspectorSection>
               <InspectorSection title={t('admin.aiPanel.fields.requirements')}>
                 <div className="flex flex-wrap gap-2">
@@ -407,7 +422,11 @@ export function ProvidersSection({
                 </InspectorSection>
               )}
               <InspectorSection title={t('admin.aiPanel.fields.identifier')}>
-                <InspectorField label={t('admin.aiPanel.fields.identifier')} value={provider.id} mono />
+                <InspectorField
+                  label={t('admin.aiPanel.fields.identifier')}
+                  value={provider.id}
+                  mono
+                />
               </InspectorSection>
             </>
           ),
@@ -417,7 +436,8 @@ export function ProvidersSection({
                 <Pencil className="mr-1.5 h-3.5 w-3.5" /> {t('admin.edit')}
               </Button>
               <Button size="sm" variant="outline" onClick={() => setDeleteTarget(provider)}>
-                <Trash2 className="mr-1.5 h-3.5 w-3.5" /> {t('admin.aiPanel.actions.disableProvider')}
+                <Trash2 className="mr-1.5 h-3.5 w-3.5" />{' '}
+                {t('admin.aiPanel.actions.disableProvider')}
               </Button>
             </div>
           ),
@@ -426,9 +446,9 @@ export function ProvidersSection({
 
       <Dialog
         open={editorOpen}
-        onOpenChange={open => {
-          if (!open) resetEditor();
-          else setEditorOpen(true);
+        onOpenChange={(open) => {
+          if (!open) resetEditor()
+          else setEditorOpen(true)
         }}
       >
         <DialogContent className="max-w-3xl">
@@ -465,7 +485,9 @@ export function ProvidersSection({
               name="apiStyle"
               placeholder={t('admin.aiPanel.placeholders.apiStyle')}
             >
-              <SelectItem value={PROVIDER_API_STYLE}>{t('admin.aiPanel.apiStyleLabels.openai_compatible')}</SelectItem>
+              <SelectItem value={PROVIDER_API_STYLE}>
+                {t('admin.aiPanel.apiStyleLabels.openai_compatible')}
+              </SelectItem>
             </FormSelectField>
             <FormSelectField
               control={providerForm.control}
@@ -475,7 +497,7 @@ export function ProvidersSection({
               name="lifecycleState"
               placeholder={t('admin.aiPanel.placeholders.lifecycle')}
             >
-              {PROVIDER_LIFECYCLE_STATES.map(state => (
+              {PROVIDER_LIFECYCLE_STATES.map((state) => (
                 <SelectItem key={state} value={state}>
                   {t(`admin.aiPanel.lifecycleLabels.${state}`)}
                 </SelectItem>
@@ -511,7 +533,9 @@ export function ProvidersSection({
             </Button>
             <Button
               disabled={!providerForm.formState.isValid || providerForm.formState.isSubmitting}
-              onClick={() => void saveProvider()}
+              onClick={async () => {
+                await saveProvider()
+              }}
             >
               {providerForm.formState.isSubmitting ? (
                 <>
@@ -527,7 +551,12 @@ export function ProvidersSection({
         </DialogContent>
       </Dialog>
 
-      <Dialog open={Boolean(deleteTarget)} onOpenChange={open => { if (!open) setDeleteTarget(null); }}>
+      <Dialog
+        open={Boolean(deleteTarget)}
+        onOpenChange={(open) => {
+          if (!open) setDeleteTarget(null)
+        }}
+      >
         <DialogContent className="max-w-md">
           <DialogHeader>
             <DialogTitle>{t('admin.aiPanel.dialogs.disableProviderTitle')}</DialogTitle>
@@ -541,7 +570,13 @@ export function ProvidersSection({
             <Button variant="outline" onClick={() => setDeleteTarget(null)}>
               {t('admin.cancel')}
             </Button>
-            <Button variant="destructive" disabled={deleting} onClick={() => void disableProvider()}>
+            <Button
+              variant="destructive"
+              disabled={deleting}
+              onClick={async () => {
+                await disableProvider()
+              }}
+            >
               {deleting ? (
                 <>
                   <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" /> {t('admin.saving')}
@@ -554,5 +589,5 @@ export function ProvidersSection({
         </DialogContent>
       </Dialog>
     </div>
-  );
+  )
 }

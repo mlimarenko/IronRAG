@@ -1,3 +1,4 @@
+#[must_use]
 pub fn resolve_document_hint(
     revision_kind: &str,
     revision_source_uri: Option<&str>,
@@ -17,7 +18,7 @@ pub fn resolve_document_hint(
     {
         return Some(uri.to_string());
     }
-    document_title.map(|t| t.to_string())
+    document_title.map(std::string::ToString::to_string)
 }
 
 #[cfg(test)]

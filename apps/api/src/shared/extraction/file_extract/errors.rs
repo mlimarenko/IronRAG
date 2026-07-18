@@ -21,7 +21,7 @@ pub struct UploadRejectionDetails {
 pub struct UploadAdmissionError {
     error_kind: &'static str,
     message: String,
-    details: UploadRejectionDetails,
+    details: Box<UploadRejectionDetails>,
 }
 
 impl UploadAdmissionError {
@@ -30,7 +30,7 @@ impl UploadAdmissionError {
         Self {
             error_kind: "multipart_stream_failure",
             message: "multipart upload stream failed".to_string(),
-            details: UploadRejectionDetails {
+            details: Box::new(UploadRejectionDetails {
                 file_name: None,
                 rejection_kind: Some("multipart_stream_failure".to_string()),
                 detected_format: None,
@@ -43,7 +43,7 @@ impl UploadAdmissionError {
                 operator_action:
                     "Retry the upload using a standard multipart/form-data request body."
                         .to_string(),
-            },
+            }),
         }
     }
 
@@ -71,7 +71,7 @@ impl UploadAdmissionError {
         Self {
             error_kind: "invalid_file_body",
             message,
-            details: UploadRejectionDetails {
+            details: Box::new(UploadRejectionDetails {
                 file_name: file_name.map(str::to_string),
                 rejection_kind: Some("invalid_file_body".to_string()),
                 detected_format,
@@ -82,7 +82,7 @@ impl UploadAdmissionError {
                 operator_action:
                     "Retry the upload; if it keeps failing, upload the file individually to isolate the broken part."
                         .to_string(),
-            },
+            }),
         }
     }
 
@@ -101,7 +101,7 @@ impl UploadAdmissionError {
         Self {
             error_kind: "multipart_stream_failure",
             message,
-            details: UploadRejectionDetails {
+            details: Box::new(UploadRejectionDetails {
                 file_name: file_name.map(str::to_string),
                 rejection_kind: Some("multipart_stream_failure".to_string()),
                 detected_format,
@@ -112,7 +112,7 @@ impl UploadAdmissionError {
                 operator_action:
                     "Retry the upload; if it keeps failing, re-export the file and upload it individually."
                         .to_string(),
-            },
+            }),
         }
     }
 
@@ -128,7 +128,7 @@ impl UploadAdmissionError {
         Self {
             error_kind: "upload_limit_exceeded",
             message: format!("file {file_name} exceeds the {upload_limit_mb} MB upload limit"),
-            details: UploadRejectionDetails {
+            details: Box::new(UploadRejectionDetails {
                 file_name: Some(file_name.to_string()),
                 rejection_kind: Some("upload_limit_exceeded".to_string()),
                 detected_format,
@@ -140,7 +140,7 @@ impl UploadAdmissionError {
                 operator_action:
                     "Upload a smaller file, split the document, or raise the configured upload limit."
                         .to_string(),
-            },
+            }),
         }
     }
 
@@ -149,7 +149,7 @@ impl UploadAdmissionError {
         Self {
             error_kind: "upload_limit_exceeded",
             message: format!("upload batch exceeds the {upload_limit_mb} MB upload limit"),
-            details: UploadRejectionDetails {
+            details: Box::new(UploadRejectionDetails {
                 file_name: None,
                 rejection_kind: Some("upload_limit_exceeded".to_string()),
                 detected_format: None,
@@ -162,7 +162,7 @@ impl UploadAdmissionError {
                 operator_action:
                     "Split the batch into smaller uploads, reduce document size, or raise the configured upload limit."
                         .to_string(),
-            },
+            }),
         }
     }
 
@@ -171,7 +171,7 @@ impl UploadAdmissionError {
         Self {
             error_kind: "upload_limit_exceeded",
             message: format!("request body exceeded the {upload_limit_mb} MB upload limit"),
-            details: UploadRejectionDetails {
+            details: Box::new(UploadRejectionDetails {
                 file_name: None,
                 rejection_kind: Some("upload_limit_exceeded".to_string()),
                 detected_format: None,
@@ -184,7 +184,7 @@ impl UploadAdmissionError {
                 operator_action:
                     "Split the upload into smaller calls, reduce document size, or raise the configured upload limit."
                         .to_string(),
-            },
+            }),
         }
     }
 
@@ -203,7 +203,7 @@ impl UploadAdmissionError {
         Self {
             error_kind: "upload_limit_exceeded",
             message,
-            details: UploadRejectionDetails {
+            details: Box::new(UploadRejectionDetails {
                 file_name: file_name.map(str::to_string),
                 rejection_kind: Some("upload_limit_exceeded".to_string()),
                 detected_format,
@@ -216,7 +216,7 @@ impl UploadAdmissionError {
                 operator_action:
                     "Upload a smaller file, split the document, or raise the configured upload limit."
                         .to_string(),
-            },
+            }),
         }
     }
 
@@ -226,7 +226,7 @@ impl UploadAdmissionError {
         Self {
             error_kind: "missing_upload_file",
             message: message.clone(),
-            details: UploadRejectionDetails {
+            details: Box::new(UploadRejectionDetails {
                 file_name: None,
                 rejection_kind: Some("missing_upload_file".to_string()),
                 detected_format: None,
@@ -235,7 +235,7 @@ impl UploadAdmissionError {
                 upload_limit_mb: None,
                 rejection_cause: message,
                 operator_action: "Attach a file field named `file` and retry.".to_string(),
-            },
+            }),
         }
     }
 
@@ -250,7 +250,7 @@ impl UploadAdmissionError {
         let message = error.to_string();
         Self {
             error_kind,
-            details: UploadRejectionDetails {
+            details: Box::new(UploadRejectionDetails {
                 file_name: Some(file_name.to_string()),
                 rejection_kind: Some(error_kind.to_string()),
                 detected_format: Some(error.detected_kind().display_name().to_string()),
@@ -259,7 +259,7 @@ impl UploadAdmissionError {
                 upload_limit_mb: None,
                 rejection_cause: error.rejection_cause(),
                 operator_action: error.operator_action().to_string(),
-            },
+            }),
             message,
         }
     }
@@ -361,45 +361,10 @@ impl FileExtractError {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum MultipartFileReadFailure {
+pub enum MultipartFileBodyErrorKind {
     StreamFailure,
     InvalidBody,
     SizeLimit,
-}
-
-fn classify_multipart_file_read_failure(message: &str) -> MultipartFileReadFailure {
-    let normalized = message.trim().to_ascii_lowercase();
-    if normalized.is_empty() {
-        return MultipartFileReadFailure::InvalidBody;
-    }
-    if [
-        "size limit",
-        "field exceeded",
-        "stream size exceeded",
-        "field size exceeded",
-        "body too large",
-        "larger than the limit",
-    ]
-    .iter()
-    .any(|pattern| normalized.contains(pattern))
-    {
-        return MultipartFileReadFailure::SizeLimit;
-    }
-    if [
-        "multipart",
-        "stream",
-        "boundary",
-        "connection",
-        "incomplete field data",
-        "failed to read field data",
-        "failed to read stream",
-    ]
-    .iter()
-    .any(|pattern| normalized.contains(pattern))
-    {
-        return MultipartFileReadFailure::StreamFailure;
-    }
-    MultipartFileReadFailure::InvalidBody
 }
 
 fn normalize_upload_rejection_cause(message: &str) -> String {
@@ -412,24 +377,29 @@ fn normalize_upload_rejection_cause(message: &str) -> String {
 }
 
 #[must_use]
-pub fn classify_multipart_file_body_error(
+pub fn multipart_file_body_error(
     file_name: Option<&str>,
     mime_type: Option<&str>,
     upload_limit_mb: u64,
+    failure_kind: MultipartFileBodyErrorKind,
     error_message: &str,
 ) -> UploadAdmissionError {
-    match classify_multipart_file_read_failure(error_message) {
-        MultipartFileReadFailure::SizeLimit => UploadAdmissionError::streaming_size_limit_exceeded(
-            file_name,
-            mime_type,
-            upload_limit_mb,
-        ),
-        MultipartFileReadFailure::StreamFailure => UploadAdmissionError::multipart_stream_failure(
-            file_name,
-            mime_type,
-            normalize_upload_rejection_cause(error_message),
-        ),
-        MultipartFileReadFailure::InvalidBody => {
+    match failure_kind {
+        MultipartFileBodyErrorKind::SizeLimit => {
+            UploadAdmissionError::streaming_size_limit_exceeded(
+                file_name,
+                mime_type,
+                upload_limit_mb,
+            )
+        }
+        MultipartFileBodyErrorKind::StreamFailure => {
+            UploadAdmissionError::multipart_stream_failure(
+                file_name,
+                mime_type,
+                normalize_upload_rejection_cause(error_message),
+            )
+        }
+        MultipartFileBodyErrorKind::InvalidBody => {
             UploadAdmissionError::invalid_file_body_with_cause(
                 file_name,
                 mime_type,

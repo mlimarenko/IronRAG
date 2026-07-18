@@ -1,7 +1,7 @@
 use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
-/// Acquires a library-scoped PostgreSQL advisory lock for canonical graph serialization.
+/// Acquires a library-scoped `PostgreSQL` advisory lock for canonical graph serialization.
 ///
 /// The returned transaction keeps the lock alive until commit/rollback.
 /// Transaction-scoped locks are used deliberately so a cancelled future cannot
@@ -18,8 +18,35 @@ pub async fn acquire_runtime_library_graph_lock(
     Ok(transaction)
 }
 
-/// Releases a library-scoped PostgreSQL advisory lock for canonical graph serialization.
+/// Releases a library-scoped `PostgreSQL` advisory lock for canonical graph serialization.
 pub async fn release_runtime_library_graph_lock(
+    transaction: Transaction<'static, Postgres>,
+    _library_id: Uuid,
+) -> Result<(), sqlx::Error> {
+    transaction.commit().await
+}
+
+/// Acquires the cross-process library merge lock. It deliberately uses a
+/// separate advisory namespace from projection publication so a reconcile can
+/// publish its projection without self-deadlocking on a second connection.
+pub async fn acquire_runtime_library_graph_merge_lock(
+    pool: &PgPool,
+    library_id: Uuid,
+) -> Result<Transaction<'static, Postgres>, sqlx::Error> {
+    let mut transaction = pool.begin().await?;
+    sqlx::query(
+        "select pg_advisory_xact_lock(
+            hashtextextended('graph-merge:' || $1::text, 0)
+         )",
+    )
+    .bind(library_id.to_string())
+    .execute(&mut *transaction)
+    .await?;
+    Ok(transaction)
+}
+
+/// Commits the merge-lock transaction, releasing its transaction-scoped lock.
+pub async fn release_runtime_library_graph_merge_lock(
     transaction: Transaction<'static, Postgres>,
     _library_id: Uuid,
 ) -> Result<(), sqlx::Error> {

@@ -5,7 +5,8 @@ use uuid::Uuid;
 
 use ironrag_backend::{
     app::config::Settings,
-    infra::repositories::{catalog_repository, ingest_repository},
+    domains::webhook::{WebhookEvent, revision_ready_event_id},
+    infra::repositories::{catalog_repository, ingest_repository, ops_repository},
 };
 
 struct TempDatabase {
@@ -76,32 +77,10 @@ impl IngestRepositoryFixture {
             .await
             .context("failed to connect ingest repository test postgres")?;
 
-        sqlx::raw_sql(include_str!("../migrations/0001_init.sql"))
-            .execute(&pool)
+        sqlx::migrate!("./migrations")
+            .run(&pool)
             .await
-            .context("failed to apply canonical 0001_init.sql for ingest repository test")?;
-        sqlx::raw_sql(include_str!("../migrations/0002_retrieval_config.sql"))
-            .execute(&pool)
-            .await
-            .context("failed to apply 0002_retrieval_config.sql for ingest repository test")?;
-        sqlx::raw_sql(include_str!("../migrations/0003_minimax_provider_catalog.sql"))
-            .execute(&pool)
-            .await
-            .context(
-                "failed to apply 0003_minimax_provider_catalog.sql for ingest repository test",
-            )?;
-        sqlx::raw_sql(include_str!("../migrations/0004_ai_config_simplification.sql"))
-            .execute(&pool)
-            .await
-            .context(
-                "failed to apply 0004_ai_config_simplification.sql for ingest repository test",
-            )?;
-        sqlx::raw_sql(include_str!("../migrations/0005_ingest_queue_lease_metadata.sql"))
-            .execute(&pool)
-            .await
-            .context(
-                "failed to apply 0005_ingest_queue_lease_metadata.sql for ingest repository test",
-            )?;
+            .context("failed to apply canonical migrations for ingest repository test")?;
 
         let workspace = catalog_repository::create_workspace(
             &pool,
@@ -171,6 +150,7 @@ async fn create_queue_job(
             workspace_id: fixture.workspace_id,
             library_id: fixture.library_id,
             mutation_id: None,
+            mutation_item_id: None,
             connector_id: None,
             async_operation_id: None,
             knowledge_document_id: None,
@@ -190,6 +170,79 @@ async fn create_queue_job(
     )
     .await
     .with_context(|| format!("failed to create {queue_state} queue job"))
+}
+
+async fn create_linked_operation(
+    fixture: &IngestRepositoryFixture,
+    subject_id: Uuid,
+) -> Result<ops_repository::OpsAsyncOperationRow> {
+    ops_repository::create_async_operation(
+        &fixture.pool,
+        &ops_repository::NewOpsAsyncOperation {
+            workspace_id: fixture.workspace_id,
+            library_id: Some(fixture.library_id),
+            operation_kind: "content_mutation",
+            surface_kind: "internal",
+            requested_by_principal_id: None,
+            status: "accepted",
+            subject_kind: "content_mutation",
+            subject_id: Some(subject_id),
+            parent_async_operation_id: None,
+            completed_at: None,
+            failure_code: None,
+        },
+    )
+    .await
+    .context("failed to create linked async-operation fixture")
+}
+
+async fn create_inline_job_with_operation(
+    fixture: &IngestRepositoryFixture,
+    operation_id: Uuid,
+    dedupe_key: &str,
+) -> Result<ingest_repository::IngestJobRow> {
+    ingest_repository::create_ingest_job(
+        &fixture.pool,
+        &ingest_repository::NewIngestJob {
+            workspace_id: fixture.workspace_id,
+            library_id: fixture.library_id,
+            mutation_id: None,
+            mutation_item_id: None,
+            connector_id: None,
+            async_operation_id: Some(operation_id),
+            knowledge_document_id: None,
+            knowledge_revision_id: None,
+            job_kind: "content_mutation".to_string(),
+            queue_state: "queued".to_string(),
+            priority: 10,
+            dedupe_key: Some(dedupe_key.to_string()),
+            queued_at: Some(Utc::now()),
+            available_at: Some(Utc::now()),
+            completed_at: None,
+        },
+    )
+    .await
+    .context("failed to create linked inline job fixture")
+}
+
+fn new_inline_attempt(job_id: Uuid, lease_token: &str) -> ingest_repository::NewIngestAttempt {
+    ingest_repository::NewIngestAttempt {
+        job_id,
+        attempt_number: 0,
+        worker_principal_id: None,
+        lease_token: Some(lease_token.to_string()),
+        knowledge_generation_id: None,
+        attempt_state: "leased".to_string(),
+        current_stage: Some("extract_content".to_string()),
+        started_at: None,
+        heartbeat_at: Some(Utc::now()),
+        finished_at: None,
+        failure_class: None,
+        failure_code: None,
+        failure_message: None,
+        progress_percent: 0,
+        retryable: false,
+    }
 }
 
 async fn set_job_queue_lease(
@@ -212,6 +265,228 @@ async fn set_job_queue_lease(
     .await
     .context("failed to set queue lease metadata")?;
     Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires local postgres with canonical extensions"]
+async fn inline_attempt_lease_and_operation_transition_are_atomic() -> Result<()> {
+    let fixture = IngestRepositoryFixture::create().await?;
+
+    let result = async {
+        let subject_id = Uuid::now_v7();
+        let operation = create_linked_operation(&fixture, subject_id).await?;
+        let job =
+            create_inline_job_with_operation(&fixture, operation.id, "atomic-operation").await?;
+        let attempt = ingest_repository::create_ingest_attempt_for_inline_lease(
+            &fixture.pool,
+            &new_inline_attempt(job.id, "inline-operation-success"),
+            "inline-operation-success",
+            "inline-test",
+        )
+        .await?
+        .context("inline attempt was not leased")?;
+        assert_eq!(attempt.attempt_number, 1);
+        let operation = ops_repository::get_async_operation_by_id(&fixture.pool, operation.id)
+            .await?
+            .context("linked operation disappeared")?;
+        assert_eq!(operation.status, "processing");
+        assert!(operation.completed_at.is_none());
+        assert!(operation.failure_code.is_none());
+
+        let rejected_operation = create_linked_operation(&fixture, Uuid::now_v7()).await?;
+        let rejected_job = create_inline_job_with_operation(
+            &fixture,
+            rejected_operation.id,
+            "atomic-operation-rollback",
+        )
+        .await?;
+        sqlx::raw_sql(
+            "create function reject_async_operation_update() returns trigger
+             language plpgsql as $$
+             begin
+                 raise exception 'injected async-operation update failure';
+             end
+             $$;
+             create trigger reject_async_operation_update
+             before update on ops_async_operation
+             for each row execute function reject_async_operation_update();",
+        )
+        .execute(&fixture.pool)
+        .await
+        .context("failed to install async-operation rollback failpoint")?;
+
+        let lease_result = ingest_repository::create_ingest_attempt_for_inline_lease(
+            &fixture.pool,
+            &new_inline_attempt(rejected_job.id, "inline-operation-failure"),
+            "inline-operation-failure",
+            "inline-test",
+        )
+        .await;
+        assert!(lease_result.is_err(), "injected operation failure must abort the lease UoW");
+        let attempts =
+            ingest_repository::list_ingest_attempts_by_job(&fixture.pool, rejected_job.id).await?;
+        assert!(attempts.is_empty(), "attempt insert escaped the rolled-back lease UoW");
+        let rejected_job = ingest_repository::get_ingest_job_by_id(&fixture.pool, rejected_job.id)
+            .await?
+            .context("rolled-back inline job disappeared")?;
+        assert_eq!(rejected_job.queue_state, "queued");
+        assert!(rejected_job.queue_lease_token.is_none());
+        let rejected_operation =
+            ops_repository::get_async_operation_by_id(&fixture.pool, rejected_operation.id)
+                .await?
+                .context("rolled-back operation disappeared")?;
+        assert_eq!(rejected_operation.status, "accepted");
+        Ok(())
+    }
+    .await;
+
+    fixture.cleanup().await?;
+    result
+}
+
+#[tokio::test]
+#[ignore = "requires local postgres with canonical extensions"]
+async fn terminal_linked_operation_is_not_reopened_by_inline_attempt_lease() -> Result<()> {
+    let fixture = IngestRepositoryFixture::create().await?;
+
+    let result = async {
+        let operation = create_linked_operation(&fixture, Uuid::now_v7()).await?;
+        let completed_at = Utc::now();
+        ops_repository::update_async_operation(
+            &fixture.pool,
+            operation.id,
+            &ops_repository::UpdateOpsAsyncOperation {
+                status: "ready",
+                completed_at: Some(completed_at),
+                failure_code: None,
+            },
+        )
+        .await?
+        .context("terminal operation disappeared")?;
+        let job =
+            create_inline_job_with_operation(&fixture, operation.id, "terminal-operation").await?;
+
+        let lease_result = ingest_repository::create_ingest_attempt_for_inline_lease(
+            &fixture.pool,
+            &new_inline_attempt(job.id, "terminal-operation-lease"),
+            "terminal-operation-lease",
+            "inline-test",
+        )
+        .await;
+        anyhow::ensure!(
+            lease_result.is_err(),
+            "an attempt lease must reject a terminal linked operation"
+        );
+        let attempts =
+            ingest_repository::list_ingest_attempts_by_job(&fixture.pool, job.id).await?;
+        anyhow::ensure!(attempts.is_empty(), "a rejected terminal operation exposed an attempt");
+        let job = ingest_repository::get_ingest_job_by_id(&fixture.pool, job.id)
+            .await?
+            .context("rejected terminal-operation job disappeared")?;
+        anyhow::ensure!(job.queue_state == "queued", "a rejected lease changed the job state");
+        anyhow::ensure!(job.queue_lease_token.is_none(), "a rejected lease retained a job token");
+        let operation = ops_repository::get_async_operation_by_id(&fixture.pool, operation.id)
+            .await?
+            .context("rejected terminal operation disappeared")?;
+        anyhow::ensure!(operation.status == "ready", "terminal operation was reopened");
+        anyhow::ensure!(operation.completed_at.is_some(), "terminal completion time was cleared");
+        Ok(())
+    }
+    .await;
+
+    fixture.cleanup().await?;
+    result
+}
+
+#[tokio::test]
+#[ignore = "requires local postgres with canonical extensions"]
+async fn queue_lease_rechecks_job_library_after_parent_lock_wait() -> Result<()> {
+    let fixture = IngestRepositoryFixture::create().await?;
+
+    let result = async {
+        let job = create_queue_job(&fixture, "leased", "library-lock-race").await?;
+        set_job_queue_lease(&fixture.pool, job.id, Utc::now(), Some("library-lock-race-token"))
+            .await?;
+        let replacement_library = catalog_repository::create_library(
+            &fixture.pool,
+            fixture.workspace_id,
+            &format!("replacement-library-{}", Uuid::now_v7().simple()),
+            "Replacement Library",
+            None,
+            None,
+        )
+        .await?;
+
+        let mut parent_lock = fixture.pool.begin().await?;
+        sqlx::query_scalar::<_, Uuid>("select id from catalog_library where id = $1 for update")
+            .bind(fixture.library_id)
+            .fetch_one(&mut *parent_lock)
+            .await?;
+
+        let lease_pool = fixture.pool.clone();
+        let attempt = new_inline_attempt(job.id, "library-lock-race-token");
+        let lease = tokio::spawn(async move {
+            ingest_repository::create_ingest_attempt_for_queue_lease(
+                &lease_pool,
+                &attempt,
+                "library-lock-race-token",
+            )
+            .await
+        });
+
+        let mut observed_parent_lock_wait = false;
+        for _ in 0..200 {
+            let waiting: i64 = sqlx::query_scalar(
+                "select count(*)::bigint
+                 from pg_stat_activity
+                 where datname = current_database()
+                   and wait_event_type = 'Lock'
+                   and query like '%from catalog_library%'
+                   and query like '%for share%'",
+            )
+            .fetch_one(&fixture.pool)
+            .await?;
+            if waiting > 0 {
+                observed_parent_lock_wait = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        anyhow::ensure!(
+            observed_parent_lock_wait,
+            "queue lease did not reach the controlled parent-library lock wait"
+        );
+
+        sqlx::query("update ingest_job set library_id = $2 where id = $1")
+            .bind(job.id)
+            .bind(replacement_library.id)
+            .execute(&fixture.pool)
+            .await?;
+        parent_lock.commit().await?;
+
+        let leased = tokio::time::timeout(std::time::Duration::from_secs(2), lease)
+            .await
+            .context("queue lease did not finish after releasing the parent-library lock")???;
+        anyhow::ensure!(
+            leased.is_none(),
+            "queue lease used authority from a library the job no longer belongs to"
+        );
+        let attempts =
+            ingest_repository::list_ingest_attempts_by_job(&fixture.pool, job.id).await?;
+        anyhow::ensure!(attempts.is_empty(), "library drift exposed an ingest attempt");
+        let moved_job = ingest_repository::get_ingest_job_by_id(&fixture.pool, job.id)
+            .await?
+            .context("moved queue job disappeared")?;
+        anyhow::ensure!(
+            moved_job.library_id == replacement_library.id,
+            "test did not preserve the concurrent library move"
+        );
+        Ok(())
+    }
+    .await;
+
+    fixture.cleanup().await?;
+    result
 }
 
 #[tokio::test]
@@ -609,6 +884,22 @@ async fn atomic_attempt_finalization_does_not_expose_stale_orphan_job() -> Resul
             },
         )
         .await?;
+        let ready_revision_id = Uuid::now_v7();
+        let ready_event = WebhookEvent {
+            event_type: "revision.ready".to_string(),
+            event_id: revision_ready_event_id(ready_revision_id),
+            occurred_at: Utc::now(),
+            workspace_id: fixture.workspace_id,
+            library_id: fixture.library_id,
+            payload_json: serde_json::json!({
+                "document_id": Uuid::now_v7(),
+                "revision_id": ready_revision_id,
+                "library_id": fixture.library_id,
+            }),
+        };
+        let source_truth_before =
+            catalog_repository::get_library_source_truth_version(&fixture.pool, fixture.library_id)
+                .await?;
 
         let finalized = ingest_repository::finalize_leased_ingest_attempt_and_update_job(
             &fixture.pool,
@@ -640,6 +931,7 @@ async fn atomic_attempt_finalization_does_not_expose_stale_orphan_job() -> Resul
                 available_at: job.available_at,
                 completed_at: Some(Utc::now()),
             },
+            Some(&ready_event),
         )
         .await?
         .context("atomic finalization returned no row")?;
@@ -655,6 +947,19 @@ async fn atomic_attempt_finalization_does_not_expose_stale_orphan_job() -> Resul
             .context("finalized job missing")?;
         assert_eq!(finalized_job.queue_state, "completed");
         assert!(finalized_job.queue_lease_token.is_none());
+        let ready_outbox_count: i64 =
+            sqlx::query_scalar("select count(*) from webhook_lifecycle_outbox where event_id = $1")
+                .bind(&ready_event.event_id)
+                .fetch_one(&fixture.pool)
+                .await?;
+        assert_eq!(ready_outbox_count, 1, "job success and ready event must commit together");
+        let source_truth_after =
+            catalog_repository::get_library_source_truth_version(&fixture.pool, fixture.library_id)
+                .await?;
+        assert!(
+            source_truth_after > source_truth_before,
+            "ready-event commit must advance the answer-cache source generation"
+        );
 
         let stale_job = create_queue_job(&fixture, "leased", "atomic-rollback").await?;
         set_job_queue_lease(&fixture.pool, stale_job.id, stale_time, Some("rollback-token"))
@@ -680,6 +985,19 @@ async fn atomic_attempt_finalization_does_not_expose_stale_orphan_job() -> Resul
             },
         )
         .await?;
+        let stale_revision_id = Uuid::now_v7();
+        let stale_event = WebhookEvent {
+            event_type: "revision.ready".to_string(),
+            event_id: revision_ready_event_id(stale_revision_id),
+            occurred_at: Utc::now(),
+            workspace_id: fixture.workspace_id,
+            library_id: fixture.library_id,
+            payload_json: serde_json::json!({
+                "document_id": Uuid::now_v7(),
+                "revision_id": stale_revision_id,
+                "library_id": fixture.library_id,
+            }),
+        };
         ingest_repository::update_ingest_job(
             &fixture.pool,
             stale_job.id,
@@ -730,9 +1048,17 @@ async fn atomic_attempt_finalization_does_not_expose_stale_orphan_job() -> Resul
                 available_at: stale_job.available_at,
                 completed_at: None,
             },
+            Some(&stale_event),
         )
         .await?;
         assert!(stale_result.is_none());
+        let source_truth_after_rollback =
+            catalog_repository::get_library_source_truth_version(&fixture.pool, fixture.library_id)
+                .await?;
+        assert_eq!(
+            source_truth_after_rollback, source_truth_after,
+            "a lost finalization lease must roll back its source-generation update"
+        );
 
         let rolled_back_attempt =
             ingest_repository::get_ingest_attempt_by_id(&fixture.pool, stale_attempt.id)
@@ -740,6 +1066,12 @@ async fn atomic_attempt_finalization_does_not_expose_stale_orphan_job() -> Resul
                 .context("rolled back attempt missing")?;
         assert_eq!(rolled_back_attempt.attempt_state, "leased");
         assert!(rolled_back_attempt.finished_at.is_none());
+        let stale_outbox_count: i64 =
+            sqlx::query_scalar("select count(*) from webhook_lifecycle_outbox where event_id = $1")
+                .bind(&stale_event.event_id)
+                .fetch_one(&fixture.pool)
+                .await?;
+        assert_eq!(stale_outbox_count, 0, "lost job lease must roll back the ready event");
 
         Ok(())
     }
@@ -788,25 +1120,28 @@ async fn migration_0005_backfills_legacy_leased_rows_and_is_idempotent() -> Resu
             None,
         )
         .await?;
-        let job = ingest_repository::create_ingest_job(
-            &pool,
-            &ingest_repository::NewIngestJob {
-                workspace_id: workspace.id,
-                library_id: library.id,
-                mutation_id: None,
-                connector_id: None,
-                async_operation_id: None,
-                knowledge_document_id: None,
-                knowledge_revision_id: None,
-                job_kind: "content_mutation".to_string(),
-                queue_state: "leased".to_string(),
-                priority: 10,
-                dedupe_key: Some("legacy-null-metadata".to_string()),
-                queued_at: Some(Utc::now() - Duration::minutes(30)),
-                available_at: Some(Utc::now() - Duration::minutes(30)),
-                completed_at: None,
-            },
+        let job_id = Uuid::now_v7();
+        let queued_at = Utc::now() - Duration::minutes(30);
+        sqlx::query(
+            "insert into ingest_job (
+                id,
+                workspace_id,
+                library_id,
+                job_kind,
+                queue_state,
+                priority,
+                dedupe_key,
+                queued_at,
+                available_at
+            )
+            values ($1, $2, $3, 'content_mutation', 'leased', 10, $4, $5, $5)",
         )
+        .bind(job_id)
+        .bind(workspace.id)
+        .bind(library.id)
+        .bind("legacy-null-metadata")
+        .bind(queued_at)
+        .execute(&pool)
         .await?;
 
         sqlx::raw_sql(include_str!("../migrations/0005_ingest_queue_lease_metadata.sql"))
@@ -816,14 +1151,23 @@ async fn migration_0005_backfills_legacy_leased_rows_and_is_idempotent() -> Resu
             .execute(&pool)
             .await?;
 
-        let row = ingest_repository::get_ingest_job_by_id(&pool, job.id)
-            .await?
-            .context("migrated job missing")?;
-        assert_eq!(row.queue_state, "leased");
-        assert!(row.queue_leased_at.is_some());
-        assert_eq!(row.queue_lease_owner.as_deref(), Some("legacy-migration"));
-        let expected_token = format!("legacy-{}", job.id);
-        assert_eq!(row.queue_lease_token.as_deref(), Some(expected_token.as_str()));
+        let row = sqlx::query_as::<
+            _,
+            (String, Option<chrono::DateTime<Utc>>, Option<String>, Option<String>),
+        >(
+            "select queue_state::text, queue_leased_at, queue_lease_owner, queue_lease_token
+             from ingest_job
+             where id = $1",
+        )
+        .bind(job_id)
+        .fetch_optional(&pool)
+        .await?
+        .context("migrated job missing")?;
+        assert_eq!(row.0, "leased");
+        assert!(row.1.is_some());
+        assert_eq!(row.2.as_deref(), Some("legacy-migration"));
+        let expected_token = format!("legacy-{job_id}");
+        assert_eq!(row.3.as_deref(), Some(expected_token.as_str()));
 
         Ok::<(), anyhow::Error>(())
     }
@@ -847,6 +1191,7 @@ async fn ingest_job_crud_and_ordering_round_trip() -> Result<()> {
                 workspace_id: fixture.workspace_id,
                 library_id: fixture.library_id,
                 mutation_id: None,
+                mutation_item_id: None,
                 connector_id: None,
                 async_operation_id: None,
                 knowledge_document_id: None,
@@ -868,6 +1213,7 @@ async fn ingest_job_crud_and_ordering_round_trip() -> Result<()> {
                 workspace_id: fixture.workspace_id,
                 library_id: fixture.library_id,
                 mutation_id: None,
+                mutation_item_id: None,
                 connector_id: None,
                 async_operation_id: None,
                 knowledge_document_id: None,
@@ -889,6 +1235,7 @@ async fn ingest_job_crud_and_ordering_round_trip() -> Result<()> {
                 workspace_id: fixture.workspace_id,
                 library_id: fixture.library_id,
                 mutation_id: None,
+                mutation_item_id: None,
                 connector_id: None,
                 async_operation_id: None,
                 knowledge_document_id: None,
@@ -985,6 +1332,7 @@ async fn ingest_attempts_and_stage_events_round_trip_with_ordered_queries() -> R
                 workspace_id: fixture.workspace_id,
                 library_id: fixture.library_id,
                 mutation_id: None,
+                mutation_item_id: None,
                 connector_id: None,
                 async_operation_id: None,
                 knowledge_document_id: None,

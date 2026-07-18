@@ -1,8 +1,8 @@
 server {
-    listen 443 ssl;
-    listen [::]:443 ssl;
-    listen 443 quic reuseport;
-    listen [::]:443 quic reuseport;
+    listen 8443 ssl;
+    listen [::]:8443 ssl;
+    listen 8443 quic reuseport;
+    listen [::]:8443 quic reuseport;
     http2 on;
     http3 on;
     quic_retry on;
@@ -33,7 +33,7 @@ server {
         text/css
         text/plain;
 
-    add_header Alt-Svc 'h3=":443"; ma=86400' always;
+    add_header Alt-Svc 'h3=":8443"; ma=86400' always;
     include /etc/nginx/snippets/ironrag-security-headers.conf;
 
     location ~ /\.(?!well-known(?:/|$)) {
@@ -80,14 +80,14 @@ server {
 
     location /assets/ {
         expires 1y;
-        add_header Alt-Svc 'h3=":443"; ma=86400' always;
+        add_header Alt-Svc 'h3=":8443"; ma=86400' always;
         add_header Cache-Control "public, immutable";
         include /etc/nginx/snippets/ironrag-security-headers.conf;
         try_files $uri =404;
     }
 
     location = /swagger.html {
-        add_header Alt-Svc 'h3=":443"; ma=86400' always;
+        add_header Alt-Svc 'h3=":8443"; ma=86400' always;
         add_header Cache-Control "no-cache, no-store, must-revalidate";
         add_header Pragma "no-cache";
         add_header Content-Security-Policy "default-src 'self'; base-uri 'self'; object-src 'none'; frame-ancestors 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' http: https: ws: wss:; worker-src 'self' blob:" always;
@@ -99,7 +99,7 @@ server {
     }
 
     location / {
-        add_header Alt-Svc 'h3=":443"; ma=86400' always;
+        add_header Alt-Svc 'h3=":8443"; ma=86400' always;
         add_header Cache-Control "no-cache, no-store, must-revalidate";
         add_header Pragma "no-cache";
         include /etc/nginx/snippets/ironrag-security-headers.conf;

@@ -16,23 +16,25 @@ use crate::{
         },
         repositories::{self, RuntimeGraphSnapshotRow},
     },
-    services::graph::{
-        error::GraphServiceError, quality_guard::GraphQualityGuardService,
-        summary::GraphSummaryRefreshRequest,
-    },
+    services::graph::{error::GraphServiceError, quality_guard::GraphQualityGuardService},
     services::knowledge::graph_stream::prewarm_graph_topology_cache,
     shared::json_coercion::from_value_or_default,
 };
 
-const INLINE_SUMMARY_REFRESH_TARGET_LIMIT: usize = 500;
-
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct GraphProjectionScope {
     pub library_id: Uuid,
     pub projection_version: i64,
+    pub build_epoch: Uuid,
     pub targeted_node_ids: Vec<Uuid>,
     pub targeted_edge_ids: Vec<Uuid>,
-    pub summary_refresh: Option<GraphSummaryRefreshRequest>,
+    pub source_truth_publication: GraphSourceTruthPublication,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GraphSourceTruthPublication {
+    Immediate,
+    DeferredToLifecycle,
 }
 
 #[derive(Debug, Clone)]
@@ -62,19 +64,20 @@ impl GraphProjectionOutcome {
 
 impl GraphProjectionScope {
     #[must_use]
-    pub const fn new(library_id: Uuid, projection_version: i64) -> Self {
+    pub fn new(library_id: Uuid, projection_version: i64) -> Self {
         Self {
             library_id,
             projection_version,
+            build_epoch: Uuid::now_v7(),
             targeted_node_ids: Vec::new(),
             targeted_edge_ids: Vec::new(),
-            summary_refresh: None,
+            source_truth_publication: GraphSourceTruthPublication::Immediate,
         }
     }
 
     #[must_use]
-    pub fn with_summary_refresh(mut self, summary_refresh: GraphSummaryRefreshRequest) -> Self {
-        self.summary_refresh = Some(summary_refresh);
+    pub const fn defer_source_truth_to_lifecycle(mut self) -> Self {
+        self.source_truth_publication = GraphSourceTruthPublication::DeferredToLifecycle;
         self
     }
 
@@ -94,22 +97,22 @@ impl GraphProjectionScope {
     }
 
     #[must_use]
-    pub fn is_targeted_refresh(&self) -> bool {
+    pub const fn is_targeted_refresh(&self) -> bool {
         !self.targeted_node_ids.is_empty() || !self.targeted_edge_ids.is_empty()
     }
 }
 
 #[must_use]
-pub fn active_projection_version(snapshot: Option<&RuntimeGraphSnapshotRow>) -> i64 {
+pub(crate) fn active_projection_version(snapshot: Option<&RuntimeGraphSnapshotRow>) -> i64 {
     snapshot.map(|row| row.projection_version).filter(|value| *value > 0).unwrap_or(1)
 }
 
 #[must_use]
-pub fn next_projection_version(snapshot: Option<&RuntimeGraphSnapshotRow>) -> i64 {
-    snapshot.map(|_| active_projection_version(snapshot) + 1).unwrap_or(1)
+pub(crate) fn next_projection_version(snapshot: Option<&RuntimeGraphSnapshotRow>) -> i64 {
+    snapshot.map_or(1, |_| active_projection_version(snapshot) + 1)
 }
 
-pub async fn resolve_projection_scope(
+pub(crate) async fn resolve_projection_scope(
     state: &AppState,
     library_id: Uuid,
 ) -> Result<GraphProjectionScope, GraphServiceError> {
@@ -120,33 +123,52 @@ pub async fn resolve_projection_scope(
     Ok(GraphProjectionScope::new(library_id, active_projection_version(snapshot.as_ref())))
 }
 
-pub async fn ensure_empty_graph_snapshot(
+pub(crate) async fn ensure_empty_graph_snapshot(
     state: &AppState,
-    library_id: Uuid,
-    projection_version: i64,
+    scope: &GraphProjectionScope,
 ) -> Result<GraphProjectionOutcome, GraphServiceError> {
-    repositories::upsert_runtime_graph_snapshot(
-        &state.persistence.postgres,
-        library_id,
-        "empty",
-        projection_version,
-        0,
-        0,
-        Some(0.0),
-        None,
-    )
-    .await
-    .context("failed to persist empty graph snapshot")?;
+    persist_runtime_graph_snapshot(state, scope, "building", 0, 0, Some(0.0), None).await?;
+    persist_runtime_graph_snapshot(state, scope, "empty", 0, 0, Some(0.0), None).await?;
 
     Ok(GraphProjectionOutcome {
-        projection_version,
+        projection_version: scope.projection_version,
         node_count: 0,
         edge_count: 0,
         graph_status: "empty".to_string(),
     })
 }
 
-pub async fn project_canonical_graph(
+pub(super) async fn persist_runtime_graph_snapshot(
+    state: &AppState,
+    scope: &GraphProjectionScope,
+    graph_status: &str,
+    node_count: i32,
+    edge_count: i32,
+    provenance_coverage_percent: Option<f64>,
+    last_error_message: Option<&str>,
+) -> Result<RuntimeGraphSnapshotRow, GraphServiceError> {
+    repositories::upsert_runtime_graph_snapshot(
+        &state.persistence.postgres,
+        scope.library_id,
+        graph_status,
+        scope.projection_version,
+        scope.build_epoch,
+        node_count,
+        edge_count,
+        provenance_coverage_percent,
+        last_error_message,
+        scope.source_truth_publication == GraphSourceTruthPublication::Immediate,
+    )
+    .await?
+    .ok_or_else(|| GraphServiceError::StateConflict {
+        message: format!(
+            "runtime graph snapshot publish conflict for library {} projection {} build {}",
+            scope.library_id, scope.projection_version, scope.build_epoch
+        ),
+    })
+}
+
+pub(crate) async fn project_canonical_graph(
     state: &AppState,
     scope: &GraphProjectionScope,
 ) -> Result<GraphProjectionOutcome, GraphServiceError> {
@@ -182,11 +204,14 @@ pub async fn project_canonical_graph(
     .await
     .context("failed to load canonical graph edges for projection")?;
 
-    repositories::upsert_runtime_graph_snapshot(
-        &state.persistence.postgres,
-        scope.library_id,
+    if nodes.is_empty() && edges.is_empty() {
+        return ensure_empty_graph_snapshot(state, scope).await;
+    }
+
+    persist_runtime_graph_snapshot(
+        state,
+        scope,
         "building",
-        scope.projection_version,
         i32::try_from(nodes.len()).unwrap_or(i32::MAX),
         i32::try_from(edges.len()).unwrap_or(i32::MAX),
         Some(provenance_coverage_percent(&nodes, &edges)),
@@ -202,13 +227,6 @@ pub async fn project_canonical_graph(
     // cycle on a library to DEL the only live key before the replacement
     // landed, forcing every concurrent GET to rebuild from Postgres and
     // producing 25 s cold-path storms on reference libraries.
-
-    if nodes.is_empty() && edges.is_empty() {
-        let outcome =
-            ensure_empty_graph_snapshot(state, scope.library_id, scope.projection_version).await?;
-        maybe_apply_summary_refresh(state, scope).await?;
-        return Ok(outcome);
-    }
 
     // Node/edge write construction + sanitization is the single biggest
     // synchronous CPU hot spot of the extract_graph stage: for a prod
@@ -239,11 +257,10 @@ pub async fn project_canonical_graph(
         .await
     {
         let failure_message = error.to_string();
-        repositories::upsert_runtime_graph_snapshot(
-            &state.persistence.postgres,
-            scope.library_id,
+        persist_runtime_graph_snapshot(
+            state,
+            scope,
             "failed",
-            scope.projection_version,
             i32::try_from(projection_writes.nodes.len()).unwrap_or(i32::MAX),
             i32::try_from(projection_writes.edges.len()).unwrap_or(i32::MAX),
             Some(provenance_coverage_percent_from_counts(
@@ -257,11 +274,10 @@ pub async fn project_canonical_graph(
         return Err(error.context("failed to refresh the canonical graph view").into());
     }
 
-    repositories::upsert_runtime_graph_snapshot(
-        &state.persistence.postgres,
-        scope.library_id,
+    persist_runtime_graph_snapshot(
+        state,
+        scope,
         "ready",
-        scope.projection_version,
         i32::try_from(projection_writes.nodes.len()).unwrap_or(i32::MAX),
         i32::try_from(projection_writes.edges.len()).unwrap_or(i32::MAX),
         Some(provenance_coverage_percent_from_counts(
@@ -279,8 +295,6 @@ pub async fn project_canonical_graph(
     // readers naturally miss old bytes while in-flight readers can keep
     // using the previous key until its TTL expires.
     schedule_topology_prewarm(state, scope.library_id);
-    maybe_apply_summary_refresh(state, scope).await?;
-
     Ok(GraphProjectionOutcome {
         projection_version: scope.projection_version,
         node_count: projection_writes.nodes.len(),
@@ -367,30 +381,22 @@ async fn prune_disallowed_projection_rows(
         return Ok(());
     }
 
-    repositories::delete_runtime_graph_edges_by_ids(
-        &state.persistence.postgres,
-        scope.library_id,
-        scope.projection_version,
-        &projection_writes.canonical_pruned_edge_ids,
-    )
-    .await
-    .context("failed to prune disallowed graph projection edges")?;
-    repositories::delete_runtime_graph_nodes_by_ids(
+    let outcome = repositories::prune_runtime_graph_projection_rows(
         &state.persistence.postgres,
         scope.library_id,
         scope.projection_version,
         &projection_writes.canonical_pruned_node_ids,
-    )
-    .await
-    .context("failed to prune disallowed graph projection nodes")?;
-    repositories::delete_runtime_graph_canonical_summaries_for_orphan_targets(
-        &state.persistence.postgres,
-        scope.library_id,
-        &projection_writes.canonical_pruned_node_ids,
         &projection_writes.canonical_pruned_edge_ids,
     )
     .await
-    .context("failed to prune disallowed graph projection summaries")?;
+    .context("failed to atomically prune disallowed graph projection rows")?;
+    tracing::debug!(
+        library_id = %scope.library_id,
+        deleted_nodes = outcome.deleted_node_count,
+        deleted_edges = outcome.deleted_edge_count,
+        deleted_summaries = outcome.deleted_summary_count,
+        "atomically pruned disallowed graph projection rows",
+    );
     Ok(())
 }
 
@@ -410,57 +416,20 @@ async fn synchronize_projection_support_counts(
     state: &AppState,
     scope: &GraphProjectionScope,
 ) -> anyhow::Result<()> {
-    repositories::recalculate_runtime_graph_support_counts(
+    let outcome = repositories::synchronize_runtime_graph_support_and_prune(
         &state.persistence.postgres,
         scope.library_id,
         scope.projection_version,
     )
     .await
-    .context("failed to recalculate canonical graph support counts before projection")?;
-
-    let deleted_edge_keys = repositories::delete_runtime_graph_edges_without_support(
-        &state.persistence.postgres,
-        scope.library_id,
-        scope.projection_version,
-    )
-    .await
-    .context("failed to prune zero-support graph edges before projection")?;
-
-    let deleted_node_keys = repositories::delete_runtime_graph_nodes_without_support(
-        &state.persistence.postgres,
-        scope.library_id,
-        scope.projection_version,
-    )
-    .await
-    .context("failed to prune zero-support graph nodes before projection")?;
-
-    if !deleted_node_keys.is_empty() {
-        let deleted = state
-            .graph_store
-            .delete_entities_by_canonical_keys(scope.library_id, &deleted_node_keys)
-            .await
-            .unwrap_or(0);
-        tracing::info!(
-            library_id = %scope.library_id,
-            pg_deleted = deleted_node_keys.len(),
-            deleted = deleted,
-            "synced orphaned entity deletions to PostgreSQL"
-        );
-    }
-
-    if !deleted_edge_keys.is_empty() {
-        let deleted = state
-            .graph_store
-            .delete_relations_by_canonical_keys(scope.library_id, &deleted_edge_keys)
-            .await
-            .unwrap_or(0);
-        tracing::info!(
-            library_id = %scope.library_id,
-            pg_deleted = deleted_edge_keys.len(),
-            deleted = deleted,
-            "synced orphaned relation deletions to PostgreSQL"
-        );
-    }
+    .context("failed to atomically synchronize canonical graph support")?;
+    tracing::debug!(
+        library_id = %scope.library_id,
+        deleted_nodes = outcome.deleted_node_count,
+        deleted_edges = outcome.deleted_edge_count,
+        deleted_summaries = outcome.deleted_summary_count,
+        "atomically synchronized canonical graph support",
+    );
 
     Ok(())
 }
@@ -546,36 +515,61 @@ async fn project_targeted_canonical_graph(
         .into_iter()
         .collect::<Vec<_>>();
 
-    execute_projection_write_with_guard(state, scope, "targeted_projection", || {
-        state.graph_store.refresh_library_projection_targets(
-            scope.library_id,
-            scope.projection_version,
-            &remove_node_ids,
-            &remove_edge_ids,
-            &projection_writes.nodes,
-            &projection_writes.edges,
-        )
-    })
-    .await
-    .context("failed to refresh targeted graph view")?;
-
     let counts = repositories::count_admitted_runtime_graph_projection(
         &state.persistence.postgres,
         scope.library_id,
         scope.projection_version,
     )
     .await
-    .context("failed to count admitted graph rows after targeted projection refresh")?;
+    .context("failed to count admitted graph rows before targeted projection refresh")?;
     let node_count = usize::try_from(counts.node_count).unwrap_or_default();
     let edge_count = usize::try_from(counts.edge_count).unwrap_or_default();
+    persist_runtime_graph_snapshot(
+        state,
+        scope,
+        "building",
+        i32::try_from(node_count).unwrap_or(i32::MAX),
+        i32::try_from(edge_count).unwrap_or(i32::MAX),
+        Some(if node_count == 0 && edge_count == 0 { 0.0 } else { 100.0 }),
+        None,
+    )
+    .await
+    .context("failed to claim targeted graph snapshot build")?;
+
+    if let Err(error) =
+        execute_projection_write_with_guard(state, scope, "targeted_projection", || {
+            state.graph_store.refresh_library_projection_targets(
+                scope.library_id,
+                scope.projection_version,
+                &remove_node_ids,
+                &remove_edge_ids,
+                &projection_writes.nodes,
+                &projection_writes.edges,
+            )
+        })
+        .await
+    {
+        let failure_message = error.to_string();
+        persist_runtime_graph_snapshot(
+            state,
+            scope,
+            "failed",
+            i32::try_from(node_count).unwrap_or(i32::MAX),
+            i32::try_from(edge_count).unwrap_or(i32::MAX),
+            Some(if node_count == 0 && edge_count == 0 { 0.0 } else { 100.0 }),
+            Some(&failure_message),
+        )
+        .await
+        .context("failed to mark targeted graph snapshot as failed")?;
+        return Err(error.context("failed to refresh targeted graph view"));
+    }
     let graph_status =
         if node_count == 0 && edge_count == 0 { GRAPH_STATUS_EMPTY } else { GRAPH_STATUS_READY };
 
-    repositories::upsert_runtime_graph_snapshot(
-        &state.persistence.postgres,
-        scope.library_id,
+    persist_runtime_graph_snapshot(
+        state,
+        scope,
         graph_status,
-        scope.projection_version,
         i32::try_from(node_count).unwrap_or(i32::MAX),
         i32::try_from(edge_count).unwrap_or(i32::MAX),
         Some(if node_count == 0 && edge_count == 0 { 0.0 } else { 100.0 }),
@@ -588,8 +582,6 @@ async fn project_targeted_canonical_graph(
     // `graph:{library_id}:v{projection_version}:g{generation}` key while
     // any in-flight reads on the previous key finish normally and old
     // bytes age out via TTL.
-    maybe_apply_summary_refresh(state, scope).await?;
-
     Ok(GraphProjectionOutcome {
         projection_version: scope.projection_version,
         node_count,
@@ -609,30 +601,49 @@ where
     Fut: std::future::Future<Output = Result<(), GraphViewWriteError>>,
 {
     let guard = &state.resolve_settle_blockers_services.graph_projection_guard;
-    let projection_lock = repositories::acquire_runtime_library_graph_lock(
+    let mut projection_lock = repositories::acquire_runtime_library_graph_lock(
         &state.persistence.postgres,
         scope.library_id,
     )
     .await
     .context("failed to acquire graph projection advisory lock")?;
-    let result = async {
-        let mut contention_retries = 0usize;
-        loop {
-            match operation().await {
-                Ok(()) => return Ok(()),
-                Err(error) => match guard.classify_write_error(&error, contention_retries + 1) {
-                    GraphWriteFailureDecision::RetryContention => {
-                        contention_retries += 1;
-                        sleep(Duration::from_millis(200)).await;
+    let build_is_current = repositories::runtime_graph_snapshot_build_is_current(
+        &mut *projection_lock,
+        scope.library_id,
+        scope.projection_version,
+        scope.build_epoch,
+    )
+    .await
+    .context("failed to verify graph snapshot build ownership")?;
+    let result = if build_is_current {
+        async {
+            let mut contention_retries = 0usize;
+            loop {
+                match operation().await {
+                    Ok(()) => return Ok(()),
+                    Err(error) => {
+                        match guard.classify_write_error(&error, contention_retries + 1) {
+                            GraphWriteFailureDecision::RetryContention => {
+                                contention_retries += 1;
+                                sleep(Duration::from_millis(200)).await;
+                            }
+                            GraphWriteFailureDecision::FailTerminal => {
+                                return Err(anyhow!(error.to_string()));
+                            }
+                        }
                     }
-                    GraphWriteFailureDecision::FailTerminal => {
-                        return Err(anyhow!(error.to_string()));
-                    }
-                },
+                }
             }
         }
-    }
-    .await;
+        .await
+    } else {
+        Err(anyhow!(
+            "graph snapshot publish conflict: build {} no longer owns library {} projection {}",
+            scope.build_epoch,
+            scope.library_id,
+            scope.projection_version
+        ))
+    };
     let release_result =
         repositories::release_runtime_library_graph_lock(projection_lock, scope.library_id)
             .await
@@ -645,76 +656,6 @@ where
     }
 }
 
-async fn maybe_apply_summary_refresh(
-    state: &AppState,
-    scope: &GraphProjectionScope,
-) -> anyhow::Result<()> {
-    let Some(summary_refresh) = scope.summary_refresh.as_ref() else {
-        return Ok(());
-    };
-    if !summary_refresh.is_active() {
-        return Ok(());
-    }
-    state
-        .retrieval_intelligence_services
-        .graph_summary
-        .invalidate_summaries(state, scope.library_id, summary_refresh)
-        .await
-        .context("failed to refresh canonical summaries after graph projection")?;
-    let affected_targets = inline_summary_refresh_target_count(state, scope, summary_refresh)
-        .await
-        .context("failed to count affected canonical summary targets after graph projection")?;
-    if !state
-        .retrieval_intelligence_services
-        .graph_summary
-        .should_batch_refresh(affected_targets, INLINE_SUMMARY_REFRESH_TARGET_LIMIT)
-    {
-        tracing::info!(
-            library_id = %scope.library_id,
-            affected_targets,
-            inline_limit = INLINE_SUMMARY_REFRESH_TARGET_LIMIT,
-            targeted = summary_refresh.is_targeted(),
-            broad = summary_refresh.broad_refresh,
-            "skipping inline canonical summary refresh for large graph mutation",
-        );
-        return Ok(());
-    }
-    state
-        .retrieval_intelligence_services
-        .graph_summary
-        .refresh_summaries(state, scope.library_id, summary_refresh)
-        .await
-        .context("failed to generate canonical summaries after graph projection")?;
-    Ok(())
-}
-
-async fn inline_summary_refresh_target_count(
-    state: &AppState,
-    scope: &GraphProjectionScope,
-    summary_refresh: &GraphSummaryRefreshRequest,
-) -> anyhow::Result<usize> {
-    if summary_refresh.is_targeted() {
-        return Ok(summary_refresh.node_ids.len().saturating_add(summary_refresh.edge_ids.len()));
-    }
-    if !summary_refresh.broad_refresh {
-        return Ok(0);
-    }
-    let snapshot =
-        repositories::get_runtime_graph_snapshot(&state.persistence.postgres, scope.library_id)
-            .await
-            .context("failed to load runtime graph snapshot for summary refresh sizing")?;
-    Ok(summary_target_count_from_snapshot(snapshot.as_ref()))
-}
-
-fn summary_target_count_from_snapshot(snapshot: Option<&RuntimeGraphSnapshotRow>) -> usize {
-    let Some(snapshot) = snapshot else {
-        return 0;
-    };
-    let nodes = usize::try_from(snapshot.node_count.max(0)).unwrap_or_default();
-    let edges = usize::try_from(snapshot.edge_count.max(0)).unwrap_or_default();
-    nodes.saturating_add(edges)
-}
-
 fn provenance_coverage_percent(
     nodes: &[repositories::RuntimeGraphNodeRow],
     edges: &[repositories::RuntimeGraphEdgeRow],
@@ -722,7 +663,7 @@ fn provenance_coverage_percent(
     provenance_coverage_percent_from_counts(nodes.len(), edges.len())
 }
 
-fn provenance_coverage_percent_from_counts(node_count: usize, edge_count: usize) -> f64 {
+const fn provenance_coverage_percent_from_counts(node_count: usize, edge_count: usize) -> f64 {
     if node_count == 0 && edge_count == 0 { 0.0 } else { 100.0 }
 }
 
@@ -794,38 +735,15 @@ mod tests {
     }
 
     #[test]
-    fn projection_scope_can_carry_summary_refresh_requests() {
-        let scope = GraphProjectionScope::new(Uuid::nil(), 4).with_summary_refresh(
-            GraphSummaryRefreshRequest::targeted(vec![Uuid::nil()], Vec::new())
-                .with_source_truth_version(11),
-        );
+    fn projection_scope_defers_source_truth_for_lifecycle_owned_publication() {
+        let immediate = GraphProjectionScope::new(Uuid::nil(), 4);
+        assert_eq!(immediate.source_truth_publication, GraphSourceTruthPublication::Immediate);
+        let scope = immediate.defer_source_truth_to_lifecycle();
 
         assert_eq!(
-            scope.summary_refresh.as_ref().and_then(|refresh| refresh.source_truth_version),
-            Some(11)
+            scope.source_truth_publication,
+            GraphSourceTruthPublication::DeferredToLifecycle
         );
-        assert!(
-            scope.summary_refresh.as_ref().is_some_and(GraphSummaryRefreshRequest::is_targeted)
-        );
-    }
-
-    #[test]
-    fn counts_summary_targets_from_snapshot_without_underflow() {
-        let snapshot = RuntimeGraphSnapshotRow {
-            library_id: Uuid::nil(),
-            graph_status: "ready".to_string(),
-            projection_version: 1,
-            topology_generation: 1,
-            node_count: -1,
-            edge_count: 8,
-            provenance_coverage_percent: Some(100.0),
-            last_built_at: None,
-            last_error_message: None,
-            created_at: chrono::Utc::now(),
-            updated_at: chrono::Utc::now(),
-        };
-
-        assert_eq!(summary_target_count_from_snapshot(Some(&snapshot)), 8);
     }
 
     #[test]

@@ -28,7 +28,7 @@ Every admitted source is normalized into structured blocks before chunking, embe
 - Text-like files: markdown, text, source code
 - Structured-record files — JSON (object or array), YAML (single document, `---` stream, or sequence of mappings), JSONL/NDJSON, and TOML — through one key-agnostic record extractor. Every field at any nesting depth is flattened to searchable text, heterogeneous schemas (different keys per record) are profiled, and any value shaped like a timestamp (RFC3339 or epoch, under any key name) time-stamps its record for temporal retrieval. There is no per-format or per-field special-casing: an arbitrary export, event log, config dump, or session transcript all flow through the same generic path.
 - PDF through Docling-backed document-layout extraction with durable page-range checkpoints for stored revisions
-- Static raster images through Docling OCR by default, or through the active `vision` binding when the library recognition policy selects `vision`
+- Static raster images through Docling OCR by default, or through the active multimodal `extract_text` profile when the library recognition policy selects `vision`
 - DOCX and PPTX through Docling-backed structured block extraction
 - Spreadsheets (`csv`, `tsv`, `xls`, `xlsx`, `xlsb`, `ods`) through native row-oriented extraction
 - Web pages through HTML main-content extraction

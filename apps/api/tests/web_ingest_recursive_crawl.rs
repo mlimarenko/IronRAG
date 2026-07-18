@@ -1,3 +1,5 @@
+#![cfg(feature = "test-support")]
+
 #[path = "support/web_ingest_fixture.rs"]
 mod web_ingest_fixture;
 #[path = "support/web_ingest_support.rs"]

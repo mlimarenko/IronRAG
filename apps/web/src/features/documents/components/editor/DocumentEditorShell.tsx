@@ -1,41 +1,45 @@
-import { useEffect, useMemo, useState } from 'react';
-import type { TFunction } from 'i18next';
-import { Loader2 } from 'lucide-react';
-import { useEditor, type Editor } from '@tiptap/react';
-import StarterKit from '@tiptap/starter-kit';
-import Image from '@tiptap/extension-image';
-import { Table } from '@tiptap/extension-table';
-import TableCell from '@tiptap/extension-table-cell';
-import TableHeader from '@tiptap/extension-table-header';
-import TableRow from '@tiptap/extension-table-row';
-import { Markdown } from '@tiptap/markdown';
+import { useEffect, useMemo, useState } from 'react'
+import type { TFunction } from 'i18next'
+import { Loader2 } from 'lucide-react'
+import { useEditor, type Editor } from '@tiptap/react'
+import StarterKit from '@tiptap/starter-kit'
+import Image from '@tiptap/extension-image'
+import { Table } from '@tiptap/extension-table'
+import TableCell from '@tiptap/extension-table-cell'
+import TableHeader from '@tiptap/extension-table-header'
+import TableRow from '@tiptap/extension-table-row'
+import { Markdown } from '@tiptap/markdown'
 
-import { Button } from '@/shared/components/ui/button';
+import { Button } from '@/shared/components/ui/button'
 
-import { createEditorBaseline, isEditorContentDirty, type DirtyStateBaseline } from './editorBaseline';
-import { DocumentEditorCanvas } from './DocumentEditorCanvas';
-import { DocumentEditorOverlay } from './DocumentEditorOverlay';
-import { DocumentEditorToolbar } from './DocumentEditorToolbar';
+import {
+  createEditorBaseline,
+  isEditorContentDirty,
+  type DirtyStateBaseline,
+} from './editorBaseline'
+import { DocumentEditorCanvas } from './DocumentEditorCanvas'
+import { DocumentEditorOverlay } from './DocumentEditorOverlay'
+import { DocumentEditorToolbar } from './DocumentEditorToolbar'
 import {
   isCodeLikeSourceFormat,
   isPlainTextSourceFormat,
   resolveEditorSurfaceMode,
-} from './editorSurfaceMode';
+} from './editorSurfaceMode'
 
-type DocumentEditorShellProps = {
-  documentName: string;
-  error: string | null;
-  loading: boolean;
-  markdown: string;
-  onOpenChange: (open: boolean) => void;
-  onSave: (markdown: string) => void | Promise<void>;
-  open: boolean;
-  readOnly?: boolean;
-  saving: boolean;
-  sourceFormat?: string;
-  sourceHref?: string | undefined;
-  t: TFunction;
-};
+type DocumentEditorShellProps = Readonly<{
+  documentName: string
+  error: string | null
+  loading: boolean
+  markdown: string
+  onOpenChange: (open: boolean) => void
+  onSave: (markdown: string) => void | Promise<void>
+  open: boolean
+  readOnly?: boolean
+  saving: boolean
+  sourceFormat?: string
+  sourceHref?: string | undefined
+  t: TFunction
+}>
 
 const editorExtensions = [
   StarterKit.configure({
@@ -64,8 +68,49 @@ const editorExtensions = [
       gfm: true,
     },
   }),
-];
-const RAW_TEXT_EDITOR_MIN_LENGTH = 512 * 1024;
+]
+const RAW_TEXT_EDITOR_MIN_LENGTH = 512 * 1024
+
+type EditorStatusState = 'readOnly' | 'saving' | 'error' | 'dirty' | 'clean'
+type EditorStatusTone = 'neutral' | 'accent' | 'destructive'
+
+function editorStatusState(
+  readOnly: boolean,
+  saving: boolean,
+  error: string | null,
+  isDirty: boolean,
+): EditorStatusState {
+  if (readOnly) return 'readOnly'
+  if (saving) return 'saving'
+  if (error) return 'error'
+  return isDirty ? 'dirty' : 'clean'
+}
+
+function editorStatusTone(statusState: EditorStatusState): EditorStatusTone {
+  if (statusState === 'dirty') return 'accent'
+  if (statusState === 'error') return 'destructive'
+  return 'neutral'
+}
+
+function surfaceModeLabel(
+  surfaceMode: ReturnType<typeof resolveEditorSurfaceMode>,
+  t: TFunction,
+): string {
+  switch (surfaceMode) {
+    case 'prose':
+      return t('documents.editor.proseMode')
+    case 'table':
+      return t('documents.editor.tableMode')
+    case 'code':
+    case 'raw_text':
+      return t('documents.editor.codeMode')
+  }
+}
+
+function documentDescription(documentName: string, sourceFormat?: string): string {
+  const formatSuffix = sourceFormat ? ` · ${sourceFormat.toUpperCase()}` : ''
+  return `${documentName}${formatSuffix}`
+}
 
 export function DocumentEditorShell({
   documentName,
@@ -81,19 +126,17 @@ export function DocumentEditorShell({
   sourceHref,
   t,
 }: DocumentEditorShellProps) {
-  const rawTextEditor = shouldUseRawTextEditor(markdown, sourceFormat);
-  const surfaceMode = useMemo(
-    () => rawTextEditor
-      ? 'raw_text'
-      : resolveEditorSurfaceMode({
-        markdown,
-        ...(sourceFormat !== undefined ? { sourceFormat } : {}),
-      }),
-    [markdown, rawTextEditor, sourceFormat],
-  );
-  const [baseline, setBaseline] = useState<DirtyStateBaseline | null>(null);
-  const [currentMarkdown, setCurrentMarkdown] = useState('');
-  const [lineWrapEnabled, setLineWrapEnabled] = useState(true);
+  const rawTextEditor = shouldUseRawTextEditor(markdown, sourceFormat)
+  const surfaceMode = useMemo(() => {
+    if (rawTextEditor) return 'raw_text'
+    return resolveEditorSurfaceMode({
+      markdown,
+      ...(sourceFormat !== undefined ? { sourceFormat } : {}),
+    })
+  }, [markdown, rawTextEditor, sourceFormat])
+  const [baseline, setBaseline] = useState<DirtyStateBaseline | null>(null)
+  const [currentMarkdown, setCurrentMarkdown] = useState('')
+  const [lineWrapEnabled, setLineWrapEnabled] = useState(true)
 
   const editor = useEditor(
     {
@@ -116,131 +159,129 @@ export function DocumentEditorShell({
       },
       onUpdate: ({ editor: nextEditor }: { editor: Editor }) => {
         if (rawTextEditor) {
-          return;
+          return
         }
-        setCurrentMarkdown(nextEditor.getMarkdown());
+        setCurrentMarkdown(nextEditor.getMarkdown())
       },
     },
     [loading, markdown, rawTextEditor, readOnly, surfaceMode],
-  );
+  )
 
   useEffect(() => {
-    const editorRoot = editor?.view?.dom;
+    const editorRoot = editor?.view?.dom
     if (!editorRoot) {
-      return;
+      return
     }
 
-    editorRoot.classList.toggle('document-editor-prosemirror--wrap', lineWrapEnabled);
-    editorRoot.classList.toggle('document-editor-prosemirror--nowrap', !lineWrapEnabled);
-  }, [editor, lineWrapEnabled]);
+    editorRoot.classList.toggle('document-editor-prosemirror--wrap', lineWrapEnabled)
+    editorRoot.classList.toggle('document-editor-prosemirror--nowrap', !lineWrapEnabled)
+  }, [editor, lineWrapEnabled])
 
   useEffect(() => {
     if (!editor) {
-      return;
+      return
     }
-    editor.setEditable(!readOnly && !rawTextEditor && !loading && !saving);
-  }, [editor, loading, rawTextEditor, readOnly, saving]);
+    editor.setEditable(!readOnly && !rawTextEditor && !loading && !saving)
+  }, [editor, loading, rawTextEditor, readOnly, saving])
 
   useEffect(() => {
-    let cancelled = false;
+    let cancelled = false
     queueMicrotask(() => {
       if (cancelled) {
-        return;
+        return
       }
 
       if (!open || loading) {
-        setBaseline(null);
-        setCurrentMarkdown('');
-        return;
+        setBaseline(null)
+        setCurrentMarkdown('')
+        return
       }
       if (!rawTextEditor) {
-        return;
+        return
       }
 
-      setBaseline(createEditorBaseline(markdown));
-      setCurrentMarkdown(markdown);
-    });
+      setBaseline(createEditorBaseline(markdown))
+      setCurrentMarkdown(markdown)
+    })
     return () => {
-      cancelled = true;
-    };
-  }, [loading, markdown, open, rawTextEditor]);
+      cancelled = true
+    }
+  }, [loading, markdown, open, rawTextEditor])
 
   useEffect(() => {
     if (!open || !editor || loading || rawTextEditor) {
-      return;
+      return
     }
 
     const syncTimer = window.setTimeout(() => {
-      const editorMarkdown = editor.getMarkdown();
-      setBaseline(createEditorBaseline(editorMarkdown));
-      setCurrentMarkdown(editorMarkdown);
-    }, 0);
+      const editorMarkdown = editor.getMarkdown()
+      setBaseline(createEditorBaseline(editorMarkdown))
+      setCurrentMarkdown(editorMarkdown)
+    }, 0)
 
-    return () => window.clearTimeout(syncTimer);
-  }, [editor, loading, markdown, open, rawTextEditor]);
+    return () => window.clearTimeout(syncTimer)
+  }, [editor, loading, markdown, open, rawTextEditor])
 
   useEffect(() => {
     if (!open || !editor || loading || rawTextEditor) {
-      return;
+      return
     }
 
     const focusTimer = window.setTimeout(() => {
-      editor.commands.focus('start');
-    }, 0);
-    return () => window.clearTimeout(focusTimer);
-  }, [editor, loading, open, rawTextEditor]);
+      editor.commands.focus('start')
+    }, 0)
+    return () => window.clearTimeout(focusTimer)
+  }, [editor, loading, open, rawTextEditor])
 
-  const isDirty = !readOnly && !loading && !saving && isEditorContentDirty(baseline, currentMarkdown);
-  const saveDisabled = loading ||
+  const isDirty =
+    !readOnly && !loading && !saving && isEditorContentDirty(baseline, currentMarkdown)
+  const saveDisabled =
+    loading ||
     saving ||
     !isDirty ||
     (rawTextEditor ? false : !editor) ||
-    Boolean(error && !currentMarkdown);
-  const statusState = readOnly ? 'readOnly' : saving ? 'saving' : error ? 'error' : isDirty ? 'dirty' : 'clean';
+    Boolean(error && !currentMarkdown)
+  const statusState = editorStatusState(readOnly, saving, error, isDirty)
   const statusLabel = (() => {
     switch (statusState) {
       case 'readOnly':
-        return t('documents.editor.readOnly');
+        return t('documents.editor.readOnly')
       case 'saving':
-        return t('documents.editor.saving');
+        return t('documents.editor.saving')
       case 'error':
-        return t('documents.editor.saveFailedShort');
+        return t('documents.editor.saveFailedShort')
       case 'dirty':
-        return t('documents.editor.unsaved');
+        return t('documents.editor.unsaved')
       case 'clean':
       default:
-        return t('documents.editor.synced');
+        return t('documents.editor.synced')
     }
-  })();
-  const statusTone = statusState === 'dirty'
-    ? 'accent'
-    : statusState === 'error'
-      ? 'destructive'
-      : 'neutral';
+  })()
+  const statusTone = editorStatusTone(statusState)
 
   const handleRequestClose = () => {
     if (saving) {
-      return;
+      return
     }
     if (isDirty && !window.confirm(t('documents.editor.unsavedConfirm'))) {
-      return;
+      return
     }
-    onOpenChange(false);
-  };
+    onOpenChange(false)
+  }
 
   const handleSave = () => {
     if (readOnly) {
-      return;
+      return
     }
     if (rawTextEditor) {
-      void onSave(currentMarkdown);
-      return;
+      void onSave(currentMarkdown)
+      return
     }
     if (!editor) {
-      return;
+      return
     }
-    void onSave(editor.getMarkdown());
-  };
+    void onSave(editor.getMarkdown())
+  }
 
   const actions = (
     <div className="flex w-full justify-end">
@@ -266,19 +307,21 @@ export function DocumentEditorShell({
         </div>
       )}
     </div>
-  );
+  )
 
   return (
     <DocumentEditorOverlay
       actions={actions}
-      description={`${documentName}${sourceFormat ? ` · ${sourceFormat.toUpperCase()}` : ''}`}
-      helperText={readOnly ? t('documents.editor.viewerDescription') : t('documents.editor.description')}
+      description={documentDescription(documentName, sourceFormat)}
+      helperText={
+        readOnly ? t('documents.editor.viewerDescription') : t('documents.editor.description')
+      }
       onOpenChange={(nextOpen) => {
         if (nextOpen) {
-          onOpenChange(true);
-          return;
+          onOpenChange(true)
+          return
         }
-        handleRequestClose();
+        handleRequestClose()
       }}
       open={open}
       title={readOnly ? t('documents.editor.viewerTitle') : t('documents.editor.title')}
@@ -291,11 +334,7 @@ export function DocumentEditorShell({
                 {statusLabel}
               </span>
               <span className="truncate text-xs font-medium text-muted-foreground">
-                {surfaceMode === 'prose'
-                  ? t('documents.editor.proseMode')
-                  : surfaceMode === 'table'
-                    ? t('documents.editor.tableMode')
-                    : t('documents.editor.codeMode')}
+                {surfaceModeLabel(surfaceMode, t)}
               </span>
             </div>
           </div>
@@ -341,13 +380,13 @@ export function DocumentEditorShell({
         />
       </div>
     </DocumentEditorOverlay>
-  );
+  )
 }
 
 function shouldUseRawTextEditor(markdown: string, sourceFormat?: string): boolean {
   if (isPlainTextSourceFormat(sourceFormat)) {
-    return true;
+    return true
   }
 
-  return isCodeLikeSourceFormat(sourceFormat) && markdown.length >= RAW_TEXT_EDITOR_MIN_LENGTH;
+  return isCodeLikeSourceFormat(sourceFormat) && markdown.length >= RAW_TEXT_EDITOR_MIN_LENGTH
 }

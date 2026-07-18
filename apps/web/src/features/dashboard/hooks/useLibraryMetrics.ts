@@ -1,8 +1,8 @@
-import { useCallback, useMemo } from 'react';
-import { useSuspenseQuery } from '@tanstack/react-query';
+import { useCallback, useMemo } from 'react'
+import { useSuspenseQuery } from '@tanstack/react-query'
 
-import { queries } from '@/shared/api';
-import type { DashboardData } from '@/features/dashboard/model/types';
+import { queries } from '@/shared/api'
+import type { DashboardData } from '@/features/dashboard/model/types'
 
 /**
  * Shared hook that polls `/ops/libraries/{id}/dashboard` while the tab
@@ -34,16 +34,16 @@ import type { DashboardData } from '@/features/dashboard/model/types';
  *   rendered on transient failures" behaviour falls out of TanStack
  *   keeping `data` populated while `error` is set.
  */
-const POLL_INTERVAL_MS = 2500;
-const DEBOUNCE_MS = 1500;
+const POLL_INTERVAL_MS = 2500
+const DEBOUNCE_MS = 1500
 
 type LibraryMetricsState = {
-  data: DashboardData;
-  error: string | null;
-  isRefreshing: boolean;
-  lastUpdatedAt: Date | null;
-  refresh: () => Promise<void>;
-};
+  data: DashboardData
+  error: string | null
+  isRefreshing: boolean
+  lastUpdatedAt: Date | null
+  refresh: () => Promise<void>
+}
 
 export function useLibraryMetrics(libraryId: string): LibraryMetricsState {
   const query = useSuspenseQuery({
@@ -53,26 +53,24 @@ export function useLibraryMetrics(libraryId: string): LibraryMetricsState {
     staleTime: DEBOUNCE_MS,
     refetchInterval: POLL_INTERVAL_MS,
     refetchIntervalInBackground: false,
-  });
+  })
 
-  const data = query.data;
+  const data = query.data
 
   const errorMessage = useMemo<string | null>(() => {
-    if (!query.error) return null;
-    return query.error instanceof Error
-      ? query.error.message
-      : String(query.error);
-  }, [query.error]);
+    if (!query.error) return null
+    return query.error instanceof Error ? query.error.message : String(query.error)
+  }, [query.error])
 
   const lastUpdatedAt = useMemo<Date | null>(() => {
-    if (!query.dataUpdatedAt) return null;
-    return new Date(query.dataUpdatedAt);
-  }, [query.dataUpdatedAt]);
+    if (!query.dataUpdatedAt) return null
+    return new Date(query.dataUpdatedAt)
+  }, [query.dataUpdatedAt])
 
-  const { refetch } = query;
+  const { refetch } = query
   const refresh = useCallback(async () => {
-    await refetch();
-  }, [refetch]);
+    await refetch()
+  }, [refetch])
 
   return {
     data,
@@ -80,5 +78,5 @@ export function useLibraryMetrics(libraryId: string): LibraryMetricsState {
     isRefreshing: query.isFetching,
     lastUpdatedAt,
     refresh,
-  };
+  }
 }

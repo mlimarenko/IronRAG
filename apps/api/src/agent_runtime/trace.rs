@@ -28,15 +28,13 @@ pub struct RuntimeExecutionTraceView {
 
 impl RuntimeExecutionTraceView {
     #[must_use]
-    #[allow(clippy::missing_const_for_fn)]
-    pub fn new(execution: RuntimeExecution) -> Self {
+    pub const fn new(execution: RuntimeExecution) -> Self {
         Self { execution, stages: Vec::new(), actions: Vec::new(), policy_decisions: Vec::new() }
     }
 }
 
 #[must_use]
-#[allow(clippy::missing_const_for_fn)]
-pub fn build_trace_view(
+pub const fn build_trace_view(
     execution: RuntimeExecution,
     stages: Vec<RuntimeStageRecord>,
     actions: Vec<RuntimeActionRecord>,

@@ -1,6 +1,6 @@
 //! `audit.*` read-only sweepers.
 //!
-//! The PostgreSQL knowledge plane is the only runtime store, so there is no
+//! The `PostgreSQL` knowledge plane is the only runtime store, so there is no
 //! separate knowledge-plane footprint to audit for orphan libraries.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -12,7 +12,7 @@ use uuid::Uuid;
 use crate::{app::state::AppState, infra::repositories::catalog_repository};
 
 /// Full audit report. Kept as the operator-facing contract for
-/// `audit orphan-libraries`; with PostgreSQL as the single knowledge plane,
+/// `audit orphan-libraries`; with `PostgreSQL` as the single knowledge plane,
 /// the audit is not applicable and always returns an empty orphan set.
 #[derive(Debug, Default, Clone, Serialize)]
 pub struct OrphanLibrariesAudit {

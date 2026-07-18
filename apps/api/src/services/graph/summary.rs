@@ -15,70 +15,188 @@ use crate::{
 #[derive(Debug, Clone, Default)]
 pub struct GraphSummaryService;
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct GraphSummaryRefreshRequest {
-    pub source_truth_version: Option<i64>,
+const INLINE_SUMMARY_REFRESH_TARGET_LIMIT: usize = 500;
+
+/// Summary work derived from a graph projection but not yet authorized by a
+/// lifecycle publication. The source-truth generation is deliberately absent:
+/// callers may bind it only after the lifecycle transaction commits.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingGraphSummaryRefresh {
     pub node_ids: Vec<Uuid>,
     pub edge_ids: Vec<Uuid>,
     pub broad_refresh: bool,
 }
 
-impl GraphSummaryRefreshRequest {
+impl PendingGraphSummaryRefresh {
     #[must_use]
-    pub fn broad() -> Self {
-        Self {
-            source_truth_version: None,
-            node_ids: Vec::new(),
-            edge_ids: Vec::new(),
-            broad_refresh: true,
-        }
+    pub const fn broad() -> Self {
+        Self { node_ids: Vec::new(), edge_ids: Vec::new(), broad_refresh: true }
     }
 
     #[must_use]
-    pub fn targeted(node_ids: Vec<Uuid>, edge_ids: Vec<Uuid>) -> Self {
-        Self { source_truth_version: None, node_ids, edge_ids, broad_refresh: false }
+    pub fn targeted(mut node_ids: Vec<Uuid>, mut edge_ids: Vec<Uuid>) -> Self {
+        node_ids.sort_unstable();
+        node_ids.dedup();
+        edge_ids.sort_unstable();
+        edge_ids.dedup();
+        Self { node_ids, edge_ids, broad_refresh: false }
     }
 
     #[must_use]
-    pub fn with_source_truth_version(mut self, source_truth_version: i64) -> Self {
-        self.source_truth_version = Some(source_truth_version);
-        self
-    }
-
-    #[must_use]
-    pub fn for_mutation_scope(
-        scope_status: &str,
-        node_ids: Vec<Uuid>,
-        edge_ids: Vec<Uuid>,
-    ) -> Self {
-        if scope_status == "targeted" && (!node_ids.is_empty() || !edge_ids.is_empty()) {
-            Self::targeted(node_ids, edge_ids)
-        } else {
-            Self::broad()
-        }
-    }
-
-    #[must_use]
-    pub fn is_targeted(&self) -> bool {
+    pub const fn is_targeted(&self) -> bool {
         !self.broad_refresh && (!self.node_ids.is_empty() || !self.edge_ids.is_empty())
     }
 
+    /// Coalesces publication work. A broad request dominates; otherwise the
+    /// exact target sets are unioned deterministically.
     #[must_use]
-    pub fn is_active(&self) -> bool {
-        self.source_truth_version.is_some() && (self.broad_refresh || self.is_targeted())
+    pub fn merge(self, other: Self) -> Self {
+        if self.broad_refresh || other.broad_refresh {
+            return Self::broad();
+        }
+        let node_ids = self.node_ids.into_iter().chain(other.node_ids).collect();
+        let edge_ids = self.edge_ids.into_iter().chain(other.edge_ids).collect();
+        Self::targeted(node_ids, edge_ids)
+    }
+
+    #[must_use]
+    fn bind_source_truth_version(&self, source_truth_version: i64) -> GraphSummaryRefreshRequest {
+        GraphSummaryRefreshRequest {
+            source_truth_version,
+            node_ids: self.node_ids.clone(),
+            edge_ids: self.edge_ids.clone(),
+            broad_refresh: self.broad_refresh,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PublishedGraphSummaryRefreshOutcome {
+    Applied { invalidated: u64, refreshed: u64 },
+    GenerationMismatch { observed_source_truth_version: i64 },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct GraphSummaryRefreshRequest {
+    source_truth_version: i64,
+    node_ids: Vec<Uuid>,
+    edge_ids: Vec<Uuid>,
+    broad_refresh: bool,
+}
+
+impl GraphSummaryRefreshRequest {
+    #[must_use]
+    const fn is_targeted(&self) -> bool {
+        !self.broad_refresh && (!self.node_ids.is_empty() || !self.edge_ids.is_empty())
     }
 }
 
 impl GraphSummaryService {
-    pub async fn invalidate_summaries(
+    /// Applies deferred summary work only while the lifecycle publication's
+    /// source generation is still current. `FOR SHARE` holds the parent row
+    /// stable for the whole refresh, so a concurrent publisher either commits
+    /// first (and causes a safe mismatch) or waits until this refresh releases
+    /// the guard. Lifecycle state is never changed by this post-commit helper.
+    pub async fn apply_published_refresh(
+        &self,
+        state: &AppState,
+        library_id: Uuid,
+        expected_source_truth_version: i64,
+        pending: &PendingGraphSummaryRefresh,
+    ) -> Result<PublishedGraphSummaryRefreshOutcome, GraphServiceError> {
+        let mut generation_guard = state
+            .persistence
+            .postgres
+            .begin()
+            .await
+            .context("failed to begin graph summary source-generation guard")?;
+        let observed_source_truth_version = sqlx::query_scalar::<_, i64>(
+            "select coalesce(source_truth_version, 1)
+             from catalog_library
+             where id = $1
+             for share",
+        )
+        .bind(library_id)
+        .fetch_optional(&mut *generation_guard)
+        .await
+        .context("failed to lock graph summary source generation")?
+        .ok_or(GraphServiceError::LibraryNotFound { library_id })?
+        .max(1);
+
+        if observed_source_truth_version != expected_source_truth_version {
+            generation_guard
+                .rollback()
+                .await
+                .context("failed to release stale graph summary source-generation guard")?;
+            tracing::warn!(
+                %library_id,
+                expected_source_truth_version,
+                observed_source_truth_version,
+                "skipping canonical summary refresh because a newer lifecycle publication committed",
+            );
+            return Ok(PublishedGraphSummaryRefreshOutcome::GenerationMismatch {
+                observed_source_truth_version,
+            });
+        }
+
+        let refresh = pending.bind_source_truth_version(expected_source_truth_version);
+        let apply_result = async {
+            let invalidated = self.invalidate_summaries(state, library_id, &refresh).await?;
+            let affected_targets = affected_summary_target_count(state, library_id, &refresh)
+                .await
+                .context("failed to count post-publication canonical summary targets")?;
+            let refreshed = if self
+                .should_batch_refresh(affected_targets, INLINE_SUMMARY_REFRESH_TARGET_LIMIT)
+            {
+                self.refresh_summaries(state, library_id, &refresh).await?
+            } else {
+                if affected_targets > 0 {
+                    tracing::info!(
+                        %library_id,
+                        affected_targets,
+                        inline_limit = INLINE_SUMMARY_REFRESH_TARGET_LIMIT,
+                        targeted = refresh.is_targeted(),
+                        broad = refresh.broad_refresh,
+                        "skipping inline canonical summary generation for large graph publication",
+                    );
+                }
+                0
+            };
+            Ok::<_, GraphServiceError>(PublishedGraphSummaryRefreshOutcome::Applied {
+                invalidated,
+                refreshed,
+            })
+        }
+        .await;
+
+        match apply_result {
+            Ok(outcome) => {
+                generation_guard
+                    .commit()
+                    .await
+                    .context("failed to release graph summary source-generation guard")?;
+                Ok(outcome)
+            }
+            Err(error) => {
+                if let Err(rollback_error) = generation_guard.rollback().await {
+                    tracing::warn!(
+                        %library_id,
+                        ?rollback_error,
+                        "failed to release graph summary source-generation guard after refresh error",
+                    );
+                }
+                Err(error)
+            }
+        }
+    }
+
+    async fn invalidate_summaries(
         &self,
         state: &AppState,
         library_id: Uuid,
         refresh: &GraphSummaryRefreshRequest,
     ) -> Result<u64, GraphServiceError> {
-        let Some(source_truth_version) = refresh.source_truth_version else {
-            return Ok(0);
-        };
+        let source_truth_version = refresh.source_truth_version;
 
         if refresh.is_targeted() {
             Ok(repositories::supersede_runtime_graph_canonical_summaries_for_targets(
@@ -106,19 +224,17 @@ impl GraphSummaryService {
     }
 
     #[must_use]
-    pub fn should_batch_refresh(&self, affected_targets: usize, batch_limit: usize) -> bool {
+    const fn should_batch_refresh(&self, affected_targets: usize, batch_limit: usize) -> bool {
         affected_targets > 0 && affected_targets <= batch_limit
     }
 
-    pub async fn refresh_summaries(
+    async fn refresh_summaries(
         &self,
         state: &AppState,
         library_id: Uuid,
         refresh: &GraphSummaryRefreshRequest,
     ) -> Result<u64, GraphServiceError> {
-        let Some(source_truth_version) = refresh.source_truth_version else {
-            return Ok(0);
-        };
+        let source_truth_version = refresh.source_truth_version;
 
         let Some(library) =
             catalog_repository::get_library_by_id(&state.persistence.postgres, library_id)
@@ -236,6 +352,29 @@ impl GraphSummaryService {
 
         Ok(refreshed)
     }
+}
+
+async fn affected_summary_target_count(
+    state: &AppState,
+    library_id: Uuid,
+    refresh: &GraphSummaryRefreshRequest,
+) -> anyhow::Result<usize> {
+    if refresh.is_targeted() {
+        return Ok(refresh.node_ids.len().saturating_add(refresh.edge_ids.len()));
+    }
+    if !refresh.broad_refresh {
+        return Ok(0);
+    }
+    let snapshot =
+        repositories::get_runtime_graph_snapshot(&state.persistence.postgres, library_id)
+            .await
+            .context("failed to load runtime graph snapshot for summary refresh sizing")?;
+    let Some(snapshot) = snapshot else {
+        return Ok(0);
+    };
+    let nodes = usize::try_from(snapshot.node_count.max(0)).unwrap_or_default();
+    let edges = usize::try_from(snapshot.edge_count.max(0)).unwrap_or_default();
+    Ok(nodes.saturating_add(edges))
 }
 
 async fn load_target_nodes(
@@ -403,10 +542,10 @@ fn compose_summary_text(
             .filter(|value| !value.is_empty())
             .unwrap_or_else(|| ensure_sentence(fallback)),
     );
-    if let Some(support_sentence) = support_sentence.map(ensure_sentence) {
-        if !parts.iter().any(|part| part == &support_sentence) {
-            parts.push(support_sentence);
-        }
+    if let Some(support_sentence) = support_sentence.map(ensure_sentence)
+        && !parts.iter().any(|part| part == &support_sentence)
+    {
+        parts.push(support_sentence);
     }
     parts.join(" ")
 }
@@ -478,26 +617,26 @@ mod tests {
     use chrono::Utc;
 
     #[test]
-    fn targeted_refresh_requires_targets() {
-        assert!(!GraphSummaryRefreshRequest::targeted(Vec::new(), Vec::new()).is_targeted());
-        assert!(GraphSummaryRefreshRequest::targeted(vec![Uuid::nil()], Vec::new()).is_targeted());
+    fn pending_refresh_unions_targets_without_binding_a_generation() {
+        let first_node = Uuid::from_u128(1);
+        let second_node = Uuid::from_u128(2);
+        let edge = Uuid::from_u128(3);
+        let pending = PendingGraphSummaryRefresh::targeted(vec![first_node], vec![edge])
+            .merge(PendingGraphSummaryRefresh::targeted(vec![first_node, second_node], Vec::new()));
+
+        assert!(pending.is_targeted());
+        assert_eq!(pending.node_ids, vec![first_node, second_node]);
+        assert_eq!(pending.edge_ids, vec![edge]);
+        assert_eq!(pending.bind_source_truth_version(9).source_truth_version, 9);
     }
 
     #[test]
-    fn refresh_is_inactive_without_source_truth_version() {
-        assert!(!GraphSummaryRefreshRequest::broad().is_active());
-        assert!(GraphSummaryRefreshRequest::broad().with_source_truth_version(7).is_active());
-    }
+    fn broad_pending_refresh_dominates_targeted_work() {
+        let pending = PendingGraphSummaryRefresh::targeted(vec![Uuid::now_v7()], Vec::new())
+            .merge(PendingGraphSummaryRefresh::broad());
 
-    #[test]
-    fn broad_refresh_is_used_for_non_targeted_mutation_scope() {
-        assert!(
-            GraphSummaryRefreshRequest::for_mutation_scope("fallback_broad", vec![], vec![])
-                .broad_refresh
-        );
-        assert!(
-            GraphSummaryRefreshRequest::for_mutation_scope("pending", vec![], vec![]).broad_refresh
-        );
+        assert!(pending.broad_refresh);
+        assert!(!pending.is_targeted());
     }
 
     #[test]

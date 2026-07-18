@@ -3,13 +3,56 @@ use crate::{
     domains::{knowledge::TypedTechnicalFact, runtime_graph::RuntimeNodeType},
     infra::knowledge_rows::{
         GraphViewData, KnowledgeChunkRow, KnowledgeEntityCandidateRow,
-        KnowledgeRelationCandidateRow,
+        KnowledgeRelationCandidateRow, KnowledgeRevisionRow,
     },
     services::graph::extract::{GraphEntityCandidate, GraphRelationCandidate},
     shared::extraction::technical_facts::{
         TechnicalFactKind, TechnicalFactQualifier, TechnicalFactValue,
     },
 };
+
+fn materialization_fixture()
+-> (KnowledgeRevisionRow, repositories::extract_repository::ExtractChunkResultRow) {
+    let now = Utc::now();
+    let revision = KnowledgeRevisionRow {
+        revision_id: Uuid::now_v7(),
+        workspace_id: Uuid::now_v7(),
+        library_id: Uuid::now_v7(),
+        document_id: Uuid::now_v7(),
+        revision_number: 1,
+        revision_state: "active".to_string(),
+        revision_kind: "source".to_string(),
+        storage_ref: None,
+        source_uri: None,
+        document_hint: None,
+        mime_type: "text/plain".to_string(),
+        checksum: "checksum".to_string(),
+        title: None,
+        byte_size: 1,
+        normalized_text: Some("text".to_string()),
+        text_checksum: Some("checksum".to_string()),
+        image_checksum: None,
+        text_state: "text_readable".to_string(),
+        vector_state: "ready".to_string(),
+        graph_state: "ready".to_string(),
+        text_readable_at: Some(now),
+        vector_ready_at: Some(now),
+        graph_ready_at: Some(now),
+        superseded_by_revision_id: None,
+        created_at: now,
+    };
+    let chunk_result = repositories::extract_repository::ExtractChunkResultRow {
+        id: Uuid::now_v7(),
+        chunk_id: Uuid::now_v7(),
+        attempt_id: Uuid::now_v7(),
+        extract_state: "ready".to_string(),
+        provider_call_id: None,
+        started_at: now,
+        finished_at: Some(now),
+        failure_code: None,
+    };
+    (revision, chunk_result)
+}
 
 #[test]
 fn merge_projection_data_prefers_incoming_canonical_rows() {
@@ -308,47 +351,7 @@ fn apply_entity_key_aliases_to_relation_candidate_rebuilds_assertion() {
 
 #[test]
 fn build_materialized_extract_candidates_recanonicalizes_unicode_node_rows() {
-    let workspace_id = Uuid::now_v7();
-    let library_id = Uuid::now_v7();
-    let revision_id = Uuid::now_v7();
-    let chunk_id = Uuid::now_v7();
-    let revision = crate::infra::knowledge_rows::KnowledgeRevisionRow {
-        revision_id,
-        workspace_id,
-        library_id,
-        document_id: Uuid::now_v7(),
-        revision_number: 1,
-        revision_state: "active".to_string(),
-        revision_kind: "source".to_string(),
-        storage_ref: None,
-        source_uri: None,
-        document_hint: None,
-        mime_type: "text/plain".to_string(),
-        checksum: "checksum".to_string(),
-        title: None,
-        byte_size: 1,
-        normalized_text: Some("text".to_string()),
-        text_checksum: Some("checksum".to_string()),
-        image_checksum: None,
-        text_state: "readable".to_string(),
-        vector_state: "ready".to_string(),
-        graph_state: "ready".to_string(),
-        text_readable_at: Some(Utc::now()),
-        vector_ready_at: Some(Utc::now()),
-        graph_ready_at: Some(Utc::now()),
-        superseded_by_revision_id: None,
-        created_at: Utc::now(),
-    };
-    let chunk_result = repositories::extract_repository::ExtractChunkResultRow {
-        id: Uuid::now_v7(),
-        chunk_id,
-        attempt_id: Uuid::now_v7(),
-        extract_state: "ready".to_string(),
-        provider_call_id: None,
-        started_at: Utc::now(),
-        finished_at: Some(Utc::now()),
-        failure_code: None,
-    };
+    let (revision, chunk_result) = materialization_fixture();
     let node_rows = vec![repositories::extract_repository::ExtractNodeCandidateRow {
         id: Uuid::now_v7(),
         chunk_result_id: chunk_result.id,
@@ -368,47 +371,7 @@ fn build_materialized_extract_candidates_recanonicalizes_unicode_node_rows() {
 
 #[test]
 fn build_materialized_extract_candidates_derives_relation_labels_from_nodes() {
-    let workspace_id = Uuid::now_v7();
-    let library_id = Uuid::now_v7();
-    let revision_id = Uuid::now_v7();
-    let chunk_id = Uuid::now_v7();
-    let revision = crate::infra::knowledge_rows::KnowledgeRevisionRow {
-        revision_id,
-        workspace_id,
-        library_id,
-        document_id: Uuid::now_v7(),
-        revision_number: 1,
-        revision_state: "active".to_string(),
-        revision_kind: "source".to_string(),
-        storage_ref: None,
-        source_uri: None,
-        document_hint: None,
-        mime_type: "text/plain".to_string(),
-        checksum: "checksum".to_string(),
-        title: None,
-        byte_size: 1,
-        normalized_text: Some("text".to_string()),
-        text_checksum: Some("checksum".to_string()),
-        image_checksum: None,
-        text_state: "readable".to_string(),
-        vector_state: "ready".to_string(),
-        graph_state: "ready".to_string(),
-        text_readable_at: Some(Utc::now()),
-        vector_ready_at: Some(Utc::now()),
-        graph_ready_at: Some(Utc::now()),
-        superseded_by_revision_id: None,
-        created_at: Utc::now(),
-    };
-    let chunk_result = repositories::extract_repository::ExtractChunkResultRow {
-        id: Uuid::now_v7(),
-        chunk_id,
-        attempt_id: Uuid::now_v7(),
-        extract_state: "ready".to_string(),
-        provider_call_id: None,
-        started_at: Utc::now(),
-        finished_at: Some(Utc::now()),
-        failure_code: None,
-    };
+    let (revision, chunk_result) = materialization_fixture();
     let node_rows = vec![
         repositories::extract_repository::ExtractNodeCandidateRow {
             id: Uuid::now_v7(),

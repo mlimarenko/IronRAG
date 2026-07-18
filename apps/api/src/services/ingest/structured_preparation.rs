@@ -1,3 +1,5 @@
+use std::collections::{BTreeMap, BTreeSet};
+
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -21,6 +23,12 @@ use crate::shared::extraction::{
     },
     table_summary::{build_table_column_summaries, render_table_column_summary},
 };
+
+const MIN_DENSE_LINK_COUNT: usize = 3;
+const MIN_STRUCTURAL_SEGMENT_COUNT: usize = 4;
+const MAX_STRUCTURAL_SEGMENT_CHARS: usize = 40;
+const MIN_REPEATED_BLOCK_PAGE_COUNT: usize = 5;
+const MAX_REPEATED_BLOCK_CHARS: usize = 160;
 
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
@@ -99,7 +107,7 @@ impl StructuredPreparationService {
 
     /// Create a service whose chunking profile is driven by a `ChunkingTemplate`.
     #[must_use]
-    pub fn with_template(template: ChunkingTemplate) -> Self {
+    pub const fn with_template(template: ChunkingTemplate) -> Self {
         let (max_chars, overlap_chars) = template.chunking_params();
         Self { chunking_profile: StructuredChunkingProfile { max_chars, overlap_chars } }
     }
@@ -181,244 +189,332 @@ fn build_structured_blocks(
     while index < lines.len() {
         ensure_not_cancelled(cancellation_token)?;
         let line = &lines[index];
-        let trimmed = line.text.trim();
-        if trimmed.is_empty() {
+        if line.text.trim().is_empty() {
             index += 1;
             continue;
         }
-
         if is_code_fence(line) {
-            let language = trimmed.trim_start_matches('`').trim();
-            let start = index;
-            index += 1;
-            let mut code_lines = Vec::<ExtractionLineHint>::new();
-            while index < lines.len() && !is_code_fence(&lines[index]) {
-                ensure_not_cancelled(cancellation_token)?;
-                if !lines[index].text.trim().is_empty() {
-                    code_lines.push(lines[index].clone());
-                }
-                index += 1;
-            }
-            if index < lines.len() && is_code_fence(&lines[index]) {
-                index += 1;
-            }
-            if !code_lines.is_empty() {
-                // If the fenced block has no language tag (` ``` ` with
-                // no annotation), auto-detect the language via tree-sitter
-                // probing so the extraction pipeline can still produce
-                // AST-based identifiers.
-                let resolved_language = if language.is_empty() {
-                    let code_text: String =
-                        code_lines.iter().map(|l| l.text.as_str()).collect::<Vec<_>>().join("\n");
-                    crate::shared::ast_extraction::detect_language(&code_text).map(str::to_string)
-                } else {
-                    Some(language.to_string())
-                };
-                blocks.push(build_block(
-                    ordinal,
-                    StructuredBlockKind::CodeBlock,
-                    &code_lines,
-                    &heading_stack,
-                    None,
-                    resolved_language,
-                    None,
-                    None,
-                ));
-                ordinal += 1;
-            } else if start == index.saturating_sub(1) {
-                continue;
-            }
+            append_code_block(
+                &lines,
+                &mut index,
+                &mut ordinal,
+                &heading_stack,
+                &mut blocks,
+                cancellation_token,
+            )?;
             continue;
         }
-
         if is_heading_line(line) {
-            let heading_text = normalize_heading_text(trimmed);
-            update_heading_stack(&mut heading_stack, heading_depth(trimmed), &heading_text);
-            blocks.push(build_block(
-                ordinal,
-                StructuredBlockKind::Heading,
-                std::slice::from_ref(line),
-                &heading_stack,
-                None,
-                None,
-                None,
-                None,
-            ));
-            ordinal += 1;
-            index += 1;
+            append_heading_block(line, &mut index, &mut ordinal, &mut heading_stack, &mut blocks);
             continue;
         }
-
         if is_table_row_line(line) {
-            let start = index;
-            while index < lines.len() && is_table_row_line(&lines[index]) {
-                ensure_not_cancelled(cancellation_token)?;
-                index += 1;
-            }
-            let row_lines = &lines[start..index];
-            let table_block = build_block(
-                ordinal,
-                StructuredBlockKind::Table,
-                row_lines,
+            append_table_blocks(
+                &lines,
+                &mut index,
+                &mut ordinal,
                 &heading_stack,
-                None,
-                None,
-                None,
-                None,
-            );
-            let table_block_id = table_block.block_id;
-            blocks.push(table_block);
-            ordinal += 1;
-            let header_cells = row_lines
-                .first()
-                .map(|row| parse_markdown_table_row(&row.text))
-                .unwrap_or_default();
-            let (sheet_name, table_name) = table_context_from_heading_stack(&heading_stack);
-            let mut data_row_index = 0usize;
-            let mut data_rows = Vec::<Vec<String>>::new();
-            for row_line in row_lines.iter().skip(1) {
-                ensure_not_cancelled(cancellation_token)?;
-                let row_cells = parse_markdown_table_row(&row_line.text);
-                if row_cells.is_empty() || is_markdown_separator_row(&row_cells) {
-                    continue;
-                }
-                data_rows.push(row_cells.clone());
-                blocks.push(build_block(
-                    ordinal,
-                    StructuredBlockKind::TableRow,
-                    std::slice::from_ref(row_line),
-                    &heading_stack,
-                    Some(table_block_id),
-                    None,
-                    Some(StructuredTableCoordinates {
-                        row_index: i32::try_from(data_row_index).unwrap_or(i32::MAX),
-                        column_index: 0,
-                        row_span: 1,
-                        column_span: 1,
-                    }),
-                    Some(build_semantic_table_row_text(
-                        sheet_name,
-                        table_name,
-                        data_row_index,
-                        &header_cells,
-                        &row_cells,
-                    )),
-                ));
-                ordinal += 1;
-                data_row_index += 1;
-            }
-            for summary in
-                build_table_column_summaries(sheet_name, table_name, &header_cells, &data_rows)
-            {
-                ensure_not_cancelled(cancellation_token)?;
-                blocks.push(build_block(
-                    ordinal,
-                    StructuredBlockKind::MetadataBlock,
-                    &[],
-                    &heading_stack,
-                    Some(table_block_id),
-                    None,
-                    None,
-                    Some(render_table_column_summary(&summary)),
-                ));
-                ordinal += 1;
-            }
+                &mut blocks,
+                cancellation_token,
+            )?;
             continue;
         }
-
-        let block_kind = classify_scalar_block_kind(line);
-        blocks.push(build_block(
-            ordinal,
-            block_kind,
-            std::slice::from_ref(line),
-            &heading_stack,
-            None,
-            None,
-            None,
-            None,
-        ));
-        ordinal += 1;
-        index += 1;
+        append_scalar_block(line, &mut index, &mut ordinal, &heading_stack, &mut blocks);
     }
 
-    for block in &mut blocks {
-        ensure_not_cancelled(cancellation_token)?;
-        if detect_boilerplate(block.block_kind, &block.text) {
-            block.is_boilerplate = true;
-        }
-    }
-
+    mark_structural_boilerplate(&mut blocks, cancellation_token)?;
     Ok(blocks)
 }
 
+fn append_code_block(
+    lines: &[ExtractionLineHint],
+    index: &mut usize,
+    ordinal: &mut i32,
+    heading_stack: &[String],
+    blocks: &mut Vec<StructuredBlockData>,
+    cancellation_token: &CancellationToken,
+) -> Result<(), StructuredPreparationError> {
+    let language = lines[*index].text.trim().trim_start_matches('`').trim().to_string();
+    *index += 1;
+    let mut code_lines = Vec::<ExtractionLineHint>::new();
+    while *index < lines.len() && !is_code_fence(&lines[*index]) {
+        ensure_not_cancelled(cancellation_token)?;
+        if !lines[*index].text.trim().is_empty() {
+            code_lines.push(lines[*index].clone());
+        }
+        *index += 1;
+    }
+    if *index < lines.len() && is_code_fence(&lines[*index]) {
+        *index += 1;
+    }
+    if code_lines.is_empty() {
+        return Ok(());
+    }
+    let resolved_language = if language.is_empty() {
+        let code_text =
+            code_lines.iter().map(|line| line.text.as_str()).collect::<Vec<_>>().join("\n");
+        crate::shared::ast_extraction::detect_language(&code_text).map(str::to_string)
+    } else {
+        Some(language)
+    };
+    blocks.push(build_block(
+        *ordinal,
+        StructuredBlockKind::CodeBlock,
+        &code_lines,
+        heading_stack,
+        None,
+        resolved_language,
+        None,
+        None,
+    ));
+    *ordinal += 1;
+    Ok(())
+}
+
+fn append_heading_block(
+    line: &ExtractionLineHint,
+    index: &mut usize,
+    ordinal: &mut i32,
+    heading_stack: &mut Vec<String>,
+    blocks: &mut Vec<StructuredBlockData>,
+) {
+    let trimmed = line.text.trim();
+    let heading_text = normalize_heading_text(trimmed);
+    update_heading_stack(heading_stack, heading_depth(trimmed), &heading_text);
+    blocks.push(build_block(
+        *ordinal,
+        StructuredBlockKind::Heading,
+        std::slice::from_ref(line),
+        heading_stack,
+        None,
+        None,
+        None,
+        None,
+    ));
+    *ordinal += 1;
+    *index += 1;
+}
+
+fn append_table_blocks(
+    lines: &[ExtractionLineHint],
+    index: &mut usize,
+    ordinal: &mut i32,
+    heading_stack: &[String],
+    blocks: &mut Vec<StructuredBlockData>,
+    cancellation_token: &CancellationToken,
+) -> Result<(), StructuredPreparationError> {
+    let start = *index;
+    while *index < lines.len() && is_table_row_line(&lines[*index]) {
+        ensure_not_cancelled(cancellation_token)?;
+        *index += 1;
+    }
+    let row_lines = &lines[start..*index];
+    let table_block = build_block(
+        *ordinal,
+        StructuredBlockKind::Table,
+        row_lines,
+        heading_stack,
+        None,
+        None,
+        None,
+        None,
+    );
+    let table_block_id = table_block.block_id;
+    blocks.push(table_block);
+    *ordinal += 1;
+    let header_cells =
+        row_lines.first().map(|row| parse_markdown_table_row(&row.text)).unwrap_or_default();
+    let (sheet_name, table_name) = table_context_from_heading_stack(heading_stack);
+    let data_rows = append_table_row_blocks(
+        row_lines,
+        *ordinal,
+        heading_stack,
+        table_block_id,
+        sheet_name,
+        table_name,
+        blocks,
+        cancellation_token,
+    )?;
+    *ordinal += i32::try_from(data_rows.len()).unwrap_or(i32::MAX);
+    append_table_summary_blocks(
+        &header_cells,
+        &data_rows,
+        sheet_name,
+        table_name,
+        heading_stack,
+        table_block_id,
+        ordinal,
+        blocks,
+        cancellation_token,
+    )
+}
+
+fn append_table_row_blocks(
+    row_lines: &[ExtractionLineHint],
+    first_ordinal: i32,
+    heading_stack: &[String],
+    table_block_id: Uuid,
+    sheet_name: Option<&str>,
+    table_name: Option<&str>,
+    blocks: &mut Vec<StructuredBlockData>,
+    cancellation_token: &CancellationToken,
+) -> Result<Vec<Vec<String>>, StructuredPreparationError> {
+    let header_cells =
+        row_lines.first().map(|row| parse_markdown_table_row(&row.text)).unwrap_or_default();
+    let mut data_rows = Vec::new();
+    for row_line in row_lines.iter().skip(1) {
+        ensure_not_cancelled(cancellation_token)?;
+        let row_cells = parse_markdown_table_row(&row_line.text);
+        if row_cells.is_empty() || is_markdown_separator_row(&row_cells) {
+            continue;
+        }
+        let row_index = data_rows.len();
+        blocks.push(build_block(
+            first_ordinal.saturating_add(i32::try_from(row_index).unwrap_or(i32::MAX)),
+            StructuredBlockKind::TableRow,
+            std::slice::from_ref(row_line),
+            heading_stack,
+            Some(table_block_id),
+            None,
+            Some(StructuredTableCoordinates {
+                row_index: i32::try_from(row_index).unwrap_or(i32::MAX),
+                column_index: 0,
+                row_span: 1,
+                column_span: 1,
+            }),
+            Some(build_semantic_table_row_text(
+                sheet_name,
+                table_name,
+                row_index,
+                &header_cells,
+                &row_cells,
+            )),
+        ));
+        data_rows.push(row_cells);
+    }
+    Ok(data_rows)
+}
+
+fn append_table_summary_blocks(
+    header_cells: &[String],
+    data_rows: &[Vec<String>],
+    sheet_name: Option<&str>,
+    table_name: Option<&str>,
+    heading_stack: &[String],
+    table_block_id: Uuid,
+    ordinal: &mut i32,
+    blocks: &mut Vec<StructuredBlockData>,
+    cancellation_token: &CancellationToken,
+) -> Result<(), StructuredPreparationError> {
+    for summary in build_table_column_summaries(sheet_name, table_name, header_cells, data_rows) {
+        ensure_not_cancelled(cancellation_token)?;
+        blocks.push(build_block(
+            *ordinal,
+            StructuredBlockKind::MetadataBlock,
+            &[],
+            heading_stack,
+            Some(table_block_id),
+            None,
+            None,
+            Some(render_table_column_summary(&summary)),
+        ));
+        *ordinal += 1;
+    }
+    Ok(())
+}
+
+fn append_scalar_block(
+    line: &ExtractionLineHint,
+    index: &mut usize,
+    ordinal: &mut i32,
+    heading_stack: &[String],
+    blocks: &mut Vec<StructuredBlockData>,
+) {
+    blocks.push(build_block(
+        *ordinal,
+        classify_scalar_block_kind(line),
+        std::slice::from_ref(line),
+        heading_stack,
+        None,
+        None,
+        None,
+        None,
+    ));
+    *ordinal += 1;
+    *index += 1;
+}
+
 fn detect_boilerplate(block_kind: StructuredBlockKind, text: &str) -> bool {
-    if matches!(
-        block_kind,
-        StructuredBlockKind::Table
-            | StructuredBlockKind::TableRow
-            | StructuredBlockKind::SourceProfile
-            | StructuredBlockKind::SourceUnit
-    ) {
+    if !is_boilerplate_candidate_kind(block_kind) {
         return false;
     }
-    let lower = text.to_ascii_lowercase();
+    has_dense_link_shape(text)
+        || ['|', '•', '>', '›']
+            .into_iter()
+            .any(|separator| has_dense_delimiter_shape(text, separator))
+}
 
-    // 5+ HTTP links
-    let http_count = lower.matches("http://").count() + lower.matches("https://").count();
-    if http_count >= 5 {
-        return true;
+const fn is_boilerplate_candidate_kind(block_kind: StructuredBlockKind) -> bool {
+    matches!(block_kind, StructuredBlockKind::Paragraph | StructuredBlockKind::ListItem)
+}
+
+fn has_dense_link_shape(text: &str) -> bool {
+    let (token_count, link_count) =
+        text.split_whitespace().fold((0_usize, 0_usize), |(token_count, link_count), token| {
+            (token_count + 1, link_count + usize::from(token.contains("://")))
+        });
+    link_count >= MIN_DENSE_LINK_COUNT && link_count.saturating_mul(2) >= token_count
+}
+
+fn has_dense_delimiter_shape(text: &str, separator: char) -> bool {
+    let mut segment_count = 0_usize;
+    for segment in text.split(separator).map(str::trim) {
+        if segment.is_empty() || segment.chars().count() > MAX_STRUCTURAL_SEGMENT_CHARS {
+            return false;
+        }
+        segment_count += 1;
     }
+    segment_count >= MIN_STRUCTURAL_SEGMENT_COUNT
+}
 
-    // Breadcrumb patterns: contains " > " or " › " with 3+ segments
-    for sep in [" > ", " › "] {
-        if lower.contains(sep) {
-            let segment_count = lower.split(sep).count();
-            if segment_count >= 3 {
-                return true;
+fn mark_structural_boilerplate(
+    blocks: &mut [StructuredBlockData],
+    cancellation_token: &CancellationToken,
+) -> Result<(), StructuredPreparationError> {
+    let mut occurrences_by_key = BTreeMap::<String, (BTreeSet<i32>, Vec<usize>)>::new();
+    for (index, block) in blocks.iter_mut().enumerate() {
+        ensure_not_cancelled(cancellation_token)?;
+        block.is_boilerplate = detect_boilerplate(block.block_kind, &block.text);
+        if let (Some(key), Some(page_number)) = (repeated_block_key(block), block.page_number) {
+            let (pages, indexes) = occurrences_by_key.entry(key).or_default();
+            pages.insert(page_number);
+            indexes.push(index);
+        }
+    }
+    for (pages, indexes) in occurrences_by_key.into_values() {
+        ensure_not_cancelled(cancellation_token)?;
+        if pages.len() >= MIN_REPEATED_BLOCK_PAGE_COUNT {
+            for index in indexes {
+                blocks[index].is_boilerplate = true;
             }
         }
     }
-
-    // Common boilerplate phrases
-    const BOILERPLATE_PHRASES: &[&str] = &[
-        "skip to content",
-        "cookie",
-        "accept cookies",
-        "privacy policy",
-        "terms of service",
-        "all rights reserved",
-        "copyright ©",
-        "powered by",
-        "follow us on",
-    ];
-    for phrase in BOILERPLATE_PHRASES {
-        if lower.contains(phrase) {
-            return true;
+    if !blocks.is_empty() && blocks.iter().all(|block| block.is_boilerplate) {
+        for block in blocks {
+            ensure_not_cancelled(cancellation_token)?;
+            block.is_boilerplate = false;
         }
     }
+    Ok(())
+}
 
-    // Pure navigation: only short words separated by "|" or "•"
-    let trimmed = text.trim();
-    if !trimmed.is_empty() {
-        let is_nav = if trimmed.contains('|') {
-            trimmed
-                .split('|')
-                .all(|segment| !segment.trim().is_empty() && segment.trim().len() <= 20)
-                && trimmed.split('|').count() >= 3
-        } else if trimmed.contains('•') {
-            trimmed
-                .split('•')
-                .all(|segment| !segment.trim().is_empty() && segment.trim().len() <= 20)
-                && trimmed.split('•').count() >= 3
-        } else {
-            false
-        };
-        if is_nav {
-            return true;
-        }
+fn repeated_block_key(block: &StructuredBlockData) -> Option<String> {
+    if !is_boilerplate_candidate_kind(block.block_kind) {
+        return None;
     }
-
-    false
+    let key = block.normalized_text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let length = key.chars().count();
+    (length > 0 && length <= MAX_REPEATED_BLOCK_CHARS).then_some(key)
 }
 
 fn fallback_line_hints(content: &str) -> Vec<ExtractionLineHint> {
@@ -427,12 +523,9 @@ fn fallback_line_hints(content: &str) -> Vec<ExtractionLineHint> {
 
 fn classify_scalar_block_kind(line: &ExtractionLineHint) -> StructuredBlockKind {
     let trimmed = line.text.trim();
-    if looks_like_docs_navigation_link(trimmed) || has_signal(line, ExtractionLineSignal::ListItem)
-    {
+    if has_signal(line, ExtractionLineSignal::ListItem) {
         StructuredBlockKind::ListItem
-    } else if has_signal(line, ExtractionLineSignal::EndpointCandidate)
-        && !looks_like_docs_navigation_link(trimmed)
-    {
+    } else if has_signal(line, ExtractionLineSignal::EndpointCandidate) {
         StructuredBlockKind::EndpointBlock
     } else if has_signal(line, ExtractionLineSignal::Quote) {
         StructuredBlockKind::QuoteBlock
@@ -481,7 +574,7 @@ fn build_block(
     let source_span = match (lines.first(), lines.last()) {
         (Some(first), Some(last)) => Some(StructuredSourceSpan {
             start_offset: first.start_offset.unwrap_or_default(),
-            end_offset: last.end_offset.unwrap_or(first.end_offset.unwrap_or_default()),
+            end_offset: last.end_offset.unwrap_or_else(|| first.end_offset.unwrap_or_default()),
         }),
         _ => None,
     };
@@ -572,14 +665,6 @@ fn looks_like_compound_product_label(text: &str) -> bool {
         && !text.contains(": ")
 }
 
-fn looks_like_docs_navigation_link(line: &str) -> bool {
-    let lowercase = line.to_ascii_lowercase();
-    (lowercase.contains("http://") || lowercase.contains("https://"))
-        && (lowercase.contains("/x/")
-            || lowercase.contains("/display/")
-            || lowercase.contains("/pages/viewpage.action"))
-}
-
 #[cfg(test)]
 mod tests {
     use std::collections::HashSet;
@@ -590,9 +675,44 @@ mod tests {
 
     use super::{PrepareStructuredRevisionCommand, StructuredPreparationService};
     use crate::shared::extraction::{
+        ExtractionLineHint, ExtractionLineSignal, ExtractionStructureHints,
         build_text_layout_from_content, record_jsonl::extract_record_jsonl,
         structured_document::StructuredBlockKind,
     };
+
+    fn prepare_page_lines(entries: &[(i32, &str)]) -> super::PreparedStructuredRevision {
+        let lines = entries
+            .iter()
+            .enumerate()
+            .map(|(ordinal, (page_number, text))| ExtractionLineHint {
+                ordinal: i32::try_from(ordinal).unwrap_or(i32::MAX),
+                page_number: Some(*page_number),
+                text: (*text).to_string(),
+                ..ExtractionLineHint::default()
+            })
+            .collect::<Vec<_>>();
+        let text = lines.iter().map(|line| line.text.as_str()).collect::<Vec<_>>().join("\n");
+        StructuredPreparationService::new()
+            .prepare_revision(
+                PrepareStructuredRevisionCommand {
+                    revision_id: Uuid::now_v7(),
+                    document_id: Uuid::now_v7(),
+                    workspace_id: Uuid::now_v7(),
+                    library_id: Uuid::now_v7(),
+                    preparation_state: "prepared".to_string(),
+                    normalization_profile: "default".to_string(),
+                    source_format: "pdf".to_string(),
+                    language_code: None,
+                    source_text: text.clone(),
+                    normalized_text: text,
+                    structure_hints: ExtractionStructureHints { lines },
+                    typed_fact_count: 0,
+                    prepared_at: Utc::now(),
+                },
+                &CancellationToken::new(),
+            )
+            .expect("prepared revision")
+    }
 
     #[test]
     fn prepare_revision_derives_outline_from_heading_blocks() {
@@ -679,6 +799,17 @@ mod tests {
                 .iter()
                 .any(|block| matches!(block.block_kind, StructuredBlockKind::EndpointBlock))
         );
+    }
+
+    #[test]
+    fn endpoint_signal_is_not_overridden_by_url_path_vocabulary() {
+        let line = ExtractionLineHint {
+            text: "GET https://service.example/x/resource".to_string(),
+            signals: vec![ExtractionLineSignal::EndpointCandidate],
+            ..ExtractionLineHint::default()
+        };
+
+        assert_eq!(super::classify_scalar_block_kind(&line), StructuredBlockKind::EndpointBlock);
     }
 
     #[test]
@@ -970,13 +1101,13 @@ mod tests {
     }
 
     #[test]
-    fn detect_boilerplate_catches_cookie_banner() {
+    fn detect_boilerplate_preserves_phrase_only_prose() {
         assert!(
-            super::detect_boilerplate(
+            !super::detect_boilerplate(
                 StructuredBlockKind::Paragraph,
                 "We use cookies to improve your experience. Accept cookies",
             ),
-            "cookie banner text should be detected as boilerplate"
+            "natural-language wording alone must not discard evidence"
         );
     }
 
@@ -992,14 +1123,58 @@ mod tests {
     }
 
     #[test]
-    fn detect_boilerplate_catches_copyright() {
+    fn detect_boilerplate_uses_link_density_instead_of_absolute_link_count() {
+        let text = "A long evidence paragraph references https://one.test, https://two.test, \
+            https://three.test, https://four.test, and https://five.test while retaining enough \
+            surrounding source material that the links are not the dominant block structure.";
+
         assert!(
-            super::detect_boilerplate(
-                StructuredBlockKind::Paragraph,
-                "Copyright © 2024 Acme Inc. All rights reserved.",
-            ),
-            "copyright notice should be detected as boilerplate"
+            !super::detect_boilerplate(StructuredBlockKind::Paragraph, text),
+            "link count alone must not discard an evidence-rich paragraph"
         );
+    }
+
+    #[test]
+    fn detect_boilerplate_marks_a_dense_link_block() {
+        assert!(super::detect_boilerplate(
+            StructuredBlockKind::Paragraph,
+            "https://one.test https://two.test https://three.test",
+        ));
+    }
+
+    #[test]
+    fn prepare_revision_marks_exact_short_blocks_repeated_across_pages() {
+        let repeated = "Repeated structural block";
+        let prepared = prepare_page_lines(&[
+            (1, repeated),
+            (2, repeated),
+            (3, repeated),
+            (4, repeated),
+            (5, repeated),
+            (3, "Unique evidence block"),
+        ]);
+
+        assert_eq!(
+            prepared
+                .ordered_blocks
+                .iter()
+                .filter(|block| block.text == repeated && block.is_boilerplate)
+                .count(),
+            5
+        );
+        assert!(
+            prepared
+                .ordered_blocks
+                .iter()
+                .any(|block| block.text == "Unique evidence block" && !block.is_boilerplate)
+        );
+    }
+
+    #[test]
+    fn prepare_revision_keeps_content_when_every_block_matches_a_structural_shape() {
+        let prepared = prepare_page_lines(&[(1, "A | B | C | D")]);
+
+        assert!(prepared.ordered_blocks.iter().all(|block| !block.is_boilerplate));
     }
 
     #[test]

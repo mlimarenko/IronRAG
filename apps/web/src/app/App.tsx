@@ -1,40 +1,40 @@
-import { lazy, Suspense, type ReactNode } from "react";
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { BrowserRouter, Route, Routes, Navigate } from "react-router-dom";
-import { Toaster as Sonner } from "@/shared/components/ui/sonner";
-import { TooltipProvider } from "@/shared/components/ui/tooltip";
-import { FeatureErrorBoundary } from "@/shared/components/FeatureErrorBoundary";
-import { AppProvider } from "@/shared/contexts/AppContext";
-import { PreferencesProvider } from "@/shared/contexts/PreferencesProvider";
-import { useApp } from "@/shared/contexts/app-context";
-import { AppShell } from "@/app/components/AppShell";
-import { useTranslation } from "react-i18next";
-import LoginPage from "@/features/auth/LoginPage";
-import DashboardPage from "@/features/dashboard/DashboardPage";
+import { lazy, Suspense, type ReactNode } from 'react'
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
+import { BrowserRouter, Route, Routes, Navigate } from 'react-router-dom'
+import { Toaster as Sonner } from '@/shared/components/ui/sonner'
+import { TooltipProvider } from '@/shared/components/ui/tooltip'
+import { FeatureErrorBoundary } from '@/shared/components/FeatureErrorBoundary'
+import { AppProvider } from '@/shared/contexts/AppContext'
+import { PreferencesProvider } from '@/shared/contexts/PreferencesProvider'
+import { useApp } from '@/shared/contexts/app-context'
+import { AppShell } from '@/app/components/AppShell'
+import { useTranslation } from 'react-i18next'
+import LoginPage from '@/features/auth/LoginPage'
+import DashboardPage from '@/features/dashboard/DashboardPage'
 
 // Lazy-load every non-landing route so the initial bundle drops by the
 // weight of admin (Radix-heavy), graph (Sigma + Graphology, ~190 KB
 // gzipped), assistant (Tiptap markdown surface), and the Swagger UI
 // runtime (≈1 MB on its own). Login + Dashboard stay eager because they
 // are reached on first paint or right after auth.
-const DocumentsPage = lazy(() => import("@/features/documents/DocumentsPage"));
-const GraphPage = lazy(() => import("@/features/graph/GraphPage"));
-const AssistantPage = lazy(() => import("@/features/assistant/AssistantPage"));
-const AdminPage = lazy(() => import("@/features/admin/AdminPage"));
-const SwaggerPage = lazy(() => import("@/features/swagger/SwaggerPage"));
-const NotFoundPage = lazy(() => import("@/app/NotFoundPage"));
+const DocumentsPage = lazy(() => import('@/features/documents/DocumentsPage'))
+const GraphPage = lazy(() => import('@/features/graph/GraphPage'))
+const AssistantPage = lazy(() => import('@/features/assistant/AssistantPage'))
+const AdminPage = lazy(() => import('@/features/admin/AdminPage'))
+const SwaggerPage = lazy(() => import('@/features/swagger/SwaggerPage'))
+const NotFoundPage = lazy(() => import('@/app/NotFoundPage'))
 function queryDevtoolsEnabled() {
-  if (import.meta.env.DEV !== true) return false;
-  if (import.meta.env.VITE_ENABLE_QUERY_DEVTOOLS === "true") return true;
-  return new URLSearchParams(window.location.search).get("queryDevtools") === "1";
+  if (import.meta.env.DEV !== true) return false
+  if (import.meta.env.VITE_ENABLE_QUERY_DEVTOOLS === 'true') return true
+  return new URLSearchParams(window.location.search).get('queryDevtools') === '1'
 }
 
 const ReactQueryDevtools = queryDevtoolsEnabled()
   ? lazy(async () => {
-      const { ReactQueryDevtools } = await import("@tanstack/react-query-devtools");
-      return { default: ReactQueryDevtools };
+      const { ReactQueryDevtools } = await import('@tanstack/react-query-devtools')
+      return { default: ReactQueryDevtools }
     })
-  : null;
+  : null
 
 // Shared QueryClient. Defaults tuned for an internal back-office app:
 //   - staleTime 30s: small but non-zero so a remount inside the same screen
@@ -56,57 +56,44 @@ const queryClient = new QueryClient({
       retry: 0,
     },
   },
-});
+})
 
 function RouteSuspenseFallback() {
-  const { t } = useTranslation();
-  return (
-    <div className="flex items-center justify-center h-screen">
-      {t("common.loading")}
-    </div>
-  );
+  const { t } = useTranslation()
+  return <div className="flex items-center justify-center h-screen">{t('common.loading')}</div>
 }
 
-function FeatureRoute({
-  feature,
-  children,
-}: {
-  feature: string;
-  children: ReactNode;
-}) {
-  return <FeatureErrorBoundary feature={feature}>{children}</FeatureErrorBoundary>;
+function FeatureRoute({ feature, children }: Readonly<{ feature: string; children: ReactNode }>) {
+  return <FeatureErrorBoundary feature={feature}>{children}</FeatureErrorBoundary>
 }
 
 function LazyFeatureRoute({
   feature,
   children,
-}: {
-  feature: string;
-  children: ReactNode;
-}) {
+}: Readonly<{ feature: string; children: ReactNode }>) {
   return (
     <FeatureRoute feature={feature}>
       <Suspense fallback={<RouteSuspenseFallback />}>{children}</Suspense>
     </FeatureRoute>
-  );
+  )
 }
 
 function QueryDevtools() {
-  if (ReactQueryDevtools === null) return null;
+  if (ReactQueryDevtools === null) return null
   return (
     <Suspense fallback={null}>
       <ReactQueryDevtools initialIsOpen={false} />
     </Suspense>
-  );
+  )
 }
 
 function AuthenticatedRoutes() {
-  const { t } = useTranslation();
-  const { isAuthenticated, isLoading } = useApp();
+  const { t } = useTranslation()
+  const { isAuthenticated, isLoading } = useApp()
   if (isLoading) {
-    return <div className="flex items-center justify-center h-screen">{t("common.loading")}</div>;
+    return <div className="flex items-center justify-center h-screen">{t('common.loading')}</div>
   }
-  if (!isAuthenticated) return <Navigate to="/login" replace />;
+  if (!isAuthenticated) return <Navigate to="/login" replace />
   return (
     <AppShell>
       <Routes>
@@ -169,33 +156,33 @@ function AuthenticatedRoutes() {
         />
       </Routes>
     </AppShell>
-  );
+  )
 }
 
 const App = () => (
   <QueryClientProvider client={queryClient}>
     <TooltipProvider>
       <PreferencesProvider>
-      <AppProvider>
-        <Sonner />
-        <BrowserRouter>
-          <Routes>
-            <Route
-              path="/login"
-              element={
-                <FeatureRoute feature="auth">
-                  <LoginPage />
-                </FeatureRoute>
-              }
-            />
-            <Route path="/*" element={<AuthenticatedRoutes />} />
-          </Routes>
-        </BrowserRouter>
-      </AppProvider>
+        <AppProvider>
+          <Sonner />
+          <BrowserRouter>
+            <Routes>
+              <Route
+                path="/login"
+                element={
+                  <FeatureRoute feature="auth">
+                    <LoginPage />
+                  </FeatureRoute>
+                }
+              />
+              <Route path="/*" element={<AuthenticatedRoutes />} />
+            </Routes>
+          </BrowserRouter>
+        </AppProvider>
       </PreferencesProvider>
     </TooltipProvider>
     <QueryDevtools />
   </QueryClientProvider>
-);
+)
 
-export default App;
+export default App

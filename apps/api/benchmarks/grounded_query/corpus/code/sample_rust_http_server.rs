@@ -483,7 +483,7 @@ async fn delete_user(
 /// Returns `200 OK` with a session token:
 /// ```json
 /// {
-///   "token": "eyJhbGciOiJIUzI1NiJ9...",
+///   "token": "<generated>",
 ///   "expires_in": 3600
 /// }
 /// ```

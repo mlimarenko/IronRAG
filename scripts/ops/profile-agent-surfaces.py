@@ -17,15 +17,18 @@ import collections
 import json
 import os
 import pathlib
+import re
 import statistics
 import subprocess
 import sys
 import tempfile
 import time
-from dataclasses import dataclass
+from collections.abc import Mapping
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 from urllib import error as urllib_error
+from uuid import uuid4
 
 
 DEFAULT_BASE_URL = "http://127.0.0.1:19000"
@@ -52,6 +55,55 @@ DEFAULT_ASSISTANT_MAX_FIRST_FRAME_MS = 5000
 DEFAULT_MIN_ANSWER_OVERLAP_RATIO: float | None = None
 MCP_ANSWER_ROUTE = "/v1/mcp"
 MCP_DIAGNOSTICS_ROUTE = "/v1/mcp/diagnostics"
+MCP_ANSWER_CAPABILITIES_ROUTE = "/v1/mcp/capabilities"
+MCP_PROTOCOL_HEADER = "mcp-protocol-version"
+MCP_PROTOCOL_VERSION = "2025-11-25"
+MCP_SESSION_HEADER = "mcp-session-id"
+MCP_TOKEN_ENV = "IRONRAG_MCP_TOKEN"  # pragma: allowlist secret
+PROBE_QUESTION_ENV = "IRONRAG_PROBE_QUESTION"
+MCP_COMPACT_PROBE_MAX_REFERENCES = 8
+JSON_MEDIA_TYPE = "application/json"
+MCP_TOOLS_LIST_METHOD = "tools/list"
+MCP_CONTRACT_HASH_PATTERN = re.compile(r"sha256:[0-9a-f]{64}\Z")
+SENSITIVE_PROBE_ENV_NAMES = frozenset(
+    {MCP_TOKEN_ENV, PROBE_PASSWORD_ENV, PROBE_QUESTION_ENV}
+)
+
+
+def sanitized_subprocess_environment(
+    source: Mapping[str, str] | None = None,
+) -> dict[str, str]:
+    environment = dict(os.environ if source is None else source)
+    for name in SENSITIVE_PROBE_ENV_NAMES:
+        environment.pop(name, None)
+    return environment
+
+
+def ensure_private_directory(path: pathlib.Path) -> None:
+    path.mkdir(mode=0o700, parents=True, exist_ok=True)
+    path.chmod(0o700)
+
+
+def write_private_text(path: pathlib.Path, content: str) -> None:
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    file_descriptor, temporary_path = tempfile.mkstemp(
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+        dir=path.parent,
+    )
+    try:
+        with os.fdopen(file_descriptor, "w", encoding="utf-8") as output:
+            os.fchmod(output.fileno(), 0o600)
+            output.write(content)
+            output.flush()
+            os.fsync(output.fileno())
+        os.replace(temporary_path, path)
+        path.chmod(0o600)
+    finally:
+        try:
+            os.unlink(temporary_path)
+        except FileNotFoundError:
+            pass
 
 
 @dataclass(frozen=True)
@@ -60,12 +112,20 @@ class CurlSample:
     time_total_s: float
     size_download_bytes: int
     payload: Any
+    response_headers: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
 class LibraryCatalogContext:
     workspace_id: str
     catalog_ref: str
+
+
+@dataclass(frozen=True)
+class ProbeInputs:
+    password: str
+    mcp_token: str | None
+    question: str | None
 
 
 @dataclass(frozen=True)
@@ -212,12 +272,91 @@ class CurlSession:
         self.cookie_jar = tempfile.NamedTemporaryFile(
             prefix="ironrag-agent-probe-cookies-", delete=False
         ).name
+        self._mcp_sessions: dict[str, tuple[str, str | None]] = {}
 
     def cleanup(self) -> None:
+        for route, (session_id, bearer_token) in tuple(self._mcp_sessions.items()):
+            try:
+                self.request_json(
+                    "DELETE",
+                    route,
+                    headers={
+                        MCP_PROTOCOL_HEADER: MCP_PROTOCOL_VERSION,
+                        MCP_SESSION_HEADER: session_id,
+                    },
+                    bearer_token=bearer_token,
+                    timeout_seconds=5,
+                )
+            except RuntimeError:
+                pass
+        self._mcp_sessions.clear()
         try:
             os.unlink(self.cookie_jar)
         except FileNotFoundError:
             pass
+
+    def initialize_mcp(
+        self,
+        route: str,
+        *,
+        bearer_token: str | None,
+        timeout_seconds: int = 60,
+    ) -> str:
+        existing = self._mcp_sessions.get(route)
+        if existing is not None:
+            return existing[0]
+        sample = self.request_json(
+            "POST",
+            route,
+            body={
+                "jsonrpc": "2.0",
+                "id": f"agent-probe-initialize-{uuid4().hex}",
+                "method": "initialize",
+                "params": {
+                    "protocolVersion": MCP_PROTOCOL_VERSION,
+                    "capabilities": {},
+                    "clientInfo": {"name": "ironrag-agent-probe", "version": "1"},
+                },
+            },
+            headers={"Content-Type": JSON_MEDIA_TYPE},
+            bearer_token=bearer_token,
+            timeout_seconds=timeout_seconds,
+        )
+        if sample.status_code != 200:
+            raise RuntimeError(f"MCP initialize returned HTTP {sample.status_code}")
+        session_id = sample.response_headers.get(MCP_SESSION_HEADER)
+        if not session_id:
+            raise RuntimeError("MCP initialize returned no session identifier")
+        self._mcp_sessions[route] = (session_id, bearer_token)
+        return session_id
+
+    def mcp_request_json(
+        self,
+        route: str,
+        *,
+        body: Any,
+        bearer_token: str | None,
+        timeout_seconds: int = 60,
+        accept: str = JSON_MEDIA_TYPE,
+    ) -> CurlSample:
+        session_id = self.initialize_mcp(
+            route,
+            bearer_token=bearer_token,
+            timeout_seconds=timeout_seconds,
+        )
+        return self.request_json(
+            "POST",
+            route,
+            body=body,
+            headers={
+                "Content-Type": JSON_MEDIA_TYPE,
+                MCP_PROTOCOL_HEADER: MCP_PROTOCOL_VERSION,
+                MCP_SESSION_HEADER: session_id,
+            },
+            bearer_token=bearer_token,
+            accept=accept,
+            timeout_seconds=timeout_seconds,
+        )
 
     def login(self, login: str, password: str) -> None:
         payload = json.dumps({"login": login, "password": password})
@@ -230,7 +369,7 @@ class CurlSession:
                 "-X",
                 "POST",
                 "-H",
-                "Content-Type: application/json",
+                f"Content-Type: {JSON_MEDIA_TYPE}",
                 "--data-binary",
                 "@-",
                 f"{self.base_url}/v1/iam/session/login",
@@ -238,6 +377,7 @@ class CurlSession:
             input=payload,
             capture_output=True,
             check=False,
+            env=sanitized_subprocess_environment(),
             text=True,
         )
         if proc.returncode != 0:
@@ -257,34 +397,67 @@ class CurlSession:
         body: Any | None = None,
         headers: dict[str, str] | None = None,
         bearer_token: str | None = None,
-        accept: str = "application/json",
+        accept: str = JSON_MEDIA_TYPE,
         timeout_seconds: int = 60,
     ) -> CurlSample:
         payload = json.dumps(body) if body is not None else None
         marker = "__CURL_METRICS__"
-        args = [
-            "curl",
-            "-s",
-            "-b",
-            self.cookie_jar,
-            "-X",
-            method,
-            "-H",
-            f"Accept: {accept}",
-            "-w",
-            f"\n{marker} %{{http_code}} %{{time_total}} %{{size_download}}",
-            "--max-time",
-            str(timeout_seconds),
-        ]
+        header_lines = [safe_curl_header_line("Accept", accept)]
         if bearer_token:
-            args.extend(["-H", f"Authorization: Bearer {bearer_token}"])
+            header_lines.append(
+                safe_curl_header_line("Authorization", f"Bearer {bearer_token}")
+            )
         if headers:
-            for key, value in headers.items():
-                args.extend(["-H", f"{key}: {value}"])
-        if payload is not None:
-            args.extend(["--data", payload])
-        args.append(f"{self.base_url}{uri}")
-        proc = subprocess.run(args, capture_output=True, check=False, text=True)
+            header_lines.extend(
+                safe_curl_header_line(key, value) for key, value in headers.items()
+            )
+        header_fd, header_path = tempfile.mkstemp(prefix="ironrag-agent-probe-headers-")
+        response_header_fd, response_header_path = tempfile.mkstemp(
+            prefix="ironrag-agent-probe-response-headers-"
+        )
+        try:
+            os.fchmod(header_fd, 0o600)
+            os.fchmod(response_header_fd, 0o600)
+            os.close(response_header_fd)
+            with os.fdopen(header_fd, "w", encoding="utf-8") as header_file:
+                header_file.write("\n".join(header_lines))
+                header_file.write("\n")
+            args = [
+                "curl",
+                "-s",
+                "-b",
+                self.cookie_jar,
+                "-X",
+                method,
+                "--header",
+                f"@{header_path}",
+                "--dump-header",
+                response_header_path,
+                "-w",
+                f"\n{marker} %{{http_code}} %{{time_total}} %{{size_download}}",
+                "--max-time",
+                str(timeout_seconds),
+            ]
+            if payload is not None:
+                args.extend(["--data-binary", "@-"])
+            args.append(f"{self.base_url}{uri}")
+            proc = subprocess.run(
+                args,
+                input=payload,
+                capture_output=True,
+                check=False,
+                env=sanitized_subprocess_environment(),
+                text=True,
+            )
+            response_headers = parse_curl_response_headers(
+                pathlib.Path(response_header_path).read_text(encoding="utf-8")
+            )
+        finally:
+            for temporary_path in (header_path, response_header_path):
+                try:
+                    os.unlink(temporary_path)
+                except FileNotFoundError:
+                    pass
         if proc.returncode != 0:
             raise RuntimeError(
                 f"{method} {uri} failed: curl exit {proc.returncode}: {proc.stderr[:200]}"
@@ -307,7 +480,36 @@ class CurlSession:
             time_total_s=float(time_text),
             size_download_bytes=int(float(size_text)),
             payload=parsed,
+            response_headers=response_headers,
         )
+
+
+def safe_curl_header_line(name: str, value: str) -> str:
+    if not name or any(char in name for char in "\r\n:"):
+        raise ValueError("curl header name contains an invalid character")
+    if any(char in value for char in "\r\n"):
+        raise ValueError("curl header value contains an invalid character")
+    return f"{name}: {value}"
+
+
+def parse_curl_response_headers(raw_headers: str) -> dict[str, str]:
+    response_headers: dict[str, str] = {}
+    current_headers: dict[str, str] = {}
+    for raw_line in raw_headers.replace("\r\n", "\n").split("\n"):
+        line = raw_line.strip()
+        if line.startswith("HTTP/"):
+            current_headers = {}
+            continue
+        if not line:
+            if current_headers:
+                response_headers = current_headers
+            continue
+        name, separator, value = line.partition(":")
+        if separator:
+            current_headers[name.strip().lower()] = value.strip()
+    if current_headers:
+        response_headers = current_headers
+    return response_headers
 
 
 def discover_library_catalog_context(session: CurlSession, library_id: str) -> LibraryCatalogContext:
@@ -343,7 +545,7 @@ def create_query_session(session: CurlSession, workspace_id: str, library_id: st
         "POST",
         "/v1/query/sessions",
         body={"workspaceId": workspace_id, "libraryId": library_id},
-        headers={"Content-Type": "application/json"},
+        headers={"Content-Type": JSON_MEDIA_TYPE},
     )
     if sample.status_code != 200:
         raise RuntimeError(f"create session returned HTTP {sample.status_code}")
@@ -363,6 +565,106 @@ def ensure_jsonrpc_result(sample: CurlSample, method_name: str) -> Any:
     return sample.payload["result"]
 
 
+def _validated_tool_names(descriptors: Any) -> list[str]:
+    if not isinstance(descriptors, list):
+        raise RuntimeError("answer MCP tools/list returned no tool descriptors")
+    tool_names: list[str] = []
+    for descriptor in descriptors:
+        if not isinstance(descriptor, dict):
+            raise RuntimeError("answer MCP tools/list returned an invalid tool descriptor")
+        name = descriptor.get("name")
+        if not isinstance(name, str) or not name:
+            raise RuntimeError("answer MCP tools/list returned an invalid tool name")
+        tool_names.append(name)
+    if len(tool_names) != len(set(tool_names)):
+        raise RuntimeError("answer MCP tools/list returned duplicate tool names")
+    return tool_names
+
+
+def _validate_capability_tools(capability_tools: Any, tool_names: list[str]) -> None:
+    if not isinstance(capability_tools, list) or not all(
+        isinstance(name, str) and bool(name) for name in capability_tools
+    ):
+        raise RuntimeError("answer MCP capabilities returned no visible tool names")
+    if len(capability_tools) != len(set(capability_tools)):
+        raise RuntimeError("answer MCP capabilities returned duplicate tool names")
+    if set(capability_tools) != set(tool_names):
+        raise RuntimeError(
+            "answer MCP tool set drift: capabilities and tools/list do not match"
+        )
+    if "grounded_answer" not in tool_names:
+        raise RuntimeError(
+            "answer MCP discovery is incomplete: grounded_answer is not visible"
+        )
+
+
+def _validate_contract_metadata(capabilities: dict[str, Any], listed: dict[str, Any]) -> str:
+    metadata = listed.get("_meta")
+    if not isinstance(metadata, dict):
+        raise RuntimeError("answer MCP tools/list returned no contract metadata")
+    versions = (
+        capabilities.get("toolContractVersion"),
+        metadata.get("ironrag/toolContractVersion"),
+    )
+    if not all(
+        isinstance(version, int) and not isinstance(version, bool) and version > 0
+        for version in versions
+    ):
+        raise RuntimeError("answer MCP tool contract version must be a positive integer")
+    if versions[0] != versions[1]:
+        raise RuntimeError(
+            "answer MCP tool contract version drift: capabilities and tools/list do not match"
+        )
+    hashes = (
+        capabilities.get("toolContractHash"),
+        metadata.get("ironrag/toolContractHash"),
+    )
+    if not all(
+        isinstance(contract_hash, str)
+        and MCP_CONTRACT_HASH_PATTERN.fullmatch(contract_hash) is not None
+        for contract_hash in hashes
+    ):
+        raise RuntimeError("answer MCP tool contract hash is not a canonical SHA-256 digest")
+    if hashes[0] != hashes[1]:
+        raise RuntimeError(
+            "answer MCP tool contract hash drift: capabilities and tools/list do not match"
+        )
+    return hashes[0]
+
+
+def validate_answer_mcp_discovery(
+    capabilities: CurlSample,
+    tools_list: CurlSample,
+) -> str:
+    """Fail before an LLM turn when the answer MCP contract is incomplete or drifting."""
+    if capabilities.status_code != 200:
+        raise RuntimeError(
+            f"answer MCP capabilities returned HTTP {capabilities.status_code}"
+        )
+    if not isinstance(capabilities.payload, dict):
+        raise RuntimeError("answer MCP capabilities returned a non-object payload")
+    listed = ensure_jsonrpc_result(tools_list, "answer MCP tools/list")
+    if not isinstance(listed, dict):
+        raise RuntimeError("answer MCP tools/list returned a non-object result")
+    tool_names = _validated_tool_names(listed.get("tools"))
+    _validate_capability_tools(capabilities.payload.get("tools"), tool_names)
+    return _validate_contract_metadata(capabilities.payload, listed)
+
+
+def build_grounded_answer_probe_arguments(
+    library_ref: str,
+    question: str,
+    top_k: int,
+) -> dict[str, Any]:
+    return {
+        "library": library_ref,
+        "query": question,
+        "topK": top_k,
+        "responseProfile": "compact",
+        "maxReferences": MCP_COMPACT_PROBE_MAX_REFERENCES,
+    }
+
+
 def probe_mcp_tool(
     session: CurlSession,
     *,
@@ -371,16 +673,14 @@ def probe_mcp_tool(
     arguments: dict[str, Any],
     route: str = MCP_DIAGNOSTICS_ROUTE,
 ) -> CurlSample:
-    return session.request_json(
-        "POST",
+    return session.mcp_request_json(
         route,
         body={
             "jsonrpc": "2.0",
-            "id": f"agent-probe-{tool_name}",
+            "id": f"agent-probe-{tool_name}-{uuid4().hex}",
             "method": "tools/call",
             "params": {"name": tool_name, "arguments": arguments},
         },
-        headers={"Content-Type": "application/json"},
         bearer_token=bearer_token,
         timeout_seconds=120,
     )
@@ -742,6 +1042,209 @@ def summarize_document_read(payload: dict[str, Any]) -> DocumentReadSummary:
     )
 
 
+def build_assistant_turn_curl_request(
+    *,
+    base_url: str,
+    cookie_jar: str,
+    session_id: str,
+    question: str,
+    top_k: int,
+    timeout_seconds: int,
+) -> tuple[list[str], str]:
+    payload = json.dumps({"contentText": question, "topK": top_k})
+    marker = "__CURL_METRICS__"
+    args = [
+        "curl",
+        "-N",
+        "-s",
+        "-b",
+        cookie_jar,
+        "-X",
+        "POST",
+        "-H",
+        "Accept: text/event-stream",
+        "-H",
+        f"Content-Type: {JSON_MEDIA_TYPE}",
+        "-w",
+        f"\n{marker} %{{http_code}} %{{time_total}} %{{size_download}}",
+        "--max-time",
+        str(timeout_seconds),
+        "--data-binary",
+        "@-",
+        f"{base_url}/v1/query/sessions/{session_id}/turns",
+    ]
+    return args, payload
+
+
+@dataclass
+class AssistantStreamState:
+    started_at: float
+    footer: tuple[int, float, int] | None = None
+    completed_payload: dict[str, Any] | None = None
+    failed_message: str | None = None
+    time_to_first_frame_s: float | None = None
+    time_to_first_activity_s: float | None = None
+    time_to_first_model_request_s: float | None = None
+    time_to_first_tool_call_s: float | None = None
+    stream_event_count: int = 0
+    tool_call_started_count: int = 0
+    tool_call_finished_count: int = 0
+
+    def elapsed(self) -> float:
+        return time.monotonic() - self.started_at
+
+
+def _record_assistant_activity(
+    state: AssistantStreamState,
+    activity: Any,
+) -> None:
+    if state.time_to_first_activity_s is None:
+        state.time_to_first_activity_s = state.elapsed()
+    if not isinstance(activity, dict):
+        return
+    activity_type = activity.get("type")
+    if activity_type == "model_request" and state.time_to_first_model_request_s is None:
+        state.time_to_first_model_request_s = state.elapsed()
+    if activity_type == "tool_call_started":
+        state.tool_call_started_count += 1
+        if state.time_to_first_tool_call_s is None:
+            state.time_to_first_tool_call_s = state.elapsed()
+    elif activity_type == "tool_call_finished":
+        state.tool_call_finished_count += 1
+
+
+def _dispatch_assistant_sse_data(state: AssistantStreamState, raw_data: str) -> None:
+    if not raw_data.strip():
+        return
+    try:
+        event_payload = json.loads(raw_data)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"assistant SSE emitted invalid JSON: {raw_data[:200]!r}") from exc
+    if not isinstance(event_payload, dict):
+        raise RuntimeError("assistant SSE emitted non-object data")
+    state.stream_event_count += 1
+    payload_type = event_payload.get("type")
+    if payload_type == "activity":
+        _record_assistant_activity(state, event_payload.get("event") or {})
+        return
+    if payload_type == "completed":
+        detail = event_payload.get("detail")
+        if not isinstance(detail, dict):
+            raise RuntimeError("assistant SSE completed event missing detail object")
+        state.completed_payload = detail
+        return
+    if payload_type == "failed":
+        message = event_payload.get("message")
+        state.failed_message = message if isinstance(message, str) else "assistant turn failed"
+
+
+def _parse_assistant_footer(marker: str, line: str) -> tuple[int, float, int]:
+    parts = line[len(marker):].strip().split(" ", 2)
+    if len(parts) != 3:
+        raise RuntimeError(f"assistant turn emitted malformed curl footer: {line!r}")
+    return int(parts[0]), float(parts[1]), int(float(parts[2]))
+
+
+def _flush_assistant_data_lines(
+    state: AssistantStreamState,
+    data_lines: list[str],
+) -> None:
+    if not data_lines:
+        return
+    _dispatch_assistant_sse_data(state, "\n".join(data_lines))
+    data_lines.clear()
+
+
+def _consume_assistant_stream_line(
+    line: str,
+    marker: str,
+    state: AssistantStreamState,
+    data_lines: list[str],
+) -> None:
+    if line.startswith(marker):
+        state.footer = _parse_assistant_footer(marker, line)
+        return
+    if state.time_to_first_frame_s is None and line.startswith(("event:", "data:", ":")):
+        state.time_to_first_frame_s = state.elapsed()
+    if not line:
+        _flush_assistant_data_lines(state, data_lines)
+        return
+    if line.startswith(":"):
+        return
+    if line.startswith("data:"):
+        data_lines.append(line[5:].lstrip())
+
+
+def _consume_assistant_stream(
+    proc: subprocess.Popen[str],
+    marker: str,
+    state: AssistantStreamState,
+) -> tuple[str, int]:
+    if proc.stdout is None:
+        raise RuntimeError("failed to capture assistant SSE stdout")
+    data_lines: list[str] = []
+    try:
+        for raw_line in proc.stdout:
+            _consume_assistant_stream_line(
+                raw_line.rstrip("\n"), marker, state, data_lines
+            )
+        _flush_assistant_data_lines(state, data_lines)
+    finally:
+        stderr = proc.stderr.read() if proc.stderr is not None else ""
+        return_code = proc.wait()
+    return stderr, return_code
+
+
+def _validate_assistant_stream_result(
+    state: AssistantStreamState,
+    stderr: str,
+    return_code: int,
+) -> tuple[dict[str, Any], float]:
+    if return_code != 0:
+        raise RuntimeError(
+            f"assistant SSE turn failed: curl exit {return_code}: {stderr[:200]}"
+        )
+    if state.footer is None:
+        raise RuntimeError("assistant SSE turn did not emit curl metrics footer")
+    status_code, time_total_s, _size_download = state.footer
+    if status_code != 200:
+        raise RuntimeError(f"assistant SSE turn returned HTTP {status_code}")
+    if state.failed_message is not None:
+        raise RuntimeError(f"assistant SSE turn failed: {state.failed_message}")
+    if state.completed_payload is None:
+        raise RuntimeError("assistant SSE turn ended without a completed event")
+    return state.completed_payload, time_total_s
+
+
+def _assistant_turn_summary(
+    completed_payload: dict[str, Any],
+    time_total_s: float,
+    state: AssistantStreamState,
+) -> AssistantTurnSummary:
+    execution = completed_payload.get("execution") or {}
+    completion_state = execution.get("lifecycleState") if isinstance(execution, dict) else None
+    query_execution_id = execution.get("id") if isinstance(execution, dict) else None
+    artifacts = summarize_assistant_turn_artifacts(completed_payload)
+    return AssistantTurnSummary(
+        time_to_completed_s=time_total_s,
+        answer_length=len(artifacts.answer_text),
+        answer_text=artifacts.answer_text,
+        total_reference_count=total_reference_count(completed_payload),
+        verification_state=artifacts.verifier_level,
+        completion_state=completion_state if isinstance(completion_state, str) else None,
+        query_execution_id=query_execution_id if isinstance(query_execution_id, str) else None,
+        runtime_execution_id=artifacts.runtime_execution_id,
+        references=artifacts.references,
+        time_to_first_frame_s=state.time_to_first_frame_s,
+        time_to_first_activity_s=state.time_to_first_activity_s,
+        time_to_first_model_request_s=state.time_to_first_model_request_s,
+        time_to_first_tool_call_s=state.time_to_first_tool_call_s,
+        stream_event_count=state.stream_event_count,
+        tool_call_started_count=state.tool_call_started_count,
+        tool_call_finished_count=state.tool_call_finished_count,
+    )
+
+
 def execute_assistant_turn(
     session: CurlSession,
     session_id: str,
@@ -750,171 +1253,34 @@ def execute_assistant_turn(
     top_k: int,
     timeout_seconds: int,
 ) -> AssistantTurnSummary:
-    payload = json.dumps({"contentText": question, "topK": top_k})
-    marker = "__CURL_METRICS__"
-    args = [
-        "curl",
-        "-N",
-        "-s",
-        "-b",
-        session.cookie_jar,
-        "-X",
-        "POST",
-        "-H",
-        "Accept: text/event-stream",
-        "-H",
-        "Content-Type: application/json",
-        "-w",
-        f"\n{marker} %{{http_code}} %{{time_total}} %{{size_download}}",
-        "--max-time",
-        str(timeout_seconds),
-        "--data",
-        payload,
-        f"{session.base_url}/v1/query/sessions/{session_id}/turns",
-    ]
-    started_at = time.monotonic()
+    args, payload = build_assistant_turn_curl_request(
+        base_url=session.base_url,
+        cookie_jar=session.cookie_jar,
+        session_id=session_id,
+        question=question,
+        top_k=top_k,
+        timeout_seconds=timeout_seconds,
+    )
+    state = AssistantStreamState(started_at=time.monotonic())
     proc = subprocess.Popen(
         args,
+        env=sanitized_subprocess_environment(),
+        stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
         bufsize=1,
     )
-
-    footer: tuple[int, float, int] | None = None
-    data_lines: list[str] = []
-    completed_payload: dict[str, Any] | None = None
-    failed_message: str | None = None
-    time_to_first_frame_s: float | None = None
-    time_to_first_activity_s: float | None = None
-    time_to_first_model_request_s: float | None = None
-    time_to_first_tool_call_s: float | None = None
-    stream_event_count = 0
-    tool_call_started_count = 0
-    tool_call_finished_count = 0
-
-    def elapsed() -> float:
-        return time.monotonic() - started_at
-
-    def dispatch_sse_data(raw_data: str) -> None:
-        nonlocal completed_payload
-        nonlocal failed_message
-        nonlocal time_to_first_activity_s
-        nonlocal time_to_first_model_request_s
-        nonlocal time_to_first_tool_call_s
-        nonlocal stream_event_count
-        nonlocal tool_call_started_count
-        nonlocal tool_call_finished_count
-
-        if not raw_data.strip():
-            return
-        try:
-            event_payload = json.loads(raw_data)
-        except json.JSONDecodeError as exc:
-            raise RuntimeError(f"assistant SSE emitted invalid JSON: {raw_data[:200]!r}") from exc
-        if not isinstance(event_payload, dict):
-            raise RuntimeError("assistant SSE emitted non-object data")
-        stream_event_count += 1
-        payload_type = event_payload.get("type")
-        if payload_type == "activity":
-            if time_to_first_activity_s is None:
-                time_to_first_activity_s = elapsed()
-            activity = event_payload.get("event") or {}
-            if not isinstance(activity, dict):
-                return
-            activity_type = activity.get("type")
-            if activity_type == "model_request" and time_to_first_model_request_s is None:
-                time_to_first_model_request_s = elapsed()
-            if activity_type == "tool_call_started":
-                tool_call_started_count += 1
-                if time_to_first_tool_call_s is None:
-                    time_to_first_tool_call_s = elapsed()
-            elif activity_type == "tool_call_finished":
-                tool_call_finished_count += 1
-        elif payload_type == "completed":
-            detail = event_payload.get("detail")
-            if not isinstance(detail, dict):
-                raise RuntimeError("assistant SSE completed event missing detail object")
-            completed_payload = detail
-        elif payload_type == "failed":
-            message = event_payload.get("message")
-            failed_message = message if isinstance(message, str) else "assistant turn failed"
-
-    if proc.stdout is None:
-        raise RuntimeError("failed to capture assistant SSE stdout")
-    try:
-        for raw_line in proc.stdout:
-            line = raw_line.rstrip("\n")
-            if line.startswith(marker):
-                parts = line[len(marker) :].strip().split(" ", 2)
-                if len(parts) != 3:
-                    raise RuntimeError(f"assistant turn emitted malformed curl footer: {line!r}")
-                footer = (int(parts[0]), float(parts[1]), int(float(parts[2])))
-                continue
-            if time_to_first_frame_s is None and (
-                line.startswith("event:") or line.startswith("data:") or line.startswith(":")
-            ):
-                time_to_first_frame_s = elapsed()
-            if not line:
-                if data_lines:
-                    dispatch_sse_data("\n".join(data_lines))
-                    data_lines.clear()
-                continue
-            if line.startswith(":"):
-                continue
-            if line.startswith("data:"):
-                data_lines.append(line[5:].lstrip())
-        if data_lines:
-            dispatch_sse_data("\n".join(data_lines))
-    finally:
-        stderr = proc.stderr.read() if proc.stderr is not None else ""
-        return_code = proc.wait()
-
-    if return_code != 0:
-        raise RuntimeError(
-            f"assistant SSE turn failed: curl exit {return_code}: {stderr[:200]}"
-        )
-    if footer is None:
-        raise RuntimeError("assistant SSE turn did not emit curl metrics footer")
-    status_code, time_total_s, _size_download = footer
-    if status_code != 200:
-        raise RuntimeError(f"assistant SSE turn returned HTTP {status_code}")
-    if failed_message is not None:
-        raise RuntimeError(f"assistant SSE turn failed: {failed_message}")
-    if completed_payload is None:
-        raise RuntimeError("assistant SSE turn ended without a completed event")
-
-    total_refs = total_reference_count(completed_payload)
-    completion_state = (
-        (completed_payload.get("execution") or {}).get("lifecycleState")
-        if isinstance(completed_payload.get("execution"), dict)
-        else None
+    if proc.stdin is None:
+        proc.kill()
+        raise RuntimeError("failed to open assistant SSE request stdin")
+    proc.stdin.write(payload)
+    proc.stdin.close()
+    stderr, return_code = _consume_assistant_stream(proc, "__CURL_METRICS__", state)
+    completed_payload, time_total_s = _validate_assistant_stream_result(
+        state, stderr, return_code
     )
-    query_execution_id = (
-        (completed_payload.get("execution") or {}).get("id")
-        if isinstance(completed_payload.get("execution"), dict)
-        else None
-    )
-    artifacts = summarize_assistant_turn_artifacts(completed_payload)
-
-    return AssistantTurnSummary(
-        time_to_completed_s=time_total_s,
-        answer_length=len(artifacts.answer_text),
-        answer_text=artifacts.answer_text,
-        total_reference_count=total_refs,
-        verification_state=artifacts.verifier_level,
-        completion_state=completion_state if isinstance(completion_state, str) else None,
-        query_execution_id=query_execution_id if isinstance(query_execution_id, str) else None,
-        runtime_execution_id=artifacts.runtime_execution_id,
-        references=artifacts.references,
-        time_to_first_frame_s=time_to_first_frame_s,
-        time_to_first_activity_s=time_to_first_activity_s,
-        time_to_first_model_request_s=time_to_first_model_request_s,
-        time_to_first_tool_call_s=time_to_first_tool_call_s,
-        stream_event_count=stream_event_count,
-        tool_call_started_count=tool_call_started_count,
-        tool_call_finished_count=tool_call_finished_count,
-    )
+    return _assistant_turn_summary(completed_payload, time_total_s, state)
 
 
 def format_seconds(value: float | None) -> str:
@@ -1012,16 +1378,66 @@ def summarize_assistant_turn_artifacts(payload: dict[str, Any]) -> GroundedAnswe
     )
 
 
-def summarize_grounded_answer(payload: dict[str, Any]) -> GroundedAnswerSummary:
-    execution_detail = payload.get("executionDetail")
-    if not isinstance(execution_detail, dict):
-        return GroundedAnswerSummary(
-            answer_text="",
-            verifier_level=None,
-            runtime_execution_id=None,
-            references=(),
+def _compact_reference_tokens(compact_references: Any) -> tuple[str, ...]:
+    reference_fields = {
+        "chunk": ("chunk", "chunkId"),
+        "prepared_segment": ("segment", "segmentId"),
+        "technical_fact": ("fact", "factId"),
+        "entity": ("entity", "nodeId"),
+        "relation": ("relation", "edgeId"),
+    }
+    if not isinstance(compact_references, list):
+        return ()
+    references: set[str] = set()
+    for reference in compact_references:
+        if not isinstance(reference, dict):
+            continue
+        reference_field = reference_fields.get(reference.get("kind"))
+        if reference_field is None:
+            continue
+        canonical_kind, identifier_field = reference_field
+        token = _coerce_reference_token(
+            canonical_kind,
+            reference.get(identifier_field),
         )
-    return summarize_assistant_turn_artifacts(execution_detail)
+        if token is not None:
+            references.add(token)
+    return tuple(sorted(references))
+
+
+def _summarize_compact_grounded_answer(payload: dict[str, Any]) -> GroundedAnswerSummary:
+    answer_text = payload.get("answerBody")
+    verifier = payload.get("verifier")
+    verifier_level = verifier.get("state") if isinstance(verifier, dict) else None
+    runtime_execution_id = payload.get("runtimeExecutionId")
+    reference_summary = payload.get("referenceSummary")
+    compact_references = (
+        reference_summary.get("references")
+        if isinstance(reference_summary, dict)
+        else []
+    )
+    return GroundedAnswerSummary(
+        answer_text=answer_text if isinstance(answer_text, str) else "",
+        verifier_level=verifier_level if isinstance(verifier_level, str) else None,
+        runtime_execution_id=(
+            runtime_execution_id if isinstance(runtime_execution_id, str) else None
+        ),
+        references=_compact_reference_tokens(compact_references),
+    )
+
+
+def summarize_grounded_answer(payload: dict[str, Any]) -> GroundedAnswerSummary:
+    if payload.get("responseProfile") == "compact":
+        return _summarize_compact_grounded_answer(payload)
+    execution_detail = payload.get("executionDetail")
+    if isinstance(execution_detail, dict):
+        return summarize_assistant_turn_artifacts(execution_detail)
+    return GroundedAnswerSummary(
+        answer_text="",
+        verifier_level=None,
+        runtime_execution_id=None,
+        references=(),
+    )
 
 
 def parse_csv_terms(value: str) -> list[str]:
@@ -1053,793 +1469,880 @@ def contains_any_term(text: str, candidate_terms: list[str]) -> bool:
     return any(term.casefold() in text_folded for term in candidate_terms)
 
 
-def build_gate_checks(
+@dataclass(frozen=True)
+class GateThresholds:
+    graph_min_entities: int
+    graph_min_relations: int
+    graph_min_documents: int
+    community_min_count: int
+    entity_search_min_hits: int
+    search_min_hits: int
+    search_min_readable_hits: int
+    read_min_content_chars: int
+    read_min_references: int
+    assistant_min_references: int
+    assistant_expected_verification: str
+    max_tool_latency_ms: int | None
+    max_completed_ms: int | None
+    max_first_frame_ms: int | None = None
+    min_answer_overlap_ratio: float | None = DEFAULT_MIN_ANSWER_OVERLAP_RATIO
+
+
+@dataclass(frozen=True)
+class GateInputs:
+    entity_search_summary: EntitySearchSummary
+    document_search_summary: DocumentSearchSummary
+    document_read_summary: DocumentReadSummary | None
+    graph_quality: McpQualitySummary
+    relation_list_summary: RelationListSummary
+    community_summary: CommunitySummary
+    assistant_summaries: list[AssistantTurnSummary]
+    runtime_execution_summary: RuntimeExecutionProbeSummary | None
+    runtime_trace_summary: RuntimeTraceProbeSummary | None
+    legacy_runtime_execution_error: ToolErrorSummary | None
+    grounded_answer_summary: GroundedAnswerSummary | None
+    assistant_require_all: list[str]
+    assistant_forbid_any: list[str]
+    expected_search_top_label: str | None
+    tool_samples: list[tuple[str, CurlSample]]
+
+
+def _gate_check(
+    label: str,
+    passes: bool,
+    detail: str,
     *,
-    entity_search_summary: EntitySearchSummary,
-    document_search_summary: DocumentSearchSummary,
-    document_read_summary: DocumentReadSummary | None,
-    graph_quality: McpQualitySummary,
-    relation_list_summary: RelationListSummary,
-    community_summary: CommunitySummary,
-    assistant_summaries: list[AssistantTurnSummary],
-    runtime_execution_summary: RuntimeExecutionProbeSummary | None,
-    runtime_trace_summary: RuntimeTraceProbeSummary | None,
-    legacy_runtime_execution_error: ToolErrorSummary | None,
-    grounded_answer_summary: GroundedAnswerSummary | None = None,
-    graph_min_entities: int,
-    graph_min_relations: int,
-    graph_min_documents: int,
-    community_min_count: int,
-    entity_search_min_hits: int,
-    search_min_hits: int,
-    search_min_readable_hits: int,
-    read_min_content_chars: int,
-    read_min_references: int,
-    assistant_min_references: int,
-    assistant_expected_verification: str,
-    assistant_require_all: list[str],
-    assistant_forbid_any: list[str],
-    expected_search_top_label: str | None,
-    max_tool_latency_ms: int | None,
-    max_completed_ms: int | None,
-    tool_samples: list[tuple[str, CurlSample]],
-    max_first_frame_ms: int | None = None,
-    min_answer_overlap_ratio: float | None = DEFAULT_MIN_ANSWER_OVERLAP_RATIO,
+    failure_status: str = "fail",
+) -> GateCheck:
+    return GateCheck(
+        label=label,
+        status="pass" if passes else failure_status,
+        detail=detail,
+    )
+
+
+def _search_alignment_gate(inputs: GateInputs) -> list[GateCheck]:
+    search_top_label = inputs.entity_search_summary.top_label
+    expected_label = inputs.expected_search_top_label
+    if expected_label is not None:
+        return [
+            _gate_check(
+                "graph.search_top_label",
+                search_top_label == expected_label,
+                f"top={search_top_label or 'n/a'} expected={expected_label}",
+            )
+        ]
+    graph = inputs.graph_quality
+    if search_top_label is None or graph.top_entity_label is None:
+        return []
+    normalized_label = normalize_quality_text(search_top_label)
+    is_visible = normalized_label in graph.visible_entity_labels_normalized
+    return [
+        _gate_check(
+            "graph.search_alignment",
+            bool(normalized_label) and is_visible,
+            (
+                f"search_top={search_top_label} visible_in_topology={is_visible} "
+                f"topology_top={graph.top_entity_label}"
+            ),
+            failure_status="warn",
+        )
+    ]
+
+
+def _build_graph_gate_checks(inputs: GateInputs, thresholds: GateThresholds) -> list[GateCheck]:
+    entity_search = inputs.entity_search_summary
+    graph = inputs.graph_quality
+    relations = inputs.relation_list_summary
+    communities = inputs.community_summary
+    checks = [
+        _gate_check(
+            "graph.entities",
+            graph.entity_count >= thresholds.graph_min_entities,
+            f"entities={graph.entity_count} min={thresholds.graph_min_entities}",
+        ),
+        _gate_check(
+            "graph.search_entities_hits",
+            entity_search.hit_count >= thresholds.entity_search_min_hits,
+            f"hits={entity_search.hit_count} min={thresholds.entity_search_min_hits}",
+        ),
+        _gate_check(
+            "graph.relations",
+            graph.relation_count >= thresholds.graph_min_relations,
+            f"relations={graph.relation_count} min={thresholds.graph_min_relations}",
+        ),
+        _gate_check(
+            "graph.documents",
+            graph.document_count >= thresholds.graph_min_documents,
+            f"documents={graph.document_count} min={thresholds.graph_min_documents}",
+        ),
+        _gate_check(
+            "graph.coherence",
+            graph.quality_status == "pass",
+            (
+                f"quality={graph.quality_status} "
+                f"orphan_relations={graph.orphan_relation_count} "
+                f"orphan_links={graph.orphan_link_count} "
+                f"orphan_documents={graph.orphan_document_count}"
+            ),
+        ),
+        _gate_check(
+            "graph.document_links_visible_documents",
+            graph.orphan_document_count == 0,
+            f"orphan_documents={graph.orphan_document_count}",
+        ),
+        _gate_check(
+            "graph.documents_ranked_by_support",
+            graph.document_rank_monotonic,
+            f"document_rank_monotonic={graph.document_rank_monotonic}",
+        ),
+        _gate_check(
+            "graph.duplicate_entity_labels",
+            graph.duplicate_entity_label_count == 0,
+            f"duplicate_entity_labels={graph.duplicate_entity_label_count}",
+        ),
+        _gate_check(
+            "graph.duplicate_relation_signatures",
+            graph.duplicate_relation_signature_count == 0,
+            f"duplicate_relation_signatures={graph.duplicate_relation_signature_count}",
+        ),
+        _gate_check(
+            "graph.list_relations_labels",
+            relations.unknown_label_count == 0,
+            f"unknown_labels={relations.unknown_label_count}",
+        ),
+        _gate_check(
+            "graph.list_relations_duplicates",
+            relations.duplicate_signature_count == 0,
+            f"duplicate_signatures={relations.duplicate_signature_count}",
+        ),
+        _gate_check(
+            "graph.communities",
+            communities.count >= thresholds.community_min_count,
+            f"communities={communities.count} min={thresholds.community_min_count}",
+        ),
+        _gate_check(
+            "graph.community_summaries",
+            communities.count == 0
+            or communities.communities_with_summary == communities.count,
+            (
+                f"with_summary={communities.communities_with_summary} "
+                f"count={communities.count}"
+            ),
+        ),
+    ]
+    checks.extend(_search_alignment_gate(inputs))
+    return checks
+
+
+def _document_read_gate_checks(
+    search: DocumentSearchSummary,
+    read: DocumentReadSummary | None,
+    thresholds: GateThresholds,
 ) -> list[GateCheck]:
-    checks: list[GateCheck] = []
-
-    checks.append(
-        GateCheck(
-            label="graph.entities",
-            status="pass" if graph_quality.entity_count >= graph_min_entities else "fail",
-            detail=f"entities={graph_quality.entity_count} min={graph_min_entities}",
-        )
-    )
-    checks.append(
-        GateCheck(
-            label="graph.search_entities_hits",
-            status=(
-                "pass" if entity_search_summary.hit_count >= entity_search_min_hits else "fail"
-            ),
-            detail=f"hits={entity_search_summary.hit_count} min={entity_search_min_hits}",
-        )
-    )
-    checks.append(
-        GateCheck(
-            label="graph.relations",
-            status="pass" if graph_quality.relation_count >= graph_min_relations else "fail",
-            detail=f"relations={graph_quality.relation_count} min={graph_min_relations}",
-        )
-    )
-    checks.append(
-        GateCheck(
-            label="graph.documents",
-            status="pass" if graph_quality.document_count >= graph_min_documents else "fail",
-            detail=f"documents={graph_quality.document_count} min={graph_min_documents}",
-        )
-    )
-    checks.append(
-        GateCheck(
-            label="graph.coherence",
-            status="pass" if graph_quality.quality_status == "pass" else "fail",
-            detail=(
-                f"quality={graph_quality.quality_status} "
-                f"orphan_relations={graph_quality.orphan_relation_count} "
-                f"orphan_links={graph_quality.orphan_link_count} "
-                f"orphan_documents={graph_quality.orphan_document_count}"
-            ),
-        )
-    )
-    checks.append(
-        GateCheck(
-            label="graph.document_links_visible_documents",
-            status="pass" if graph_quality.orphan_document_count == 0 else "fail",
-            detail=f"orphan_documents={graph_quality.orphan_document_count}",
-        )
-    )
-    checks.append(
-        GateCheck(
-            label="graph.documents_ranked_by_support",
-            status="pass" if graph_quality.document_rank_monotonic else "fail",
-            detail=f"document_rank_monotonic={graph_quality.document_rank_monotonic}",
-        )
-    )
-    checks.append(
-        GateCheck(
-            label="graph.duplicate_entity_labels",
-            status="pass" if graph_quality.duplicate_entity_label_count == 0 else "fail",
-            detail=f"duplicate_entity_labels={graph_quality.duplicate_entity_label_count}",
-        )
-    )
-    checks.append(
-        GateCheck(
-            label="graph.duplicate_relation_signatures",
-            status="pass" if graph_quality.duplicate_relation_signature_count == 0 else "fail",
-            detail=(
-                "duplicate_relation_signatures="
-                f"{graph_quality.duplicate_relation_signature_count}"
-            ),
-        )
-    )
-    checks.append(
-        GateCheck(
-            label="graph.list_relations_labels",
-            status="pass" if relation_list_summary.unknown_label_count == 0 else "fail",
-            detail=f"unknown_labels={relation_list_summary.unknown_label_count}",
-        )
-    )
-    checks.append(
-        GateCheck(
-            label="graph.list_relations_duplicates",
-            status="pass" if relation_list_summary.duplicate_signature_count == 0 else "fail",
-            detail=f"duplicate_signatures={relation_list_summary.duplicate_signature_count}",
-        )
-    )
-    checks.append(
-        GateCheck(
-            label="graph.communities",
-            status="pass" if community_summary.count >= community_min_count else "fail",
-            detail=f"communities={community_summary.count} min={community_min_count}",
-        )
-    )
-    checks.append(
-        GateCheck(
-            label="graph.community_summaries",
-            status=(
-                "pass"
-                if community_summary.count == 0
-                or community_summary.communities_with_summary == community_summary.count
-                else "fail"
-            ),
-            detail=(
-                f"with_summary={community_summary.communities_with_summary} "
-                f"count={community_summary.count}"
-            ),
-        )
-    )
-
-    search_top_label = entity_search_summary.top_label
-    if expected_search_top_label is not None:
-        checks.append(
-            GateCheck(
-                label="graph.search_top_label",
-                status="pass" if search_top_label == expected_search_top_label else "fail",
-                detail=f"top={search_top_label or 'n/a'} expected={expected_search_top_label}",
-            )
-        )
-    elif search_top_label is not None and graph_quality.top_entity_label is not None:
-        normalized_top_label = normalize_quality_text(search_top_label)
-        search_visible_in_topology = (
-            normalized_top_label in graph_quality.visible_entity_labels_normalized
-            if normalized_top_label
-            else False
-        )
-        checks.append(
-            GateCheck(
-                label="graph.search_alignment",
-                status="pass" if search_visible_in_topology else "warn",
-                detail=(
-                    f"search_top={search_top_label} "
-                    f"visible_in_topology={search_visible_in_topology} "
-                    f"topology_top={graph_quality.top_entity_label}"
-                ),
-            )
-        )
-
-    checks.append(
-        GateCheck(
-            label="mcp.search_documents_hits",
-            status="pass" if document_search_summary.hit_count >= search_min_hits else "fail",
-            detail=f"hits={document_search_summary.hit_count} min={search_min_hits}",
-        )
-    )
-    checks.append(
-        GateCheck(
-            label="mcp.search_documents_readable_hits",
-            status=(
-                "pass"
-                if document_search_summary.readable_hit_count >= search_min_readable_hits
-                else "fail"
-            ),
-            detail=(
-                f"readable_hits={document_search_summary.readable_hit_count} "
-                f"min={search_min_readable_hits}"
-            ),
-        )
-    )
-    checks.append(
-        GateCheck(
-            label="mcp.search_documents_guidance",
-            status=(
-                "pass"
-                if document_search_summary.top_suggested_start_offset is not None
-                else "fail"
-            ),
-            detail=(
-                "top_hit suggestedStartOffset present"
-                if document_search_summary.top_suggested_start_offset is not None
-                else "top_hit suggestedStartOffset missing"
-            ),
-        )
-    )
-
-    if document_read_summary is None:
-        checks.append(
+    if read is None:
+        return [
             GateCheck(
                 label="mcp.read_document",
                 status="fail",
                 detail="no readable top hit available for read_document probe",
             )
-        )
-    else:
-        checks.append(
-            GateCheck(
-                label="mcp.read_document_readability",
-                status=(
-                    "pass" if document_read_summary.readability_state == "readable" else "fail"
-                ),
-                detail=f"readability={document_read_summary.readability_state or 'n/a'}",
-            )
-        )
-        checks.append(
-            GateCheck(
-                label="mcp.read_document_content",
-                status=(
-                    "pass"
-                    if document_read_summary.content_length >= read_min_content_chars
-                    else "fail"
-                ),
-                detail=(
-                    f"content_chars={document_read_summary.content_length} "
-                    f"min={read_min_content_chars}"
-                ),
-            )
-        )
-        checks.append(
-            GateCheck(
-                label="mcp.read_document_references",
-                status=(
-                    "pass"
-                    if document_read_summary.total_reference_count >= read_min_references
-                    else "fail"
-                ),
-                detail=(
-                    f"references={document_read_summary.total_reference_count} "
-                    f"min={read_min_references}"
-                ),
-            )
-        )
-        checks.append(
-            GateCheck(
-                label="mcp.read_document_alignment",
-                status=(
-                    "pass"
-                    if document_read_summary.document_id == document_search_summary.top_document_id
-                    else "fail"
-                ),
-                detail=(
-                    f"read_document_id={document_read_summary.document_id} "
-                    f"search_top_document_id={document_search_summary.top_document_id}"
-                ),
-            )
-        )
-        if document_search_summary.top_suggested_start_offset is not None:
-            checks.append(
-                GateCheck(
-                    label="mcp.read_document_offset_alignment",
-                    status=(
-                        "pass"
-                        if document_read_summary.slice_start_offset
-                        == document_search_summary.top_suggested_start_offset
-                        else "fail"
-                    ),
-                    detail=(
-                        f"slice_start={document_read_summary.slice_start_offset} "
-                        f"suggested_start={document_search_summary.top_suggested_start_offset}"
-                    ),
-                )
-            )
-
-    for idx, summary in enumerate(assistant_summaries, start=1):
-        checks.append(
-            GateCheck(
-                label=f"assistant.run_{idx}.stream_events",
-                status="pass" if summary.stream_event_count > 0 else "fail",
-                detail=f"events={summary.stream_event_count}",
-            )
-        )
-        checks.append(
-            GateCheck(
-                label=f"assistant.run_{idx}.stream_tool_events",
-                status=(
-                    "pass"
-                    if summary.tool_call_started_count > 0
-                    and summary.tool_call_started_count == summary.tool_call_finished_count
-                    else "fail"
-                ),
-                detail=(
-                    f"started={summary.tool_call_started_count} "
-                    f"finished={summary.tool_call_finished_count}"
-                ),
-            )
-        )
-        if max_first_frame_ms is not None:
-            first_frame_ms = (
-                int(summary.time_to_first_frame_s * 1000)
-                if summary.time_to_first_frame_s is not None
-                else None
-            )
-            checks.append(
-                GateCheck(
-                    label=f"assistant.run_{idx}.first_frame_budget",
-                    status=(
-                        "pass"
-                        if first_frame_ms is not None and first_frame_ms <= max_first_frame_ms
-                        else "fail"
-                    ),
-                    detail=f"first_frame_ms={first_frame_ms or 'n/a'} max={max_first_frame_ms}",
-                )
-            )
-        checks.append(
-            GateCheck(
-                label=f"assistant.run_{idx}.verification",
-                status=(
-                    "pass"
-                    if summary.verification_state == assistant_expected_verification
-                    else "fail"
-                ),
-                detail=(
-                    f"verification={summary.verification_state or 'n/a'} "
-                    f"expected={assistant_expected_verification}"
-                ),
-            )
-        )
-        checks.append(
-            GateCheck(
-                label=f"assistant.run_{idx}.references",
-                status=(
-                    "pass"
-                    if summary.total_reference_count >= assistant_min_references
-                    else "fail"
-                ),
-                detail=(
-                    f"references={summary.total_reference_count} min={assistant_min_references}"
-                ),
-            )
-        )
-        checks.append(
-            GateCheck(
-                label=f"assistant.run_{idx}.completed",
-                status="pass",
-                detail=f"completed={format_seconds(summary.time_to_completed_s)}",
-            )
-        )
-        if assistant_require_all:
-            checks.append(
-                GateCheck(
-                    label=f"assistant.run_{idx}.required_terms",
-                    status=(
-                        "pass"
-                        if contains_all_terms(summary.answer_text, assistant_require_all)
-                        else "fail"
-                    ),
-                    detail=f"required={assistant_require_all}",
-                )
-            )
-        if assistant_forbid_any:
-            checks.append(
-                GateCheck(
-                    label=f"assistant.run_{idx}.forbidden_terms",
-                    status=(
-                        "fail"
-                        if contains_any_term(summary.answer_text, assistant_forbid_any)
-                        else "pass"
-                    ),
-                    detail=f"forbidden={assistant_forbid_any}",
-                )
-            )
-        if max_completed_ms is not None:
-            completed_ms = int(summary.time_to_completed_s * 1000)
-            checks.append(
-                GateCheck(
-                    label=f"assistant.run_{idx}.completed_budget",
-                    status="pass" if completed_ms <= max_completed_ms else "fail",
-                    detail=f"completed_ms={completed_ms} max={max_completed_ms}",
-                )
-            )
-    runtime_ids = [
-        summary.runtime_execution_id for summary in assistant_summaries if summary.runtime_execution_id
+        ]
+    checks = [
+        _gate_check(
+            "mcp.read_document_readability",
+            read.readability_state == "readable",
+            f"readability={read.readability_state or 'n/a'}",
+        ),
+        _gate_check(
+            "mcp.read_document_content",
+            read.content_length >= thresholds.read_min_content_chars,
+            f"content_chars={read.content_length} min={thresholds.read_min_content_chars}",
+        ),
+        _gate_check(
+            "mcp.read_document_references",
+            read.total_reference_count >= thresholds.read_min_references,
+            f"references={read.total_reference_count} min={thresholds.read_min_references}",
+        ),
+        _gate_check(
+            "mcp.read_document_alignment",
+            read.document_id == search.top_document_id,
+            (
+                f"read_document_id={read.document_id} "
+                f"search_top_document_id={search.top_document_id}"
+            ),
+        ),
     ]
-    first_runtime_id = runtime_ids[0] if runtime_ids else None
-    checks.append(
-        GateCheck(
-            label="assistant.runtime_execution_id",
-            status="pass" if first_runtime_id is not None else "fail",
-            detail=f"runtimeExecutionId={first_runtime_id or 'missing'}",
-        )
-    )
-    if runtime_execution_summary is None:
+    if search.top_suggested_start_offset is not None:
         checks.append(
+            _gate_check(
+                "mcp.read_document_offset_alignment",
+                read.slice_start_offset == search.top_suggested_start_offset,
+                (
+                    f"slice_start={read.slice_start_offset} "
+                    f"suggested_start={search.top_suggested_start_offset}"
+                ),
+            )
+        )
+    return checks
+
+
+def _build_document_gate_checks(inputs: GateInputs, thresholds: GateThresholds) -> list[GateCheck]:
+    search = inputs.document_search_summary
+    has_guidance = search.top_suggested_start_offset is not None
+    checks = [
+        _gate_check(
+            "mcp.search_documents_hits",
+            search.hit_count >= thresholds.search_min_hits,
+            f"hits={search.hit_count} min={thresholds.search_min_hits}",
+        ),
+        _gate_check(
+            "mcp.search_documents_readable_hits",
+            search.readable_hit_count >= thresholds.search_min_readable_hits,
+            (
+                f"readable_hits={search.readable_hit_count} "
+                f"min={thresholds.search_min_readable_hits}"
+            ),
+        ),
+        _gate_check(
+            "mcp.search_documents_guidance",
+            has_guidance,
+            (
+                "top_hit suggestedStartOffset present"
+                if has_guidance
+                else "top_hit suggestedStartOffset missing"
+            ),
+        ),
+    ]
+    checks.extend(
+        _document_read_gate_checks(search, inputs.document_read_summary, thresholds)
+    )
+    return checks
+
+
+def _optional_assistant_gate_checks(
+    run_number: int,
+    summary: AssistantTurnSummary,
+    inputs: GateInputs,
+    thresholds: GateThresholds,
+) -> list[GateCheck]:
+    prefix = f"assistant.run_{run_number}"
+    checks: list[GateCheck] = []
+    if thresholds.max_first_frame_ms is not None:
+        first_frame_ms = (
+            int(summary.time_to_first_frame_s * 1000)
+            if summary.time_to_first_frame_s is not None
+            else None
+        )
+        checks.append(
+            _gate_check(
+                f"{prefix}.first_frame_budget",
+                first_frame_ms is not None
+                and first_frame_ms <= thresholds.max_first_frame_ms,
+                f"first_frame_ms={first_frame_ms or 'n/a'} max={thresholds.max_first_frame_ms}",
+            )
+        )
+    if inputs.assistant_require_all:
+        checks.append(
+            _gate_check(
+                f"{prefix}.required_terms",
+                contains_all_terms(summary.answer_text, inputs.assistant_require_all),
+                f"required={inputs.assistant_require_all}",
+            )
+        )
+    if inputs.assistant_forbid_any:
+        checks.append(
+            _gate_check(
+                f"{prefix}.forbidden_terms",
+                not contains_any_term(summary.answer_text, inputs.assistant_forbid_any),
+                f"forbidden={inputs.assistant_forbid_any}",
+            )
+        )
+    if thresholds.max_completed_ms is not None:
+        completed_ms = int(summary.time_to_completed_s * 1000)
+        checks.append(
+            _gate_check(
+                f"{prefix}.completed_budget",
+                completed_ms <= thresholds.max_completed_ms,
+                f"completed_ms={completed_ms} max={thresholds.max_completed_ms}",
+            )
+        )
+    return checks
+
+
+def _assistant_run_gate_checks(
+    run_number: int,
+    summary: AssistantTurnSummary,
+    inputs: GateInputs,
+    thresholds: GateThresholds,
+) -> list[GateCheck]:
+    prefix = f"assistant.run_{run_number}"
+    tool_events_match = (
+        summary.tool_call_started_count > 0
+        and summary.tool_call_started_count == summary.tool_call_finished_count
+    )
+    checks = [
+        _gate_check(
+            f"{prefix}.stream_events",
+            summary.stream_event_count > 0,
+            f"events={summary.stream_event_count}",
+        ),
+        _gate_check(
+            f"{prefix}.stream_tool_events",
+            tool_events_match,
+            (
+                f"started={summary.tool_call_started_count} "
+                f"finished={summary.tool_call_finished_count}"
+            ),
+        ),
+        _gate_check(
+            f"{prefix}.verification",
+            summary.verification_state == thresholds.assistant_expected_verification,
+            (
+                f"verification={summary.verification_state or 'n/a'} "
+                f"expected={thresholds.assistant_expected_verification}"
+            ),
+        ),
+        _gate_check(
+            f"{prefix}.references",
+            summary.total_reference_count >= thresholds.assistant_min_references,
+            (
+                f"references={summary.total_reference_count} "
+                f"min={thresholds.assistant_min_references}"
+            ),
+        ),
+        GateCheck(
+            label=f"{prefix}.completed",
+            status="pass",
+            detail=f"completed={format_seconds(summary.time_to_completed_s)}",
+        ),
+    ]
+    checks.extend(
+        _optional_assistant_gate_checks(run_number, summary, inputs, thresholds)
+    )
+    return checks
+
+
+def _build_assistant_gate_checks(inputs: GateInputs, thresholds: GateThresholds) -> list[GateCheck]:
+    checks: list[GateCheck] = []
+    for run_number, summary in enumerate(inputs.assistant_summaries, start=1):
+        checks.extend(
+            _assistant_run_gate_checks(run_number, summary, inputs, thresholds)
+        )
+    return checks
+
+
+def _runtime_execution_gate_checks(
+    summary: RuntimeExecutionProbeSummary | None,
+    expected_runtime_id: str | None,
+) -> list[GateCheck]:
+    if summary is None:
+        return [
             GateCheck(
                 label="mcp.get_runtime_execution",
                 status="fail",
                 detail="runtime execution probe missing",
             )
-        )
-    else:
-        checks.append(
-            GateCheck(
-                label="mcp.get_runtime_execution_alignment",
-                status=(
-                    "pass"
-                    if runtime_execution_summary.runtime_execution_id == first_runtime_id
-                    else "fail"
-                ),
-                detail=(
-                    "probe="
-                    f"{runtime_execution_summary.runtime_execution_id or 'missing'} "
-                    f"assistant={first_runtime_id or 'missing'}"
-                ),
-            )
-        )
-        checks.append(
-            GateCheck(
-                label="mcp.get_runtime_execution_lifecycle",
-                status=(
-                    "pass"
-                    if runtime_execution_summary.lifecycle_state == "completed"
-                    else "fail"
-                ),
-                detail=f"lifecycle={runtime_execution_summary.lifecycle_state or 'missing'}",
-            )
-        )
-    if runtime_trace_summary is None:
-        checks.append(
+        ]
+    return [
+        _gate_check(
+            "mcp.get_runtime_execution_alignment",
+            summary.runtime_execution_id == expected_runtime_id,
+            (
+                f"probe={summary.runtime_execution_id or 'missing'} "
+                f"assistant={expected_runtime_id or 'missing'}"
+            ),
+        ),
+        _gate_check(
+            "mcp.get_runtime_execution_lifecycle",
+            summary.lifecycle_state == "completed",
+            f"lifecycle={summary.lifecycle_state or 'missing'}",
+        ),
+    ]
+
+
+def _runtime_trace_gate_checks(
+    summary: RuntimeTraceProbeSummary | None,
+    expected_runtime_id: str | None,
+) -> list[GateCheck]:
+    if summary is None:
+        return [
             GateCheck(
                 label="mcp.get_runtime_execution_trace",
                 status="fail",
                 detail="runtime trace probe missing",
             )
-        )
-    else:
-        checks.append(
-            GateCheck(
-                label="mcp.get_runtime_execution_trace_alignment",
-                status=(
-                    "pass"
-                    if runtime_trace_summary.runtime_execution_id == first_runtime_id
-                    else "fail"
-                ),
-                detail=(
-                    "probe="
-                    f"{runtime_trace_summary.runtime_execution_id or 'missing'} "
-                    f"assistant={first_runtime_id or 'missing'}"
-                ),
-            )
-        )
-        checks.append(
-            GateCheck(
-                label="mcp.get_runtime_execution_trace_stages",
-                status="pass" if runtime_trace_summary.stage_count >= 1 else "fail",
-                detail=f"stage_count={runtime_trace_summary.stage_count}",
-            )
-        )
-    if legacy_runtime_execution_error is None:
-        checks.append(
-            GateCheck(
-                label="mcp.get_runtime_execution_legacy_field_rejected",
-                status="fail",
-                detail="legacy executionId rejection probe missing",
-            )
-        )
-    else:
-        checks.append(
-            GateCheck(
-                label="mcp.get_runtime_execution_legacy_field_rejected",
-                status=(
-                    "pass"
-                    if legacy_runtime_execution_error.error_kind == "invalid_mcp_tool_call"
-                    and legacy_runtime_execution_error.message is not None
-                    and "runtimeExecutionId" in legacy_runtime_execution_error.message
-                    else "fail"
-                ),
-                detail=(
-                    f"error_kind={legacy_runtime_execution_error.error_kind or 'missing'} "
-                    f"message={legacy_runtime_execution_error.message or 'missing'}"
-                ),
-            )
-        )
+        ]
+    return [
+        _gate_check(
+            "mcp.get_runtime_execution_trace_alignment",
+            summary.runtime_execution_id == expected_runtime_id,
+            (
+                f"probe={summary.runtime_execution_id or 'missing'} "
+                f"assistant={expected_runtime_id or 'missing'}"
+            ),
+        ),
+        _gate_check(
+            "mcp.get_runtime_execution_trace_stages",
+            summary.stage_count >= 1,
+            f"stage_count={summary.stage_count}",
+        ),
+    ]
 
-    if grounded_answer_summary is None:
-        checks.append(
+
+def _legacy_runtime_gate_check(summary: ToolErrorSummary | None) -> GateCheck:
+    label = "mcp.get_runtime_execution_legacy_field_rejected"
+    if summary is None:
+        return GateCheck(
+            label=label,
+            status="fail",
+            detail="legacy executionId rejection probe missing",
+        )
+    is_rejected = (
+        summary.error_kind == "invalid_mcp_tool_call"
+        and summary.message is not None
+        and "runtimeExecutionId" in summary.message
+    )
+    return _gate_check(
+        label,
+        is_rejected,
+        (
+            f"error_kind={summary.error_kind or 'missing'} "
+            f"message={summary.message or 'missing'}"
+        ),
+    )
+
+
+def _build_runtime_gate_checks(inputs: GateInputs) -> list[GateCheck]:
+    runtime_id = next(
+        (
+            summary.runtime_execution_id
+            for summary in inputs.assistant_summaries
+            if summary.runtime_execution_id
+        ),
+        None,
+    )
+    checks = [
+        _gate_check(
+            "assistant.runtime_execution_id",
+            runtime_id is not None,
+            f"runtimeExecutionId={runtime_id or 'missing'}",
+        )
+    ]
+    checks.extend(
+        _runtime_execution_gate_checks(inputs.runtime_execution_summary, runtime_id)
+    )
+    checks.extend(_runtime_trace_gate_checks(inputs.runtime_trace_summary, runtime_id))
+    checks.append(_legacy_runtime_gate_check(inputs.legacy_runtime_execution_error))
+    return checks
+
+
+def _answer_quality_parity_gate(
+    grounded: GroundedAnswerSummary,
+    assistant_summaries: list[AssistantTurnSummary],
+    thresholds: GateThresholds,
+) -> GateCheck:
+    label = "assistant.run_1.mcp_answer_quality_parity"
+    if not assistant_summaries:
+        return GateCheck(
+            label=label,
+            status="fail",
+            detail="assistant run missing for MCP answer quality comparison",
+        )
+    assistant = assistant_summaries[0]
+    answer_overlap = answer_token_overlap_ratio(
+        assistant.answer_text, grounded.answer_text
+    )
+    overlap_passes = thresholds.min_answer_overlap_ratio is None or (
+        answer_overlap is not None
+        and answer_overlap >= thresholds.min_answer_overlap_ratio
+    )
+    references_pass = (
+        assistant.total_reference_count >= thresholds.assistant_min_references
+        and len(grounded.references) >= thresholds.assistant_min_references
+    )
+    return _gate_check(
+        label,
+        assistant.verification_state == grounded.verifier_level
+        and references_pass
+        and overlap_passes,
+        (
+            f"ui_verifier={assistant.verification_state or 'n/a'} "
+            f"mcp_verifier={grounded.verifier_level or 'n/a'} "
+            f"ui_references={assistant.total_reference_count} "
+            f"mcp_references={len(grounded.references)} "
+            f"answer_overlap={answer_overlap if answer_overlap is not None else 'n/a'} "
+            "min_overlap="
+            f"{thresholds.min_answer_overlap_ratio if thresholds.min_answer_overlap_ratio is not None else 'disabled'}"
+        ),
+    )
+
+
+def _build_grounded_answer_gate_checks(inputs: GateInputs, thresholds: GateThresholds) -> list[GateCheck]:
+    grounded = inputs.grounded_answer_summary
+    if grounded is None:
+        return [
             GateCheck(
                 label="mcp.grounded_answer",
                 status="fail",
                 detail="grounded_answer probe missing",
             )
-        )
-    else:
-        checks.append(
-            GateCheck(
-                label="mcp.grounded_answer.verifier",
-                status=(
-                    "pass"
-                    if grounded_answer_summary.verifier_level == assistant_expected_verification
-                    else "fail"
-                ),
-                detail=(
-                    f"verifier={grounded_answer_summary.verifier_level or 'n/a'} "
-                    f"expected={assistant_expected_verification}"
-                ),
-            )
-        )
-        checks.append(
-            GateCheck(
-                label="mcp.grounded_answer.references",
-                status=(
-                    "pass"
-                    if len(grounded_answer_summary.references) >= assistant_min_references
-                    else "fail"
-                ),
-                detail=(
-                    f"references={len(grounded_answer_summary.references)} "
-                    f"min={assistant_min_references}"
-                ),
-            )
-        )
-        checks.append(
-            GateCheck(
-                label="mcp.grounded_answer.runtime_execution_id",
-                status="pass" if grounded_answer_summary.runtime_execution_id else "fail",
-                detail=f"runtimeExecutionId={grounded_answer_summary.runtime_execution_id or 'missing'}",
-            )
-        )
-        if assistant_summaries:
-            ui_summary = assistant_summaries[0]
-            answer_overlap = answer_token_overlap_ratio(
-                ui_summary.answer_text, grounded_answer_summary.answer_text
-            )
-            overlap_passes = (
-                min_answer_overlap_ratio is None
-                or (
-                    answer_overlap is not None
-                    and answer_overlap >= min_answer_overlap_ratio
-                )
-            )
-            checks.append(
-                GateCheck(
-                    label="assistant.run_1.mcp_answer_quality_parity",
-                    status=(
-                        "pass"
-                        if ui_summary.verification_state == grounded_answer_summary.verifier_level
-                        and ui_summary.total_reference_count >= assistant_min_references
-                        and len(grounded_answer_summary.references) >= assistant_min_references
-                        and overlap_passes
-                        else "fail"
-                    ),
-                    detail=(
-                        f"ui_verifier={ui_summary.verification_state or 'n/a'} "
-                        f"mcp_verifier={grounded_answer_summary.verifier_level or 'n/a'} "
-                        f"ui_references={ui_summary.total_reference_count} "
-                        f"mcp_references={len(grounded_answer_summary.references)} "
-                        f"answer_overlap={answer_overlap if answer_overlap is not None else 'n/a'} "
-                        f"min_overlap={min_answer_overlap_ratio if min_answer_overlap_ratio is not None else 'disabled'}"
-                    ),
-                )
-            )
-        else:
-            checks.append(
-                GateCheck(
-                    label="assistant.run_1.mcp_answer_quality_parity",
-                    status="fail",
-                    detail="assistant run missing for MCP answer quality comparison",
-                )
-            )
-
-    if max_tool_latency_ms is not None:
-        for name, sample in tool_samples:
-            tool_ms = int(sample.time_total_s * 1000)
-            if name == "grounded_answer" and max_completed_ms is not None:
-                checks.append(
-                    GateCheck(
-                        label="tool.grounded_answer.completed_budget",
-                        status="pass" if tool_ms <= max_completed_ms else "fail",
-                        detail=f"completed_ms={tool_ms} max={max_completed_ms}",
-                    )
-                )
-                continue
-            checks.append(
-                GateCheck(
-                    label=f"tool.{name}.latency_budget",
-                    status="pass" if tool_ms <= max_tool_latency_ms else "fail",
-                    detail=f"latency_ms={tool_ms} max={max_tool_latency_ms}",
-                )
-            )
-
+        ]
+    checks = [
+        _gate_check(
+            "mcp.grounded_answer.verifier",
+            grounded.verifier_level == thresholds.assistant_expected_verification,
+            (
+                f"verifier={grounded.verifier_level or 'n/a'} "
+                f"expected={thresholds.assistant_expected_verification}"
+            ),
+        ),
+        _gate_check(
+            "mcp.grounded_answer.references",
+            len(grounded.references) >= thresholds.assistant_min_references,
+            (
+                f"references={len(grounded.references)} "
+                f"min={thresholds.assistant_min_references}"
+            ),
+        ),
+        _gate_check(
+            "mcp.grounded_answer.runtime_execution_id",
+            bool(grounded.runtime_execution_id),
+            f"runtimeExecutionId={grounded.runtime_execution_id or 'missing'}",
+        ),
+        _answer_quality_parity_gate(
+            grounded, inputs.assistant_summaries, thresholds
+        ),
+    ]
     return checks
 
 
-def render_report(
-    *,
-    output_path: pathlib.Path,
-    base_url: str,
-    library_id: str,
-    workspace_id: str,
-    entity_query: str,
-    document_query: str,
-    question: str,
-    tools_list: CurlSample,
-    entity_search: CurlSample,
-    entity_search_summary: EntitySearchSummary,
-    document_search: CurlSample,
-    document_search_summary: DocumentSearchSummary,
-    document_read: CurlSample | None,
-    document_read_summary: DocumentReadSummary | None,
-    graph_topology: CurlSample,
-    list_relations: CurlSample,
-    communities: CurlSample,
-    community_summary: CommunitySummary,
-    runtime_execution: CurlSample | None,
-    runtime_execution_summary: RuntimeExecutionProbeSummary | None,
-    runtime_trace: CurlSample | None,
-    runtime_trace_summary: RuntimeTraceProbeSummary | None,
-    legacy_runtime_execution_probe: CurlSample | None,
-    legacy_runtime_execution_error: ToolErrorSummary | None,
-    grounded_answer: CurlSample | None,
-    grounded_answer_summary: GroundedAnswerSummary | None,
-    graph_quality: McpQualitySummary,
-    relation_list_summary: RelationListSummary,
-    assistant_summaries: list[AssistantTurnSummary],
-    gate_checks: list[GateCheck],
-) -> None:
-    avg_completed = statistics.mean(
-        summary.time_to_completed_s or 0.0 for summary in assistant_summaries
+def _tool_latency_gate_check(
+    name: str,
+    sample: CurlSample,
+    thresholds: GateThresholds,
+) -> GateCheck:
+    tool_ms = int(sample.time_total_s * 1000)
+    if name == "grounded_answer" and thresholds.max_completed_ms is not None:
+        return _gate_check(
+            "tool.grounded_answer.completed_budget",
+            tool_ms <= thresholds.max_completed_ms,
+            f"completed_ms={tool_ms} max={thresholds.max_completed_ms}",
+        )
+    return _gate_check(
+        f"tool.{name}.latency_budget",
+        tool_ms <= thresholds.max_tool_latency_ms,
+        f"latency_ms={tool_ms} max={thresholds.max_tool_latency_ms}",
     )
-    report = f"""# Agent surface profile
 
-- Generated at: {datetime.now(timezone.utc).isoformat()}
-- Base URL: `{base_url}`
-- Library ID: `{library_id}`
-- Workspace ID: `{workspace_id}`
-- Entity query: `{entity_query}`
-- Document query: `{document_query}`
-- Assistant question: `{question}`
 
-## MCP probes
+def _build_tool_latency_gate_checks(inputs: GateInputs, thresholds: GateThresholds) -> list[GateCheck]:
+    if thresholds.max_tool_latency_ms is None:
+        return []
+    return [
+        _tool_latency_gate_check(name, sample, thresholds)
+        for name, sample in inputs.tool_samples
+    ]
+
+
+def build_gate_checks(inputs: GateInputs, thresholds: GateThresholds) -> list[GateCheck]:
+    checks = _build_graph_gate_checks(inputs, thresholds)
+    checks.extend(_build_document_gate_checks(inputs, thresholds))
+    checks.extend(_build_assistant_gate_checks(inputs, thresholds))
+    checks.extend(_build_runtime_gate_checks(inputs))
+    checks.extend(_build_grounded_answer_gate_checks(inputs, thresholds))
+    checks.extend(_build_tool_latency_gate_checks(inputs, thresholds))
+    return checks
+
+
+@dataclass(frozen=True)
+class ReportIdentity:
+    base_url: str
+    library_id: str
+    workspace_id: str
+    entity_query: str
+    document_query: str
+    question: str
+
+
+@dataclass(frozen=True)
+class ReportSamples:
+    tools_list: CurlSample
+    entity_search: CurlSample
+    document_search: CurlSample
+    document_read: CurlSample | None
+    graph_topology: CurlSample
+    list_relations: CurlSample
+    communities: CurlSample
+    runtime_execution: CurlSample | None
+    runtime_trace: CurlSample | None
+    legacy_runtime_execution_probe: CurlSample | None
+    grounded_answer: CurlSample | None
+
+
+@dataclass(frozen=True)
+class ReportSummaries:
+    entity_search_summary: EntitySearchSummary
+    document_search_summary: DocumentSearchSummary
+    document_read_summary: DocumentReadSummary | None
+    community_summary: CommunitySummary
+    runtime_execution_summary: RuntimeExecutionProbeSummary | None
+    runtime_trace_summary: RuntimeTraceProbeSummary | None
+    legacy_runtime_execution_error: ToolErrorSummary | None
+    grounded_answer_summary: GroundedAnswerSummary | None
+    graph_quality: McpQualitySummary
+    relation_list_summary: RelationListSummary
+    assistant_summaries: list[AssistantTurnSummary]
+
+
+def _sample_report_fields(sample: CurlSample | None) -> tuple[str | int, str, str]:
+    if sample is None:
+        return "n/a", "n/a", "n/a"
+    return (
+        sample.status_code,
+        format_seconds(sample.time_total_s),
+        format_bytes(sample.size_download_bytes),
+    )
+
+
+def _summary_value(summary: Any | None, field_name: str, default: Any) -> Any:
+    if summary is None:
+        return default
+    return getattr(summary, field_name)
+
+
+def _mcp_probe_report(samples: ReportSamples, summaries: ReportSummaries) -> str:
+    tools_status, tools_time, tools_size = _sample_report_fields(samples.tools_list)
+    entity_status, entity_time, entity_size = _sample_report_fields(samples.entity_search)
+    search_status, search_time, search_size = _sample_report_fields(samples.document_search)
+    read_status, read_time, read_size = _sample_report_fields(samples.document_read)
+    graph_status, graph_time, graph_size = _sample_report_fields(samples.graph_topology)
+    relations_status, relations_time, relations_size = _sample_report_fields(samples.list_relations)
+    communities_status, communities_time, communities_size = _sample_report_fields(samples.communities)
+    runtime_status, runtime_time, runtime_size = _sample_report_fields(samples.runtime_execution)
+    trace_status, trace_time, trace_size = _sample_report_fields(samples.runtime_trace)
+    legacy_status, legacy_time, legacy_size = _sample_report_fields(
+        samples.legacy_runtime_execution_probe
+    )
+    grounded_status, grounded_time, grounded_size = _sample_report_fields(
+        samples.grounded_answer
+    )
+    entity = summaries.entity_search_summary
+    search = summaries.document_search_summary
+    read = summaries.document_read_summary
+    graph = summaries.graph_quality
+    relations = summaries.relation_list_summary
+    communities = summaries.community_summary
+    runtime = summaries.runtime_execution_summary
+    trace = summaries.runtime_trace_summary
+    legacy = summaries.legacy_runtime_execution_error
+    grounded = summaries.grounded_answer_summary
+    tools_count = len((samples.tools_list.payload.get("result") or {}).get("tools") or [])
+    return f"""## MCP probes
 
 | Probe | HTTP | Time | Size | Notes |
 |---|---:|---:|---:|---|
-| `tools/list` | {tools_list.status_code} | {format_seconds(tools_list.time_total_s)} | {format_bytes(tools_list.size_download_bytes)} | tools={len((tools_list.payload.get("result") or {}).get("tools") or [])} |
-| `search_entities` | {entity_search.status_code} | {format_seconds(entity_search.time_total_s)} | {format_bytes(entity_search.size_download_bytes)} | hits={entity_search_summary.hit_count} top={entity_search_summary.top_label or "n/a"} |
-| `search_documents` | {document_search.status_code} | {format_seconds(document_search.time_total_s)} | {format_bytes(document_search.size_download_bytes)} | hits={document_search_summary.hit_count} top={document_search_summary.top_document_title or "n/a"} |
-| `read_document` | {(document_read.status_code if document_read else "n/a")} | {(format_seconds(document_read.time_total_s) if document_read else "n/a")} | {(format_bytes(document_read.size_download_bytes) if document_read else "n/a")} | chars={(document_read_summary.content_length if document_read_summary else 0)} refs={(document_read_summary.total_reference_count if document_read_summary else 0)} |
-| `get_graph_topology` | {graph_topology.status_code} | {format_seconds(graph_topology.time_total_s)} | {format_bytes(graph_topology.size_download_bytes)} | quality={graph_quality.quality_status} entities={graph_quality.entity_count} relations={graph_quality.relation_count} docs={graph_quality.document_count} |
-| `list_relations` | {list_relations.status_code} | {format_seconds(list_relations.time_total_s)} | {format_bytes(list_relations.size_download_bytes)} | rows={relation_list_summary.row_count} |
-| `get_communities` | {communities.status_code} | {format_seconds(communities.time_total_s)} | {format_bytes(communities.size_download_bytes)} | communities={community_summary.count} summarized={community_summary.communities_with_summary} |
-| `get_runtime_execution` | {(runtime_execution.status_code if runtime_execution else "n/a")} | {(format_seconds(runtime_execution.time_total_s) if runtime_execution else "n/a")} | {(format_bytes(runtime_execution.size_download_bytes) if runtime_execution else "n/a")} | lifecycle={(runtime_execution_summary.lifecycle_state if runtime_execution_summary else "n/a")} |
-| `get_runtime_execution_trace` | {(runtime_trace.status_code if runtime_trace else "n/a")} | {(format_seconds(runtime_trace.time_total_s) if runtime_trace else "n/a")} | {(format_bytes(runtime_trace.size_download_bytes) if runtime_trace else "n/a")} | stages={(runtime_trace_summary.stage_count if runtime_trace_summary else 0)} actions={(runtime_trace_summary.action_count if runtime_trace_summary else 0)} |
-| `get_runtime_execution (legacy executionId)` | {(legacy_runtime_execution_probe.status_code if legacy_runtime_execution_probe else "n/a")} | {(format_seconds(legacy_runtime_execution_probe.time_total_s) if legacy_runtime_execution_probe else "n/a")} | {(format_bytes(legacy_runtime_execution_probe.size_download_bytes) if legacy_runtime_execution_probe else "n/a")} | error={(legacy_runtime_execution_error.error_kind if legacy_runtime_execution_error else "n/a")} |
-| `grounded_answer` | {(grounded_answer.status_code if grounded_answer else "n/a")} | {(format_seconds(grounded_answer.time_total_s) if grounded_answer else "n/a")} | {(format_bytes(grounded_answer.size_download_bytes) if grounded_answer else "n/a")} | verifier={(grounded_answer_summary.verifier_level if grounded_answer_summary else "n/a")} runtime={(grounded_answer_summary.runtime_execution_id if grounded_answer_summary else "n/a")} references={len(grounded_answer_summary.references) if grounded_answer_summary else 0} |
+| `tools/list` | {tools_status} | {tools_time} | {tools_size} | tools={tools_count} |
+| `search_entities` | {entity_status} | {entity_time} | {entity_size} | hits={entity.hit_count} top={entity.top_label or "n/a"} |
+| `search_documents` | {search_status} | {search_time} | {search_size} | hits={search.hit_count} top={search.top_document_title or "n/a"} |
+| `read_document` | {read_status} | {read_time} | {read_size} | chars={_summary_value(read, "content_length", 0)} refs={_summary_value(read, "total_reference_count", 0)} |
+| `get_graph_topology` | {graph_status} | {graph_time} | {graph_size} | quality={graph.quality_status} entities={graph.entity_count} relations={graph.relation_count} docs={graph.document_count} |
+| `list_relations` | {relations_status} | {relations_time} | {relations_size} | rows={relations.row_count} |
+| `get_communities` | {communities_status} | {communities_time} | {communities_size} | communities={communities.count} summarized={communities.communities_with_summary} |
+| `get_runtime_execution` | {runtime_status} | {runtime_time} | {runtime_size} | lifecycle={_summary_value(runtime, "lifecycle_state", "n/a")} |
+| `get_runtime_execution_trace` | {trace_status} | {trace_time} | {trace_size} | stages={_summary_value(trace, "stage_count", 0)} actions={_summary_value(trace, "action_count", 0)} |
+| `get_runtime_execution (legacy executionId)` | {legacy_status} | {legacy_time} | {legacy_size} | error={_summary_value(legacy, "error_kind", "n/a")} |
+| `grounded_answer` | {grounded_status} | {grounded_time} | {grounded_size} | verifier={_summary_value(grounded, "verifier_level", "n/a")} runtime={_summary_value(grounded, "runtime_execution_id", "n/a")} references={len(grounded.references) if grounded else 0} |
+"""
 
+
+def _quality_report(summaries: ReportSummaries) -> str:
+    graph = summaries.graph_quality
+    relations = summaries.relation_list_summary
+    communities = summaries.community_summary
+    search = summaries.document_search_summary
+    read = summaries.document_read_summary
+    suggested_offset = (
+        search.top_suggested_start_offset
+        if search.top_suggested_start_offset is not None
+        else "n/a"
+    )
+    return f"""
 ### Graph quality checks
 
 | Check | Value |
 |---|---|
-| entity rank monotonic | {graph_quality.entity_rank_monotonic} |
-| relation rank monotonic | {graph_quality.relation_rank_monotonic} |
-| document rank monotonic | {graph_quality.document_rank_monotonic} |
-| orphan relations | {graph_quality.orphan_relation_count} |
-| orphan links | {graph_quality.orphan_link_count} |
-| orphan documents | {graph_quality.orphan_document_count} |
-| duplicate entity labels | {graph_quality.duplicate_entity_label_count} |
-| duplicate relation signatures | {graph_quality.duplicate_relation_signature_count} |
-| top entity label | {graph_quality.top_entity_label or "n/a"} |
-| probe entity label | {graph_quality.probe_entity_label or "n/a"} |
+| entity rank monotonic | {graph.entity_rank_monotonic} |
+| relation rank monotonic | {graph.relation_rank_monotonic} |
+| document rank monotonic | {graph.document_rank_monotonic} |
+| orphan relations | {graph.orphan_relation_count} |
+| orphan links | {graph.orphan_link_count} |
+| orphan documents | {graph.orphan_document_count} |
+| duplicate entity labels | {graph.duplicate_entity_label_count} |
+| duplicate relation signatures | {graph.duplicate_relation_signature_count} |
+| top entity label | {graph.top_entity_label or "n/a"} |
+| probe entity label | {graph.probe_entity_label or "n/a"} |
 
 ### `list_relations` quality checks
 
 | Check | Value |
 |---|---|
-| relation rows | {relation_list_summary.row_count} |
-| unknown endpoint labels | {relation_list_summary.unknown_label_count} |
-| duplicate relation signatures | {relation_list_summary.duplicate_signature_count} |
+| relation rows | {relations.row_count} |
+| unknown endpoint labels | {relations.unknown_label_count} |
+| duplicate relation signatures | {relations.duplicate_signature_count} |
 
 ### Community checks
 
 | Check | Value |
 |---|---|
-| community rows | {community_summary.count} |
-| summaries present | {community_summary.communities_with_summary} |
-| total top entities surfaced | {community_summary.top_entity_count} |
+| community rows | {communities.count} |
+| summaries present | {communities.communities_with_summary} |
+| total top entities surfaced | {communities.top_entity_count} |
 
 ## MCP document retrieval checks
 
 | Check | Value |
 |---|---|
-| search hits | {document_search_summary.hit_count} |
-| readable search hits | {document_search_summary.readable_hit_count} |
-| top document title | {document_search_summary.top_document_title or "n/a"} |
-| top suggestedStartOffset | {document_search_summary.top_suggested_start_offset if document_search_summary.top_suggested_start_offset is not None else "n/a"} |
-| top excerpt chars | {document_search_summary.top_excerpt_length} |
-| top hit chunk refs | {document_search_summary.top_chunk_reference_count} |
-| read content chars | {document_read_summary.content_length if document_read_summary else 0} |
-| read references | {document_read_summary.total_reference_count if document_read_summary else 0} |
-| read readability | {document_read_summary.readability_state if document_read_summary else "n/a"} |
+| search hits | {search.hit_count} |
+| readable search hits | {search.readable_hit_count} |
+| top document title | {search.top_document_title or "n/a"} |
+| top suggestedStartOffset | {suggested_offset} |
+| top excerpt chars | {search.top_excerpt_length} |
+| top hit chunk refs | {search.top_chunk_reference_count} |
+| read content chars | {_summary_value(read, "content_length", 0)} |
+| read references | {_summary_value(read, "total_reference_count", 0)} |
+| read readability | {_summary_value(read, "readability_state", "n/a")} |
+"""
 
+
+def _assistant_run_row(run_number: int, summary: AssistantTurnSummary) -> str:
+    return (
+        f"| {run_number} | {format_seconds(summary.time_to_first_frame_s)}"
+        f" | {format_seconds(summary.time_to_first_tool_call_s)}"
+        f" | {format_seconds(summary.time_to_completed_s)}"
+        f" | {summary.tool_call_started_count}/{summary.tool_call_finished_count}"
+        f" | {summary.answer_length}"
+        f" | {summary.total_reference_count}"
+        f" | {summary.verification_state or 'n/a'}"
+        f" | {summary.query_execution_id or 'n/a'}"
+        f" | {summary.runtime_execution_id or 'n/a'}"
+        f" | {summary.completion_state or 'n/a'} |\n"
+    )
+
+
+def _assistant_report(summaries: ReportSummaries) -> str:
+    assistant_summaries = summaries.assistant_summaries
+    avg_completed = statistics.mean(
+        summary.time_to_completed_s or 0.0 for summary in assistant_summaries
+    )
+    avg_references = statistics.mean(
+        summary.total_reference_count for summary in assistant_summaries
+    )
+    rows = "".join(
+        _assistant_run_row(run_number, summary)
+        for run_number, summary in enumerate(assistant_summaries, start=1)
+    )
+    return f"""
 ## Assistant and runtime probes
 
 | Runs | Avg completed | Avg references |
 |---:|---:|---:|
-| {len(assistant_summaries)} | {format_seconds(avg_completed)} | {statistics.mean(summary.total_reference_count for summary in assistant_summaries):.1f} |
+| {len(assistant_summaries)} | {format_seconds(avg_completed)} | {avg_references:.1f} |
 
 | Run | First frame | First tool | Completed | Tool events | Answer chars | References | Verification | Query execution | Runtime execution | Lifecycle |
 |---|---:|---:|---:|---:|---:|---:|---|---|---|---|
-"""
-    for idx, summary in enumerate(assistant_summaries, start=1):
-        report += (
-            f"| {idx} | {format_seconds(summary.time_to_first_frame_s)}"
-            f" | {format_seconds(summary.time_to_first_tool_call_s)}"
-            f" | {format_seconds(summary.time_to_completed_s)}"
-            f" | {summary.tool_call_started_count}/{summary.tool_call_finished_count}"
-            f" | {summary.answer_length}"
-            f" | {summary.total_reference_count}"
-            f" | {summary.verification_state or 'n/a'}"
-            f" | {summary.query_execution_id or 'n/a'}"
-            f" | {summary.runtime_execution_id or 'n/a'}"
-            f" | {summary.completion_state or 'n/a'} |\n"
-        )
-    report += f"""
+{rows}"""
+
+
+def _runtime_and_preview_report(summaries: ReportSummaries) -> str:
+    runtime = summaries.runtime_execution_summary
+    trace = summaries.runtime_trace_summary
+    legacy = summaries.legacy_runtime_execution_error
+    preview_rows = "".join(
+        f"| {run_number} | {format_preview(summary.answer_text).replace('|', r'\|')} |\n"
+        for run_number, summary in enumerate(summaries.assistant_summaries, start=1)
+    )
+    return f"""
 
 ### Runtime lookup checks
 
 | Check | Value |
 |---|---|
-| runtime execution id | {runtime_execution_summary.runtime_execution_id if runtime_execution_summary else "n/a"} |
-| runtime lifecycle | {runtime_execution_summary.lifecycle_state if runtime_execution_summary else "n/a"} |
-| runtime active stage | {runtime_execution_summary.active_stage if runtime_execution_summary else "n/a"} |
-| runtime trace stages | {runtime_trace_summary.stage_count if runtime_trace_summary else 0} |
-| runtime trace actions | {runtime_trace_summary.action_count if runtime_trace_summary else 0} |
-| runtime trace policy decisions | {runtime_trace_summary.policy_decision_count if runtime_trace_summary else 0} |
-| legacy runtime field rejection | {legacy_runtime_execution_error.error_kind if legacy_runtime_execution_error else "n/a"} |
+| runtime execution id | {_summary_value(runtime, "runtime_execution_id", "n/a")} |
+| runtime lifecycle | {_summary_value(runtime, "lifecycle_state", "n/a")} |
+| runtime active stage | {_summary_value(runtime, "active_stage", "n/a")} |
+| runtime trace stages | {_summary_value(trace, "stage_count", 0)} |
+| runtime trace actions | {_summary_value(trace, "action_count", 0)} |
+| runtime trace policy decisions | {_summary_value(trace, "policy_decision_count", 0)} |
+| legacy runtime field rejection | {_summary_value(legacy, "error_kind", "n/a")} |
 
 ### Assistant answer previews
 
 | Run | Answer preview |
 |---|---|
-"""
-    for idx, summary in enumerate(assistant_summaries, start=1):
-        preview = format_preview(summary.answer_text).replace("|", "\\|")
-        report += f"| {idx} | {preview} |\n"
-    report += """
+{preview_rows}
 
 ### MCP grounded_answer answer preview
 
 | Answer preview | Verifier | Runtime execution id | References |
 |---|---|---|---|
 """
-    grounded_preview = "n/a"
-    grounded_verifier = "n/a"
-    grounded_runtime = "n/a"
-    grounded_references = "0"
-    if grounded_answer_summary is not None:
-        grounded_preview = format_preview(grounded_answer_summary.answer_text).replace("|", "\\|")
-        grounded_verifier = grounded_answer_summary.verifier_level or "n/a"
-        grounded_runtime = grounded_answer_summary.runtime_execution_id or "n/a"
-        grounded_references = str(len(grounded_answer_summary.references))
-    report += (
-        f"| {grounded_preview} | {grounded_verifier} | {grounded_runtime} | "
-        f"{grounded_references} |\n"
+
+
+def _grounded_answer_report(summary: GroundedAnswerSummary | None) -> str:
+    if summary is None:
+        return "| n/a | n/a | n/a | 0 |\n"
+    preview = format_preview(summary.answer_text).replace("|", "\\|")
+    return (
+        f"| {preview} | {summary.verifier_level or 'n/a'} | "
+        f"{summary.runtime_execution_id or 'n/a'} | {len(summary.references)} |\n"
     )
-    report += """
+
+
+def _release_gate_report(gate_checks: list[GateCheck]) -> str:
+    rows = "".join(
+        f"| `{check.label}` | {check.status} | {check.detail} |\n"
+        for check in gate_checks
+    )
+    return f"""
 
 ## Release gate
 
 | Check | Status | Detail |
 |---|---|---|
+{rows}"""
+
+
+def render_report(
+    output_path: pathlib.Path,
+    identity: ReportIdentity,
+    samples: ReportSamples,
+    summaries: ReportSummaries,
+    gate_checks: list[GateCheck],
+) -> None:
+    header = f"""# Agent surface profile
+
+- Generated at: {datetime.now(timezone.utc).isoformat()}
+- Base URL: `{identity.base_url}`
+- Library ID: `{identity.library_id}`
+- Workspace ID: `{identity.workspace_id}`
+- Entity query: `{identity.entity_query}`
+- Document query: `{identity.document_query}`
+- Assistant question: `{identity.question}`
+
 """
-    for check in gate_checks:
-        report += f"| `{check.label}` | {check.status} | {check.detail} |\n"
-    output_path.write_text(report, encoding="utf-8")
+    report = "".join(
+        (
+            header,
+            _mcp_probe_report(samples, summaries),
+            _quality_report(summaries),
+            _assistant_report(summaries),
+            _runtime_and_preview_report(summaries),
+            _grounded_answer_report(summaries.grounded_answer_summary),
+            _release_gate_report(gate_checks),
+        )
+    )
+    write_private_text(output_path, report)
 
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
@@ -1848,7 +2351,14 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--login", default=DEFAULT_LOGIN)
     parser.add_argument("--library-id", required=True)
     parser.add_argument("--workspace-id")
-    parser.add_argument("--mcp-token", default=os.environ.get("IRONRAG_MCP_TOKEN"))
+    parser.add_argument(
+        "--probe-input-stdin",
+        action="store_true",
+        help=(
+            "Read suite-only password, MCP token, and question inputs from one JSON object on "
+            "stdin. Direct invocations use the IRONRAG_* environment variables instead."
+        ),
+    )
     parser.add_argument(
         "--entity-query",
         default=DEFAULT_ENTITY_QUERY,
@@ -1864,7 +2374,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--read-length", type=int, default=DEFAULT_READ_LENGTH)
     parser.add_argument(
         "--question",
-        default=DEFAULT_ASSISTANT_QUESTION,
+        default=os.environ.get(PROBE_QUESTION_ENV, DEFAULT_ASSISTANT_QUESTION),
         help="Assistant and grounded_answer probe question. Defaults to the top graph entity.",
     )
     parser.add_argument("--assistant-top-k", type=int, default=DEFAULT_ASSISTANT_TOP_K)
@@ -1909,329 +2419,503 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
-def resolve_probe_password() -> str:
-    password = os.environ.get(PROBE_PASSWORD_ENV)
-    if not password:
+def resolve_probe_inputs(args: argparse.Namespace) -> ProbeInputs:
+    if args.probe_input_stdin:
+        try:
+            payload = json.loads(sys.stdin.read())
+        except json.JSONDecodeError as error:
+            raise SystemExit("probe stdin input must be valid JSON") from error
+        if not isinstance(payload, dict):
+            raise SystemExit("probe stdin input must be a JSON object")
+        password = payload.get("password")
+        mcp_token = payload.get("mcpToken")
+        question = payload.get("question", args.question)
+    else:
+        password = os.environ.get(PROBE_PASSWORD_ENV)
+        mcp_token = os.environ.get(MCP_TOKEN_ENV)
+        question = args.question
+
+    if not isinstance(password, str) or not password:
         raise SystemExit(f"{PROBE_PASSWORD_ENV} is required")
-    return password
+    if mcp_token is not None and (not isinstance(mcp_token, str) or not mcp_token):
+        raise SystemExit(f"{MCP_TOKEN_ENV} must be a non-empty string when provided")
+    if question is not None and not isinstance(question, str):
+        raise SystemExit(f"{PROBE_QUESTION_ENV} must be a string when provided")
+    return ProbeInputs(password=password, mcp_token=mcp_token, question=question)
 
 
-def main(argv: list[str]) -> int:
-    args = parse_args(argv)
-    session = CurlSession(args.base_url)
-    try:
-        session.login(args.login, resolve_probe_password())
-        library_catalog_context = discover_library_catalog_context(session, args.library_id)
-        workspace_id = args.workspace_id or library_catalog_context.workspace_id
-        library_catalog_ref = library_catalog_context.catalog_ref
+@dataclass(frozen=True)
+class DocumentProbe:
+    search_sample: CurlSample
+    search_summary: DocumentSearchSummary
+    read_sample: CurlSample | None
+    read_summary: DocumentReadSummary | None
 
-        tools_list = session.request_json(
-            "POST",
-            MCP_DIAGNOSTICS_ROUTE,
-            body={
-                "jsonrpc": "2.0",
-                "id": "agent-probe-tools-list",
-                "method": "tools/list",
-                "params": {},
-            },
-            headers={"Content-Type": "application/json"},
-            bearer_token=args.mcp_token,
-            timeout_seconds=args.timeout_seconds,
-        )
-        ensure_jsonrpc_result(tools_list, "tools/list")
 
-        graph_topology = probe_mcp_tool(
-            session,
-            bearer_token=args.mcp_token,
-            tool_name="get_graph_topology",
-            arguments={"library": library_catalog_ref, "limit": args.graph_limit},
-        )
-        topology_result = ensure_jsonrpc_result(graph_topology, "get_graph_topology")
-        if topology_result.get("isError"):
-            raise RuntimeError(f"get_graph_topology returned tool error: {topology_result!r}")
-        graph_quality = summarize_graph_quality(topology_result.get("structuredContent") or {})
+@dataclass(frozen=True)
+class RuntimeProbe:
+    execution_sample: CurlSample | None
+    execution_summary: RuntimeExecutionProbeSummary | None
+    trace_sample: CurlSample | None
+    trace_summary: RuntimeTraceProbeSummary | None
+    legacy_sample: CurlSample | None
+    legacy_error: ToolErrorSummary | None
 
-        entity_query, document_query, question = resolve_probe_queries(
-            entity_query=args.entity_query,
-            document_query=args.document_query,
-            question=args.question,
-            graph_quality=graph_quality,
-        )
 
-        entity_search = probe_mcp_tool(
-            session,
-            bearer_token=args.mcp_token,
-            tool_name="search_entities",
-            arguments={"library": library_catalog_ref, "query": entity_query, "limit": 10},
-        )
-        entity_search_result = ensure_jsonrpc_result(entity_search, "search_entities")
-        if entity_search_result.get("isError"):
-            raise RuntimeError(f"search_entities returned tool error: {entity_search_result!r}")
-        entity_search_summary = summarize_entity_search(
-            entity_search_result.get("structuredContent") or {}
-        )
+@dataclass(frozen=True)
+class ProbeExecution:
+    identity: ReportIdentity
+    samples: ReportSamples
+    summaries: ReportSummaries
 
-        document_search = probe_mcp_tool(
-            session,
-            bearer_token=args.mcp_token,
-            tool_name="search_documents",
-            arguments=build_document_search_arguments(
-                library_catalog_ref, document_query, args.document_limit
-            ),
-        )
-        document_search_result = ensure_jsonrpc_result(document_search, "search_documents")
-        if document_search_result.get("isError"):
-            raise RuntimeError(
-                f"search_documents returned tool error: {document_search_result!r}"
-            )
-        document_search_summary = summarize_document_search(
-            document_search_result.get("structuredContent") or {}
-        )
 
-        document_read: CurlSample | None = None
-        document_read_summary: DocumentReadSummary | None = None
-        if document_search_summary.top_document_id is not None:
-            read_arguments: dict[str, Any] = {
-                "documentId": document_search_summary.top_document_id,
-                "mode": "excerpt",
-                "length": args.read_length,
-                "includeReferences": True,
-            }
-            if document_search_summary.top_suggested_start_offset is not None:
-                read_arguments["startOffset"] = document_search_summary.top_suggested_start_offset
-            document_read = probe_mcp_tool(
+def _tool_content(sample: CurlSample, tool_name: str) -> dict[str, Any]:
+    result = ensure_jsonrpc_result(sample, tool_name)
+    if result.get("isError"):
+        raise RuntimeError(f"{tool_name} returned tool error: {result!r}")
+    content = result.get("structuredContent") or {}
+    return content if isinstance(content, dict) else {}
+
+
+def _discover_mcp_tools(
+    session: CurlSession,
+    args: argparse.Namespace,
+    token: str | None,
+) -> CurlSample:
+    capabilities = session.request_json(
+        "GET",
+        MCP_ANSWER_CAPABILITIES_ROUTE,
+        bearer_token=token,
+        timeout_seconds=args.timeout_seconds,
+    )
+    answer_tools = session.mcp_request_json(
+        MCP_ANSWER_ROUTE,
+        body={
+            "jsonrpc": "2.0",
+            "id": "agent-probe-answer-tools-list",
+            "method": MCP_TOOLS_LIST_METHOD,
+            "params": {},
+        },
+        bearer_token=token,
+        timeout_seconds=args.timeout_seconds,
+    )
+    validate_answer_mcp_discovery(capabilities, answer_tools)
+    diagnostic_tools = session.mcp_request_json(
+        MCP_DIAGNOSTICS_ROUTE,
+        body={
+            "jsonrpc": "2.0",
+            "id": "agent-probe-tools-list",
+            "method": MCP_TOOLS_LIST_METHOD,
+            "params": {},
+        },
+        bearer_token=token,
+        timeout_seconds=args.timeout_seconds,
+    )
+    ensure_jsonrpc_result(diagnostic_tools, MCP_TOOLS_LIST_METHOD)
+    return diagnostic_tools
+
+
+def _probe_topology(
+    session: CurlSession,
+    token: str | None,
+    library_ref: str,
+    limit: int,
+) -> tuple[CurlSample, McpQualitySummary]:
+    sample = probe_mcp_tool(
+        session,
+        bearer_token=token,
+        tool_name="get_graph_topology",
+        arguments={"library": library_ref, "limit": limit},
+    )
+    return sample, summarize_graph_quality(_tool_content(sample, "get_graph_topology"))
+
+
+def _probe_entity_search(
+    session: CurlSession,
+    token: str | None,
+    library_ref: str,
+    query: str,
+) -> tuple[CurlSample, EntitySearchSummary]:
+    sample = probe_mcp_tool(
+        session,
+        bearer_token=token,
+        tool_name="search_entities",
+        arguments={"library": library_ref, "query": query, "limit": 10},
+    )
+    return sample, summarize_entity_search(_tool_content(sample, "search_entities"))
+
+
+def _probe_document_read(
+    session: CurlSession,
+    args: argparse.Namespace,
+    token: str | None,
+    search: DocumentSearchSummary,
+) -> tuple[CurlSample | None, DocumentReadSummary | None]:
+    if search.top_document_id is None:
+        return None, None
+    arguments: dict[str, Any] = {
+        "documentId": search.top_document_id,
+        "mode": "excerpt",
+        "length": args.read_length,
+        "includeReferences": True,
+    }
+    if search.top_suggested_start_offset is not None:
+        arguments["startOffset"] = search.top_suggested_start_offset
+    sample = probe_mcp_tool(
+        session,
+        bearer_token=token,
+        tool_name="read_document",
+        arguments=arguments,
+    )
+    return sample, summarize_document_read(_tool_content(sample, "read_document"))
+
+
+def _probe_documents(
+    session: CurlSession,
+    args: argparse.Namespace,
+    token: str | None,
+    library_ref: str,
+    query: str,
+) -> DocumentProbe:
+    search_sample = probe_mcp_tool(
+        session,
+        bearer_token=token,
+        tool_name="search_documents",
+        arguments=build_document_search_arguments(
+            library_ref, query, args.document_limit
+        ),
+    )
+    search_summary = summarize_document_search(
+        _tool_content(search_sample, "search_documents")
+    )
+    read_sample, read_summary = _probe_document_read(
+        session, args, token, search_summary
+    )
+    return DocumentProbe(search_sample, search_summary, read_sample, read_summary)
+
+
+def _probe_relations(
+    session: CurlSession,
+    token: str | None,
+    library_ref: str,
+    limit: int,
+) -> tuple[CurlSample, RelationListSummary]:
+    sample = probe_mcp_tool(
+        session,
+        bearer_token=token,
+        tool_name="list_relations",
+        arguments={"library": library_ref, "limit": limit},
+    )
+    result = ensure_jsonrpc_result(sample, "list_relations")
+    return sample, summarize_relation_list(result.get("structuredContent") or [])
+
+
+def _probe_communities(
+    session: CurlSession,
+    token: str | None,
+    library_ref: str,
+    limit: int,
+) -> tuple[CurlSample, CommunitySummary]:
+    sample = probe_mcp_tool(
+        session,
+        bearer_token=token,
+        tool_name="get_communities",
+        arguments={"library": library_ref, "limit": limit},
+    )
+    return sample, summarize_communities(_tool_content(sample, "get_communities"))
+
+
+def _probe_grounded_answer(
+    session: CurlSession,
+    args: argparse.Namespace,
+    token: str | None,
+    library_ref: str,
+    question: str,
+) -> tuple[CurlSample, GroundedAnswerSummary]:
+    sample = probe_mcp_tool(
+        session,
+        bearer_token=token,
+        tool_name="grounded_answer",
+        arguments=build_grounded_answer_probe_arguments(
+            library_ref, question, args.assistant_top_k
+        ),
+        route=MCP_ANSWER_ROUTE,
+    )
+    return sample, summarize_grounded_answer(_tool_content(sample, "grounded_answer"))
+
+
+def _probe_assistant_runs(
+    session: CurlSession,
+    args: argparse.Namespace,
+    workspace_id: str,
+    question: str,
+) -> list[AssistantTurnSummary]:
+    summaries: list[AssistantTurnSummary] = []
+    for _ in range(args.assistant_runs):
+        query_session_id = create_query_session(session, workspace_id, args.library_id)
+        summaries.append(
+            execute_assistant_turn(
                 session,
-                bearer_token=args.mcp_token,
-                tool_name="read_document",
-                arguments=read_arguments,
+                query_session_id,
+                question,
+                top_k=args.assistant_top_k,
+                timeout_seconds=args.timeout_seconds,
             )
-            document_read_result = ensure_jsonrpc_result(document_read, "read_document")
-            if document_read_result.get("isError"):
-                raise RuntimeError(f"read_document returned tool error: {document_read_result!r}")
-            document_read_summary = summarize_document_read(
-                document_read_result.get("structuredContent") or {}
-            )
-
-        list_relations = probe_mcp_tool(
-            session,
-            bearer_token=args.mcp_token,
-            tool_name="list_relations",
-            arguments={"library": library_catalog_ref, "limit": args.graph_limit},
         )
-        list_relations_result = ensure_jsonrpc_result(list_relations, "list_relations")
-        relation_list_summary = summarize_relation_list(
-            list_relations_result.get("structuredContent") or []
-        )
+    return summaries
 
-        communities = probe_mcp_tool(
-            session,
-            bearer_token=args.mcp_token,
-            tool_name="get_communities",
-            arguments={"library": library_catalog_ref, "limit": args.graph_limit},
-        )
-        communities_result = ensure_jsonrpc_result(communities, "get_communities")
-        if communities_result.get("isError"):
-            raise RuntimeError(f"get_communities returned tool error: {communities_result!r}")
-        community_summary = summarize_communities(
-            communities_result.get("structuredContent") or {}
-        )
 
-        grounded_answer: CurlSample | None = None
-        grounded_answer_summary: GroundedAnswerSummary | None = None
-        grounded_answer = probe_mcp_tool(
-            session,
-            bearer_token=args.mcp_token,
-            tool_name="grounded_answer",
-            arguments={
-                "library": library_catalog_ref,
-                "query": question,
-                "topK": args.assistant_top_k,
-            },
-            route=MCP_ANSWER_ROUTE,
-        )
-        grounded_answer_result = ensure_jsonrpc_result(grounded_answer, "grounded_answer")
-        if grounded_answer_result.get("isError"):
-            raise RuntimeError(f"grounded_answer returned tool error: {grounded_answer_result!r}")
-        grounded_answer_summary = summarize_grounded_answer(
-            grounded_answer_result.get("structuredContent") or {}
-        )
+def _first_runtime_execution_id(
+    summaries: list[AssistantTurnSummary],
+) -> str | None:
+    return next(
+        (
+            summary.runtime_execution_id
+            for summary in summaries
+            if summary.runtime_execution_id is not None
+        ),
+        None,
+    )
 
-        assistant_summaries: list[AssistantTurnSummary] = []
-        for _ in range(args.assistant_runs):
-            query_session_id = create_query_session(session, workspace_id, args.library_id)
-            assistant_summaries.append(
-                execute_assistant_turn(
-                    session,
-                    query_session_id,
-                    question,
-                    top_k=args.assistant_top_k,
-                    timeout_seconds=args.timeout_seconds,
-                )
-            )
 
-        first_runtime_execution_id = next(
-            (
-                summary.runtime_execution_id
-                for summary in assistant_summaries
-                if summary.runtime_execution_id is not None
-            ),
-            None,
-        )
-        runtime_execution: CurlSample | None = None
-        runtime_execution_summary: RuntimeExecutionProbeSummary | None = None
-        runtime_trace: CurlSample | None = None
-        runtime_trace_summary: RuntimeTraceProbeSummary | None = None
-        legacy_runtime_execution_probe: CurlSample | None = None
-        legacy_runtime_execution_error: ToolErrorSummary | None = None
-        if first_runtime_execution_id is not None:
-            runtime_execution = probe_mcp_tool(
-                session,
-                bearer_token=args.mcp_token,
-                tool_name="get_runtime_execution",
-                arguments={"runtimeExecutionId": first_runtime_execution_id},
-            )
-            runtime_execution_result = ensure_jsonrpc_result(
-                runtime_execution, "get_runtime_execution"
-            )
-            if runtime_execution_result.get("isError"):
-                raise RuntimeError(
-                    "get_runtime_execution returned tool error: "
-                    f"{runtime_execution_result!r}"
-                )
-            runtime_execution_summary = summarize_runtime_execution(
-                runtime_execution_result.get("structuredContent") or {}
-            )
+def _probe_runtime(
+    session: CurlSession,
+    token: str | None,
+    runtime_execution_id: str | None,
+) -> RuntimeProbe:
+    if runtime_execution_id is None:
+        return RuntimeProbe(None, None, None, None, None, None)
+    execution_sample = probe_mcp_tool(
+        session,
+        bearer_token=token,
+        tool_name="get_runtime_execution",
+        arguments={"runtimeExecutionId": runtime_execution_id},
+    )
+    execution_summary = summarize_runtime_execution(
+        _tool_content(execution_sample, "get_runtime_execution")
+    )
+    trace_sample = probe_mcp_tool(
+        session,
+        bearer_token=token,
+        tool_name="get_runtime_execution_trace",
+        arguments={"runtimeExecutionId": runtime_execution_id},
+    )
+    trace_summary = summarize_runtime_trace(
+        _tool_content(trace_sample, "get_runtime_execution_trace")
+    )
+    legacy_sample = probe_mcp_tool(
+        session,
+        bearer_token=token,
+        tool_name="get_runtime_execution",
+        arguments={"executionId": runtime_execution_id},
+    )
+    legacy_result = ensure_jsonrpc_result(
+        legacy_sample, "get_runtime_execution legacy executionId"
+    )
+    return RuntimeProbe(
+        execution_sample,
+        execution_summary,
+        trace_sample,
+        trace_summary,
+        legacy_sample,
+        summarize_tool_error(legacy_result),
+    )
 
-            runtime_trace = probe_mcp_tool(
-                session,
-                bearer_token=args.mcp_token,
-                tool_name="get_runtime_execution_trace",
-                arguments={"runtimeExecutionId": first_runtime_execution_id},
-            )
-            runtime_trace_result = ensure_jsonrpc_result(
-                runtime_trace, "get_runtime_execution_trace"
-            )
-            if runtime_trace_result.get("isError"):
-                raise RuntimeError(
-                    "get_runtime_execution_trace returned tool error: "
-                    f"{runtime_trace_result!r}"
-                )
-            runtime_trace_summary = summarize_runtime_trace(
-                runtime_trace_result.get("structuredContent") or {}
-            )
 
-            legacy_runtime_execution_probe = probe_mcp_tool(
-                session,
-                bearer_token=args.mcp_token,
-                tool_name="get_runtime_execution",
-                arguments={"executionId": first_runtime_execution_id},
-            )
-            legacy_runtime_execution_result = ensure_jsonrpc_result(
-                legacy_runtime_execution_probe, "get_runtime_execution legacy executionId"
-            )
-            legacy_runtime_execution_error = summarize_tool_error(
-                legacy_runtime_execution_result
-            )
-
-        gate_checks = build_gate_checks(
-            entity_search_summary=entity_search_summary,
-            document_search_summary=document_search_summary,
-            document_read_summary=document_read_summary,
-            graph_quality=graph_quality,
-            relation_list_summary=relation_list_summary,
-            community_summary=community_summary,
-            assistant_summaries=assistant_summaries,
-            runtime_execution_summary=runtime_execution_summary,
-            runtime_trace_summary=runtime_trace_summary,
-            legacy_runtime_execution_error=legacy_runtime_execution_error,
-            grounded_answer_summary=grounded_answer_summary,
-            graph_min_entities=args.graph_min_entities,
-            graph_min_relations=args.graph_min_relations,
-            graph_min_documents=args.graph_min_documents,
-            community_min_count=args.community_min_count,
-            entity_search_min_hits=args.entity_search_min_hits,
-            search_min_hits=args.search_min_hits,
-            search_min_readable_hits=args.search_min_readable_hits,
-            read_min_content_chars=args.read_min_content_chars,
-            read_min_references=args.read_min_references,
-            assistant_min_references=args.assistant_min_references,
-            assistant_expected_verification=args.assistant_expected_verification,
-            assistant_require_all=parse_csv_terms(args.assistant_require_all),
-            assistant_forbid_any=parse_csv_terms(args.assistant_forbid_any),
-            expected_search_top_label=args.expected_search_top_label,
-            min_answer_overlap_ratio=args.min_answer_overlap_ratio,
-            max_tool_latency_ms=args.max_tool_latency_ms,
-            max_completed_ms=args.max_completed_ms,
-            tool_samples=[
-                ("tools_list", tools_list),
-                ("search_entities", entity_search),
-                ("search_documents", document_search),
-                *((("read_document", document_read),) if document_read is not None else ()),
-                ("get_graph_topology", graph_topology),
-                ("list_relations", list_relations),
-                ("get_communities", communities),
-                *((("get_runtime_execution", runtime_execution),) if runtime_execution is not None else ()),
-                *((("get_runtime_execution_trace", runtime_trace),) if runtime_trace is not None else ()),
-                *((("get_runtime_execution_legacy_field", legacy_runtime_execution_probe),) if legacy_runtime_execution_probe is not None else ()),
-                *((("grounded_answer", grounded_answer),) if grounded_answer is not None else ()),
-            ],
-            max_first_frame_ms=args.max_first_frame_ms,
-        )
-
-        timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-        output_path = (
-            pathlib.Path(args.output_path)
-            if args.output_path
-            else pathlib.Path("tmp") / f"agent-surface-profile-{timestamp}.md"
-        )
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        render_report(
-            output_path=output_path,
+def _run_probe_surfaces(
+    session: CurlSession,
+    args: argparse.Namespace,
+    probe_inputs: ProbeInputs,
+) -> ProbeExecution:
+    session.login(args.login, probe_inputs.password)
+    catalog = discover_library_catalog_context(session, args.library_id)
+    workspace_id = args.workspace_id or catalog.workspace_id
+    token = probe_inputs.mcp_token
+    tools_list = _discover_mcp_tools(session, args, token)
+    topology_sample, graph = _probe_topology(
+        session, token, catalog.catalog_ref, args.graph_limit
+    )
+    entity_query, document_query, question = resolve_probe_queries(
+        entity_query=args.entity_query,
+        document_query=args.document_query,
+        question=probe_inputs.question,
+        graph_quality=graph,
+    )
+    entity_sample, entity_summary = _probe_entity_search(
+        session, token, catalog.catalog_ref, entity_query
+    )
+    documents = _probe_documents(
+        session, args, token, catalog.catalog_ref, document_query
+    )
+    relation_sample, relation_summary = _probe_relations(
+        session, token, catalog.catalog_ref, args.graph_limit
+    )
+    community_sample, community_summary = _probe_communities(
+        session, token, catalog.catalog_ref, args.graph_limit
+    )
+    grounded_sample, grounded_summary = _probe_grounded_answer(
+        session, args, token, catalog.catalog_ref, question
+    )
+    assistant_summaries = _probe_assistant_runs(
+        session, args, workspace_id, question
+    )
+    runtime = _probe_runtime(
+        session, token, _first_runtime_execution_id(assistant_summaries)
+    )
+    return ProbeExecution(
+        identity=ReportIdentity(
             base_url=args.base_url,
             library_id=args.library_id,
             workspace_id=workspace_id,
             entity_query=entity_query,
             document_query=document_query,
             question=question,
+        ),
+        samples=ReportSamples(
             tools_list=tools_list,
-            entity_search=entity_search,
-            entity_search_summary=entity_search_summary,
-            document_search=document_search,
-            document_search_summary=document_search_summary,
-            document_read=document_read,
-            document_read_summary=document_read_summary,
-            graph_topology=graph_topology,
-            list_relations=list_relations,
-            communities=communities,
+            entity_search=entity_sample,
+            document_search=documents.search_sample,
+            document_read=documents.read_sample,
+            graph_topology=topology_sample,
+            list_relations=relation_sample,
+            communities=community_sample,
+            runtime_execution=runtime.execution_sample,
+            runtime_trace=runtime.trace_sample,
+            legacy_runtime_execution_probe=runtime.legacy_sample,
+            grounded_answer=grounded_sample,
+        ),
+        summaries=ReportSummaries(
+            entity_search_summary=entity_summary,
+            document_search_summary=documents.search_summary,
+            document_read_summary=documents.read_summary,
             community_summary=community_summary,
-            runtime_execution=runtime_execution,
-            runtime_execution_summary=runtime_execution_summary,
-            runtime_trace=runtime_trace,
-            runtime_trace_summary=runtime_trace_summary,
-            legacy_runtime_execution_probe=legacy_runtime_execution_probe,
-            legacy_runtime_execution_error=legacy_runtime_execution_error,
-            grounded_answer=grounded_answer,
-            grounded_answer_summary=grounded_answer_summary,
-            graph_quality=graph_quality,
-            relation_list_summary=relation_list_summary,
+            runtime_execution_summary=runtime.execution_summary,
+            runtime_trace_summary=runtime.trace_summary,
+            legacy_runtime_execution_error=runtime.legacy_error,
+            grounded_answer_summary=grounded_summary,
+            graph_quality=graph,
+            relation_list_summary=relation_summary,
             assistant_summaries=assistant_summaries,
-            gate_checks=gate_checks,
-        )
-        print(output_path)
-        failed_checks = [check for check in gate_checks if check.status == "fail"]
-        if failed_checks:
-            print(
-                "agent surface probe failed release gate: "
-                + ", ".join(check.label for check in failed_checks),
-                file=sys.stderr,
-            )
-            return 2
+        ),
+    )
+
+
+def _tool_samples(samples: ReportSamples) -> list[tuple[str, CurlSample]]:
+    required = [
+        ("tools_list", samples.tools_list),
+        ("search_entities", samples.entity_search),
+        ("search_documents", samples.document_search),
+        ("get_graph_topology", samples.graph_topology),
+        ("list_relations", samples.list_relations),
+        ("get_communities", samples.communities),
+    ]
+    optional = [
+        ("read_document", samples.document_read),
+        ("get_runtime_execution", samples.runtime_execution),
+        ("get_runtime_execution_trace", samples.runtime_trace),
+        ("get_runtime_execution_legacy_field", samples.legacy_runtime_execution_probe),
+        ("grounded_answer", samples.grounded_answer),
+    ]
+    required.extend((name, sample) for name, sample in optional if sample is not None)
+    return required
+
+
+def _gate_thresholds(args: argparse.Namespace) -> GateThresholds:
+    return GateThresholds(
+        graph_min_entities=args.graph_min_entities,
+        graph_min_relations=args.graph_min_relations,
+        graph_min_documents=args.graph_min_documents,
+        community_min_count=args.community_min_count,
+        entity_search_min_hits=args.entity_search_min_hits,
+        search_min_hits=args.search_min_hits,
+        search_min_readable_hits=args.search_min_readable_hits,
+        read_min_content_chars=args.read_min_content_chars,
+        read_min_references=args.read_min_references,
+        assistant_min_references=args.assistant_min_references,
+        assistant_expected_verification=args.assistant_expected_verification,
+        max_tool_latency_ms=args.max_tool_latency_ms,
+        max_completed_ms=args.max_completed_ms,
+        max_first_frame_ms=args.max_first_frame_ms,
+        min_answer_overlap_ratio=args.min_answer_overlap_ratio,
+    )
+
+
+def _probe_gate_checks(
+    execution: ProbeExecution,
+    args: argparse.Namespace,
+) -> list[GateCheck]:
+    summaries = execution.summaries
+    return build_gate_checks(
+        GateInputs(
+            entity_search_summary=summaries.entity_search_summary,
+            document_search_summary=summaries.document_search_summary,
+            document_read_summary=summaries.document_read_summary,
+            graph_quality=summaries.graph_quality,
+            relation_list_summary=summaries.relation_list_summary,
+            community_summary=summaries.community_summary,
+            assistant_summaries=summaries.assistant_summaries,
+            runtime_execution_summary=summaries.runtime_execution_summary,
+            runtime_trace_summary=summaries.runtime_trace_summary,
+            legacy_runtime_execution_error=summaries.legacy_runtime_execution_error,
+            grounded_answer_summary=summaries.grounded_answer_summary,
+            assistant_require_all=parse_csv_terms(args.assistant_require_all),
+            assistant_forbid_any=parse_csv_terms(args.assistant_forbid_any),
+            expected_search_top_label=args.expected_search_top_label,
+            tool_samples=_tool_samples(execution.samples),
+        ),
+        _gate_thresholds(args),
+    )
+
+
+def _report_output_path(args: argparse.Namespace) -> pathlib.Path:
+    if args.output_path:
+        output_path = pathlib.Path(args.output_path)
+        output_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        return output_path
+    output_directory = pathlib.Path("tmp")
+    ensure_private_directory(output_directory)
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    return output_directory / f"agent-surface-profile-{timestamp}.md"
+
+
+def _finish_probe(execution: ProbeExecution, args: argparse.Namespace) -> int:
+    gate_checks = _probe_gate_checks(execution, args)
+    output_path = _report_output_path(args)
+    render_report(
+        output_path,
+        execution.identity,
+        execution.samples,
+        execution.summaries,
+        gate_checks,
+    )
+    print(output_path)
+    failed_checks = [check for check in gate_checks if check.status == "fail"]
+    if not failed_checks:
         return 0
+    print(
+        "agent surface probe failed release gate: "
+        + ", ".join(check.label for check in failed_checks),
+        file=sys.stderr,
+    )
+    return 2
+
+
+def run_probe(argv: list[str]) -> int:
+    args = parse_args(argv)
+    probe_inputs = resolve_probe_inputs(args)
+    session = CurlSession(args.base_url)
+    try:
+        execution = _run_probe_surfaces(session, args, probe_inputs)
+        return _finish_probe(execution, args)
     except (RuntimeError, TimeoutError, urllib_error.URLError) as exc:
         print(f"agent surface probe failed: {exc}", file=sys.stderr)
         return 1
     finally:
         session.cleanup()
+
+
+def main(argv: list[str]) -> int:
+    return run_probe(argv)
 
 
 if __name__ == "__main__":

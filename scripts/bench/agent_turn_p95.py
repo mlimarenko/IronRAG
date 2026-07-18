@@ -19,13 +19,13 @@ IRONRAG_BENCH_QUESTIONS
 
 Exit codes
 ----------
-0  p95 latency is within the SLO gate (≤ 28 000 ms)
+0  p95 latency is within the configured gate (default hard SLO: ≤ 90 000 ms)
 1  p95 latency breaches the gate, a quality gate fails, or required env vars
    are missing
 
-SLO gate reference: the project concurrency SLO — "p95 ≤ 30 s" for a full turn;
-this script uses a 28 000 ms gate (28 s) to match WALL_CLOCK_DEADLINE in
-mcp_agent/turn.rs, with a 2 s margin before the constitution threshold.
+SLO model: 90 s is the hard full-turn availability ceiling. Release and canary
+workflows intentionally pass stricter 30 s and 25 s targets respectively. The
+relative baseline/candidate gate remains mandatory even when the hard SLO passes.
 """
 
 from __future__ import annotations
@@ -33,10 +33,10 @@ from __future__ import annotations
 import argparse
 import http.cookiejar
 import json
+import math
 import os
 import pathlib
 import re
-import statistics
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -52,13 +52,14 @@ from urllib import request as urllib_request
 DEFAULT_BASE_URL = "http://localhost:19000"
 DEFAULT_QUESTIONS_PATH = "scripts/bench/grounded-queries.md"
 
-# Concurrency SLO gate: p95 <= 30 s per turn.
-# We enforce 28 s here to match WALL_CLOCK_DEADLINE in mcp_agent/turn.rs,
-# providing a 2 s margin before the SLO threshold.
-P95_GATE_MS = 28_000
+# Hard full-turn availability SLO. Release/canary commands override this with
+# stricter targets; keeping the hard ceiling here prevents silent conflicts
+# between the generic tool and environment-specific rollout policy.
+P95_GATE_MS = 90_000
 DEFAULT_EXPECTED_VERIFICATION: str | None = None
 DEFAULT_MIN_REFERENCES = 1
 DEFAULT_MIN_ANSWER_CHARS = 1
+JSON_MEDIA_TYPE = "application/json"
 UUID_PATTERN = re.compile(
     r"^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-"
     r"[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$"
@@ -99,8 +100,8 @@ class BenchmarkQuestion:
 
 def _headers(auth_headers: dict[str, str]) -> dict[str, str]:
     headers = {
-        "Content-Type": "application/json",
-        "Accept": "application/json",
+        "Content-Type": JSON_MEDIA_TYPE,
+        "Accept": JSON_MEDIA_TYPE,
     }
     headers.update(auth_headers)
     return headers
@@ -115,7 +116,7 @@ def _cookie_auth_header(base_url: str, login: str, password: str) -> str:
     req = urllib_request.Request(
         url,
         data=data,
-        headers={"Content-Type": "application/json", "Accept": "application/json"},
+        headers={"Content-Type": JSON_MEDIA_TYPE, "Accept": JSON_MEDIA_TYPE},
         method="POST",
     )
     with opener.open(req, timeout=30) as resp:
@@ -221,23 +222,26 @@ def parse_question_case(case: Any) -> BenchmarkQuestion:
     )
 
 
+def _expectation_values(value: Any, key: str) -> list[str]:
+    if isinstance(value, str):
+        return split_expectation_list(value)
+    if isinstance(value, list):
+        expectations = []
+        for item in value:
+            if not isinstance(item, str):
+                raise ValueError(f"{key} entries must be strings")
+            stripped = item.strip()
+            if stripped:
+                expectations.append(stripped)
+        return expectations
+    raise ValueError(f"{key} must be a string or list")
+
+
 def read_expectation_values(case: dict[str, Any], *keys: str) -> list[str]:
     for key in keys:
         value = case.get(key)
-        if value is None:
-            continue
-        if isinstance(value, str):
-            return split_expectation_list(value)
-        if isinstance(value, list):
-            expectations: list[str] = []
-            for item in value:
-                if not isinstance(item, str):
-                    raise ValueError(f"{key} entries must be strings")
-                stripped = item.strip()
-                if stripped:
-                    expectations.append(stripped)
-            return expectations
-        raise ValueError(f"{key} must be a string or list")
+        if value is not None:
+            return _expectation_values(value, key)
     return []
 
 
@@ -369,15 +373,133 @@ def run_turn(
 
 
 def percentile(data: list[float], p: int) -> float:
-    """Return the p-th percentile (inclusive method) from a sorted list."""
-    if len(data) == 1:
-        return data[0]
-    # statistics.quantiles returns n-1 cut points; we need the p-th percentile
-    # via the 'inclusive' method, which matches the constitution definition.
-    qs = statistics.quantiles(sorted(data), n=100, method="inclusive")
-    # quantiles(n=100) returns 99 values: index 0 = P1, index 98 = P99
-    idx = max(0, min(p - 1, len(qs) - 1))
-    return qs[idx]
+    """Return the conservative nearest-rank percentile for a finite sample."""
+    if not data:
+        raise ValueError("percentile requires at least one sample")
+    if p < 0 or p > 100:
+        raise ValueError("percentile must be between 0 and 100")
+    ordered = sorted(data)
+    if p == 0:
+        return ordered[0]
+    rank = math.ceil((p / 100.0) * len(ordered))
+    return ordered[rank - 1]
+
+
+def _case_quality_thresholds(
+    spec: BenchmarkQuestion,
+    expected_verification: str | None,
+    min_references: int,
+    min_answer_chars: int,
+) -> tuple[str | None, int, int]:
+    return (
+        spec.expected_verification
+        if spec.expected_verification is not None
+        else expected_verification,
+        max(min_references, spec.min_references)
+        if spec.min_references is not None
+        else min_references,
+        max(min_answer_chars, spec.min_answer_chars)
+        if spec.min_answer_chars is not None
+        else min_answer_chars,
+    )
+
+
+def _run_question(
+    spec: BenchmarkQuestion,
+    base_url: str,
+    auth_headers: dict[str, str],
+    library_id: str,
+    top_k: int | None,
+    expected_verification: str | None,
+    min_references: int,
+    min_answer_chars: int,
+    require_all: list[str],
+    forbid_any: list[str],
+) -> tuple[BenchmarkQuestion, float, TurnQuality | None, str | None]:
+    spec_expected_verification, spec_min_references, spec_min_answer_chars = _case_quality_thresholds(
+        spec, expected_verification, min_references, min_answer_chars
+    )
+    elapsed_ms, quality, error = run_turn(
+        base_url,
+        auth_headers,
+        library_id,
+        spec.question,
+        top_k,
+        spec_expected_verification,
+        spec_min_references,
+        spec_min_answer_chars,
+        [*require_all, *spec.require_all],
+        [*forbid_any, *spec.forbid_any],
+    )
+    return spec, elapsed_ms, quality, error
+
+
+def _benchmark_entry(
+    spec: BenchmarkQuestion, elapsed_ms: float, quality: TurnQuality | None, error: str | None
+) -> dict[str, Any]:
+    entry: dict[str, Any] = {"question": spec.question, "elapsed_ms": round(elapsed_ms, 1)}
+    if spec.case_id:
+        entry["case_id"] = spec.case_id
+    if quality is not None:
+        entry.update(
+            answer_chars=quality.answer_chars,
+            verification_state=quality.verification_state,
+            reference_count=quality.reference_count,
+        )
+        if quality.missing_required:
+            entry["missing_required"] = list(quality.missing_required)
+        if quality.forbidden_found:
+            entry["forbidden_found"] = list(quality.forbidden_found)
+    if error:
+        entry["error"] = error
+    return entry
+
+
+def _report_question_result(
+    spec: BenchmarkQuestion, elapsed_ms: float, quality: TurnQuality | None, error: str | None
+) -> None:
+    case_label = f"{spec.case_id}: " if spec.case_id else ""
+    if error:
+        print(
+            f"  FAIL  [{elapsed_ms:8.0f} ms]  {case_label}{spec.question[:60]}  — {error}",
+            file=sys.stderr,
+        )
+        return
+    print(
+        f"  OK    [{elapsed_ms:8.0f} ms]  refs={quality.reference_count if quality else 0:>3}  {case_label}{spec.question[:60]}",
+        file=sys.stderr,
+    )
+
+
+def _empty_benchmark_result(questions: list[BenchmarkQuestion], failure_count: int, per_question: list[dict[str, Any]]) -> dict[str, Any]:
+    return {
+        "runs": len(questions),
+        "successes": 0,
+        "failures": failure_count,
+        "p50_ms": None,
+        "p95_ms": None,
+        "p99_ms": None,
+        "min_ms": None,
+        "max_ms": None,
+        "per_question": per_question,
+    }
+
+
+def _successful_benchmark_result(
+    questions: list[BenchmarkQuestion], failure_count: int, per_question: list[dict[str, Any]], latencies_ms: list[float]
+) -> dict[str, Any]:
+    sorted_latencies = sorted(latencies_ms)
+    return {
+        "runs": len(questions),
+        "successes": len(sorted_latencies),
+        "failures": failure_count,
+        "min_ms": round(sorted_latencies[0], 1),
+        "p50_ms": round(percentile(sorted_latencies, 50), 1),
+        "p95_ms": round(percentile(sorted_latencies, 95), 1),
+        "p99_ms": round(percentile(sorted_latencies, 99), 1),
+        "max_ms": round(sorted_latencies[-1], 1),
+        "per_question": sorted(per_question, key=lambda entry: entry["elapsed_ms"], reverse=True),
+    }
 
 
 def run_benchmark(
@@ -401,98 +523,36 @@ def run_benchmark(
     latencies_ms: list[float] = []
     failure_count = 0
 
-    def _task(spec: BenchmarkQuestion) -> tuple[BenchmarkQuestion, float, TurnQuality | None, str | None]:
-        spec_expected_verification = (
-            spec.expected_verification
-            if spec.expected_verification is not None
-            else expected_verification
-        )
-        spec_min_references = (
-            max(min_references, spec.min_references)
-            if spec.min_references is not None
-            else min_references
-        )
-        spec_min_answer_chars = (
-            max(min_answer_chars, spec.min_answer_chars)
-            if spec.min_answer_chars is not None
-            else min_answer_chars
-        )
-        elapsed_ms, quality, err = run_turn(
-            base_url,
-            auth_headers,
-            library_id,
-            spec.question,
-            top_k,
-            spec_expected_verification,
-            spec_min_references,
-            spec_min_answer_chars,
-            [*require_all, *spec.require_all],
-            [*forbid_any, *spec.forbid_any],
-        )
-        return spec, elapsed_ms, quality, err
-
     with ThreadPoolExecutor(max_workers=concurrency) as executor:
-        futures = {executor.submit(_task, spec): spec for spec in questions}
+        futures = {
+            executor.submit(
+                _run_question,
+                spec,
+                base_url,
+                auth_headers,
+                library_id,
+                top_k,
+                expected_verification,
+                min_references,
+                min_answer_chars,
+                require_all,
+                forbid_any,
+            ): spec
+            for spec in questions
+        }
         for future in as_completed(futures):
-            spec, elapsed_ms, quality, err = future.result()
-            entry: dict[str, Any] = {
-                "question": spec.question,
-                "elapsed_ms": round(elapsed_ms, 1),
-            }
-            if spec.case_id:
-                entry["case_id"] = spec.case_id
-            case_label = f"{spec.case_id}: " if spec.case_id else ""
-            if quality is not None:
-                entry["answer_chars"] = quality.answer_chars
-                entry["verification_state"] = quality.verification_state
-                entry["reference_count"] = quality.reference_count
-                if quality.missing_required:
-                    entry["missing_required"] = list(quality.missing_required)
-                if quality.forbidden_found:
-                    entry["forbidden_found"] = list(quality.forbidden_found)
-            if err:
-                entry["error"] = err
+            spec, elapsed_ms, quality, error = future.result()
+            entry = _benchmark_entry(spec, elapsed_ms, quality, error)
+            _report_question_result(spec, elapsed_ms, quality, error)
+            if error:
                 failure_count += 1
-                print(
-                    f"  FAIL  [{elapsed_ms:8.0f} ms]  {case_label}{spec.question[:60]}  — {err}",
-                    file=sys.stderr,
-                )
             else:
                 latencies_ms.append(elapsed_ms)
-                print(
-                    f"  OK    [{elapsed_ms:8.0f} ms]  refs={quality.reference_count if quality else 0:>3}  {case_label}{spec.question[:60]}",
-                    file=sys.stderr,
-                )
             per_question.append(entry)
 
     if not latencies_ms:
-        return {
-            "runs": len(questions),
-            "successes": 0,
-            "failures": failure_count,
-            "p50_ms": None,
-            "p95_ms": None,
-            "p99_ms": None,
-            "min_ms": None,
-            "max_ms": None,
-            "per_question": per_question,
-        }
-
-    sorted_lat = sorted(latencies_ms)
-    n = len(sorted_lat)
-
-    result: dict[str, Any] = {
-        "runs": len(questions),
-        "successes": n,
-        "failures": failure_count,
-        "min_ms": round(sorted_lat[0], 1),
-        "p50_ms": round(percentile(sorted_lat, 50), 1),
-        "p95_ms": round(percentile(sorted_lat, 95), 1),
-        "p99_ms": round(percentile(sorted_lat, 99), 1),
-        "max_ms": round(sorted_lat[-1], 1),
-        "per_question": sorted(per_question, key=lambda x: x["elapsed_ms"], reverse=True),
-    }
-    return result
+        return _empty_benchmark_result(questions, failure_count, per_question)
+    return _successful_benchmark_result(questions, failure_count, per_question, latencies_ms)
 
 
 def normalize_concurrency(value: int) -> int:

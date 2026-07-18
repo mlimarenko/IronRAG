@@ -1,15 +1,143 @@
-#![allow(clippy::missing_const_for_fn)]
-
 use chrono::{DateTime, Utc};
-use sqlx::{FromRow, PgPool};
+use sqlx::{FromRow, PgConnection, PgPool};
 use uuid::Uuid;
 
 use crate::domains::{
-    agent_runtime::{RuntimeLifecycleState, RuntimeStageKind},
+    agent_runtime::{RuntimeLifecycleState, RuntimeStageKind, RuntimeSurfaceKind},
     query::{QueryConversationState, QueryTurnKind},
 };
 
 pub const INTERRUPTED_QUERY_EXECUTION_FAILURE_CODE: &str = "query_execution_interrupted";
+
+const MCP_REQUEST_SURFACE: &str = RuntimeSurfaceKind::Mcp.as_str();
+const CONVERSATION_RETENTION_LOCK_SQL: &str =
+    "select pg_advisory_xact_lock(hashtextextended(concat($1::text, ':', $2::text), 0))";
+const MCP_CONVERSATION_OVERFLOW_DELETE_SQL: &str = "delete from query_conversation
+     where id in (
+         select conversation.id
+         from query_conversation conversation
+         where conversation.library_id = $1
+           and conversation.request_surface = $2::surface_kind
+           and ($4::uuid is null or conversation.id <> $4)
+           and (
+               (
+                   exists (
+                       select 1
+                       from query_execution execution
+                       where execution.conversation_id = conversation.id
+                   )
+                   and not exists (
+                       select 1
+                       from query_execution execution
+                       where execution.conversation_id = conversation.id
+                         and execution.completed_at is null
+                   )
+               )
+               or (
+                   not exists (
+                       select 1
+                       from query_execution execution
+                       where execution.conversation_id = conversation.id
+                   )
+                   and conversation.created_at < now() - interval '10 minutes'
+               )
+           )
+           and not exists (
+               select 1
+               from query_execution source_execution
+               join query_execution_replay replay
+                 on replay.source_execution_id = source_execution.id
+               where source_execution.conversation_id = conversation.id
+                 and replay.conversation_id <> conversation.id
+           )
+         order by conversation.created_at asc, conversation.id asc
+         limit $3
+         for update skip locked
+     )";
+const MCP_CONVERSATION_RETENTION_ENFORCE_SQL: &str = "with retention_lock as materialized (
+         select pg_advisory_xact_lock(
+             hashtextextended(concat($1::text, ':', $2::text), 0)
+         )
+     ), overflow as materialized (
+         select greatest(count(*)::bigint - $3::bigint, 0::bigint) as row_count
+         from query_conversation conversation
+         cross join retention_lock
+         where conversation.library_id = $1
+           and conversation.request_surface = $2::surface_kind
+     ), candidates as materialized (
+         select conversation.id
+         from query_conversation conversation
+         cross join overflow
+         where conversation.library_id = $1
+           and conversation.request_surface = $2::surface_kind
+           and conversation.id <> $4
+           and (
+               (
+                   exists (
+                       select 1
+                       from query_execution execution
+                       where execution.conversation_id = conversation.id
+                   )
+                   and not exists (
+                       select 1
+                       from query_execution execution
+                       where execution.conversation_id = conversation.id
+                         and execution.completed_at is null
+                   )
+               )
+               or (
+                   not exists (
+                       select 1
+                       from query_execution execution
+                       where execution.conversation_id = conversation.id
+                   )
+                   and conversation.created_at < now() - interval '10 minutes'
+               )
+           )
+           and not exists (
+               select 1
+               from query_execution source_execution
+               join query_execution_replay replay
+                 on replay.source_execution_id = source_execution.id
+               where source_execution.conversation_id = conversation.id
+                 and replay.conversation_id <> conversation.id
+           )
+         order by conversation.created_at asc, conversation.id asc
+         limit (select row_count from overflow)
+         for update of conversation skip locked
+     ), deleted as (
+         delete from query_conversation conversation
+         using candidates
+         where conversation.id = candidates.id
+         returning conversation.id
+     )
+     select count(*)::bigint from deleted";
+const AGE_GUARDED_CONVERSATION_OVERFLOW_DELETE_SQL: &str = "delete from query_conversation
+     where id in (
+         select conversation.id
+         from query_conversation conversation
+         where conversation.library_id = $1
+           and conversation.request_surface = $2::surface_kind
+           and ($4::uuid is null or conversation.id <> $4)
+           and conversation.created_at < now() - interval '10 minutes'
+           and not exists (
+               select 1
+               from query_execution execution
+               where execution.conversation_id = conversation.id
+                 and execution.completed_at is null
+           )
+           and not exists (
+               select 1
+               from query_execution source_execution
+               join query_execution_replay replay
+                 on replay.source_execution_id = source_execution.id
+               where source_execution.conversation_id = conversation.id
+                 and replay.conversation_id <> conversation.id
+           )
+         order by conversation.created_at asc, conversation.id asc
+         limit $3
+         for update skip locked
+     )";
 
 #[derive(Debug, Clone, FromRow)]
 struct StaleQueryExecutionCandidate {
@@ -120,7 +248,7 @@ pub struct NewQueryConversation<'a> {
     pub title: Option<&'a str>,
     pub conversation_state: &'a str,
     /// Canonical `surface_kind` enum value — `'ui'` for the web
-    /// assistant session-create path, `'mcp'` for the grounded_answer
+    /// assistant session-create path, `'mcp'` for the `grounded_answer`
     /// tool. Set once at creation time and drives the UI session
     /// listing filter so MCP-born conversations do not leak into the
     /// web surface.
@@ -159,13 +287,26 @@ pub struct UpdateQueryExecution<'a> {
     pub completed_at: Option<DateTime<Utc>>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Atomic result of deleting one durable UI conversation.
+pub enum DeleteQueryConversationOutcome {
+    /// The conversation and its query-owned children were removed.
+    Deleted,
+    /// The row was absent, non-UI, or outside the caller's mutation ownership.
+    NotFoundOrForbidden,
+    /// At least one execution has not reached its canonical terminal state.
+    ActiveExecution,
+    /// Another conversation still depends on an execution as replay provenance.
+    RetainedByExternalReplay,
+}
+
 pub async fn list_conversations_by_library(
     postgres: &PgPool,
     library_id: Uuid,
 ) -> Result<Vec<QueryConversationRow>, sqlx::Error> {
-    // UI-only listing: MCP-born conversations are audit-visible but
-    // must not surface in the web assistant session list. The surface
-    // is set at creation time on `request_surface`.
+    // UI-only listing: MCP-born rows are transient execution state and must
+    // not surface in the web assistant session list. Their durable audit
+    // trail lives independently in `audit_event` / `audit_event_subject`.
     sqlx::query_as::<_, QueryConversationRowRecord>(
         "select
             id,
@@ -220,46 +361,17 @@ pub async fn create_conversation(
     max_library_conversations: usize,
 ) -> Result<QueryConversationRow, sqlx::Error> {
     let mut transaction = postgres.begin().await?;
-    let existing_count = sqlx::query_scalar::<_, i64>(
-        "select count(*)::bigint
-         from query_conversation
-         where library_id = $1
-           and request_surface = $2::surface_kind",
-    )
-    .bind(input.library_id)
-    .bind(input.request_surface)
-    .fetch_one(&mut *transaction)
-    .await?;
-
-    let overflow_count =
-        existing_count.saturating_add(1).saturating_sub(max_library_conversations as i64);
-
-    if overflow_count > 0 {
-        sqlx::query(
-            "delete from query_conversation
-             where id in (
-                 select conversation.id
-                 from query_conversation conversation
-                 where conversation.library_id = $1
-                   and conversation.request_surface = $2::surface_kind
-                   and conversation.created_at < now() - interval '10 minutes'
-                   and not exists (
-                       select 1
-                       from query_execution execution
-                       where execution.conversation_id = conversation.id
-                         and execution.completed_at is null
-                   )
-                 order by conversation.created_at asc, conversation.id asc
-                 limit $3
-                 for update skip locked
-             )",
-        )
-        .bind(input.library_id)
-        .bind(input.request_surface)
-        .bind(overflow_count)
-        .execute(&mut *transaction)
+    acquire_conversation_retention_lock(&mut transaction, input.library_id, input.request_surface)
         .await?;
-    }
+    delete_conversation_overflow(
+        &mut transaction,
+        input.library_id,
+        input.request_surface,
+        max_library_conversations,
+        1,
+        None,
+    )
+    .await?;
 
     let row = sqlx::query_as::<_, QueryConversationRowRecord>(
         "insert into query_conversation (
@@ -297,16 +409,145 @@ pub async fn create_conversation(
     map_query_conversation_row(row)
 }
 
-pub async fn update_conversation_title(
+/// Re-applies the MCP retention cap after a tool execution reaches a terminal
+/// state. This closes the burst window where several fresh conversations can
+/// all be active during creation and only become evictable afterwards.
+///
+/// The current response's conversation is protected so the caller's returned
+/// trace identifiers remain resolvable. Older completed conversations can be
+/// deleted immediately; their canonical `audit_event` and
+/// `audit_event_subject` rows are independent durable records without foreign
+/// keys back to query storage.
+pub async fn prune_mcp_conversation_overflow(
+    postgres: &PgPool,
+    library_id: Uuid,
+    max_library_conversations: usize,
+    protected_conversation_id: Uuid,
+) -> Result<u64, sqlx::Error> {
+    let max_library_conversations =
+        i64::try_from(max_library_conversations.max(1)).unwrap_or(i64::MAX);
+    let deleted = sqlx::query_scalar::<_, i64>(MCP_CONVERSATION_RETENTION_ENFORCE_SQL)
+        .bind(library_id)
+        .bind(MCP_REQUEST_SURFACE)
+        .bind(max_library_conversations)
+        .bind(protected_conversation_id)
+        .fetch_one(postgres)
+        .await?;
+    Ok(u64::try_from(deleted).unwrap_or(0))
+}
+
+async fn acquire_conversation_retention_lock(
+    connection: &mut PgConnection,
+    library_id: Uuid,
+    request_surface: &str,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(CONVERSATION_RETENTION_LOCK_SQL)
+        .bind(library_id)
+        .bind(request_surface)
+        .execute(&mut *connection)
+        .await?;
+    Ok(())
+}
+
+async fn delete_conversation_overflow(
+    connection: &mut PgConnection,
+    library_id: Uuid,
+    request_surface: &str,
+    max_library_conversations: usize,
+    reserved_rows: i64,
+    protected_conversation_id: Option<Uuid>,
+) -> Result<u64, sqlx::Error> {
+    let existing_count = sqlx::query_scalar::<_, i64>(
+        "select count(*)::bigint
+         from query_conversation
+         where library_id = $1
+           and request_surface = $2::surface_kind",
+    )
+    .bind(library_id)
+    .bind(request_surface)
+    .fetch_one(&mut *connection)
+    .await?;
+
+    let max_library_conversations =
+        i64::try_from(max_library_conversations.max(1)).unwrap_or(i64::MAX);
+    let overflow_count = existing_count
+        .saturating_add(reserved_rows.max(0))
+        .saturating_sub(max_library_conversations);
+
+    if overflow_count <= 0 {
+        return Ok(0);
+    }
+
+    let delete_sql = if request_surface == MCP_REQUEST_SURFACE {
+        MCP_CONVERSATION_OVERFLOW_DELETE_SQL
+    } else {
+        AGE_GUARDED_CONVERSATION_OVERFLOW_DELETE_SQL
+    };
+    let result = sqlx::query(delete_sql)
+        .bind(library_id)
+        .bind(request_surface)
+        .bind(overflow_count)
+        .bind(protected_conversation_id)
+        .execute(&mut *connection)
+        .await?;
+    Ok(result.rows_affected())
+}
+
+/// Sets the automatically-derived title only while the conversation is untitled.
+///
+/// # Errors
+/// Returns a repository error when the conversation cannot be loaded or updated.
+pub async fn initialize_conversation_title(
     postgres: &PgPool,
     conversation_id: Uuid,
     title: &str,
 ) -> Result<QueryConversationRow, sqlx::Error> {
     let row = sqlx::query_as::<_, QueryConversationRowRecord>(
+        "with initialized as (
+            update query_conversation
+            set title = $2,
+                updated_at = now()
+            where id = $1
+              and title is null
+            returning id
+         )
+         select
+            id,
+            workspace_id,
+            library_id,
+            created_by_principal_id,
+            title,
+            conversation_state::text as conversation_state_text,
+            created_at,
+            updated_at
+         from query_conversation
+         where id = $1",
+    )
+    .bind(conversation_id)
+    .bind(title)
+    .fetch_one(postgres)
+    .await?;
+    map_query_conversation_row(row)
+}
+
+/// Persists an explicit title for an owned or manager-authorized UI conversation.
+///
+/// # Errors
+/// Returns a repository error when the update cannot be executed.
+pub async fn rename_ui_conversation(
+    postgres: &PgPool,
+    conversation_id: Uuid,
+    actor_principal_id: Uuid,
+    allow_manage_all: bool,
+    title: &str,
+) -> Result<Option<QueryConversationRow>, sqlx::Error> {
+    sqlx::query_as::<_, QueryConversationRowRecord>(
         "update query_conversation
-         set title = $2,
+         set title = $4,
              updated_at = now()
          where id = $1
+           and request_surface = 'ui'
+           and (created_by_principal_id = $2 or $3::boolean)
          returning
             id,
             workspace_id,
@@ -318,10 +559,106 @@ pub async fn update_conversation_title(
             updated_at",
     )
     .bind(conversation_id)
+    .bind(actor_principal_id)
+    .bind(allow_manage_all)
     .bind(title)
-    .fetch_one(postgres)
+    .fetch_optional(postgres)
+    .await?
+    .map(map_query_conversation_row)
+    .transpose()
+}
+
+/// Atomically deletes a UI conversation when lifecycle and provenance guards allow it.
+///
+/// # Errors
+/// Returns a repository error when locking, guard evaluation, or deletion fails.
+pub async fn delete_ui_conversation(
+    postgres: &PgPool,
+    conversation_id: Uuid,
+    actor_principal_id: Uuid,
+    allow_manage_all: bool,
+) -> Result<DeleteQueryConversationOutcome, sqlx::Error> {
+    let mut transaction = postgres.begin().await?;
+    let locked = sqlx::query_scalar::<_, Uuid>(
+        "select id
+         from query_conversation
+         where id = $1
+           and request_surface = 'ui'
+           and (created_by_principal_id = $2 or $3::boolean)
+         for update",
+    )
+    .bind(conversation_id)
+    .bind(actor_principal_id)
+    .bind(allow_manage_all)
+    .fetch_optional(&mut *transaction)
     .await?;
-    map_query_conversation_row(row)
+    if locked.is_none() {
+        transaction.commit().await?;
+        return Ok(DeleteQueryConversationOutcome::NotFoundOrForbidden);
+    }
+
+    // Lock source executions before inspecting replay references. A concurrent
+    // replay insert must acquire a foreign-key key-share lock and therefore
+    // cannot appear between this check and the conversation delete.
+    let _locked_execution_ids = sqlx::query_scalar::<_, Uuid>(
+        "select id
+         from query_execution
+         where conversation_id = $1
+         for update",
+    )
+    .bind(conversation_id)
+    .fetch_all(&mut *transaction)
+    .await?;
+
+    let has_active_execution = sqlx::query_scalar::<_, bool>(
+        "select exists (
+            select 1
+            from query_execution execution
+            join runtime_execution runtime
+              on runtime.id = execution.runtime_execution_id
+            where execution.conversation_id = $1
+              and (
+                  execution.completed_at is null
+                  or runtime.lifecycle_state in ('accepted', 'running')
+              )
+         )",
+    )
+    .bind(conversation_id)
+    .fetch_one(&mut *transaction)
+    .await?;
+    if has_active_execution {
+        transaction.commit().await?;
+        return Ok(DeleteQueryConversationOutcome::ActiveExecution);
+    }
+
+    let has_external_replay = sqlx::query_scalar::<_, bool>(
+        "select exists (
+            select 1
+            from query_execution source_execution
+            join query_execution_replay replay
+              on replay.source_execution_id = source_execution.id
+            where source_execution.conversation_id = $1
+              and replay.conversation_id <> $1
+         )",
+    )
+    .bind(conversation_id)
+    .fetch_one(&mut *transaction)
+    .await?;
+    if has_external_replay {
+        transaction.commit().await?;
+        return Ok(DeleteQueryConversationOutcome::RetainedByExternalReplay);
+    }
+
+    let deleted = sqlx::query("delete from query_conversation where id = $1")
+        .bind(conversation_id)
+        .execute(&mut *transaction)
+        .await?;
+    transaction.commit().await?;
+    if deleted.rows_affected() == 1 {
+        Ok(DeleteQueryConversationOutcome::Deleted)
+    } else {
+        Ok(DeleteQueryConversationOutcome::NotFoundOrForbidden)
+    }
 }
 
 pub async fn list_turns_by_conversation(
@@ -375,10 +712,73 @@ pub async fn get_turn_by_id(
     .transpose()
 }
 
-pub async fn create_turn(
+/// Counts the persisted turns for one conversation. Used by the session list
+/// endpoint so `turnCount` reflects reality instead of the hard-coded `0`
+/// the flat `/query/sessions` listing shipped with previously.
+pub async fn count_turns_by_conversation(
     postgres: &PgPool,
-    input: &NewQueryTurn<'_>,
-) -> Result<QueryTurnRow, sqlx::Error> {
+    conversation_id: Uuid,
+) -> Result<i64, sqlx::Error> {
+    sqlx::query_scalar::<_, i64>(
+        "select count(*)::bigint from query_turn where conversation_id = $1",
+    )
+    .bind(conversation_id)
+    .fetch_one(postgres)
+    .await
+}
+
+/// Removes a request that never reached either a paid execution or a cache
+/// replay. This is the rollback surface for pre-execution coordination errors
+/// (for example a content projection changing while a fill lock is awaited).
+/// The negative execution/audit predicates make a late successful owner win:
+/// cleanup becomes a no-op instead of deleting accepted conversation history.
+pub async fn delete_unexecuted_request_turn(
+    postgres: &PgPool,
+    conversation_id: Uuid,
+    request_turn_id: Uuid,
+) -> Result<bool, sqlx::Error> {
+    let deleted = sqlx::query(
+        "delete from query_turn as request_turn
+         where request_turn.id = $1
+           and request_turn.conversation_id = $2
+           and request_turn.turn_kind = 'user'
+           and request_turn.execution_id is null
+           and not exists (
+               select 1
+               from query_execution execution
+               where execution.request_turn_id = request_turn.id
+           )
+           and not exists (
+               select 1
+               from query_execution_replay replay
+               where replay.request_turn_id = request_turn.id
+           )",
+    )
+    .bind(request_turn_id)
+    .bind(conversation_id)
+    .execute(postgres)
+    .await?;
+    Ok(deleted.rows_affected() == 1)
+}
+
+pub async fn create_turn<'borrow, 'data>(
+    postgres: &'borrow PgPool,
+    input: &'borrow NewQueryTurn<'data>,
+) -> Result<QueryTurnRow, sqlx::Error>
+where
+    'data: 'borrow,
+{
+    let mut connection = postgres.acquire().await?;
+    create_turn_in_connection(&mut connection, input).await
+}
+
+pub(crate) async fn create_turn_in_connection<'borrow, 'data>(
+    connection: &'borrow mut PgConnection,
+    input: &'borrow NewQueryTurn<'data>,
+) -> Result<QueryTurnRow, sqlx::Error>
+where
+    'data: 'borrow,
+{
     let row = sqlx::query_as::<_, QueryTurnRowRecord>(
         "with locked_conversation as (
             update query_conversation
@@ -427,7 +827,7 @@ pub async fn create_turn(
     .bind(input.author_principal_id)
     .bind(input.content_text)
     .bind(input.execution_id)
-    .fetch_one(postgres)
+    .fetch_one(connection)
     .await?;
     map_query_turn_row(row)
 }
@@ -698,7 +1098,7 @@ pub struct NewQueryChunkReference {
 /// batch insert — one Postgres round-trip regardless of how many
 /// chunks landed in the bundle. `ON CONFLICT DO NOTHING` makes the
 /// call idempotent if the turn layer ever retries after a transient
-/// failure on a later step (the caller holds the execution_id so a
+/// failure on a later step (the caller holds the `execution_id` so a
 /// replay cannot produce mismatched rows).
 ///
 /// No-op when `references` is empty — avoids a redundant round-trip
@@ -993,6 +1393,59 @@ fn parse_runtime_stage_kind(value: &str) -> Result<RuntimeStageKind, sqlx::Error
     value.parse().map_err(invalid_enum_value)
 }
 
-fn invalid_enum_value(message: String) -> sqlx::Error {
+const fn invalid_enum_value(message: String) -> sqlx::Error {
     sqlx::Error::Protocol(message)
+}
+
+#[cfg(test)]
+mod retention_tests {
+    use super::{
+        AGE_GUARDED_CONVERSATION_OVERFLOW_DELETE_SQL, CONVERSATION_RETENTION_LOCK_SQL,
+        MCP_CONVERSATION_OVERFLOW_DELETE_SQL, MCP_CONVERSATION_RETENTION_ENFORCE_SQL,
+    };
+
+    #[test]
+    fn retention_lock_is_transaction_scoped_to_library_and_surface() {
+        assert!(CONVERSATION_RETENTION_LOCK_SQL.contains("pg_advisory_xact_lock"));
+        assert!(CONVERSATION_RETENTION_LOCK_SQL.contains("$1::text"));
+        assert!(CONVERSATION_RETENTION_LOCK_SQL.contains("$2::text"));
+    }
+
+    #[test]
+    fn fresh_completed_mcp_rows_are_evictable_but_active_and_replay_rows_are_not() {
+        let completed_guard = MCP_CONVERSATION_OVERFLOW_DELETE_SQL
+            .find("execution.completed_at is null")
+            .expect("MCP retention must protect active executions");
+        let empty_row_grace = MCP_CONVERSATION_OVERFLOW_DELETE_SQL
+            .find("conversation.created_at < now() - interval '10 minutes'")
+            .expect("empty MCP rows need an in-flight grace period");
+
+        assert!(completed_guard < empty_row_grace);
+        assert!(MCP_CONVERSATION_OVERFLOW_DELETE_SQL.contains("replay.conversation_id <>"));
+        assert!(MCP_CONVERSATION_OVERFLOW_DELETE_SQL.contains("conversation.id <> $4"));
+    }
+
+    #[test]
+    fn post_terminal_mcp_retention_is_one_serialized_database_statement() {
+        assert!(MCP_CONVERSATION_RETENTION_ENFORCE_SQL.contains("with retention_lock"));
+        assert!(MCP_CONVERSATION_RETENTION_ENFORCE_SQL.contains("pg_advisory_xact_lock"));
+        assert!(MCP_CONVERSATION_RETENTION_ENFORCE_SQL.contains("cross join retention_lock"));
+        assert!(MCP_CONVERSATION_RETENTION_ENFORCE_SQL.contains("execution.completed_at is null"));
+        assert!(MCP_CONVERSATION_RETENTION_ENFORCE_SQL.contains("replay.conversation_id <>"));
+        assert!(
+            MCP_CONVERSATION_RETENTION_ENFORCE_SQL.contains("select count(*)::bigint from deleted")
+        );
+    }
+
+    #[test]
+    fn ui_overflow_keeps_its_existing_age_guard() {
+        assert!(
+            AGE_GUARDED_CONVERSATION_OVERFLOW_DELETE_SQL
+                .contains("conversation.created_at < now() - interval '10 minutes'")
+        );
+        assert!(
+            AGE_GUARDED_CONVERSATION_OVERFLOW_DELETE_SQL.contains("execution.completed_at is null")
+        );
+        assert!(AGE_GUARDED_CONVERSATION_OVERFLOW_DELETE_SQL.contains("replay.conversation_id <>"));
+    }
 }

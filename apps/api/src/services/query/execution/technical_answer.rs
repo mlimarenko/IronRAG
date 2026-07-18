@@ -2,27 +2,25 @@ use std::{collections::BTreeSet, sync::LazyLock};
 
 use uuid::Uuid;
 
-use crate::domains::query_ir::{QueryAct, QueryIR, QueryScope};
+use crate::domains::query_ir::{QueryAct, QueryIR, QueryTargetKind};
 use crate::infra::knowledge_rows::KnowledgeStructuredBlockRow;
+use crate::shared::extraction::technical_facts::TechnicalFactKind;
 
 use super::question_intent::{
-    QuestionIntent, canonical_target_type_tag, classify_question_or_ir_intents, has_question_intent,
+    QuestionIntent, classify_question_or_ir_intents, has_question_intent,
 };
 #[cfg(test)]
 use super::technical_literals::technical_chunk_selection_score;
 use super::technical_literals::{
     extract_config_section_literals, extract_explicit_path_literals,
-    extract_package_command_literals, extract_parameter_literals,
+    extract_package_command_literals,
 };
 use super::technical_parameter_answer::build_exact_parameter_answer;
 use super::technical_url_answer::build_exact_url_answer;
 use super::{CanonicalAnswerEvidence, RuntimeMatchedChunk};
-use crate::services::query::text_match::{
-    near_token_match, near_token_overlap_count, normalized_alnum_tokens,
-};
 
 static ERROR_CODE_ASSIGNMENT_REGEX: LazyLock<regex::Regex> = LazyLock::new(|| {
-    #[allow(clippy::expect_used)]
+    #[allow(clippy::expect_used, reason = "the static regex literal is compile-time owned")]
     regex::RegexBuilder::new(
         r"^\s*([A-Za-z][A-Za-z0-9_.-]{2,160})\s*=\s*((?:-?[0-9]+(?:[.][0-9]+)?\s*[,;]\s*)*-?[0-9]+(?:[.][0-9]+)?)\s*$",
     )
@@ -33,7 +31,7 @@ static ERROR_CODE_ASSIGNMENT_REGEX: LazyLock<regex::Regex> = LazyLock::new(|| {
 });
 
 static ERROR_CODE_MAPPING_REGEX: LazyLock<regex::Regex> = LazyLock::new(|| {
-    #[allow(clippy::expect_used)]
+    #[allow(clippy::expect_used, reason = "the static regex literal is compile-time owned")]
     regex::RegexBuilder::new(r"^\s*(-?[0-9]+(?:[.][0-9]+)?)\s*=\s*(\S[^\r\n]{0,160})$")
         .multi_line(true)
         .build()
@@ -41,7 +39,7 @@ static ERROR_CODE_MAPPING_REGEX: LazyLock<regex::Regex> = LazyLock::new(|| {
 });
 
 static CONFIG_ASSIGNMENT_REGEX: LazyLock<regex::Regex> = LazyLock::new(|| {
-    #[allow(clippy::expect_used)]
+    #[allow(clippy::expect_used, reason = "the static regex literal is compile-time owned")]
     regex::RegexBuilder::new(
         r"(?:^|[;\r\n])\s*[#;]?\s*([A-Za-z][A-Za-z0-9_.-]{2,160})\s*=\s*([^;\r\n]{1,220})",
     )
@@ -50,7 +48,7 @@ static CONFIG_ASSIGNMENT_REGEX: LazyLock<regex::Regex> = LazyLock::new(|| {
 });
 
 static MARKDOWN_TABLE_FIRST_CELL_REGEX: LazyLock<regex::Regex> = LazyLock::new(|| {
-    #[allow(clippy::expect_used)]
+    #[allow(clippy::expect_used, reason = "the static regex literal is compile-time owned")]
     regex::RegexBuilder::new(r"(?m)^\s*\|\s*`?([A-Za-z][A-Za-z0-9_.-]{1,160})`?\s*\|")
         .build()
         .expect("markdown table first-cell regex must compile")
@@ -66,7 +64,7 @@ pub(super) fn build_exact_technical_literal_answer(
         return None;
     }
     build_module_configuration_setup_answer(question, query_ir, evidence, chunks)
-        .or_else(|| build_transport_config_assignment_answer(question, query_ir, chunks))
+        .or_else(|| build_transport_config_assignment_answer(question, query_ir, evidence, chunks))
         .or_else(|| build_error_code_mapping_answer(question, query_ir, chunks))
         .or_else(|| build_exact_parameter_answer(question, query_ir, evidence, chunks))
         .or_else(|| build_exact_url_answer(question, query_ir, evidence, chunks))
@@ -86,22 +84,11 @@ pub(super) fn build_module_configuration_setup_answer(
     if module_configuration_inventory_question(question, query_ir) {
         return None;
     }
-    let explicitly_requested = query_ir_requests_module_configuration_setup(query_ir);
-    if !explicitly_requested
-        && !query_ir_allows_evidence_driven_module_configuration_setup(question, query_ir)
-    {
+    if !query_ir_requests_module_configuration_setup(query_ir) {
         return None;
     }
     let scoped_chunks = module_configuration_scope_chunks(question, chunks);
     let candidate_chunks = if scoped_chunks.is_empty() { chunks } else { scoped_chunks.as_slice() };
-    let low_confidence_evidence_driven = (low_confidence_unfocused_configuration_ir(query_ir)
-        && query_text_has_configuration_setup_anchor(question))
-        || low_confidence_structural_configuration_ir(query_ir);
-    if low_confidence_evidence_driven
-        && !module_configuration_candidate_matches_question(question, candidate_chunks)
-    {
-        return None;
-    }
     let packages = collect_module_packages_with_structured_blocks(
         candidate_chunks,
         &evidence.structured_blocks,
@@ -129,16 +116,6 @@ pub(super) fn build_module_configuration_setup_answer(
         &parameter_focus_terms,
         32,
     );
-    if !explicitly_requested
-        && !evidence_supports_module_configuration_answer(
-            &packages,
-            &config_paths,
-            &config_sections,
-            &parameters,
-        )
-    {
-        return None;
-    }
     if packages.is_empty() && parameters.is_empty() {
         return None;
     }
@@ -155,34 +132,51 @@ pub(super) fn build_module_configuration_setup_answer(
     // code-side per-language dictionary. Markdown grouping (a code-span header
     // plus blank-line-separated bullet blocks) keeps the sections distinct
     // without embedding prose in any language.
+    Some(render_module_configuration_answer(
+        document_label,
+        packages,
+        &config_path,
+        &config_paths,
+        config_sections,
+        parameters,
+    ))
+}
+
+fn push_code_bullets(answer: &mut String, values: impl IntoIterator<Item = String>) {
+    for value in values {
+        answer.push_str(&format!("\n- `{value}`"));
+    }
+}
+
+fn render_module_configuration_answer(
+    document_label: &str,
+    packages: Vec<String>,
+    config_path: &str,
+    config_paths: &[String],
+    config_sections: Vec<String>,
+    parameters: Vec<String>,
+) -> String {
     let mut answer = format!("`{document_label}`\n");
     if !packages.is_empty() {
-        for package in packages {
-            answer.push_str(&format!("\n- `{package}`"));
-        }
+        push_code_bullets(&mut answer, packages);
         answer.push('\n');
     }
-    let additional_config_paths =
-        config_paths.iter().filter(|path| path.as_str() != config_path).take(6).collect::<Vec<_>>();
-    answer.push_str(&format!("\n- `{config_path}`"));
-    for path in additional_config_paths {
-        answer.push_str(&format!("\n- `{path}`"));
-    }
+    push_code_bullets(
+        &mut answer,
+        std::iter::once(config_path.to_string()).chain(
+            config_paths.iter().filter(|path| path.as_str() != config_path).take(6).cloned(),
+        ),
+    );
     answer.push('\n');
     if !config_sections.is_empty() {
-        for section in config_sections {
-            answer.push_str(&format!("\n- `{section}`"));
-        }
+        push_code_bullets(&mut answer, config_sections);
         answer.push('\n');
     }
-    if !parameters.is_empty() {
-        for parameter in parameters {
-            answer.push_str("\n- ");
-            answer.push_str(&render_parameter_bullet(&parameter));
-        }
-        answer.push('\n');
+    for parameter in parameters {
+        answer.push_str("\n- ");
+        answer.push_str(&render_parameter_bullet(&parameter));
     }
-    Some(answer.trim_end().to_string())
+    answer.trim_end().to_string()
 }
 
 fn query_ir_requests_module_configuration_setup(query_ir: &QueryIR) -> bool {
@@ -196,15 +190,10 @@ fn query_ir_requests_module_configuration_setup(query_ir: &QueryIR) -> bool {
         || !query_ir.target_entities.is_empty()
         || !query_ir.literal_constraints.is_empty()
         || !query_ir.conversation_refs.is_empty();
-    let requests_configuration = query_ir.target_types.iter().any(|target_type| {
-        matches!(
-            canonical_target_type_tag(target_type).as_str(),
-            "configuration_file" | "config_key"
-        )
-    });
-    let requests_module_or_parameter = query_ir.target_types.iter().any(|target_type| {
-        matches!(canonical_target_type_tag(target_type).as_str(), "package" | "parameter")
-    });
+    let requests_configuration =
+        query_ir.targets_any(&[QueryTargetKind::ConfigurationFile, QueryTargetKind::ConfigKey]);
+    let requests_module_or_parameter =
+        query_ir.targets_any(&[QueryTargetKind::Package, QueryTargetKind::Parameter]);
     requests_configuration && (requests_module_or_parameter || has_focus_signal)
 }
 
@@ -212,127 +201,15 @@ fn module_configuration_inventory_question(_question: &str, query_ir: &QueryIR) 
     if matches!(query_ir.act, QueryAct::ConfigureHow) {
         return false;
     }
-    query_ir.target_types.iter().any(|target_type| {
-        matches!(
-            canonical_target_type_tag(target_type).as_str(),
-            "port"
-                | "service"
-                | "endpoint"
-                | "http_method"
-                | "error_code"
-                | "relationship"
-                | "protocol"
-        )
-    })
-}
-
-fn query_ir_allows_evidence_driven_module_configuration_setup(
-    question: &str,
-    query_ir: &QueryIR,
-) -> bool {
-    (matches!(query_ir.act, QueryAct::ConfigureHow)
-        && (matches!(query_ir.scope, crate::domains::query_ir::QueryScope::SingleDocument)
-            || query_ir.document_focus.is_some()
-            || !query_ir.target_entities.is_empty()))
-        || (low_confidence_unfocused_configuration_ir(query_ir)
-            && query_text_has_configuration_setup_anchor(question))
-        || low_confidence_structural_configuration_ir(query_ir)
-}
-
-fn low_confidence_unfocused_configuration_ir(query_ir: &QueryIR) -> bool {
-    query_ir.confidence <= 0.35
-        && matches!(query_ir.act, QueryAct::Describe | QueryAct::RetrieveValue)
-        && query_ir.source_slice.is_none()
-        && query_ir.document_focus.is_none()
-        && query_ir.target_types.is_empty()
-        && query_ir.target_entities.is_empty()
-        && query_ir.literal_constraints.is_empty()
-        && query_ir.temporal_constraints.is_empty()
-        && query_ir.conversation_refs.is_empty()
-}
-
-fn low_confidence_structural_configuration_ir(query_ir: &QueryIR) -> bool {
-    query_ir.confidence <= 0.35
-        && matches!(query_ir.scope, QueryScope::SingleDocument | QueryScope::MultiDocument)
-        && matches!(
-            query_ir.act,
-            QueryAct::Describe | QueryAct::ConfigureHow | QueryAct::RetrieveValue
-        )
-        && query_ir.source_slice.is_none()
-        && query_ir.document_focus.is_none()
-        && query_ir.target_types.is_empty()
-        && query_ir.comparison.is_none()
-        && query_ir.temporal_constraints.is_empty()
-        && query_ir.conversation_refs.is_empty()
-        && (!query_ir.target_entities.is_empty() || !query_ir.literal_constraints.is_empty())
-}
-
-fn evidence_supports_module_configuration_answer(
-    packages: &[String],
-    config_paths: &[String],
-    config_sections: &[String],
-    parameters: &[String],
-) -> bool {
-    (!packages.is_empty() && !config_paths.is_empty())
-        || (!config_paths.is_empty() && !config_sections.is_empty() && parameters.len() >= 2)
-        || (!config_paths.is_empty() && parameters.len() >= 4)
-}
-
-fn query_text_has_configuration_setup_anchor(question: &str) -> bool {
-    !extract_explicit_path_literals(question, 1).is_empty()
-        || !extract_config_section_literals(question, 1).is_empty()
-        || extract_parameter_literals(question, 2).len() >= 2
-}
-
-fn module_configuration_candidate_matches_question(
-    question: &str,
-    chunks: &[RuntimeMatchedChunk],
-) -> bool {
-    let question_tokens = normalized_alnum_tokens(question, 3);
-    if question_tokens.len() < 2 {
-        return false;
-    }
-    let question_uppercase_codes = uppercase_code_tokens(question);
-    chunks.iter().any(|chunk| {
-        let label_tokens = normalized_alnum_tokens(&chunk.document_label, 3);
-        let overlap = near_token_overlap_count(&question_tokens, &label_tokens);
-        if overlap >= 3 {
-            return true;
-        }
-        if overlap < 2 {
-            return false;
-        }
-        if document_label_has_distinctive_overlap(&question_tokens, &label_tokens) {
-            return true;
-        }
-        if question_uppercase_codes.is_empty() {
-            return true;
-        }
-        let label_uppercase_codes = uppercase_code_tokens(&chunk.document_label);
-        question_uppercase_codes.iter().any(|code| label_uppercase_codes.contains(code))
-    })
-}
-
-fn document_label_has_distinctive_overlap(
-    question_tokens: &BTreeSet<String>,
-    label_tokens: &BTreeSet<String>,
-) -> bool {
-    question_tokens.iter().any(|question_token| {
-        question_token.chars().count() >= 8
-            && label_tokens.iter().any(|label_token| near_token_match(question_token, label_token))
-    })
-}
-
-fn uppercase_code_tokens(text: &str) -> BTreeSet<String> {
-    text.split(|ch: char| !ch.is_alphanumeric())
-        .filter_map(|token| {
-            let letters = token.chars().filter(|ch| ch.is_alphabetic()).collect::<Vec<_>>();
-            if letters.len() < 2 || !letters.iter().all(|ch| ch.is_uppercase()) {
-                return None;
-            }
-            Some(token.chars().flat_map(char::to_lowercase).collect::<String>())
-        })
-        .collect()
+    query_ir.targets_any(&[
+        QueryTargetKind::Port,
+        QueryTargetKind::Service,
+        QueryTargetKind::Endpoint,
+        QueryTargetKind::HttpMethod,
+        QueryTargetKind::ErrorCode,
+        QueryTargetKind::Relationship,
+        QueryTargetKind::Protocol,
+    ])
 }
 
 fn module_configuration_scope_chunks(
@@ -770,6 +647,7 @@ struct ErrorCodeMappingCandidate {
 fn build_transport_config_assignment_answer(
     question: &str,
     query_ir: &QueryIR,
+    evidence: &CanonicalAnswerEvidence,
     chunks: &[RuntimeMatchedChunk],
 ) -> Option<String> {
     let intents = classify_question_or_ir_intents(question, query_ir);
@@ -783,7 +661,9 @@ fn build_transport_config_assignment_answer(
     let mut candidates = chunks
         .iter()
         .enumerate()
-        .filter_map(|(rank, chunk)| config_assignment_candidate_from_chunk(rank, chunk))
+        .filter_map(|(rank, chunk)| {
+            config_assignment_candidate_from_chunk(rank, query_ir, evidence, chunk)
+        })
         .collect::<Vec<_>>();
     candidates.sort_by(|left, right| {
         right.score.cmp(&left.score).then_with(|| left.document_label.cmp(&right.document_label))
@@ -814,11 +694,18 @@ fn query_ir_requests_transport_config_assignment(
     let mut has_connection_target = false;
     let mut has_configuration_target = false;
     for target_type in &query_ir.target_types {
-        match canonical_target_type_tag(target_type).as_str() {
-            "connection" | "endpoint" | "url" | "base_url" | "wsdl" => {
+        match target_type {
+            QueryTargetKind::Connection
+            | QueryTargetKind::Endpoint
+            | QueryTargetKind::Url
+            | QueryTargetKind::BaseUrl
+            | QueryTargetKind::Wsdl => {
                 has_connection_target = true;
             }
-            "configuration_file" | "config_key" | "env_var" | "parameter" => {
+            QueryTargetKind::ConfigurationFile
+            | QueryTargetKind::ConfigKey
+            | QueryTargetKind::EnvVar
+            | QueryTargetKind::Parameter => {
                 has_configuration_target = true;
             }
             _ => {}
@@ -833,22 +720,24 @@ fn query_ir_requests_port_inventory_without_connection(
     intents: &[QuestionIntent],
 ) -> bool {
     let has_port = has_question_intent(intents, QuestionIntent::Port);
-    let mut has_non_port_target = false;
-    let mut has_connection = has_question_intent(intents, QuestionIntent::Protocol);
-    for target_type in &query_ir.target_types {
-        match canonical_target_type_tag(target_type).as_str() {
-            "connection" | "endpoint" | "url" | "base_url" | "wsdl" | "protocol" => {
-                has_connection = true;
-            }
-            "port" => {}
-            _ => has_non_port_target = true,
-        }
-    }
+    let has_non_port_target =
+        query_ir.target_types.iter().any(|target| !matches!(target, QueryTargetKind::Port));
+    let has_connection = has_question_intent(intents, QuestionIntent::Protocol)
+        || query_ir.targets_any(&[
+            QueryTargetKind::Connection,
+            QueryTargetKind::Endpoint,
+            QueryTargetKind::Url,
+            QueryTargetKind::BaseUrl,
+            QueryTargetKind::Wsdl,
+            QueryTargetKind::Protocol,
+        ]);
     has_port && has_non_port_target && !has_connection
 }
 
 fn config_assignment_candidate_from_chunk(
     rank: usize,
+    query_ir: &QueryIR,
+    evidence: &CanonicalAnswerEvidence,
     chunk: &RuntimeMatchedChunk,
 ) -> Option<ConfigAssignmentCandidate> {
     let text = if chunk.source_text.trim().is_empty() {
@@ -875,10 +764,11 @@ fn config_assignment_candidate_from_chunk(
     if entries.len() < 2 {
         return None;
     }
-    let score = (64usize.saturating_sub(rank.min(64)) * 1000)
+    let score = (64usize.saturating_sub(rank.min(64)) * 100)
+        + typed_config_assignment_fact_score(query_ir, evidence, chunk, &entries)
         + entries
             .iter()
-            .map(|(name, value)| config_assignment_entry_score(name, value))
+            .map(|(_, value)| formal_config_assignment_value_score(value))
             .sum::<usize>()
             .saturating_add(entries.len() * 12);
     (score > 0).then_some(ConfigAssignmentCandidate {
@@ -899,16 +789,133 @@ fn clean_config_assignment_value(raw: &str) -> String {
         .to_string()
 }
 
-fn config_assignment_entry_score(name: &str, value: &str) -> usize {
-    let lowered_name = name.to_ascii_lowercase();
-    let lowered_value = value.to_ascii_lowercase();
-    usize::from(lowered_value.contains("://")) * 120
-        + usize::from(url_value_contains_port(&lowered_value)) * 240
-        + usize::from(lowered_name.contains("port")) * 80
-        + usize::from(lowered_name.contains("url")) * 70
-        + usize::from(lowered_name.contains("timeout")) * 40
-        + usize::from(matches!(lowered_value.as_str(), "true" | "false")) * 20
-        + usize::from(value.chars().all(|ch| ch.is_ascii_digit())) * 20
+fn formal_config_assignment_value_score(value: &str) -> usize {
+    let trimmed = value.trim();
+    usize::from(trimmed.contains("://")) * 120
+        + usize::from(url_value_contains_port(trimmed)) * 240
+        + usize::from(trimmed.parse::<bool>().is_ok()) * 20
+        + usize::from(trimmed.parse::<i64>().is_ok()) * 20
+}
+
+fn typed_config_assignment_fact_score(
+    query_ir: &QueryIR,
+    evidence: &CanonicalAnswerEvidence,
+    chunk: &RuntimeMatchedChunk,
+    entries: &[(String, String)],
+) -> usize {
+    let mut seen = BTreeSet::<(TechnicalFactKind, String)>::new();
+    evidence
+        .technical_facts
+        .iter()
+        .filter(|fact| {
+            fact.document_id == chunk.document_id && fact.revision_id == chunk.revision_id
+        })
+        .filter_map(|fact| {
+            let kind = fact.fact_kind.parse::<TechnicalFactKind>().ok()?;
+            if !query_target_supports_technical_fact(query_ir, kind) {
+                return None;
+            }
+            let matches_entry = entries
+                .iter()
+                .any(|(name, value)| technical_fact_matches_config_entry(kind, fact, name, value));
+            if !matches_entry {
+                return None;
+            }
+            let canonical_value = if fact.canonical_value_exact.trim().is_empty() {
+                fact.display_value.trim()
+            } else {
+                fact.canonical_value_exact.trim()
+            };
+            if !seen.insert((kind, canonical_value.to_string())) {
+                return None;
+            }
+            let support_score =
+                usize::from(fact.support_chunk_ids.contains(&chunk.chunk_id)) * 1_000;
+            Some(20_000usize.saturating_add(support_score))
+        })
+        .fold(0usize, usize::saturating_add)
+}
+
+fn query_target_supports_technical_fact(query_ir: &QueryIR, kind: TechnicalFactKind) -> bool {
+    query_ir.target_types.iter().any(|target_type| match kind {
+        TechnicalFactKind::Url => matches!(
+            target_type,
+            QueryTargetKind::Url
+                | QueryTargetKind::BaseUrl
+                | QueryTargetKind::Wsdl
+                | QueryTargetKind::Endpoint
+                | QueryTargetKind::Connection
+        ),
+        TechnicalFactKind::EndpointPath => {
+            matches!(
+                target_type,
+                QueryTargetKind::Endpoint | QueryTargetKind::Path | QueryTargetKind::Connection
+            )
+        }
+        TechnicalFactKind::Port => {
+            matches!(
+                target_type,
+                QueryTargetKind::Port | QueryTargetKind::Endpoint | QueryTargetKind::Connection
+            )
+        }
+        TechnicalFactKind::Protocol => {
+            matches!(
+                target_type,
+                QueryTargetKind::Protocol | QueryTargetKind::Endpoint | QueryTargetKind::Connection
+            )
+        }
+        TechnicalFactKind::ConfigurationKey => {
+            matches!(target_type, QueryTargetKind::ConfigKey | QueryTargetKind::Parameter)
+        }
+        TechnicalFactKind::ParameterName => {
+            matches!(target_type, QueryTargetKind::Parameter | QueryTargetKind::ConfigKey)
+        }
+        TechnicalFactKind::EnvironmentVariable => {
+            matches!(target_type, QueryTargetKind::EnvVar)
+        }
+        _ => false,
+    })
+}
+
+fn technical_fact_matches_config_entry(
+    kind: TechnicalFactKind,
+    fact: &crate::infra::knowledge_rows::KnowledgeTechnicalFactRow,
+    name: &str,
+    value: &str,
+) -> bool {
+    let fact_values = [
+        fact.display_value.as_str(),
+        fact.canonical_value_exact.as_str(),
+        fact.canonical_value_text.as_str(),
+    ];
+    match kind {
+        TechnicalFactKind::ConfigurationKey
+        | TechnicalFactKind::ParameterName
+        | TechnicalFactKind::EnvironmentVariable => fact_values
+            .iter()
+            .any(|candidate| !candidate.is_empty() && name.eq_ignore_ascii_case(candidate)),
+        TechnicalFactKind::Url
+        | TechnicalFactKind::EndpointPath
+        | TechnicalFactKind::Port
+        | TechnicalFactKind::Protocol => fact_values
+            .iter()
+            .any(|candidate| formal_assignment_value_contains_fact(value, candidate)),
+        _ => false,
+    }
+}
+
+fn formal_assignment_value_contains_fact(value: &str, fact_value: &str) -> bool {
+    let value = value.trim().trim_matches(['`', '\'', '"']);
+    let fact_value = fact_value.trim().trim_matches(['`', '\'', '"']);
+    if fact_value.is_empty() {
+        return false;
+    }
+    value.eq_ignore_ascii_case(fact_value)
+        || value
+            .split(|ch: char| {
+                ch.is_whitespace() || matches!(ch, ',' | ';' | '[' | ']' | '(' | ')' | '{' | '}')
+            })
+            .any(|token| token.eq_ignore_ascii_case(fact_value))
 }
 
 fn config_assignment_source_excerpt(text: &str) -> String {
@@ -1046,932 +1053,5 @@ pub(super) fn document_focus_preference(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::domains::query_ir::{
-        DocumentHint, EntityMention, EntityRole, QueryLanguage, QueryScope, SourceSliceSpec,
-        UnresolvedRef,
-    };
-    use crate::services::query::execution::RuntimeChunkScoreKind;
-
-    #[test]
-    fn module_configuration_setup_answer_prefers_package_owned_config_path() {
-        let target_document_id = Uuid::now_v7();
-        let distractor_document_id = Uuid::now_v7();
-        let chunks = vec![
-            runtime_chunk(
-                distractor_document_id,
-                0,
-                "Widget Beta setup",
-                r#"
-Install the module:
-sample-install beta-widget
-
-Settings are stored in /opt/beta/display/display.ini.
-
-| settingOne | string | Wrong setting |
-"#,
-            ),
-            runtime_chunk(
-                target_document_id,
-                1,
-                "Widget Alpha setup",
-                r#"
-Install the module:
-sample-install alpha-connector
-
-Configure the module:
-sample-configure alpha-connector
-
-Connector settings are stored in /opt/alpha/modules/connector/connector.conf under [Main].
-"#,
-            ),
-            runtime_chunk(
-                target_document_id,
-                2,
-                "Widget Alpha setup",
-                r#"
-| settingOne | string | First connector setting |
-| settingTwo | string | Second connector setting |
-| settingThree | string | Third connector setting |
-
-Display settings use /opt/alpha/display/display.ini.
-"#,
-            ),
-        ];
-        let answer = build_module_configuration_setup_answer(
-            "Configure Widget Alpha",
-            &configuration_setup_ir(),
-            &empty_evidence(),
-            &chunks,
-        )
-        .expect("setup answer");
-
-        assert!(answer.contains("`alpha-connector`"));
-        assert!(answer.contains("`/opt/alpha/modules/connector/connector.conf`"));
-        assert!(answer.contains("`settingOne`"));
-        assert!(answer.contains("`settingTwo`"));
-        // The package-owned config path must be selected as the primary, i.e.
-        // rendered ahead of the unrelated display-settings path (which may still
-        // surface as an additional bullet).
-        let primary = answer
-            .find("`/opt/alpha/modules/connector/connector.conf`")
-            .expect("package-owned config path present");
-        if let Some(display) = answer.find("`/opt/alpha/display/display.ini`") {
-            assert!(primary < display, "package-owned config path must precede the display path");
-        }
-        assert!(!answer.contains("`beta-widget`"));
-    }
-
-    #[test]
-    fn module_configuration_setup_answer_reads_structured_table_rows() {
-        let document_id = Uuid::now_v7();
-        let chunks = vec![
-            runtime_chunk(
-                document_id,
-                1,
-                "Widget Gamma setup",
-                r#"
-Install the module:
-sample-install gamma-connector
-
-Configure the module:
-sample-configure gamma-connector
-
-Connector settings are stored in /opt/gamma/modules/connector/connector.conf under [Main].
-"#,
-            ),
-            runtime_chunk(
-                document_id,
-                2,
-                "Widget Gamma setup",
-                "Sheet: Connector settings | Row 1 | Name: endpointUrl | Type: string | Description: Service endpoint",
-            ),
-            runtime_chunk(
-                document_id,
-                3,
-                "Widget Gamma setup",
-                "Sheet: Connector settings | Row 2 | Name: partnerId | Type: string | Description: Partner identifier",
-            ),
-            runtime_chunk(
-                document_id,
-                4,
-                "Widget Gamma setup",
-                "Sheet: Connector settings | Row 3 | Name: secretKey | Type: string | Description: Shared secret",
-            ),
-        ];
-        let mut query_ir = configuration_setup_ir();
-        query_ir.literal_constraints = vec![literal_constraint("secret"), literal_constraint("id")];
-
-        let answer = build_module_configuration_setup_answer(
-            "Configure Widget Gamma",
-            &query_ir,
-            &empty_evidence(),
-            &chunks,
-        )
-        .expect("setup answer");
-        let partner_pos = answer.find("`partnerId`").expect("partnerId row");
-        let secret_pos = answer.find("`secretKey`").expect("secretKey row");
-        let endpoint_pos = answer.find("`endpointUrl`").expect("endpointUrl row");
-
-        assert!(answer.contains("`/opt/gamma/modules/connector/connector.conf`"));
-        assert!(partner_pos < endpoint_pos);
-        assert!(secret_pos < endpoint_pos);
-    }
-
-    #[test]
-    fn module_configuration_setup_answer_prefers_parameter_rich_setup_document() {
-        let release_document_id = Uuid::now_v7();
-        let setup_document_id = Uuid::now_v7();
-        let chunks = vec![
-            runtime_chunk(
-                release_document_id,
-                0,
-                "Widget Alpha release note",
-                r#"
-Release note:
-sample-install alpha-connector
-Configuration file: /opt/alpha/modules/connector/connector.conf
-"#,
-            ),
-            runtime_chunk(
-                setup_document_id,
-                1,
-                "Widget Alpha administrator guide",
-                r#"
-Install the module:
-sample-install alpha-connector
-
-Connector settings are stored in /opt/alpha/modules/connector/connector.conf under [Main].
-"#,
-            ),
-            runtime_chunk(
-                setup_document_id,
-                2,
-                "Widget Alpha administrator guide",
-                "Sheet: Connector settings | Row 1 | Name: partnerId | Type: string | Description: Partner identifier",
-            ),
-            runtime_chunk(
-                setup_document_id,
-                3,
-                "Widget Alpha administrator guide",
-                "Sheet: Connector settings | Row 2 | Name: secretKey | Type: string | Description: Shared secret",
-            ),
-        ];
-
-        let answer = build_module_configuration_setup_answer(
-            "Configure Widget Alpha",
-            &configuration_setup_ir(),
-            &empty_evidence(),
-            &chunks,
-        )
-        .expect("setup answer");
-
-        assert!(answer.contains("`Widget Alpha administrator guide`"));
-        assert!(answer.contains("`partnerId`"));
-        assert!(answer.contains("`secretKey`"));
-        assert!(!answer.contains("`Widget Alpha release note`"));
-    }
-
-    #[test]
-    fn module_configuration_setup_answer_uses_evidence_when_compiler_keeps_generic_target_type() {
-        let document_id = Uuid::now_v7();
-        let chunks = vec![
-            runtime_chunk(document_id, 0, "Provider Alpha setup", "Overview of Provider Alpha."),
-            runtime_chunk(
-                document_id,
-                1,
-                "Provider Alpha setup",
-                r#"
-To use the module, install it with sample-install alpha-connector and run sample-configure alpha-connector.
-
-The module configuration file is /opt/alpha/modules/connector/connector.conf.
-| endpointUrl | string | Service endpoint |
-| partnerId | string | Partner identifier |
-"#,
-            ),
-        ];
-        let mut query_ir = configuration_setup_ir();
-        query_ir.target_types = vec!["procedure".to_string()];
-        query_ir.document_focus = Some(DocumentHint { hint: "Provider Alpha".to_string() });
-
-        let answer = build_module_configuration_setup_answer(
-            "How do I configure Provider Alpha?",
-            &query_ir,
-            &empty_evidence(),
-            &chunks,
-        )
-        .expect("setup answer");
-
-        assert!(answer.contains("`alpha-connector`"));
-        assert!(answer.contains("`/opt/alpha/modules/connector/connector.conf`"));
-        assert!(answer.contains("`endpointUrl`"));
-        assert!(answer.contains("`partnerId`"));
-    }
-
-    #[test]
-    fn module_configuration_setup_answer_uses_structural_evidence_for_untyped_low_confidence_ir() {
-        let document_id = Uuid::now_v7();
-        let chunks = vec![
-            runtime_chunk(
-                document_id,
-                1,
-                "Provider Alpha setup",
-                r#"
-Install the module:
-sample-install alpha-connector
-
-The module configuration file is /opt/alpha/modules/connector/connector.conf.
-[Main]
-endpointUrl = https://alpha.example/api
-partnerId = alpha-partner
-"#,
-            ),
-            runtime_chunk(
-                document_id,
-                2,
-                "Provider Alpha setup",
-                r#"
-| endpointUrl | string | Service endpoint |
-| partnerId | string | Partner identifier |
-| visible | boolean | true false | Display the code |
-"#,
-            ),
-        ];
-        let mut query_ir = configuration_setup_ir();
-        query_ir.act = QueryAct::Describe;
-        query_ir.target_types.clear();
-        query_ir.target_entities.clear();
-        query_ir.literal_constraints.clear();
-        query_ir.temporal_constraints.clear();
-        query_ir.document_focus = None;
-        query_ir.source_slice = None;
-        query_ir.conversation_refs.clear();
-        query_ir.confidence = 0.25;
-
-        let answer = build_module_configuration_setup_answer(
-            "Provider Alpha setup `/opt/alpha/modules/connector/connector.conf` `endpointUrl`",
-            &query_ir,
-            &empty_evidence(),
-            &chunks,
-        )
-        .expect("setup answer from structural evidence");
-
-        assert!(answer.contains("`alpha-connector`"));
-        assert!(answer.contains("`/opt/alpha/modules/connector/connector.conf`"));
-        assert!(answer.contains("endpointUrl"));
-        assert!(answer.contains("partnerId"));
-        assert!(answer.contains("visible"));
-    }
-
-    #[test]
-    fn low_confidence_untyped_ir_requires_query_anchor_before_setup_answer() {
-        let document_id = Uuid::now_v7();
-        let chunks = vec![runtime_chunk(
-            document_id,
-            1,
-            "Provider Alpha setup",
-            r#"
-Install the module:
-sample-install alpha-connector
-
-The module configuration file is /opt/alpha/modules/connector/connector.conf.
-[Main]
-endpointUrl = https://alpha.example/api
-partnerId = alpha-partner
-"#,
-        )];
-        let mut query_ir = configuration_setup_ir();
-        query_ir.act = QueryAct::Describe;
-        query_ir.target_types.clear();
-        query_ir.target_entities.clear();
-        query_ir.literal_constraints.clear();
-        query_ir.temporal_constraints.clear();
-        query_ir.document_focus = None;
-        query_ir.source_slice = None;
-        query_ir.conversation_refs.clear();
-        query_ir.confidence = 0.25;
-
-        let answer = build_module_configuration_setup_answer(
-            "Provider Alpha terminal loses payment confirmation",
-            &query_ir,
-            &empty_evidence(),
-            &chunks,
-        );
-
-        assert!(answer.is_none(), "{answer:?}");
-    }
-
-    #[test]
-    fn low_confidence_untyped_ir_does_not_turn_unmatched_config_evidence_into_setup_answer() {
-        let document_id = Uuid::now_v7();
-        let chunks = vec![runtime_chunk(
-            document_id,
-            1,
-            "Provider Beta setup",
-            r#"
-Install the module:
-sample-install beta-connector
-
-The module configuration file is /opt/beta/modules/connector/connector.conf.
-[Main]
-endpointUrl = https://beta.example/api
-partnerId = beta-partner
-visible = true
-"#,
-        )];
-        let mut query_ir = configuration_setup_ir();
-        query_ir.act = QueryAct::Describe;
-        query_ir.target_types.clear();
-        query_ir.target_entities.clear();
-        query_ir.literal_constraints.clear();
-        query_ir.temporal_constraints.clear();
-        query_ir.document_focus = None;
-        query_ir.source_slice = None;
-        query_ir.conversation_refs.clear();
-        query_ir.confidence = 0.25;
-
-        let answer = build_module_configuration_setup_answer(
-            "Provider Alpha operational troubleshooting",
-            &query_ir,
-            &empty_evidence(),
-            &chunks,
-        );
-
-        assert!(answer.is_none(), "{answer:?}");
-    }
-
-    #[test]
-    fn low_confidence_untyped_ir_requires_shared_code_for_weak_label_overlap() {
-        let document_id = Uuid::now_v7();
-        let chunks = vec![runtime_chunk(
-            document_id,
-            1,
-            "Cash link setup",
-            r#"
-Install the module:
-sample-install cash-link
-
-The module configuration file is /opt/cash/link/link.conf.
-[Main]
-endpointUrl = https://cash.example/api
-partnerId = cash-partner
-visible = true
-"#,
-        )];
-        let mut query_ir = configuration_setup_ir();
-        query_ir.act = QueryAct::Describe;
-        query_ir.target_types.clear();
-        query_ir.target_entities.clear();
-        query_ir.literal_constraints.clear();
-        query_ir.temporal_constraints.clear();
-        query_ir.document_focus = None;
-        query_ir.source_slice = None;
-        query_ir.conversation_refs.clear();
-        query_ir.confidence = 0.25;
-
-        let answer = build_module_configuration_setup_answer(
-            "PAY cash link troubleshooting",
-            &query_ir,
-            &empty_evidence(),
-            &chunks,
-        );
-
-        assert!(answer.is_none(), "{answer:?}");
-    }
-
-    #[test]
-    fn low_confidence_untyped_ir_accepts_shared_code_for_config_evidence() {
-        let document_id = Uuid::now_v7();
-        let chunks = vec![runtime_chunk(
-            document_id,
-            1,
-            "PAY cash link setup",
-            r#"
-Install the module:
-sample-install cash-link
-
-The module configuration file is /opt/cash/link/link.conf.
-[Main]
-endpointUrl = https://cash.example/api
-partnerId = cash-partner
-visible = true
-"#,
-        )];
-        let mut query_ir = configuration_setup_ir();
-        query_ir.act = QueryAct::Describe;
-        query_ir.target_types.clear();
-        query_ir.target_entities.clear();
-        query_ir.literal_constraints.clear();
-        query_ir.temporal_constraints.clear();
-        query_ir.document_focus = None;
-        query_ir.source_slice = None;
-        query_ir.conversation_refs.clear();
-        query_ir.confidence = 0.25;
-
-        let answer = build_module_configuration_setup_answer(
-            "PAY cash link setup `/opt/cash/link/link.conf` `visible`",
-            &query_ir,
-            &empty_evidence(),
-            &chunks,
-        )
-        .expect("setup answer");
-
-        assert!(answer.contains("`cash-link`"));
-        assert!(answer.contains("`/opt/cash/link/link.conf`"));
-        assert!(answer.contains("visible"));
-    }
-
-    #[test]
-    fn low_confidence_structural_ir_uses_matching_config_evidence() {
-        let document_id = Uuid::now_v7();
-        let chunks = vec![runtime_chunk(
-            document_id,
-            1,
-            "Provider Alpha setup",
-            r#"
-Install the module:
-sample-install alpha-connector
-
-The module configuration file is /opt/alpha/modules/connector/connector.conf.
-[Main]
-endpointUrl = https://alpha.example/api
-partnerId = alpha-partner
-visible = true
-"#,
-        )];
-        let mut query_ir = configuration_setup_ir();
-        query_ir.act = QueryAct::Describe;
-        query_ir.scope = QueryScope::MultiDocument;
-        query_ir.target_types.clear();
-        query_ir.target_entities =
-            vec![EntityMention { label: "Provider Alpha".to_string(), role: EntityRole::Subject }];
-        query_ir.literal_constraints.clear();
-        query_ir.temporal_constraints.clear();
-        query_ir.document_focus = None;
-        query_ir.source_slice = None;
-        query_ir.conversation_refs.clear();
-        query_ir.confidence = 0.25;
-
-        let answer = build_module_configuration_setup_answer(
-            "Provider Alpha settings",
-            &query_ir,
-            &empty_evidence(),
-            &chunks,
-        )
-        .expect("setup answer");
-
-        assert!(answer.contains("`alpha-connector`"));
-        assert!(answer.contains("`/opt/alpha/modules/connector/connector.conf`"));
-        assert!(answer.contains("`visible = true`"));
-    }
-
-    #[test]
-    fn low_confidence_structural_ir_rejects_unmatched_config_evidence() {
-        let document_id = Uuid::now_v7();
-        let chunks = vec![runtime_chunk(
-            document_id,
-            1,
-            "Provider Beta setup",
-            r#"
-Install the module:
-sample-install beta-connector
-
-The module configuration file is /opt/beta/modules/connector/connector.conf.
-[Main]
-endpointUrl = https://beta.example/api
-partnerId = beta-partner
-visible = true
-"#,
-        )];
-        let mut query_ir = configuration_setup_ir();
-        query_ir.act = QueryAct::Describe;
-        query_ir.scope = QueryScope::MultiDocument;
-        query_ir.target_types.clear();
-        query_ir.target_entities =
-            vec![EntityMention { label: "Provider Alpha".to_string(), role: EntityRole::Subject }];
-        query_ir.literal_constraints.clear();
-        query_ir.temporal_constraints.clear();
-        query_ir.document_focus = None;
-        query_ir.source_slice = None;
-        query_ir.conversation_refs.clear();
-        query_ir.confidence = 0.25;
-
-        let answer = build_module_configuration_setup_answer(
-            "Provider Alpha settings",
-            &query_ir,
-            &empty_evidence(),
-            &chunks,
-        );
-
-        assert!(answer.is_none(), "{answer:?}");
-    }
-
-    #[test]
-    fn module_configuration_setup_answer_adds_structured_rows_for_focused_document() {
-        let setup_document_id = Uuid::now_v7();
-        let other_document_id = Uuid::now_v7();
-        let revision_id = Uuid::now_v7();
-        let chunks = vec![
-            runtime_chunk(
-                setup_document_id,
-                0,
-                "Provider Delta setup",
-                r#"
-Install the module:
-sample-install delta-connector
-
-The module configuration file is /opt/delta/modules/connector/connector.conf.
-| endpointUrl | string | Service endpoint |
-"#,
-            ),
-            runtime_chunk(
-                setup_document_id,
-                1,
-                "Provider Delta setup",
-                "Table Summary | Sheet: Connector settings | Row Count: 12",
-            ),
-        ];
-        let mut block = crate::services::query::execution::types::sample_structured_block_row(
-            Uuid::now_v7(),
-            setup_document_id,
-            revision_id,
-        );
-        block.ordinal = 12;
-        block.text =
-            "Sheet: Connector settings | Row 12 | Name: fillDetails | Type: boolean | Description: Send detailed payload"
-                .to_string();
-        block.normalized_text = block.text.clone();
-        let mut unrelated_block =
-            crate::services::query::execution::types::sample_structured_block_row(
-                Uuid::now_v7(),
-                other_document_id,
-                Uuid::now_v7(),
-            );
-        unrelated_block.text =
-            "Sheet: Other settings | Row 1 | Name: unrelatedSecret | Type: string".to_string();
-        unrelated_block.normalized_text = unrelated_block.text.clone();
-        let evidence = evidence_with_blocks(vec![block, unrelated_block]);
-
-        let answer = build_module_configuration_setup_answer(
-            "Configure Provider Delta parameters",
-            &configuration_setup_ir(),
-            &evidence,
-            &chunks,
-        )
-        .expect("setup answer");
-
-        assert!(answer.contains("`endpointUrl`"));
-        assert!(answer.contains("`fillDetails`"));
-        assert!(!answer.contains("- ``"));
-        assert!(!answer.contains("`unrelatedSecret`"));
-    }
-
-    #[test]
-    fn module_configuration_setup_answer_reads_structured_paths_and_packages() {
-        let setup_document_id = Uuid::now_v7();
-        let other_document_id = Uuid::now_v7();
-        let revision_id = Uuid::now_v7();
-        let chunks = vec![runtime_chunk(
-            setup_document_id,
-            0,
-            "Provider Epsilon setup",
-            "Overview for Provider Epsilon connector settings.",
-        )];
-        let mut install_block =
-            crate::services::query::execution::types::sample_structured_block_row(
-                Uuid::now_v7(),
-                setup_document_id,
-                revision_id,
-            );
-        install_block.ordinal = 1;
-        install_block.text =
-            "Install the module:\nsample-install epsilon-connector\n\nConfigure it:\nsample-configure epsilon-connector"
-                .to_string();
-        install_block.normalized_text = install_block.text.clone();
-        let mut path_block = crate::services::query::execution::types::sample_structured_block_row(
-            Uuid::now_v7(),
-            setup_document_id,
-            revision_id,
-        );
-        path_block.ordinal = 2;
-        path_block.text =
-            "The module configuration file is /opt/epsilon/modules/connector/connector.conf. Receipt display uses /opt/epsilon/receipt/receipt.ini."
-                .to_string();
-        path_block.normalized_text = path_block.text.clone();
-        let mut parameter_block =
-            crate::services::query::execution::types::sample_structured_block_row(
-                Uuid::now_v7(),
-                setup_document_id,
-                revision_id,
-            );
-        parameter_block.ordinal = 3;
-        parameter_block.text =
-            "Sheet: Connector settings | Row 1 | Name: endpointUrl | Type: string | Description: Service endpoint"
-                .to_string();
-        parameter_block.normalized_text = parameter_block.text.clone();
-        let mut unrelated_block =
-            crate::services::query::execution::types::sample_structured_block_row(
-                Uuid::now_v7(),
-                other_document_id,
-                Uuid::now_v7(),
-            );
-        unrelated_block.text =
-            "Install unrelated module with `sample-install omega-connector`; file /opt/omega/omega.conf"
-                .to_string();
-        unrelated_block.normalized_text = unrelated_block.text.clone();
-        let evidence =
-            evidence_with_blocks(vec![install_block, path_block, parameter_block, unrelated_block]);
-
-        let answer = build_module_configuration_setup_answer(
-            "Configure Provider Epsilon connector",
-            &configuration_setup_ir(),
-            &evidence,
-            &chunks,
-        )
-        .expect("setup answer");
-
-        assert!(answer.contains("`epsilon-connector`"));
-        assert!(answer.contains("`/opt/epsilon/modules/connector/connector.conf`"));
-        assert!(answer.contains("`/opt/epsilon/receipt/receipt.ini`"));
-        assert!(answer.contains("`endpointUrl`"));
-        assert!(!answer.contains("- ``"));
-        assert!(!answer.contains("omega-connector"));
-        assert!(!answer.contains("/opt/omega/omega.conf"));
-    }
-
-    #[test]
-    fn exact_technical_literal_answer_abstains_for_untyped_entity_only_fallback_ir() {
-        let document_id = Uuid::now_v7();
-        let chunks = vec![runtime_chunk(
-            document_id,
-            0,
-            "Provider Alpha setup",
-            r#"
-Install the module:
-sample-install alpha-connector
-
-Settings are stored in /opt/alpha/modules/connector/connector.conf under [Main].
-endpointUrl = https://alpha.example/api
-partnerId = alpha-partner
-"#,
-        )];
-        let evidence = empty_evidence();
-        let mut low_confidence_ir = configuration_setup_ir();
-        low_confidence_ir.act = QueryAct::Describe;
-        low_confidence_ir.target_types.clear();
-        low_confidence_ir.target_entities =
-            vec![EntityMention { label: "Provider Alpha".to_string(), role: EntityRole::Subject }];
-        low_confidence_ir.confidence = 0.25;
-
-        assert!(
-            build_exact_technical_literal_answer(
-                "What operational limits apply to Provider Alpha?",
-                &low_confidence_ir,
-                &evidence,
-                &chunks,
-            )
-            .is_none(),
-            "entity-only provider-free fallback IR must not turn setup literals into a final operational answer"
-        );
-
-        let typed_ir = configuration_setup_ir();
-        let answer = build_exact_technical_literal_answer(
-            "How do I configure Provider Alpha?",
-            &typed_ir,
-            &evidence,
-            &chunks,
-        )
-        .expect("typed configuration IR should still allow deterministic literal answer");
-        assert!(answer.contains("`alpha-connector`"), "{answer}");
-    }
-
-    #[test]
-    fn module_configuration_setup_answer_abstains_for_port_inventory_question() {
-        let document_id = Uuid::now_v7();
-        let chunks = vec![runtime_chunk(
-            document_id,
-            0,
-            "sample-manifest.yaml",
-            r#"
-services:
-  api:
-    environment:
-      PORT: 8001
-      apiPort = 8001
-    ports:
-      - "8001:8001"
-  postgres:
-    postgresPort = 5432
-    ports:
-      - "5432:5432"
-"#,
-        )];
-        let mut query_ir = configuration_setup_ir();
-        query_ir.act = QueryAct::Describe;
-        query_ir.target_types =
-            vec!["configuration_file".to_string(), "service".to_string(), "port".to_string()];
-        query_ir.target_entities =
-            vec![EntityMention { label: "Sample Manifest".to_string(), role: EntityRole::Subject }];
-
-        let answer = build_module_configuration_setup_answer(
-            "What ports do the Sample Manifest services expose?",
-            &query_ir,
-            &empty_evidence(),
-            &chunks,
-        );
-
-        assert!(
-            answer.is_none(),
-            "service/port inventory questions should use synthesis over source coverage, not setup field rendering: {answer:?}"
-        );
-        let exact_answer = build_exact_technical_literal_answer(
-            "What ports do the Sample Manifest services expose?",
-            &query_ir,
-            &empty_evidence(),
-            &chunks,
-        );
-        assert!(
-            exact_answer.is_none(),
-            "service/port inventory questions should not use exact assignment rendering: {exact_answer:?}"
-        );
-    }
-
-    #[test]
-    fn transport_config_assignment_answer_requires_assignment_evidence() {
-        let document_id = Uuid::now_v7();
-        let chunks = vec![runtime_chunk(
-            document_id,
-            0,
-            "checkout_service_notes.md",
-            "The checkout service accepts HTTPS traffic and calls the inventory service on port 9443.",
-        )];
-        let mut query_ir = configuration_setup_ir();
-        query_ir.act = QueryAct::RetrieveValue;
-        query_ir.target_types = vec!["port".to_string(), "connection".to_string()];
-
-        let answer = build_transport_config_assignment_answer(
-            "Which ports and connections does the checkout service require?",
-            &query_ir,
-            &chunks,
-        );
-
-        assert!(
-            answer.is_none(),
-            "transport assignment rendering requires concrete config assignments: {answer:?}"
-        );
-    }
-
-    #[test]
-    fn transport_config_assignment_answer_abstains_for_compound_port_inventory() {
-        let document_id = Uuid::now_v7();
-        let chunks = vec![runtime_chunk(
-            document_id,
-            0,
-            "alpha_records.txt",
-            r#"
-entity.alpha = alpha
-entity.beta = beta
-entity.updated_at = now()
-"#,
-        )];
-        let mut query_ir = configuration_setup_ir();
-        query_ir.act = QueryAct::Describe;
-        query_ir.target_types =
-            vec!["configuration_file".to_string(), "port".to_string(), "procedure".to_string()];
-        query_ir.target_entities =
-            vec![EntityMention { label: "Alpha Records".to_string(), role: EntityRole::Subject }];
-
-        let answer = build_transport_config_assignment_answer(
-            "Which port values does Alpha Records expose?",
-            &query_ir,
-            &chunks,
-        );
-
-        assert!(
-            answer.is_none(),
-            "compound port inventory should not be answered by assignment-shaped rows: {answer:?}"
-        );
-    }
-
-    #[test]
-    fn transport_config_assignment_answer_abstains_for_broad_protocol_explanation() {
-        let document_id = Uuid::now_v7();
-        let chunks = vec![runtime_chunk(
-            document_id,
-            0,
-            "neighboring_config.txt",
-            r#"
-service.endpoint = https://example.invalid:9443
-service.timeout = 30
-service.enabled = true
-"#,
-        )];
-        let mut query_ir = configuration_setup_ir();
-        query_ir.act = QueryAct::Describe;
-        query_ir.target_types = vec!["protocol".to_string(), "concept".to_string()];
-
-        let answer = build_transport_config_assignment_answer(
-            "What are the main improvements of Protocol X version 2 over version 1?",
-            &query_ir,
-            &chunks,
-        );
-
-        assert!(
-            answer.is_none(),
-            "broad protocol/concept questions should be synthesized from evidence, not rendered as config assignments: {answer:?}"
-        );
-    }
-
-    #[test]
-    fn transport_config_assignment_answer_requires_connection_or_configuration_target() {
-        let document_id = Uuid::now_v7();
-        let chunks = vec![runtime_chunk(
-            document_id,
-            0,
-            "neighboring_config.txt",
-            r#"
-listener.protocol = alpha
-listener.timeout = 30
-listener.enabled = true
-"#,
-        )];
-        let mut query_ir = configuration_setup_ir();
-        query_ir.act = QueryAct::RetrieveValue;
-        query_ir.target_types = vec!["protocol".to_string()];
-
-        let answer = build_transport_config_assignment_answer(
-            "Which protocol is described?",
-            &query_ir,
-            &chunks,
-        );
-
-        assert!(
-            answer.is_none(),
-            "a protocol-only value lookup must not infer a config-assignment answer without a connection/config target: {answer:?}"
-        );
-    }
-
-    fn configuration_setup_ir() -> QueryIR {
-        QueryIR {
-            act: QueryAct::ConfigureHow,
-            scope: QueryScope::SingleDocument,
-            language: QueryLanguage::En,
-            target_types: vec![
-                "package".to_string(),
-                "configuration_file".to_string(),
-                "parameter".to_string(),
-            ],
-            target_entities: Vec::new(),
-            literal_constraints: Vec::new(),
-            temporal_constraints: Vec::new(),
-            comparison: None,
-            document_focus: None,
-            conversation_refs: Vec::<UnresolvedRef>::new(),
-            needs_clarification: None,
-            source_slice: Option::<SourceSliceSpec>::None,
-            retrieval_query: None,
-            confidence: 1.0,
-        }
-    }
-
-    fn literal_constraint(text: &str) -> crate::domains::query_ir::LiteralSpan {
-        crate::domains::query_ir::LiteralSpan {
-            kind: crate::domains::query_ir::LiteralKind::Identifier,
-            text: text.to_string(),
-        }
-    }
-
-    fn empty_evidence() -> CanonicalAnswerEvidence {
-        evidence_with_blocks(Vec::new())
-    }
-
-    fn evidence_with_blocks(blocks: Vec<KnowledgeStructuredBlockRow>) -> CanonicalAnswerEvidence {
-        CanonicalAnswerEvidence {
-            bundle: None,
-            chunk_rows: Vec::new(),
-            structured_blocks: blocks,
-            technical_facts: Vec::new(),
-        }
-    }
-
-    fn runtime_chunk(
-        document_id: Uuid,
-        index: i32,
-        label: &str,
-        text: &str,
-    ) -> RuntimeMatchedChunk {
-        RuntimeMatchedChunk {
-            chunk_id: Uuid::now_v7(),
-            document_id,
-            revision_id: Uuid::now_v7(),
-            chunk_index: index,
-            chunk_kind: None,
-            document_label: label.to_string(),
-            excerpt: text.to_string(),
-            score_kind: RuntimeChunkScoreKind::Relevance,
-            score: Some(1.0),
-            source_text: text.to_string(),
-        }
-    }
-}
+#[path = "technical_answer_tests.rs"]
+mod tests;

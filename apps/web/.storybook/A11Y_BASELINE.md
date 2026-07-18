@@ -10,17 +10,17 @@ Scope:
 
 Current baseline:
 
-| Impact | Count | Axe rule IDs |
-| --- | ---: | --- |
-| Minor | 0 | None |
-| Moderate | 0 | None |
+| Impact   | Count | Axe rule IDs |
+| -------- | ----: | ------------ |
+| Minor    |     0 | None         |
+| Moderate |     0 | None         |
 
 Gating result:
 
-| Impact | Count |
-| --- | ---: |
-| Serious | 0 |
-| Critical | 0 |
+| Impact   | Count |
+| -------- | ----: |
+| Serious  |     0 |
+| Critical |     0 |
 
 Notes:
 

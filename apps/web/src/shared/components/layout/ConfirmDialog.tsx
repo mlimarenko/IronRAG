@@ -1,7 +1,7 @@
-import type { ReactNode } from "react";
-import { AlertTriangle } from "lucide-react";
+import type { ReactNode } from 'react'
+import { AlertTriangle } from 'lucide-react'
 
-import { Button } from "@/shared/components/ui/button";
+import { Button } from '@/shared/components/ui/button'
 import {
   Dialog,
   DialogContent,
@@ -9,21 +9,21 @@ import {
   DialogFooter,
   DialogHeader,
   DialogTitle,
-} from "@/shared/components/ui/dialog";
+} from '@/shared/components/ui/dialog'
 
-type ConfirmDialogProps = {
-  open: boolean;
-  title: ReactNode;
-  description?: ReactNode;
-  cancelLabel: ReactNode;
-  confirmLabel: ReactNode;
-  onCancel: () => void;
-  onConfirm: () => void;
-  onOpenChange?: (open: boolean) => void;
-  confirmDisabled?: boolean;
-  destructive?: boolean;
-  icon?: ReactNode;
-};
+type ConfirmDialogProps = Readonly<{
+  open: boolean
+  title: ReactNode
+  description?: ReactNode
+  cancelLabel: ReactNode
+  confirmLabel: ReactNode
+  onCancel: () => void
+  onConfirm: () => void
+  onOpenChange?: (open: boolean) => void
+  confirmDisabled?: boolean
+  destructive?: boolean
+  icon?: ReactNode
+}>
 
 export function ConfirmDialog({
   open,
@@ -42,8 +42,8 @@ export function ConfirmDialog({
     <Dialog
       open={open}
       onOpenChange={(nextOpen) => {
-        onOpenChange?.(nextOpen);
-        if (!nextOpen) onCancel();
+        onOpenChange?.(nextOpen)
+        if (!nextOpen) onCancel()
       }}
     >
       <DialogContent>
@@ -67,12 +67,12 @@ export function ConfirmDialog({
           <Button
             disabled={confirmDisabled}
             onClick={onConfirm}
-            variant={destructive ? "destructive" : "default"}
+            variant={destructive ? 'destructive' : 'default'}
           >
             {confirmLabel}
           </Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>
-  );
+  )
 }

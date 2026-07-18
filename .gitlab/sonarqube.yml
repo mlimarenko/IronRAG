@@ -1,0 +1,152 @@
+# Managed by general/infrastructure/sonarqube.
+include:
+  - project: general/infrastructure/sonarqube
+    ref: master
+    file: /templates/sonarqube.gitlab-ci.yml
+
+.sonarqube-coverage-rules:
+  # All project runners require tags (run_untagged=false); without this the
+  # coverage jobs sit in pending until stuck_or_timeout_failure.
+  tags: [docker]
+  rules:
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+
+sonarqube:frontend-coverage:
+  extends: .sonarqube-coverage-rules
+  stage: test
+  image:
+    name: node:26.4.0-bookworm-slim@sha256:ec82d089a8ae2cf02628da7b34ea57dc357b24db724d557fe2d240e6beb659c1
+    entrypoint: [""]
+  interruptible: true
+  cache:
+    key:
+      files:
+        - apps/web/package-lock.json
+    paths:
+      - .npm/
+  variables:
+    npm_config_cache: "$CI_PROJECT_DIR/.npm"
+  script:
+    - npm --prefix apps/web ci
+    - npm --prefix apps/web run test:coverage
+    - test -s apps/web/coverage/lcov.info
+  artifacts:
+    expire_in: 1 week
+    paths:
+      - apps/web/coverage/lcov.info
+
+sonarqube:python-coverage:
+  extends: .sonarqube-coverage-rules
+  stage: test
+  image:
+    name: gitlab.piping.space:4567/general/devopsimage:4.0.1@sha256:1b9d2ce5b0a2de1117852b997ca8a7d3337ddfbbcedc3ef776586edd9e0c1fbb
+    entrypoint: [""]
+  interruptible: true
+  variables:
+    COVERAGE_FILE: "$CI_PROJECT_DIR/coverage/python/.coverage"
+    PIP_CACHE_DIR: "$CI_PROJECT_DIR/.cache/pip"
+  cache:
+    key: python-coverage-7.15.2-requests-2.32.5
+    paths:
+      - .cache/pip/
+  before_script:
+    - mkdir -p .ci
+    - python3 -m venv .ci/python-coverage
+    - .ci/python-coverage/bin/pip install --disable-pip-version-check "coverage==7.15.2" "requests==2.32.5"
+  script:
+    - mkdir -p coverage/python
+    - .ci/python-coverage/bin/python -m coverage erase
+    # Literal block, not folded: YAML keeps line breaks on more-indented
+    # lines inside `>-`, which split the coverage command into three bare
+    # statements ("coverage run --append --branch" alone prints "Nothing
+    # to do." and fails the job).
+    - |
+      for suite in \
+        apps/api/benchmarks/grounded_query \
+        apps/api/scripts \
+        apps/api/docker \
+        scripts/bench \
+        scripts/ops; do
+        .ci/python-coverage/bin/python -m coverage run --append --branch \
+          --source=apps/api/benchmarks/grounded_query,apps/api/scripts,apps/api/docker,scripts/bench,scripts/ops \
+          -m unittest discover -s "$suite" -p 'test_*.py'
+      done
+    - .ci/python-coverage/bin/python -m coverage xml -o coverage/python/coverage.xml
+    - test -s coverage/python/coverage.xml
+  artifacts:
+    expire_in: 1 week
+    paths:
+      - coverage/python/coverage.xml
+
+sonarqube:rust-coverage:
+  extends: .sonarqube-coverage-rules
+  stage: test
+  # The instrumented compile of the ironrag-backend crate peaks past what
+  # the 11 GB pxm-docker01 host can offer, so the kernel OOM-kills rustc
+  # even with debuginfo stripped and two build jobs. Run this one job on
+  # the quality runner (16 GB k8s nodes) with an explicit memory grant.
+  tags: [docker-quality]
+  image:
+    name: rust:1.97.0-trixie@sha256:b92b8c8574f8f3b207fcb0912fb3e2de4041580b5934d90312d53938c9a038a9
+    entrypoint: [""]
+  interruptible: true
+  timeout: 45m
+  variables:
+    CARGO_HOME: "$CI_PROJECT_DIR/.cargo-home"
+    CARGO_TARGET_DIR: "$CI_PROJECT_DIR/.cargo-target/coverage"
+    CARGO_INCREMENTAL: "0"
+    RUSTUP_TOOLCHAIN: "1.97.0"
+    # Coverage mapping does not need DWARF; dropping debuginfo and capping
+    # build parallelism keeps the peak well inside the memory grant.
+    CARGO_BUILD_JOBS: "2"
+    CARGO_PROFILE_TEST_DEBUG: "0"
+    CARGO_PROFILE_DEV_DEBUG: "0"
+    KUBERNETES_MEMORY_REQUEST: "10Gi"
+    KUBERNETES_MEMORY_LIMIT: "13Gi"
+    KUBERNETES_CPU_REQUEST: "2"
+  cache:
+    key:
+      files:
+        - Cargo.lock
+    paths:
+      - .cargo-home/registry/
+      - .cargo-home/git/
+      - .cargo-target/coverage/
+  before_script:
+    - rustup component add llvm-tools-preview
+    - mkdir -p .ci/bin coverage/rust
+    - >-
+      curl --fail --location --retry 3
+      --output /tmp/cargo-llvm-cov.tar.gz
+      https://github.com/taiki-e/cargo-llvm-cov/releases/download/v0.8.7/cargo-llvm-cov-x86_64-unknown-linux-gnu.tar.gz
+    - printf '%s  %s\n' '9a75fe29538d3800b3da57f6f6efb64cba5c720a257bf0cb8b51f39d495a9168' '/tmp/cargo-llvm-cov.tar.gz' | sha256sum --check
+    - tar -xzf /tmp/cargo-llvm-cov.tar.gz -C .ci/bin cargo-llvm-cov
+    - test "$(.ci/bin/cargo-llvm-cov llvm-cov --version)" = "cargo-llvm-cov 0.8.7"
+  script:
+    - >-
+      .ci/bin/cargo-llvm-cov
+      llvm-cov
+      --locked
+      --workspace
+      --all-features
+      --lcov
+      --output-path coverage/rust/lcov.info
+    - test -s coverage/rust/lcov.info
+  artifacts:
+    expire_in: 1 week
+    paths:
+      - coverage/rust/lcov.info
+
+sonarqube:
+  extends: .sonarqube-main
+  stage: test
+  allow_failure: false
+  needs:
+    - job: sonarqube:frontend-coverage
+      artifacts: true
+    - job: sonarqube:python-coverage
+      artifacts: true
+    - job: sonarqube:rust-coverage
+      artifacts: true
+  variables:
+    SONAR_PROJECT_KEY: "general_tools_ironrag_84080755-c1ce-4e19-a3c4-e4ca4d95ad11"

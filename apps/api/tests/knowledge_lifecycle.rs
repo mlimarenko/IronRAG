@@ -183,7 +183,7 @@ fn knowledge_revision_command(
         title: Some(title.to_string()),
         normalized_text: Some(normalized_text.to_string()),
         text_checksum: Some(format!("sha256:text:{revision_id}")),
-        text_state: "readable".to_string(),
+        text_state: "text_readable".to_string(),
         vector_state: "ready".to_string(),
         graph_state: "pending".to_string(),
         text_readable_at: Some(Utc::now()),
@@ -305,17 +305,7 @@ async fn canonical_knowledge_lifecycle_persists_document_shell_revisions_pointer
             .state
             .canonical_services
             .knowledge
-            .promote_document(
-                &fixture.state,
-                PromoteKnowledgeDocumentCommand {
-                    document_id,
-                    document_state: "active".to_string(),
-                    active_revision_id: Some(revision_id),
-                    readable_revision_id: Some(revision_id),
-                    latest_revision_no: Some(1),
-                    deleted_at: None,
-                },
-            )
+            .promote_document(&fixture.state, PromoteKnowledgeDocumentCommand { document_id })
             .await
             .context("failed to promote knowledge document")?;
 
@@ -417,7 +407,7 @@ async fn canonical_knowledge_lifecycle_handles_append_replace_and_delete_without
         let revision_one_chunk_id =
             write_chunk(&fixture, document_id, revision_one_id, 0, "Base memory about the engine.")
                 .await?;
-        let embedding_model_id = Uuid::now_v7();
+        let embedding_profile_key = format!("embedding-profile:v1:{0}{0}", Uuid::now_v7().simple());
         fixture
             .state
             .search_store
@@ -427,7 +417,7 @@ async fn canonical_knowledge_lifecycle_handles_append_replace_and_delete_without
                 library_id: fixture.library_id,
                 chunk_id: revision_one_chunk_id,
                 revision_id: revision_one_id,
-                embedding_model_key: embedding_model_id.to_string(),
+                embedding_model_key: embedding_profile_key.clone(),
                 vector_kind: "chunk_embedding".to_string(),
                 dimensions: 2,
                 vector: vec![0.1, 0.2],
@@ -443,17 +433,7 @@ async fn canonical_knowledge_lifecycle_handles_append_replace_and_delete_without
             .state
             .canonical_services
             .knowledge
-            .promote_document(
-                &fixture.state,
-                PromoteKnowledgeDocumentCommand {
-                    document_id,
-                    document_state: "active".to_string(),
-                    active_revision_id: Some(revision_one_id),
-                    readable_revision_id: Some(revision_one_id),
-                    latest_revision_no: Some(1),
-                    deleted_at: None,
-                },
-            )
+            .promote_document(&fixture.state, PromoteKnowledgeDocumentCommand { document_id })
             .await
             .context("failed to promote revision one")?;
 
@@ -488,17 +468,7 @@ async fn canonical_knowledge_lifecycle_handles_append_replace_and_delete_without
             .state
             .canonical_services
             .knowledge
-            .promote_document(
-                &fixture.state,
-                PromoteKnowledgeDocumentCommand {
-                    document_id,
-                    document_state: "active".to_string(),
-                    active_revision_id: Some(revision_two_id),
-                    readable_revision_id: Some(revision_one_id),
-                    latest_revision_no: Some(2),
-                    deleted_at: None,
-                },
-            )
+            .promote_document(&fixture.state, PromoteKnowledgeDocumentCommand { document_id })
             .await
             .context("failed to promote revision two with split readable pointer")?;
 
@@ -562,7 +532,7 @@ async fn canonical_knowledge_lifecycle_handles_append_replace_and_delete_without
             .search_store
             .count_chunk_vectors_by_revision(
                 revision_one_id,
-                &embedding_model_id.to_string(),
+                &embedding_profile_key,
                 "chunk_embedding",
                 1,
             )
@@ -574,17 +544,7 @@ async fn canonical_knowledge_lifecycle_handles_append_replace_and_delete_without
             .state
             .canonical_services
             .knowledge
-            .promote_document(
-                &fixture.state,
-                PromoteKnowledgeDocumentCommand {
-                    document_id,
-                    document_state: "deleted".to_string(),
-                    active_revision_id: None,
-                    readable_revision_id: Some(revision_three_id),
-                    latest_revision_no: Some(3),
-                    deleted_at: Some(Utc::now()),
-                },
-            )
+            .promote_document(&fixture.state, PromoteKnowledgeDocumentCommand { document_id })
             .await
             .context("failed to tombstone knowledge document")?;
 
@@ -628,7 +588,7 @@ async fn deleted_document_revision_cleanup_is_not_capped_at_one_hundred_revision
     let result = async {
         let document_id = Uuid::now_v7();
         let external_key = format!("knowledge-revision-cap-doc-{}", document_id.simple());
-        let embedding_model_id = Uuid::now_v7();
+        let embedding_profile_key = format!("embedding-profile:v1:{0}{0}", Uuid::now_v7().simple());
         let mut oldest_revision_id = None;
         let mut oldest_chunk_id = None;
 
@@ -692,7 +652,7 @@ async fn deleted_document_revision_cleanup_is_not_capped_at_one_hundred_revision
                         library_id: fixture.library_id,
                         chunk_id,
                         revision_id,
-                        embedding_model_key: embedding_model_id.to_string(),
+                        embedding_model_key: embedding_profile_key.clone(),
                         vector_kind: "chunk_embedding".to_string(),
                         dimensions: 2,
                         vector: vec![0.1, 0.2],
@@ -848,17 +808,7 @@ async fn knowledge_readiness_coherence_keeps_readable_pointer_until_new_revision
             .state
             .canonical_services
             .knowledge
-            .promote_document(
-                &fixture.state,
-                PromoteKnowledgeDocumentCommand {
-                    document_id,
-                    document_state: "active".to_string(),
-                    active_revision_id: Some(active_revision_id),
-                    readable_revision_id: Some(readable_revision_id),
-                    latest_revision_no: Some(2),
-                    deleted_at: None,
-                },
-            )
+            .promote_document(&fixture.state, PromoteKnowledgeDocumentCommand { document_id })
             .await
             .context("failed to promote split readiness pointers")?;
 

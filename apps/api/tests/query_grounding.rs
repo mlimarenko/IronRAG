@@ -16,7 +16,10 @@ use ironrag_backend::{
         audit::AuditEventSubject,
         ops::{OpsAsyncOperation, OpsAsyncOperationStatus},
     },
-    infra::repositories::{self, ops_repository, query_repository, runtime_repository},
+    infra::repositories::{
+        self, iam_repository, ops_repository, query_repository, query_result_cache_repository,
+        runtime_repository,
+    },
     infra::{
         knowledge_plane::{ContextStore, DocumentStore, GraphStore},
         knowledge_rows::{
@@ -174,8 +177,8 @@ impl QueryGroundingFixture {
                 text_checksum: Some(format!("text-checksum-{revision_id}")),
                 image_checksum: None,
                 text_state: "text_readable".to_string(),
-                vector_state: "pending".to_string(),
-                graph_state: "pending".to_string(),
+                vector_state: "accepted".to_string(),
+                graph_state: "accepted".to_string(),
                 text_readable_at: Some(now),
                 vector_ready_at: None,
                 graph_ready_at: None,
@@ -219,6 +222,92 @@ impl QueryGroundingFixture {
 
         Ok(())
     }
+}
+
+async fn seed_completed_mcp_conversation(
+    postgres: &PgPool,
+    workspace_id: Uuid,
+    library_id: Uuid,
+    age_seconds: i32,
+) -> Result<(Uuid, Uuid)> {
+    let conversation = query_repository::create_conversation(
+        postgres,
+        &query_repository::NewQueryConversation {
+            workspace_id,
+            library_id,
+            created_by_principal_id: None,
+            title: Some("Transient MCP retention fixture"),
+            conversation_state: "active",
+            request_surface: "mcp",
+        },
+        64,
+    )
+    .await?;
+    sqlx::query(
+        "update query_conversation
+         set created_at = now() - ($2 * interval '1 second'),
+             updated_at = now() - ($2 * interval '1 second')
+         where id = $1",
+    )
+    .bind(conversation.id)
+    .bind(age_seconds)
+    .execute(postgres)
+    .await?;
+
+    let execution_id = Uuid::now_v7();
+    let runtime_execution_id = Uuid::now_v7();
+    runtime_repository::create_runtime_execution(
+        postgres,
+        &runtime_repository::NewRuntimeExecution {
+            id: runtime_execution_id,
+            owner_kind: RuntimeExecutionOwnerKind::QueryExecution.as_str(),
+            owner_id: execution_id,
+            task_kind: RuntimeTaskKind::QueryAnswer.as_str(),
+            surface_kind: "mcp",
+            contract_name: "query_answer",
+            contract_version: "retention-test",
+            lifecycle_state: RuntimeLifecycleState::Completed.as_str(),
+            active_stage: None,
+            turn_budget: 1,
+            turn_count: 1,
+            parallel_action_limit: 1,
+            failure_code: None,
+            failure_summary_redacted: None,
+            parent_execution_id: None,
+        },
+    )
+    .await?;
+    query_repository::create_execution(
+        postgres,
+        &query_repository::NewQueryExecution {
+            execution_id,
+            context_bundle_id: Uuid::now_v7(),
+            workspace_id,
+            library_id,
+            conversation_id: conversation.id,
+            request_turn_id: None,
+            response_turn_id: None,
+            binding_id: None,
+            runtime_execution_id,
+            query_text: "Synthetic retention probe",
+            failure_code: None,
+        },
+    )
+    .await?;
+    query_repository::update_execution(
+        postgres,
+        execution_id,
+        &query_repository::UpdateQueryExecution {
+            request_turn_id: None,
+            response_turn_id: None,
+            failure_code: None,
+            completed_at: Some(Utc::now()),
+        },
+    )
+    .await?
+    .context("completed MCP execution disappeared")?;
+
+    Ok((conversation.id, execution_id))
 }
 
 struct QueryGroundingAppFixture {
@@ -523,7 +612,7 @@ impl QueryGroundingAppFixture {
                     image_checksum: None,
                     text_state: "text_readable".to_string(),
                     vector_state: "ready".to_string(),
-                    graph_state: "graph_ready".to_string(),
+                    graph_state: "ready".to_string(),
                     text_readable_at: Some(now),
                     vector_ready_at: Some(now),
                     graph_ready_at: Some(now),
@@ -629,6 +718,69 @@ impl QueryGroundingAppFixture {
         QueryService::new().get_execution(&self.state, execution.id).await.map_err(|error| {
             anyhow!("failed to load execution detail with canonical evidence: {error}")
         })
+    }
+
+    async fn create_replayable_execution_detail(
+        &self,
+        query_text: &str,
+        answer_text: &str,
+    ) -> Result<ironrag_backend::domains::query::QueryExecutionDetail> {
+        let document_id = Uuid::now_v7();
+        let revision_id = Uuid::now_v7();
+        let fact = sample_technical_fact_row(
+            self.workspace_id,
+            self.library_id,
+            document_id,
+            revision_id,
+            "configuration_value",
+            "enabled",
+            "enabled",
+            Vec::new(),
+            Vec::new(),
+        );
+        let detail = self
+            .create_execution_detail_with_canonical_evidence(
+                query_text,
+                "verified",
+                json!([]),
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                vec![fact],
+            )
+            .await?;
+        let request_turn = detail.request_turn.context("replay source request turn missing")?;
+        let response_turn = query_repository::create_turn(
+            &self.state.persistence.postgres,
+            &query_repository::NewQueryTurn {
+                conversation_id: self.conversation_id,
+                turn_kind: "assistant",
+                author_principal_id: None,
+                content_text: answer_text,
+                execution_id: Some(detail.execution.id),
+            },
+        )
+        .await
+        .context("failed to create replay source response turn")?;
+        query_repository::update_execution(
+            &self.state.persistence.postgres,
+            detail.execution.id,
+            &query_repository::UpdateQueryExecution {
+                request_turn_id: Some(request_turn.id),
+                response_turn_id: Some(response_turn.id),
+                failure_code: None,
+                completed_at: Some(Utc::now()),
+            },
+        )
+        .await
+        .context("failed to link replay source response turn")?
+        .context("replay source execution disappeared")?;
+
+        QueryService::new()
+            .get_execution(&self.state, detail.execution.id)
+            .await
+            .map_err(|error| anyhow!("failed to reload replayable execution detail: {error}"))
     }
 }
 
@@ -1309,6 +1461,119 @@ fn failure_cancellation_and_retry_scaffold_preserve_execution_bundle_linkage() {
 
 #[tokio::test]
 #[ignore = "requires local postgres service with database create/drop access"]
+async fn setup_structured_block_repository_bounds_and_deduplicates_lanes() -> Result<()> {
+    let fixture = QueryGroundingFixture::create().await?;
+    let result = async {
+        let workspace_id = Uuid::now_v7();
+        let library_id = Uuid::now_v7();
+        let document_id = Uuid::now_v7();
+        let revision_id = Uuid::now_v7();
+        fixture
+            .seed_chunk(
+                workspace_id,
+                library_id,
+                document_id,
+                revision_id,
+                Uuid::now_v7(),
+                "neutral grounding chunk",
+            )
+            .await?;
+
+        let blocks = vec![
+            sample_structured_block_row(
+                workspace_id,
+                library_id,
+                document_id,
+                revision_id,
+                0,
+                "table_row",
+                "early structural row",
+                Vec::new(),
+                Vec::new(),
+            ),
+            sample_structured_block_row(
+                workspace_id,
+                library_id,
+                document_id,
+                revision_id,
+                1,
+                "paragraph",
+                "early plain row",
+                Vec::new(),
+                Vec::new(),
+            ),
+            sample_structured_block_row(
+                workspace_id,
+                library_id,
+                document_id,
+                revision_id,
+                10,
+                "code_block",
+                "late code row",
+                Vec::new(),
+                Vec::new(),
+            ),
+            sample_structured_block_row(
+                workspace_id,
+                library_id,
+                document_id,
+                revision_id,
+                11,
+                "source_unit",
+                "late source row",
+                Vec::new(),
+                Vec::new(),
+            ),
+        ];
+        fixture
+            .document_store
+            .replace_structured_blocks(revision_id, &blocks)
+            .await
+            .context("failed to seed setup structured blocks")?;
+
+        let selected = fixture
+            .document_store
+            .list_setup_structured_blocks_by_revision(revision_id, 2, 2)
+            .await
+            .context("failed to list bounded setup structured blocks")?;
+        let selected_again = fixture
+            .document_store
+            .list_setup_structured_blocks_by_revision(revision_id, 2, 2)
+            .await
+            .context("failed to repeat bounded setup structured block read")?;
+        let selected_ids = selected.iter().map(|block| block.block_id).collect::<Vec<_>>();
+        let selected_id_set =
+            selected_ids.iter().copied().collect::<std::collections::HashSet<_>>();
+
+        assert_eq!(selected.len(), 4);
+        assert_eq!(selected_id_set.len(), selected.len());
+        assert_eq!(
+            selected.iter().map(|block| block.ordinal).collect::<Vec<_>>(),
+            vec![0, 1, 10, 11]
+        );
+        assert_eq!(
+            selected_again.iter().map(|block| block.block_id).collect::<Vec<_>>(),
+            selected_ids
+        );
+        assert!(selected.iter().any(|block| block.block_kind == "code_block"));
+        assert!(selected.iter().any(|block| block.block_kind == "source_unit"));
+        assert!(
+            fixture
+                .document_store
+                .list_setup_structured_blocks_by_revision(revision_id, 0, 0)
+                .await?
+                .is_empty()
+        );
+        Ok(())
+    }
+    .await;
+
+    fixture.cleanup().await?;
+    result
+}
+
+#[tokio::test]
+#[ignore = "requires local postgres service with database create/drop access"]
 async fn context_bundle_roundtrip_by_query_execution_persists_trace_and_chunk_references()
 -> Result<()> {
     let fixture = QueryGroundingFixture::create().await?;
@@ -1477,6 +1742,1445 @@ async fn context_bundle_roundtrip_by_query_execution_persists_trace_and_chunk_re
         assert_eq!(traces[0].dropped_reasons[0]["kind"], json!("debug_scaffold"));
         assert_eq!(traces[0].timing_breakdown["bundle_ms"], json!(1));
         assert_eq!(traces[0].diagnostics_json["grounding_kind"], json!("hybrid"));
+
+        Ok(())
+    }
+    .await;
+
+    fixture.cleanup().await?;
+    result
+}
+
+#[tokio::test]
+#[ignore = "requires local postgres service with database create/drop access"]
+async fn persistent_query_result_cache_expires_and_replaces_stale_winner() -> Result<()> {
+    let fixture = QueryGroundingAppFixture::create().await?;
+    let result = async {
+        let first =
+            fixture.create_execution_detail("First cache source", "verified", json!([])).await?;
+        let second = fixture
+            .create_execution_detail("Replacement cache source", "verified", json!([]))
+            .await?;
+        let source_truth_version = repositories::get_library_source_truth_version(
+            &fixture.state.persistence.postgres,
+            fixture.library_id,
+        )
+        .await?;
+        let cache_key = "query_result:v3:persistent-expiry-test";
+        let initial = query_result_cache_repository::upsert_query_result_cache_winner(
+            &fixture.state.persistence.postgres,
+            &query_result_cache_repository::UpsertQueryResultCacheInput {
+                cache_key,
+                workspace_id: fixture.workspace_id,
+                library_id: fixture.library_id,
+                source_execution_id: first.execution.id,
+                expected_source_truth_version: source_truth_version,
+                readable_content_fingerprint: "content:v1",
+                graph_projection_version: 1,
+                graph_topology_generation: 1,
+                binding_fingerprint: "bindings:v1",
+                ttl_seconds: 300,
+            },
+        )
+        .await?
+        .context("current-generation cache winner was not persisted")?;
+        assert_eq!(initial.source_execution_id, first.execution.id);
+
+        sqlx::query(
+            "update query_result_cache
+             set updated_at = now() - interval '301 seconds'
+             where cache_key = $1",
+        )
+        .bind(cache_key)
+        .execute(&fixture.state.persistence.postgres)
+        .await?;
+        assert!(
+            query_result_cache_repository::get_query_result_cache(
+                &fixture.state.persistence.postgres,
+                cache_key,
+                300,
+            )
+            .await?
+            .is_none()
+        );
+
+        let replacement = query_result_cache_repository::upsert_query_result_cache_winner(
+            &fixture.state.persistence.postgres,
+            &query_result_cache_repository::UpsertQueryResultCacheInput {
+                cache_key,
+                workspace_id: fixture.workspace_id,
+                library_id: fixture.library_id,
+                source_execution_id: second.execution.id,
+                expected_source_truth_version: source_truth_version,
+                readable_content_fingerprint: "content:v2",
+                graph_projection_version: 2,
+                graph_topology_generation: 2,
+                binding_fingerprint: "bindings:v2",
+                ttl_seconds: 300,
+            },
+        )
+        .await?
+        .context("current-generation replacement cache winner was not persisted")?;
+        assert_eq!(replacement.source_execution_id, second.execution.id);
+        assert_eq!(replacement.hit_count, 0);
+
+        let losing_conflict = query_result_cache_repository::upsert_query_result_cache_winner(
+            &fixture.state.persistence.postgres,
+            &query_result_cache_repository::UpsertQueryResultCacheInput {
+                cache_key,
+                workspace_id: fixture.workspace_id,
+                library_id: fixture.library_id,
+                source_execution_id: first.execution.id,
+                expected_source_truth_version: source_truth_version,
+                readable_content_fingerprint: "content:v1",
+                graph_projection_version: 1,
+                graph_topology_generation: 1,
+                binding_fingerprint: "bindings:v1",
+                ttl_seconds: 300,
+            },
+        )
+        .await?
+        .context("current-generation conflicting cache winner was not returned")?;
+        assert_eq!(losing_conflict.source_execution_id, second.execution.id);
+        assert_eq!(losing_conflict.updated_at, replacement.updated_at);
+        assert_eq!(losing_conflict.hit_count, 1);
+        assert_eq!(
+            query_result_cache_repository::delete_query_result_cache(
+                &fixture.state.persistence.postgres,
+                cache_key,
+                first.execution.id,
+            )
+            .await?,
+            0,
+            "an old reader must not evict a concurrently replaced winner",
+        );
+        let winner_after_stale_evict = query_result_cache_repository::get_query_result_cache(
+            &fixture.state.persistence.postgres,
+            cache_key,
+            300,
+        )
+        .await?
+        .context("replacement winner was removed by stale eviction")?;
+        assert_eq!(winner_after_stale_evict.source_execution_id, second.execution.id);
+
+        repositories::touch_library_source_truth_version(
+            &fixture.state.persistence.postgres,
+            fixture.library_id,
+        )
+        .await?;
+        let stale_winner = query_result_cache_repository::upsert_query_result_cache_winner(
+            &fixture.state.persistence.postgres,
+            &query_result_cache_repository::UpsertQueryResultCacheInput {
+                cache_key: "query_result:v3:stale-generation-winner",
+                workspace_id: fixture.workspace_id,
+                library_id: fixture.library_id,
+                source_execution_id: first.execution.id,
+                expected_source_truth_version: source_truth_version,
+                readable_content_fingerprint: "content:stale",
+                graph_projection_version: 1,
+                graph_topology_generation: 1,
+                binding_fingerprint: "bindings:v1",
+                ttl_seconds: 300,
+            },
+        )
+        .await?;
+        assert!(stale_winner.is_none());
+        Ok(())
+    }
+    .await;
+
+    fixture.cleanup().await?;
+    result
+}
+
+#[tokio::test]
+#[ignore = "requires local postgres service with database create/drop access"]
+async fn query_result_cache_gc_uses_db_ttl_and_keeps_each_batch_bounded() -> Result<()> {
+    let fixture = QueryGroundingAppFixture::create().await?;
+    let result = async {
+        let detail = fixture
+            .create_replayable_execution_detail(
+                "Cache retention fixture",
+                "Retained replay audit fixture",
+            )
+            .await?;
+        let request_turn = query_repository::create_turn(
+            &fixture.state.persistence.postgres,
+            &query_repository::NewQueryTurn {
+                conversation_id: fixture.conversation_id,
+                turn_kind: "user",
+                author_principal_id: None,
+                content_text: "Replay the retained cache answer.",
+                execution_id: None,
+            },
+        )
+        .await?;
+        let source_truth_version = repositories::get_library_source_truth_version(
+            &fixture.state.persistence.postgres,
+            fixture.library_id,
+        )
+        .await?;
+        let cache_key = "query_result:v3:gc-replay-audit";
+        query_result_cache_repository::upsert_query_result_cache_winner(
+            &fixture.state.persistence.postgres,
+            &query_result_cache_repository::UpsertQueryResultCacheInput {
+                cache_key,
+                workspace_id: fixture.workspace_id,
+                library_id: fixture.library_id,
+                source_execution_id: detail.execution.id,
+                expected_source_truth_version: source_truth_version,
+                readable_content_fingerprint: "content:gc-replay-audit",
+                graph_projection_version: 1,
+                graph_topology_generation: 1,
+                binding_fingerprint: "bindings:gc-replay-audit",
+                ttl_seconds: 300,
+            },
+        )
+        .await?
+        .context("failed to persist replay-audit cache winner")?;
+        let (_, replay) = query_result_cache_repository::create_query_execution_replay(
+            &fixture.state.persistence.postgres,
+            &query_result_cache_repository::CreateQueryExecutionReplayInput {
+                workspace_id: fixture.workspace_id,
+                library_id: fixture.library_id,
+                conversation_id: fixture.conversation_id,
+                request_turn_id: request_turn.id,
+                source_execution_id: detail.execution.id,
+                expected_source_truth_version: source_truth_version,
+                cache_key,
+                ttl_seconds: 300,
+            },
+        )
+        .await?
+        .context("current-generation replay should be materialized")?;
+
+        let gc_index_exists: bool = sqlx::query_scalar(
+            "select to_regclass('public.idx_query_result_cache_gc_updated') is not null",
+        )
+        .fetch_one(&fixture.state.persistence.postgres)
+        .await?;
+        assert!(gc_index_exists, "the global TTL sweep index must be installed");
+
+        let expired_rows: i64 =
+            query_result_cache_repository::MAX_QUERY_RESULT_CACHE_GC_BATCH_LIMIT + 1;
+        sqlx::query(
+            "insert into query_result_cache (
+                cache_key,
+                workspace_id,
+                library_id,
+                source_execution_id,
+                readable_content_fingerprint,
+                graph_projection_version,
+                graph_topology_generation,
+                binding_fingerprint,
+                updated_at
+             )
+             select
+                'query_result:v3:gc-expired:' || ordinal::text,
+                $1,
+                $2,
+                $3,
+                'content:gc-expired',
+                1,
+                1,
+                'bindings:gc-expired',
+                now() - interval '301 seconds'
+             from generate_series(1::bigint, $4) ordinal",
+        )
+        .bind(fixture.workspace_id)
+        .bind(fixture.library_id)
+        .bind(detail.execution.id)
+        .bind(expired_rows)
+        .execute(&fixture.state.persistence.postgres)
+        .await?;
+        sqlx::query(
+            "insert into query_result_cache (
+                cache_key,
+                workspace_id,
+                library_id,
+                source_execution_id,
+                readable_content_fingerprint,
+                graph_projection_version,
+                graph_topology_generation,
+                binding_fingerprint,
+                updated_at
+             ) values ($1, $2, $3, $4, 'content:gc-fresh', 1, 1, 'bindings:gc-fresh', now())",
+        )
+        .bind("query_result:v3:gc-fresh")
+        .bind(fixture.workspace_id)
+        .bind(fixture.library_id)
+        .bind(detail.execution.id)
+        .execute(&fixture.state.persistence.postgres)
+        .await?;
+
+        let initial_backlog =
+            query_result_cache_repository::probe_expired_query_result_cache_backlog(
+                &fixture.state.persistence.postgres,
+                300,
+                i64::MAX,
+            )
+            .await?;
+        assert_eq!(
+            initial_backlog.sample_limit,
+            u64::try_from(
+                query_result_cache_repository::MAX_QUERY_RESULT_CACHE_GC_BACKLOG_PROBE_LIMIT,
+            )
+            .unwrap_or(u64::MAX),
+        );
+        assert_eq!(initial_backlog.sampled_expired_rows, 501);
+        assert!(initial_backlog.sample_at_capacity());
+        assert!(
+            initial_backlog.oldest_expired_age_seconds.is_some_and(|age| age >= 1.0),
+            "the bounded probe must report seconds past TTL using PostgreSQL's clock",
+        );
+
+        let removed =
+            ironrag_backend::services::maintenance::scheduler::gc_expired_query_result_cache_once(
+                &fixture.state,
+                std::time::Duration::from_secs(300),
+                i64::MAX,
+            )
+            .await?;
+        assert_eq!(
+            removed,
+            u64::try_from(query_result_cache_repository::MAX_QUERY_RESULT_CACHE_GC_BATCH_LIMIT)
+                .unwrap_or(u64::MAX),
+            "the repository hard cap must bound a scheduler pass",
+        );
+
+        let expired_remaining: i64 = sqlx::query_scalar(
+            "select count(*)::bigint
+             from query_result_cache
+             where cache_key like 'query_result:v3:gc-expired:%'",
+        )
+        .fetch_one(&fixture.state.persistence.postgres)
+        .await?;
+        assert_eq!(expired_remaining, 1);
+        let one_row_backlog =
+            query_result_cache_repository::probe_expired_query_result_cache_backlog(
+                &fixture.state.persistence.postgres,
+                300,
+                i64::MAX,
+            )
+            .await?;
+        assert_eq!(one_row_backlog.sampled_expired_rows, 1);
+        assert!(!one_row_backlog.sample_at_capacity());
+        assert!(one_row_backlog.oldest_expired_age_seconds.is_some());
+        let fresh_remaining: bool = sqlx::query_scalar(
+            "select exists (
+                select 1 from query_result_cache where cache_key = $1
+             )",
+        )
+        .bind("query_result:v3:gc-fresh")
+        .fetch_one(&fixture.state.persistence.postgres)
+        .await?;
+        assert!(fresh_remaining, "a DB-clock-fresh cache row must survive GC");
+
+        let replay_remaining: bool = sqlx::query_scalar(
+            "select exists (
+                select 1 from query_execution_replay where id = $1
+             )",
+        )
+        .bind(replay.id)
+        .fetch_one(&fixture.state.persistence.postgres)
+        .await?;
+        assert!(
+            replay_remaining,
+            "target-conversation replay provenance must outlive short-lived winner cache TTL",
+        );
+
+        let no_op_removed =
+            ironrag_backend::services::maintenance::scheduler::gc_expired_query_result_cache_once(
+                &fixture.state,
+                std::time::Duration::from_secs(300),
+                0,
+            )
+            .await?;
+        assert_eq!(no_op_removed, 0, "a zero-sized batch must remain a no-op");
+
+        let final_removed =
+            ironrag_backend::services::maintenance::scheduler::gc_expired_query_result_cache_once(
+                &fixture.state,
+                std::time::Duration::from_secs(300),
+                1,
+            )
+            .await?;
+        assert_eq!(final_removed, 1);
+        let empty_backlog =
+            query_result_cache_repository::probe_expired_query_result_cache_backlog(
+                &fixture.state.persistence.postgres,
+                300,
+                i64::MAX,
+            )
+            .await?;
+        assert_eq!(empty_backlog.sampled_expired_rows, 0);
+        assert!(!empty_backlog.sample_at_capacity());
+        assert!(empty_backlog.oldest_expired_age_seconds.is_none());
+        Ok(())
+    }
+    .await;
+
+    fixture.cleanup().await?;
+    result
+}
+
+#[tokio::test]
+#[ignore = "requires local postgres service with database create/drop access"]
+async fn cached_replay_turn_and_audit_row_commit_atomically() -> Result<()> {
+    let fixture = QueryGroundingAppFixture::create().await?;
+    let result = async {
+        let detail = fixture
+            .create_replayable_execution_detail(
+                "What is the supported value?",
+                "The supported value is grounded.",
+            )
+            .await?;
+        let request_turn = query_repository::create_turn(
+            &fixture.state.persistence.postgres,
+            &query_repository::NewQueryTurn {
+                conversation_id: fixture.conversation_id,
+                turn_kind: "user",
+                author_principal_id: None,
+                content_text: "Repeat the supported value.",
+                execution_id: None,
+            },
+        )
+        .await?;
+        let stale_source_truth_version = repositories::get_library_source_truth_version(
+            &fixture.state.persistence.postgres,
+            fixture.library_id,
+        )
+        .await?;
+        let current_source_truth_version = repositories::touch_library_source_truth_version(
+            &fixture.state.persistence.postgres,
+            fixture.library_id,
+        )
+        .await?;
+        let mut input = query_result_cache_repository::CreateQueryExecutionReplayInput {
+            workspace_id: fixture.workspace_id,
+            library_id: fixture.library_id,
+            conversation_id: fixture.conversation_id,
+            request_turn_id: request_turn.id,
+            source_execution_id: detail.execution.id,
+            expected_source_truth_version: stale_source_truth_version,
+            cache_key: "query_result:v3:atomic-replay-test",
+            ttl_seconds: 300,
+        };
+
+        assert!(
+            query_result_cache_repository::create_query_execution_replay(
+                &fixture.state.persistence.postgres,
+                &input,
+            )
+            .await?
+            .is_none(),
+            "a stale source generation must not materialize a replay turn",
+        );
+        assert_eq!(
+            query_repository::list_turns_by_conversation(
+                &fixture.state.persistence.postgres,
+                fixture.conversation_id,
+            )
+            .await?
+            .len(),
+            3,
+        );
+        input.expected_source_truth_version = current_source_truth_version;
+        query_result_cache_repository::upsert_query_result_cache_winner(
+            &fixture.state.persistence.postgres,
+            &query_result_cache_repository::UpsertQueryResultCacheInput {
+                cache_key: input.cache_key,
+                workspace_id: fixture.workspace_id,
+                library_id: fixture.library_id,
+                source_execution_id: detail.execution.id,
+                expected_source_truth_version: current_source_truth_version,
+                readable_content_fingerprint: "content:atomic-replay",
+                graph_projection_version: 1,
+                graph_topology_generation: 1,
+                binding_fingerprint: "bindings:atomic-replay",
+                ttl_seconds: input.ttl_seconds,
+            },
+        )
+        .await?
+        .context("failed to persist atomic replay cache winner")?;
+
+        let (response_turn, replay) = query_result_cache_repository::create_query_execution_replay(
+            &fixture.state.persistence.postgres,
+            &input,
+        )
+        .await?
+        .context("current source generation should allow replay")?;
+        assert_eq!(replay.response_turn_id, response_turn.id);
+        assert_eq!(replay.request_turn_id, request_turn.id);
+        assert_eq!(response_turn.content_text, "The supported value is grounded.");
+
+        let turns_after_success = query_repository::list_turns_by_conversation(
+            &fixture.state.persistence.postgres,
+            fixture.conversation_id,
+        )
+        .await?;
+        assert_eq!(turns_after_success.len(), 4);
+
+        // Reusing the request turn violates the replay uniqueness constraint
+        // after the helper has tentatively inserted another assistant turn.
+        // The encompassing transaction must roll that turn back.
+        assert!(
+            query_result_cache_repository::create_query_execution_replay(
+                &fixture.state.persistence.postgres,
+                &input,
+            )
+            .await
+            .is_err()
+        );
+        let turns_after_failure = query_repository::list_turns_by_conversation(
+            &fixture.state.persistence.postgres,
+            fixture.conversation_id,
+        )
+        .await?;
+        assert_eq!(turns_after_failure.len(), turns_after_success.len());
+        let replay_count: i64 = sqlx::query_scalar(
+            "select count(*) from query_execution_replay where request_turn_id = $1",
+        )
+        .bind(request_turn.id)
+        .fetch_one(&fixture.state.persistence.postgres)
+        .await?;
+        assert_eq!(replay_count, 1);
+        Ok(())
+    }
+    .await;
+
+    fixture.cleanup().await?;
+    result
+}
+
+#[tokio::test]
+#[ignore = "requires local postgres service with database create/drop access"]
+async fn cached_replay_rechecks_exact_db_winner_and_ttl_before_materializing() -> Result<()> {
+    let fixture = QueryGroundingAppFixture::create().await?;
+    let result = async {
+        let first = fixture
+            .create_replayable_execution_detail("First cache source?", "First grounded answer.")
+            .await?;
+        let second = fixture
+            .create_replayable_execution_detail("Second cache source?", "Second grounded answer.")
+            .await?;
+        let source_truth_version = repositories::get_library_source_truth_version(
+            &fixture.state.persistence.postgres,
+            fixture.library_id,
+        )
+        .await?;
+        let cache_key = "query_result:v3:replay-winner-race";
+        let winner_input =
+            |source_execution_id| query_result_cache_repository::UpsertQueryResultCacheInput {
+                cache_key,
+                workspace_id: fixture.workspace_id,
+                library_id: fixture.library_id,
+                source_execution_id,
+                expected_source_truth_version: source_truth_version,
+                readable_content_fingerprint: "content:replay-winner-race",
+                graph_projection_version: 1,
+                graph_topology_generation: 1,
+                binding_fingerprint: "bindings:replay-winner-race",
+                ttl_seconds: 300,
+            };
+        query_result_cache_repository::upsert_query_result_cache_winner(
+            &fixture.state.persistence.postgres,
+            &winner_input(first.execution.id),
+        )
+        .await?
+        .context("failed to persist first race winner")?;
+        let observed = query_result_cache_repository::get_query_result_cache(
+            &fixture.state.persistence.postgres,
+            cache_key,
+            300,
+        )
+        .await?
+        .context("failed to observe first race winner")?;
+        assert_eq!(observed.source_execution_id, first.execution.id);
+
+        sqlx::query(
+            "update query_result_cache
+             set updated_at = clock_timestamp() - interval '301 seconds'
+             where cache_key = $1",
+        )
+        .bind(cache_key)
+        .execute(&fixture.state.persistence.postgres)
+        .await?;
+        query_result_cache_repository::upsert_query_result_cache_winner(
+            &fixture.state.persistence.postgres,
+            &winner_input(second.execution.id),
+        )
+        .await?
+        .context("failed to replace race winner")?;
+
+        let stale_request = query_repository::create_turn(
+            &fixture.state.persistence.postgres,
+            &query_repository::NewQueryTurn {
+                conversation_id: fixture.conversation_id,
+                turn_kind: "user",
+                author_principal_id: None,
+                content_text: "Do not replay the stale winner.",
+                execution_id: None,
+            },
+        )
+        .await?;
+        let turns_before_stale_replay = query_repository::list_turns_by_conversation(
+            &fixture.state.persistence.postgres,
+            fixture.conversation_id,
+        )
+        .await?
+        .len();
+        let stale_replay = query_result_cache_repository::create_query_execution_replay(
+            &fixture.state.persistence.postgres,
+            &query_result_cache_repository::CreateQueryExecutionReplayInput {
+                workspace_id: fixture.workspace_id,
+                library_id: fixture.library_id,
+                conversation_id: fixture.conversation_id,
+                request_turn_id: stale_request.id,
+                source_execution_id: first.execution.id,
+                expected_source_truth_version: source_truth_version,
+                cache_key,
+                ttl_seconds: 300,
+            },
+        )
+        .await?;
+        assert!(stale_replay.is_none(), "a replaced winner must not be replayed");
+        assert_eq!(
+            query_repository::list_turns_by_conversation(
+                &fixture.state.persistence.postgres,
+                fixture.conversation_id,
+            )
+            .await?
+            .len(),
+            turns_before_stale_replay,
+            "a rejected stale winner must not leave an assistant turn",
+        );
+
+        sqlx::query(
+            "update query_result_cache
+             set updated_at = clock_timestamp() - interval '301 seconds'
+             where cache_key = $1",
+        )
+        .bind(cache_key)
+        .execute(&fixture.state.persistence.postgres)
+        .await?;
+        let expired_request = query_repository::create_turn(
+            &fixture.state.persistence.postgres,
+            &query_repository::NewQueryTurn {
+                conversation_id: fixture.conversation_id,
+                turn_kind: "user",
+                author_principal_id: None,
+                content_text: "Do not replay the expired winner.",
+                execution_id: None,
+            },
+        )
+        .await?;
+        let expired_replay = query_result_cache_repository::create_query_execution_replay(
+            &fixture.state.persistence.postgres,
+            &query_result_cache_repository::CreateQueryExecutionReplayInput {
+                workspace_id: fixture.workspace_id,
+                library_id: fixture.library_id,
+                conversation_id: fixture.conversation_id,
+                request_turn_id: expired_request.id,
+                source_execution_id: second.execution.id,
+                expected_source_truth_version: source_truth_version,
+                cache_key,
+                ttl_seconds: 300,
+            },
+        )
+        .await?;
+        assert!(expired_replay.is_none(), "an expired winner must not be replayed");
+
+        Ok(())
+    }
+    .await;
+
+    fixture.cleanup().await?;
+    result
+}
+
+#[tokio::test]
+#[ignore = "requires local postgres service with database create/drop access"]
+async fn parallel_cached_replays_in_one_conversation_serialize_without_deadlock() -> Result<()> {
+    let fixture = QueryGroundingAppFixture::create().await?;
+    let result = Box::pin(async {
+        let source = fixture
+            .create_replayable_execution_detail(
+                "Which setting is enabled?",
+                "The grounded setting is enabled.",
+            )
+            .await?;
+        let source_truth_version = repositories::get_library_source_truth_version(
+            &fixture.state.persistence.postgres,
+            fixture.library_id,
+        )
+        .await?;
+        let cache_key = "query_result:v3:parallel-replay-lock-order";
+        query_result_cache_repository::upsert_query_result_cache_winner(
+            &fixture.state.persistence.postgres,
+            &query_result_cache_repository::UpsertQueryResultCacheInput {
+                cache_key,
+                workspace_id: fixture.workspace_id,
+                library_id: fixture.library_id,
+                source_execution_id: source.execution.id,
+                expected_source_truth_version: source_truth_version,
+                readable_content_fingerprint: "content:parallel-replay",
+                graph_projection_version: 1,
+                graph_topology_generation: 1,
+                binding_fingerprint: "bindings:parallel-replay",
+                ttl_seconds: 300,
+            },
+        )
+        .await?
+        .context("failed to persist parallel replay winner")?;
+        let first_request = query_repository::create_turn(
+            &fixture.state.persistence.postgres,
+            &query_repository::NewQueryTurn {
+                conversation_id: fixture.conversation_id,
+                turn_kind: "user",
+                author_principal_id: None,
+                content_text: "First parallel replay request.",
+                execution_id: None,
+            },
+        )
+        .await?;
+        let second_request = query_repository::create_turn(
+            &fixture.state.persistence.postgres,
+            &query_repository::NewQueryTurn {
+                conversation_id: fixture.conversation_id,
+                turn_kind: "user",
+                author_principal_id: None,
+                content_text: "Second parallel replay request.",
+                execution_id: None,
+            },
+        )
+        .await?;
+
+        let first_input = query_result_cache_repository::CreateQueryExecutionReplayInput {
+            workspace_id: fixture.workspace_id,
+            library_id: fixture.library_id,
+            conversation_id: fixture.conversation_id,
+            request_turn_id: first_request.id,
+            source_execution_id: source.execution.id,
+            expected_source_truth_version: source_truth_version,
+            cache_key,
+            ttl_seconds: 300,
+        };
+        let second_input = query_result_cache_repository::CreateQueryExecutionReplayInput {
+            request_turn_id: second_request.id,
+            ..first_input.clone()
+        };
+        let first_replay = query_result_cache_repository::create_query_execution_replay(
+            &fixture.state.persistence.postgres,
+            &first_input,
+        );
+        let second_replay = query_result_cache_repository::create_query_execution_replay(
+            &fixture.state.persistence.postgres,
+            &second_input,
+        );
+        let (first, second) =
+            Box::pin(tokio::time::timeout(std::time::Duration::from_secs(10), async {
+                tokio::join!(first_replay, second_replay)
+            }))
+            .await
+            .context(
+                "parallel replay transactions timed out, likely due to a lock-order deadlock",
+            )?;
+        let (first_turn, _) = first?.context("first parallel replay was rejected")?;
+        let (second_turn, _) = second?.context("second parallel replay was rejected")?;
+        assert_ne!(first_turn.id, second_turn.id);
+        assert_ne!(first_turn.turn_index, second_turn.turn_index);
+        assert_eq!(first_turn.content_text, "The grounded setting is enabled.");
+        assert_eq!(second_turn.content_text, "The grounded setting is enabled.");
+
+        Ok(())
+    })
+    .await;
+
+    fixture.cleanup().await?;
+    result
+}
+
+#[tokio::test]
+#[ignore = "requires local postgres service with database create/drop access"]
+async fn cached_replay_rechecks_terminal_verification_and_grounding_in_transaction() -> Result<()> {
+    let fixture = QueryGroundingAppFixture::create().await?;
+    let result = async {
+        let source = fixture
+            .create_replayable_execution_detail(
+                "Which neutral option is supported?",
+                "The supported option is enabled.",
+            )
+            .await?;
+        let source_truth_version = repositories::get_library_source_truth_version(
+            &fixture.state.persistence.postgres,
+            fixture.library_id,
+        )
+        .await?;
+        let cache_key = "query_result:v3:terminal-replay-fence";
+        query_result_cache_repository::upsert_query_result_cache_winner(
+            &fixture.state.persistence.postgres,
+            &query_result_cache_repository::UpsertQueryResultCacheInput {
+                cache_key,
+                workspace_id: fixture.workspace_id,
+                library_id: fixture.library_id,
+                source_execution_id: source.execution.id,
+                expected_source_truth_version: source_truth_version,
+                readable_content_fingerprint: "content:terminal-replay-fence",
+                graph_projection_version: 1,
+                graph_topology_generation: 1,
+                binding_fingerprint: "bindings:terminal-replay-fence",
+                ttl_seconds: 300,
+            },
+        )
+        .await?
+        .context("failed to persist terminal replay winner")?;
+
+        sqlx::query(
+            "update knowledge_context_bundle
+             set verification_state = 'failed', updated_at = clock_timestamp()
+             where bundle_id = $1",
+        )
+        .bind(source.execution.context_bundle_id)
+        .execute(&fixture.state.persistence.postgres)
+        .await?;
+        let downgraded_request = query_repository::create_turn(
+            &fixture.state.persistence.postgres,
+            &query_repository::NewQueryTurn {
+                conversation_id: fixture.conversation_id,
+                turn_kind: "user",
+                author_principal_id: None,
+                content_text: "Do not replay downgraded verification.",
+                execution_id: None,
+            },
+        )
+        .await?;
+        let downgraded_input = query_result_cache_repository::CreateQueryExecutionReplayInput {
+            workspace_id: fixture.workspace_id,
+            library_id: fixture.library_id,
+            conversation_id: fixture.conversation_id,
+            request_turn_id: downgraded_request.id,
+            source_execution_id: source.execution.id,
+            expected_source_truth_version: source_truth_version,
+            cache_key,
+            ttl_seconds: 300,
+        };
+        let downgraded = query_result_cache_repository::create_query_execution_replay(
+            &fixture.state.persistence.postgres,
+            &downgraded_input,
+        )
+        .await?;
+        assert!(downgraded.is_none());
+
+        sqlx::query(
+            "update knowledge_context_bundle
+             set verification_state = 'verified', updated_at = clock_timestamp()
+             where bundle_id = $1",
+        )
+        .bind(source.execution.context_bundle_id)
+        .execute(&fixture.state.persistence.postgres)
+        .await?;
+        sqlx::query(
+            "delete from knowledge_technical_fact as fact
+             using knowledge_context_bundle as bundle
+             where bundle.bundle_id = $1
+               and fact.fact_id = any(bundle.selected_fact_ids)",
+        )
+        .bind(source.execution.context_bundle_id)
+        .execute(&fixture.state.persistence.postgres)
+        .await?;
+        let ungrounded_request = query_repository::create_turn(
+            &fixture.state.persistence.postgres,
+            &query_repository::NewQueryTurn {
+                conversation_id: fixture.conversation_id,
+                turn_kind: "user",
+                author_principal_id: None,
+                content_text: "Do not replay deleted grounding.",
+                execution_id: None,
+            },
+        )
+        .await?;
+        let ungrounded_input = query_result_cache_repository::CreateQueryExecutionReplayInput {
+            request_turn_id: ungrounded_request.id,
+            ..downgraded_input
+        };
+        let ungrounded = query_result_cache_repository::create_query_execution_replay(
+            &fixture.state.persistence.postgres,
+            &ungrounded_input,
+        )
+        .await?;
+        assert!(ungrounded.is_none());
+
+        let replay_count: i64 = sqlx::query_scalar(
+            "select count(*)::bigint
+             from query_execution_replay
+             where cache_key = $1",
+        )
+        .bind(cache_key)
+        .fetch_one(&fixture.state.persistence.postgres)
+        .await?;
+        assert_eq!(replay_count, 0);
+
+        Ok(())
+    }
+    .await;
+
+    fixture.cleanup().await?;
+    result
+}
+
+#[tokio::test]
+#[ignore = "requires local postgres service with database create/drop access"]
+async fn fresh_completed_mcp_overflow_is_pruned_without_deleting_durable_audit() -> Result<()> {
+    let fixture = QueryGroundingFixture::create().await?;
+    let result = async {
+        let suffix = Uuid::now_v7().simple().to_string();
+        let workspace = repositories::catalog_repository::create_workspace(
+            &fixture.postgres,
+            &format!("mcp-retention-workspace-{suffix}"),
+            "MCP Retention Workspace",
+            None,
+        )
+        .await?;
+        let library = repositories::catalog_repository::create_library(
+            &fixture.postgres,
+            workspace.id,
+            &format!("mcp-retention-library-{suffix}"),
+            "MCP Retention Library",
+            None,
+            None,
+        )
+        .await?;
+
+        let mut conversations = Vec::new();
+        for age_seconds in [4, 3, 2, 1] {
+            conversations.push(
+                seed_completed_mcp_conversation(
+                    &fixture.postgres,
+                    workspace.id,
+                    library.id,
+                    age_seconds,
+                )
+                .await?,
+            );
+        }
+        let (oldest_conversation_id, oldest_execution_id) = conversations[0];
+        let protected_conversation_id = conversations[3].0;
+        let audit_event_id = Uuid::now_v7();
+        sqlx::query(
+            "insert into audit_event (
+                id, surface_kind, action_kind, result_kind, redacted_message, internal_message
+             ) values (
+                $1, 'mcp'::surface_kind, 'query.execution.run', 'succeeded'::audit_result_kind,
+                'retention proof', 'retention proof'
+             )",
+        )
+        .bind(audit_event_id)
+        .execute(&fixture.postgres)
+        .await?;
+        sqlx::query(
+            "insert into audit_event_subject (
+                audit_event_id, subject_kind, subject_id, workspace_id, library_id
+             ) values ($1, 'query_execution', $2, $3, $4)",
+        )
+        .bind(audit_event_id)
+        .bind(oldest_execution_id)
+        .bind(workspace.id)
+        .bind(library.id)
+        .execute(&fixture.postgres)
+        .await?;
+
+        let deleted = query_repository::prune_mcp_conversation_overflow(
+            &fixture.postgres,
+            library.id,
+            2,
+            protected_conversation_id,
+        )
+        .await?;
+
+        assert_eq!(deleted, 2, "fresh completed rows must not receive the UI grace period");
+        let retained_count: i64 = sqlx::query_scalar(
+            "select count(*)::bigint
+             from query_conversation
+             where library_id = $1 and request_surface = 'mcp'",
+        )
+        .bind(library.id)
+        .fetch_one(&fixture.postgres)
+        .await?;
+        assert_eq!(retained_count, 2);
+        assert!(
+            query_repository::get_conversation_by_id(&fixture.postgres, oldest_conversation_id,)
+                .await?
+                .is_none()
+        );
+        assert!(
+            query_repository::get_conversation_by_id(&fixture.postgres, protected_conversation_id,)
+                .await?
+                .is_some()
+        );
+        let audit_survived: bool = sqlx::query_scalar(
+            "select exists(
+                 select 1
+                 from audit_event_subject
+                 where audit_event_id = $1
+                   and subject_kind = 'query_execution'
+                   and subject_id = $2
+             )",
+        )
+        .bind(audit_event_id)
+        .bind(oldest_execution_id)
+        .fetch_one(&fixture.postgres)
+        .await?;
+        assert!(audit_survived, "query storage retention must not cascade into durable audit");
+
+        Ok(())
+    }
+    .await;
+
+    fixture.cleanup().await?;
+    result
+}
+
+#[tokio::test]
+#[ignore = "requires local postgres service with database create/drop access"]
+async fn ui_conversation_rename_and_delete_are_owner_guarded_and_durable() -> Result<()> {
+    let fixture = QueryGroundingFixture::create().await?;
+    let result = async {
+        let suffix = Uuid::now_v7().simple().to_string();
+        let workspace = repositories::catalog_repository::create_workspace(
+            &fixture.postgres,
+            &format!("session-mutation-workspace-{suffix}"),
+            "Session Mutation Workspace",
+            None,
+        )
+        .await?;
+        let library = repositories::catalog_repository::create_library(
+            &fixture.postgres,
+            workspace.id,
+            &format!("session-mutation-library-{suffix}"),
+            "Session Mutation Library",
+            None,
+            None,
+        )
+        .await?;
+        let owner = iam_repository::create_principal(
+            &fixture.postgres,
+            "user",
+            "Session Mutation Owner",
+            None,
+        )
+        .await?;
+        let conversation = query_repository::create_conversation(
+            &fixture.postgres,
+            &query_repository::NewQueryConversation {
+                workspace_id: workspace.id,
+                library_id: library.id,
+                created_by_principal_id: Some(owner.id),
+                title: Some("Initial title"),
+                conversation_state: "active",
+                request_surface: "ui",
+            },
+            8,
+        )
+        .await?;
+
+        let foreign_principal_id = Uuid::now_v7();
+        assert!(
+            query_repository::rename_ui_conversation(
+                &fixture.postgres,
+                conversation.id,
+                foreign_principal_id,
+                false,
+                "Foreign title",
+            )
+            .await?
+            .is_none(),
+        );
+        let renamed = query_repository::rename_ui_conversation(
+            &fixture.postgres,
+            conversation.id,
+            owner.id,
+            false,
+            "Durable title",
+        )
+        .await?
+        .context("owned conversation was not renamed")?;
+        assert_eq!(renamed.title.as_deref(), Some("Durable title"));
+        let after_auto_title = query_repository::initialize_conversation_title(
+            &fixture.postgres,
+            conversation.id,
+            "Automatic title",
+        )
+        .await?;
+        assert_eq!(after_auto_title.title.as_deref(), Some("Durable title"));
+
+        assert_eq!(
+            query_repository::delete_ui_conversation(
+                &fixture.postgres,
+                conversation.id,
+                foreign_principal_id,
+                false,
+            )
+            .await?,
+            query_repository::DeleteQueryConversationOutcome::NotFoundOrForbidden,
+        );
+        assert_eq!(
+            query_repository::delete_ui_conversation(
+                &fixture.postgres,
+                conversation.id,
+                owner.id,
+                false,
+            )
+            .await?,
+            query_repository::DeleteQueryConversationOutcome::Deleted,
+        );
+        assert!(
+            query_repository::get_conversation_by_id(&fixture.postgres, conversation.id)
+                .await?
+                .is_none(),
+        );
+
+        let mcp_conversation = query_repository::create_conversation(
+            &fixture.postgres,
+            &query_repository::NewQueryConversation {
+                workspace_id: workspace.id,
+                library_id: library.id,
+                created_by_principal_id: Some(owner.id),
+                title: Some("Tool execution"),
+                conversation_state: "active",
+                request_surface: "mcp",
+            },
+            8,
+        )
+        .await?;
+        assert!(
+            query_repository::rename_ui_conversation(
+                &fixture.postgres,
+                mcp_conversation.id,
+                owner.id,
+                true,
+                "UI title",
+            )
+            .await?
+            .is_none(),
+        );
+        assert_eq!(
+            query_repository::delete_ui_conversation(
+                &fixture.postgres,
+                mcp_conversation.id,
+                owner.id,
+                true,
+            )
+            .await?,
+            query_repository::DeleteQueryConversationOutcome::NotFoundOrForbidden,
+        );
+        assert!(
+            query_repository::get_conversation_by_id(&fixture.postgres, mcp_conversation.id)
+                .await?
+                .is_some(),
+        );
+
+        let active_conversation = query_repository::create_conversation(
+            &fixture.postgres,
+            &query_repository::NewQueryConversation {
+                workspace_id: workspace.id,
+                library_id: library.id,
+                created_by_principal_id: Some(owner.id),
+                title: Some("Active execution"),
+                conversation_state: "active",
+                request_surface: "ui",
+            },
+            8,
+        )
+        .await?;
+        let execution_id = Uuid::now_v7();
+        let runtime_execution_id = Uuid::now_v7();
+        runtime_repository::create_runtime_execution(
+            &fixture.postgres,
+            &runtime_repository::NewRuntimeExecution {
+                id: runtime_execution_id,
+                owner_kind: RuntimeExecutionOwnerKind::QueryExecution.as_str(),
+                owner_id: execution_id,
+                task_kind: RuntimeTaskKind::QueryAnswer.as_str(),
+                surface_kind: "ui",
+                contract_name: "query_answer",
+                contract_version: "session-mutation-test",
+                lifecycle_state: RuntimeLifecycleState::Running.as_str(),
+                active_stage: None,
+                turn_budget: 1,
+                turn_count: 0,
+                parallel_action_limit: 1,
+                failure_code: None,
+                failure_summary_redacted: None,
+                parent_execution_id: None,
+            },
+        )
+        .await?;
+        query_repository::create_execution(
+            &fixture.postgres,
+            &query_repository::NewQueryExecution {
+                execution_id,
+                context_bundle_id: Uuid::now_v7(),
+                workspace_id: workspace.id,
+                library_id: library.id,
+                conversation_id: active_conversation.id,
+                request_turn_id: None,
+                response_turn_id: None,
+                binding_id: None,
+                runtime_execution_id,
+                query_text: "Neutral lifecycle fixture",
+                failure_code: None,
+            },
+        )
+        .await?;
+        assert_eq!(
+            query_repository::delete_ui_conversation(
+                &fixture.postgres,
+                active_conversation.id,
+                owner.id,
+                false,
+            )
+            .await?,
+            query_repository::DeleteQueryConversationOutcome::ActiveExecution,
+        );
+        sqlx::query(
+            "update runtime_execution
+             set lifecycle_state = 'completed', completed_at = now()
+             where id = $1",
+        )
+        .bind(runtime_execution_id)
+        .execute(&fixture.postgres)
+        .await?;
+        sqlx::query("update query_execution set completed_at = now() where id = $1")
+            .bind(execution_id)
+            .execute(&fixture.postgres)
+            .await?;
+        assert_eq!(
+            query_repository::delete_ui_conversation(
+                &fixture.postgres,
+                active_conversation.id,
+                owner.id,
+                false,
+            )
+            .await?,
+            query_repository::DeleteQueryConversationOutcome::Deleted,
+        );
+        let query_execution_survived: bool =
+            sqlx::query_scalar("select exists(select 1 from query_execution where id = $1)")
+                .bind(execution_id)
+                .fetch_one(&fixture.postgres)
+                .await?;
+        assert!(!query_execution_survived, "query-owned execution must cascade");
+        let runtime_execution_survived: bool =
+            sqlx::query_scalar("select exists(select 1 from runtime_execution where id = $1)")
+                .bind(runtime_execution_id)
+                .fetch_one(&fixture.postgres)
+                .await?;
+        assert!(runtime_execution_survived, "independent runtime retention must survive");
+
+        Ok(())
+    }
+    .await;
+
+    fixture.cleanup().await?;
+    result
+}
+
+#[tokio::test]
+#[ignore = "requires local postgres service with database create/drop access"]
+async fn concurrent_mcp_retention_enforcement_is_serialized_and_bounded() -> Result<()> {
+    let fixture = QueryGroundingFixture::create().await?;
+    let result = async {
+        let suffix = Uuid::now_v7().simple().to_string();
+        let workspace = repositories::catalog_repository::create_workspace(
+            &fixture.postgres,
+            &format!("mcp-retention-race-workspace-{suffix}"),
+            "MCP Retention Race Workspace",
+            None,
+        )
+        .await?;
+        let library = repositories::catalog_repository::create_library(
+            &fixture.postgres,
+            workspace.id,
+            &format!("mcp-retention-race-library-{suffix}"),
+            "MCP Retention Race Library",
+            None,
+            None,
+        )
+        .await?;
+
+        let mut conversations = Vec::new();
+        for age_seconds in (1..=8).rev() {
+            conversations.push(
+                seed_completed_mcp_conversation(
+                    &fixture.postgres,
+                    workspace.id,
+                    library.id,
+                    age_seconds,
+                )
+                .await?,
+            );
+        }
+        let protected_conversation_id = conversations
+            .last()
+            .map(|row| row.0)
+            .context("MCP retention fixture did not create a conversation")?;
+
+        let mut tasks = tokio::task::JoinSet::new();
+        for _ in 0..8 {
+            let postgres = fixture.postgres.clone();
+            tasks.spawn(async move {
+                query_repository::prune_mcp_conversation_overflow(
+                    &postgres,
+                    library.id,
+                    3,
+                    protected_conversation_id,
+                )
+                .await
+            });
+        }
+        let mut deleted = 0_u64;
+        while let Some(result) = tasks.join_next().await {
+            deleted = deleted.saturating_add(result.context("retention task panicked")??);
+        }
+
+        assert_eq!(deleted, 5);
+        let retained_count: i64 = sqlx::query_scalar(
+            "select count(*)::bigint
+             from query_conversation
+             where library_id = $1 and request_surface = 'mcp'",
+        )
+        .bind(library.id)
+        .fetch_one(&fixture.postgres)
+        .await?;
+        assert_eq!(retained_count, 3);
+
+        Ok(())
+    }
+    .await;
+
+    fixture.cleanup().await?;
+    result
+}
+
+#[tokio::test]
+#[ignore = "requires local postgres service with database create/drop access"]
+async fn replay_provenance_keeps_external_source_conversation_from_eviction() -> Result<()> {
+    let fixture = QueryGroundingAppFixture::create().await?;
+    let result = async {
+        let source = fixture
+            .create_replayable_execution_detail(
+                "Which provenance value is canonical?",
+                "The canonical provenance value is enabled.",
+            )
+            .await?;
+        let target_conversation = query_repository::create_conversation(
+            &fixture.state.persistence.postgres,
+            &query_repository::NewQueryConversation {
+                workspace_id: fixture.workspace_id,
+                library_id: fixture.library_id,
+                created_by_principal_id: None,
+                title: Some("Replay provenance target"),
+                conversation_state: "active",
+                request_surface: "ui",
+            },
+            64,
+        )
+        .await?;
+        let target_request = query_repository::create_turn(
+            &fixture.state.persistence.postgres,
+            &query_repository::NewQueryTurn {
+                conversation_id: target_conversation.id,
+                turn_kind: "user",
+                author_principal_id: None,
+                content_text: "Replay with durable provenance.",
+                execution_id: None,
+            },
+        )
+        .await?;
+        let source_truth_version = repositories::get_library_source_truth_version(
+            &fixture.state.persistence.postgres,
+            fixture.library_id,
+        )
+        .await?;
+        let cache_key = "query_result:v3:durable-replay-provenance";
+        query_result_cache_repository::upsert_query_result_cache_winner(
+            &fixture.state.persistence.postgres,
+            &query_result_cache_repository::UpsertQueryResultCacheInput {
+                cache_key,
+                workspace_id: fixture.workspace_id,
+                library_id: fixture.library_id,
+                source_execution_id: source.execution.id,
+                expected_source_truth_version: source_truth_version,
+                readable_content_fingerprint: "content:durable-replay-provenance",
+                graph_projection_version: 1,
+                graph_topology_generation: 1,
+                binding_fingerprint: "bindings:durable-replay-provenance",
+                ttl_seconds: 300,
+            },
+        )
+        .await?
+        .context("failed to persist provenance cache winner")?;
+        let (response_turn, replay) =
+            query_result_cache_repository::create_query_execution_replay(
+                &fixture.state.persistence.postgres,
+                &query_result_cache_repository::CreateQueryExecutionReplayInput {
+                    workspace_id: fixture.workspace_id,
+                    library_id: fixture.library_id,
+                    conversation_id: target_conversation.id,
+                    request_turn_id: target_request.id,
+                    source_execution_id: source.execution.id,
+                    expected_source_truth_version: source_truth_version,
+                    cache_key,
+                    ttl_seconds: 300,
+                },
+            )
+            .await?
+            .context("external replay was rejected")?;
+
+        let delete_source = query_repository::delete_ui_conversation(
+            &fixture.state.persistence.postgres,
+            fixture.conversation_id,
+            Uuid::now_v7(),
+            true,
+        )
+        .await?;
+        assert_eq!(
+            delete_source,
+            query_repository::DeleteQueryConversationOutcome::RetainedByExternalReplay,
+            "source deletion must be restricted while another conversation retains replay provenance",
+        );
+        assert!(
+            query_repository::get_conversation_by_id(
+                &fixture.state.persistence.postgres,
+                fixture.conversation_id,
+            )
+            .await?
+            .is_some()
+        );
+        let target_turn = query_repository::get_turn_by_id(
+            &fixture.state.persistence.postgres,
+            response_turn.id,
+        )
+        .await?
+        .context("target replay response disappeared")?;
+        assert_eq!(target_turn.content_text, "The canonical provenance value is enabled.");
+        let replay_still_present: bool = sqlx::query_scalar(
+            "select exists(select 1 from query_execution_replay where id = $1)",
+        )
+        .bind(replay.id)
+        .fetch_one(&fixture.state.persistence.postgres)
+        .await?;
+        assert!(replay_still_present);
+        assert!(
+            fixture
+                .state
+                .context_store
+                .get_bundle_reference_set_by_query_execution(source.execution.id)
+                .await?
+                .is_some(),
+            "source grounding evidence must remain hydratable",
+        );
 
         Ok(())
     }

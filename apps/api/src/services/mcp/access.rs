@@ -5,9 +5,10 @@ mod graph;
 mod runtime;
 mod types;
 
-pub use self::{
+pub(crate) use self::{
     catalog::{
-        create_library, create_workspace, visible_catalog, visible_libraries, visible_workspaces,
+        create_library, create_workspace, update_library, update_workspace, visible_catalog,
+        visible_libraries, visible_workspaces,
     },
     documents::{
         authorize_library_for_mcp, delete_document, list_documents, read_document, search_documents,
@@ -18,7 +19,7 @@ pub use self::{
 
 pub(crate) use self::{
     catalog::{
-        library_catalog_ref, load_library_by_catalog_ref,
+        library_catalog_ref, load_library_by_catalog_ref, load_sole_query_authorized_library,
         load_workspace_by_catalog_ref_for_discovery,
     },
     documents::resolve_document_state,

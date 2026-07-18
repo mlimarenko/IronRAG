@@ -367,8 +367,7 @@ fn build_exact_technical_literals_section_keeps_config_chunks_for_configure_scop
 #[test]
 fn detect_technical_literal_intent_falls_back_to_parameters_for_exact_literal_queries_without_known_tags()
  {
-    let mut ir =
-        query_ir_with_scope_and_target_types(QueryScope::SingleDocument, ["route_map_inventory"]);
+    let mut ir = query_ir_with_scope_and_target_types(QueryScope::SingleDocument, ["record"]);
     ir.act = QueryAct::RetrieveValue;
     ir.literal_constraints =
         vec![LiteralSpan { text: "12".to_string(), kind: LiteralKind::NumericCode }];
@@ -383,8 +382,7 @@ fn detect_technical_literal_intent_falls_back_to_parameters_for_exact_literal_qu
 
 #[test]
 fn plain_alphabetic_identifier_literal_does_not_request_parameters() {
-    let mut ir =
-        query_ir_with_scope_and_target_types(QueryScope::SingleDocument, ["route_map_inventory"]);
+    let mut ir = query_ir_with_scope_and_target_types(QueryScope::SingleDocument, ["record"]);
     ir.act = QueryAct::RetrieveValue;
     ir.literal_constraints =
         vec![LiteralSpan { text: "alpha".to_string(), kind: LiteralKind::Identifier }];
@@ -396,8 +394,7 @@ fn plain_alphabetic_identifier_literal_does_not_request_parameters() {
 
 #[test]
 fn structural_identifier_literal_requests_parameters() {
-    let mut ir =
-        query_ir_with_scope_and_target_types(QueryScope::SingleDocument, ["route_map_inventory"]);
+    let mut ir = query_ir_with_scope_and_target_types(QueryScope::SingleDocument, ["record"]);
     ir.act = QueryAct::RetrieveValue;
     ir.literal_constraints =
         vec![LiteralSpan { text: "callbackUrl".to_string(), kind: LiteralKind::Identifier }];
@@ -409,8 +406,7 @@ fn structural_identifier_literal_requests_parameters() {
 
 #[test]
 fn exact_literal_queries_without_technical_tag_still_build_technical_literal_sections() {
-    let mut ir =
-        query_ir_with_scope_and_target_types(QueryScope::SingleDocument, ["route_map_inventory"]);
+    let mut ir = query_ir_with_scope_and_target_types(QueryScope::SingleDocument, ["record"]);
     ir.act = QueryAct::RetrieveValue;
     ir.literal_constraints =
         vec![LiteralSpan { text: "12".to_string(), kind: LiteralKind::NumericCode }];

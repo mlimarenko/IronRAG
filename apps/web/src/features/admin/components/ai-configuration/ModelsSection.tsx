@@ -1,10 +1,10 @@
-import { useMemo, useState } from 'react';
-import { useTranslation } from 'react-i18next';
-import { DollarSign } from 'lucide-react';
+import { useMemo, useState } from 'react'
+import { useTranslation } from 'react-i18next'
+import { DollarSign } from 'lucide-react'
 
-import { Badge } from '@/shared/components/ui/badge';
-import { Button } from '@/shared/components/ui/button';
-import type { AIModelOption, AIProvider, PricingRule } from '@/shared/types';
+import { Badge } from '@/shared/components/ui/badge'
+import { Button } from '@/shared/components/ui/button'
+import type { AIModelOption, AIProvider, PricingRule } from '@/shared/types'
 import {
   formatModelLabel,
   formatModelPriceSuffix,
@@ -12,27 +12,91 @@ import {
   purposeLabel,
   resolveModelPriceSummary,
   type AiConfigDataState,
-} from '@/features/admin/model/aiConfig';
+} from '@/features/admin/model/aiConfig'
 
-import { EntityWorkbench, InspectorField, InspectorSection } from './EntityWorkbench';
-import { PriceOverrideDialog } from './PriceOverrideDialog';
+import { EntityWorkbench, InspectorField, InspectorSection } from './EntityWorkbench'
+import { PriceOverrideDialog } from './PriceOverrideDialog'
 
-type ModelsSectionProps = {
-  modelsState: AiConfigDataState<AIModelOption[]>;
-  providers: AIProvider[];
-  prices: PricingRule[];
-  activeWorkspaceId: string | undefined;
-  invalidateAll: () => void;
-};
+type ModelsSectionProps = Readonly<{
+  modelsState: AiConfigDataState<AIModelOption[]>
+  providers: AIProvider[]
+  prices: PricingRule[]
+  activeWorkspaceId: string | undefined
+  invalidateAll: () => Promise<void>
+}>
 
-export function ModelsSection({ modelsState, providers, prices, activeWorkspaceId, invalidateAll }: ModelsSectionProps) {
-  const { t } = useTranslation();
-  const providerById = useMemo(() => new Map(providers.map(p => [p.id, p])), [providers]);
-  const [priceDialogModel, setPriceDialogModel] = useState<AIModelOption | null>(null);
-  const models = modelsState.data ?? [];
+type ModelNameCellProps = Readonly<{
+  model: AIModelOption
+  providerName: string | undefined
+}>
+
+function ModelNameCell({ model, providerName }: ModelNameCellProps) {
+  const unavailable = model.availabilityState === 'unavailable'
+  return (
+    <div className="min-w-0">
+      <div
+        className={`truncate text-sm font-semibold ${unavailable ? 'text-muted-foreground line-through' : ''}`}
+        title={model.modelName}
+      >
+        {model.modelName}
+      </div>
+      <div className="truncate text-2xs text-muted-foreground">
+        {providerName ?? '—'}
+        {model.capabilityKind ? ` · ${model.capabilityKind}` : ''}
+      </div>
+    </div>
+  )
+}
+
+type ModelPurposesCellProps = Readonly<{
+  labels: string[]
+}>
+
+function ModelPurposesCell({ labels }: ModelPurposesCellProps) {
+  const text = labels.length === 0 ? '—' : labels.join(', ')
+  return (
+    <span className="block truncate text-xs text-muted-foreground" title={text}>
+      {text}
+    </span>
+  )
+}
+
+type ModelRow = AIModelOption &
+  Readonly<{
+    providerName: string | undefined
+    purposeLabels: string[]
+  }>
+
+function renderModelNameCell(model: ModelRow) {
+  return <ModelNameCell model={model} providerName={model.providerName} />
+}
+
+function renderModelPurposesCell(model: ModelRow) {
+  return <ModelPurposesCell labels={model.purposeLabels} />
+}
+
+export function ModelsSection({
+  modelsState,
+  providers,
+  prices,
+  activeWorkspaceId,
+  invalidateAll,
+}: ModelsSectionProps) {
+  const { t } = useTranslation()
+  const providerById = useMemo(() => new Map(providers.map((p) => [p.id, p])), [providers])
+  const [priceDialogModel, setPriceDialogModel] = useState<AIModelOption | null>(null)
+  const models = useMemo<ModelRow[]>(
+    () =>
+      (modelsState.data ?? []).map((model) => ({
+        ...model,
+        providerName: providerById.get(model.providerCatalogId)?.displayName,
+        purposeLabels: model.allowedBindingPurposes.map((purpose) => purposeLabel(purpose, t)),
+      })),
+    [modelsState.data, providerById, t],
+  )
 
   const priceCell = (model: AIModelOption) => {
-    const suffix = formatModelPriceSuffix(resolveModelPriceSummary(model.id, prices));
+    const suffix = formatModelPriceSuffix(resolveModelPriceSummary(model.id, prices))
     return (
       <div className="flex items-center justify-end gap-2">
         <span className="tabular-nums text-xs text-muted-foreground">{suffix || '—'}</span>
@@ -47,8 +111,8 @@ export function ModelsSection({ modelsState, providers, prices, activeWorkspaceI
           <DollarSign className="h-3.5 w-3.5" />
         </Button>
       </div>
-    );
-  };
+    )
+  }
 
   return (
     <div className="flex flex-1 min-h-0 flex-col">
@@ -58,7 +122,7 @@ export function ModelsSection({ modelsState, providers, prices, activeWorkspaceI
         count={models.length}
         state={modelsState}
         rows={models}
-        rowKey={model => model.id}
+        rowKey={(model) => model.id}
         emptyMessage={t('admin.aiPanel.empty.noSelectableModels')}
         searchPlaceholder={t('admin.searchModels')}
         matchesFilter={(model, filter) =>
@@ -68,7 +132,7 @@ export function ModelsSection({ modelsState, providers, prices, activeWorkspaceI
               model.capabilityKind,
               model.modalityKind,
               formatModelLabel(model, providers),
-              model.allowedBindingPurposes.map(p => purposeLabel(p, t)).join(', '),
+              model.allowedBindingPurposes.map((p) => purposeLabel(p, t)).join(', '),
             ],
             filter,
           )
@@ -77,39 +141,15 @@ export function ModelsSection({ modelsState, providers, prices, activeWorkspaceI
           {
             key: 'name',
             header: t('admin.model'),
-            sortValue: model => model.modelName,
-            cell: model => {
-              const provider = providerById.get(model.providerCatalogId);
-              const unavailable = model.availabilityState === 'unavailable';
-              return (
-                <div className="min-w-0">
-                  <div
-                    className={`truncate text-sm font-semibold ${unavailable ? 'text-muted-foreground line-through' : ''}`}
-                    title={model.modelName}
-                  >
-                    {model.modelName}
-                  </div>
-                  <div className="truncate text-2xs text-muted-foreground">
-                    {provider?.displayName ?? '—'}
-                    {model.capabilityKind ? ` · ${model.capabilityKind}` : ''}
-                  </div>
-                </div>
-              );
-            },
+            sortValue: (model) => model.modelName,
+            cell: renderModelNameCell,
           },
           {
             key: 'purposes',
             header: t('admin.aiPanel.fields.purposes'),
-            sortValue: model => model.allowedBindingPurposes.map(p => purposeLabel(p, t)).join(', '),
-            cell: model => {
-              const labels = model.allowedBindingPurposes.map(p => purposeLabel(p, t));
-              const text = labels.length === 0 ? '—' : labels.join(', ');
-              return (
-                <span className="block truncate text-xs text-muted-foreground" title={text}>
-                  {text}
-                </span>
-              );
-            },
+            sortValue: (model) =>
+              model.allowedBindingPurposes.map((p) => purposeLabel(p, t)).join(', '),
+            cell: renderModelPurposesCell,
           },
           {
             key: 'price',
@@ -119,10 +159,10 @@ export function ModelsSection({ modelsState, providers, prices, activeWorkspaceI
             cell: priceCell,
           },
         ]}
-        renderInspector={model => {
-          const provider = providerById.get(model.providerCatalogId);
-          const unavailable = model.availabilityState === 'unavailable';
-          const priceSuffix = formatModelPriceSuffix(resolveModelPriceSummary(model.id, prices));
+        renderInspector={(model) => {
+          const provider = providerById.get(model.providerCatalogId)
+          const unavailable = model.availabilityState === 'unavailable'
+          const priceSuffix = formatModelPriceSuffix(resolveModelPriceSummary(model.id, prices))
           return {
             row: model,
             title: model.modelName,
@@ -169,7 +209,7 @@ export function ModelsSection({ modelsState, providers, prices, activeWorkspaceI
                     {model.allowedBindingPurposes.length === 0 ? (
                       <span className="text-xs text-muted-foreground">—</span>
                     ) : (
-                      model.allowedBindingPurposes.map(purpose => (
+                      model.allowedBindingPurposes.map((purpose) => (
                         <Badge key={purpose} variant="outline">
                           {purposeLabel(purpose, t)}
                         </Badge>
@@ -178,7 +218,11 @@ export function ModelsSection({ modelsState, providers, prices, activeWorkspaceI
                   </div>
                 </InspectorSection>
                 <InspectorSection title={t('admin.aiPanel.fields.identifier')}>
-                  <InspectorField label={t('admin.aiPanel.fields.identifier')} value={model.id} mono />
+                  <InspectorField
+                    label={t('admin.aiPanel.fields.identifier')}
+                    value={model.id}
+                    mono
+                  />
                   <InspectorField
                     label={t('admin.aiPanel.fields.providerId')}
                     value={model.providerCatalogId}
@@ -189,21 +233,24 @@ export function ModelsSection({ modelsState, providers, prices, activeWorkspaceI
             ),
             actions: (
               <Button size="sm" variant="outline" onClick={() => setPriceDialogModel(model)}>
-                <DollarSign className="mr-1.5 h-3.5 w-3.5" /> {t('admin.aiPanel.actions.overridePrice')}
+                <DollarSign className="mr-1.5 h-3.5 w-3.5" />{' '}
+                {t('admin.aiPanel.actions.overridePrice')}
               </Button>
             ),
-          };
+          }
         }}
       />
 
       <PriceOverrideDialog
         open={priceDialogModel !== null}
-        onOpenChange={open => { if (!open) setPriceDialogModel(null); }}
+        onOpenChange={(open) => {
+          if (!open) setPriceDialogModel(null)
+        }}
         model={priceDialogModel}
         prices={prices}
         activeWorkspaceId={activeWorkspaceId}
         invalidatePrices={invalidateAll}
       />
     </div>
-  );
+  )
 }

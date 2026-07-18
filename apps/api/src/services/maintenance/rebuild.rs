@@ -26,12 +26,12 @@ pub async fn vector_plane(state: &AppState, source_library_id: Uuid) -> anyhow::
         .rebuild_vector_plane_for_library(state, source_library_id)
         .await
         .with_context(|| {
-            format!("failed to rebuild vector plane from library binding {source_library_id}",)
+            format!("failed to rebuild vector plane from library binding {source_library_id}")
         })?;
     info!(
         library_id = %source_library_id,
         previous_dimensions = ?outcome.previous_dimensions,
-        target_dimensions = outcome.target_dimensions,
+        target_dimensions = ?outcome.target_dimensions,
         indexes_recreated = outcome.indexes_recreated,
         libraries_rebuilt = outcome.libraries_rebuilt,
         chunk_embeddings_rebuilt = outcome.chunk_embeddings_rebuilt,
@@ -102,10 +102,10 @@ pub async fn runtime_graph(state: &AppState, library_filter: Option<Uuid>) -> an
 }
 
 /// Re-embed every entity node in `library_id` into the per-dim
-/// `knowledge_entity_vector_d*` PostgreSQL relations.
+/// `knowledge_entity_vector_d*` `PostgreSQL` relations.
 ///
 /// Fails loudly if no active `EmbedChunk` binding is configured for the
-/// library (binding=embed_chunk, reason=not_configured).  The underlying
+/// library (`binding=embed_chunk`, `reason=not_configured`).  The underlying
 /// `search.rebuild_graph_node_embeddings` upserts by
 /// `(entity_id, model_catalog_id, freshness_generation)`, so the
 /// operation is idempotent and safe to re-run.
@@ -117,10 +117,10 @@ pub async fn entity_embeddings(state: &AppState, library_id: Uuid) -> anyhow::Re
         .resolve_active_runtime_binding(state, library_id, AiBindingPurpose::EmbedChunk)
         .await
         .with_context(|| {
-            format!("binding=embed_chunk, reason=not_configured, library_id={library_id}",)
+            format!("binding=embed_chunk, reason=not_configured, library_id={library_id}")
         })?;
     if binding.is_none() {
-        anyhow::bail!("binding=embed_chunk, reason=not_configured, library_id={library_id}",);
+        anyhow::bail!("binding=embed_chunk, reason=not_configured, library_id={library_id}");
     }
 
     let vectors_upserted = state

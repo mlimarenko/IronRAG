@@ -1,12 +1,15 @@
 use std::collections::{BTreeSet, HashMap};
-use std::sync::{Mutex, OnceLock};
-use std::time::{Duration, Instant};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 
 use chrono::{DateTime, Utc};
 use sqlx::{Executor, FromRow, PgPool, Postgres, QueryBuilder, Transaction};
+use tokio::sync::Mutex as AsyncMutex;
 use uuid::Uuid;
 
-use crate::shared::versioning::dotted_version_terms;
+use crate::{
+    domains::content::{derive_document_role, revision_is_raster_image},
+    shared::versioning::dotted_version_terms,
+};
 
 /// Canonical CASE expression that derives the five status buckets the
 /// documents surface exposes (`canceled` / `failed` / `processing` /
@@ -17,8 +20,8 @@ use crate::shared::versioning::dotted_version_terms;
 /// Priority (top row wins):
 /// 1. Mutation is terminally failed / conflicted → `failed`.
 ///    The head itself is broken; the operator must see this.
-/// 2. Latest ingest_job is `failed` → `failed`.
-/// 3. Latest ingest_job is `leased` → `processing`. A worker is
+/// 2. Latest `ingest_job` is `failed` → `failed`.
+/// 3. Latest `ingest_job` is `leased` → `processing`. A worker is
 ///    actively running this document; surface it regardless of
 ///    whether a previous readable revision exists, so the operator
 ///    can see the pipeline moving even during bulk re-ingest.
@@ -29,12 +32,12 @@ use crate::shared::versioning::dotted_version_terms;
 ///    document should not hide it from the ready bucket. Otherwise
 ///    canceled fan-out jobs can dominate the pick during bulk
 ///    re-ingest.
-/// 5. Latest ingest_job or mutation is `canceled` → `canceled` (no
+/// 5. Latest `ingest_job` or mutation is `canceled` → `canceled` (no
 ///    readable, work was canceled before finishing).
-/// 6. Latest ingest_job is `queued` → `queued` (new document
+/// 6. Latest `ingest_job` is `queued` → `queued` (new document
 ///    waiting for its first ingest; no readable yet).
 /// 7. Mutation state is `accepted` / `running` → `processing`.
-/// 8. Latest ingest_job is `completed` but no readable → `failed`
+/// 8. Latest `ingest_job` is `completed` but no readable → `failed`
 ///    (post-completion head update did not land; surface the anomaly).
 /// 9. Everything else → `queued`.
 ///
@@ -102,6 +105,57 @@ pub struct ContentRevisionRow {
     pub storage_key: Option<String>,
     pub created_by_principal_id: Option<Uuid>,
     pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone)]
+pub enum UpdateRevisionDocumentHintOutcome {
+    Updated(Box<ContentRevisionRow>),
+    RevisionNotFound,
+    KnowledgeProjectionNotFound,
+}
+
+#[derive(Debug, Clone)]
+pub enum UpdateRevisionStorageKeyOutcome {
+    Updated(Box<ContentRevisionRow>),
+    RevisionNotFound,
+    KnowledgeProjectionNotFound,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MaterializeKnowledgeDocumentOutcome {
+    Materialized,
+    DocumentNotFound,
+    DocumentHeadNotFound,
+    RevisionNotFound,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MaterializeKnowledgeDocumentResult {
+    pub outcome: MaterializeKnowledgeDocumentOutcome,
+    pub changed: bool,
+}
+
+#[derive(Debug, Clone)]
+pub enum CreateContentRevisionOutcome {
+    Created(Box<ContentRevisionRow>),
+    DocumentNotFound,
+    DocumentDeleted,
+    ProjectionUnavailable,
+}
+
+#[derive(Debug, Clone)]
+pub enum PromoteDocumentHeadOutcome {
+    Promoted(ContentDocumentHeadRow),
+    DocumentNotFound,
+    RevisionNotFound,
+    ReferenceIntegrityViolation,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) enum ValidatedDocumentHeadWriteOutcome {
+    Updated(ContentDocumentHeadRow),
+    DocumentNotFound,
+    ReferenceIntegrityViolation,
 }
 
 #[derive(Debug, Clone, FromRow)]
@@ -198,6 +252,25 @@ pub struct NewContentRevision<'a> {
     pub created_by_principal_id: Option<Uuid>,
 }
 
+/// Production append input. Revision identity and ancestry are deliberately
+/// absent: the repository derives them while holding the document lock.
+#[derive(Debug, Clone)]
+pub struct NewContentRevisionProjection<'a> {
+    pub document_id: Uuid,
+    pub workspace_id: Uuid,
+    pub library_id: Uuid,
+    pub content_source_kind: &'a str,
+    pub checksum: &'a str,
+    pub mime_type: &'a str,
+    pub byte_size: i64,
+    pub title: Option<&'a str>,
+    pub language_code: Option<&'a str>,
+    pub source_uri: Option<&'a str>,
+    pub document_hint: Option<&'a str>,
+    pub storage_key: Option<&'a str>,
+    pub created_by_principal_id: Option<Uuid>,
+}
+
 #[derive(Debug, Clone)]
 pub struct NewContentChunk<'a> {
     pub revision_id: Uuid,
@@ -214,6 +287,35 @@ pub struct NewContentChunk<'a> {
     /// Latest record timestamp aggregated into this chunk. Equals
     /// `occurred_at` for single-record chunks; None when `occurred_at`
     /// is None.
+    pub occurred_until: Option<DateTime<Utc>>,
+}
+
+/// Complete canonical + query-projection chunk payload. Owned values keep the
+/// atomic replacement API free of parallel slices whose ordering could drift.
+#[derive(Debug, Clone)]
+pub struct NewContentChunkProjection {
+    pub workspace_id: Uuid,
+    pub library_id: Uuid,
+    pub document_id: Uuid,
+    pub revision_id: Uuid,
+    pub chunk_index: i32,
+    pub start_offset: i32,
+    pub end_offset: i32,
+    pub token_count: Option<i32>,
+    pub chunk_kind: Option<String>,
+    pub content_text: String,
+    pub normalized_text: String,
+    pub text_checksum: String,
+    pub support_block_ids: Vec<Uuid>,
+    pub section_path: Vec<String>,
+    pub heading_trail: Vec<String>,
+    pub literal_digest: Option<String>,
+    pub chunk_state: String,
+    pub text_generation: Option<i64>,
+    pub vector_generation: Option<i64>,
+    pub quality_score: Option<f32>,
+    pub window_text: Option<String>,
+    pub occurred_at: Option<DateTime<Utc>>,
     pub occurred_until: Option<DateTime<Utc>>,
 }
 
@@ -302,6 +404,39 @@ where
     .await
 }
 
+/// Loads and locks one canonical document row for a lifecycle transition.
+///
+/// Concurrent delete requests serialize on this row so only the transaction
+/// that observes the non-deleted state creates the durable outbox event.
+pub async fn lock_document_by_id_with_executor<'e, E>(
+    executor: E,
+    document_id: Uuid,
+) -> Result<Option<ContentDocumentRow>, sqlx::Error>
+where
+    E: Executor<'e, Database = Postgres>,
+{
+    sqlx::query_as::<_, ContentDocumentRow>(
+        "select
+            id,
+            workspace_id,
+            library_id,
+            external_key,
+            document_state::text as document_state,
+            created_by_principal_id,
+            created_at,
+            deleted_at,
+            parent_document_id,
+            parent_external_key,
+            document_role
+         from content_document
+         where id = $1
+         for update",
+    )
+    .bind(document_id)
+    .fetch_optional(executor)
+    .await
+}
+
 pub async fn get_document_by_external_key(
     postgres: &PgPool,
     library_id: Uuid,
@@ -371,18 +506,54 @@ pub async fn list_active_children_by_parent(
 /// Used when a parent is deleted but the child (role `attachment`) stays alive
 /// as a peer document; keeping the declared key lets the resolver re-attach if
 /// the parent reappears.
-pub async fn detach_document_parent<'e, E>(
-    executor: E,
+pub async fn detach_document_parent(
+    postgres: &PgPool,
+    library_id: Uuid,
     document_id: Uuid,
-) -> Result<(), sqlx::Error>
-where
-    E: Executor<'e, Database = Postgres>,
-{
-    sqlx::query("update content_document set parent_document_id = null where id = $1")
-        .bind(document_id)
-        .execute(executor)
-        .await
-        .map(|_| ())
+) -> Result<(), sqlx::Error> {
+    let mut transaction = postgres.begin().await?;
+    let parent_locked = sqlx::query_scalar::<_, Uuid>(
+        "select library.id
+         from content_document as document
+         join catalog_library as library on library.id = document.library_id
+         where document.id = $1
+           and library.id = $2
+         for no key update of library",
+    )
+    .bind(document_id)
+    .bind(library_id)
+    .fetch_optional(&mut *transaction)
+    .await?;
+    if parent_locked.is_none() {
+        transaction.rollback().await?;
+        return Ok(());
+    }
+    sqlx::query(
+        "update content_document
+         set parent_document_id = null
+         where id = $1 and library_id = $2",
+    )
+    .bind(document_id)
+    .bind(library_id)
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "update knowledge_document
+         set parent_document_id = null,
+             updated_at = now()
+         where document_id = $1 and library_id = $2",
+    )
+    .bind(document_id)
+    .bind(library_id)
+    .execute(&mut *transaction)
+    .await?;
+    super::catalog_repository::touch_library_source_truth_version_with_executor(
+        &mut *transaction,
+        library_id,
+    )
+    .await?;
+    transaction.commit().await?;
+    Ok(())
 }
 
 pub async fn create_document(
@@ -390,6 +561,126 @@ pub async fn create_document(
     new_document: &NewContentDocument<'_>,
 ) -> Result<ContentDocumentRow, sqlx::Error> {
     create_document_with_executor(postgres, new_document).await
+}
+
+/// Creates the canonical document, its empty head, and the query-facing
+/// document projection in one transaction.
+///
+/// `knowledge_document.file_name` is derived only from canonical metadata:
+/// the readable/active revision storage key when one exists, otherwise the
+/// document external key. A storage key generated by `ContentStorageService`
+/// has a `<sha256>-<file-name>` basename; the digest prefix is stripped. This
+/// makes rematerialization deterministic and prevents a stale projection from
+/// becoming an accidental source of truth.
+pub async fn create_document_with_projection(
+    postgres: &PgPool,
+    new_document: &NewContentDocument<'_>,
+    source_file_name: Option<&str>,
+) -> Result<ContentDocumentRow, sqlx::Error> {
+    let mut transaction = postgres.begin().await?;
+    if !super::catalog_repository::lock_library_for_lifecycle_event_with_executor(
+        &mut *transaction,
+        new_document.workspace_id,
+        new_document.library_id,
+    )
+    .await?
+    {
+        transaction.rollback().await?;
+        return Err(sqlx::Error::RowNotFound);
+    }
+    let document = create_document_with_executor(&mut *transaction, new_document).await?;
+    let source_file_name = source_file_name.map_or_else(
+        || canonical_file_name_component(&document.external_key),
+        canonical_file_name_component,
+    );
+    sqlx::query("update content_document set source_file_name = $2 where id = $1")
+        .bind(document.id)
+        .bind(&source_file_name)
+        .execute(&mut *transaction)
+        .await?;
+    upsert_document_head_with_executor(
+        &mut *transaction,
+        &NewContentDocumentHead {
+            document_id: document.id,
+            active_revision_id: None,
+            readable_revision_id: None,
+            latest_mutation_id: None,
+            latest_successful_attempt_id: None,
+        },
+    )
+    .await?;
+    let file_name =
+        canonical_projection_file_name(&document.external_key, Some(&source_file_name), None);
+    sqlx::query(
+        "insert into knowledge_document (
+            document_id, workspace_id, library_id, external_key, file_name, title,
+            document_state, active_revision_id, readable_revision_id, latest_revision_no,
+            parent_document_id, document_role, created_at, updated_at, deleted_at
+         ) values (
+            $1, $2, $3, $4, $5, null, $6, null, null, null,
+            $7, $8, $9, $9, $10
+         )",
+    )
+    .bind(document.id)
+    .bind(document.workspace_id)
+    .bind(document.library_id)
+    .bind(&document.external_key)
+    .bind(file_name)
+    .bind(&document.document_state)
+    .bind(document.parent_document_id)
+    .bind(&document.document_role)
+    .bind(document.created_at)
+    .bind(document.deleted_at)
+    .execute(&mut *transaction)
+    .await?;
+
+    transaction.commit().await?;
+    Ok(document)
+}
+
+fn canonical_projection_file_name(
+    external_key: &str,
+    source_file_name: Option<&str>,
+    storage_key: Option<&str>,
+) -> String {
+    storage_key
+        .and_then(canonical_file_name_from_storage_key)
+        .or_else(|| source_file_name.map(canonical_file_name_component))
+        .unwrap_or_else(|| canonical_file_name_component(external_key))
+}
+
+fn canonical_file_name_from_storage_key(storage_key: &str) -> Option<String> {
+    let basename = storage_key
+        .trim()
+        .split(['/', '\\'])
+        .next_back()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())?;
+    basename
+        .split_once('-')
+        .and_then(|(prefix, suffix)| {
+            (prefix.len() == 64
+                && prefix.bytes().all(|byte| byte.is_ascii_hexdigit())
+                && !suffix.trim().is_empty())
+            .then_some(suffix)
+        })
+        .map(canonical_file_name_component)
+}
+
+pub(crate) fn canonical_file_name_component(value: &str) -> String {
+    let basename = value
+        .trim()
+        .split(['/', '\\'])
+        .next_back()
+        .unwrap_or(value)
+        .chars()
+        .map(|character| if character.is_ascii_control() { '_' } else { character })
+        .collect::<String>()
+        .replace('"', "")
+        .trim()
+        .trim_matches('.')
+        .to_string();
+    if basename.is_empty() { "document".to_string() } else { basename }
 }
 
 pub async fn create_document_with_executor<'e, E>(
@@ -440,13 +731,393 @@ where
     .await
 }
 
+/// Materializes one knowledge document exclusively from its locked canonical
+/// document and head state.
+///
+/// The library parent is locked before the canonical document, head, and
+/// knowledge row. A delayed promotion therefore never trusts the head pointers
+/// carried in its request: after it acquires the lock it observes the newest
+/// committed canonical head and writes that state. The projection write, typed
+/// role finalization, and durable generation fence commit atomically.
+pub async fn materialize_knowledge_document_from_canonical_head(
+    postgres: &PgPool,
+    document_id: Uuid,
+) -> Result<MaterializeKnowledgeDocumentOutcome, sqlx::Error> {
+    let mut transaction = postgres.begin().await?;
+    let outcome = materialize_knowledge_document_from_canonical_head_with_transaction(
+        &mut transaction,
+        document_id,
+    )
+    .await?;
+    if outcome.outcome == MaterializeKnowledgeDocumentOutcome::Materialized {
+        if outcome.changed {
+            let library_id = sqlx::query_scalar::<_, Uuid>(
+                "select library_id from content_document where id = $1",
+            )
+            .bind(document_id)
+            .fetch_one(&mut *transaction)
+            .await?;
+            super::catalog_repository::touch_library_source_truth_version_with_executor(
+                &mut *transaction,
+                library_id,
+            )
+            .await?;
+        }
+        transaction.commit().await?;
+    } else {
+        transaction.rollback().await?;
+    }
+    Ok(outcome.outcome)
+}
+
+/// Transaction-scoped form used by canonical lifecycle operations so the
+/// authoritative write and its query projection cannot commit independently.
+pub async fn materialize_knowledge_document_from_canonical_head_with_transaction(
+    transaction: &mut Transaction<'_, Postgres>,
+    document_id: Uuid,
+) -> Result<MaterializeKnowledgeDocumentResult, sqlx::Error> {
+    let Some((workspace_id, library_id)) = sqlx::query_as::<_, (Uuid, Uuid)>(
+        "select workspace_id, library_id
+         from content_document
+         where id = $1",
+    )
+    .bind(document_id)
+    .fetch_optional(&mut **transaction)
+    .await?
+    else {
+        return Ok(MaterializeKnowledgeDocumentResult {
+            outcome: MaterializeKnowledgeDocumentOutcome::DocumentNotFound,
+            changed: false,
+        });
+    };
+
+    if !super::catalog_repository::lock_library_for_lifecycle_event_with_executor(
+        &mut **transaction,
+        workspace_id,
+        library_id,
+    )
+    .await?
+    {
+        return Ok(MaterializeKnowledgeDocumentResult {
+            outcome: MaterializeKnowledgeDocumentOutcome::DocumentNotFound,
+            changed: false,
+        });
+    }
+
+    let Some((
+        external_key,
+        source_file_name,
+        document_state,
+        created_at,
+        deleted_at,
+        parent_document_id,
+    )) = sqlx::query_as::<
+        _,
+        (String, Option<String>, String, DateTime<Utc>, Option<DateTime<Utc>>, Option<Uuid>),
+    >(
+        "select
+                external_key,
+                source_file_name,
+                document_state::text,
+                created_at,
+                deleted_at,
+                parent_document_id
+             from content_document
+             where id = $1
+               and workspace_id = $2
+               and library_id = $3
+             for no key update",
+    )
+    .bind(document_id)
+    .bind(workspace_id)
+    .bind(library_id)
+    .fetch_optional(&mut **transaction)
+    .await?
+    else {
+        return Ok(MaterializeKnowledgeDocumentResult {
+            outcome: MaterializeKnowledgeDocumentOutcome::DocumentNotFound,
+            changed: false,
+        });
+    };
+
+    let Some((active_revision_id, readable_revision_id)) =
+        sqlx::query_as::<_, (Option<Uuid>, Option<Uuid>)>(
+            "select active_revision_id, readable_revision_id
+             from content_document_head
+             where document_id = $1
+             for no key update",
+        )
+        .bind(document_id)
+        .fetch_optional(&mut **transaction)
+        .await?
+    else {
+        return Ok(MaterializeKnowledgeDocumentResult {
+            outcome: MaterializeKnowledgeDocumentOutcome::DocumentHeadNotFound,
+            changed: false,
+        });
+    };
+
+    let head_revision_id = readable_revision_id.or(active_revision_id);
+    let (head_mime_type, head_title, head_storage_key) = if let Some(revision_id) = head_revision_id
+    {
+        let revision = sqlx::query_as::<_, (String, Option<String>, Option<String>)>(
+            "select mime_type, title, storage_key
+             from content_revision
+             where id = $1
+               and document_id = $2
+               and workspace_id = $3
+               and library_id = $4",
+        )
+        .bind(revision_id)
+        .bind(document_id)
+        .bind(workspace_id)
+        .bind(library_id)
+        .fetch_optional(&mut **transaction)
+        .await?;
+        let Some(revision) = revision else {
+            return Ok(MaterializeKnowledgeDocumentResult {
+                outcome: MaterializeKnowledgeDocumentOutcome::RevisionNotFound,
+                changed: false,
+            });
+        };
+        (Some(revision.0), revision.1, revision.2)
+    } else {
+        (None, None, None)
+    };
+    let latest_revision_no = sqlx::query_scalar::<_, Option<i64>>(
+        "select max(revision_number)::bigint
+         from content_revision
+         where document_id = $1
+           and workspace_id = $2
+           and library_id = $3",
+    )
+    .bind(document_id)
+    .bind(workspace_id)
+    .bind(library_id)
+    .fetch_one(&mut **transaction)
+    .await?;
+
+    let file_name = canonical_projection_file_name(
+        &external_key,
+        source_file_name.as_deref(),
+        head_storage_key.as_deref(),
+    );
+    let is_raster_image = head_revision_id.is_some()
+        && revision_is_raster_image(Some(&file_name), head_mime_type.as_deref());
+    let document_role =
+        derive_document_role(parent_document_id.is_some(), is_raster_image).to_string();
+
+    let canonical_update = sqlx::query(
+        "update content_document
+         set document_role = $2
+         where id = $1
+           and workspace_id = $3
+           and library_id = $4
+           and document_role is distinct from $2",
+    )
+    .bind(document_id)
+    .bind(&document_role)
+    .bind(workspace_id)
+    .bind(library_id)
+    .execute(&mut **transaction)
+    .await?;
+    let projection_changed = sqlx::query_scalar::<_, Uuid>(
+        "insert into knowledge_document (
+            document_id, workspace_id, library_id, external_key, file_name, title,
+            document_state, active_revision_id, readable_revision_id, latest_revision_no,
+            parent_document_id, document_role, created_at, updated_at, deleted_at
+         ) values (
+            $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
+            $11, $12, $13, now(), $14
+         )
+         on conflict (document_id) do update
+         set workspace_id = excluded.workspace_id,
+             library_id = excluded.library_id,
+             external_key = excluded.external_key,
+             file_name = excluded.file_name,
+             title = excluded.title,
+             document_state = excluded.document_state,
+             active_revision_id = excluded.active_revision_id,
+             readable_revision_id = excluded.readable_revision_id,
+             latest_revision_no = excluded.latest_revision_no,
+             parent_document_id = excluded.parent_document_id,
+             document_role = excluded.document_role,
+             updated_at = excluded.updated_at,
+             deleted_at = excluded.deleted_at
+         where knowledge_document.workspace_id is distinct from excluded.workspace_id
+            or knowledge_document.library_id is distinct from excluded.library_id
+            or knowledge_document.external_key is distinct from excluded.external_key
+            or knowledge_document.file_name is distinct from excluded.file_name
+            or knowledge_document.title is distinct from excluded.title
+            or knowledge_document.document_state is distinct from excluded.document_state
+            or knowledge_document.active_revision_id is distinct from excluded.active_revision_id
+            or knowledge_document.readable_revision_id is distinct from excluded.readable_revision_id
+            or knowledge_document.latest_revision_no is distinct from excluded.latest_revision_no
+            or knowledge_document.parent_document_id is distinct from excluded.parent_document_id
+            or knowledge_document.document_role is distinct from excluded.document_role
+            or knowledge_document.deleted_at is distinct from excluded.deleted_at
+         returning document_id",
+    )
+    .bind(document_id)
+    .bind(workspace_id)
+    .bind(library_id)
+    .bind(&external_key)
+    .bind(&file_name)
+    .bind(&head_title)
+    .bind(&document_state)
+    .bind(active_revision_id)
+    .bind(readable_revision_id)
+    .bind(latest_revision_no)
+    .bind(parent_document_id)
+    .bind(&document_role)
+    .bind(created_at)
+    .bind(deleted_at)
+    .fetch_optional(&mut **transaction)
+    .await?;
+
+    Ok(MaterializeKnowledgeDocumentResult {
+        outcome: MaterializeKnowledgeDocumentOutcome::Materialized,
+        changed: canonical_update.rows_affected() > 0 || projection_changed.is_some(),
+    })
+}
+
+/// Promotes the canonical head and rematerializes its query projection in one
+/// parent-first transaction. A stale caller payload cannot overwrite a newer
+/// head because the materializer rereads the locked canonical row.
+pub async fn promote_document_head_with_projection(
+    postgres: &PgPool,
+    new_head: &NewContentDocumentHead,
+) -> Result<PromoteDocumentHeadOutcome, sqlx::Error> {
+    let mut transaction = postgres.begin().await?;
+    let Some((workspace_id, library_id)) = sqlx::query_as::<_, (Uuid, Uuid)>(
+        "select workspace_id, library_id from content_document where id = $1",
+    )
+    .bind(new_head.document_id)
+    .fetch_optional(&mut *transaction)
+    .await?
+    else {
+        transaction.rollback().await?;
+        return Ok(PromoteDocumentHeadOutcome::DocumentNotFound);
+    };
+    if !super::catalog_repository::lock_library_for_lifecycle_event_with_executor(
+        &mut *transaction,
+        workspace_id,
+        library_id,
+    )
+    .await?
+    {
+        transaction.rollback().await?;
+        return Ok(PromoteDocumentHeadOutcome::DocumentNotFound);
+    }
+    if lock_document_by_id_with_executor(&mut *transaction, new_head.document_id).await?.is_none() {
+        transaction.rollback().await?;
+        return Ok(PromoteDocumentHeadOutcome::DocumentNotFound);
+    }
+    let previous_head =
+        get_document_head_for_update_with_executor(&mut *transaction, new_head.document_id).await?;
+    let head =
+        match upsert_document_head_without_generation_outcome(&mut transaction, new_head).await? {
+            ValidatedDocumentHeadWriteOutcome::Updated(head) => head,
+            ValidatedDocumentHeadWriteOutcome::DocumentNotFound => {
+                transaction.rollback().await?;
+                return Ok(PromoteDocumentHeadOutcome::DocumentNotFound);
+            }
+            ValidatedDocumentHeadWriteOutcome::ReferenceIntegrityViolation => {
+                transaction.rollback().await?;
+                return Ok(PromoteDocumentHeadOutcome::ReferenceIntegrityViolation);
+            }
+        };
+    let materialized = materialize_knowledge_document_from_canonical_head_with_transaction(
+        &mut transaction,
+        new_head.document_id,
+    )
+    .await?;
+    match materialized.outcome {
+        MaterializeKnowledgeDocumentOutcome::Materialized => {
+            let readable_changed = previous_head.as_ref().map_or_else(
+                || head.readable_revision_id.is_some(),
+                |previous| previous.readable_revision_id != head.readable_revision_id,
+            );
+            if readable_changed || materialized.changed {
+                super::catalog_repository::touch_library_source_truth_version_with_executor(
+                    &mut *transaction,
+                    library_id,
+                )
+                .await?;
+            }
+            transaction.commit().await?;
+            Ok(PromoteDocumentHeadOutcome::Promoted(head))
+        }
+        MaterializeKnowledgeDocumentOutcome::RevisionNotFound => {
+            transaction.rollback().await?;
+            Ok(PromoteDocumentHeadOutcome::RevisionNotFound)
+        }
+        MaterializeKnowledgeDocumentOutcome::DocumentNotFound
+        | MaterializeKnowledgeDocumentOutcome::DocumentHeadNotFound => {
+            transaction.rollback().await?;
+            Ok(PromoteDocumentHeadOutcome::DocumentNotFound)
+        }
+    }
+}
+
 pub async fn update_document_state(
     postgres: &PgPool,
     document_id: Uuid,
     document_state: &str,
     deleted_at: Option<DateTime<Utc>>,
 ) -> Result<Option<ContentDocumentRow>, sqlx::Error> {
-    update_document_state_with_executor(postgres, document_id, document_state, deleted_at).await
+    let mut transaction = postgres.begin().await?;
+    // Read scope without a child lock, then acquire the library parent before
+    // mutating the document. Catalog deletion uses the same parent-first order.
+    let Some(document_scope) =
+        get_document_by_id_with_executor(&mut *transaction, document_id).await?
+    else {
+        transaction.rollback().await?;
+        return Ok(None);
+    };
+    let parent_locked = super::catalog_repository::lock_library_for_lifecycle_event_with_executor(
+        &mut *transaction,
+        document_scope.workspace_id,
+        document_scope.library_id,
+    )
+    .await?;
+    if !parent_locked {
+        transaction.rollback().await?;
+        return Ok(None);
+    }
+    let updated = update_document_state_with_executor(
+        &mut *transaction,
+        document_id,
+        document_state,
+        deleted_at,
+    )
+    .await?;
+    if let Some(updated_document) = updated.as_ref() {
+        // Keep the retrieval projection's visibility fence in the same
+        // transaction. This path is used by unrecoverable-document cleanup,
+        // where no later head-promotion step exists to repair a stale active
+        // knowledge row.
+        sqlx::query(
+            "update knowledge_document
+             set document_state = $2,
+                 deleted_at = $3,
+                 updated_at = now()
+             where document_id = $1 and library_id = $4",
+        )
+        .bind(document_id)
+        .bind(&updated_document.document_state)
+        .bind(updated_document.deleted_at)
+        .bind(updated_document.library_id)
+        .execute(&mut *transaction)
+        .await?;
+        super::catalog_repository::touch_library_source_truth_version_with_executor(
+            &mut *transaction,
+            document_scope.library_id,
+        )
+        .await?;
+    }
+    transaction.commit().await?;
+    Ok(updated)
 }
 
 pub async fn update_document_state_with_executor<'e, E>(
@@ -556,6 +1227,35 @@ pub async fn get_document_head(
     .await
 }
 
+/// Loads and locks one document-head row for a lifecycle transaction.
+///
+/// # Errors
+/// Returns any `SQLx` error raised while reading or locking the row.
+pub async fn get_document_head_for_update_with_executor<'e, E>(
+    executor: E,
+    document_id: Uuid,
+) -> Result<Option<ContentDocumentHeadRow>, sqlx::Error>
+where
+    E: Executor<'e, Database = Postgres>,
+{
+    sqlx::query_as::<_, ContentDocumentHeadRow>(
+        "select
+            document_id,
+            active_revision_id,
+            readable_revision_id,
+            latest_mutation_id,
+            latest_successful_attempt_id,
+            head_updated_at,
+            document_summary
+         from content_document_head
+         where document_id = $1
+         for update",
+    )
+    .bind(document_id)
+    .fetch_optional(executor)
+    .await
+}
+
 pub async fn list_document_heads_by_document_ids(
     postgres: &PgPool,
     document_ids: &[Uuid],
@@ -595,8 +1295,226 @@ pub async fn upsert_document_head_with_executor<'e, E>(
 where
     E: Executor<'e, Database = Postgres>,
 {
+    try_upsert_document_head_with_generation_policy(executor, new_head, true)
+        .await?
+        .ok_or(sqlx::Error::RowNotFound)
+}
+
+/// Writes a head inside a wider lifecycle transaction without independently
+/// advancing the library generation. The caller must advance it exactly once
+/// after every answer-visible canonical/projection write has succeeded.
+pub async fn upsert_document_head_without_generation_with_executor<'e, E>(
+    executor: E,
+    new_head: &NewContentDocumentHead,
+) -> Result<ContentDocumentHeadRow, sqlx::Error>
+where
+    E: Executor<'e, Database = Postgres>,
+{
+    try_upsert_document_head_with_generation_policy(executor, new_head, false)
+        .await?
+        .ok_or(sqlx::Error::RowNotFound)
+}
+
+/// Applies the structurally validated head write and reports why its guarded
+/// input CTE produced no row.
+///
+/// Lifecycle callers must lock the target document before invoking this
+/// function. The caller-owned transaction retains that lock while the guarded
+/// write locks the library. Therefore an existing document with a rejected
+/// revision, mutation, or attempt reference is a persistent integrity
+/// violation, not a retryable concurrent-head conflict.
+pub(crate) async fn upsert_document_head_without_generation_outcome(
+    transaction: &mut Transaction<'_, Postgres>,
+    new_head: &NewContentDocumentHead,
+) -> Result<ValidatedDocumentHeadWriteOutcome, sqlx::Error> {
+    if let Some(head) =
+        try_upsert_document_head_with_generation_policy(&mut **transaction, new_head, false).await?
+    {
+        return Ok(ValidatedDocumentHeadWriteOutcome::Updated(head));
+    }
+
+    let document_exists = sqlx::query_scalar::<_, bool>(
+        "select exists(select 1 from content_document where id = $1)",
+    )
+    .bind(new_head.document_id)
+    .fetch_one(&mut **transaction)
+    .await?;
+    Ok(if document_exists {
+        ValidatedDocumentHeadWriteOutcome::ReferenceIntegrityViolation
+    } else {
+        ValidatedDocumentHeadWriteOutcome::DocumentNotFound
+    })
+}
+
+async fn try_upsert_document_head_with_generation_policy<'e, E>(
+    executor: E,
+    new_head: &NewContentDocumentHead,
+    touch_generation: bool,
+) -> Result<Option<ContentDocumentHeadRow>, sqlx::Error>
+where
+    E: Executor<'e, Database = Postgres>,
+{
+    // Parent lock -> input validation -> head row -> conditional generation
+    // update is one statement and one lock order. Foreign revision/mutation/
+    // attempt ids therefore cannot be laundered through this denormalized head.
+    // Only readable-pointer transitions invalidate answers; shell creation,
+    // active work-in-progress pointers, operational ids, and exact no-ops do
+    // not churn cache generations.
     sqlx::query_as::<_, ContentDocumentHeadRow>(
-        "insert into content_document_head (
+        "with locked_document as materialized (
+            select
+                document.id as document_id,
+                document.workspace_id,
+                document.library_id
+            from content_document as document
+            join catalog_library as library on library.id = document.library_id
+            where document.id = $1
+            for no key update of library
+         ), validated_input as materialized (
+            select document.*
+            from locked_document as document
+            where (
+                $2::uuid is null
+                or exists (
+                    select 1
+                    from content_revision as revision
+                    where revision.id = $2
+                      and revision.document_id = document.document_id
+                      and revision.workspace_id = document.workspace_id
+                      and revision.library_id = document.library_id
+                )
+            )
+              and (
+                $3::uuid is null
+                or exists (
+                    select 1
+                    from content_revision as revision
+                    where revision.id = $3
+                      and revision.document_id = document.document_id
+                      and revision.workspace_id = document.workspace_id
+                      and revision.library_id = document.library_id
+                )
+            )
+              and (
+                $4::uuid is null
+                or exists (
+                    select 1
+                    from content_mutation as mutation
+                    where mutation.id = $4
+                      and mutation.workspace_id = document.workspace_id
+                      and mutation.library_id = document.library_id
+                      and (
+                        exists (
+                            select 1
+                            from content_mutation_item as item
+                            where item.mutation_id = mutation.id
+                              and (
+                                item.document_id = document.document_id
+                                or exists (
+                                    select 1
+                                    from content_revision as item_revision
+                                    where item_revision.id in (
+                                        item.base_revision_id,
+                                        item.result_revision_id
+                                    )
+                                      and item_revision.document_id = document.document_id
+                                      and item_revision.workspace_id = document.workspace_id
+                                      and item_revision.library_id = document.library_id
+                                )
+                              )
+                        )
+                        or exists (
+                            select 1
+                            from ingest_job as job
+                            where job.mutation_id = mutation.id
+                              and job.workspace_id = document.workspace_id
+                              and job.library_id = document.library_id
+                              and (
+                                job.knowledge_document_id = document.document_id
+                                or exists (
+                                    select 1
+                                    from content_revision as job_revision
+                                    where job_revision.id = job.knowledge_revision_id
+                                      and job_revision.document_id = document.document_id
+                                      and job_revision.workspace_id = document.workspace_id
+                                      and job_revision.library_id = document.library_id
+                                )
+                              )
+                        )
+                        or (
+                            $2::uuid is null
+                            and $3::uuid is null
+                            and not exists (
+                                select 1
+                                from content_mutation_item as item
+                                where item.mutation_id = mutation.id
+                                  and (
+                                    item.document_id is not null
+                                    or item.base_revision_id is not null
+                                    or item.result_revision_id is not null
+                                  )
+                            )
+                            and not exists (
+                                select 1
+                                from ingest_job as job
+                                where job.mutation_id = mutation.id
+                                  and (
+                                    job.knowledge_document_id is not null
+                                    or job.knowledge_revision_id is not null
+                                  )
+                            )
+                        )
+                      )
+                )
+            )
+              and (
+                $5::uuid is null
+                or exists (
+                    select 1
+                    from ingest_attempt as attempt
+                    join ingest_job as job on job.id = attempt.job_id
+                    where attempt.id = $5
+                      and job.workspace_id = document.workspace_id
+                      and job.library_id = document.library_id
+                      and (
+                        job.knowledge_document_id = document.document_id
+                        or exists (
+                            select 1
+                            from content_revision as job_revision
+                            where job_revision.id = job.knowledge_revision_id
+                              and job_revision.document_id = document.document_id
+                              and job_revision.workspace_id = document.workspace_id
+                              and job_revision.library_id = document.library_id
+                        )
+                        or exists (
+                            select 1
+                            from content_mutation_item as item
+                            where item.id = job.mutation_item_id
+                              and item.mutation_id = job.mutation_id
+                              and item.document_id = document.document_id
+                        )
+                      )
+                )
+            )
+         ), previous_head as materialized (
+            select head.document_id, head.readable_revision_id
+            from content_document_head as head
+            join validated_input as input on input.document_id = head.document_id
+            for update of head
+         ), answer_transition as materialized (
+            select input.library_id
+            from validated_input as input
+            left join previous_head as previous on true
+            where (
+                previous.document_id is null
+                and $3::uuid is not null
+            )
+               or (
+                previous.document_id is not null
+                and previous.readable_revision_id is distinct from $3::uuid
+            )
+         ), updated_head as (
+         insert into content_document_head (
             document_id,
             active_revision_id,
             readable_revision_id,
@@ -604,28 +1522,52 @@ where
             latest_successful_attempt_id,
             head_updated_at
         )
-        values ($1, $2, $3, $4, $5, now())
+        select $1, $2, $3, $4, $5, now()
+        from validated_input
+        left join previous_head on true
         on conflict (document_id) do update
         set active_revision_id = excluded.active_revision_id,
             readable_revision_id = excluded.readable_revision_id,
             latest_mutation_id = excluded.latest_mutation_id,
             latest_successful_attempt_id = excluded.latest_successful_attempt_id,
             head_updated_at = now()
-        returning
+         returning
             document_id,
             active_revision_id,
             readable_revision_id,
             latest_mutation_id,
             latest_successful_attempt_id,
             head_updated_at,
-            document_summary",
+            document_summary
+         ), bumped_library as (
+            update catalog_library as library
+            set source_truth_version = greatest(
+                    coalesce(library.source_truth_version, 0) + 1,
+                    (extract(epoch from clock_timestamp()) * 1000000)::bigint
+                )
+            from answer_transition, updated_head
+            where library.id = answer_transition.library_id
+              and $6::boolean
+            returning library.id
+         )
+         select
+            head.document_id,
+            head.active_revision_id,
+            head.readable_revision_id,
+            head.latest_mutation_id,
+            head.latest_successful_attempt_id,
+            head.head_updated_at,
+            head.document_summary
+         from updated_head as head
+         left join bumped_library on true",
     )
     .bind(new_head.document_id)
     .bind(new_head.active_revision_id)
     .bind(new_head.readable_revision_id)
     .bind(new_head.latest_mutation_id)
     .bind(new_head.latest_successful_attempt_id)
-    .fetch_one(executor)
+    .bind(touch_generation)
+    .fetch_optional(executor)
     .await
 }
 
@@ -646,111 +1588,494 @@ pub async fn update_document_summary(
     Ok(())
 }
 
-const FINGERPRINT_CACHE_TTL: Duration = Duration::from_secs(30);
+const FINGERPRINT_CACHE_CAPACITY: usize = 1_024;
 
-fn fingerprint_cache() -> &'static Mutex<HashMap<Uuid, (Instant, String)>> {
-    static CACHE: OnceLock<Mutex<HashMap<Uuid, (Instant, String)>>> = OnceLock::new();
-    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LibraryReadableContentFingerprint {
+    pub value: String,
+    pub source_truth_version: i64,
+    pub projection_is_current: bool,
+}
+
+#[derive(Debug, Clone)]
+struct FingerprintCacheEntry {
+    source_truth_version: i64,
+    value: String,
+    projection_is_current: bool,
+    last_access: u64,
+}
+
+#[derive(Debug)]
+struct FingerprintCache {
+    capacity: usize,
+    access_sequence: u64,
+    entries: HashMap<Uuid, FingerprintCacheEntry>,
+}
+
+impl FingerprintCache {
+    fn with_capacity(capacity: usize) -> Self {
+        Self { capacity: capacity.max(1), access_sequence: 0, entries: HashMap::new() }
+    }
+
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    const fn next_access_sequence(&mut self) -> u64 {
+        self.access_sequence = self.access_sequence.saturating_add(1);
+        self.access_sequence
+    }
+
+    fn get(&mut self, library_id: Uuid, source_truth_version: i64) -> Option<(String, bool)> {
+        let last_access = self.next_access_sequence();
+        let entry = self.entries.get_mut(&library_id)?;
+        if entry.source_truth_version != source_truth_version {
+            self.entries.remove(&library_id);
+            return None;
+        }
+        entry.last_access = last_access;
+        Some((entry.value.clone(), entry.projection_is_current))
+    }
+
+    fn insert(
+        &mut self,
+        library_id: Uuid,
+        source_truth_version: i64,
+        value: String,
+        projection_is_current: bool,
+    ) {
+        let last_access = self.next_access_sequence();
+        self.entries.insert(
+            library_id,
+            FingerprintCacheEntry {
+                source_truth_version,
+                value,
+                projection_is_current,
+                last_access,
+            },
+        );
+        if self.entries.len() > self.capacity
+            && let Some(least_recently_used) = self
+                .entries
+                .iter()
+                .min_by_key(|(_, entry)| entry.last_access)
+                .map(|(library_id, _)| *library_id)
+        {
+            self.entries.remove(&least_recently_used);
+        }
+    }
+}
+
+fn fingerprint_cache() -> &'static Mutex<FingerprintCache> {
+    static CACHE: OnceLock<Mutex<FingerprintCache>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(FingerprintCache::with_capacity(FINGERPRINT_CACHE_CAPACITY)))
+}
+
+fn fingerprint_singleflight_registry() -> &'static Mutex<HashMap<Uuid, Weak<AsyncMutex<()>>>> {
+    static REGISTRY: OnceLock<Mutex<HashMap<Uuid, Weak<AsyncMutex<()>>>>> = OnceLock::new();
+    REGISTRY.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn fingerprint_singleflight(library_id: Uuid) -> Arc<AsyncMutex<()>> {
+    let mut registry = fingerprint_singleflight_registry()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    registry.retain(|_, lock| lock.strong_count() > 0);
+    if let Some(lock) = registry.get(&library_id).and_then(Weak::upgrade) {
+        return lock;
+    }
+
+    let lock = Arc::new(AsyncMutex::new(()));
+    registry.insert(library_id, Arc::downgrade(&lock));
+    lock
 }
 
 pub async fn get_library_readable_content_fingerprint(
     postgres: &PgPool,
     library_id: Uuid,
-) -> Result<String, sqlx::Error> {
+) -> Result<LibraryReadableContentFingerprint, sqlx::Error> {
+    // Every lookup reads only the durable generation. Equal generations reuse
+    // the bounded process LRU indefinitely; all canonical answer-visible
+    // writes advance that generation atomically. A generation miss is
+    // singleflighted per library so concurrent queries perform one O(chunks)
+    // parity/fingerprint scan instead of stampeding Postgres.
+    let observed_source_truth_version =
+        super::catalog_repository::get_library_source_truth_version(postgres, library_id).await?;
     {
-        let guard = fingerprint_cache().lock().unwrap_or_else(|e| e.into_inner());
-        if let Some((cached_at, cached_value)) = guard.get(&library_id) {
-            if cached_at.elapsed() < FINGERPRINT_CACHE_TTL {
-                return Ok(cached_value.clone());
-            }
+        let mut cache =
+            fingerprint_cache().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some((value, projection_is_current)) =
+            cache.get(library_id, observed_source_truth_version)
+        {
+            return Ok(LibraryReadableContentFingerprint {
+                value,
+                source_truth_version: observed_source_truth_version,
+                projection_is_current,
+            });
         }
     }
 
-    let result = sqlx::query_scalar::<_, String>(
-        "with readable_heads as (
+    let singleflight = fingerprint_singleflight(library_id);
+    let _singleflight_guard = singleflight.lock().await;
+
+    // A preceding waiter may have filled the cache, and the generation may
+    // have advanced while this request waited. Re-read both under the
+    // per-library singleflight before doing the expensive scan.
+    let current_source_truth_version =
+        super::catalog_repository::get_library_source_truth_version(postgres, library_id).await?;
+    {
+        let mut cache =
+            fingerprint_cache().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some((value, projection_is_current)) =
+            cache.get(library_id, current_source_truth_version)
+        {
+            return Ok(LibraryReadableContentFingerprint {
+                value,
+                source_truth_version: current_source_truth_version,
+                projection_is_current,
+            });
+        }
+    }
+
+    let (value, source_truth_version, projection_is_current) =
+        sqlx::query_as::<_, (String, i64, bool)>(
+            "with library_source as materialized (
+            select greatest(coalesce(source_truth_version, 1), 1) as source_truth_version
+            from catalog_library
+            where id = $1
+        ),
+        canonical_readable as materialized (
             select
                 document.id as document_id,
+                document.workspace_id,
+                document.library_id,
                 document.external_key,
-                coalesce(head.readable_revision_id, head.active_revision_id) as revision_id
+                document.parent_document_id,
+                document.document_role,
+                head.readable_revision_id as revision_id
             from content_document as document
-            left join content_document_head as head
+            join content_document_head as head
               on head.document_id = document.id
             where document.library_id = $1
               and document.document_state = 'active'
               and document.deleted_at is null
+              and head.readable_revision_id is not null
         ),
-        chunk_fingerprints as (
+        knowledge_readable as materialized (
+            select
+                document_id,
+                workspace_id,
+                library_id,
+                external_key,
+                parent_document_id,
+                document_role,
+                readable_revision_id as revision_id
+            from knowledge_document
+            where library_id = $1
+              and document_state = 'active'
+              and deleted_at is null
+              and readable_revision_id is not null
+        ),
+        document_projection_parity as (
+            select not exists (
+                select 1
+                from canonical_readable as canonical
+                full join knowledge_readable as knowledge
+                  on knowledge.document_id = canonical.document_id
+                where canonical.document_id is null
+                   or knowledge.document_id is null
+                   or canonical.workspace_id is distinct from knowledge.workspace_id
+                   or canonical.library_id is distinct from knowledge.library_id
+                   or canonical.external_key is distinct from knowledge.external_key
+                   or canonical.parent_document_id is distinct from knowledge.parent_document_id
+                   or canonical.document_role is distinct from knowledge.document_role
+                   or canonical.revision_id is distinct from knowledge.revision_id
+            ) as is_current
+        ),
+        canonical_revisions as materialized (
+            select
+                revision.id as revision_id,
+                revision.document_id,
+                revision.workspace_id,
+                revision.library_id,
+                revision.revision_number::bigint as revision_number,
+                revision.content_source_kind::text as revision_kind,
+                revision.source_uri,
+                revision.document_hint,
+                revision.mime_type,
+                revision.checksum,
+                revision.title,
+                revision.language_code,
+                revision.byte_size
+            from canonical_readable as document
+            join content_revision as revision
+              on revision.id = document.revision_id
+        ),
+        knowledge_revisions as materialized (
+            select
+                revision.revision_id,
+                revision.document_id,
+                revision.workspace_id,
+                revision.library_id,
+                revision.revision_number,
+                revision.revision_kind,
+                revision.source_uri,
+                revision.document_hint,
+                revision.mime_type,
+                revision.checksum,
+                revision.title,
+                revision.byte_size,
+                revision.normalized_text,
+                revision.text_checksum,
+                revision.image_checksum,
+                revision.text_state,
+                revision.vector_state,
+                revision.graph_state
+            from knowledge_readable as document
+            join knowledge_revision as revision
+              on revision.revision_id = document.revision_id
+        ),
+        revision_projection_parity as (
+            select not exists (
+                select 1
+                from canonical_revisions as canonical
+                full join knowledge_revisions as knowledge
+                  on knowledge.revision_id = canonical.revision_id
+                where canonical.revision_id is null
+                   or knowledge.revision_id is null
+                   or canonical.document_id is distinct from knowledge.document_id
+                   or canonical.workspace_id is distinct from knowledge.workspace_id
+                   or canonical.library_id is distinct from knowledge.library_id
+                   or canonical.revision_number is distinct from knowledge.revision_number
+                   or canonical.revision_kind is distinct from knowledge.revision_kind
+                   or canonical.source_uri is distinct from knowledge.source_uri
+                   or canonical.document_hint is distinct from knowledge.document_hint
+                   or canonical.mime_type is distinct from knowledge.mime_type
+                   or canonical.checksum is distinct from knowledge.checksum
+                   or canonical.title is distinct from knowledge.title
+                   or canonical.byte_size is distinct from knowledge.byte_size
+            ) as is_current
+        ),
+        canonical_chunks as materialized (
+            select
+                chunk.id as chunk_id,
+                chunk.revision_id,
+                revision.document_id,
+                revision.workspace_id,
+                revision.library_id,
+                chunk.chunk_index,
+                chunk.start_offset as span_start,
+                chunk.end_offset as span_end,
+                chunk.token_count,
+                chunk.normalized_text,
+                chunk.text_checksum,
+                chunk.occurred_at,
+                chunk.occurred_until
+            from canonical_revisions as revision
+            join content_chunk as chunk
+              on chunk.revision_id = revision.revision_id
+            where chunk.raptor_level = 0
+        ),
+        knowledge_chunks as materialized (
+            select
+                chunk.chunk_id,
+                chunk.revision_id,
+                chunk.document_id,
+                chunk.workspace_id,
+                chunk.library_id,
+                chunk.chunk_index,
+                chunk.span_start,
+                chunk.span_end,
+                chunk.token_count,
+                chunk.content_text,
+                chunk.normalized_text,
+                chunk.chunk_kind,
+                chunk.support_block_ids,
+                chunk.section_path,
+                chunk.heading_trail,
+                chunk.literal_digest,
+                chunk.chunk_state,
+                chunk.text_generation,
+                chunk.vector_generation,
+                chunk.quality_score,
+                chunk.window_text,
+                chunk.occurred_at,
+                chunk.occurred_until
+            from knowledge_revisions as revision
+            join knowledge_chunk as chunk
+              on chunk.revision_id = revision.revision_id
+            where chunk.raptor_level is null
+        ),
+        chunk_projection_parity as (
+            select not exists (
+                select 1
+                from canonical_chunks as canonical
+                full join knowledge_chunks as knowledge
+                  on knowledge.chunk_id = canonical.chunk_id
+                where canonical.chunk_id is null
+                   or knowledge.chunk_id is null
+                   or canonical.revision_id is distinct from knowledge.revision_id
+                   or canonical.document_id is distinct from knowledge.document_id
+                   or canonical.workspace_id is distinct from knowledge.workspace_id
+                   or canonical.library_id is distinct from knowledge.library_id
+                   or canonical.chunk_index is distinct from knowledge.chunk_index
+                   or canonical.span_start is distinct from knowledge.span_start
+                   or canonical.span_end is distinct from knowledge.span_end
+                   or canonical.token_count is distinct from knowledge.token_count
+                   or canonical.normalized_text is distinct from knowledge.normalized_text
+                   or replace(lower(canonical.text_checksum), 'sha256:', '')
+                        is distinct from encode(
+                            public.digest(knowledge.normalized_text, 'sha256'),
+                            'hex'
+                        )
+                   or knowledge.chunk_state is distinct from 'ready'
+                   or canonical.occurred_at is distinct from knowledge.occurred_at
+                   or canonical.occurred_until is distinct from knowledge.occurred_until
+            ) as is_current
+        ),
+        projection_parity as (
+            select
+                document.is_current
+                and revision.is_current
+                and chunk.is_current as is_current
+            from document_projection_parity as document
+            cross join revision_projection_parity as revision
+            cross join chunk_projection_parity as chunk
+        ),
+        canonical_chunk_fingerprints as (
             select
                 chunk.revision_id,
                 count(*)::bigint as chunk_count,
                 md5(string_agg(
-                    array_to_string(
-                        array[
+                    md5(array_to_string(array[
+                            chunk.chunk_id::text,
                             chunk.chunk_index::text,
-                            chunk.text_checksum
+                            chunk.span_start::text,
+                            chunk.span_end::text,
+                            coalesce(chunk.token_count::text, ''),
+                            chunk.normalized_text,
+                            chunk.text_checksum,
+                            coalesce(chunk.occurred_at::text, ''),
+                            coalesce(chunk.occurred_until::text, '')
                         ],
                         chr(31),
                         ''
-                    ),
+                    )),
                     chr(30)
-                    order by chunk.chunk_index, chunk.id
+                    order by chunk.chunk_index, chunk.chunk_id
                 )) as chunk_fingerprint
-            from content_chunk as chunk
-            where chunk.revision_id in (
-                select revision_id
-                from readable_heads
-                where revision_id is not null
-            )
+            from canonical_chunks as chunk
+            group by chunk.revision_id
+        ),
+        knowledge_chunk_fingerprints as (
+            select
+                chunk.revision_id,
+                md5(string_agg(
+                    md5(array_to_string(array[
+                            chunk.chunk_id::text,
+                            chunk.chunk_index::text,
+                            coalesce(chunk.chunk_kind, ''),
+                            chunk.content_text,
+                            chunk.normalized_text,
+                            coalesce(chunk.span_start::text, ''),
+                            coalesce(chunk.span_end::text, ''),
+                            coalesce(chunk.token_count::text, ''),
+                            coalesce(array_to_string(chunk.support_block_ids, chr(29)), ''),
+                            coalesce(array_to_string(chunk.section_path, chr(29)), ''),
+                            coalesce(array_to_string(chunk.heading_trail, chr(29)), ''),
+                            coalesce(chunk.literal_digest, ''),
+                            chunk.chunk_state,
+                            coalesce(chunk.text_generation::text, ''),
+                            coalesce(chunk.vector_generation::text, ''),
+                            coalesce(chunk.quality_score::text, ''),
+                            coalesce(chunk.window_text, ''),
+                            coalesce(chunk.occurred_at::text, ''),
+                            coalesce(chunk.occurred_until::text, '')
+                        ],
+                        chr(31),
+                        ''
+                    )),
+                    chr(30)
+                    order by chunk.chunk_index, chunk.chunk_id
+                )) as chunk_fingerprint
+            from knowledge_chunks as chunk
             group by chunk.revision_id
         ),
         document_fingerprints as (
             select
-                head.document_id,
+                document.document_id,
                 array_to_string(
                     array[
-                        head.document_id::text,
-                        head.external_key,
-                        coalesce(head.revision_id::text, ''),
-                        coalesce(revision.revision_number::text, ''),
-                        coalesce(revision.checksum, ''),
-                        coalesce(revision.mime_type, ''),
-                        coalesce(revision.byte_size::text, ''),
+                        document.document_id::text,
+                        document.external_key,
+                        coalesce(document.parent_document_id::text, ''),
+                        document.document_role,
+                        revision.revision_id::text,
+                        revision.revision_number::text,
+                        revision.revision_kind,
+                        revision.checksum,
+                        revision.mime_type,
+                        revision.byte_size::text,
                         coalesce(revision.title, ''),
+                        coalesce(revision.language_code, ''),
                         coalesce(revision.source_uri, ''),
                         coalesce(revision.document_hint, ''),
-                        coalesce(chunks.chunk_count::text, '0'),
-                        coalesce(chunks.chunk_fingerprint, '')
+                        coalesce(canonical_chunks.chunk_count::text, '0'),
+                        coalesce(canonical_chunks.chunk_fingerprint, ''),
+                        coalesce(knowledge_revision.normalized_text, ''),
+                        coalesce(knowledge_revision.text_checksum, ''),
+                        coalesce(knowledge_revision.image_checksum, ''),
+                        knowledge_revision.text_state,
+                        knowledge_revision.vector_state,
+                        knowledge_revision.graph_state,
+                        coalesce(knowledge_chunks.chunk_fingerprint, '')
                     ],
                     chr(31),
                     ''
                 ) as fingerprint_part
-            from readable_heads as head
-            left join content_revision as revision
-              on revision.id = head.revision_id
-            left join chunk_fingerprints as chunks
-              on chunks.revision_id = head.revision_id
+            from canonical_readable as document
+            join canonical_revisions as revision
+              on revision.revision_id = document.revision_id
+            join knowledge_revisions as knowledge_revision
+              on knowledge_revision.revision_id = document.revision_id
+            left join canonical_chunk_fingerprints as canonical_chunks
+              on canonical_chunks.revision_id = document.revision_id
+            left join knowledge_chunk_fingerprints as knowledge_chunks
+              on knowledge_chunks.revision_id = document.revision_id
+        ), content_fingerprint as (
+            select coalesce(
+                md5(string_agg(
+                    fingerprint_part,
+                    chr(30)
+                    order by document_id
+                )),
+                md5('empty')
+            ) as value
+            from document_fingerprints
         )
-        select coalesce(
-            md5(string_agg(
-                fingerprint_part,
-                chr(30)
-                order by document_id
-            )),
-            md5('empty')
+        select
+            content_fingerprint.value,
+            library_source.source_truth_version,
+            projection_parity.is_current
+        from content_fingerprint
+        cross join library_source
+        cross join projection_parity",
         )
-        from document_fingerprints",
-    )
-    .bind(library_id)
-    .fetch_one(postgres)
-    .await?;
+        .bind(library_id)
+        .fetch_one(postgres)
+        .await?;
 
     {
-        let mut guard = fingerprint_cache().lock().unwrap_or_else(|e| e.into_inner());
-        guard.retain(|_, (at, _)| at.elapsed() < FINGERPRINT_CACHE_TTL);
-        guard.insert(library_id, (Instant::now(), result.clone()));
+        let mut cache =
+            fingerprint_cache().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        // Cache negative parity too. All waiters for one broken generation
+        // must observe the same fail-closed result instead of serially repeating
+        // the full scan. Projection repair is an answer-visible write and must
+        // advance the durable generation before this entry can be replaced.
+        cache.insert(library_id, source_truth_version, value.clone(), projection_is_current);
     }
-
-    Ok(result)
+    Ok(LibraryReadableContentFingerprint { value, source_truth_version, projection_is_current })
 }
 
 pub async fn list_revisions_by_document(
@@ -789,6 +2114,16 @@ pub async fn get_revision_by_id(
     postgres: &PgPool,
     revision_id: Uuid,
 ) -> Result<Option<ContentRevisionRow>, sqlx::Error> {
+    get_revision_by_id_with_executor(postgres, revision_id).await
+}
+
+pub async fn get_revision_by_id_with_executor<'e, E>(
+    executor: E,
+    revision_id: Uuid,
+) -> Result<Option<ContentRevisionRow>, sqlx::Error>
+where
+    E: Executor<'e, Database = Postgres>,
+{
     sqlx::query_as::<_, ContentRevisionRow>(
         "select
             id,
@@ -812,7 +2147,7 @@ pub async fn get_revision_by_id(
          where id = $1",
     )
     .bind(revision_id)
-    .fetch_optional(postgres)
+    .fetch_optional(executor)
     .await
 }
 
@@ -820,11 +2155,38 @@ pub async fn update_revision_storage_key(
     postgres: &PgPool,
     revision_id: Uuid,
     storage_key: Option<&str>,
-) -> Result<Option<ContentRevisionRow>, sqlx::Error> {
-    sqlx::query_as::<_, ContentRevisionRow>(
+) -> Result<UpdateRevisionStorageKeyOutcome, sqlx::Error> {
+    let mut transaction = postgres.begin().await?;
+    let Some((document_id, workspace_id, library_id)) = sqlx::query_as::<_, (Uuid, Uuid, Uuid)>(
+        "select document_id, workspace_id, library_id
+         from content_revision
+         where id = $1",
+    )
+    .bind(revision_id)
+    .fetch_optional(&mut *transaction)
+    .await?
+    else {
+        transaction.rollback().await?;
+        return Ok(UpdateRevisionStorageKeyOutcome::RevisionNotFound);
+    };
+    if !super::catalog_repository::lock_library_for_lifecycle_event_with_executor(
+        &mut *transaction,
+        workspace_id,
+        library_id,
+    )
+    .await?
+    {
+        transaction.rollback().await?;
+        return Ok(UpdateRevisionStorageKeyOutcome::RevisionNotFound);
+    }
+    let updated = sqlx::query_as::<_, ContentRevisionRow>(
         "update content_revision
          set storage_key = $2
          where id = $1
+           and document_id = $3
+           and workspace_id = $4
+           and library_id = $5
+           and storage_key is distinct from $2
          returning
             id,
             document_id,
@@ -846,19 +2208,99 @@ pub async fn update_revision_storage_key(
     )
     .bind(revision_id)
     .bind(storage_key)
-    .fetch_optional(postgres)
-    .await
+    .bind(document_id)
+    .bind(workspace_id)
+    .bind(library_id)
+    .fetch_optional(&mut *transaction)
+    .await?;
+    let changed = updated.is_some();
+    let revision = if let Some(updated) = updated {
+        updated
+    } else {
+        get_revision_by_id_with_executor(&mut *transaction, revision_id)
+            .await?
+            .ok_or(sqlx::Error::RowNotFound)?
+    };
+    let projection_updated = sqlx::query(
+        "update knowledge_revision
+         set storage_ref = $2
+         where revision_id = $1
+           and document_id = $3
+           and workspace_id = $4
+           and library_id = $5",
+    )
+    .bind(revision_id)
+    .bind(storage_key)
+    .bind(document_id)
+    .bind(workspace_id)
+    .bind(library_id)
+    .execute(&mut *transaction)
+    .await?;
+    if projection_updated.rows_affected() != 1 {
+        transaction.rollback().await?;
+        return Ok(UpdateRevisionStorageKeyOutcome::KnowledgeProjectionNotFound);
+    }
+
+    let materialized = materialize_knowledge_document_from_canonical_head_with_transaction(
+        &mut transaction,
+        document_id,
+    )
+    .await?;
+    if materialized.outcome != MaterializeKnowledgeDocumentOutcome::Materialized {
+        transaction.rollback().await?;
+        return Ok(UpdateRevisionStorageKeyOutcome::KnowledgeProjectionNotFound);
+    }
+    if changed || materialized.changed {
+        super::catalog_repository::touch_library_source_truth_version_with_executor(
+            &mut *transaction,
+            library_id,
+        )
+        .await?;
+    }
+    transaction.commit().await?;
+    Ok(UpdateRevisionStorageKeyOutcome::Updated(Box::new(revision)))
 }
 
 pub async fn update_revision_document_hint(
     postgres: &PgPool,
     revision_id: Uuid,
     document_hint: Option<&str>,
-) -> Result<Option<ContentRevisionRow>, sqlx::Error> {
-    sqlx::query_as::<_, ContentRevisionRow>(
+) -> Result<UpdateRevisionDocumentHintOutcome, sqlx::Error> {
+    let mut transaction = postgres.begin().await?;
+    let Some((document_id, workspace_id, library_id)) = sqlx::query_as::<_, (Uuid, Uuid, Uuid)>(
+        "select document_id, workspace_id, library_id
+             from content_revision
+             where id = $1",
+    )
+    .bind(revision_id)
+    .fetch_optional(&mut *transaction)
+    .await?
+    else {
+        transaction.rollback().await?;
+        return Ok(UpdateRevisionDocumentHintOutcome::RevisionNotFound);
+    };
+
+    // Parent-first locking matches every other answer-visible content
+    // transition. Canonical metadata, the query projection, and the cache
+    // generation either commit together or remain entirely unchanged.
+    if !super::catalog_repository::lock_library_for_lifecycle_event_with_executor(
+        &mut *transaction,
+        workspace_id,
+        library_id,
+    )
+    .await?
+    {
+        transaction.rollback().await?;
+        return Ok(UpdateRevisionDocumentHintOutcome::RevisionNotFound);
+    }
+
+    let updated_revision = sqlx::query_as::<_, ContentRevisionRow>(
         "update content_revision
          set document_hint = $2
          where id = $1
+           and document_id = $3
+           and workspace_id = $4
+           and library_id = $5
          returning
             id,
             document_id,
@@ -880,8 +2322,43 @@ pub async fn update_revision_document_hint(
     )
     .bind(revision_id)
     .bind(document_hint)
-    .fetch_optional(postgres)
-    .await
+    .bind(document_id)
+    .bind(workspace_id)
+    .bind(library_id)
+    .fetch_optional(&mut *transaction)
+    .await?;
+    let Some(updated_revision) = updated_revision else {
+        transaction.rollback().await?;
+        return Ok(UpdateRevisionDocumentHintOutcome::RevisionNotFound);
+    };
+
+    let knowledge_updated = sqlx::query(
+        "update knowledge_revision
+         set document_hint = $2
+         where revision_id = $1
+           and document_id = $3
+           and workspace_id = $4
+           and library_id = $5",
+    )
+    .bind(revision_id)
+    .bind(document_hint)
+    .bind(document_id)
+    .bind(workspace_id)
+    .bind(library_id)
+    .execute(&mut *transaction)
+    .await?;
+    if knowledge_updated.rows_affected() != 1 {
+        transaction.rollback().await?;
+        return Ok(UpdateRevisionDocumentHintOutcome::KnowledgeProjectionNotFound);
+    }
+
+    super::catalog_repository::touch_library_source_truth_version_with_executor(
+        &mut *transaction,
+        library_id,
+    )
+    .await?;
+    transaction.commit().await?;
+    Ok(UpdateRevisionDocumentHintOutcome::Updated(Box::new(updated_revision)))
 }
 
 pub async fn list_revisions_by_ids(
@@ -956,6 +2433,138 @@ pub async fn create_revision(
     postgres: &PgPool,
     new_revision: &NewContentRevision<'_>,
 ) -> Result<ContentRevisionRow, sqlx::Error> {
+    create_revision_with_executor(postgres, new_revision).await
+}
+
+/// Appends the next canonical revision and its query projection atomically.
+///
+/// The document parent lock serializes revision numbering, so two concurrent
+/// appenders cannot derive the same revision number from a stale pre-read.
+pub async fn create_revision_with_projection(
+    postgres: &PgPool,
+    new_revision: &NewContentRevisionProjection<'_>,
+) -> Result<CreateContentRevisionOutcome, sqlx::Error> {
+    let mut transaction = postgres.begin().await?;
+    if !super::catalog_repository::lock_library_for_lifecycle_event_with_executor(
+        &mut *transaction,
+        new_revision.workspace_id,
+        new_revision.library_id,
+    )
+    .await?
+    {
+        transaction.rollback().await?;
+        return Ok(CreateContentRevisionOutcome::DocumentNotFound);
+    }
+    let Some(document) =
+        lock_document_by_id_with_executor(&mut *transaction, new_revision.document_id).await?
+    else {
+        transaction.rollback().await?;
+        return Ok(CreateContentRevisionOutcome::DocumentNotFound);
+    };
+    if document.workspace_id != new_revision.workspace_id
+        || document.library_id != new_revision.library_id
+    {
+        transaction.rollback().await?;
+        return Ok(CreateContentRevisionOutcome::DocumentNotFound);
+    }
+    if document.document_state == "deleted" || document.deleted_at.is_some() {
+        transaction.rollback().await?;
+        return Ok(CreateContentRevisionOutcome::DocumentDeleted);
+    }
+    let materialized = materialize_knowledge_document_from_canonical_head_with_transaction(
+        &mut transaction,
+        document.id,
+    )
+    .await?;
+    if materialized.outcome != MaterializeKnowledgeDocumentOutcome::Materialized {
+        transaction.rollback().await?;
+        return Ok(CreateContentRevisionOutcome::ProjectionUnavailable);
+    }
+
+    let latest = sqlx::query_as::<_, (Uuid, i32)>(
+        "select id, revision_number
+         from content_revision
+         where document_id = $1
+           and workspace_id = $2
+           and library_id = $3
+         order by revision_number desc, created_at desc
+         limit 1",
+    )
+    .bind(document.id)
+    .bind(document.workspace_id)
+    .bind(document.library_id)
+    .fetch_optional(&mut *transaction)
+    .await?;
+    let revision_number = latest.as_ref().map_or(1, |(_, number)| number.saturating_add(1));
+    let derived_revision = NewContentRevision {
+        document_id: document.id,
+        workspace_id: document.workspace_id,
+        library_id: document.library_id,
+        revision_number,
+        parent_revision_id: latest.map(|(id, _)| id),
+        content_source_kind: new_revision.content_source_kind,
+        checksum: new_revision.checksum,
+        mime_type: new_revision.mime_type,
+        byte_size: new_revision.byte_size,
+        title: new_revision.title,
+        language_code: new_revision.language_code,
+        source_uri: new_revision.source_uri,
+        document_hint: new_revision.document_hint,
+        storage_key: new_revision.storage_key,
+        created_by_principal_id: new_revision.created_by_principal_id,
+    };
+    let revision = create_revision_with_executor(&mut *transaction, &derived_revision).await?;
+    sqlx::query(
+        "insert into knowledge_revision (
+            revision_id, workspace_id, library_id, document_id, revision_number,
+            revision_state, revision_kind, storage_ref, source_uri, document_hint, mime_type,
+            checksum, title, byte_size, normalized_text, text_checksum, image_checksum,
+            text_state, vector_state, graph_state, text_readable_at, vector_ready_at,
+            graph_ready_at, superseded_by_revision_id, created_at
+         ) values (
+            $1, $2, $3, $4, $5,
+            'accepted', $6, $7, $8, $9, $10,
+            $11, $12, $13, null, null, null,
+            'accepted', 'accepted', 'accepted', null, null,
+            null, null, $14
+         )",
+    )
+    .bind(revision.id)
+    .bind(revision.workspace_id)
+    .bind(revision.library_id)
+    .bind(revision.document_id)
+    .bind(i64::from(revision.revision_number))
+    .bind(&revision.content_source_kind)
+    .bind(&revision.storage_key)
+    .bind(&revision.source_uri)
+    .bind(&revision.document_hint)
+    .bind(&revision.mime_type)
+    .bind(&revision.checksum)
+    .bind(&revision.title)
+    .bind(revision.byte_size)
+    .bind(revision.created_at)
+    .execute(&mut *transaction)
+    .await?;
+
+    if materialized.changed {
+        super::catalog_repository::touch_library_source_truth_version_with_executor(
+            &mut *transaction,
+            document.library_id,
+        )
+        .await?;
+    }
+
+    transaction.commit().await?;
+    Ok(CreateContentRevisionOutcome::Created(Box::new(revision)))
+}
+
+pub async fn create_revision_with_executor<'e, E>(
+    executor: E,
+    new_revision: &NewContentRevision<'_>,
+) -> Result<ContentRevisionRow, sqlx::Error>
+where
+    E: Executor<'e, Database = Postgres>,
+{
     sqlx::query_as::<_, ContentRevisionRow>(
         "insert into content_revision (
             id,
@@ -1030,7 +2639,7 @@ pub async fn create_revision(
     .bind(new_revision.document_hint)
     .bind(new_revision.storage_key)
     .bind(new_revision.created_by_principal_id)
-    .fetch_one(postgres)
+    .fetch_one(executor)
     .await
 }
 
@@ -1224,6 +2833,156 @@ pub async fn delete_chunks_by_revision(
         .execute(postgres)
         .await
         .map(|result| result.rows_affected())
+}
+
+/// Replaces canonical and query-facing chunks in one transaction.
+///
+/// Vector rows are dimension-sharded runtime artifacts and are intentionally
+/// removed by the caller before this transaction; that operation is fallible
+/// and propagated. The durable text rows below either both commit or both stay
+/// unchanged, including when a projection FK/constraint rejects the batch.
+pub async fn replace_chunks_with_projection(
+    postgres: &PgPool,
+    revision_id: Uuid,
+    chunks: &[NewContentChunkProjection],
+) -> Result<Vec<ContentChunkRow>, sqlx::Error> {
+    let mut transaction = postgres.begin().await?;
+    let Some((document_id, workspace_id, library_id)) = sqlx::query_as::<_, (Uuid, Uuid, Uuid)>(
+        "select document_id, workspace_id, library_id
+         from content_revision
+         where id = $1",
+    )
+    .bind(revision_id)
+    .fetch_optional(&mut *transaction)
+    .await?
+    else {
+        transaction.rollback().await?;
+        return Err(sqlx::Error::RowNotFound);
+    };
+    if !super::catalog_repository::lock_library_for_lifecycle_event_with_executor(
+        &mut *transaction,
+        workspace_id,
+        library_id,
+    )
+    .await?
+    {
+        transaction.rollback().await?;
+        return Err(sqlx::Error::RowNotFound);
+    }
+    let locked_document = lock_document_by_id_with_executor(&mut *transaction, document_id).await?;
+    if locked_document.as_ref().is_none_or(|document| {
+        document.workspace_id != workspace_id || document.library_id != library_id
+    }) {
+        transaction.rollback().await?;
+        return Err(sqlx::Error::RowNotFound);
+    }
+    if chunks.iter().any(|chunk| {
+        chunk.revision_id != revision_id
+            || chunk.document_id != document_id
+            || chunk.workspace_id != workspace_id
+            || chunk.library_id != library_id
+            || chunk.start_offset < 0
+            || chunk.end_offset < chunk.start_offset
+    }) {
+        transaction.rollback().await?;
+        return Err(sqlx::Error::Protocol(
+            "chunk projection payload does not match its canonical revision scope".to_string(),
+        ));
+    }
+
+    sqlx::query("delete from knowledge_chunk where revision_id = $1")
+        .bind(revision_id)
+        .execute(&mut *transaction)
+        .await?;
+    sqlx::query("delete from content_chunk where revision_id = $1")
+        .bind(revision_id)
+        .execute(&mut *transaction)
+        .await?;
+
+    const POSTGRES_MAX_BIND_PARAMETERS: usize = 65_535;
+    const CONTENT_CHUNK_BIND_COUNT: usize = 10;
+    const KNOWLEDGE_CHUNK_BIND_COUNT: usize = 24;
+    let mut created_chunks = Vec::with_capacity(chunks.len());
+    for batch in chunks.chunks(POSTGRES_MAX_BIND_PARAMETERS / CONTENT_CHUNK_BIND_COUNT) {
+        let mut builder = QueryBuilder::<Postgres>::new(
+            "insert into content_chunk (
+                id, revision_id, chunk_index, start_offset, end_offset, token_count,
+                normalized_text, text_checksum, occurred_at, occurred_until
+             ) ",
+        );
+        builder.push_values(batch, |mut row, chunk| {
+            row.push_bind(canonical_content_chunk_projection_id(chunk))
+                .push_bind(chunk.revision_id)
+                .push_bind(chunk.chunk_index)
+                .push_bind(chunk.start_offset)
+                .push_bind(chunk.end_offset)
+                .push_bind(chunk.token_count)
+                .push_bind(&chunk.normalized_text)
+                .push_bind(&chunk.text_checksum)
+                .push_bind(chunk.occurred_at)
+                .push_bind(chunk.occurred_until);
+        });
+        builder.push(
+            " returning
+                id, revision_id, chunk_index, start_offset, end_offset, token_count,
+                normalized_text, text_checksum, occurred_at, occurred_until",
+        );
+        created_chunks.extend(
+            builder.build_query_as::<ContentChunkRow>().fetch_all(&mut *transaction).await?,
+        );
+    }
+    for batch in chunks.chunks(POSTGRES_MAX_BIND_PARAMETERS / KNOWLEDGE_CHUNK_BIND_COUNT) {
+        let mut builder = QueryBuilder::<Postgres>::new(
+            "insert into knowledge_chunk (
+                chunk_id, workspace_id, library_id, document_id, revision_id, chunk_index,
+                chunk_kind, content_text, normalized_text, span_start, span_end, token_count,
+                support_block_ids, section_path, heading_trail, literal_digest, chunk_state,
+                text_generation, vector_generation, quality_score, window_text, raptor_level,
+                occurred_at, occurred_until
+             ) ",
+        );
+        builder.push_values(batch, |mut row, chunk| {
+            row.push_bind(canonical_content_chunk_projection_id(chunk))
+                .push_bind(chunk.workspace_id)
+                .push_bind(chunk.library_id)
+                .push_bind(chunk.document_id)
+                .push_bind(chunk.revision_id)
+                .push_bind(chunk.chunk_index)
+                .push_bind(&chunk.chunk_kind)
+                .push_bind(&chunk.content_text)
+                .push_bind(&chunk.normalized_text)
+                .push_bind(Some(chunk.start_offset))
+                .push_bind(Some(chunk.end_offset))
+                .push_bind(chunk.token_count)
+                .push_bind(&chunk.support_block_ids)
+                .push_bind(&chunk.section_path)
+                .push_bind(&chunk.heading_trail)
+                .push_bind(&chunk.literal_digest)
+                .push_bind(&chunk.chunk_state)
+                .push_bind(chunk.text_generation)
+                .push_bind(chunk.vector_generation)
+                .push_bind(chunk.quality_score)
+                .push_bind(&chunk.window_text)
+                .push_bind(Option::<i32>::None)
+                .push_bind(chunk.occurred_at)
+                .push_bind(chunk.occurred_until);
+        });
+        builder.build().execute(&mut *transaction).await?;
+    }
+
+    super::catalog_repository::touch_library_source_truth_version_with_executor(
+        &mut *transaction,
+        library_id,
+    )
+    .await?;
+    transaction.commit().await?;
+    created_chunks.sort_by_key(|chunk| chunk.chunk_index);
+    Ok(created_chunks)
+}
+
+fn canonical_content_chunk_projection_id(chunk: &NewContentChunkProjection) -> Uuid {
+    let name = format!("{}:{}:{}", chunk.revision_id, chunk.chunk_index, chunk.text_checksum);
+    Uuid::new_v5(&CONTENT_CHUNK_ID_NAMESPACE, name.as_bytes())
 }
 
 pub async fn list_mutations_by_library(
@@ -1554,6 +3313,20 @@ pub async fn create_mutation_item(
     postgres: &PgPool,
     new_item: &NewContentMutationItem<'_>,
 ) -> Result<ContentMutationItemRow, sqlx::Error> {
+    create_mutation_item_with_executor(postgres, new_item).await
+}
+
+/// Creates one mutation item on a caller-owned connection or transaction.
+///
+/// Admission paths use this executor form so an item cannot become visible
+/// without its exact queue job and pending document-head ownership.
+pub async fn create_mutation_item_with_executor<'e, E>(
+    executor: E,
+    new_item: &NewContentMutationItem<'_>,
+) -> Result<ContentMutationItemRow, sqlx::Error>
+where
+    E: Executor<'e, Database = Postgres>,
+{
     sqlx::query_as::<_, ContentMutationItemRow>(
         "insert into content_mutation_item (
             id,
@@ -1581,7 +3354,54 @@ pub async fn create_mutation_item(
     .bind(new_item.result_revision_id)
     .bind(new_item.item_state)
     .bind(new_item.message)
-    .fetch_one(postgres)
+    .fetch_one(executor)
+    .await
+}
+
+/// Atomically claims one legacy mutation item that has no document target.
+///
+/// The mutation id is part of the compare-and-set predicate so a caller cannot
+/// claim an item discovered through a stale or mismatched mutation graph. A
+/// concurrent claimant can update the row only while `document_id` is null;
+/// after one claim commits every later claimant receives `None` and must
+/// classify the now-bound row without rewriting its target.
+pub async fn claim_unbound_mutation_item(
+    postgres: &PgPool,
+    mutation_id: Uuid,
+    item_id: Uuid,
+    document_id: Uuid,
+    base_revision_id: Option<Uuid>,
+    result_revision_id: Option<Uuid>,
+    item_state: &str,
+    message: Option<&str>,
+) -> Result<Option<ContentMutationItemRow>, sqlx::Error> {
+    sqlx::query_as::<_, ContentMutationItemRow>(
+        "update content_mutation_item
+         set document_id = $3,
+             base_revision_id = $4,
+             result_revision_id = $5,
+             item_state = $6::content_mutation_item_state,
+             message = $7
+         where id = $1
+           and mutation_id = $2
+           and document_id is null
+         returning
+            id,
+            mutation_id,
+            document_id,
+            base_revision_id,
+            result_revision_id,
+            item_state::text as item_state,
+            message",
+    )
+    .bind(item_id)
+    .bind(mutation_id)
+    .bind(document_id)
+    .bind(base_revision_id)
+    .bind(result_revision_id)
+    .bind(item_state)
+    .bind(message)
+    .fetch_optional(postgres)
     .await
 }
 
@@ -1627,7 +3447,7 @@ pub async fn update_mutation_item(
 
 /// One row of the paginated document-list query. Joins the minimum set of
 /// tables required to render the document list card server-side (status,
-/// readiness, file_name fallback, source access) without any per-document
+/// readiness, `file_name` fallback, source access) without any per-document
 /// round-trips. Knowledge-plane readiness signals (`knowledge_revision.text_state`
 /// etc.) are merged in by the caller.
 #[derive(Debug, Clone, FromRow)]
@@ -1680,8 +3500,14 @@ pub struct ContentDocumentListRow {
     // Surfaced on the canonical list response so the frontend never has
     // to issue a library-wide `/billing/library-document-costs` fetch to
     // fill in the cost column.
-    pub cost_total: rust_decimal::Decimal,
-    pub cost_currency_code: String,
+    /// `None` is a fail-closed mixed-currency sentinel. The service rejects
+    /// the complete page instead of presenting a dimensionally invalid sum.
+    pub cost_total: Option<rust_decimal::Decimal>,
+    pub cost_currency_code: Option<String>,
+    /// Scope health is selected in the same Postgres statement snapshot as
+    /// the per-document cost, preventing a clean-check/stale-total race.
+    pub billing_rollup_dirty: bool,
+    pub billing_rollup_terminal_error_code: Option<String>,
 }
 
 #[derive(Debug, Clone, FromRow)]
@@ -1729,7 +3555,7 @@ pub struct ContentDocumentListPage {
 ///   keyset are returned.
 /// * `include_deleted` mirrors the query parameter on the HTTP surface.
 /// * `search` applies a lower(ILIKE) filter on `external_key` using the
-///   pg_trgm index. Case-insensitive.
+///   `pg_trgm` index. Case-insensitive.
 /// * The join strategy is:
 ///   ```text
 ///   content_document
@@ -1740,7 +3566,6 @@ pub struct ContentDocumentListPage {
 ///     LEFT JOIN LATERAL ingest_attempt ON (job_id, attempt_number DESC)
 ///   ```
 ///   Every join is LEFT so documents without a head/mutation/job still show.
-#[allow(clippy::too_many_arguments)]
 pub async fn list_document_page_rows(
     postgres: &PgPool,
     library_id: Uuid,
@@ -1839,7 +3664,23 @@ pub async fn list_document_page_rows(
     // `revision_byte_size` (the file-type / file-size column headers)
     // can push down into keyset sort.
     let sql = format!(
-        "with joined as (
+        "with billing_health as materialized (
+            select
+                exists (
+                    select 1
+                    from billing_execution_cost_rollup_state rollup_state
+                    where rollup_state.library_id = $1
+                      and rollup_state.applied_generation < rollup_state.dirty_generation
+                ) as rollup_dirty,
+                (
+                    select rollup_state.terminal_error_code
+                    from billing_execution_cost_rollup_state rollup_state
+                    where rollup_state.library_id = $1
+                      and rollup_state.terminal_error_code is not null
+                    order by rollup_state.owning_execution_id
+                    limit 1
+                ) as terminal_error_code
+        ), joined as (
             select
                 d.id,
                 d.workspace_id,
@@ -1946,9 +3787,12 @@ pub async fn list_document_page_rows(
             a.heartbeat_at as attempt_heartbeat_at,
             a.failure_message as attempt_failure_message,
             a.progress_percent as attempt_progress_percent,
-            coalesce(c.cost_total, 0) as cost_total,
-            coalesce(c.cost_currency_code, 'USD') as cost_currency_code
+            c.cost_total,
+            c.cost_currency_code,
+            billing_health.rollup_dirty as billing_rollup_dirty,
+            billing_health.terminal_error_code as billing_rollup_terminal_error_code
         from page p
+        cross join billing_health
         left join lateral (
             select ia.*
             from ingest_attempt ia
@@ -1964,16 +3808,20 @@ pub async fn list_document_page_rows(
             -- keeps the cost column optional — documents with no
             -- billable execution just get 0.
             select
-                coalesce(sum(bec.total_cost), 0) as cost_total,
-                coalesce(max(bec.currency_code), 'USD') as cost_currency_code
+                case
+                    when count(distinct bec.currency_code) <= 1
+                    then coalesce(sum(bec.total_cost), 0)
+                end as cost_total,
+                case
+                    when count(distinct bec.currency_code) <= 1
+                    then coalesce(min(bec.currency_code), 'USD')
+                end as cost_currency_code
             from billing_execution_cost bec
             where bec.library_id = p.library_id
               and bec.knowledge_document_id = p.id
-        ) c on true
+        ) c on not billing_health.rollup_dirty
+              and billing_health.terminal_error_code is null
         order by {page_order_sql}",
-        keyset_sql = keyset_sql,
-        joined_order_sql = joined_order_sql,
-        page_order_sql = page_order_sql,
     );
 
     // Bind order: $1 library_id, $2 include_deleted, $3 search,
@@ -2179,7 +4027,7 @@ pub async fn search_document_metadata_rows(
         search_terms.version.iter().map(|term| format!("%{term}%")).collect::<Vec<_>>();
 
     sqlx::query_as::<_, ContentDocumentMetadataSearchRow>(
-        r#"with candidate as (
+        r"with candidate as (
          select
             d.id as document_id,
             d.workspace_id,
@@ -2271,7 +4119,7 @@ pub async fn search_document_metadata_rows(
             coalesce((version_parts[3])::integer, -1) desc,
             coalesce((version_parts[4])::integer, -1) desc,
             document_id desc
-         limit $5"#,
+         limit $5",
     )
     .bind(library_id)
     .bind(search_terms.generic)
@@ -2289,7 +4137,7 @@ struct MetadataSearchTerms {
 }
 
 impl MetadataSearchTerms {
-    fn is_empty(&self) -> bool {
+    const fn is_empty(&self) -> bool {
         self.generic.is_empty() && self.version.is_empty()
     }
 }
@@ -2343,9 +4191,70 @@ fn metadata_version_terms(normalized_query: &str) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use uuid::Uuid;
 
-    use super::{NewContentChunk, canonical_content_chunk_id, metadata_search_terms};
+    use super::{
+        FingerprintCache, NewContentChunk, canonical_content_chunk_id, fingerprint_singleflight,
+        metadata_search_terms,
+    };
+
+    #[test]
+    fn fingerprint_cache_evicts_the_least_recently_used_library() {
+        let first = Uuid::now_v7();
+        let second = Uuid::now_v7();
+        let third = Uuid::now_v7();
+        let mut cache = FingerprintCache::with_capacity(2);
+
+        cache.insert(first, 1, "first".to_string(), true);
+        cache.insert(second, 1, "second".to_string(), true);
+        assert_eq!(cache.get(first, 1).map(|entry| entry.0), Some("first".to_string()));
+
+        cache.insert(third, 1, "third".to_string(), true);
+
+        assert_eq!(cache.len(), 2);
+        assert!(cache.get(second, 1).is_none());
+        assert_eq!(cache.get(first, 1).map(|entry| entry.0), Some("first".to_string()));
+        assert_eq!(cache.get(third, 1).map(|entry| entry.0), Some("third".to_string()));
+    }
+
+    #[test]
+    fn fingerprint_cache_keeps_a_value_until_the_durable_generation_changes() {
+        let library_id = Uuid::now_v7();
+        let mut cache = FingerprintCache::with_capacity(1);
+        cache.insert(library_id, 41, "stable".to_string(), true);
+
+        for _ in 0..10_000 {
+            assert_eq!(cache.get(library_id, 41), Some(("stable".to_string(), true)));
+        }
+        assert!(cache.get(library_id, 42).is_none());
+    }
+
+    #[test]
+    fn fingerprint_cache_coalesces_fail_closed_results_for_one_generation() {
+        let library_id = Uuid::now_v7();
+        let mut cache = FingerprintCache::with_capacity(1);
+        cache.insert(library_id, 7, "divergent".to_string(), false);
+
+        assert_eq!(cache.get(library_id, 7), Some(("divergent".to_string(), false)));
+        assert!(cache.get(library_id, 8).is_none());
+    }
+
+    #[tokio::test]
+    async fn fingerprint_singleflight_reuses_one_async_lock_per_library() {
+        let library_id = Uuid::now_v7();
+        let first = fingerprint_singleflight(library_id);
+        let second = fingerprint_singleflight(library_id);
+
+        assert!(Arc::ptr_eq(&first, &second));
+
+        let first_guard = first.lock().await;
+        let waiting =
+            tokio::time::timeout(std::time::Duration::from_millis(1), second.lock()).await;
+        assert!(waiting.is_err(), "same-library recomputes must serialize");
+        drop(first_guard);
+    }
 
     #[test]
     fn metadata_search_terms_extracts_filename_token_from_mixed_query() {
@@ -2364,8 +4273,8 @@ mod tests {
 
     #[test]
     fn metadata_search_terms_extracts_version_prefix_with_word_context() {
-        let terms = metadata_search_terms("\"Version 4.6.\" \"Alpha Suite Administrator Guide\"");
-        assert!(terms.version.iter().any(|term| term == "4.6"));
+        let terms = metadata_search_terms("\"Version 7.8.\" \"Alpha Suite Administrator Guide\"");
+        assert!(terms.version.iter().any(|term| term == "7.8"));
     }
 
     #[test]

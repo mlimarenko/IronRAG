@@ -1,0 +1,62 @@
+{{- if .Values.networkPolicy.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "ironrag.fullname" . }}-internal
+  labels:
+    {{- include "ironrag.labels" . | nindent 4 }}
+    app.kubernetes.io/component: network-policy
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "ironrag.selectorLabels" . | nindent 6 }}
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              {{- include "ironrag.selectorLabels" . | nindent 14 }}
+{{- if .Values.networkPolicy.allowExternalWeb }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "ironrag.fullname" . }}-web
+  labels:
+    {{- include "ironrag.labels" . | nindent 4 }}
+    app.kubernetes.io/component: web
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "ironrag.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: web
+  policyTypes:
+    - Ingress
+  ingress:
+    - ports:
+        - protocol: TCP
+          port: 80
+{{- end }}
+{{- range $component, $rules := .Values.networkPolicy.extraIngress }}
+{{- if $rules }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "ironrag.fullname" $ }}-{{ $component }}-extra
+  labels:
+    {{- include "ironrag.labels" $ | nindent 4 }}
+    app.kubernetes.io/component: {{ $component }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "ironrag.selectorLabels" $ | nindent 6 }}
+      app.kubernetes.io/component: {{ $component }}
+  policyTypes:
+    - Ingress
+  ingress:
+    {{- toYaml $rules | nindent 4 }}
+{{- end }}
+{{- end }}
+{{- end }}

@@ -5,60 +5,22 @@ use futures::stream::{self, StreamExt};
 use tracing::error;
 use uuid::Uuid;
 
-use super::*;
+use super::{
+    ApiError, AppState, FetchedWebResource, HostClassification, UpdateAsyncOperationCommand,
+    UpdateMutationCommand, UpdateWebIngestRun, WebCandidateState, WebClassificationReason,
+    WebDiscoveredPageRow, WebIngestRunRow, WebIngestService, WebRunFailure, WebRunFailureCode,
+    WebRunState, derive_terminal_run_state, extract_html_canonical_url, ingest_repository,
+    is_direct_image_web_resource, map_web_run_counts_row, now_if_terminal, parse_run_url_filter,
+    payload_looks_like_html_document, source_file_name_from_url, telemetry,
+};
+use crate::infra::repositories::ingest_repository::NewWebDiscoveredPage;
+use crate::services::{
+    ingest::service::AdmitIngestJobCommand, ops::service::CreateAsyncOperationCommand,
+};
 use crate::shared::web::ingest::{
     WebIngestUrlFilter, classify_web_crawl_filter_exclusion,
     classify_web_materialization_filter_exclusion, parse_web_boundary_policy,
 };
-
-pub(super) async fn enqueue_recursive_run(
-    service: &WebIngestService,
-    state: &AppState,
-    row: WebIngestRunRow,
-) -> Result<WebIngestRunRow, ApiError> {
-    let job_operation = state
-        .canonical_services
-        .ops
-        .create_async_operation(
-            state,
-            CreateAsyncOperationCommand {
-                workspace_id: row.workspace_id,
-                library_id: Some(row.library_id),
-                operation_kind: "web_discovery".to_string(),
-                surface_kind: "worker".to_string(),
-                requested_by_principal_id: row.requested_by_principal_id,
-                status: "accepted".to_string(),
-                subject_kind: "content_web_ingest_run".to_string(),
-                subject_id: Some(row.id),
-                parent_async_operation_id: None,
-                completed_at: None,
-                failure_code: None,
-            },
-        )
-        .await?;
-    let _ = state
-        .canonical_services
-        .ingest
-        .admit_job(
-            state,
-            AdmitIngestJobCommand {
-                workspace_id: row.workspace_id,
-                library_id: row.library_id,
-                mutation_id: None,
-                connector_id: None,
-                async_operation_id: Some(job_operation.id),
-                knowledge_document_id: None,
-                knowledge_revision_id: None,
-                job_kind: "web_discovery".to_string(),
-                priority: 40,
-                dedupe_key: Some(format!("web-discovery:{}", row.id)),
-                available_at: None,
-            },
-        )
-        .await?;
-    let _ = service;
-    Ok(row)
-}
 
 pub(super) async fn discover_recursive_scope(
     service: &WebIngestService,
@@ -152,354 +114,81 @@ pub(super) async fn discover_recursive_scope(
             .await;
 
         for (candidate, fetch_result) in fetched_wave {
-            if service.run_cancel_requested(state, run.id).await? {
-                break 'outer;
-            }
-            let resource = match fetch_result {
-                Ok(resource) => resource,
-                Err(failure) => {
-                    telemetry::web_failure_event(
-                        "candidate_fetch_failed",
-                        run.id,
-                        Some(candidate.id),
-                        &failure.failure_code,
-                        failure.candidate_reason.as_deref(),
-                        failure.final_url.as_deref(),
-                        failure.content_type.as_deref(),
-                        failure.http_status,
-                    );
-                    let _ = ingest_repository::update_web_discovered_page(
-                        &state.persistence.postgres,
-                        candidate.id,
-                        &crate::infra::repositories::ingest_repository::UpdateWebDiscoveredPage {
-                            final_url: failure.final_url.as_deref(),
-                            canonical_url: failure.final_url.as_deref(),
-                            host_classification: None,
-                            candidate_state: WebCandidateState::Blocked.as_str(),
-                            classification_reason: failure.candidate_reason.as_deref(),
-                            classification_detail: candidate.classification_detail.as_deref(),
-                            content_type: failure.content_type.as_deref(),
-                            http_status: failure.http_status,
-                            snapshot_storage_key: candidate.snapshot_storage_key.as_deref(),
-                            updated_at: Some(Utc::now()),
-                            document_id: None,
-                            result_revision_id: None,
-                            mutation_item_id: None,
-                        },
-                    )
-                    .await
-                    .map_err(|error| {
-                        error!(
-                            run_id = %run.id,
-                            candidate_id = %candidate.id,
-                            normalized_url = %candidate.normalized_url,
-                            failure_code = %failure.failure_code,
-                            db_error = %error,
-                            "web ingest failed to persist blocked candidate after fetch failure"
-                        );
-                        ApiError::Internal
-                    })?;
-                    continue;
-                }
-            };
-            if service.run_cancel_requested(state, run.id).await? {
-                break;
-            }
-
-            let host_classification = crate::shared::web::url_identity::classify_host(
-                &run.normalized_seed_url,
-                &resource.final_url,
-            )
-            .unwrap_or(HostClassification::External);
-            let resource_canonical_url = extract_html_canonical_url(
-                &resource.payload_bytes,
-                resource.content_type.as_deref(),
-                &resource.final_url,
-            )
-            .unwrap_or_else(|| resource.final_url.clone());
-            let host_classification_label = host_classification.as_str();
-
-            if !boundary_policy.allows_host_classification(&host_classification) {
-                let _ = ingest_repository::update_web_discovered_page(
-                    &state.persistence.postgres,
-                    candidate.id,
-                    &crate::infra::repositories::ingest_repository::UpdateWebDiscoveredPage {
-                        final_url: Some(resource.final_url.as_str()),
-                        canonical_url: Some(resource_canonical_url.as_str()),
-                        host_classification: Some(host_classification_label),
-                        candidate_state: WebCandidateState::Excluded.as_str(),
-                        classification_reason: Some(
-                            WebClassificationReason::OutsideBoundaryPolicy.as_str(),
-                        ),
-                        classification_detail: None,
-                        content_type: resource.content_type.as_deref(),
-                        http_status: Some(resource.http_status),
-                        snapshot_storage_key: None,
-                        updated_at: Some(Utc::now()),
-                        document_id: None,
-                        result_revision_id: None,
-                        mutation_item_id: None,
-                    },
-                )
-                .await
-                .map_err(|error| {
-                    error!(
-                        run_id = %run.id,
-                        candidate_id = %candidate.id,
-                        normalized_url = %candidate.normalized_url,
-                        final_url = %resource.final_url,
-                        db_error = %error,
-                        "web ingest failed to persist boundary-excluded candidate"
-                    );
-                    ApiError::Internal
-                })?;
-                telemetry::web_candidate_event(
-                    "candidate_excluded_boundary",
-                    run.id,
-                    candidate.id,
-                    WebCandidateState::Excluded.as_str(),
-                    &candidate.normalized_url,
-                    candidate.depth,
-                    Some(WebClassificationReason::OutsideBoundaryPolicy.as_str()),
-                    Some(host_classification_label),
-                );
-                continue;
-            }
-
-            if let Some(filter_exclusion) =
-                classify_web_crawl_filter_exclusion(&resource.final_url, &crawl_filter)
-            {
-                let _ = ingest_repository::update_web_discovered_page(
-                    &state.persistence.postgres,
-                    candidate.id,
-                    &crate::infra::repositories::ingest_repository::UpdateWebDiscoveredPage {
-                        final_url: Some(resource.final_url.as_str()),
-                        canonical_url: Some(resource_canonical_url.as_str()),
-                        host_classification: Some(host_classification_label),
-                        candidate_state: WebCandidateState::Excluded.as_str(),
-                        classification_reason: Some(WebClassificationReason::UrlFilter.as_str()),
-                        classification_detail: Some(filter_exclusion.detail.as_str()),
-                        content_type: resource.content_type.as_deref(),
-                        http_status: Some(resource.http_status),
-                        snapshot_storage_key: None,
-                        updated_at: Some(Utc::now()),
-                        document_id: None,
-                        result_revision_id: None,
-                        mutation_item_id: None,
-                    },
-                )
-                .await
-                .map_err(|error| {
-                    error!(
-                        run_id = %run.id,
-                        candidate_id = %candidate.id,
-                        normalized_url = %candidate.normalized_url,
-                        final_url = %resource.final_url,
-                        classification_detail = %filter_exclusion.detail,
-                        db_error = %error,
-                        "web ingest failed to persist url-filter-excluded candidate"
-                    );
-                    ApiError::Internal
-                })?;
-                telemetry::web_candidate_event(
-                    "candidate_excluded_url_filter",
-                    run.id,
-                    candidate.id,
-                    WebCandidateState::Excluded.as_str(),
-                    &candidate.normalized_url,
-                    candidate.depth,
-                    Some(WebClassificationReason::UrlFilter.as_str()),
-                    Some(filter_exclusion.detail.as_str()),
-                );
-                continue;
-            }
-
-            if canonical_urls.contains(&resource_canonical_url) {
-                let _ = ingest_repository::update_web_discovered_page(
-                    &state.persistence.postgres,
-                    candidate.id,
-                    &crate::infra::repositories::ingest_repository::UpdateWebDiscoveredPage {
-                        final_url: Some(resource.final_url.as_str()),
-                        canonical_url: Some(resource_canonical_url.as_str()),
-                        host_classification: Some(host_classification_label),
-                        candidate_state: WebCandidateState::Duplicate.as_str(),
-                        classification_reason: Some(
-                            WebClassificationReason::DuplicateCanonicalUrl.as_str(),
-                        ),
-                        classification_detail: None,
-                        content_type: resource.content_type.as_deref(),
-                        http_status: Some(resource.http_status),
-                        snapshot_storage_key: None,
-                        updated_at: Some(Utc::now()),
-                        document_id: None,
-                        result_revision_id: None,
-                        mutation_item_id: None,
-                    },
-                )
-                .await
-                .map_err(|error| {
-                    error!(
-                        run_id = %run.id,
-                        candidate_id = %candidate.id,
-                        normalized_url = %candidate.normalized_url,
-                        final_url = %resource.final_url,
-                        canonical_url = %resource_canonical_url,
-                        db_error = %error,
-                        "web ingest failed to persist duplicate canonical candidate"
-                    );
-                    ApiError::Internal
-                })?;
-                telemetry::web_candidate_event(
-                    "candidate_duplicate",
-                    run.id,
-                    candidate.id,
-                    WebCandidateState::Duplicate.as_str(),
-                    &candidate.normalized_url,
-                    candidate.depth,
-                    Some(WebClassificationReason::DuplicateCanonicalUrl.as_str()),
-                    Some(host_classification_label),
-                );
-                continue;
-            }
-            canonical_urls.insert(resource_canonical_url.clone());
-
-            if let Some(filter_exclusion) = classify_web_materialization_filter_exclusion(
-                &resource.final_url,
+            match process_fetched_candidate(
+                service,
+                state,
+                run,
+                boundary_policy,
+                candidate,
+                fetch_result,
+                &crawl_filter,
                 &materialization_filter,
-            ) {
-                let candidate_row = ingest_repository::update_web_discovered_page(
-                    &state.persistence.postgres,
-                    candidate.id,
-                    &crate::infra::repositories::ingest_repository::UpdateWebDiscoveredPage {
-                        final_url: Some(resource.final_url.as_str()),
-                        canonical_url: Some(resource_canonical_url.as_str()),
-                        host_classification: Some(host_classification_label),
-                        candidate_state: WebCandidateState::Excluded.as_str(),
-                        classification_reason: Some(WebClassificationReason::UrlFilter.as_str()),
-                        classification_detail: Some(filter_exclusion.detail.as_str()),
-                        content_type: resource.content_type.as_deref(),
-                        http_status: Some(resource.http_status),
-                        snapshot_storage_key: None,
-                        updated_at: Some(Utc::now()),
-                        document_id: None,
-                        result_revision_id: None,
-                        mutation_item_id: None,
-                    },
-                )
-                .await
-                .map_err(|error| {
-                    error!(
-                        run_id = %run.id,
-                        candidate_id = %candidate.id,
-                        normalized_url = %candidate.normalized_url,
-                        final_url = %resource.final_url,
-                        classification_detail = %filter_exclusion.detail,
-                        db_error = %error,
-                        "web ingest failed to persist materialization-filter-excluded candidate"
-                    );
-                    ApiError::Internal
-                })?
-                .ok_or_else(|| ApiError::resource_not_found("web_discovered_page", candidate.id))?;
-                telemetry::web_candidate_event(
-                    "candidate_excluded_url_filter",
-                    run.id,
-                    candidate_row.id,
-                    WebCandidateState::Excluded.as_str(),
-                    &candidate_row.normalized_url,
-                    candidate_row.depth,
-                    Some(WebClassificationReason::UrlFilter.as_str()),
-                    Some(filter_exclusion.detail.as_str()),
-                );
-                discover_outbound_candidates(
-                    service,
-                    state,
-                    run,
-                    boundary_policy,
-                    &candidate_row,
-                    &resource,
-                    &crawl_filter,
-                    &materialization_filter,
-                    &mut seen_urls,
-                    &mut budgeted_urls,
-                    &mut frontier,
-                )
-                .await?;
-                continue;
+                &mut canonical_urls,
+                &mut seen_urls,
+                &mut budgeted_urls,
+                &mut frontier,
+            )
+            .await?
+            {
+                FetchedCandidateOutcome::Stop => break 'outer,
+                FetchedCandidateOutcome::Continue => {}
+                FetchedCandidateOutcome::Eligible(candidate) => eligible_pages.push(*candidate),
             }
+        }
+    }
 
-            if is_direct_image_web_resource(&resource.final_url, resource.content_type.as_deref()) {
-                let candidate_row = ingest_repository::update_web_discovered_page(
-                    &state.persistence.postgres,
-                    candidate.id,
-                    &crate::infra::repositories::ingest_repository::UpdateWebDiscoveredPage {
-                        final_url: Some(resource.final_url.as_str()),
-                        canonical_url: Some(resource_canonical_url.as_str()),
-                        host_classification: Some(host_classification_label),
-                        candidate_state: WebCandidateState::Excluded.as_str(),
-                        classification_reason: Some(
-                            WebClassificationReason::UnsupportedContent.as_str(),
-                        ),
-                        classification_detail: Some("embedded_web_resource:image"),
-                        content_type: resource.content_type.as_deref(),
-                        http_status: Some(resource.http_status),
-                        snapshot_storage_key: None,
-                        updated_at: Some(Utc::now()),
-                        document_id: None,
-                        result_revision_id: None,
-                        mutation_item_id: None,
-                    },
-                )
-                .await
-                .map_err(|error| {
-                    error!(
-                        run_id = %run.id,
-                        candidate_id = %candidate.id,
-                        normalized_url = %candidate.normalized_url,
-                        final_url = %resource.final_url,
-                        content_type = ?resource.content_type,
-                        db_error = %error,
-                        "web ingest failed to persist direct image resource exclusion"
-                    );
-                    ApiError::Internal
-                })?
-                .ok_or_else(|| ApiError::resource_not_found("web_discovered_page", candidate.id))?;
-                telemetry::web_candidate_event(
-                    "candidate_excluded_embedded_resource",
-                    run.id,
-                    candidate_row.id,
-                    WebCandidateState::Excluded.as_str(),
-                    &candidate_row.normalized_url,
-                    candidate_row.depth,
-                    Some(WebClassificationReason::UnsupportedContent.as_str()),
-                    Some("embedded_web_resource:image"),
-                );
-                continue;
-            }
+    Ok(eligible_pages)
+}
 
-            let snapshot_storage_key = service
-                .persist_resource_snapshot(state, run, &resource)
-                .await
-                .map_err(|failure| {
-                    ApiError::BadRequest(
-                        failure
-                            .candidate_reason
-                            .clone()
-                            .unwrap_or_else(|| failure.failure_code.clone()),
-                    )
-                })?;
-            let candidate_row = ingest_repository::update_web_discovered_page(
+enum FetchedCandidateOutcome {
+    Stop,
+    Continue,
+    Eligible(Box<WebDiscoveredPageRow>),
+}
+
+async fn process_fetched_candidate(
+    service: &WebIngestService,
+    state: &AppState,
+    run: &WebIngestRunRow,
+    boundary_policy: crate::shared::web::ingest::WebBoundaryPolicy,
+    candidate: WebDiscoveredPageRow,
+    fetch_result: Result<FetchedWebResource, WebRunFailure>,
+    crawl_filter: &WebIngestUrlFilter,
+    materialization_filter: &WebIngestUrlFilter,
+    canonical_urls: &mut HashSet<String>,
+    seen_urls: &mut HashSet<String>,
+    budgeted_urls: &mut HashSet<String>,
+    frontier: &mut VecDeque<WebDiscoveredPageRow>,
+) -> Result<FetchedCandidateOutcome, ApiError> {
+    if service.run_cancel_requested(state, run.id).await? {
+        return Ok(FetchedCandidateOutcome::Stop);
+    }
+    let resource = match fetch_result {
+        Ok(resource) => resource,
+        Err(failure) => {
+            telemetry::web_failure_event(
+                "candidate_fetch_failed",
+                run.id,
+                Some(candidate.id),
+                &failure.failure_code,
+                failure.candidate_reason.as_deref(),
+                failure.final_url.as_deref(),
+                failure.content_type.as_deref(),
+                failure.http_status,
+            );
+            let _ = ingest_repository::update_web_discovered_page(
                 &state.persistence.postgres,
                 candidate.id,
                 &crate::infra::repositories::ingest_repository::UpdateWebDiscoveredPage {
-                    final_url: Some(resource.final_url.as_str()),
-                    canonical_url: Some(resource_canonical_url.as_str()),
-                    host_classification: Some(host_classification_label),
-                    candidate_state: WebCandidateState::Eligible.as_str(),
-                    classification_reason: candidate.classification_reason.as_deref(),
+                    final_url: failure.final_url.as_deref(),
+                    canonical_url: failure.final_url.as_deref(),
+                    host_classification: None,
+                    candidate_state: WebCandidateState::Blocked.as_str(),
+                    classification_reason: failure.candidate_reason.as_deref(),
                     classification_detail: candidate.classification_detail.as_deref(),
-                    content_type: resource.content_type.as_deref(),
-                    http_status: Some(resource.http_status),
-                    snapshot_storage_key: Some(snapshot_storage_key.as_str()),
+                    content_type: failure.content_type.as_deref(),
+                    http_status: failure.http_status,
+                    snapshot_storage_key: candidate.snapshot_storage_key.as_deref(),
                     updated_at: Some(Utc::now()),
                     document_id: None,
                     result_revision_id: None,
@@ -512,45 +201,423 @@ pub(super) async fn discover_recursive_scope(
                     run_id = %run.id,
                     candidate_id = %candidate.id,
                     normalized_url = %candidate.normalized_url,
-                    final_url = %resource.final_url,
-                    content_type = ?resource.content_type,
-                    snapshot_storage_key = %snapshot_storage_key,
+                    failure_code = %failure.failure_code,
                     db_error = %error,
-                    "web ingest failed to persist discovered candidate snapshot state"
+                    "web ingest failed to persist blocked candidate after fetch failure"
                 );
                 ApiError::Internal
-            })?
-            .ok_or_else(|| ApiError::resource_not_found("web_discovered_page", candidate.id))?;
-            telemetry::web_candidate_event(
-                "candidate_eligible",
-                run.id,
-                candidate_row.id,
-                &candidate_row.candidate_state,
-                &candidate_row.normalized_url,
-                candidate_row.depth,
-                candidate_row.classification_reason.as_deref(),
-                Some(candidate_row.host_classification.as_str()),
-            );
-
-            discover_outbound_candidates(
-                service,
-                state,
-                run,
-                boundary_policy,
-                &candidate_row,
-                &resource,
-                &crawl_filter,
-                &materialization_filter,
-                &mut seen_urls,
-                &mut budgeted_urls,
-                &mut frontier,
-            )
-            .await?;
-            eligible_pages.push(candidate_row);
+            })?;
+            return Ok(FetchedCandidateOutcome::Continue);
         }
+    };
+    if service.run_cancel_requested(state, run.id).await? {
+        return Ok(FetchedCandidateOutcome::Stop);
     }
 
-    Ok(eligible_pages)
+    let host_classification = crate::shared::web::url_identity::classify_host(
+        &run.normalized_seed_url,
+        &resource.final_url,
+    )
+    .unwrap_or(HostClassification::External);
+    let resource_canonical_url = extract_html_canonical_url(
+        &resource.payload_bytes,
+        resource.content_type.as_deref(),
+        &resource.final_url,
+    )
+    .unwrap_or_else(|| resource.final_url.clone());
+    let host_classification_label = host_classification.as_str();
+
+    if !boundary_policy.allows_host_classification(&host_classification) {
+        let _ = ingest_repository::update_web_discovered_page(
+            &state.persistence.postgres,
+            candidate.id,
+            &crate::infra::repositories::ingest_repository::UpdateWebDiscoveredPage {
+                final_url: Some(resource.final_url.as_str()),
+                canonical_url: Some(resource_canonical_url.as_str()),
+                host_classification: Some(host_classification_label),
+                candidate_state: WebCandidateState::Excluded.as_str(),
+                classification_reason: Some(
+                    WebClassificationReason::OutsideBoundaryPolicy.as_str(),
+                ),
+                classification_detail: None,
+                content_type: resource.content_type.as_deref(),
+                http_status: Some(resource.http_status),
+                snapshot_storage_key: None,
+                updated_at: Some(Utc::now()),
+                document_id: None,
+                result_revision_id: None,
+                mutation_item_id: None,
+            },
+        )
+        .await
+        .map_err(|error| {
+            error!(
+                run_id = %run.id,
+                candidate_id = %candidate.id,
+                normalized_url = %candidate.normalized_url,
+                final_url = %resource.final_url,
+                db_error = %error,
+                "web ingest failed to persist boundary-excluded candidate"
+            );
+            ApiError::Internal
+        })?;
+        telemetry::web_candidate_event(
+            "candidate_excluded_boundary",
+            run.id,
+            candidate.id,
+            WebCandidateState::Excluded.as_str(),
+            &candidate.normalized_url,
+            candidate.depth,
+            Some(WebClassificationReason::OutsideBoundaryPolicy.as_str()),
+            Some(host_classification_label),
+        );
+        return Ok(FetchedCandidateOutcome::Continue);
+    }
+
+    if let Some(filter_exclusion) =
+        classify_web_crawl_filter_exclusion(&resource.final_url, crawl_filter)
+    {
+        let _ = ingest_repository::update_web_discovered_page(
+            &state.persistence.postgres,
+            candidate.id,
+            &crate::infra::repositories::ingest_repository::UpdateWebDiscoveredPage {
+                final_url: Some(resource.final_url.as_str()),
+                canonical_url: Some(resource_canonical_url.as_str()),
+                host_classification: Some(host_classification_label),
+                candidate_state: WebCandidateState::Excluded.as_str(),
+                classification_reason: Some(WebClassificationReason::UrlFilter.as_str()),
+                classification_detail: Some(filter_exclusion.detail.as_str()),
+                content_type: resource.content_type.as_deref(),
+                http_status: Some(resource.http_status),
+                snapshot_storage_key: None,
+                updated_at: Some(Utc::now()),
+                document_id: None,
+                result_revision_id: None,
+                mutation_item_id: None,
+            },
+        )
+        .await
+        .map_err(|error| {
+            error!(
+                run_id = %run.id,
+                candidate_id = %candidate.id,
+                normalized_url = %candidate.normalized_url,
+                final_url = %resource.final_url,
+                classification_detail = %filter_exclusion.detail,
+                db_error = %error,
+                "web ingest failed to persist url-filter-excluded candidate"
+            );
+            ApiError::Internal
+        })?;
+        telemetry::web_candidate_event(
+            "candidate_excluded_url_filter",
+            run.id,
+            candidate.id,
+            WebCandidateState::Excluded.as_str(),
+            &candidate.normalized_url,
+            candidate.depth,
+            Some(WebClassificationReason::UrlFilter.as_str()),
+            Some(filter_exclusion.detail.as_str()),
+        );
+        return Ok(FetchedCandidateOutcome::Continue);
+    }
+
+    if canonical_urls.contains(&resource_canonical_url) {
+        let _ = ingest_repository::update_web_discovered_page(
+            &state.persistence.postgres,
+            candidate.id,
+            &crate::infra::repositories::ingest_repository::UpdateWebDiscoveredPage {
+                final_url: Some(resource.final_url.as_str()),
+                canonical_url: Some(resource_canonical_url.as_str()),
+                host_classification: Some(host_classification_label),
+                candidate_state: WebCandidateState::Duplicate.as_str(),
+                classification_reason: Some(
+                    WebClassificationReason::DuplicateCanonicalUrl.as_str(),
+                ),
+                classification_detail: None,
+                content_type: resource.content_type.as_deref(),
+                http_status: Some(resource.http_status),
+                snapshot_storage_key: None,
+                updated_at: Some(Utc::now()),
+                document_id: None,
+                result_revision_id: None,
+                mutation_item_id: None,
+            },
+        )
+        .await
+        .map_err(|error| {
+            error!(
+                run_id = %run.id,
+                candidate_id = %candidate.id,
+                normalized_url = %candidate.normalized_url,
+                final_url = %resource.final_url,
+                canonical_url = %resource_canonical_url,
+                db_error = %error,
+                "web ingest failed to persist duplicate canonical candidate"
+            );
+            ApiError::Internal
+        })?;
+        telemetry::web_candidate_event(
+            "candidate_duplicate",
+            run.id,
+            candidate.id,
+            WebCandidateState::Duplicate.as_str(),
+            &candidate.normalized_url,
+            candidate.depth,
+            Some(WebClassificationReason::DuplicateCanonicalUrl.as_str()),
+            Some(host_classification_label),
+        );
+        return Ok(FetchedCandidateOutcome::Continue);
+    }
+    canonical_urls.insert(resource_canonical_url.clone());
+
+    if let Some(filter_exclusion) =
+        classify_web_materialization_filter_exclusion(&resource.final_url, materialization_filter)
+    {
+        let candidate_row = ingest_repository::update_web_discovered_page(
+            &state.persistence.postgres,
+            candidate.id,
+            &crate::infra::repositories::ingest_repository::UpdateWebDiscoveredPage {
+                final_url: Some(resource.final_url.as_str()),
+                canonical_url: Some(resource_canonical_url.as_str()),
+                host_classification: Some(host_classification_label),
+                candidate_state: WebCandidateState::Excluded.as_str(),
+                classification_reason: Some(WebClassificationReason::UrlFilter.as_str()),
+                classification_detail: Some(filter_exclusion.detail.as_str()),
+                content_type: resource.content_type.as_deref(),
+                http_status: Some(resource.http_status),
+                snapshot_storage_key: None,
+                updated_at: Some(Utc::now()),
+                document_id: None,
+                result_revision_id: None,
+                mutation_item_id: None,
+            },
+        )
+        .await
+        .map_err(|error| {
+            error!(
+                run_id = %run.id,
+                candidate_id = %candidate.id,
+                normalized_url = %candidate.normalized_url,
+                final_url = %resource.final_url,
+                classification_detail = %filter_exclusion.detail,
+                db_error = %error,
+                "web ingest failed to persist materialization-filter-excluded candidate"
+            );
+            ApiError::Internal
+        })?
+        .ok_or_else(|| ApiError::resource_not_found("web_discovered_page", candidate.id))?;
+        telemetry::web_candidate_event(
+            "candidate_excluded_url_filter",
+            run.id,
+            candidate_row.id,
+            WebCandidateState::Excluded.as_str(),
+            &candidate_row.normalized_url,
+            candidate_row.depth,
+            Some(WebClassificationReason::UrlFilter.as_str()),
+            Some(filter_exclusion.detail.as_str()),
+        );
+        discover_outbound_candidates(
+            service,
+            state,
+            run,
+            boundary_policy,
+            &candidate_row,
+            &resource,
+            crawl_filter,
+            materialization_filter,
+            seen_urls,
+            budgeted_urls,
+            frontier,
+        )
+        .await?;
+        return Ok(FetchedCandidateOutcome::Continue);
+    }
+
+    if is_direct_image_web_resource(&resource.final_url, resource.content_type.as_deref()) {
+        let candidate_row = ingest_repository::update_web_discovered_page(
+            &state.persistence.postgres,
+            candidate.id,
+            &crate::infra::repositories::ingest_repository::UpdateWebDiscoveredPage {
+                final_url: Some(resource.final_url.as_str()),
+                canonical_url: Some(resource_canonical_url.as_str()),
+                host_classification: Some(host_classification_label),
+                candidate_state: WebCandidateState::Excluded.as_str(),
+                classification_reason: Some(WebClassificationReason::UnsupportedContent.as_str()),
+                classification_detail: Some("embedded_web_resource:image"),
+                content_type: resource.content_type.as_deref(),
+                http_status: Some(resource.http_status),
+                snapshot_storage_key: None,
+                updated_at: Some(Utc::now()),
+                document_id: None,
+                result_revision_id: None,
+                mutation_item_id: None,
+            },
+        )
+        .await
+        .map_err(|error| {
+            error!(
+                run_id = %run.id,
+                candidate_id = %candidate.id,
+                normalized_url = %candidate.normalized_url,
+                final_url = %resource.final_url,
+                content_type = ?resource.content_type,
+                db_error = %error,
+                "web ingest failed to persist direct image resource exclusion"
+            );
+            ApiError::Internal
+        })?
+        .ok_or_else(|| ApiError::resource_not_found("web_discovered_page", candidate.id))?;
+        telemetry::web_candidate_event(
+            "candidate_excluded_embedded_resource",
+            run.id,
+            candidate_row.id,
+            WebCandidateState::Excluded.as_str(),
+            &candidate_row.normalized_url,
+            candidate_row.depth,
+            Some(WebClassificationReason::UnsupportedContent.as_str()),
+            Some("embedded_web_resource:image"),
+        );
+        return Ok(FetchedCandidateOutcome::Continue);
+    }
+
+    let snapshot_storage_key =
+        service.persist_resource_snapshot(state, run, &resource).await.map_err(|failure| {
+            ApiError::BadRequest(
+                failure.candidate_reason.clone().unwrap_or_else(|| failure.failure_code.clone()),
+            )
+        })?;
+    let candidate_row = ingest_repository::update_web_discovered_page(
+        &state.persistence.postgres,
+        candidate.id,
+        &crate::infra::repositories::ingest_repository::UpdateWebDiscoveredPage {
+            final_url: Some(resource.final_url.as_str()),
+            canonical_url: Some(resource_canonical_url.as_str()),
+            host_classification: Some(host_classification_label),
+            candidate_state: WebCandidateState::Eligible.as_str(),
+            classification_reason: candidate.classification_reason.as_deref(),
+            classification_detail: candidate.classification_detail.as_deref(),
+            content_type: resource.content_type.as_deref(),
+            http_status: Some(resource.http_status),
+            snapshot_storage_key: Some(snapshot_storage_key.as_str()),
+            updated_at: Some(Utc::now()),
+            document_id: None,
+            result_revision_id: None,
+            mutation_item_id: None,
+        },
+    )
+    .await
+    .map_err(|error| {
+        error!(
+            run_id = %run.id,
+            candidate_id = %candidate.id,
+            normalized_url = %candidate.normalized_url,
+            final_url = %resource.final_url,
+            content_type = ?resource.content_type,
+            snapshot_storage_key = %snapshot_storage_key,
+            db_error = %error,
+            "web ingest failed to persist discovered candidate snapshot state"
+        );
+        ApiError::Internal
+    })?
+    .ok_or_else(|| ApiError::resource_not_found("web_discovered_page", candidate.id))?;
+    telemetry::web_candidate_event(
+        "candidate_eligible",
+        run.id,
+        candidate_row.id,
+        &candidate_row.candidate_state,
+        &candidate_row.normalized_url,
+        candidate_row.depth,
+        candidate_row.classification_reason.as_deref(),
+        Some(candidate_row.host_classification.as_str()),
+    );
+
+    discover_outbound_candidates(
+        service,
+        state,
+        run,
+        boundary_policy,
+        &candidate_row,
+        &resource,
+        crawl_filter,
+        materialization_filter,
+        seen_urls,
+        budgeted_urls,
+        frontier,
+    )
+    .await?;
+    Ok(FetchedCandidateOutcome::Eligible(Box::new(candidate_row)))
+}
+
+struct OutboundCandidateClassification {
+    state: WebCandidateState,
+    reason: Option<&'static str>,
+    detail: Option<String>,
+    enqueue_for_fetch: bool,
+}
+
+impl OutboundCandidateClassification {
+    fn persisted_fields(&self) -> (WebCandidateState, Option<&'static str>, Option<String>) {
+        (self.state, self.reason, self.detail.clone())
+    }
+}
+
+fn classify_outbound_candidate(
+    run: &WebIngestRunRow,
+    boundary_policy: crate::shared::web::ingest::WebBoundaryPolicy,
+    host: &HostClassification,
+    url: &str,
+    depth: i32,
+    crawl_filter: &WebIngestUrlFilter,
+    materialization_filter: &WebIngestUrlFilter,
+    budgeted_urls: &mut HashSet<String>,
+) -> OutboundCandidateClassification {
+    if depth > run.max_depth {
+        return excluded_outbound(WebClassificationReason::ExceededMaxDepth, None);
+    }
+    if !boundary_policy.allows_host_classification(host) {
+        return excluded_outbound(WebClassificationReason::OutsideBoundaryPolicy, None);
+    }
+    if let Some(exclusion) = classify_web_crawl_filter_exclusion(url, crawl_filter) {
+        return excluded_outbound(WebClassificationReason::UrlFilter, Some(exclusion.detail));
+    }
+    if i32::try_from(budgeted_urls.len()).unwrap_or(i32::MAX) >= run.max_pages {
+        return excluded_outbound(WebClassificationReason::ExceededMaxPages, None);
+    }
+    budgeted_urls.insert(url.to_string());
+    classify_materialization_outbound(url, materialization_filter)
+}
+
+fn classify_materialization_outbound(
+    url: &str,
+    materialization_filter: &WebIngestUrlFilter,
+) -> OutboundCandidateClassification {
+    classify_web_materialization_filter_exclusion(url, materialization_filter).map_or(
+        OutboundCandidateClassification {
+            state: WebCandidateState::Eligible,
+            reason: Some(WebClassificationReason::SeedAccepted.as_str()),
+            detail: None,
+            enqueue_for_fetch: true,
+        },
+        |exclusion| OutboundCandidateClassification {
+            state: WebCandidateState::Discovered,
+            reason: Some(WebClassificationReason::UrlFilter.as_str()),
+            detail: Some(exclusion.detail),
+            enqueue_for_fetch: true,
+        },
+    )
+}
+
+fn excluded_outbound(
+    reason: WebClassificationReason,
+    detail: Option<String>,
+) -> OutboundCandidateClassification {
+    OutboundCandidateClassification {
+        state: WebCandidateState::Excluded,
+        reason: Some(reason.as_str()),
+        detail,
+        enqueue_for_fetch: false,
+    }
 }
 
 async fn discover_outbound_candidates(
@@ -592,56 +659,18 @@ async fn discover_outbound_candidates(
         }
         seen_urls.insert(resolved_url.clone());
 
-        let mut enqueue_for_fetch = false;
-        let (candidate_state, classification_reason, classification_detail) = if next_depth
-            > run.max_depth
-        {
-            (
-                WebCandidateState::Excluded,
-                Some(WebClassificationReason::ExceededMaxDepth.as_str()),
-                None,
-            )
-        } else if !boundary_policy.allows_host_classification(&discovered_host) {
-            (
-                WebCandidateState::Excluded,
-                Some(WebClassificationReason::OutsideBoundaryPolicy.as_str()),
-                None,
-            )
-        } else if let Some(filter_exclusion) =
-            classify_web_crawl_filter_exclusion(&resolved_url, crawl_filter)
-        {
-            (
-                WebCandidateState::Excluded,
-                Some(WebClassificationReason::UrlFilter.as_str()),
-                Some(filter_exclusion.detail),
-            )
-        } else if i32::try_from(budgeted_urls.len()).unwrap_or(i32::MAX) >= run.max_pages {
-            (
-                WebCandidateState::Excluded,
-                Some(WebClassificationReason::ExceededMaxPages.as_str()),
-                None,
-            )
-        } else {
-            budgeted_urls.insert(resolved_url.clone());
-            enqueue_for_fetch = true;
-            // Materialization filters suppress documents, not traversal: a
-            // skipped page can still expose links to pages that should ingest.
-            if let Some(filter_exclusion) =
-                classify_web_materialization_filter_exclusion(&resolved_url, materialization_filter)
-            {
-                (
-                    WebCandidateState::Discovered,
-                    Some(WebClassificationReason::UrlFilter.as_str()),
-                    Some(filter_exclusion.detail),
-                )
-            } else {
-                (
-                    WebCandidateState::Eligible,
-                    Some(WebClassificationReason::SeedAccepted.as_str()),
-                    None,
-                )
-            }
-        };
+        let classification = classify_outbound_candidate(
+            run,
+            boundary_policy,
+            &discovered_host,
+            &resolved_url,
+            next_depth,
+            crawl_filter,
+            materialization_filter,
+            budgeted_urls,
+        );
+        let (candidate_state, classification_reason, classification_detail) =
+            classification.persisted_fields();
         if service.run_cancel_requested(state, run.id).await? {
             return Ok(());
         }
@@ -696,7 +725,7 @@ async fn discover_outbound_candidates(
             Some(discovered_row.host_classification.as_str()),
         );
 
-        if enqueue_for_fetch {
+        if classification.enqueue_for_fetch {
             frontier.push_back(discovered_row);
         }
     }
@@ -800,6 +829,7 @@ pub(super) async fn queue_recursive_page_jobs(
                     workspace_id: run.workspace_id,
                     library_id: run.library_id,
                     mutation_id: None,
+                    mutation_item_id: None,
                     connector_id: None,
                     async_operation_id: Some(job_operation.id),
                     knowledge_document_id: None,

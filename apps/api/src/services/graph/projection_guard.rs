@@ -24,36 +24,20 @@ impl GraphWriteGuardService {
     }
 
     #[must_use]
-    pub fn max_retry_count(&self) -> usize {
+    pub const fn max_retry_count(&self) -> usize {
         self.max_retry_count
     }
 
     #[must_use]
-    pub fn is_retryable_contention(&self, message: &str) -> bool {
-        let normalized = message.to_ascii_lowercase();
-        normalized.contains("deadlock")
-            || normalized.contains("lock")
-            || normalized.contains("transient")
-            || normalized.contains("concurrent")
-    }
-
-    #[must_use]
-    pub fn classify_write_error(
+    pub const fn classify_write_error(
         &self,
         error: &GraphViewWriteError,
         next_retry_count: usize,
     ) -> GraphWriteFailureDecision {
-        match error {
-            GraphViewWriteError::GraphWriteContention { .. }
-                if next_retry_count < self.max_retry_count =>
-            {
-                GraphWriteFailureDecision::RetryContention
-            }
-            GraphViewWriteError::GraphWriteContention { .. }
-            | GraphViewWriteError::GraphPersistenceIntegrity { .. }
-            | GraphViewWriteError::GraphWriteFailure { .. } => {
-                GraphWriteFailureDecision::FailTerminal
-            }
+        if error.is_retryable_contention() && next_retry_count < self.max_retry_count {
+            GraphWriteFailureDecision::RetryContention
+        } else {
+            GraphWriteFailureDecision::FailTerminal
         }
     }
 }
@@ -63,11 +47,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn detects_retryable_contention_strings() {
-        let service = GraphWriteGuardService::default();
+    fn error_message_does_not_control_retryability() {
+        let retryable =
+            GraphViewWriteError::GraphWriteContention { message: "validation failed".to_string() };
+        let terminal = GraphViewWriteError::GraphWriteFailure {
+            message: "deadlock while writing".to_string(),
+        };
 
-        assert!(service.is_retryable_contention("graph write deadlock detected"));
-        assert!(!service.is_retryable_contention("validation failed"));
+        assert!(retryable.is_retryable_contention());
+        assert!(!terminal.is_retryable_contention());
     }
 
     #[test]

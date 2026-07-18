@@ -1,11 +1,11 @@
-import { useTranslation } from 'react-i18next';
+import { useTranslation } from 'react-i18next'
 
-import { PageHeader } from '@/shared/components/layout/PageHeader';
-import { PageShell } from '@/shared/components/layout/PageShell';
-import { IngestQueueTab } from './IngestQueueTab';
+import { PageHeader } from '@/shared/components/layout/PageHeader'
+import { PageShell } from '@/shared/components/layout/PageShell'
+import { IngestQueueTab } from './IngestQueueTab'
 
 export default function AdminQueuePage() {
-  const { t } = useTranslation();
+  const { t } = useTranslation()
 
   return (
     <PageShell
@@ -16,5 +16,5 @@ export default function AdminQueuePage() {
         <IngestQueueTab t={t} active />
       </div>
     </PageShell>
-  );
+  )
 }

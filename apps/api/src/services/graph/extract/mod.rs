@@ -13,8 +13,10 @@ pub(crate) use parse::canonical_graph_extraction_normalized_json;
 pub(crate) use parse::repair_graph_extraction_candidate_set;
 pub(crate) use parse::repair_graph_extraction_normalized_json;
 pub(crate) use prompt::GRAPH_EXTRACTION_VERSION;
-pub use recovery::{extraction_lifecycle_from_record, extraction_recovery_summary_from_record};
-pub use types::{
+pub(crate) use recovery::{
+    extraction_lifecycle_from_record, extraction_recovery_summary_from_record,
+};
+pub(crate) use types::{
     GraphEntityCandidate, GraphExtractionCandidateSet, GraphExtractionExecutionError,
     GraphExtractionOutcome, GraphExtractionRequest, GraphExtractionResumeState,
     GraphExtractionStructuredChunkContext, GraphExtractionSubTypeHintEntry,
@@ -22,9 +24,9 @@ pub use types::{
     GraphExtractionTaskFailureCode, GraphExtractionTechnicalFact, GraphRelationCandidate,
 };
 
-#[allow(unused_imports)]
 #[cfg(test)]
-pub use prompt::build_graph_extraction_prompt;
+#[allow(unused_imports, reason = "integration tests consume this test-only prompt facade")]
+pub(crate) use prompt::build_graph_extraction_prompt;
 
 use crate::{
     agent_runtime::{
@@ -37,7 +39,6 @@ use crate::{
     app::state::AppState,
     domains::{
         agent_runtime::{RuntimeExecutionOwner, RuntimeStageKind, RuntimeStageState},
-        ai::AiBindingPurpose,
         graph_quality::{ExtractionOutcomeStatus, ExtractionRecoverySummary},
     },
     infra::repositories,
@@ -60,7 +61,7 @@ use tokio_util::sync::CancellationToken;
 use types::{GraphExtractionFailureOutcome, GraphExtractionPromptVariant};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct GraphExtractionCacheFingerprint {
+pub(crate) struct GraphExtractionCacheFingerprint {
     pub extraction_version: String,
     pub prompt_hash: String,
     pub request_shape_key: String,
@@ -68,7 +69,7 @@ pub struct GraphExtractionCacheFingerprint {
 }
 
 #[must_use]
-pub fn build_graph_extraction_cache_fingerprint(
+pub(crate) fn build_graph_extraction_cache_fingerprint(
     request: &GraphExtractionRequest,
     runtime_binding: &ResolvedRuntimeBinding,
     request_size_soft_limit_bytes: usize,
@@ -178,7 +179,7 @@ fn update_hash_json(hasher: &mut Sha256, value: &serde_json::Value) {
     }
 }
 
-pub async fn extract_chunk_graph_candidates(
+pub(crate) async fn extract_chunk_graph_candidates(
     state: &AppState,
     runtime_context: &RuntimeTaskExecutionContext,
     request: &GraphExtractionRequest,
@@ -197,18 +198,7 @@ pub async fn extract_chunk_graph_candidates(
             .await
             .map_err(|error| map_graph_runtime_execution_error(request, None, error))?;
 
-    // ExtractGraph is the required binding for this task; the caller
-    // (`resolve_effective_provider_profile`) enforces its presence, so
-    // `selection_for_binding_purpose` always returns `Some` here. The
-    // `.expect` stays as a documented invariant — a panic here is
-    // exactly the right signal that the enforcement invariant above
-    // was broken, and the function's error type does not have a
-    // `From<ApiError>` impl to route it through.
-    #[allow(clippy::expect_used)]
-    let initial_selection = runtime_context
-        .provider_profile
-        .selection_for_binding_purpose(AiBindingPurpose::ExtractGraph)
-        .expect("extract_graph selection is required for graph extraction runtime");
+    let runtime_binding = &runtime_context.runtime_binding;
     repositories::create_runtime_graph_extraction_record(
         &state.persistence.postgres,
         &repositories::CreateRuntimeGraphExtractionRecordInput {
@@ -217,8 +207,8 @@ pub async fn extract_chunk_graph_candidates(
             library_id: request.library_id,
             document_id: request.document.id,
             chunk_id: request.chunk.id,
-            provider_kind: initial_selection.provider_kind.as_str().to_string(),
-            model_name: initial_selection.model_name.clone(),
+            provider_kind: runtime_binding.provider_kind.clone(),
+            model_name: runtime_binding.model_name.clone(),
             extraction_version: prompt::GRAPH_EXTRACTION_VERSION.to_string(),
             prompt_hash: "pending".to_string(),
             status: "processing".to_string(),
@@ -351,8 +341,7 @@ pub async fn extract_chunk_graph_candidates(
                 graph_extraction_execution_error(
                     request,
                     format!(
-                        "graph extraction owner record {} was not found during update",
-                        extraction_record_id
+                        "graph extraction owner record {extraction_record_id} was not found during update"
                     ),
                     extraction_outcome.provider_failure.clone(),
                     extraction_outcome.recovery_summary.clone(),
@@ -427,8 +416,7 @@ pub async fn extract_chunk_graph_candidates(
             })?
             .ok_or_else(|| GraphExtractionExecutionError {
                 message: format!(
-                    "graph extraction owner record {} was not found during failure update",
-                    extraction_record_id
+                    "graph extraction owner record {extraction_record_id} was not found during failure update"
                 ),
                 request_shape_key: error.request_shape_key.clone(),
                 request_size_bytes: error.request_size_bytes,
@@ -505,7 +493,7 @@ async fn run_graph_extraction_runtime(
         GraphExtractionExecutionError,
     ),
 > {
-    let provider_profile = &runtime_context.provider_profile;
+    let runtime_binding = &runtime_context.runtime_binding;
 
     if let Err(failure) = begin_graph_runtime_stage(
         state.agent_runtime.executor(),
@@ -534,7 +522,7 @@ async fn run_graph_extraction_runtime(
             },
             Vec::new(),
         );
-        return Err((make_graph_terminal_failure_outcome(failure.clone()), error));
+        return Err((make_graph_terminal_failure_outcome(failure), error));
     }
 
     if cancellation_token.is_cancelled() {
@@ -559,7 +547,7 @@ async fn run_graph_extraction_runtime(
         return Err((make_graph_terminal_failure_outcome(failure), error));
     }
 
-    match resolve_graph_extraction(state, provider_profile, request, cancellation_token).await {
+    match resolve_graph_extraction(state, runtime_binding, request, cancellation_token).await {
         Ok(resolved) => {
             record_graph_runtime_stage(
                 state.agent_runtime.executor(),
@@ -600,7 +588,7 @@ async fn run_graph_extraction_runtime(
                         resolved.recovery_summary.clone(),
                         resolved.recovery_attempts.clone(),
                     );
-                    return Err((make_graph_terminal_failure_outcome(failure.clone()), error));
+                    return Err((make_graph_terminal_failure_outcome(failure), error));
                 }
                 record_graph_runtime_stage(
                     state.agent_runtime.executor(),
@@ -658,7 +646,6 @@ async fn run_graph_extraction_runtime(
                     },
                     summary: make_graph_runtime_failure_summary(
                         GraphExtractionTaskFailureCode::MalformedOutput.as_str(),
-                        "graph extraction resolved with failed recovery status",
                     ),
                 },
             };
@@ -670,7 +657,7 @@ async fn run_graph_extraction_runtime(
                         "graph extraction resolved with failed recovery status",
                         outcome.provider_failure.clone(),
                         outcome.recovery_summary.clone(),
-                        outcome.recovery_attempts.clone(),
+                        outcome.recovery_attempts,
                     ),
                 )),
                 _ => Ok((runtime_outcome, outcome)),
@@ -699,7 +686,7 @@ async fn run_graph_extraction_runtime(
                 summary: failure.error_message.clone(),
             };
             Err((
-                make_graph_terminal_failure_outcome(task_failure.clone()),
+                make_graph_terminal_failure_outcome(task_failure),
                 GraphExtractionExecutionError {
                     message: failure.error_message,
                     request_shape_key: failure.request_shape_key,
@@ -712,8 +699,7 @@ async fn run_graph_extraction_runtime(
                         replay_count: request
                             .resume_hint
                             .as_ref()
-                            .map(|hint| hint.replay_count.saturating_add(1))
-                            .unwrap_or(1),
+                            .map_or(1, |hint| hint.replay_count.saturating_add(1)),
                         downgrade_level: normalized_downgrade_level(request),
                     },
                     cancelled: failure.cancelled,
@@ -725,31 +711,15 @@ async fn run_graph_extraction_runtime(
 
 async fn resolve_graph_extraction(
     state: &AppState,
-    provider_profile: &crate::domains::provider_profiles::EffectiveProviderProfile,
+    runtime_binding: &ResolvedRuntimeBinding,
     request: &GraphExtractionRequest,
     cancellation_token: &CancellationToken,
 ) -> std::result::Result<types::ResolvedGraphExtraction, GraphExtractionFailureOutcome> {
-    let library_id = request.library_id;
-    let runtime_binding = state
-        .canonical_services
-        .ai_catalog
-        .resolve_active_runtime_binding(state, library_id, AiBindingPurpose::ExtractGraph)
-        .await
-        .map_err(|error| {
-            recovery::unconfigured_graph_extraction_failure(request, error.to_string())
-        })?
-        .ok_or_else(|| {
-            recovery::unconfigured_graph_extraction_failure(
-                request,
-                "active graph extraction binding is not configured for this library",
-            )
-        })?;
     session::resolve_graph_extraction_with_gateway(
         state.llm_gateway.as_ref(),
         &state.retrieval_intelligence_services.extraction_recovery,
         &state.resolve_settle_blockers_services.provider_failure_classification,
-        provider_profile,
-        &runtime_binding,
+        runtime_binding,
         request,
         cancellation_token,
         state.retrieval_intelligence.extraction_recovery_enabled,

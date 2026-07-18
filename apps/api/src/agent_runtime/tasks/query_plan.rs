@@ -1,11 +1,8 @@
 use crate::{
     agent_runtime::task::{RuntimeTask, RuntimeTaskSpec, StructuredRuntimeTask},
-    domains::{
-        agent_runtime::{
-            RuntimeOutputMode, RuntimeRecoveryPolicy, RuntimeStageKind, RuntimeSurfaceKind,
-            RuntimeTaskKind,
-        },
-        ai::AiBindingPurpose,
+    domains::agent_runtime::{
+        RuntimeOutputMode, RuntimeRecoveryPolicy, RuntimeStageKind, RuntimeSurfaceKind,
+        RuntimeTaskKind,
     },
     services::query::planner::{QueryPlanFailure, QueryPlanTaskInput, RuntimeQueryPlan},
 };
@@ -26,7 +23,7 @@ impl RuntimeTask for QueryPlanTask {
         RuntimeTaskSpec {
             task_kind: RuntimeTaskKind::QueryPlan,
             surface_kind: RuntimeSurfaceKind::Internal,
-            binding_purpose: AiBindingPurpose::for_runtime_task_kind(RuntimeTaskKind::QueryPlan),
+            binding_purpose: RuntimeTaskKind::QueryPlan.binding_purpose(),
             machine_consumed: true,
             max_turns: 1,
             max_parallel_actions: 1,

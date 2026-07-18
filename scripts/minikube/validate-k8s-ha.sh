@@ -32,22 +32,22 @@ fi
 . "${ROOT_DIR}/scripts/minikube/common.sh"
 
 read_openai_key() {
-  if [ -n "${IRONRAG_OPENAI_API_KEY:-}" ]; then
-    printf '%s' "${IRONRAG_OPENAI_API_KEY}"
-    return
-  fi
-
-  if [ -f "${ROOT_DIR}/.env" ]; then
-    python3 - <<'PY' "${ROOT_DIR}/.env"
+  local provider_map_b64="${IRONRAG_AI_PROVIDER_API_KEYS_JSON_B64:-}"
+  if [ -z "${provider_map_b64}" ] && [ -f "${ROOT_DIR}/.env" ]; then
+    provider_map_b64="$(python3 - <<'PY' "${ROOT_DIR}/.env"
 from pathlib import Path
 import sys
 
 for line in Path(sys.argv[1]).read_text().splitlines():
-    if line.startswith("IRONRAG_OPENAI_API_KEY="):
+    if line.startswith("IRONRAG_AI_PROVIDER_API_KEYS_JSON_B64="):
         print(line.split("=", 1)[1], end="")
         break
 PY
+    )"
   fi
+  [ -n "${provider_map_b64}" ] || return 0
+  printf '%s' "${provider_map_b64}" | python3 -c \
+    'import base64,json,sys; print(json.loads(base64.b64decode(sys.stdin.read(), validate=True).decode()).get("openai", ""), end="")'
 }
 
 MINIKUBE_BIN="$(resolve_bin minikube "${ROOT_DIR}")"
@@ -150,7 +150,7 @@ import sys
 override_path = Path(sys.argv[1])
 openai_key = sys.argv[2].replace("\\", "\\\\").replace('"', '\\"')
 override_path.write_text(
-    f'app:\n  providerSecrets:\n    openaiApiKey: "{openai_key}"\n',
+    f'app:\n  providerSecrets:\n    openai: "{openai_key}"\n',
     encoding="utf-8",
 )
 PY
@@ -260,7 +260,7 @@ PY
       --strict
   fi
 else
-  echo "content smoke skipped: IRONRAG_OPENAI_API_KEY not available or RUN_CONTENT_SMOKE=0"
+  echo "content smoke skipped: provider kind openai is absent from IRONRAG_AI_PROVIDER_API_KEYS_JSON_B64 or RUN_CONTENT_SMOKE=0"
 fi
 
 "${KUBECTL_BIN}" -n "${NAMESPACE}" get deploy,pods,jobs

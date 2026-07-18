@@ -5,13 +5,10 @@ use uuid::Uuid;
 
 use ironrag_backend::{
     app::{config::Settings, state::AppState},
-    infra::repositories::{ai_repository, catalog_repository, content_repository},
-    services::{
-        ingest::extract::{
-            CheckpointResumeCursorCommand, ExtractService, MaterializeChunkResultCommand,
-            NewEdgeCandidate, NewNodeCandidate,
-        },
-        query::search::{ChunkEmbeddingWrite, GraphNodeEmbeddingWrite, SearchService},
+    infra::repositories::{catalog_repository, content_repository},
+    services::ingest::extract::{
+        CheckpointResumeCursorCommand, ExtractService, MaterializeChunkResultCommand,
+        NewEdgeCandidate, NewNodeCandidate,
     },
 };
 
@@ -75,8 +72,6 @@ struct ExtractGraphFixture {
     chunk_id: Uuid,
     attempt_id: Uuid,
     node_id: Uuid,
-    primary_model_catalog_id: Uuid,
-    alternate_model_catalog_id: Uuid,
 }
 
 impl ExtractGraphFixture {
@@ -107,8 +102,6 @@ impl ExtractGraphFixture {
             chunk_id: Uuid::nil(),
             attempt_id: Uuid::nil(),
             node_id: Uuid::nil(),
-            primary_model_catalog_id: Uuid::nil(),
-            alternate_model_catalog_id: Uuid::nil(),
         };
         fixture.seed().await
     }
@@ -134,7 +127,7 @@ impl ExtractGraphFixture {
         .await
         .context("failed to create library fixture")?;
 
-        let document = content_repository::create_document(
+        let document = content_repository::create_document_with_projection(
             &self.state.persistence.postgres,
             &content_repository::NewContentDocument {
                 workspace_id: workspace.id,
@@ -146,17 +139,16 @@ impl ExtractGraphFixture {
                 parent_document_id: None,
                 document_role: "primary",
             },
+            Some("extract-graph.txt"),
         )
         .await
         .context("failed to create content document")?;
-        let revision = content_repository::create_revision(
+        let revision = match content_repository::create_revision_with_projection(
             &self.state.persistence.postgres,
-            &content_repository::NewContentRevision {
+            &content_repository::NewContentRevisionProjection {
                 document_id: document.id,
                 workspace_id: workspace.id,
                 library_id: library.id,
-                revision_number: 1,
-                parent_revision_id: None,
                 content_source_kind: "upload",
                 checksum: "sha256:extract-graph",
                 mime_type: "text/plain",
@@ -170,7 +162,11 @@ impl ExtractGraphFixture {
             },
         )
         .await
-        .context("failed to create content revision")?;
+        .context("failed to create content revision projection")?
+        {
+            content_repository::CreateContentRevisionOutcome::Created(revision) => *revision,
+            outcome => anyhow::bail!("content revision fixture was not created: {outcome:?}"),
+        };
         let chunk = content_repository::create_chunk(
             &self.state.persistence.postgres,
             &content_repository::NewContentChunk {
@@ -229,7 +225,7 @@ impl ExtractGraphFixture {
             .set_revision_extract_state(
                 &self.state,
                 revision.id,
-                "readable",
+                "ready",
                 Some("Readable extracted text for the canonical greenfield test."),
                 Some("sha256:extract-graph"),
             )
@@ -284,37 +280,6 @@ impl ExtractGraphFixture {
             .await
             .context("failed to checkpoint resume cursor")?;
 
-        let provider_catalogs =
-            ai_repository::list_provider_catalog(&self.state.persistence.postgres)
-                .await
-                .context("failed to list provider catalog")?;
-        let openai_provider = provider_catalogs
-            .iter()
-            .find(|row| row.provider_kind == "openai")
-            .context("missing openai provider catalog entry")?;
-        let qwen_provider = provider_catalogs
-            .iter()
-            .find(|row| row.provider_kind == "qwen")
-            .context("missing qwen provider catalog entry")?;
-        let openai_model = ai_repository::list_model_catalog(
-            &self.state.persistence.postgres,
-            Some(openai_provider.id),
-        )
-        .await
-        .context("failed to list openai model catalog")?
-        .into_iter()
-        .find(|row| row.capability_kind == "embedding")
-        .context("missing openai embedding model catalog entry")?;
-        let qwen_model = ai_repository::list_model_catalog(
-            &self.state.persistence.postgres,
-            Some(qwen_provider.id),
-        )
-        .await
-        .context("failed to list qwen model catalog")?
-        .into_iter()
-        .find(|row| row.capability_kind == "embedding")
-        .context("missing qwen embedding model catalog entry")?;
-
         self.workspace_id = workspace.id;
         self.library_id = library.id;
         self.document_id = document.id;
@@ -322,8 +287,6 @@ impl ExtractGraphFixture {
         self.chunk_id = chunk.id;
         self.attempt_id = cursor.attempt_id;
         self.node_id = Uuid::now_v7();
-        self.primary_model_catalog_id = openai_model.id;
-        self.alternate_model_catalog_id = qwen_model.id;
         Ok(self)
     }
 
@@ -393,7 +356,7 @@ async fn extract_flow_preserves_readable_text_chunk_results_and_resume_cursors()
             .get_extract_content(&fixture.state, fixture.revision_id)
             .await
             .context("failed to load extract content")?;
-        assert_eq!(content.extract_state, "readable");
+        assert_eq!(content.extract_state, "ready");
         assert_eq!(
             content.normalized_text.as_deref(),
             Some("Readable extracted text for the canonical greenfield test."),
@@ -411,8 +374,14 @@ async fn extract_flow_preserves_readable_text_chunk_results_and_resume_cursors()
             .list_node_candidates(&fixture.state, chunk_results[0].id)
             .await
             .context("failed to list node candidates")?;
-        assert_eq!(node_candidates.len(), 1);
-        assert_eq!(node_candidates[0].canonical_key, "entity:greenfield-test");
+        assert_eq!(node_candidates.len(), 2);
+        assert_eq!(
+            node_candidates
+                .iter()
+                .map(|candidate| candidate.canonical_key.as_str())
+                .collect::<Vec<_>>(),
+            vec!["entity:greenfield_other", "entity:greenfield_test"]
+        );
 
         let edge_candidates = extract_service
             .list_edge_candidates(&fixture.state, chunk_results[0].id)
@@ -421,7 +390,7 @@ async fn extract_flow_preserves_readable_text_chunk_results_and_resume_cursors()
         assert_eq!(edge_candidates.len(), 1);
         assert_eq!(
             edge_candidates[0].canonical_key,
-            "entity:greenfield-test--relates_to--entity:greenfield-other",
+            "entity:greenfield_test--mentions--entity:greenfield_other",
         );
 
         let cursor = extract_service
@@ -443,109 +412,6 @@ async fn extract_flow_preserves_readable_text_chunk_results_and_resume_cursors()
             .await
             .context("failed to increment downgrade level")?;
         assert_eq!(downgrade.downgrade_level, 1);
-
-        assert_legacy_truth_tables_absent(&fixture.state.persistence.postgres).await
-    }
-    .await;
-
-    fixture.cleanup().await?;
-    result
-}
-
-#[tokio::test]
-#[ignore = "requires local postgres with canonical extensions"]
-async fn chunk_and_graph_embeddings_rebuild_and_select_active_indexes() -> Result<()> {
-    let fixture = ExtractGraphFixture::create().await?;
-
-    let result = async {
-        let search_service = SearchService::new();
-        let chunk_rebuilt = search_service
-            .persist_chunk_embeddings(
-                &fixture.state,
-                &[
-                    ChunkEmbeddingWrite {
-                        chunk_id: fixture.chunk_id,
-                        model_catalog_id: fixture.primary_model_catalog_id,
-                        embedding_vector: vec![1.0, 2.0, 3.0],
-                        active: false,
-                    },
-                    ChunkEmbeddingWrite {
-                        chunk_id: fixture.chunk_id,
-                        model_catalog_id: fixture.alternate_model_catalog_id,
-                        embedding_vector: vec![4.0, 5.0, 6.0],
-                        active: true,
-                    },
-                ],
-            )
-            .await
-            .context("failed to persist chunk embeddings")?;
-        assert_eq!(chunk_rebuilt, 2);
-
-        let graph_rebuilt = search_service
-            .persist_graph_node_embeddings(
-                &fixture.state,
-                &[
-                    GraphNodeEmbeddingWrite {
-                        node_id: fixture.node_id,
-                        model_catalog_id: fixture.primary_model_catalog_id,
-                        embedding_vector: vec![1.0, 1.0, 1.0],
-                        active: false,
-                    },
-                    GraphNodeEmbeddingWrite {
-                        node_id: fixture.node_id,
-                        model_catalog_id: fixture.alternate_model_catalog_id,
-                        embedding_vector: vec![2.0, 2.0, 2.0],
-                        active: true,
-                    },
-                ],
-            )
-            .await
-            .context("failed to persist graph node embeddings")?;
-        assert_eq!(graph_rebuilt, 2);
-
-        let chunk_rows = fixture
-            .state
-            .search_store
-            .list_chunk_vectors_by_chunk(fixture.chunk_id)
-            .await
-            .context("failed to list canonical chunk vectors")?;
-        let chunk_model_keys =
-            chunk_rows.iter().map(|row| row.embedding_model_key.as_str()).collect::<Vec<_>>();
-        assert_eq!(chunk_rows.len(), 2);
-        assert!(chunk_model_keys.contains(&fixture.primary_model_catalog_id.to_string().as_str()));
-        assert!(
-            chunk_model_keys.contains(&fixture.alternate_model_catalog_id.to_string().as_str())
-        );
-
-        let node_rows = fixture
-            .state
-            .search_store
-            .list_entity_vectors_by_entity(fixture.node_id)
-            .await
-            .context("failed to list canonical entity vectors")?;
-        let node_model_keys =
-            node_rows.iter().map(|row| row.embedding_model_key.as_str()).collect::<Vec<_>>();
-        assert_eq!(node_rows.len(), 2);
-        assert!(node_model_keys.contains(&fixture.primary_model_catalog_id.to_string().as_str()));
-        assert!(node_model_keys.contains(&fixture.alternate_model_catalog_id.to_string().as_str()));
-
-        let current_chunk_vector = SearchService::new()
-            .select_current_chunk_vector(&chunk_rows)
-            .context("missing current canonical chunk vector")?;
-        assert_eq!(current_chunk_vector.chunk_id, fixture.chunk_id);
-        assert_eq!(
-            current_chunk_vector.embedding_model_key,
-            fixture.alternate_model_catalog_id.to_string()
-        );
-
-        let current_node_vector = SearchService::new()
-            .select_current_entity_vector(&node_rows)
-            .context("missing current canonical entity vector")?;
-        assert_eq!(current_node_vector.entity_id, fixture.node_id);
-        assert_eq!(
-            current_node_vector.embedding_model_key,
-            fixture.alternate_model_catalog_id.to_string()
-        );
 
         assert_legacy_truth_tables_absent(&fixture.state.persistence.postgres).await
     }

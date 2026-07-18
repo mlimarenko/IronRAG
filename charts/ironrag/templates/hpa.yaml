@@ -1,0 +1,43 @@
+{{- if .Values.autoscaling.enabled }}
+{{- range $component := list "api" "worker" "web" }}
+{{- $settings := index $.Values.autoscaling $component }}
+{{- if $settings.enabled }}
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: {{ include "ironrag.fullname" $ }}-{{ $component }}
+  labels:
+    {{- include "ironrag.labels" $ | nindent 4 }}
+    app.kubernetes.io/component: {{ $component }}
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: {{ include "ironrag.fullname" $ }}-{{ $component }}
+  minReplicas: {{ $settings.minReplicas }}
+  maxReplicas: {{ $settings.maxReplicas }}
+  metrics:
+    {{- with $settings.targetCPUUtilizationPercentage }}
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: {{ . }}
+    {{- end }}
+    {{- with $settings.targetMemoryUtilizationPercentage }}
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type: Utilization
+          averageUtilization: {{ . }}
+    {{- end }}
+  {{- with $settings.behavior }}
+  behavior:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+---
+{{- end }}
+{{- end }}
+{{- end }}

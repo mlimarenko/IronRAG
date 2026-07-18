@@ -31,7 +31,10 @@
 #   local source build     build the images from this tree instead of pulling:
 #     IRONRAG_BACKEND_IMAGE=ironrag-backend:local \
 #     IRONRAG_FRONTEND_IMAGE=ironrag-frontend:local \
-#       docker compose up -d --build
+#       docker compose build backend frontend
+#     IRONRAG_BACKEND_IMAGE=ironrag-backend:local \
+#     IRONRAG_FRONTEND_IMAGE=ironrag-frontend:local \
+#       docker compose up -d
 #     (`make docker-local-*` wires these names in for you.)
 #
 #   scale ingest workers   run N ingest workers. Default 1 keeps the baseline
@@ -50,10 +53,8 @@
 # setting the matching IRONRAG_*/OTEL_* env var.
 x-ironrag-runtime-env: &ironrag-runtime-env
   IRONRAG_ENVIRONMENT: ${IRONRAG_ENVIRONMENT:-production}
-  # Stable per-deployment telemetry id. Empty -> auto-derived from the Postgres
-  # cluster identity (unique per stack, stable across container recreation,
-  # shared by every role). Set a value only to override the auto id or when
-  # several stacks deliberately share one database.
+  # Optional stable telemetry id. It is ignored unless OTLP export is enabled
+  # below; an empty value is derived from Postgres only after that opt-in.
   IRONRAG_DEPLOYMENT_ID: ${IRONRAG_DEPLOYMENT_ID:-}
   IRONRAG_DATABASE_URL: postgres://${IRONRAG_POSTGRES_USER:-postgres}:${IRONRAG_POSTGRES_PASSWORD:-postgres}@${IRONRAG_POSTGRES_HOST:-postgres}:5432/${IRONRAG_POSTGRES_DB:-ironrag}
   # Deployment-wide app connection budget. The backend divides it across the
@@ -64,7 +65,13 @@ x-ironrag-runtime-env: &ironrag-runtime-env
   IRONRAG_KNOWLEDGE_PLANE_BACKEND: postgres
   IRONRAG_REDIS_URL: ${IRONRAG_REDIS_URL:-redis://redis:6379}
   IRONRAG_LOG_FILTER: ${IRONRAG_LOG_FILTER:-info}
+  # Shared UI CORS and MCP Streamable HTTP Origin allowlist.
   IRONRAG_FRONTEND_ORIGIN: ${IRONRAG_FRONTEND_ORIGIN:-http://127.0.0.1:19000,http://localhost:19000}
+  IRONRAG_OPENAPI_PUBLIC_ORIGIN: ${IRONRAG_OPENAPI_PUBLIC_ORIGIN:-}
+  IRONRAG_CREDENTIAL_MASTER_KEY: ${IRONRAG_CREDENTIAL_MASTER_KEY:-}
+  IRONRAG_CREDENTIAL_MASTER_KEY_ID: ${IRONRAG_CREDENTIAL_MASTER_KEY_ID:-}
+  IRONRAG_CREDENTIAL_PREVIOUS_MASTER_KEYS: ${IRONRAG_CREDENTIAL_PREVIOUS_MASTER_KEYS:-}
+  IRONRAG_CREDENTIAL_ENCRYPTION_WRITE_ENABLED: ${IRONRAG_CREDENTIAL_ENCRYPTION_WRITE_ENABLED:-false}
   IRONRAG_UI_BOOTSTRAP_ADMIN_LOGIN: ${IRONRAG_UI_BOOTSTRAP_ADMIN_LOGIN:-}
   IRONRAG_UI_BOOTSTRAP_ADMIN_PASSWORD: ${IRONRAG_UI_BOOTSTRAP_ADMIN_PASSWORD:-}
   IRONRAG_UI_BOOTSTRAP_ADMIN_API_TOKEN: ${IRONRAG_UI_BOOTSTRAP_ADMIN_API_TOKEN:-}
@@ -72,17 +79,15 @@ x-ironrag-runtime-env: &ironrag-runtime-env
   IRONRAG_UI_BOOTSTRAP_EXTRACT_GRAPH_MODEL_NAME: ${IRONRAG_UI_BOOTSTRAP_EXTRACT_GRAPH_MODEL_NAME:-gpt-5.4-mini}
   IRONRAG_UI_BOOTSTRAP_EMBED_CHUNK_PROVIDER_KIND: ${IRONRAG_UI_BOOTSTRAP_EMBED_CHUNK_PROVIDER_KIND:-openai}
   IRONRAG_UI_BOOTSTRAP_EMBED_CHUNK_MODEL_NAME: ${IRONRAG_UI_BOOTSTRAP_EMBED_CHUNK_MODEL_NAME:-text-embedding-3-large}
+  IRONRAG_UI_BOOTSTRAP_QUERY_COMPILE_PROVIDER_KIND: ${IRONRAG_UI_BOOTSTRAP_QUERY_COMPILE_PROVIDER_KIND:-openai}
+  IRONRAG_UI_BOOTSTRAP_QUERY_COMPILE_MODEL_NAME: ${IRONRAG_UI_BOOTSTRAP_QUERY_COMPILE_MODEL_NAME:-gpt-5.4-nano}
   IRONRAG_UI_BOOTSTRAP_QUERY_ANSWER_PROVIDER_KIND: ${IRONRAG_UI_BOOTSTRAP_QUERY_ANSWER_PROVIDER_KIND:-openai}
   IRONRAG_UI_BOOTSTRAP_QUERY_ANSWER_MODEL_NAME: ${IRONRAG_UI_BOOTSTRAP_QUERY_ANSWER_MODEL_NAME:-gpt-5.4-mini}
-  IRONRAG_UI_BOOTSTRAP_VISION_PROVIDER_KIND: ${IRONRAG_UI_BOOTSTRAP_VISION_PROVIDER_KIND:-openai}
-  IRONRAG_UI_BOOTSTRAP_VISION_MODEL_NAME: ${IRONRAG_UI_BOOTSTRAP_VISION_MODEL_NAME:-gpt-5.4-mini}
-  IRONRAG_OPENAI_API_KEY: ${IRONRAG_OPENAI_API_KEY:-}
-  IRONRAG_DEEPSEEK_API_KEY: ${IRONRAG_DEEPSEEK_API_KEY:-}
-  IRONRAG_QWEN_API_KEY: ${IRONRAG_QWEN_API_KEY:-}
-  IRONRAG_OPENROUTER_API_KEY: ${IRONRAG_OPENROUTER_API_KEY:-}
-  IRONRAG_GPTUNNEL_API_KEY: ${IRONRAG_GPTUNNEL_API_KEY:-}
-  IRONRAG_ROUTERAI_API_KEY: ${IRONRAG_ROUTERAI_API_KEY:-}
-  IRONRAG_MINIMAX_API_KEY: ${IRONRAG_MINIMAX_API_KEY:-}
+  IRONRAG_UI_BOOTSTRAP_AGENT_PROVIDER_KIND: ${IRONRAG_UI_BOOTSTRAP_AGENT_PROVIDER_KIND:-openai}
+  IRONRAG_UI_BOOTSTRAP_AGENT_MODEL_NAME: ${IRONRAG_UI_BOOTSTRAP_AGENT_MODEL_NAME:-gpt-5.4-mini}
+  IRONRAG_UI_BOOTSTRAP_EXTRACT_TEXT_PROVIDER_KIND: ${IRONRAG_UI_BOOTSTRAP_EXTRACT_TEXT_PROVIDER_KIND:-openai}
+  IRONRAG_UI_BOOTSTRAP_EXTRACT_TEXT_MODEL_NAME: ${IRONRAG_UI_BOOTSTRAP_EXTRACT_TEXT_MODEL_NAME:-gpt-5.4-mini}
+  IRONRAG_AI_PROVIDER_API_KEYS_JSON_B64: ${IRONRAG_AI_PROVIDER_API_KEYS_JSON_B64:-}
   IRONRAG_UI_DEFAULT_LOCALE: ${IRONRAG_UI_DEFAULT_LOCALE:-ru}
   IRONRAG_STARTUP_AUTHORITY_MODE: compose_one_shot
   IRONRAG_DEPENDENCY_POSTGRES_MODE: bundled
@@ -113,21 +118,61 @@ x-ironrag-runtime-env: &ironrag-runtime-env
   IRONRAG_INGESTION_MAX_PARALLEL_JOBS_GLOBAL: ${IRONRAG_INGESTION_MAX_PARALLEL_JOBS_GLOBAL:-4}
   IRONRAG_INGESTION_MAX_PARALLEL_JOBS_PER_WORKSPACE: ${IRONRAG_INGESTION_MAX_PARALLEL_JOBS_PER_WORKSPACE:-2}
   IRONRAG_INGESTION_MAX_PARALLEL_JOBS_PER_LIBRARY: ${IRONRAG_INGESTION_MAX_PARALLEL_JOBS_PER_LIBRARY:-1}
+  IRONRAG_DOCLING_PAGE_BATCH_SIZE: ${IRONRAG_DOCLING_PAGE_BATCH_SIZE:-10}
+  IRONRAG_DOCLING_PAGE_STREAM_WINDOW_PAGES: ${IRONRAG_DOCLING_PAGE_STREAM_WINDOW_PAGES:-40}
+  IRONRAG_DOCLING_MAX_CONCURRENCY: ${IRONRAG_DOCLING_MAX_CONCURRENCY:-auto}
+  IRONRAG_INGESTION_HEAVY_PIPELINE_PARALLELISM: ${IRONRAG_INGESTION_HEAVY_PIPELINE_PARALLELISM:-auto}
+  IRONRAG_INGESTION_EMBEDDING_PARALLELISM: ${IRONRAG_INGESTION_EMBEDDING_PARALLELISM:-8}
+  IRONRAG_INGESTION_GRAPH_EXTRACT_PARALLELISM_PER_DOC: ${IRONRAG_INGESTION_GRAPH_EXTRACT_PARALLELISM_PER_DOC:-16}
+  IRONRAG_PROVIDER_CONCURRENCY_MAX_OUTBOUND: ${IRONRAG_PROVIDER_CONCURRENCY_MAX_OUTBOUND:-16}
+  IRONRAG_PROVIDER_CONCURRENCY_QUERY_RESERVED: ${IRONRAG_PROVIDER_CONCURRENCY_QUERY_RESERVED:-4}
+  IRONRAG_PROVIDER_CONCURRENCY_ACQUIRE_TIMEOUT_MS: ${IRONRAG_PROVIDER_CONCURRENCY_ACQUIRE_TIMEOUT_MS:-30000}
+  IRONRAG_PROVIDER_CONCURRENCY_REGISTRY_MAX_ENTRIES: ${IRONRAG_PROVIDER_CONCURRENCY_REGISTRY_MAX_ENTRIES:-64}
+  IRONRAG_PROVIDER_CONCURRENCY_REGISTRY_IDLE_TTL_SECONDS: ${IRONRAG_PROVIDER_CONCURRENCY_REGISTRY_IDLE_TTL_SECONDS:-900}
+  # pgvector applies lane filters after approximate HNSW traversal. Iterative
+  # scans use explicit tuple/memory bounds; small underfilled lanes get one
+  # bounded exact retry rather than silently returning a truncated candidate set.
+  IRONRAG_PG_HNSW_EF_SEARCH: ${IRONRAG_PG_HNSW_EF_SEARCH:-400}
+  IRONRAG_PG_HNSW_MAX_SCAN_TUPLES: ${IRONRAG_PG_HNSW_MAX_SCAN_TUPLES:-50000}
+  IRONRAG_PG_HNSW_SCAN_MEM_MULTIPLIER: ${IRONRAG_PG_HNSW_SCAN_MEM_MULTIPLIER:-2}
+  IRONRAG_PG_HNSW_EXACT_FALLBACK_MAX_ROWS: ${IRONRAG_PG_HNSW_EXACT_FALLBACK_MAX_ROWS:-10000}
   # Graph projection prewarm is opt-in. Large libraries can allocate enough
   # memory to OOM the API role if every active graph is loaded at startup.
   IRONRAG_RUNTIME_GRAPH_PROJECTION_PREWARM_ENABLED: ${IRONRAG_RUNTIME_GRAPH_PROJECTION_PREWARM_ENABLED:-false}
   IRONRAG_RUNTIME_GRAPH_PROJECTION_PREWARM_MAX_LIBRARIES: ${IRONRAG_RUNTIME_GRAPH_PROJECTION_PREWARM_MAX_LIBRARIES:-0}
-  IRONRAG_OTEL_ENABLED: ${IRONRAG_OTEL_ENABLED:-true}
+  IRONRAG_RUNTIME_GRAPH_EXTRACT_IDLE_TIMEOUT_SECONDS: ${IRONRAG_RUNTIME_GRAPH_EXTRACT_IDLE_TIMEOUT_SECONDS:-300}
+  IRONRAG_RUNTIME_POLICY_REJECT_TASK_KINDS: ${IRONRAG_RUNTIME_POLICY_REJECT_TASK_KINDS:-}
+  IRONRAG_RUNTIME_POLICY_REJECT_TARGET_KINDS: ${IRONRAG_RUNTIME_POLICY_REJECT_TARGET_KINDS:-}
+  IRONRAG_WEB_INGEST_HTTP_TIMEOUT_SECONDS: ${IRONRAG_WEB_INGEST_HTTP_TIMEOUT_SECONDS:-20}
+  IRONRAG_WEB_INGEST_MAX_REDIRECTS: ${IRONRAG_WEB_INGEST_MAX_REDIRECTS:-10}
+  # Provider-backed semantic reranking is opt-in. Shadow collects a bounded
+  # comparison without changing answer order; active adds at most the bounded
+  # provider timeout and falls back to deterministic local reranking.
+  IRONRAG_QUERY_RERANK_ENABLED: ${IRONRAG_QUERY_RERANK_ENABLED:-true}
+  IRONRAG_QUERY_RERANK_CANDIDATE_LIMIT: ${IRONRAG_QUERY_RERANK_CANDIDATE_LIMIT:-24}
+  IRONRAG_QUERY_SEMANTIC_RERANK_MODE: ${IRONRAG_QUERY_SEMANTIC_RERANK_MODE:-off}
+  IRONRAG_QUERY_SEMANTIC_RERANK_TIMEOUT_MS: ${IRONRAG_QUERY_SEMANTIC_RERANK_TIMEOUT_MS:-1500}
+  IRONRAG_QUERY_SEMANTIC_RERANK_CANDIDATE_LIMIT: ${IRONRAG_QUERY_SEMANTIC_RERANK_CANDIDATE_LIMIT:-16}
+  IRONRAG_QUERY_SEMANTIC_RERANK_CANDIDATE_TEXT_CHARS: ${IRONRAG_QUERY_SEMANTIC_RERANK_CANDIDATE_TEXT_CHARS:-1200}
+  IRONRAG_QUERY_SEMANTIC_RERANK_TOTAL_TEXT_CHARS: ${IRONRAG_QUERY_SEMANTIC_RERANK_TOTAL_TEXT_CHARS:-18000}
+  IRONRAG_QUERY_BALANCED_CONTEXT_ENABLED: ${IRONRAG_QUERY_BALANCED_CONTEXT_ENABLED:-true}
+  IRONRAG_QUERY_ANSWER_SOURCE_LINKS_ENABLED: ${IRONRAG_QUERY_ANSWER_SOURCE_LINKS_ENABLED:-false}
+  # OTLP export is opt-in. Enabling it also requires an explicit collector
+  # endpoint below; without both settings the services keep local logs only.
+  IRONRAG_OTEL_ENABLED: ${IRONRAG_OTEL_ENABLED:-false}
   OTEL_RESOURCE_ATTRIBUTES: ${OTEL_RESOURCE_ATTRIBUTES:-service.namespace=ironrag}
-  # Logs are the only content-bearing signal (they carry query text and document
-  # chunk previews), so they are OFF by default — the shipped telemetry is then
-  # traces + metrics only, i.e. performance data with no document/query content.
-  # Set OTEL_LOGS_EXPORTER=otlp to also ship logs to your own collector.
+  OTEL_DEPLOYMENT_ENVIRONMENT: ${OTEL_DEPLOYMENT_ENVIRONMENT:-${IRONRAG_ENVIRONMENT:-production}}
+  OTEL_TRACES_EXPORTER: ${OTEL_TRACES_EXPORTER:-otlp}
+  OTEL_METRICS_EXPORTER: ${OTEL_METRICS_EXPORTER:-otlp}
+  # Logs may carry query text and document chunk previews, so exporting them
+  # requires an additional explicit opt-in after OTLP itself is enabled.
   OTEL_LOGS_EXPORTER: ${OTEL_LOGS_EXPORTER:-none}
-  # Empty endpoint/protocol defer to the compiled-in diagnostics sink
-  # (apps/api/observability.toml); set either to point at your own collector.
+
+  # No collector is compiled into IronRAG. Set an endpoint and enable export
+  # above to send traces/metrics to a collector controlled by the operator.
   OTEL_EXPORTER_OTLP_PROTOCOL: ${OTEL_EXPORTER_OTLP_PROTOCOL:-}
   OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
+  OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE: ${OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE:-cumulative}
 
 x-ironrag-dns: &ironrag-dns
   - ${IRONRAG_DOCKER_DNS_PRIMARY:-1.1.1.1}
@@ -143,14 +188,14 @@ x-ironrag-dns: &ironrag-dns
 # extractor and still fail fast before pressure turns into SIGKILL loops.
 #
 #   anchor    default  services            counts toward steady Σ?
-#   frontend   192M    frontend            yes
-#   cache      192M    redis               yes
+#   frontend   128M    frontend            yes
+#   cache      160M    redis               yes
 #   db        1024M    postgres, startup   postgres: yes / startup: one-shot
 #   worker    3072M    worker              yes
 #   backend   1024M    backend             yes
 #
 # Steady Σ (repo services, one-shot startup excluded):
-#   1024 + 1024 + 3072 + 192 + 192 = 5504 MiB ≈ 5.4 GiB.
+#   1024 + 1024 + 3072 + 128 + 160 = 5408 MiB ≈ 5.3 GiB.
 # `scripts/ops/check-mem-budget.sh` (wired into `make check`) parses the
 # defaults below and fails the build if this baseline sum is exceeded, so a
 # future edit cannot silently make the default stack more memory-hungry. Both
@@ -161,7 +206,7 @@ x-ironrag-dns: &ironrag-dns
 x-ironrag-resources-frontend: &ironrag-resources-frontend
   limits:
     cpus: ${IRONRAG_FRONTEND_CPUS:-0.50}
-    memory: ${IRONRAG_FRONTEND_MEMORY_LIMIT:-192M}
+    memory: ${IRONRAG_FRONTEND_MEMORY_LIMIT:-128M}
   reservations:
     cpus: "0.10"
     memory: 32M
@@ -169,7 +214,7 @@ x-ironrag-resources-frontend: &ironrag-resources-frontend
 x-ironrag-resources-cache: &ironrag-resources-cache
   limits:
     cpus: ${IRONRAG_CACHE_CPUS:-0.50}
-    memory: ${IRONRAG_CACHE_MEMORY_LIMIT:-192M}
+    memory: ${IRONRAG_CACHE_MEMORY_LIMIT:-160M}
   reservations:
     cpus: "0.10"
     memory: 64M
@@ -268,7 +313,10 @@ services:
       - --appendonly
       - "no"
       - --maxmemory
-      - "${IRONRAG_REDIS_MAXMEMORY:-512mb}"
+      # Keep Redis' data ceiling below its cgroup limit. A 512 MiB internal
+      # ceiling under the old 192 MiB container cap made the kernel, not Redis,
+      # choose the failure mode during cache bursts.
+      - "${IRONRAG_REDIS_MAXMEMORY:-96mb}"
       - --maxmemory-policy
       - volatile-lru
     healthcheck:
@@ -308,13 +356,9 @@ services:
         <<: *ironrag-resources-s4core
   startup:
     image: ${IRONRAG_BACKEND_IMAGE:-pipingspace/ironrag-backend:latest}
-    # `build` is dev-only: the public install path (install.sh) ships only this
-    # file + `docker compose pull`, so the registry image is present and the
-    # build context is never needed. Local source builds set
-    # IRONRAG_BACKEND_IMAGE=ironrag-backend:local and run with --build.
-    build:
-      context: .
-      dockerfile: apps/api/Dockerfile
+    # `backend` is the single build owner for this shared image. Keeping a
+    # second build definition here lets Compose race two differently-argued
+    # builds into the same tag and can run migrations from the wrong image.
     restart: on-failure
     depends_on:
       postgres:
@@ -384,9 +428,8 @@ services:
         <<: *ironrag-resources-backend
   worker:
     image: ${IRONRAG_BACKEND_IMAGE:-pipingspace/ironrag-backend:latest}
-    build:
-      context: .
-      dockerfile: apps/api/Dockerfile
+    # Built exactly once by `backend`; startup, API, and worker must execute the
+    # same immutable image id.
     restart: unless-stopped
     stop_signal: SIGTERM
     stop_grace_period: 10m
@@ -431,13 +474,13 @@ services:
       dockerfile: Dockerfile
       args:
         APP_VERSION: ${IRONRAG_VERSION:-0.0.0-dev}
-        # Browser traces (web vitals, fetch/navigation spans — no document or
-        # query content) default to the maintainers' collector; set empty to
-        # disable, or point at your own OTLP/HTTP traces endpoint.
-        VITE_OTEL_EXPORTER_OTLP_ENDPOINT: ${VITE_OTEL_EXPORTER_OTLP_ENDPOINT:-https://otel.piping.space:4318/v1/traces}
+        # Browser traces are off unless the image is explicitly built with an
+        # operator-controlled OTLP/HTTP traces endpoint.
+        VITE_OTEL_EXPORTER_OTLP_ENDPOINT: ${VITE_OTEL_EXPORTER_OTLP_ENDPOINT:-}
         VITE_OTEL_SERVICE_NAME: ${VITE_OTEL_SERVICE_NAME:-ironrag-web}
         VITE_OTEL_SERVICE_VERSION: ${VITE_OTEL_SERVICE_VERSION:-${IRONRAG_VERSION:-0.0.0-dev}}
         VITE_OTEL_DEPLOYMENT_ENVIRONMENT: ${VITE_OTEL_DEPLOYMENT_ENVIRONMENT:-production}
+        VITE_ENABLE_QUERY_DEVTOOLS: ${VITE_ENABLE_QUERY_DEVTOOLS:-false}
     restart: unless-stopped
     depends_on:
       backend:
@@ -446,9 +489,9 @@ services:
       IRONRAG_API_UPSTREAM: http://backend:8080
     dns: *ironrag-dns
     ports:
-      - "${IRONRAG_PORT:-19000}:80"
+      - "${IRONRAG_PORT:-19000}:8080"
     healthcheck:
-      test: ["CMD-SHELL", "wget -q -O - http://127.0.0.1/ >/dev/null 2>&1 || exit 1"]
+      test: ["CMD-SHELL", "wget -q -O - http://127.0.0.1:8080/ >/dev/null 2>&1 || exit 1"]
       interval: 10s
       timeout: 5s
       retries: 5

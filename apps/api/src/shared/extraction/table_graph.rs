@@ -1,5 +1,7 @@
 use std::collections::BTreeSet;
 
+use unicode_normalization::UnicodeNormalization;
+
 use super::{
     table_markdown::normalize_table_cell_text,
     table_summary::{TableColumnSummary, TableSummaryValueKind, TableSummaryValueShape},
@@ -51,9 +53,9 @@ pub fn build_table_graph_profile(summaries: &[TableColumnSummary]) -> TableGraph
 
 #[must_use]
 pub fn normalize_table_graph_key(key: &str) -> String {
-    key.to_ascii_lowercase()
-        .chars()
-        .map(|character| if character.is_ascii_alphanumeric() { character } else { ' ' })
+    key.nfkc()
+        .flat_map(char::to_lowercase)
+        .map(|character| if character.is_alphanumeric() { character } else { ' ' })
         .collect::<String>()
         .split_whitespace()
         .collect::<Vec<_>>()
@@ -68,22 +70,16 @@ pub fn build_graph_table_row_text(
     let segments = semantic_text
         .split(" | ")
         .map(str::trim)
-        .filter(|segment| {
-            !segment.is_empty()
-                && !segment.starts_with("Sheet: ")
-                && !segment.starts_with("Table: ")
-                && !segment.starts_with("Row ")
-        })
+        .filter(|segment| !segment.is_empty())
         .collect::<Vec<_>>();
+    let data_start =
+        segments.iter().position(|segment| !segment.contains(": ")).map_or(0, |index| index + 1);
 
     let mut key_value_pairs = Vec::new();
-    for segment in &segments {
+    for segment in &segments[data_start..] {
         let Some((key, value)) = segment.split_once(": ") else {
             continue;
         };
-        if key == "Index" && is_numeric_index_value(value) {
-            continue;
-        }
         let value = normalize_table_cell_text(value);
         if value.is_empty() {
             continue;
@@ -95,17 +91,8 @@ pub fn build_graph_table_row_text(
     let attributes = key_value_pairs
         .iter()
         .filter(|(key, value)| attribute_allowed_for_graph(key, value, profile))
-        .filter(|(key, value)| {
-            let normalized_key = normalize_table_graph_key(key);
-            subject.as_ref().is_none_or(|subject| {
-                if matches!(normalized_key.as_str(), "first name" | "last name" | "full name") {
-                    return false;
-                }
-                !subject.eq_ignore_ascii_case(&format!("{key}: {value}"))
-                    && !subject.ends_with(value.as_str())
-            })
-        })
         .map(|(key, value)| format!("{key}: {value}"))
+        .filter(|attribute| subject.as_ref() != Some(attribute))
         .collect::<Vec<_>>();
 
     let filtered = subject.into_iter().chain(attributes).collect::<Vec<_>>();
@@ -129,39 +116,45 @@ fn attribute_allowed_for_graph(
         return profile.allows_attribute(key);
     }
 
-    !is_ignored_graph_key(key)
+    true
 }
 
 fn is_graph_subject_candidate(summary: &TableColumnSummary) -> bool {
-    if matches!(summary.value_kind, TableSummaryValueKind::Numeric)
-        || matches!(
-            summary.value_shape,
-            TableSummaryValueShape::Identifier | TableSummaryValueShape::Url
-        )
+    if summary.value_kind == TableSummaryValueKind::Numeric
+        || summary.value_shape != TableSummaryValueShape::Label
     {
         return false;
     }
 
-    summary.non_empty_count > 0
-        && summary.distinct_count.saturating_mul(5) >= summary.non_empty_count.saturating_mul(4)
+    ratio_at_least(summary.non_empty_count, summary.row_count, 4, 5)
+        && ratio_at_least(summary.distinct_count, summary.non_empty_count, 4, 5)
 }
 
 fn is_graph_attribute_candidate(summary: &TableColumnSummary) -> bool {
-    if matches!(summary.value_kind, TableSummaryValueKind::Numeric)
+    if is_low_signal_graph_column(summary) {
+        return false;
+    }
+
+    ratio_at_least(summary.non_empty_count, summary.row_count, 1, 2)
+        && summary.most_frequent_count > 1
+}
+
+const fn is_low_signal_graph_column(summary: &TableColumnSummary) -> bool {
+    matches!(summary.value_kind, TableSummaryValueKind::Numeric)
         || matches!(
             summary.value_shape,
             TableSummaryValueShape::Identifier | TableSummaryValueShape::Url
         )
-    {
-        return false;
-    }
-
-    summary.most_frequent_count > 1
 }
 
-fn is_numeric_index_value(value: &str) -> bool {
-    let trimmed = value.trim();
-    !trimmed.is_empty() && trimmed.chars().all(|character| character.is_ascii_digit())
+const fn ratio_at_least(
+    value: usize,
+    total: usize,
+    minimum_numerator: usize,
+    minimum_denominator: usize,
+) -> bool {
+    total > 0
+        && value.saturating_mul(minimum_denominator) >= total.saturating_mul(minimum_numerator)
 }
 
 fn is_synthetic_column_key(key: &str) -> bool {
@@ -179,75 +172,10 @@ fn is_numeric_like_literal(value: &str) -> bool {
         })
 }
 
-fn is_ignored_graph_key(key: &str) -> bool {
-    let normalized = normalize_table_graph_key(key);
-    matches!(
-        normalized.as_str(),
-        "index"
-            | "row"
-            | "sheet"
-            | "table"
-            | "sex"
-            | "gender"
-            | "email"
-            | "phone"
-            | "mobile"
-            | "fax"
-            | "website"
-            | "url"
-            | "date"
-            | "date of birth"
-            | "birth date"
-            | "dob"
-            | "created at"
-            | "updated at"
-    ) || normalized.ends_with(" id")
-        || normalized.ends_with(" code")
-        || normalized.ends_with(" email")
-        || normalized.ends_with(" phone")
-        || normalized.ends_with(" date")
-        || normalized.ends_with(" url")
-}
-
 fn build_graph_subject(
     pairs: &[(String, String)],
     profile: Option<&TableGraphProfile>,
 ) -> Option<String> {
-    let value_for = |target: &str| {
-        pairs.iter().find_map(|(key, value)| {
-            if normalize_table_graph_key(key) == target { Some(value.as_str()) } else { None }
-        })
-    };
-
-    if let (Some(first_name), Some(last_name)) = (value_for("first name"), value_for("last name")) {
-        let subject = format!("{first_name} {last_name}").trim().to_string();
-        if !subject.is_empty() {
-            return Some(format!("Person: {subject}"));
-        }
-    }
-
-    if let Some(full_name) = value_for("full name") {
-        return Some(format!("Person: {full_name}"));
-    }
-
-    for (target, label) in [
-        ("product name", "Product"),
-        ("product", "Product"),
-        ("organization name", "Organization"),
-        ("organization", "Organization"),
-        ("company name", "Organization"),
-        ("company", "Organization"),
-        ("customer name", "Customer"),
-        ("customer", "Customer"),
-        ("lead name", "Lead"),
-        ("lead", "Lead"),
-        ("name", "Name"),
-    ] {
-        if let Some(value) = value_for(target) {
-            return Some(format!("{label}: {value}"));
-        }
-    }
-
     profile.and_then(|profile| {
         pairs.iter().find_map(|(key, value)| {
             profile.prefers_subject(key).then(|| format!("{key}: {value}"))
@@ -352,15 +280,88 @@ mod tests {
     }
 
     #[test]
-    fn graph_text_falls_back_to_header_heuristics_without_profile() {
+    fn graph_text_profile_prefers_well_covered_subject_over_sparse_named_column() {
+        let summaries = build_table_column_summaries(
+            None,
+            None,
+            &["Name".to_string(), "Primary".to_string(), "Group".to_string()],
+            &[
+                vec!["Legacy".to_string(), "Alpha".to_string(), "Shared".to_string()],
+                vec![String::new(), "Beta".to_string(), "Shared".to_string()],
+                vec![String::new(), "Gamma".to_string(), "Shared".to_string()],
+                vec![String::new(), "Delta".to_string(), "Shared".to_string()],
+                vec![String::new(), "Epsilon".to_string(), "Shared".to_string()],
+            ],
+        );
+        let profile = build_table_graph_profile(&summaries);
         let text = build_graph_table_row_text(
-            "Sheet: people-100 | Row 1 | Index: 1 | User Id: 88F7B33d2bcf9f5 | First Name: Shelby | Last Name: Terrell | Sex: Male | Email: elijah57@example.net | Phone: 001-084-906-7849x73518 | Date of birth: 1945-10-26 | Job Title: Games developer",
+            "Row 1 | Name: Legacy | Primary: Alpha | Group: Shared",
+            Some(&profile),
+        )
+        .expect("graph text");
+
+        assert!(!profile.prefers_subject("Name"));
+        assert!(profile.prefers_subject("Primary"));
+        assert_eq!(text, "Primary: Alpha | Group: Shared");
+    }
+
+    #[test]
+    fn graph_text_profile_does_not_use_narrative_column_as_subject() {
+        let summaries = build_table_column_summaries(
+            None,
+            None,
+            &["Narrative".to_string(), "Label".to_string(), "Group".to_string()],
+            &[
+                vec![
+                    "segment alpha carries eight distinct narrative tokens now".to_string(),
+                    "Alpha".to_string(),
+                    "Shared".to_string(),
+                ],
+                vec![
+                    "segment beta carries eight distinct narrative tokens now".to_string(),
+                    "Beta".to_string(),
+                    "Shared".to_string(),
+                ],
+                vec![
+                    "segment gamma carries eight distinct narrative tokens now".to_string(),
+                    "Gamma".to_string(),
+                    "Shared".to_string(),
+                ],
+            ],
+        );
+        let profile = build_table_graph_profile(&summaries);
+        let text = build_graph_table_row_text(
+            "Row 1 | Narrative: segment alpha carries eight distinct narrative tokens now | Label: Alpha | Group: Shared",
+            Some(&profile),
+        )
+        .expect("graph text");
+
+        assert!(!profile.prefers_subject("Narrative"));
+        assert_eq!(text, "Label: Alpha | Group: Shared");
+    }
+
+    #[test]
+    fn graph_text_without_profile_preserves_source_pairs_without_synthesizing_ontology() {
+        let text = build_graph_table_row_text(
+            "Sheet: sample | Row 1 | First Name: Shelby | Last Name: Terrell | Category: Analyst",
             None,
         )
         .expect("graph text");
 
-        assert_eq!(text, "Person: Shelby Terrell | Job Title: Games developer");
-        assert_eq!(normalize_table_graph_key("Job Title"), "job title");
+        assert_eq!(text, "First Name: Shelby | Last Name: Terrell | Category: Analyst");
+    }
+
+    #[test]
+    fn graph_text_preserves_source_header_that_starts_like_row_metadata() {
+        let text = build_graph_table_row_text("Row 1 | Row Label: Alpha | Secondary: Beta", None)
+            .expect("graph text");
+
+        assert_eq!(text, "Row Label: Alpha | Secondary: Beta");
+    }
+
+    #[test]
+    fn table_graph_key_normalization_preserves_unicode_letters() {
+        assert_eq!(normalize_table_graph_key("Δείγμα Поле"), "δείγμα поле");
     }
 
     #[test]

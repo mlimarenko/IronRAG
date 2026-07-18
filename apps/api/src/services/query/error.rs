@@ -2,6 +2,7 @@ use thiserror::Error;
 use uuid::Uuid;
 
 use crate::{
+    integrations::retry::ProviderCallError,
     interfaces::http::router_support::ApiError,
     services::{
         ingest::{cancellation::StageError, error::IngestServiceError},
@@ -25,6 +26,8 @@ pub enum QueryServiceError {
     CacheUnavailable { message: String },
     #[error("query operation cancelled")]
     Cancelled,
+    #[error("query execution deadline exceeded")]
+    DeadlineExceeded,
     #[error("query repository failure: {0}")]
     Repository(#[from] sqlx::Error),
     #[error("query internal failure: {0}")]
@@ -33,11 +36,35 @@ pub enum QueryServiceError {
 
 impl From<anyhow::Error> for QueryServiceError {
     fn from(error: anyhow::Error) -> Self {
-        let message = error.to_string();
-        match Self::from_message(message) {
-            Self::Internal(_) => Self::Internal(error),
-            classified => classified,
-        }
+        let error = match error.downcast::<Self>() {
+            Ok(error) => return error,
+            Err(error) => error,
+        };
+        let error = match error.downcast::<ProviderCallError>() {
+            Ok(error) => return error.into(),
+            Err(error) => error,
+        };
+        let error = match error.downcast::<IngestServiceError>() {
+            Ok(error) => return error.into(),
+            Err(error) => error,
+        };
+        let error = match error.downcast::<KnowledgeServiceError>() {
+            Ok(error) => return error.into(),
+            Err(error) => error,
+        };
+        let error = match error.downcast::<ApiError>() {
+            Ok(error) => return error.into(),
+            Err(error) => error,
+        };
+        let error = match error.downcast::<StageError>() {
+            Ok(error) => return error.into(),
+            Err(error) => error,
+        };
+        let error = match error.downcast::<sqlx::Error>() {
+            Ok(error) => return Self::Repository(error),
+            Err(error) => error,
+        };
+        Self::Internal(error)
     }
 }
 
@@ -52,6 +79,7 @@ impl QueryServiceError {
             Self::ProviderUnavailable { .. } => "QueryServiceError::ProviderUnavailable",
             Self::CacheUnavailable { .. } => "QueryServiceError::CacheUnavailable",
             Self::Cancelled => "QueryServiceError::Cancelled",
+            Self::DeadlineExceeded => "QueryServiceError::DeadlineExceeded",
             Self::Repository(_) => "QueryServiceError::Repository",
             Self::Internal(_) => "QueryServiceError::Internal",
         }
@@ -60,46 +88,19 @@ impl QueryServiceError {
     /// Whether a failure of the chunk-embedding stage should KEEP the chunk
     /// vectors already persisted for this revision instead of wiping them.
     ///
-    /// Transient/retryable failures (provider 429/timeout, vector-store write
-    /// blip) leave the successfully persisted batches valid: the next attempt's
-    /// resume path (`load_current_revision_chunk_vector_ids`) re-uses them and
-    /// only embeds the missing remainder, so a blip at 95% of a large document
-    /// no longer throws away every paid-for vector. Terminal/correctness
-    /// failures (cancellation, dimension/coverage violations) must still wipe
-    /// the partial state because reusing it on a later run could be wrong.
+    /// Explicitly typed provider failures leave successfully persisted batches
+    /// valid: the next attempt's resume path re-uses them and embeds only the
+    /// missing remainder. Repository, cancellation, correctness, and unknown
+    /// failures must wipe partial state because reuse may be unsafe.
     #[must_use]
     pub const fn preserves_partial_vectors(&self) -> bool {
         matches!(self, Self::ProviderUnavailable { .. })
     }
+}
 
-    #[must_use]
-    pub fn from_message(message: impl Into<String>) -> Self {
-        let message = message.into();
-        let normalized = message.to_ascii_lowercase();
-        if normalized.contains("not found") {
-            return Self::NotFound { message };
-        }
-        if normalized.contains("not configured") || normalized.contains("no active") {
-            return Self::BindingNotConfigured { message };
-        }
-        if normalized.contains("provider")
-            || normalized.contains("llm")
-            || normalized.contains("embedding")
-            || normalized.contains("upstream")
-            || normalized.contains("invalid model output")
-        {
-            return Self::ProviderUnavailable { message };
-        }
-        if normalized.contains("redis") || normalized.contains("cache") {
-            return Self::CacheUnavailable { message };
-        }
-        if normalized.contains("cancelled") || normalized.contains("canceled") {
-            return Self::Cancelled;
-        }
-        if normalized.contains("conflict") || normalized.contains("invalid state") {
-            return Self::StateConflict { message };
-        }
-        Self::Internal(anyhow::anyhow!(message))
+impl From<ProviderCallError> for QueryServiceError {
+    fn from(error: ProviderCallError) -> Self {
+        Self::ProviderUnavailable { message: error.to_string() }
     }
 }
 
@@ -118,7 +119,7 @@ impl From<IngestServiceError> for QueryServiceError {
             IngestServiceError::StateConflict { message } => Self::StateConflict { message },
             IngestServiceError::Cancelled => Self::Cancelled,
             IngestServiceError::Repository(error) => Self::Repository(error),
-            other => Self::Internal(anyhow::anyhow!(other.to_string())),
+            IngestServiceError::Internal(error) => Self::Internal(error),
         }
     }
 }
@@ -135,7 +136,7 @@ impl From<KnowledgeServiceError> for QueryServiceError {
                 Self::CacheUnavailable { message }
             }
             KnowledgeServiceError::Repository(error) => Self::Repository(error),
-            other => Self::Internal(anyhow::anyhow!(other.to_string())),
+            KnowledgeServiceError::Internal(error) => Self::Internal(error),
         }
     }
 }
@@ -151,17 +152,19 @@ impl From<ApiError> for QueryServiceError {
         match error {
             ApiError::NotFound(message) => Self::NotFound { message },
             ApiError::ProviderFailure(message) => Self::ProviderUnavailable { message },
+            ApiError::GatewayTimeout { .. } => Self::DeadlineExceeded,
             ApiError::KnowledgeNotReady(message)
             | ApiError::Conflict(message)
             | ApiError::UnreadableDocument(message)
             | ApiError::StaleRevision(message)
             | ApiError::ConflictingMutation(message)
+            | ApiError::BootstrapAlreadyClaimed(message)
+            | ApiError::IdempotencyConflict(message)
+            | ApiError::MissingPrice(message)
             | ApiError::GraphWriteContention(message)
             | ApiError::GraphPersistenceIntegrity(message) => Self::StateConflict { message },
-            ApiError::Internal => {
-                Self::Internal(anyhow::anyhow!("query dependency returned internal error"))
-            }
-            other => Self::from_message(other.to_string()),
+            ApiError::SettlementRefreshFailed(message) => Self::StateConflict { message },
+            other => Self::Internal(anyhow::Error::new(other)),
         }
     }
 }
@@ -169,11 +172,11 @@ impl From<ApiError> for QueryServiceError {
 #[cfg(test)]
 mod tests {
     use super::QueryServiceError;
+    use crate::integrations::retry::ProviderCallError;
     use uuid::Uuid;
 
-    // BUG B: only transient/retryable provider failures preserve the partial
-    // vectors already persisted for a revision; terminal/correctness failures
-    // must still wipe them so stale partial state is never reused.
+    // BUG B: only explicitly typed provider failures preserve partial vectors;
+    // terminal, repository, and unknown failures must still wipe them.
     #[test]
     fn only_provider_unavailable_preserves_partial_vectors() {
         assert!(
@@ -195,14 +198,34 @@ mod tests {
         );
     }
 
-    // A transient embedding-provider error message classifies as
-    // ProviderUnavailable, so the embed failure path preserves partial vectors.
     #[test]
-    fn transient_embedding_error_classifies_as_provider_unavailable() {
-        let error = QueryServiceError::from_message(
-            "failed to embed chunk batch for revision: upstream timeout",
-        );
-        assert!(matches!(error, QueryServiceError::ProviderUnavailable { .. }));
+    fn unknown_anyhow_messages_are_always_internal() {
+        for message in [
+            "library not found",
+            "binding not configured",
+            "provider embedding upstream timeout",
+            "redis cache unavailable",
+            "operation cancelled",
+            "invalid state conflict",
+        ] {
+            let error = QueryServiceError::from(anyhow::anyhow!(message));
+
+            assert!(matches!(&error, QueryServiceError::Internal(_)), "{message}");
+            assert!(!error.preserves_partial_vectors(), "{message}");
+        }
+    }
+
+    #[test]
+    fn anyhow_context_preserves_typed_provider_failure() {
+        let error = anyhow::Error::new(ProviderCallError::protocol("opaque provider failure"))
+            .context("query embedding boundary failed");
+
+        let error = QueryServiceError::from(error);
+        assert!(matches!(
+            &error,
+            QueryServiceError::ProviderUnavailable { message }
+                if message == "opaque provider failure"
+        ));
         assert!(error.preserves_partial_vectors());
     }
 }

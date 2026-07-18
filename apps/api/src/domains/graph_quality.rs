@@ -19,7 +19,7 @@ pub struct ExtractionRecoverySummary {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
-pub enum GraphSummaryConfidenceStatus {
+pub(crate) enum GraphSummaryConfidenceStatus {
     Strong,
     Partial,
     Weak,

@@ -14,13 +14,18 @@ spec:
       labels:
         {{- include "ironrag.selectorLabels" . | nindent 8 }}
         app.kubernetes.io/component: startup
-      {{- with .Values.podAnnotations }}
       annotations:
-        {{- toYaml . | nindent 8 }}
-      {{- end }}
+        {{- include "ironrag.runtimePodAnnotations" . | nindent 8 }}
     spec:
       serviceAccountName: {{ include "ironrag.serviceAccountName" . }}
+      automountServiceAccountToken: false
       restartPolicy: OnFailure
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: {{ .Values.security.runAsUser | default 1000 }}
+        runAsGroup: {{ .Values.security.runAsUser | default 1000 }}
+        seccompProfile:
+          type: RuntimeDefault
       initContainers:
         {{- include "ironrag.startupDependencyWaitInitContainer" . | nindent 8 }}
       containers:
@@ -32,6 +37,9 @@ spec:
             runAsUser: {{ .Values.security.runAsUser | default 1000 }}
             readOnlyRootFilesystem: true
             allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
           envFrom:
             - configMapRef:
                 name: {{ include "ironrag.fullname" . }}-runtime
@@ -54,6 +62,7 @@ spec:
           resources:
             {{- toYaml .Values.startup.resources | nindent 12 }}
       volumes:
+        {{- include "ironrag.startupWaitKubeApiVolume" . | nindent 8 }}
         - name: tmp
           emptyDir:
             # Disk-backed (node ephemeral storage), NOT medium: Memory. A

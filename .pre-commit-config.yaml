@@ -14,7 +14,9 @@ repos:
         exclude: ^apps/web/src/shared/api/generated/|^apps/web/src/shared/api/mocks/handlers\.ts
         stages: [pre-commit]
       - id: end-of-file-fixer
-        exclude: ^apps/web/src/shared/api/generated/|^apps/web/src/shared/api/mocks/handlers\.ts
+        # swagger-ui-* are vendored verbatim from swagger-ui-dist and byte-hash
+        # checked by frontend-swagger-check; appending a newline breaks the gate.
+        exclude: ^apps/web/src/shared/api/generated/|^apps/web/src/shared/api/mocks/handlers\.ts|^apps/web/public/swagger-ui
         stages: [pre-commit]
       - id: check-merge-conflict
         stages: [pre-commit]
@@ -29,16 +31,40 @@ repos:
       - id: mixed-line-ending
         stages: [pre-commit]
 
-  - repo: https://github.com/Yelp/detect-secrets
-    rev: v1.5.0
+  - repo: https://github.com/gitleaks/gitleaks
+    # v8.30.1 commit; a full SHA prevents a mutable tag from changing the hook.
+    rev: 83d9cd684c87d95d656c1458ef04895a7f1cbd8e
     hooks:
-      - id: detect-secrets
-        args: ["--baseline", ".secrets.baseline"]
-        exclude: ^(\.secrets\.baseline|apps/web/pnpm-lock\.yaml|apps/web/package-lock\.json)$
+      - id: gitleaks
+        args: ["--ignore-gitleaks-allow", "--no-banner", "--no-color"]
         stages: [pre-commit]
 
   - repo: local
     hooks:
+      - id: architecture-check
+        name: backend architecture boundaries
+        entry: python3 scripts/ops/lint_architecture.py
+        language: system
+        files: ^(apps/api/src/.*\.rs|scripts/ops/(lint_architecture|test_lint_architecture)\.py)$
+        pass_filenames: false
+        stages: [pre-commit]
+
+      - id: blanket-suppression-check
+        name: reject file-wide lint suppressions
+        entry: make blanket-suppression-check
+        language: system
+        files: \.(cjs|js|jsx|mjs|py|rs|ts|tsx)$
+        pass_filenames: false
+        stages: [pre-commit]
+
+      - id: migration-check
+        name: migration policy and frozen-file integrity
+        entry: make migration-check
+        language: system
+        files: ^(apps/api/migrations/.*\.sql|scripts/ops/lint_migrations\.sh|Makefile)$
+        pass_filenames: false
+        stages: [pre-commit]
+
       - id: cargo-fmt
         name: cargo fmt
         entry: cargo fmt --all -- --check
@@ -57,9 +83,17 @@ repos:
 
       - id: eslint
         name: eslint
-        entry: bash -c 'cd apps/web && npx eslint --no-warn-ignored "${@/#apps\/web\//}"' --
+        entry: bash -c 'cd apps/web && ./node_modules/.bin/eslint --no-warn-ignored "${@/#apps\/web\//}"' --
         language: system
         files: ^apps/web/.*\.(ts|tsx)$
+        stages: [pre-commit]
+
+      - id: prettier
+        name: prettier
+        entry: make frontend-format-check
+        language: system
+        files: ^apps/web/
+        pass_filenames: false
         stages: [pre-commit]
 
       - id: tsc
@@ -75,5 +109,12 @@ repos:
         entry: make frontend-test
         language: system
         files: ^apps/web/
+        pass_filenames: false
+        stages: [pre-push]
+
+      - id: duplication-check
+        name: exact duplication ratchet
+        entry: make duplication-check
+        language: system
         pass_filenames: false
         stages: [pre-push]

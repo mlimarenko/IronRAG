@@ -14,7 +14,7 @@ use uuid::Uuid;
 
 use crate::{
     app::state::AppState, infra::repositories::catalog_repository,
-    services::content::service::PromoteHeadCommand,
+    interfaces::http::router_support::ApiError, services::content::service::PromoteHeadCommand,
 };
 
 #[derive(Debug, FromRow)]
@@ -32,7 +32,7 @@ pub const DEFAULT_RECOVERY_MAX_ATTEMPTS: i32 = 3;
 /// Cool-down between successive auto-recovery attempts on the same
 /// document. Spaces out retries so a flaky upstream provider does not
 /// burn the entire budget in seconds.
-pub const DEFAULT_RECOVERY_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(60 * 60);
+pub const DEFAULT_RECOVERY_COOLDOWN: std::time::Duration = std::time::Duration::from_hours(1);
 
 /// Aggregate report for one [`promote_null_heads`] run.
 ///
@@ -317,7 +317,7 @@ pub async fn promote_null_heads_auto(
                     let dead_lettered = record_failure(
                         pool,
                         candidate.document_id,
-                        &error_code,
+                        error_code,
                         candidate.last_recovery_error_code.as_deref(),
                         candidate.recovery_attempts_count,
                         DEFAULT_RECOVERY_MAX_ATTEMPTS,
@@ -371,7 +371,7 @@ async fn clear_recovery_state(pool: &sqlx::PgPool, document_id: Uuid) -> Result<
 }
 
 /// Record a failed recovery attempt, returning `true` if the row
-/// ended up dead-lettered (i.e. attempts ≥ max_attempts with the same
+/// ended up dead-lettered (i.e. attempts ≥ `max_attempts` with the same
 /// error code).
 async fn record_failure(
     pool: &sqlx::PgPool,
@@ -401,16 +401,13 @@ async fn record_failure(
     Ok(dead_letter)
 }
 
-/// Reduce an arbitrary error to a stable string used to bucket retries.
+/// Reduce an API error to its stable typed kind used to bucket retries.
 /// Two failures share a bucket when this returns the same code, which
 /// is what the rate-limit treats as "same error" — three consecutive
 /// hits with the same bucket inside the cool-down window cross into
-/// dead-letter. The bucket is the first 64 chars of the error
-/// `Display`, lowercased; that is short enough to round-trip through
-/// the `text` column cheaply and stable enough that the same error
-/// type produces the same bucket across runs.
-fn classify_error(error: &dyn std::error::Error) -> String {
-    error.to_string().chars().take(64).collect::<String>().to_ascii_lowercase()
+/// dead-letter. Dynamic messages never participate in retry identity.
+fn classify_error(error: &ApiError) -> &'static str {
+    error.kind()
 }
 
 /// Clear the `dead_letter_at` mark and counters for a document so the
@@ -437,25 +434,19 @@ mod tests {
     use super::*;
 
     #[test]
-    fn classify_truncates_to_sixty_four_chars() {
-        let long = "x".repeat(200);
-        let err = anyhow::anyhow!("{long}");
-        let bucket = classify_error(err.as_ref());
-        assert_eq!(bucket.len(), 64);
-        assert!(bucket.chars().all(|c| c == 'x'));
+    fn classify_groups_same_api_error_kind_regardless_of_message() {
+        let first = ApiError::BadRequest("first dynamic detail".to_string());
+        let second = ApiError::BadRequest("completely different detail".to_string());
+
+        assert_eq!(classify_error(&first), classify_error(&second));
+        assert_eq!(classify_error(&first), "bad_request");
     }
 
     #[test]
-    fn classify_lowercases_for_stable_buckets() {
-        let err = anyhow::anyhow!("Postgres Connection Refused on 5432");
-        let bucket = classify_error(err.as_ref());
-        assert_eq!(bucket, "postgres connection refused on 5432");
-    }
+    fn classify_keeps_distinct_api_error_kinds_separate() {
+        let bad_request = ApiError::BadRequest("same detail".to_string());
+        let conflict = ApiError::Conflict("same detail".to_string());
 
-    #[test]
-    fn classify_distinguishes_distinct_messages() {
-        let a = anyhow::anyhow!("provider returned 502 bad gateway");
-        let b = anyhow::anyhow!("provider returned 504 gateway timeout");
-        assert_ne!(classify_error(a.as_ref()), classify_error(b.as_ref()));
+        assert_ne!(classify_error(&bad_request), classify_error(&conflict));
     }
 }

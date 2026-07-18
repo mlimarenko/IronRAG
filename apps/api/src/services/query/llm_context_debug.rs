@@ -2,7 +2,7 @@
 //! iteration, used by the assistant's debug panel to show the user
 //! what actually reached the provider.
 //!
-//! The grounded-answer path hands a Vec<ChatMessage> to the LLM for
+//! The grounded-answer path hands a `Vec<ChatMessage>` to the LLM for
 //! the initial fixed-evidence answer and, when needed, a literal-
 //! fidelity revision over the same evidence. This module lets the
 //! operator inspect those exact wire payloads after the fact.
@@ -160,10 +160,10 @@ pub async fn upsert_snapshot(
     // queries, retrieval lanes) unless the snapshot already carries them.
     if snapshot.spans.is_empty() {
         let spans = crate::services::query::turn_spans::take_execution_spans(snapshot.execution_id);
-        if !spans.is_empty() {
-            if let Ok(spans_value) = serde_json::to_value(&spans) {
-                snapshot_json["spans"] = spans_value;
-            }
+        if !spans.is_empty()
+            && let Ok(spans_value) = serde_json::to_value(&spans)
+        {
+            snapshot_json["spans"] = spans_value;
         }
     }
     sqlx::query(

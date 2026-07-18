@@ -31,10 +31,33 @@ pub enum ContentServiceError {
 
 impl From<anyhow::Error> for ContentServiceError {
     fn from(error: anyhow::Error) -> Self {
-        let message = error.to_string();
-        match Self::from_message(message) {
-            Self::InvalidRequest { .. } => Self::Internal(error),
-            classified => classified,
+        let error = match error.downcast::<Self>() {
+            Ok(error) => return error,
+            Err(error) => error,
+        };
+        let error = match error.downcast::<ApiError>() {
+            Ok(error) => return error.into(),
+            Err(error) => error,
+        };
+        let error = match error.downcast::<StageError>() {
+            Ok(error) => return error.into(),
+            Err(error) => error,
+        };
+        let error = match error.downcast::<IngestServiceError>() {
+            Ok(error) => return error.into(),
+            Err(error) => error,
+        };
+        let error = match error.downcast::<GraphServiceError>() {
+            Ok(error) => return error.into(),
+            Err(error) => error,
+        };
+        let error = match error.downcast::<KnowledgeServiceError>() {
+            Ok(error) => return error.into(),
+            Err(error) => error,
+        };
+        match error.downcast::<sqlx::Error>() {
+            Ok(error) => Self::Repository(error),
+            Err(error) => Self::Internal(error),
         }
     }
 }
@@ -52,41 +75,6 @@ impl ContentServiceError {
             Self::Repository(_) => "ContentServiceError::Repository",
             Self::Internal(_) => "ContentServiceError::Internal",
         }
-    }
-
-    #[must_use]
-    pub fn from_message(message: impl Into<String>) -> Self {
-        let message = message.into();
-        let normalized = message.to_ascii_lowercase();
-        if normalized.contains("not found") || normalized.contains("no delivery attempt found") {
-            return Self::NotFound { message };
-        }
-        if normalized.contains("already exists")
-            || normalized.contains("conflict")
-            || normalized.contains("stale revision")
-            || normalized.contains("still processing")
-        {
-            return Self::StateConflict { message };
-        }
-        if normalized.contains("provider")
-            || normalized.contains("llm")
-            || normalized.contains("embedding")
-            || normalized.contains("upstream")
-        {
-            return Self::ProviderUnavailable { message };
-        }
-        if normalized.contains("storage")
-            || normalized.contains("object storage")
-            || normalized.contains("s3")
-            || normalized.contains("stored content")
-            || normalized.contains("filesystem")
-        {
-            return Self::StorageUnavailable { message };
-        }
-        if normalized.contains("cancelled") || normalized.contains("canceled") {
-            return Self::Cancelled;
-        }
-        Self::InvalidRequest { message }
     }
 }
 
@@ -175,5 +163,59 @@ impl From<KnowledgeServiceError> for ContentServiceError {
             KnowledgeServiceError::Repository(error) => Self::Repository(error),
             other => Self::Internal(anyhow::anyhow!(other.to_string())),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unknown_anyhow_messages_are_always_internal() {
+        for message in [
+            "resource not found",
+            "state conflict",
+            "provider upstream failure",
+            "object storage unavailable",
+            "operation cancelled",
+        ] {
+            let error = ContentServiceError::from(anyhow::anyhow!(message));
+
+            assert!(matches!(error, ContentServiceError::Internal(_)), "{message}");
+        }
+    }
+
+    #[test]
+    fn anyhow_context_preserves_typed_api_error() {
+        let error = anyhow::Error::new(ApiError::ProviderFailure("opaque".to_string()))
+            .context("content boundary");
+
+        assert!(matches!(
+            ContentServiceError::from(error),
+            ContentServiceError::ProviderUnavailable { message } if message == "opaque"
+        ));
+    }
+
+    #[test]
+    fn anyhow_context_preserves_typed_graph_error() {
+        let error = anyhow::Error::new(GraphServiceError::PersistenceIntegrity {
+            message: "opaque".to_string(),
+        })
+        .context("content graph boundary");
+
+        assert!(matches!(
+            ContentServiceError::from(error),
+            ContentServiceError::StateConflict { message } if message == "opaque"
+        ));
+    }
+
+    #[test]
+    fn anyhow_context_preserves_typed_repository_error() {
+        let error = anyhow::Error::new(sqlx::Error::RowNotFound).context("content query failed");
+
+        assert!(matches!(
+            ContentServiceError::from(error),
+            ContentServiceError::Repository(sqlx::Error::RowNotFound)
+        ));
     }
 }

@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use anyhow::Context;
 use chrono::Utc;
@@ -29,27 +29,124 @@ use crate::{
     services::query::execution::{
         QueryChunkReferenceSnapshot, RuntimeMatchedEntity, RuntimeMatchedRelationship,
     },
+    shared::extraction::technical_facts::{TechnicalFactKind, TechnicalFactQualifier},
 };
 
 const CONTEXT_BUNDLE_GRAPH_SEED_LIMIT: usize = 4;
 const CONTEXT_BUNDLE_GRAPH_TRAVERSAL_DEPTH: usize = 1;
 const CONTEXT_BUNDLE_GRAPH_TRAVERSAL_LIMIT_MULTIPLIER: usize = 2;
 
-pub(crate) async fn assemble_context_bundle(
+pub(crate) struct AssembleContextBundleRequest<'a> {
+    pub(crate) state: &'a AppState,
+    pub(crate) conversation: &'a query_repository::QueryConversationRow,
+    pub(crate) execution_id: Uuid,
+    pub(crate) bundle_id: Uuid,
+    pub(crate) query_text: &'a str,
+    pub(crate) query_ir: &'a crate::domains::query_ir::QueryIR,
+    pub(crate) requested_mode: RuntimeQueryMode,
+    pub(crate) top_k: usize,
+    pub(crate) include_debug: bool,
+    pub(crate) resolved_mode: RuntimeQueryMode,
+    pub(crate) answer_chunk_references: &'a [QueryChunkReferenceSnapshot],
+    pub(crate) answer_entity_references: &'a [RuntimeMatchedEntity],
+    pub(crate) answer_relation_references: &'a [RuntimeMatchedRelationship],
+}
+
+fn merge_lexical_references(
+    fact_hits: &[crate::infra::knowledge_rows::KnowledgeTechnicalFactSearchRow],
+    entity_hits: &[crate::infra::knowledge_rows::KnowledgeEntitySearchRow],
+    relation_hits: &[crate::infra::knowledge_rows::KnowledgeRelationSearchRow],
+    fact_refs: &mut HashMap<Uuid, RankedBundleReference>,
+    entity_refs: &mut HashMap<Uuid, RankedBundleReference>,
+    relation_refs: &mut HashMap<Uuid, RankedBundleReference>,
+) {
+    for (index, hit) in fact_hits.iter().enumerate() {
+        merge_ranked_reference(
+            fact_refs,
+            hit.fact_id,
+            saturating_rank(index),
+            hit.score,
+            if hit.exact_match { "lexical_fact_exact" } else { "lexical_fact" },
+        );
+    }
+    for (index, hit) in entity_hits.iter().enumerate() {
+        merge_ranked_reference(
+            entity_refs,
+            hit.entity_id,
+            saturating_rank(index),
+            hit.score,
+            "lexical_entity",
+        );
+    }
+    for (index, hit) in relation_hits.iter().enumerate() {
+        merge_ranked_reference(
+            relation_refs,
+            hit.relation_id,
+            saturating_rank(index),
+            hit.score,
+            "lexical_relation",
+        );
+    }
+}
+
+async fn persist_context_debug_trace(
     state: &AppState,
     conversation: &query_repository::QueryConversationRow,
     execution_id: Uuid,
     bundle_id: Uuid,
-    query_text: &str,
-    query_ir: &crate::domains::query_ir::QueryIR,
-    requested_mode: RuntimeQueryMode,
-    top_k: usize,
     include_debug: bool,
-    resolved_mode: RuntimeQueryMode,
-    answer_chunk_references: &[QueryChunkReferenceSnapshot],
-    answer_entity_references: &[RuntimeMatchedEntity],
-    answer_relation_references: &[RuntimeMatchedRelationship],
+    started_at: Instant,
+    candidate_summary: serde_json::Value,
+    assembly_diagnostics: serde_json::Value,
+    retrieval_strategy: String,
+    now: chrono::DateTime<Utc>,
 ) -> anyhow::Result<()> {
+    if !include_debug {
+        return Ok(());
+    }
+    let trace = KnowledgeRetrievalTraceRow {
+        trace_id: bundle_id,
+        workspace_id: conversation.workspace_id,
+        library_id: conversation.library_id,
+        query_execution_id: Some(execution_id),
+        bundle_id,
+        trace_state: "ready".to_string(),
+        retrieval_strategy,
+        candidate_counts: candidate_summary,
+        dropped_reasons: json!([]),
+        timing_breakdown: json!({
+            "bundleAssemblyMs": started_at.elapsed().as_millis(),
+        }),
+        diagnostics_json: assembly_diagnostics,
+        created_at: now,
+        updated_at: now,
+    };
+    state
+        .context_store
+        .upsert_trace(&trace)
+        .await
+        .context("failed to upsert knowledge retrieval trace")?;
+    Ok(())
+}
+
+pub(crate) async fn assemble_context_bundle(
+    request: AssembleContextBundleRequest<'_>,
+) -> anyhow::Result<()> {
+    let AssembleContextBundleRequest {
+        state,
+        conversation,
+        execution_id,
+        bundle_id,
+        query_text,
+        query_ir,
+        requested_mode,
+        top_k,
+        include_debug,
+        resolved_mode,
+        answer_chunk_references,
+        answer_entity_references,
+        answer_relation_references,
+    } = request;
     let started_at = Instant::now();
     let candidate_limit = top_k.saturating_mul(3).max(6);
 
@@ -85,35 +182,16 @@ pub(crate) async fn assemble_context_bundle(
     seed_relation_endpoint_refs_from_answer_graph(answer_relation_references, &mut entity_refs);
     seed_relation_refs_from_answer_graph(answer_relation_references, &mut relation_refs);
 
-    for (index, hit) in lexical_fact_hits.iter().enumerate() {
-        merge_ranked_reference(
-            &mut fact_refs,
-            hit.fact_id,
-            saturating_rank(index),
-            hit.score,
-            if hit.exact_match { "lexical_fact_exact" } else { "lexical_fact" },
-        );
-    }
-    for (index, hit) in lexical_entity_hits.iter().enumerate() {
-        merge_ranked_reference(
-            &mut entity_refs,
-            hit.entity_id,
-            saturating_rank(index),
-            hit.score,
-            "lexical_entity",
-        );
-    }
-    for (index, hit) in lexical_relation_hits.iter().enumerate() {
-        merge_ranked_reference(
-            &mut relation_refs,
-            hit.relation_id,
-            saturating_rank(index),
-            hit.score,
-            "lexical_relation",
-        );
-    }
+    merge_lexical_references(
+        &lexical_fact_hits,
+        &lexical_entity_hits,
+        &lexical_relation_hits,
+        &mut fact_refs,
+        &mut entity_refs,
+        &mut relation_refs,
+    );
 
-    let graph_seed_limit = top_k.max(3).min(CONTEXT_BUNDLE_GRAPH_SEED_LIMIT);
+    let graph_seed_limit = top_k.clamp(3, CONTEXT_BUNDLE_GRAPH_SEED_LIMIT);
     let graph_traversal_limit = candidate_limit
         .saturating_mul(CONTEXT_BUNDLE_GRAPH_TRAVERSAL_LIMIT_MULTIPLIER)
         .max(candidate_limit)
@@ -277,7 +355,6 @@ pub(crate) async fn assemble_context_bundle(
             .await
             .context("failed to load chunk rows while assembling query context bundle")?
     };
-    let mut fact_refs = fact_refs;
     let chunk_supported_fact_rows = if selected_chunk_rows.is_empty() {
         Vec::new()
     } else {
@@ -359,7 +436,7 @@ pub(crate) async fn assemble_context_bundle(
         &mut fact_refs,
     );
     merge_technical_fact_rows(&mut fact_rows, &chunk_supported_fact_rows);
-    let selected_fact_ids = top_ranked_ids(&fact_refs, top_k.max(6));
+    let selected_fact_ids = select_diversified_fact_ids(&fact_refs, &fact_rows, top_k.max(6));
     let block_rank_refs = derive_block_rank_refs(
         &KnowledgeContextBundleReferenceSetRow {
             bundle: KnowledgeContextBundleRow {
@@ -407,6 +484,7 @@ pub(crate) async fn assemble_context_bundle(
         "exactLiteralBias": exact_literal_bias,
         "bundleId": bundle_id,
         "queryExecutionId": execution_id,
+        "queryIr": query_ir,
     });
 
     let bundle_row = KnowledgeContextBundleRow {
@@ -453,30 +531,19 @@ pub(crate) async fn assemble_context_bundle(
         .await
         .context("failed to replace bundle evidence edges")?;
 
-    if include_debug {
-        let trace = KnowledgeRetrievalTraceRow {
-            trace_id: bundle_id,
-            workspace_id: conversation.workspace_id,
-            library_id: conversation.library_id,
-            query_execution_id: Some(execution_id),
-            bundle_id,
-            trace_state: "ready".to_string(),
-            retrieval_strategy,
-            candidate_counts: candidate_summary,
-            dropped_reasons: json!([]),
-            timing_breakdown: json!({
-                "bundleAssemblyMs": started_at.elapsed().as_millis(),
-            }),
-            diagnostics_json: assembly_diagnostics,
-            created_at: now,
-            updated_at: now,
-        };
-        state
-            .context_store
-            .upsert_trace(&trace)
-            .await
-            .context("failed to upsert knowledge retrieval trace")?;
-    }
+    persist_context_debug_trace(
+        state,
+        conversation,
+        execution_id,
+        bundle_id,
+        include_debug,
+        started_at,
+        candidate_summary,
+        assembly_diagnostics,
+        retrieval_strategy,
+        now,
+    )
+    .await?;
 
     tracing::info!(
         stage = "query.context_bundle.assembled",
@@ -802,6 +869,80 @@ pub(crate) fn merge_technical_fact_rows(
     });
 }
 
+#[derive(Debug, PartialEq, Eq, Hash)]
+struct TechnicalFactDiversityKey {
+    document_id: Uuid,
+    revision_id: Uuid,
+    fact_kind: TechnicalFactKind,
+    canonical_value: String,
+    qualifiers: Vec<(String, String)>,
+}
+
+#[derive(Debug, PartialEq, Eq, Hash)]
+enum TechnicalFactDiversityIdentity {
+    Known(TechnicalFactDiversityKey),
+    Opaque(Uuid),
+}
+
+pub(crate) fn select_diversified_fact_ids(
+    fact_rank_refs: &HashMap<Uuid, RankedBundleReference>,
+    technical_fact_rows: &[KnowledgeTechnicalFactRow],
+    limit: usize,
+) -> Vec<Uuid> {
+    if limit == 0 || fact_rank_refs.is_empty() {
+        return Vec::new();
+    }
+
+    let facts_by_id =
+        technical_fact_rows.iter().map(|fact| (fact.fact_id, fact)).collect::<HashMap<_, _>>();
+    let mut seen = HashSet::<TechnicalFactDiversityIdentity>::new();
+    let mut selected = Vec::<Uuid>::with_capacity(limit.min(fact_rank_refs.len()));
+
+    for fact_id in top_ranked_ids(fact_rank_refs, fact_rank_refs.len()) {
+        let identity =
+            facts_by_id.get(&fact_id).and_then(|fact| technical_fact_diversity_key(fact)).map_or(
+                TechnicalFactDiversityIdentity::Opaque(fact_id),
+                TechnicalFactDiversityIdentity::Known,
+            );
+        if seen.insert(identity) {
+            selected.push(fact_id);
+            if selected.len() >= limit {
+                break;
+            }
+        }
+    }
+
+    selected
+}
+
+fn technical_fact_diversity_key(
+    fact: &KnowledgeTechnicalFactRow,
+) -> Option<TechnicalFactDiversityKey> {
+    let fact_kind = fact.fact_kind.parse::<TechnicalFactKind>().ok()?;
+    let canonical_value = fact.canonical_value_exact.trim();
+    if canonical_value.is_empty() {
+        return None;
+    }
+    let mut qualifiers =
+        serde_json::from_value::<Vec<TechnicalFactQualifier>>(fact.qualifiers_json.clone())
+            .ok()?
+            .into_iter()
+            .map(|qualifier| {
+                (qualifier.key.trim().to_ascii_lowercase(), qualifier.value.trim().to_string())
+            })
+            .collect::<Vec<_>>();
+    qualifiers.sort();
+    qualifiers.dedup();
+
+    Some(TechnicalFactDiversityKey {
+        document_id: fact.document_id,
+        revision_id: fact.revision_id,
+        fact_kind,
+        canonical_value: canonical_value.to_string(),
+        qualifiers,
+    })
+}
+
 pub(crate) fn derive_fact_rank_refs(
     bundle: &KnowledgeContextBundleReferenceSetRow,
     evidence_rows: &[KnowledgeEvidenceRow],
@@ -1030,6 +1171,15 @@ fn assistant_document_references_from_diagnostics(
             serde_json::from_value::<Vec<AssistantGroundingDocumentReference>>(value).ok()
         })
         .unwrap_or_default()
+}
+
+pub(crate) fn query_ir_from_bundle_diagnostics(
+    assembly_diagnostics: &serde_json::Value,
+) -> Option<crate::domains::query_ir::QueryIR> {
+    assembly_diagnostics
+        .get("queryIr")
+        .cloned()
+        .and_then(|value| serde_json::from_value(value).ok())
 }
 
 async fn load_prepared_segment_revision_info(

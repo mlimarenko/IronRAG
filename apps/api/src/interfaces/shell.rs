@@ -20,8 +20,8 @@ use crate::{
 };
 use ironrag_contracts::{
     auth::{
-        BootstrapAiSetup, BootstrapBindingPurpose, BootstrapCredentialSource,
-        BootstrapProviderBinding, BootstrapProviderBindingBundle, BootstrapStatus, UiLocale,
+        BootstrapAiSetup, BootstrapCredentialSource, BootstrapProviderBinding,
+        BootstrapProviderBindingBundle, BootstrapStatus, UiLocale,
     },
     provider::{
         ProviderAuthScheme as ContractProviderAuthScheme,
@@ -117,12 +117,7 @@ pub(crate) async fn build_shell_bootstrap(
                 let ingestion_ready = library.ingestion_readiness.ready;
                 let query_ready =
                     shell_library_query_ready(&library.runtime_readiness.missing_binding_purposes);
-                let missing_binding_purposes = library
-                    .runtime_readiness
-                    .missing_binding_purposes
-                    .into_iter()
-                    .map(map_bootstrap_binding_purpose)
-                    .collect();
+                let missing_binding_purposes = library.runtime_readiness.missing_binding_purposes;
                 LibrarySummary {
                     id: library.id,
                     workspace_id: library.workspace_id,
@@ -167,14 +162,16 @@ pub(crate) fn parse_ui_locale(locale: &str) -> UiLocale {
     }
 }
 
-fn map_contract_provider_auth_scheme(value: ProviderAuthScheme) -> ContractProviderAuthScheme {
+const fn map_contract_provider_auth_scheme(
+    value: ProviderAuthScheme,
+) -> ContractProviderAuthScheme {
     match value {
         ProviderAuthScheme::Bearer => ContractProviderAuthScheme::Bearer,
         ProviderAuthScheme::RawAuthorization => ContractProviderAuthScheme::RawAuthorization,
     }
 }
 
-fn map_contract_provider_token_limit_parameter(
+const fn map_contract_provider_token_limit_parameter(
     value: ProviderTokenLimitParameter,
 ) -> ContractProviderTokenLimitParameter {
     match value {
@@ -185,7 +182,7 @@ fn map_contract_provider_token_limit_parameter(
     }
 }
 
-fn map_contract_provider_structured_output_mode(
+const fn map_contract_provider_structured_output_mode(
     value: ProviderStructuredOutputMode,
 ) -> ContractProviderStructuredOutputMode {
     match value {
@@ -220,7 +217,9 @@ fn map_contract_provider_runtime_profile(
     }
 }
 
-fn map_contract_provider_base_url_mode(value: ProviderBaseUrlMode) -> ContractProviderBaseUrlMode {
+const fn map_contract_provider_base_url_mode(
+    value: ProviderBaseUrlMode,
+) -> ContractProviderBaseUrlMode {
     match value {
         ProviderBaseUrlMode::Fixed => ContractProviderBaseUrlMode::Fixed,
         ProviderBaseUrlMode::Required => ContractProviderBaseUrlMode::Required,
@@ -228,7 +227,7 @@ fn map_contract_provider_base_url_mode(value: ProviderBaseUrlMode) -> ContractPr
     }
 }
 
-fn map_contract_provider_credential_validation_mode(
+const fn map_contract_provider_credential_validation_mode(
     value: ProviderCredentialValidationMode,
 ) -> ContractProviderCredentialValidationMode {
     match value {
@@ -264,7 +263,7 @@ fn map_contract_provider_base_url_policy(
     }
 }
 
-fn map_contract_provider_model_discovery_mode(
+const fn map_contract_provider_model_discovery_mode(
     value: ProviderModelDiscoveryMode,
 ) -> ContractProviderModelDiscoveryMode {
     match value {
@@ -290,7 +289,7 @@ fn map_contract_provider_model_discovery(
     }
 }
 
-fn map_contract_provider_capability_state(
+const fn map_contract_provider_capability_state(
     value: ProviderCapabilityState,
 ) -> ContractProviderCapabilityState {
     match value {
@@ -345,7 +344,7 @@ pub(crate) fn to_bootstrap_contract(value: &BootstrapStatusOutcome) -> Bootstrap
                     .bindings
                     .iter()
                     .map(|binding| BootstrapProviderBinding {
-                        binding_purpose: map_bootstrap_binding_purpose(binding.binding_purpose),
+                        binding_purpose: binding.binding_purpose,
                         model_catalog_id: binding.model_catalog_id,
                         model_name: binding.model_name.clone(),
                         system_prompt: binding.system_prompt.clone(),
@@ -372,24 +371,12 @@ fn shell_library_query_ready(missing: &[AiBindingPurpose]) -> bool {
     !missing.iter().any(|purpose| {
         matches!(
             purpose,
-            AiBindingPurpose::QueryRetrieve
+            AiBindingPurpose::EmbedChunk
                 | AiBindingPurpose::QueryCompile
                 | AiBindingPurpose::QueryAnswer
+                | AiBindingPurpose::Agent
         )
     })
-}
-
-fn map_bootstrap_binding_purpose(value: AiBindingPurpose) -> BootstrapBindingPurpose {
-    match value {
-        AiBindingPurpose::ExtractText => BootstrapBindingPurpose::ExtractText,
-        AiBindingPurpose::ExtractGraph => BootstrapBindingPurpose::ExtractGraph,
-        AiBindingPurpose::EmbedChunk => BootstrapBindingPurpose::EmbedChunk,
-        AiBindingPurpose::QueryCompile => BootstrapBindingPurpose::QueryCompile,
-        AiBindingPurpose::QueryRetrieve => BootstrapBindingPurpose::QueryRetrieve,
-        AiBindingPurpose::QueryAnswer => BootstrapBindingPurpose::QueryAnswer,
-        AiBindingPurpose::Vision => BootstrapBindingPurpose::Vision,
-        AiBindingPurpose::Agent => BootstrapBindingPurpose::Agent,
-    }
 }
 
 #[cfg(test)]
@@ -397,27 +384,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn bootstrap_binding_purpose_mapping_preserves_provider_router_vocabulary() {
-        assert_eq!(
-            map_bootstrap_binding_purpose(AiBindingPurpose::ExtractText),
-            BootstrapBindingPurpose::ExtractText,
-        );
-        assert_eq!(
-            map_bootstrap_binding_purpose(AiBindingPurpose::QueryRetrieve),
-            BootstrapBindingPurpose::QueryRetrieve,
-        );
-        assert_eq!(
-            map_bootstrap_binding_purpose(AiBindingPurpose::QueryAnswer),
-            BootstrapBindingPurpose::QueryAnswer,
-        );
-    }
-
-    #[test]
-    fn shell_query_readiness_only_blocks_on_query_purposes() {
+    fn shell_query_readiness_blocks_on_required_query_and_agent_purposes() {
         assert!(shell_library_query_ready(&[AiBindingPurpose::ExtractText]));
         assert!(!shell_library_query_ready(&[AiBindingPurpose::QueryCompile]));
         assert!(!shell_library_query_ready(&[AiBindingPurpose::QueryAnswer]));
-        assert!(!shell_library_query_ready(&[AiBindingPurpose::QueryRetrieve]));
+        assert!(!shell_library_query_ready(&[AiBindingPurpose::EmbedChunk]));
+        assert!(!shell_library_query_ready(&[AiBindingPurpose::Agent]));
         assert!(shell_library_query_ready(&[]));
     }
 }

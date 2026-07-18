@@ -1,28 +1,28 @@
-import { useMemo, type Dispatch, type SetStateAction } from "react";
+import { useMemo, type Dispatch, type SetStateAction } from 'react'
 
-import { useLocalStorageState } from "./useLocalStorageState";
+import { useLocalStorageState } from './useLocalStorageState'
 
-const TABLE_STATE_STORAGE_PREFIX = "ironrag_table_state";
+const TABLE_STATE_STORAGE_PREFIX = 'ironrag_table_state'
 
-export type TableSortDirection = "asc" | "desc";
+type TableSortDirection = 'asc' | 'desc'
 
 export type TableSortState<SortKey extends string> = {
-  key: SortKey;
-  direction: TableSortDirection;
-} | null;
+  key: SortKey
+  direction: TableSortDirection
+} | null
 
 type UseTableStateOptions<T> = {
-  tableId: string;
-  defaultValue: T;
-  parse: (raw: unknown) => T;
-};
+  tableId: string
+  defaultValue: T
+  parse: (raw: unknown) => T
+}
 
 export function getTableStateStorageKey(tableId: string): string {
-  return `${TABLE_STATE_STORAGE_PREFIX}:${tableId}`;
+  return `${TABLE_STATE_STORAGE_PREFIX}:${tableId}`
 }
 
 export function isStorageRecord(raw: unknown): raw is Record<string, unknown> {
-  return typeof raw === "object" && raw !== null && !Array.isArray(raw);
+  return typeof raw === 'object' && raw !== null && !Array.isArray(raw)
 }
 
 export function parseNumberOption<Option extends number>(
@@ -30,9 +30,7 @@ export function parseNumberOption<Option extends number>(
   options: readonly Option[],
   fallback: Option,
 ): Option {
-  return typeof raw === "number" && options.some((option) => option === raw)
-    ? (raw as Option)
-    : fallback;
+  return typeof raw === 'number' && options.includes(raw as Option) ? (raw as Option) : fallback
 }
 
 export function parseStringOption<Option extends string>(
@@ -40,9 +38,7 @@ export function parseStringOption<Option extends string>(
   options: readonly Option[],
   fallback: Option,
 ): Option {
-  return typeof raw === "string" && options.some((option) => option === raw)
-    ? (raw as Option)
-    : fallback;
+  return typeof raw === 'string' && options.includes(raw as Option) ? (raw as Option) : fallback
 }
 
 export function parseTableSort<SortKey extends string>(
@@ -50,17 +46,17 @@ export function parseTableSort<SortKey extends string>(
   sortKeys: readonly SortKey[],
   fallback: TableSortState<SortKey>,
 ): TableSortState<SortKey> {
-  if (!isStorageRecord(raw)) return fallback;
-  const key = raw.key;
-  const direction = raw.direction;
+  if (!isStorageRecord(raw)) return fallback
+  const key = raw.key
+  const direction = raw.direction
   if (
-    typeof key === "string" &&
-    sortKeys.some((sortKey) => sortKey === key) &&
-    (direction === "asc" || direction === "desc")
+    typeof key === 'string' &&
+    sortKeys.includes(key as SortKey) &&
+    (direction === 'asc' || direction === 'desc')
   ) {
-    return { key: key as SortKey, direction };
+    return { key: key as SortKey, direction }
   }
-  return fallback;
+  return fallback
 }
 
 export function useTableState<T>({
@@ -68,6 +64,6 @@ export function useTableState<T>({
   defaultValue,
   parse,
 }: UseTableStateOptions<T>): [T, Dispatch<SetStateAction<T>>] {
-  const storageKey = useMemo(() => getTableStateStorageKey(tableId), [tableId]);
-  return useLocalStorageState({ key: storageKey, defaultValue, parse });
+  const storageKey = useMemo(() => getTableStateStorageKey(tableId), [tableId])
+  return useLocalStorageState({ key: storageKey, defaultValue, parse })
 }

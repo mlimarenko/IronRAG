@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 
 use axum::{
     Json,
-    extract::{Path, Query, State},
+    extract::{Path, State},
 };
 use futures::stream::{self, StreamExt};
 use serde::{Deserialize, Serialize};
@@ -20,16 +20,24 @@ use crate::{
     infra::knowledge_rows::{
         KnowledgeChunkRow, KnowledgeChunkSearchRow, KnowledgeChunkVectorSearchRow,
         KnowledgeDocumentRow, KnowledgeEntitySearchRow, KnowledgeEntityVectorSearchRow,
-        KnowledgeEvidenceRow, KnowledgeLibraryGenerationRow, KnowledgeRelationSearchRow,
-        KnowledgeRevisionRow,
+        KnowledgeEvidenceRow, KnowledgeRelationSearchRow, KnowledgeRevisionRow,
     },
     integrations::llm::EmbeddingRequest,
     interfaces::http::{
         auth::AuthContext,
         authorization::{POLICY_KNOWLEDGE_READ, load_library_and_authorize},
-        router_support::ApiError,
+        router_support::{ApiError, map_runtime_lifecycle_error},
     },
-    services::query::vector_dimensions::library_vector_index_dimensions,
+    services::query::{
+        error::QueryServiceError,
+        vector_dimensions::{
+            EmbeddingProfileIndexState, EmbeddingProfileInventoryVersion,
+            ensure_active_embedding_profile_key,
+            ensure_embedding_profile_inventory_version_current,
+            ensure_library_embedding_profile_indexed, load_embedding_profile_inventory_version,
+            validate_embedding_vector_dimensions,
+        },
+    },
     shared::{
         extraction::text_render::repair_technical_layout_noise,
         text_tokens::normalized_alnum_token_sequence_by,
@@ -60,27 +68,16 @@ const DOCUMENT_SOFT_TITLE_SCORE_MAX: f64 = 50.5;
 const DOCUMENT_SOFT_TITLE_LOW_EVIDENCE_MIN_SCALE: f64 = 0.25;
 const DOCUMENT_SOFT_TITLE_IDENTITY_PRESERVE_THRESHOLD: f64 = 1.0;
 
-#[derive(Debug, Deserialize, utoipa::ToSchema, utoipa::IntoParams)]
+/// JSON body for `POST /v1/knowledge/libraries/{libraryId}/search` — the
+/// single hybrid lexical+vector search interface (plan §1.5.1: the one
+/// sanctioned `POST`-that-reads exception in the whole redesign, because
+/// free-text query input does not fit a query string safely/practically).
+/// `text` replaces the former `query` field name to match the plan's wire
+/// contract.
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
-#[into_params(parameter_in = Query)]
-pub struct KnowledgeDocumentSearchQuery {
-    #[serde(alias = "q")]
-    query: Option<String>,
-    #[serde(default)]
-    limit: Option<usize>,
-    #[serde(default)]
-    chunk_hit_limit_per_document: Option<usize>,
-    #[serde(default)]
-    evidence_sample_limit: Option<usize>,
-}
-
-#[derive(Debug, Deserialize, utoipa::ToSchema, utoipa::IntoParams)]
-#[serde(rename_all = "camelCase")]
-#[into_params(parameter_in = Query)]
-pub struct KnowledgeDocumentSearchRequest {
-    library_id: Uuid,
-    #[serde(alias = "q")]
-    query: Option<String>,
+pub struct KnowledgeSearchRequest {
+    text: String,
     #[serde(default)]
     limit: Option<usize>,
     #[serde(default)]
@@ -162,7 +159,10 @@ struct KnowledgeHybridSearchContext {
     provider_kind: String,
     model_name: String,
     model_catalog_id: Uuid,
+    embedding_profile_key: String,
     freshness_generation: i64,
+    inventory_version: EmbeddingProfileInventoryVersion,
+    dimensions: u64,
     query_vector: Vec<f32>,
 }
 
@@ -293,13 +293,13 @@ fn document_identity_bonus(document: &KnowledgeDocumentRow, query_text: &str) ->
         .map(|value| {
             let normalized_value = value.to_ascii_lowercase();
             let normalized_source_phrase = normalized_alnum_token_sequence_by(
-                &value,
+                value,
                 |token| token.chars().count() >= 2 || token.chars().any(|ch| ch.is_ascii_digit()),
                 Some(64),
             )
             .join(" ");
             let identity_tokens = normalized_alnum_token_sequence_by(
-                &value,
+                value,
                 |token| token.chars().count() >= 4 || token.chars().any(|ch| ch.is_ascii_digit()),
                 Some(32),
             )
@@ -333,8 +333,10 @@ fn document_best_chunk_focus_bonus(
     query_text: &str,
 ) -> f64 {
     let signals = document_best_chunk_focus_signals(chunk_hits, keywords, query_text);
-    signals.keyword * DOCUMENT_BEST_CHUNK_KEYWORD_COVERAGE_WEIGHT
-        + signals.anchor * DOCUMENT_BEST_CHUNK_ANCHOR_COVERAGE_WEIGHT
+    signals.anchor.mul_add(
+        DOCUMENT_BEST_CHUNK_ANCHOR_COVERAGE_WEIGHT,
+        signals.keyword * DOCUMENT_BEST_CHUNK_KEYWORD_COVERAGE_WEIGHT,
+    )
 }
 
 fn document_best_chunk_evidence_coverage(
@@ -417,10 +419,8 @@ fn document_lexical_signal(
         && identity_bonus < DOCUMENT_SOFT_TITLE_IDENTITY_PRESERVE_THRESHOLD
     {
         let evidence_coverage = best_chunk_evidence_coverage.clamp(0.0, 1.0);
-        let scale = DOCUMENT_SOFT_TITLE_LOW_EVIDENCE_MIN_SCALE
-            + ((1.0 - DOCUMENT_SOFT_TITLE_LOW_EVIDENCE_MIN_SCALE)
-                * evidence_coverage
-                * evidence_coverage);
+        let scale = ((1.0 - DOCUMENT_SOFT_TITLE_LOW_EVIDENCE_MIN_SCALE) * evidence_coverage)
+            .mul_add(evidence_coverage, DOCUMENT_SOFT_TITLE_LOW_EVIDENCE_MIN_SCALE);
         return base * scale;
     }
     base
@@ -476,81 +476,46 @@ fn expand_document_search_queries(query_text: &str) -> Vec<String> {
     queries
 }
 
+/// Hybrid lexical + vector search over one library's knowledge — the single
+/// canonical search interface. `POST` carries the request because a free-text
+/// query does not fit a URL query string safely or practically (the same
+/// rationale as Elasticsearch `_search`-style endpoints); it is still a pure
+/// read: 200 with a result body, never 201/202 and no `Location` header.
 #[tracing::instrument(
     level = "info",
-    name = "http.search_documents",
+    name = "http.search_library",
     skip_all,
     fields(library_id = %library_id, elapsed_ms)
 )]
 #[utoipa::path(
-    get,
-    path = "/v1/knowledge/libraries/{libraryId}/search/documents",
-    tag = "search",
-    operation_id = "searchKnowledgeDocuments",
-    params(
-        ("libraryId" = uuid::Uuid, Path, description = "Library identifier"),
-        KnowledgeDocumentSearchQuery,
-    ),
+    post,
+    path = "/v1/knowledge/libraries/{libraryId}/search",
+    tag = "knowledge",
+    operation_id = "searchKnowledgeLibrary",
+    params(("libraryId" = uuid::Uuid, Path, description = "Library identifier")),
+    request_body = KnowledgeSearchRequest,
     responses(
-        (status = 200, description = "Hybrid lexical + vector document search results", body = KnowledgeDocumentSearchResponse),
+        (status = 200, description = "Hybrid lexical + vector search results for the library", body = KnowledgeDocumentSearchResponse),
+        (status = 400, description = "text must not be empty"),
         (status = 401, description = "Caller is not authenticated"),
         (status = 403, description = "Caller is not authorized for the library"),
     ),
 )]
-pub async fn search_documents(
+pub async fn search_library(
     auth: AuthContext,
     State(state): State<AppState>,
     Path(library_id): Path<Uuid>,
-    Query(query): Query<KnowledgeDocumentSearchQuery>,
+    Json(request): Json<KnowledgeSearchRequest>,
 ) -> Result<Json<KnowledgeDocumentSearchResponse>, ApiError> {
     let started_at = std::time::Instant::now();
     let result = search_documents_impl(
         auth,
         state,
         library_id,
-        query.query,
-        query.limit,
-        query.chunk_hit_limit_per_document,
-        query.evidence_sample_limit,
-    )
-    .await;
-    tracing::Span::current().record("elapsed_ms", started_at.elapsed().as_millis() as u64);
-    result
-}
-
-#[tracing::instrument(
-    level = "info",
-    name = "http.search_documents_by_library_query",
-    skip_all,
-    fields(library_id = %query.library_id, elapsed_ms)
-)]
-#[utoipa::path(
-    get,
-    path = "/v1/search/documents",
-    tag = "search",
-    operation_id = "searchDocuments",
-    params(KnowledgeDocumentSearchRequest),
-    responses(
-        (status = 200, description = "Hybrid document search across the requested library", body = KnowledgeDocumentSearchResponse),
-        (status = 400, description = "libraryId is required"),
-        (status = 401, description = "Caller is not authenticated"),
-        (status = 403, description = "Caller is not authorized for the library"),
-    ),
-)]
-pub async fn search_documents_by_library_query(
-    auth: AuthContext,
-    State(state): State<AppState>,
-    Query(query): Query<KnowledgeDocumentSearchRequest>,
-) -> Result<Json<KnowledgeDocumentSearchResponse>, ApiError> {
-    let started_at = std::time::Instant::now();
-    let result = search_documents_impl(
-        auth,
-        state,
-        query.library_id,
-        query.query,
-        query.limit,
-        query.chunk_hit_limit_per_document,
-        query.evidence_sample_limit,
+        Some(request.text),
+        request.limit,
+        request.chunk_hit_limit_per_document,
+        request.evidence_sample_limit,
     )
     .await;
     tracing::Span::current().record("elapsed_ms", started_at.elapsed().as_millis() as u64);
@@ -593,17 +558,29 @@ async fn search_documents_impl(
         let _vector_guard = state
             .canonical_services
             .search
-            .vector_plane_read_guard(&state)
+            .vector_plane_read_guard(&state, library_id)
             .await
             .map_err(|error| ApiError::internal_with_log(error, "internal"))?;
-        let embedding_model_key = context.model_catalog_id.to_string();
-        let library_dim = library_vector_index_dimensions(&state, library_id)
+        ensure_active_embedding_profile_key(&state, library_id, &context.embedding_profile_key)
             .await
-            .map_err(|error| ApiError::internal_with_log(error, "internal"))?;
-        let vector_chunk_future = state.search_store.search_chunk_vectors_by_similarity(
-            library_dim,
+            .map_err(map_runtime_lifecycle_error)?;
+        ensure_embedding_profile_inventory_version_current(
+            &state,
             library_id,
-            &embedding_model_key,
+            context.inventory_version,
+        )
+        .await
+        .map_err(map_runtime_lifecycle_error)?;
+        validate_embedding_vector_dimensions(
+            context.dimensions,
+            &context.query_vector,
+            "knowledge hybrid search query",
+        )
+        .map_err(|error| ApiError::internal_with_log(error, "internal"))?;
+        let vector_chunk_future = state.search_store.search_chunk_vectors_by_similarity(
+            context.dimensions,
+            library_id,
+            &context.embedding_profile_key,
             &context.query_vector,
             vector_chunk_limit,
             None,
@@ -611,9 +588,9 @@ async fn search_documents_impl(
             None,
         );
         let vector_entity_future = state.search_store.search_entity_vectors_by_similarity(
-            library_dim,
+            context.dimensions,
             library_id,
-            &embedding_model_key,
+            &context.embedding_profile_key,
             &context.query_vector,
             vector_entity_limit,
             None,
@@ -868,16 +845,14 @@ async fn search_documents_impl(
         limit,
         embedding_provider_kind: hybrid_context
             .as_ref()
-            .map(|context| context.provider_kind.clone())
-            .unwrap_or_else(|| "lexical_only".to_string()),
+            .map_or_else(|| "lexical_only".to_string(), |context| context.provider_kind.clone()),
         embedding_model_name: hybrid_context
             .as_ref()
             .map(|context| context.model_name.clone())
             .unwrap_or_default(),
         embedding_model_catalog_id: hybrid_context
             .as_ref()
-            .map(|context| context.model_catalog_id)
-            .unwrap_or_else(Uuid::nil),
+            .map_or_else(Uuid::nil, |context| context.model_catalog_id),
         freshness_generation: hybrid_context
             .as_ref()
             .map(|context| context.freshness_generation)
@@ -1159,50 +1134,77 @@ async fn prepare_document_search_candidate(
     )
     .await?;
 
+    truncate_document_candidate_chunk_hits(&mut accumulator, chunk_hit_limit_per_document);
+    let deduped_chunk_ids = document_candidate_chunk_ids(&accumulator);
+    append_document_evidence_samples(
+        &state,
+        evidence_sample_limit,
+        &deduped_chunk_ids,
+        &mut accumulator,
+    )
+    .await?;
+
+    accumulator.score = score_document_accumulator(&accumulator, &query_keywords, &query_text);
+    Ok(accumulator)
+}
+
+fn truncate_document_candidate_chunk_hits(
+    accumulator: &mut KnowledgeDocumentAccumulator,
+    chunk_hit_limit_per_document: usize,
+) {
     accumulator.chunk_hits.truncate(chunk_hit_limit_per_document);
     accumulator.vector_chunk_hits.truncate(chunk_hit_limit_per_document);
-    let mut seen_evidence_chunks = HashSet::new();
-    let candidate_chunk_ids: Vec<Uuid> = accumulator
+}
+
+fn document_candidate_chunk_ids(accumulator: &KnowledgeDocumentAccumulator) -> Vec<Uuid> {
+    let mut seen_chunk_ids = HashSet::new();
+    accumulator
         .chunk_hits
         .iter()
         .map(|hit| hit.chunk_id)
         .chain(accumulator.vector_chunk_hits.iter().map(|hit| hit.chunk_id))
-        .collect();
-    let mut deduped_chunk_ids = Vec::<Uuid>::new();
-    for chunk_id in candidate_chunk_ids {
-        if !seen_evidence_chunks.insert(chunk_id) {
+        .filter(|chunk_id| seen_chunk_ids.insert(*chunk_id))
+        .collect()
+}
+
+async fn append_document_evidence_samples(
+    state: &AppState,
+    evidence_sample_limit: usize,
+    chunk_ids: &[Uuid],
+    accumulator: &mut KnowledgeDocumentAccumulator,
+) -> Result<(), ApiError> {
+    if evidence_sample_limit == 0 {
+        return Ok(());
+    }
+
+    let evidence_by_chunk =
+        load_evidence_samples_by_chunk_ids(state, accumulator.document.document_id, chunk_ids)
+            .await?;
+    for chunk_id in chunk_ids {
+        let Some(evidence_rows) = evidence_by_chunk.get(chunk_id) else {
             continue;
-        }
-        deduped_chunk_ids.push(chunk_id);
-    }
-
-    if evidence_sample_limit > 0 {
-        let evidence_by_chunk = load_evidence_samples_by_chunk_ids(
-            &state,
-            accumulator.document.document_id,
-            &deduped_chunk_ids,
-        )
-        .await?;
-        for chunk_id in deduped_chunk_ids {
-            let Some(evidence_rows) = evidence_by_chunk.get(&chunk_id) else {
-                continue;
-            };
-            for evidence in evidence_rows {
-                if accumulator.evidence_ids.insert(evidence.evidence_id) {
-                    accumulator.evidence_samples.push(evidence.clone());
-                }
-                if accumulator.evidence_samples.len() >= evidence_sample_limit {
-                    break;
-                }
-            }
-            if accumulator.evidence_samples.len() >= evidence_sample_limit {
-                break;
-            }
+        };
+        append_evidence_rows(evidence_rows, evidence_sample_limit, accumulator);
+        if accumulator.evidence_samples.len() >= evidence_sample_limit {
+            break;
         }
     }
+    Ok(())
+}
 
-    accumulator.score = score_document_accumulator(&accumulator, &query_keywords, &query_text);
-    Ok(accumulator)
+fn append_evidence_rows(
+    evidence_rows: &[KnowledgeEvidenceRow],
+    evidence_sample_limit: usize,
+    accumulator: &mut KnowledgeDocumentAccumulator,
+) {
+    for evidence in evidence_rows {
+        if accumulator.evidence_ids.insert(evidence.evidence_id) {
+            accumulator.evidence_samples.push(evidence.clone());
+        }
+        if accumulator.evidence_samples.len() >= evidence_sample_limit {
+            break;
+        }
+    }
 }
 
 fn score_document_accumulator(
@@ -1387,27 +1389,51 @@ async fn resolve_hybrid_search_context(
     library_id: Uuid,
     query_text: &str,
 ) -> Result<Option<KnowledgeHybridSearchContext>, ApiError> {
-    let Some(binding) = state
+    let _vector_guard = state
+        .canonical_services
+        .search
+        .vector_plane_read_guard(state, library_id)
+        .await
+        .map_err(|error| ApiError::internal_with_log(error, "internal"))?;
+    let inventory_version = load_embedding_profile_inventory_version(state, library_id)
+        .await
+        .map_err(|error| ApiError::internal_with_log(error, "internal"))?;
+    let binding = state
         .canonical_services
         .ai_catalog
         .resolve_active_runtime_binding(state, library_id, AiBindingPurpose::EmbedChunk)
         .await?
-    else {
-        return Ok(None);
-    };
+        .ok_or_else(|| {
+            map_runtime_lifecycle_error(anyhow::Error::new(QueryServiceError::StateConflict {
+                message: format!(
+                    "active embed_chunk binding is unavailable while proving the exact vector inventory for library {library_id}; configure the binding and rebuild before querying"
+                ),
+            }))
+        })?;
 
-    let generations = state
-        .canonical_services
-        .knowledge
-        .derive_library_generation_rows(state, library_id)
-        .await
-        .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
-    let Some(generation): Option<&KnowledgeLibraryGenerationRow> = generations.first() else {
-        return Ok(None);
+    let embedding_profile_key = binding.embedding_execution_profile_key();
+    let index_state = ensure_library_embedding_profile_indexed(
+        state,
+        library_id,
+        &embedding_profile_key,
+        inventory_version,
+    )
+    .await
+    .map_err(map_runtime_lifecycle_error)?;
+    let dimensions = match index_state {
+        EmbeddingProfileIndexState::Empty => {
+            ensure_embedding_profile_inventory_version_current(
+                state,
+                library_id,
+                inventory_version,
+            )
+            .await
+            .map_err(map_runtime_lifecycle_error)?;
+            return Ok(None);
+        }
+        EmbeddingProfileIndexState::Ready { dimensions } => dimensions,
     };
-    if generation.active_vector_generation <= 0 {
-        return Ok(None);
-    }
+    drop(_vector_guard);
 
     let embedding = state
         .llm_gateway
@@ -1423,12 +1449,27 @@ async fn resolve_hybrid_search_context(
         .map_err(|error| {
             ApiError::ProviderFailure(format!("failed to embed knowledge search query: {error}"))
         })?;
+    ensure_active_embedding_profile_key(state, library_id, &embedding_profile_key)
+        .await
+        .map_err(map_runtime_lifecycle_error)?;
+    ensure_embedding_profile_inventory_version_current(state, library_id, inventory_version)
+        .await
+        .map_err(map_runtime_lifecycle_error)?;
+    validate_embedding_vector_dimensions(
+        dimensions,
+        &embedding.embedding,
+        "knowledge hybrid search query",
+    )
+    .map_err(|error| ApiError::internal_with_log(error, "internal"))?;
 
     Ok(Some(KnowledgeHybridSearchContext {
-        provider_kind: binding.provider_kind,
-        model_name: binding.model_name,
+        provider_kind: binding.provider_kind.clone(),
+        model_name: binding.model_name.clone(),
         model_catalog_id: binding.model_catalog_id,
-        freshness_generation: generation.active_vector_generation,
+        embedding_profile_key,
+        freshness_generation: inventory_version.active_vector_generation,
+        inventory_version,
+        dimensions,
         query_vector: embedding.embedding,
     }))
 }

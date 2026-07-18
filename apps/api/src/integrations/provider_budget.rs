@@ -6,9 +6,11 @@
 //! calls can overwhelm a self-hosted provider (e.g. a local Ollama) or trigger
 //! 429 storms from a cloud provider, and concurrent query turns hitting the
 //! same endpoint make it worse. This module is the pure, network-free core of
-//! the budget: a process-wide registry that maps a structural provider identity
+//! the budget: a gateway-local registry that maps a structural provider identity
 //! to a two-tier semaphore, plus a permit guard acquired around each outbound
-//! call.
+//! call. The registry is injected into the gateway that owns it: there is no
+//! process-global first-writer state, so tests and multiple app instances cannot
+//! accidentally inherit another instance's limits.
 //!
 //! ## Identity key
 //!
@@ -33,17 +35,12 @@
 //! concurrent permits even under a fully saturating ingest load — no custom
 //! scheduler required.
 //!
-//! ## Default = no behavior change
-//!
-//! When a provider has no configured cap (the default), [`acquire`] returns an
-//! unlimited guard that holds no semaphore permit. No registry entry is created
-//! and no waiting ever happens, so without an explicit operator opt-in the
-//! budget is fully transparent.
-
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
-use tokio::sync::{OwnedSemaphorePermit, Semaphore};
+use thiserror::Error;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore, TryAcquireError};
 
 /// Lane a provider call belongs to. The query lane is prioritized over the
 /// ingest lane so latency-sensitive turns never starve behind an ingest burst.
@@ -99,29 +96,44 @@ impl ProviderIdentity {
     }
 }
 
-/// Per-provider budget configuration. `max_outbound == 0` means unlimited (the
-/// default), which yields zero behavior change.
+/// Per-provider budget configuration. `max_outbound == 0` is an explicit
+/// unlimited mode and requires `query_reserved == 0`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ProviderBudgetConfig {
     /// Maximum concurrent outbound calls to one provider endpoint. `0` =
     /// unlimited.
     pub max_outbound: usize,
-    /// Permits reserved exclusively for the query lane. Clamped to
-    /// `max_outbound` so the shared pool is never negative.
+    /// Permits reserved exclusively for the query lane. A bounded
+    /// configuration must leave at least one shared permit for ingest.
     pub query_reserved: usize,
 }
 
 impl ProviderBudgetConfig {
-    /// The canonical unlimited (default) config: no cap, no reserve.
+    /// The explicit unlimited config: no cap, no reserve.
     #[must_use]
     pub const fn unlimited() -> Self {
         Self { max_outbound: 0, query_reserved: 0 }
     }
 
-    /// True when this config imposes no cap (the default).
+    /// True when this config imposes no cap.
     #[must_use]
     pub const fn is_unlimited(&self) -> bool {
         self.max_outbound == 0
+    }
+
+    /// Validates that unlimited mode is explicit and bounded mode cannot
+    /// deadlock the ingest lane.
+    pub const fn validate(self) -> Result<Self, ProviderBudgetError> {
+        match (self.max_outbound, self.query_reserved) {
+            (0, 0) => Ok(self),
+            (0, _) => Err(ProviderBudgetError::InvalidConfiguration(
+                "query_reserved must be zero when max_outbound is zero",
+            )),
+            (max, reserved) if reserved >= max => Err(ProviderBudgetError::InvalidConfiguration(
+                "query_reserved must be smaller than max_outbound",
+            )),
+            _ => Ok(self),
+        }
     }
 }
 
@@ -129,6 +141,64 @@ impl Default for ProviderBudgetConfig {
     fn default() -> Self {
         Self::unlimited()
     }
+}
+
+/// Operational bounds for a provider limiter registry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProviderBudgetRegistryOptions {
+    /// Maximum time an outbound call may wait for a permit.
+    pub acquire_timeout: Duration,
+    /// Maximum number of endpoint identities retained by one gateway.
+    pub max_entries: usize,
+    /// Idle entries older than this are removed before admission.
+    pub idle_ttl: Duration,
+}
+
+impl ProviderBudgetRegistryOptions {
+    pub const fn validate(self) -> Result<Self, ProviderBudgetError> {
+        if self.acquire_timeout.is_zero() {
+            return Err(ProviderBudgetError::InvalidConfiguration(
+                "acquire_timeout must be greater than zero",
+            ));
+        }
+        if self.max_entries == 0 {
+            return Err(ProviderBudgetError::InvalidConfiguration(
+                "registry max_entries must be greater than zero",
+            ));
+        }
+        if self.idle_ttl.is_zero() {
+            return Err(ProviderBudgetError::InvalidConfiguration(
+                "registry idle_ttl must be greater than zero",
+            ));
+        }
+        Ok(self)
+    }
+}
+
+impl Default for ProviderBudgetRegistryOptions {
+    fn default() -> Self {
+        Self {
+            acquire_timeout: Duration::from_secs(30),
+            max_entries: 64,
+            idle_ttl: Duration::from_mins(15),
+        }
+    }
+}
+
+/// Fail-closed provider budget failures. None of these errors silently bypass
+/// the configured upstream protection.
+#[derive(Debug, Error, Clone, PartialEq, Eq)]
+pub enum ProviderBudgetError {
+    #[error("invalid provider concurrency configuration: {0}")]
+    InvalidConfiguration(&'static str),
+    #[error("provider concurrency permit wait timed out after {timeout_ms} ms")]
+    AcquireTimeout { timeout_ms: u64 },
+    #[error("provider concurrency limiter is closed")]
+    LimiterClosed,
+    #[error("provider concurrency registry is full ({max_entries} active endpoints)")]
+    RegistryCapacity { max_entries: usize },
+    #[error("provider concurrency registry lock is poisoned")]
+    RegistryPoisoned,
 }
 
 /// Two-tier limiter for one provider endpoint: a shared pool plus a
@@ -139,19 +209,26 @@ struct ProviderLimiter {
     shared: Arc<Semaphore>,
     /// `query_reserved` permits; only the query lane may use it.
     reserved: Arc<Semaphore>,
+    shared_capacity: usize,
+    reserved_capacity: usize,
 }
 
 impl ProviderLimiter {
     fn new(config: ProviderBudgetConfig) -> Self {
-        let reserved = config.query_reserved.min(config.max_outbound);
+        let reserved = config.query_reserved;
         let shared = config.max_outbound - reserved;
         Self {
             shared: Arc::new(Semaphore::new(shared)),
             reserved: Arc::new(Semaphore::new(reserved)),
+            shared_capacity: shared,
+            reserved_capacity: reserved,
         }
     }
 
-    async fn acquire(&self, lane: ProviderLane) -> ProviderBudgetGuard {
+    async fn acquire(
+        &self,
+        lane: ProviderLane,
+    ) -> Result<ProviderBudgetGuard, ProviderBudgetError> {
         match lane {
             ProviderLane::Ingest => {
                 // Ingest may only ever draw from the shared pool, so it can
@@ -163,11 +240,19 @@ impl ProviderLimiter {
                 // reserved pool only when shared is saturated. Because ingest
                 // never touches `reserved`, query is guaranteed at least
                 // `query_reserved` concurrent permits under full ingest load.
-                if let Ok(permit) = Arc::clone(&self.shared).try_acquire_owned() {
-                    return ProviderBudgetGuard::Limited(permit);
+                match Arc::clone(&self.shared).try_acquire_owned() {
+                    Ok(permit) => return Ok(ProviderBudgetGuard::Limited(permit)),
+                    Err(TryAcquireError::Closed) => {
+                        return Err(ProviderBudgetError::LimiterClosed);
+                    }
+                    Err(TryAcquireError::NoPermits) => {}
                 }
-                if let Ok(permit) = Arc::clone(&self.reserved).try_acquire_owned() {
-                    return ProviderBudgetGuard::Limited(permit);
+                match Arc::clone(&self.reserved).try_acquire_owned() {
+                    Ok(permit) => return Ok(ProviderBudgetGuard::Limited(permit)),
+                    Err(TryAcquireError::Closed) => {
+                        return Err(ProviderBudgetError::LimiterClosed);
+                    }
+                    Err(TryAcquireError::NoPermits) => {}
                 }
                 // Both pools are momentarily full. Wait on whichever frees a
                 // permit first so a query call never deadlocks behind ingest.
@@ -181,18 +266,21 @@ impl ProviderLimiter {
             }
         }
     }
+
+    fn is_idle(&self) -> bool {
+        self.shared.available_permits().saturating_add(self.reserved.available_permits())
+            == self.shared_capacity.saturating_add(self.reserved_capacity)
+    }
 }
 
-/// Maps an `acquire_owned` result to a guard. The semaphores backing the
-/// registry are never closed (the registry holds them for the whole process
-/// lifetime), so the `Err` branch is unreachable; degrade open with an
-/// unlimited guard rather than panicking if that invariant is ever violated.
+/// Maps an `acquire_owned` result to a guard and preserves fail-closed behavior
+/// if an internal semaphore is unexpectedly closed.
 fn guard_from_acquire(
     permit: Result<OwnedSemaphorePermit, tokio::sync::AcquireError>,
-) -> ProviderBudgetGuard {
+) -> Result<ProviderBudgetGuard, ProviderBudgetError> {
     match permit {
-        Ok(permit) => ProviderBudgetGuard::Limited(permit),
-        Err(_) => ProviderBudgetGuard::Unlimited,
+        Ok(permit) => Ok(ProviderBudgetGuard::Limited(permit)),
+        Err(_) => Err(ProviderBudgetError::LimiterClosed),
     }
 }
 
@@ -206,29 +294,46 @@ pub enum ProviderBudgetGuard {
     Limited(OwnedSemaphorePermit),
 }
 
-/// Process-wide registry mapping a [`ProviderIdentity`] to its limiter.
+#[derive(Debug)]
+struct ProviderLimiterEntry {
+    limiter: Arc<ProviderLimiter>,
+    last_used: Instant,
+}
+
+/// Gateway-local registry mapping a [`ProviderIdentity`] to its limiter.
 ///
 /// The registry is config-driven: it resolves the per-provider config through a
 /// pluggable lookup so the hot path carries no magic numbers. Providers with an
 /// unlimited config never get a registry entry.
 pub struct ProviderBudgetRegistry {
-    limiters: Mutex<HashMap<ProviderIdentity, Arc<ProviderLimiter>>>,
+    limiters: Mutex<HashMap<ProviderIdentity, ProviderLimiterEntry>>,
     resolver: Box<dyn Fn(&ProviderIdentity) -> ProviderBudgetConfig + Send + Sync>,
+    options: ProviderBudgetRegistryOptions,
 }
 
 impl ProviderBudgetRegistry {
     /// Builds a registry whose per-provider config comes from `resolver`.
-    pub fn new<R>(resolver: R) -> Self
+    pub fn new<R>(
+        resolver: R,
+        options: ProviderBudgetRegistryOptions,
+    ) -> Result<Self, ProviderBudgetError>
     where
         R: Fn(&ProviderIdentity) -> ProviderBudgetConfig + Send + Sync + 'static,
     {
-        Self { limiters: Mutex::new(HashMap::new()), resolver: Box::new(resolver) }
+        Ok(Self {
+            limiters: Mutex::new(HashMap::new()),
+            resolver: Box::new(resolver),
+            options: options.validate()?,
+        })
     }
 
     /// Builds a registry that applies the same config to every provider.
-    #[must_use]
-    pub fn uniform(config: ProviderBudgetConfig) -> Self {
-        Self::new(move |_identity| config)
+    pub fn uniform(
+        config: ProviderBudgetConfig,
+        options: ProviderBudgetRegistryOptions,
+    ) -> Result<Self, ProviderBudgetError> {
+        let config = config.validate()?;
+        Self::new(move |_identity| config, options)
     }
 
     /// Acquires a budget permit for `identity` on `lane`, awaiting if the
@@ -238,48 +343,72 @@ impl ProviderBudgetRegistry {
         &self,
         identity: &ProviderIdentity,
         lane: ProviderLane,
-    ) -> ProviderBudgetGuard {
-        let Some(limiter) = self.limiter_for(identity) else {
-            return ProviderBudgetGuard::Unlimited;
+    ) -> Result<ProviderBudgetGuard, ProviderBudgetError> {
+        let Some(limiter) = self.limiter_for(identity)? else {
+            return Ok(ProviderBudgetGuard::Unlimited);
         };
-        limiter.acquire(lane).await
+        match tokio::time::timeout(self.options.acquire_timeout, limiter.acquire(lane)).await {
+            Ok(result) => result,
+            Err(_) => Err(ProviderBudgetError::AcquireTimeout {
+                timeout_ms: u64::try_from(self.options.acquire_timeout.as_millis())
+                    .unwrap_or(u64::MAX),
+            }),
+        }
     }
 
     /// Returns the limiter for `identity`, creating it on first use. Returns
     /// `None` when the provider is unlimited so no entry is ever allocated for
     /// the default path.
-    fn limiter_for(&self, identity: &ProviderIdentity) -> Option<Arc<ProviderLimiter>> {
-        let config = (self.resolver)(identity);
+    fn limiter_for(
+        &self,
+        identity: &ProviderIdentity,
+    ) -> Result<Option<Arc<ProviderLimiter>>, ProviderBudgetError> {
+        let config = (self.resolver)(identity).validate()?;
         if config.is_unlimited() {
-            return None;
+            return Ok(None);
         }
-        let mut limiters = self.limiters.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let Some(existing) = limiters.get(identity) {
-            return Some(Arc::clone(existing));
+        let now = Instant::now();
+        let mut limiters =
+            self.limiters.lock().map_err(|_| ProviderBudgetError::RegistryPoisoned)?;
+        limiters.retain(|_, entry| {
+            !(entry.limiter.is_idle()
+                && Arc::strong_count(&entry.limiter) == 1
+                && now.saturating_duration_since(entry.last_used) >= self.options.idle_ttl)
+        });
+        if let Some(existing) = limiters.get_mut(identity) {
+            existing.last_used = now;
+            return Ok(Some(Arc::clone(&existing.limiter)));
+        }
+        if limiters.len() >= self.options.max_entries {
+            let eviction_key = limiters
+                .iter()
+                .filter(|(_, entry)| {
+                    entry.limiter.is_idle() && Arc::strong_count(&entry.limiter) == 1
+                })
+                .min_by_key(|(_, entry)| entry.last_used)
+                .map(|(identity, _)| identity.clone());
+            let Some(eviction_key) = eviction_key else {
+                return Err(ProviderBudgetError::RegistryCapacity {
+                    max_entries: self.options.max_entries,
+                });
+            };
+            limiters.remove(&eviction_key);
         }
         let limiter = Arc::new(ProviderLimiter::new(config));
-        limiters.insert(identity.clone(), Arc::clone(&limiter));
-        Some(limiter)
+        limiters.insert(
+            identity.clone(),
+            ProviderLimiterEntry { limiter: Arc::clone(&limiter), last_used: now },
+        );
+        drop(limiters);
+        Ok(Some(limiter))
     }
-}
 
-/// Global registry handle. Installed once at startup; defaults to an unlimited
-/// registry so any call before installation is a transparent no-op.
-static GLOBAL_REGISTRY: OnceLock<Arc<ProviderBudgetRegistry>> = OnceLock::new();
-
-/// Installs the process-wide registry. Idempotent: the first install wins and
-/// later calls are ignored (returns `false` when an earlier registry was kept).
-pub fn install_global_registry(registry: Arc<ProviderBudgetRegistry>) -> bool {
-    GLOBAL_REGISTRY.set(registry).is_ok()
-}
-
-/// Acquires a budget permit from the global registry for the current lane.
-/// Falls back to an unlimited guard when no registry is installed.
-pub async fn acquire(identity: &ProviderIdentity) -> ProviderBudgetGuard {
-    let lane = current_lane();
-    match GLOBAL_REGISTRY.get() {
-        Some(registry) => registry.acquire(identity, lane).await,
-        None => ProviderBudgetGuard::Unlimited,
+    #[cfg(test)]
+    fn entry_count(&self) -> Result<usize, ProviderBudgetError> {
+        self.limiters
+            .lock()
+            .map(|entries| entries.len())
+            .map_err(|_| ProviderBudgetError::RegistryPoisoned)
     }
 }
 
@@ -294,19 +423,21 @@ mod tests {
         ProviderIdentity::new(kind, url)
     }
 
+    fn registry(config: ProviderBudgetConfig) -> ProviderBudgetRegistry {
+        ProviderBudgetRegistry::uniform(config, ProviderBudgetRegistryOptions::default())
+            .expect("test provider budget config must be valid")
+    }
+
     #[tokio::test]
     async fn same_identity_shares_one_limiter_distinct_identities_are_independent() {
-        let registry = ProviderBudgetRegistry::uniform(ProviderBudgetConfig {
-            max_outbound: 1,
-            query_reserved: 0,
-        });
+        let registry = registry(ProviderBudgetConfig { max_outbound: 1, query_reserved: 0 });
         let a1 = identity("alpha", "https://endpoint-a.example/v1");
         let a2 = identity("alpha", "https://endpoint-a.example/v1");
         let b = identity("beta", "https://endpoint-b.example/v1");
 
         // Same identity -> same limiter: the second acquire must wait while the
         // first guard is held (cap == 1).
-        let guard_a1 = registry.acquire(&a1, ProviderLane::Ingest).await;
+        let guard_a1 = registry.acquire(&a1, ProviderLane::Ingest).await.unwrap();
         let blocked = tokio::time::timeout(
             Duration::from_millis(50),
             registry.acquire(&a2, ProviderLane::Ingest),
@@ -331,10 +462,8 @@ mod tests {
     async fn budget_caps_concurrency_at_configured_max() {
         const CAP: usize = 3;
         const TASKS: usize = 24;
-        let registry = Arc::new(ProviderBudgetRegistry::uniform(ProviderBudgetConfig {
-            max_outbound: CAP,
-            query_reserved: 0,
-        }));
+        let registry =
+            Arc::new(registry(ProviderBudgetConfig { max_outbound: CAP, query_reserved: 0 }));
         let id = identity("alpha", "https://endpoint.example/v1");
         let in_flight = Arc::new(AtomicUsize::new(0));
         let peak = Arc::new(AtomicUsize::new(0));
@@ -349,7 +478,7 @@ mod tests {
             let barrier = Arc::clone(&barrier);
             handles.push(tokio::spawn(async move {
                 barrier.wait().await;
-                let _guard = registry.acquire(&id, ProviderLane::Ingest).await;
+                let _guard = registry.acquire(&id, ProviderLane::Ingest).await.unwrap();
                 let now = in_flight.fetch_add(1, Ordering::SeqCst) + 1;
                 peak.fetch_max(now, Ordering::SeqCst);
                 tokio::time::sleep(Duration::from_millis(20)).await;
@@ -373,14 +502,12 @@ mod tests {
         // max=4, reserve=2 -> shared pool=2. Saturate the shared pool with two
         // long-held ingest guards, then prove the query lane still gets up to
         // `reserved` concurrent permits.
-        let registry = Arc::new(ProviderBudgetRegistry::uniform(ProviderBudgetConfig {
-            max_outbound: 4,
-            query_reserved: 2,
-        }));
+        let registry =
+            Arc::new(registry(ProviderBudgetConfig { max_outbound: 4, query_reserved: 2 }));
         let id = identity("alpha", "https://endpoint.example/v1");
 
-        let ingest_one = registry.acquire(&id, ProviderLane::Ingest).await;
-        let ingest_two = registry.acquire(&id, ProviderLane::Ingest).await;
+        let ingest_one = registry.acquire(&id, ProviderLane::Ingest).await.unwrap();
+        let ingest_two = registry.acquire(&id, ProviderLane::Ingest).await.unwrap();
 
         // A third ingest acquire must now block: the shared pool (size 2) is
         // exhausted and ingest may not touch the reserve.
@@ -420,9 +547,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn default_unlimited_config_lets_a_large_burst_proceed_without_capping() {
+    async fn explicit_unlimited_config_lets_a_large_burst_proceed_without_capping() {
         const TASKS: usize = 256;
-        let registry = Arc::new(ProviderBudgetRegistry::uniform(ProviderBudgetConfig::unlimited()));
+        let registry = Arc::new(registry(ProviderBudgetConfig::unlimited()));
         let id = identity("alpha", "https://endpoint.example/v1");
         let in_flight = Arc::new(AtomicUsize::new(0));
         let peak = Arc::new(AtomicUsize::new(0));
@@ -436,7 +563,7 @@ mod tests {
             let peak = Arc::clone(&peak);
             let barrier = Arc::clone(&barrier);
             handles.push(tokio::spawn(async move {
-                let guard = registry.acquire(&id, ProviderLane::Ingest).await;
+                let guard = registry.acquire(&id, ProviderLane::Ingest).await.unwrap();
                 assert!(matches!(guard, ProviderBudgetGuard::Unlimited));
                 barrier.wait().await;
                 let now = in_flight.fetch_add(1, Ordering::SeqCst) + 1;
@@ -454,7 +581,7 @@ mod tests {
         assert_eq!(
             peak.load(Ordering::SeqCst),
             TASKS,
-            "the default unlimited config must not cap concurrency",
+            "the explicit unlimited config must not cap concurrency",
         );
     }
 
@@ -465,5 +592,70 @@ mod tests {
         assert_eq!(observed, ProviderLane::Query, "with_lane establishes the lane");
         // Lane scope is restored after the future completes.
         assert_eq!(current_lane(), ProviderLane::Ingest);
+    }
+
+    #[test]
+    fn invalid_reserve_cannot_remove_every_ingest_permit() {
+        let error = ProviderBudgetRegistry::uniform(
+            ProviderBudgetConfig { max_outbound: 4, query_reserved: 4 },
+            ProviderBudgetRegistryOptions::default(),
+        )
+        .err()
+        .expect("max == reserve must fail closed");
+        assert!(matches!(error, ProviderBudgetError::InvalidConfiguration(_)));
+    }
+
+    #[tokio::test]
+    async fn saturated_budget_returns_a_typed_timeout() {
+        let registry = ProviderBudgetRegistry::uniform(
+            ProviderBudgetConfig { max_outbound: 1, query_reserved: 0 },
+            ProviderBudgetRegistryOptions {
+                acquire_timeout: Duration::from_millis(20),
+                ..ProviderBudgetRegistryOptions::default()
+            },
+        )
+        .unwrap();
+        let id = identity("alpha", "https://endpoint.example/v1");
+        let _held = registry.acquire(&id, ProviderLane::Ingest).await.unwrap();
+
+        let error = registry.acquire(&id, ProviderLane::Ingest).await.unwrap_err();
+        assert_eq!(error, ProviderBudgetError::AcquireTimeout { timeout_ms: 20 });
+    }
+
+    #[tokio::test]
+    async fn registry_is_bounded_and_only_evicts_idle_limiters() {
+        let registry = ProviderBudgetRegistry::uniform(
+            ProviderBudgetConfig { max_outbound: 1, query_reserved: 0 },
+            ProviderBudgetRegistryOptions {
+                max_entries: 2,
+                ..ProviderBudgetRegistryOptions::default()
+            },
+        )
+        .unwrap();
+        let first = identity("alpha", "https://one.example/v1");
+        let second = identity("alpha", "https://two.example/v1");
+        let third = identity("alpha", "https://three.example/v1");
+        let held_first = registry.acquire(&first, ProviderLane::Ingest).await.unwrap();
+        let held_second = registry.acquire(&second, ProviderLane::Ingest).await.unwrap();
+
+        let error = registry.acquire(&third, ProviderLane::Ingest).await.unwrap_err();
+        assert_eq!(error, ProviderBudgetError::RegistryCapacity { max_entries: 2 });
+        assert_eq!(registry.entry_count().unwrap(), 2);
+
+        drop(held_first);
+        let third_guard = registry.acquire(&third, ProviderLane::Ingest).await.unwrap();
+        assert_eq!(registry.entry_count().unwrap(), 2);
+        drop(third_guard);
+        drop(held_second);
+    }
+
+    #[tokio::test]
+    async fn a_closed_limiter_fails_closed() {
+        let limiter =
+            ProviderLimiter::new(ProviderBudgetConfig { max_outbound: 1, query_reserved: 0 });
+        limiter.shared.close();
+
+        let error = limiter.acquire(ProviderLane::Ingest).await.unwrap_err();
+        assert_eq!(error, ProviderBudgetError::LimiterClosed);
     }
 }

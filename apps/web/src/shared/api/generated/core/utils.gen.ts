@@ -15,6 +15,14 @@ export interface PathSerializer {
 
 export const PATH_PARAM_RE: RegExp = /\{[^{}]+\}/g;
 
+const serializePathValue = (name: string, value: unknown, explode: boolean, style: ArraySeparatorStyle): string | null => {
+  if (value == null) return null;
+  if (Array.isArray(value)) return serializeArrayParam({ explode, name, style, value });
+  if (typeof value === 'object') return serializeObjectParam({ explode, name, style: style === 'spaceDelimited' || style === 'pipeDelimited' ? 'form' : style, value: value as Record<string, unknown>, valueOnly: true });
+  if (style === 'matrix') return `;${serializePrimitiveParam({ name, value: value as string })}`;
+  return encodeURIComponent(style === 'label' ? `.${value as string}` : value as string);
+};
+
 export const defaultPathSerializer = ({ path, url: _url }: PathSerializer): string => {
   let url = _url;
   const matches = _url.match(PATH_PARAM_RE);
@@ -37,46 +45,8 @@ export const defaultPathSerializer = ({ path, url: _url }: PathSerializer): stri
         style = 'matrix';
       }
 
-      const value = path[name];
-
-      if (value === undefined || value === null) {
-        continue;
-      }
-
-      if (Array.isArray(value)) {
-        url = url.replace(match, serializeArrayParam({ explode, name, style, value }));
-        continue;
-      }
-
-      if (typeof value === 'object') {
-        url = url.replace(
-          match,
-          serializeObjectParam({
-            explode,
-            name,
-            style,
-            value: value as Record<string, unknown>,
-            valueOnly: true,
-          }),
-        );
-        continue;
-      }
-
-      if (style === 'matrix') {
-        url = url.replace(
-          match,
-          `;${serializePrimitiveParam({
-            name,
-            value: value as string,
-          })}`,
-        );
-        continue;
-      }
-
-      const replaceValue = encodeURIComponent(
-        style === 'label' ? `.${value as string}` : (value as string),
-      );
-      url = url.replace(match, replaceValue);
+      const replaceValue = serializePathValue(name, path[name], explode, style);
+      if (replaceValue !== null) url = url.replace(match, replaceValue);
     }
   }
   return url;

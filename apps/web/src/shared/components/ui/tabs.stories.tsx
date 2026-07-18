@@ -1,13 +1,13 @@
-import type { Meta, StoryObj } from "@storybook/react";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "./tabs";
+import type { Meta, StoryObj } from '@storybook/react'
+import { Tabs, TabsContent, TabsList, TabsTrigger } from './tabs'
 
 const meta = {
-  title: "UI/Tabs",
+  title: 'UI/Tabs',
   component: Tabs,
-} satisfies Meta<typeof Tabs>;
+} satisfies Meta<typeof Tabs>
 
-export default meta;
-type Story = StoryObj<typeof meta>;
+export default meta
+type Story = StoryObj<typeof meta>
 
 export const Default: Story = {
   render: () => (
@@ -24,7 +24,7 @@ export const Default: Story = {
       </TabsContent>
     </Tabs>
   ),
-};
+}
 
 export const DisabledTab: Story = {
   render: () => (
@@ -44,7 +44,7 @@ export const DisabledTab: Story = {
       </TabsContent>
     </Tabs>
   ),
-};
+}
 
 export const ThreePanelWorkbench: Story = {
   render: () => (
@@ -65,4 +65,4 @@ export const ThreePanelWorkbench: Story = {
       </TabsContent>
     </Tabs>
   ),
-};
+}
