@@ -1469,6 +1469,15 @@ where
             )
               and (
                 $5::uuid is null
+                -- Attempt rows are retention-pruned operational history; a
+                -- pointer whose row is gone entirely is tolerated (and written
+                -- back as null below), while an attempt that still exists but
+                -- fails the ownership join stays a laundering violation.
+                or not exists (
+                    select 1
+                    from ingest_attempt as absent_attempt
+                    where absent_attempt.id = $5
+                )
                 or exists (
                     select 1
                     from ingest_attempt as attempt
@@ -1496,6 +1505,36 @@ where
                       )
                 )
             )
+         ), resolved_attempt_pointer as materialized (
+            select
+                input.document_id,
+                case when exists (
+                    select 1
+                    from ingest_attempt as attempt
+                    join ingest_job as job on job.id = attempt.job_id
+                    where attempt.id = $5
+                      and job.workspace_id = input.workspace_id
+                      and job.library_id = input.library_id
+                      and (
+                        job.knowledge_document_id = input.document_id
+                        or exists (
+                            select 1
+                            from content_revision as job_revision
+                            where job_revision.id = job.knowledge_revision_id
+                              and job_revision.document_id = input.document_id
+                              and job_revision.workspace_id = input.workspace_id
+                              and job_revision.library_id = input.library_id
+                        )
+                        or exists (
+                            select 1
+                            from content_mutation_item as item
+                            where item.id = job.mutation_item_id
+                              and item.mutation_id = job.mutation_id
+                              and item.document_id = input.document_id
+                        )
+                      )
+                ) then $5::uuid end as effective_attempt_id
+            from validated_input as input
          ), previous_head as materialized (
             select head.document_id, head.readable_revision_id
             from content_document_head as head
@@ -1522,8 +1561,10 @@ where
             latest_successful_attempt_id,
             head_updated_at
         )
-        select $1, $2, $3, $4, $5, now()
+        select $1, $2, $3, $4, pointer.effective_attempt_id, now()
         from validated_input
+        join resolved_attempt_pointer as pointer
+          on pointer.document_id = validated_input.document_id
         left join previous_head on true
         on conflict (document_id) do update
         set active_revision_id = excluded.active_revision_id,

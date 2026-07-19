@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.5.12 — 2026-07-19
+
+### Fixed
+
+- Revisions on documents restored from a library snapshot failed with an
+  internal error: snapshots deliberately exclude operational ingest-attempt
+  history, but the restore preserved each document head's
+  `latest_successful_attempt_id` while foreign-key enforcement was disabled
+  for the restore transaction, leaving a pointer at a row that no longer
+  exists. The validated head write now distinguishes a pruned pointer (row
+  gone entirely — tolerated and rewritten as null) from a live but
+  wrongly-linked one (still rejected), so admissions on restored documents
+  succeed and heal the pointer in place.
+- Snapshot imports now drop `latest_successful_attempt_id` when writing
+  restored document heads, so restores no longer materialize dangling
+  foreign-key references that would also break a later dump/restore cycle.
+
 ## 0.5.11 — 2026-07-19
 
 ### Fixed

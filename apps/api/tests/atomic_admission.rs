@@ -594,6 +594,82 @@ async fn invalid_head_reference_is_an_integrity_error_not_a_retryable_conflict()
 
 #[tokio::test]
 #[ignore = "requires local postgres with canonical extensions"]
+async fn retention_pruned_attempt_pointer_does_not_block_revision_admission() -> Result<()> {
+    let fixture = ContentLifecycleFixture::create().await?;
+
+    let result = async {
+        let content = &fixture.state.canonical_services.content;
+        let document = content
+            .create_document(
+                &fixture.state,
+                CreateDocumentCommand {
+                    workspace_id: fixture.workspace_id,
+                    library_id: fixture.library_id,
+                    external_key: Some(format!("pruned-attempt-{}", Uuid::now_v7())),
+                    file_name: Some("pruned.txt".to_string()),
+                    created_by_principal_id: None,
+                    parent_external_key: None,
+                },
+            )
+            .await?;
+        let revision = content
+            .create_revision(
+                &fixture.state,
+                revision_command(
+                    document.id,
+                    "upload",
+                    "sha256:pruned-attempt-base",
+                    "Pruned attempt base",
+                    Some("upload://pruned-attempt-base.txt"),
+                ),
+            )
+            .await?;
+        // Simulate the snapshot-restore aftermath observed in production: the
+        // head carries an operational attempt pointer whose row no longer
+        // exists. The restore path writes with FK enforcement disabled
+        // (session_replication_role = replica), so mirror that here.
+        let dangling_attempt = Uuid::now_v7();
+        sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
+            "set session_replication_role = replica;
+             update content_document_head
+             set active_revision_id = '{rev}',
+                 readable_revision_id = '{rev}',
+                 latest_successful_attempt_id = '{attempt}'
+             where document_id = '{doc}';
+             set session_replication_role = origin;",
+            rev = revision.id,
+            attempt = dangling_attempt,
+            doc = document.id,
+        )))
+        .execute(&fixture.state.persistence.postgres)
+        .await?;
+
+        let mut request = content_request(&fixture, "pruned-attempt-pointer");
+        request.operation_kind = "replace".to_string();
+        request.target = ContentAdmissionTarget::Existing { document_id: document.id };
+        admit_content_with_failpoint(&fixture.state.persistence.postgres, &request, None)
+            .await
+            .expect("a retention-pruned attempt pointer must not block admission");
+
+        let head_attempt = sqlx::query_scalar::<_, Option<Uuid>>(
+            "select latest_successful_attempt_id from content_document_head
+             where document_id = $1",
+        )
+        .bind(document.id)
+        .fetch_one(&fixture.state.persistence.postgres)
+        .await?;
+        assert_eq!(head_attempt, None, "dangling operational pointer must be written back as null");
+
+        Ok(())
+    }
+    .await;
+
+    fixture.cleanup().await?;
+    result
+}
+
+#[tokio::test]
+#[ignore = "requires local postgres with canonical extensions"]
 async fn projection_promotion_reports_reference_integrity_instead_of_missing_document() -> Result<()>
 {
     let fixture = ContentLifecycleFixture::create().await?;

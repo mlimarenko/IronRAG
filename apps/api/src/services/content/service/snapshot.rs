@@ -2857,6 +2857,16 @@ fn route_pg_row_through_dedup(
     *kept = true;
     match table {
         "content_document_head" => {
+            // Ingest attempts are operational history and are never part of a
+            // snapshot, while FK enforcement is disabled for the whole restore
+            // transaction. A carried-over attempt pointer would therefore be
+            // restored as a validated-but-violated foreign key that later
+            // fails every head rewrite and breaks pg_dump/restore. Drop it;
+            // the next successful ingest repopulates the pointer.
+            let mut row = row;
+            if let Some(object) = row.as_object_mut() {
+                object.insert("latest_successful_attempt_id".to_string(), serde_json::Value::Null);
+            }
             dedup.note_head_row(&row);
             batcher.push(table, row);
         }
