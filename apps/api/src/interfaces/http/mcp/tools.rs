@@ -8,7 +8,7 @@ use crate::{
         auth::AuthContext,
         authorization::{
             POLICY_DOCUMENTS_WRITE, POLICY_LIBRARY_READ, POLICY_LIBRARY_WRITE,
-            POLICY_MCP_MEMORY_READ, POLICY_QUERY_RUN, POLICY_RUNTIME_READ, POLICY_USAGE_READ,
+            POLICY_MCP_MEMORY_READ, POLICY_OPERATION_READ, POLICY_QUERY_RUN, POLICY_RUNTIME_READ,
             POLICY_WORKSPACE_ADMIN,
         },
         router_support::ApiError,
@@ -345,7 +345,9 @@ const TOOL_REGISTRY: &[ToolRegistryEntry] = &[
     ToolRegistryEntry {
         name: "get_operation",
         surfaces: ToolSurfaces::DIAGNOSTICS_ONLY,
-        visible: |auth, _capabilities| auth.can_read_any_document_memory(POLICY_USAGE_READ),
+        // Same contract as the REST poll route: admitting a mutation implies
+        // the right to poll its operation to a terminal state.
+        visible: |auth, _capabilities| auth.can_read_any_document_memory(POLICY_OPERATION_READ),
     },
     ToolRegistryEntry {
         name: "submit_web_run",

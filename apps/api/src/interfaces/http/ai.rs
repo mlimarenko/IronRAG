@@ -1038,14 +1038,49 @@ pub async fn create_account(
     Json(mut payload): Json<CreateAiAccountRequest>,
 ) -> Result<axum::response::Response, ApiError> {
     let request_id = request_id.map(|value| value.0.0);
-    let scope = authorize_exact_ai_scope(
+    let scope = match authorize_exact_ai_scope(
         &auth,
         &state,
         payload.scope_kind,
         payload.workspace_id,
         payload.library_id,
     )
-    .await?;
+    .await
+    {
+        Ok(scope) => scope,
+        Err(error @ ApiError::Unauthorized) => {
+            // Governance denials are audited like the catalog and IAM
+            // surfaces: the attempted credential write is itself a
+            // security-relevant action.
+            record_ai_audit_event(
+                &state,
+                &auth,
+                request_id,
+                "ai.provider_credential.create",
+                "rejected",
+                Some("provider credential creation denied".to_string()),
+                Some(format!(
+                    "principal {} was denied provider credential creation",
+                    auth.principal_id
+                )),
+                payload
+                    .workspace_id
+                    .map(|workspace_id| {
+                        vec![AppendAuditEventSubjectCommand {
+                            subject_kind: "workspace".to_string(),
+                            subject_id: workspace_id,
+                            workspace_id: Some(workspace_id),
+                            library_id: None,
+                            document_id: None,
+                        }]
+                    })
+                    .unwrap_or_default(),
+            )
+            .await;
+            return Err(error);
+        }
+        Err(error) => return Err(error),
+    };
     let entry = state
         .canonical_services
         .ai_catalog

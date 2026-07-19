@@ -1,3 +1,7 @@
+#[path = "support/http_response_support.rs"]
+mod http_response_support;
+use http_response_support::response_json;
+
 #[path = "support/mcp_tool_call_support.rs"]
 mod mcp_tool_call_support;
 
@@ -7,8 +11,8 @@ use axum::{
     body::Body,
     http::{Request, StatusCode, header},
 };
+use base64::Engine as _;
 use chrono::Utc;
-use http_body_util::BodyExt;
 use rust_decimal::Decimal;
 use serde_json::{Value, json};
 use sqlx::{PgPool, postgres::PgPoolOptions};
@@ -36,7 +40,6 @@ use ironrag_backend::{
 
 const TEST_TOKEN_PREFIX: &str = "audit-events";
 const TEST_PROVIDER_CREDENTIAL_LABEL: &str = "audit-events-provider-credential";
-const TEST_BINDING_PURPOSE: &str = "query_answer";
 
 #[derive(Clone)]
 struct GrantSpec {
@@ -113,6 +116,11 @@ impl AuditEventsFixture {
         let temp_database = TempDatabase::create(&settings.database_url).await?;
         settings.database_url = temp_database.database_url.clone();
         settings.destructive_fresh_bootstrap_required = true;
+        // Credentialed AI-account writes fail closed without an encryption
+        // key; use the same deterministic test key as governance_auth.
+        settings.credential_master_key =
+            Some(base64::engine::general_purpose::STANDARD.encode([37_u8; 32]));
+        settings.credential_encryption_write_enabled = true;
 
         let postgres = PgPoolOptions::new()
             .max_connections(4)
@@ -336,12 +344,17 @@ impl AuditEventsFixture {
         Ok((status, response_json(response).await?))
     }
 
-    async fn mcp_call(&self, token: &str, method: &str, params: Option<Value>) -> Result<Value> {
+    async fn mcp_diagnostics_call(
+        &self,
+        token: &str,
+        method: &str,
+        params: Option<Value>,
+    ) -> Result<Value> {
         mcp_tool_call_support::call_rpc(
             self.app(),
-            "/v1/mcp",
+            "/v1/mcp/diagnostics",
             token,
-            &format!("audit-{}", method.replace('/', "-")),
+            &format!("audit-diag-{}", method.replace('/', "-")),
             method,
             params.unwrap_or(Value::Null),
         )
@@ -504,6 +517,28 @@ impl AuditEventsFixture {
         .await
         .context("failed to upsert execution cost")?;
 
+        // The audit cost surface only shows settled rollups
+        // (applied_generation == dirty_generation); mark the seeded cost
+        // clean the way the rollup worker would.
+        sqlx::query(
+            "insert into billing_execution_cost_rollup_state (
+                owning_execution_kind, owning_execution_id, workspace_id,
+                library_id, dirty_generation, applied_generation, dirty_at,
+                repair_attempts, next_attempt_at, last_error
+             ) values (
+                'query_execution'::billing_owning_execution_kind, $1, $2, $3,
+                1, 1, now(), 0, now(), null
+             )
+             on conflict (owning_execution_kind, owning_execution_id)
+             do update set dirty_generation = 1, applied_generation = 1",
+        )
+        .bind(execution_id)
+        .bind(self.workspace_id)
+        .bind(self.library_id)
+        .execute(self.pool())
+        .await
+        .context("failed to settle execution cost rollup state")?;
+
         self.state
             .canonical_services
             .audit
@@ -563,15 +598,6 @@ async fn terminate_database_connections(postgres: &PgPool, database_name: &str) 
     .await
     .with_context(|| format!("failed to terminate connections for {database_name}"))?;
     Ok(())
-}
-
-async fn response_json(response: axum::response::Response) -> Result<Value> {
-    let bytes =
-        response.into_body().collect().await.context("failed to collect response body")?.to_bytes();
-    if bytes.is_empty() {
-        return Ok(Value::Null);
-    }
-    serde_json::from_slice(&bytes).context("failed to decode response json")
 }
 
 async fn latest_audit_event_for_action(
@@ -862,19 +888,81 @@ async fn governance_actions_and_denials_append_expected_audit_subjects() -> Resu
         let workspace_admin = fixture.mint_workspace_admin_token("workspace-admin").await?;
         let read_only = fixture.mint_read_only_workspace_token("workspace-readonly").await?;
 
+        // Account creation validates against the live provider. Use the
+        // ollama catalog entry (loopback base urls allowed, no api key
+        // required) pointed at a hermetic stub that answers both the tag
+        // listing and an OpenAI-style chat round trip.
+        let ollama_catalog =
+            ai_repository::list_provider_catalog(&fixture.state.persistence.postgres)
+                .await?
+                .into_iter()
+                .find(|provider| provider.provider_kind == "ollama")
+                .context("expected seeded ollama provider catalog")?;
+        let ollama_model = ai_repository::list_model_catalog(
+            &fixture.state.persistence.postgres,
+            Some(ollama_catalog.id),
+        )
+        .await?
+        .into_iter()
+        .next()
+        .context("expected seeded ollama model catalog")?;
+        let stub_model_name = ollama_model.model_name.clone();
+        let stub_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let stub_base_url = format!("http://{}", stub_listener.local_addr()?);
+        let tags_model_name = stub_model_name.clone();
+        let models_model_name = stub_model_name.clone();
+        let stub_app = Router::new()
+            .route(
+                "/api/tags",
+                axum::routing::get(move || {
+                    let name = tags_model_name.clone();
+                    async move { axum::Json(json!({ "models": [{ "name": name }] })) }
+                }),
+            )
+            .route(
+                "/models",
+                axum::routing::get(move || {
+                    let name = models_model_name.clone();
+                    async move {
+                        axum::Json(json!({
+                            "object": "list",
+                            "data": [{ "id": name, "object": "model" }]
+                        }))
+                    }
+                }),
+            )
+            .route(
+                "/api/chat",
+                axum::routing::post(move || {
+                    let name = stub_model_name.clone();
+                    async move {
+                        axum::Json(json!({
+                            "model": name,
+                            "message": { "role": "assistant", "content": "OK" },
+                            "done": true
+                        }))
+                    }
+                }),
+            );
+        let stub_server = tokio::spawn(async move {
+            let _ = axum::serve(stub_listener, stub_app).await;
+        });
+
         let credential_response = fixture
             .rest_post(
                 &workspace_admin,
                 "/v1/ai/accounts",
                 json!({
+                    "scopeKind": "workspace",
                     "workspaceId": fixture.workspace_id,
-                    "providerCatalogId": fixture.provider_catalog_id,
+                    "providerCatalogId": ollama_catalog.id,
                     "label": TEST_PROVIDER_CREDENTIAL_LABEL,
-                    "apiKey": "audit-events-provider-key"
+                    "baseUrl": stub_base_url
                 }),
             )
             .await?;
-        assert_eq!(credential_response.0, StatusCode::CREATED);
+        stub_server.abort();
+        assert_eq!(credential_response.0, StatusCode::CREATED, "{}", credential_response.1);
         let credential_id = Uuid::parse_str(
             credential_response.1["id"].as_str().context("expected provider credential id")?,
         )?;
@@ -893,42 +981,53 @@ async fn governance_actions_and_denials_append_expected_audit_subjects() -> Resu
                 &workspace_admin,
                 "/v1/ai/bindings",
                 json!({
+                    "scopeKind": "library",
                     "workspaceId": fixture.workspace_id,
                     "libraryId": fixture.library_id,
-                    "bindingPurpose": TEST_BINDING_PURPOSE,
+                    // The stubbed ollama account carries an embedding model.
+                    "bindingPurpose": "embed_chunk",
                     "accountId": credential_id,
-                    "modelCatalogId": fixture.model_catalog_id
+                    "modelCatalogId": ollama_model.id
                 }),
             )
             .await?;
-        assert_eq!(binding_response.0, StatusCode::CREATED);
+        assert_eq!(binding_response.0, StatusCode::CREATED, "{}", binding_response.1);
         let binding_id = Uuid::parse_str(
             binding_response.1["id"].as_str().context("expected library binding id")?,
         )?;
         let binding_event =
-            latest_audit_event_for_action(fixture.pool(), "ai.library_binding.create").await?;
+            latest_audit_event_for_action(fixture.pool(), "ai.binding_assignment.create").await?;
         assert_eq!(binding_event.result_kind, "succeeded");
         let binding_subjects =
             audit_repository::list_audit_event_subjects(fixture.pool(), binding_event.id).await?;
         assert_eq!(binding_subjects.len(), 1);
-        assert_eq!(binding_subjects[0].subject_kind, "library_binding");
+        assert_eq!(binding_subjects[0].subject_kind, "binding_assignment");
         assert_eq!(binding_subjects[0].subject_id, binding_id);
         assert_eq!(binding_subjects[0].library_id, Some(fixture.library_id));
 
+        let workspace_slug =
+            sqlx::query_scalar::<_, String>("select slug from catalog_workspace where id = $1")
+                .bind(fixture.workspace_id)
+                .fetch_one(fixture.pool())
+                .await?;
         let create_library_response = fixture
-            .mcp_call(
+            .mcp_diagnostics_call(
                 &workspace_admin,
                 "tools/call",
                 Some(json!({
                     "name": "create_library",
                     "arguments": {
-                        "workspaceId": fixture.workspace_id,
-                        "name": "Audit Events MCP Library"
+                        "library": format!("{workspace_slug}/audit-events-mcp-library"),
+                        "title": "Audit Events MCP Library"
                     }
                 })),
             )
             .await?;
-        assert_eq!(create_library_response["result"]["isError"], json!(false));
+        assert_eq!(
+            create_library_response["result"]["isError"],
+            json!(false),
+            "{create_library_response}"
+        );
         let created_library_id = Uuid::parse_str(
             create_library_response["result"]["structuredContent"]["library"]["libraryId"]
                 .as_str()
@@ -970,6 +1069,7 @@ async fn governance_actions_and_denials_append_expected_audit_subjects() -> Resu
                 &read_only,
                 "/v1/ai/accounts",
                 json!({
+                    "scopeKind": "workspace",
                     "workspaceId": fixture.workspace_id,
                     "providerCatalogId": fixture.provider_catalog_id,
                     "label": "denied-credential",
@@ -1003,7 +1103,18 @@ async fn audit_events_surface_assistant_models_cost_and_runtime_subjects() -> Re
 
     let result = async {
         let workspace_admin = fixture.mint_workspace_admin_token("workspace-admin").await?;
-        let actor_principal_id = Uuid::now_v7();
+        // query_conversation.created_by_principal_id is FK-enforced; mint a
+        // real principal instead of a random id.
+        let actor_principal_id = iam_repository::create_api_token(
+            fixture.pool(),
+            Some(fixture.workspace_id),
+            "audit-cost-actor",
+            "audit",
+            None,
+            None,
+        )
+        .await?
+        .principal_id;
         let request_id = "assistant-mcp-audit";
         let execution_id = fixture
             .seed_assistant_call_audit(
@@ -1035,7 +1146,11 @@ async fn audit_events_surface_assistant_models_cost_and_runtime_subjects() -> Re
         assert_eq!(event["surfaceKind"], json!("mcp"));
         assert_eq!(event["actorPrincipalId"], json!(actor_principal_id));
         assert_eq!(event["assistantCall"]["queryExecutionId"], json!(execution_id));
-        assert_eq!(event["assistantCall"]["totalCost"], json!("0.0123"));
+        let total_cost: Decimal = event["assistantCall"]["totalCost"]
+            .as_str()
+            .context("assistant call total cost must be a string")?
+            .parse()?;
+        assert_eq!(total_cost, Decimal::new(123, 4));
         assert_eq!(event["assistantCall"]["currencyCode"], json!("USD"));
         assert_eq!(event["assistantCall"]["providerCallCount"], json!(1));
         assert_eq!(
@@ -1070,9 +1185,20 @@ async fn audit_events_hide_assistant_costs_without_usage_read() -> Result<()> {
     let result = async {
         let audit_reader = fixture.mint_audit_read_workspace_token("audit-reader").await?;
         let request_id = "assistant-audit-redacted";
+        // created_by_principal_id is FK-enforced; use a real principal.
+        let redacted_actor = iam_repository::create_api_token(
+            fixture.pool(),
+            Some(fixture.workspace_id),
+            "audit-redacted-actor",
+            "audit",
+            None,
+            None,
+        )
+        .await?
+        .principal_id;
         fixture
             .seed_assistant_call_audit(
-                Uuid::now_v7(),
+                redacted_actor,
                 "rest",
                 Some(request_id),
                 &fixture.provider_kind,

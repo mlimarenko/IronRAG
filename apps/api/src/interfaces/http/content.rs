@@ -43,7 +43,7 @@ use crate::{
         authorization::{
             POLICY_DOCUMENTS_READ, POLICY_DOCUMENTS_WRITE, POLICY_LIBRARY_READ,
             POLICY_LIBRARY_WRITE, load_canonical_content_document_and_authorize,
-            load_content_document_and_authorize, load_library_and_authorize,
+            load_library_and_authorize,
         },
         router_support::ApiError,
     },
@@ -335,9 +335,13 @@ pub async fn list_chunks(
 
     let document_id =
         query.document_id.ok_or_else(|| ApiError::BadRequest("documentId is required".into()))?;
-    let document =
-        load_content_document_and_authorize(&auth, &state, document_id, POLICY_DOCUMENTS_READ)
-            .await?;
+    let document = load_canonical_content_document_and_authorize(
+        &auth,
+        &state,
+        document_id,
+        POLICY_DOCUMENTS_READ,
+    )
+    .await?;
     let head = state.canonical_services.content.get_document_head(&state, document_id).await?;
     let revision_id = head.and_then(|row| row.effective_revision_id());
     let items = match revision_id {
@@ -503,8 +507,13 @@ pub async fn get_document(
     State(state): State<AppState>,
     Path(document_id): Path<Uuid>,
 ) -> Result<Json<ContentDocumentDetailResponse>, ApiError> {
-    let _ = load_content_document_and_authorize(&auth, &state, document_id, POLICY_DOCUMENTS_READ)
-        .await?;
+    let _ = load_canonical_content_document_and_authorize(
+        &auth,
+        &state,
+        document_id,
+        POLICY_DOCUMENTS_READ,
+    )
+    .await?;
     let summary = state.canonical_services.content.get_document(&state, document_id).await?;
     let lifecycle = crate::services::content::document_accounting::load_document_lifecycle(
         &state,
@@ -596,8 +605,13 @@ pub async fn get_document_head(
     State(state): State<AppState>,
     Path(document_id): Path<Uuid>,
 ) -> Result<Json<ContentDocumentHead>, ApiError> {
-    let _ = load_content_document_and_authorize(&auth, &state, document_id, POLICY_DOCUMENTS_READ)
-        .await?;
+    let _ = load_canonical_content_document_and_authorize(
+        &auth,
+        &state,
+        document_id,
+        POLICY_DOCUMENTS_READ,
+    )
+    .await?;
     let head = state.canonical_services.content.get_document_head(&state, document_id).await?;
     head.map(Json).ok_or_else(|| ApiError::resource_not_found("document_head", document_id))
 }
@@ -631,8 +645,13 @@ pub async fn get_document_prepared_segments(
     Query(query): Query<PreparedDataQuery>,
 ) -> Result<Json<PreparedSegmentsPageResponse>, ApiError> {
     let span = tracing::Span::current();
-    let _ = load_content_document_and_authorize(&auth, &state, document_id, POLICY_DOCUMENTS_READ)
-        .await?;
+    let _ = load_canonical_content_document_and_authorize(
+        &auth,
+        &state,
+        document_id,
+        POLICY_DOCUMENTS_READ,
+    )
+    .await?;
     let revision_id = resolve_readable_revision_id(&state, document_id).await?;
     let (offset, limit) = normalize_page_window(query.offset, query.limit);
     let (items, total) = match revision_id {
@@ -678,8 +697,13 @@ pub async fn get_document_technical_facts(
     Query(query): Query<PreparedDataQuery>,
 ) -> Result<Json<TechnicalFactsPageResponse>, ApiError> {
     let span = tracing::Span::current();
-    let _ = load_content_document_and_authorize(&auth, &state, document_id, POLICY_DOCUMENTS_READ)
-        .await?;
+    let _ = load_canonical_content_document_and_authorize(
+        &auth,
+        &state,
+        document_id,
+        POLICY_DOCUMENTS_READ,
+    )
+    .await?;
     let revision_id = resolve_readable_revision_id(&state, document_id).await?;
     let (offset, limit) = normalize_page_window(query.offset, query.limit);
     let items = match revision_id {
@@ -920,8 +944,13 @@ pub async fn list_revisions(
     Path(document_id): Path<Uuid>,
 ) -> Result<Json<Vec<ContentRevision>>, ApiError> {
     let span = tracing::Span::current();
-    let _ = load_content_document_and_authorize(&auth, &state, document_id, POLICY_DOCUMENTS_READ)
-        .await?;
+    let _ = load_canonical_content_document_and_authorize(
+        &auth,
+        &state,
+        document_id,
+        POLICY_DOCUMENTS_READ,
+    )
+    .await?;
     let revisions = state.canonical_services.content.list_revisions(&state, document_id).await?;
     span.record("item_count", revisions.len());
     Ok(Json(revisions))

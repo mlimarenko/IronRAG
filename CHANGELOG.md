@@ -1,5 +1,30 @@
 # Changelog
 
+## 0.5.13 — 2026-07-19
+
+### Fixed
+
+- Polling an asynchronous operation is now part of the write contract: any
+  principal allowed to admit a mutation can follow the `202` + `Location`
+  response to `GET /v1/ops/operations/{operationId}` (and the diagnostics-mount
+  `get_operation` MCP tool) without also holding the ops-observability
+  permission. Least-privilege connector tokens could previously create
+  revisions but never confirm them.
+- A document-scoped grant now surfaces its parent library in catalog
+  discovery, so a principal holding a document can navigate to it.
+- `GET /v1/chunks` and the other content-surface document reads resolve
+  documents and chunks from canonical content storage instead of the
+  eventually-consistent knowledge projection, which returned 404 or empty
+  lists for freshly created documents.
+- Denied provider-credential creation attempts are audited again with a
+  rejected governance event, matching the catalog and IAM surfaces.
+
+### Changed
+
+- The continuous-integration database test matrix now runs the governance,
+  audit, and atomic-admission suites so authorization and audit contracts
+  cannot drift silently.
+
 ## 0.5.12 — 2026-07-19
 
 ### Fixed

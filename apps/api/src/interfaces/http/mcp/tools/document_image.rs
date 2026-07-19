@@ -35,7 +35,7 @@ use crate::{
     domains::ai::AiBindingPurpose,
     interfaces::http::{
         auth::AuthContext,
-        authorization::{POLICY_MCP_MEMORY_READ, load_content_document_and_authorize},
+        authorization::{POLICY_MCP_MEMORY_READ, load_canonical_content_document_and_authorize},
         mcp::{
             McpToolDescriptor, McpToolResult, audit::record_canonical_mcp_audit, ok_tool_result,
             parse_tool_args, tool_error_result,
@@ -144,7 +144,7 @@ async fn view_document_image_inner(
     context: ToolCallContext<'_>,
     args: &ViewDocumentImageArgs,
 ) -> Result<Value, ApiError> {
-    let document = load_content_document_and_authorize(
+    let document = load_canonical_content_document_and_authorize(
         context.auth,
         context.state,
         args.document_id,

@@ -27,10 +27,9 @@ use crate::{
 
 use super::{
     ContentService, PrefetchedDocumentSummaryData, ReconcileFailedIngestMutationCommand,
-    map_document_pipeline_job, map_document_row, map_knowledge_chunk_row,
-    map_knowledge_document_row, map_knowledge_revision_readiness, map_knowledge_revision_row,
-    map_mutation_row, map_revision_row, map_structured_revision_row, map_web_page_provenance_row,
-    segment_excerpt,
+    map_document_pipeline_job, map_document_row, map_knowledge_document_row,
+    map_knowledge_revision_readiness, map_knowledge_revision_row, map_mutation_row,
+    map_revision_row, map_structured_revision_row, map_web_page_provenance_row, segment_excerpt,
 };
 
 #[derive(Debug, Clone, Default)]
@@ -478,12 +477,28 @@ impl ContentService {
         state: &AppState,
         revision_id: Uuid,
     ) -> Result<Vec<ContentChunk>, ApiError> {
-        let rows = state
-            .document_store
-            .list_chunks_by_revision(revision_id)
-            .await
-            .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
-        Ok(rows.into_iter().map(map_knowledge_chunk_row).collect())
+        // Canonical content_chunk rows are the source of truth for the
+        // content surface; the knowledge-plane projection lags ingest and
+        // does not carry temporal bounds.
+        let rows =
+            content_repository::list_chunks_by_revision(&state.persistence.postgres, revision_id)
+                .await
+                .map_err(|e| ApiError::internal_with_log(e, "internal"))?;
+        Ok(rows
+            .into_iter()
+            .map(|row| crate::domains::content::ContentChunk {
+                id: row.id,
+                revision_id: row.revision_id,
+                chunk_index: row.chunk_index,
+                start_offset: row.start_offset,
+                end_offset: row.end_offset,
+                token_count: row.token_count,
+                normalized_text: row.normalized_text,
+                text_checksum: row.text_checksum,
+                occurred_at: row.occurred_at,
+                occurred_until: row.occurred_until,
+            })
+            .collect())
     }
 
     /// Canonical paginated read for the inspector's prepared-segments

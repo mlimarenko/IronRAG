@@ -88,6 +88,16 @@ pub const POLICY_QUERY_RUN: &[&str] = &[
 pub const POLICY_RUNTIME_READ: &[&str] = POLICY_QUERY_READ;
 pub const POLICY_USAGE_READ: &[&str] =
     &[PERMISSION_OPS_READ, PERMISSION_WORKSPACE_ADMIN, PERMISSION_IAM_ADMIN];
+/// Async-operation polling is part of the 202 + Location write contract: any
+/// principal allowed to admit the mutation must be able to poll it to a
+/// terminal state, without also holding the ops-observability permission.
+pub const POLICY_OPERATION_READ: &[&str] = &[
+    PERMISSION_OPS_READ,
+    PERMISSION_DOCUMENT_WRITE,
+    PERMISSION_LIBRARY_WRITE,
+    PERMISSION_WORKSPACE_ADMIN,
+    PERMISSION_IAM_ADMIN,
+];
 pub const POLICY_MCP_DISCOVERY: &[&str] = &[
     PERMISSION_WORKSPACE_READ,
     PERMISSION_LIBRARY_READ,
@@ -567,32 +577,6 @@ pub async fn load_async_operation_and_authorize(
         None => authorize_workspace_permission(auth, operation.workspace_id, accepted_permissions)?,
     }
     Ok(operation)
-}
-
-pub async fn load_content_document_and_authorize(
-    auth: &AuthContext,
-    state: &AppState,
-    document_id: Uuid,
-    accepted_permissions: &[&str],
-) -> Result<AuthorizedContentDocument, ApiError> {
-    let document = state
-        .document_store
-        .get_document(document_id)
-        .await
-        .map_err(|e| ApiError::internal_with_log(e, "internal"))?
-        .ok_or_else(|| ApiError::resource_not_found("document", document_id))?;
-    authorize_document_permission(
-        auth,
-        document.workspace_id,
-        document.library_id,
-        document.document_id,
-        accepted_permissions,
-    )?;
-    Ok(AuthorizedContentDocument {
-        id: document.document_id,
-        workspace_id: document.workspace_id,
-        library_id: document.library_id,
-    })
 }
 
 pub async fn load_canonical_content_document_and_authorize(

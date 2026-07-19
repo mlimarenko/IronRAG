@@ -1,3 +1,7 @@
+#[path = "support/http_response_support.rs"]
+mod http_response_support;
+use http_response_support::response_json;
+
 use anyhow::{Context, Result};
 use axum::{
     Router,
@@ -23,8 +27,9 @@ use ironrag_backend::{
         auth::{AuthContext, hash_token},
         authorization::{
             POLICY_DOCUMENTS_READ, POLICY_DOCUMENTS_WRITE, POLICY_LIBRARY_READ,
-            POLICY_LIBRARY_WRITE, POLICY_WORKSPACE_ADMIN, load_content_document_and_authorize,
-            load_library_and_authorize, load_workspace_and_authorize,
+            POLICY_LIBRARY_WRITE, POLICY_WORKSPACE_ADMIN,
+            load_canonical_content_document_and_authorize, load_library_and_authorize,
+            load_workspace_and_authorize,
         },
         mcp::{MCP_PROTOCOL_HEADER, MCP_PROTOCOL_VERSION, MCP_SESSION_HEADER},
         router,
@@ -431,9 +436,24 @@ impl GovernanceAuthFixture {
         Ok((status, response_json(response).await?))
     }
 
+    async fn mcp_diagnostics_tools_list(&self, token: &str) -> Result<Value> {
+        self.mcp_call_at("/v1/mcp/diagnostics", token, "tools/list", None).await
+    }
+
     async fn mcp_call(&self, token: &str, method: &str, params: Option<Value>) -> Result<Value> {
+        self.mcp_call_at("/v1/mcp", token, method, params).await
+    }
+
+    async fn mcp_call_at(
+        &self,
+        uri: &str,
+        token: &str,
+        method: &str,
+        params: Option<Value>,
+    ) -> Result<Value> {
         let initialize = self
-            .mcp_transport_request(
+            .mcp_transport_request_at(
+                uri,
                 token,
                 "POST",
                 None,
@@ -459,7 +479,8 @@ impl GovernanceAuthFixture {
             .context("MCP initialize omitted its session id")?
             .to_string();
         let response = self
-            .mcp_transport_request(
+            .mcp_transport_request_at(
+                uri,
                 token,
                 "POST",
                 Some(&session_id),
@@ -473,7 +494,8 @@ impl GovernanceAuthFixture {
             .await?;
         let status = response.status();
         let json = response_json(response).await?;
-        let cleanup = self.mcp_transport_request(token, "DELETE", Some(&session_id), None).await?;
+        let cleanup =
+            self.mcp_transport_request_at(uri, token, "DELETE", Some(&session_id), None).await?;
         if cleanup.status() != StatusCode::OK {
             anyhow::bail!("unexpected MCP session cleanup status {}", cleanup.status());
         }
@@ -494,9 +516,20 @@ impl GovernanceAuthFixture {
         session_id: Option<&str>,
         payload: Option<Value>,
     ) -> Result<axum::response::Response> {
+        self.mcp_transport_request_at("/v1/mcp", token, method, session_id, payload).await
+    }
+
+    async fn mcp_transport_request_at(
+        &self,
+        uri: &str,
+        token: &str,
+        method: &str,
+        session_id: Option<&str>,
+        payload: Option<Value>,
+    ) -> Result<axum::response::Response> {
         let mut request = Request::builder()
             .method(method)
-            .uri("/v1/mcp")
+            .uri(uri)
             .header(header::AUTHORIZATION, format!("Bearer {token}"));
         if let Some(session_id) = session_id {
             request = request
@@ -573,15 +606,6 @@ async fn terminate_database_connections(postgres: &PgPool, database_name: &str) 
     .await
     .with_context(|| format!("failed to terminate connections for {database_name}"))?;
     Ok(())
-}
-
-async fn response_json(response: axum::response::Response) -> Result<Value> {
-    let bytes =
-        response.into_body().collect().await.context("failed to collect response body")?.to_bytes();
-    if bytes.is_empty() {
-        return Ok(Value::Null);
-    }
-    serde_json::from_slice(&bytes).context("failed to decode response json")
 }
 
 async fn insert_content_document(
@@ -754,8 +778,13 @@ async fn probe_document_read(
     State(state): State<AppState>,
     Path(document_id): Path<Uuid>,
 ) -> Result<StatusCode, ironrag_backend::interfaces::http::router_support::ApiError> {
-    let _ = load_content_document_and_authorize(&auth, &state, document_id, POLICY_DOCUMENTS_READ)
-        .await?;
+    let _ = load_canonical_content_document_and_authorize(
+        &auth,
+        &state,
+        document_id,
+        POLICY_DOCUMENTS_READ,
+    )
+    .await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -764,8 +793,13 @@ async fn probe_document_write(
     State(state): State<AppState>,
     Path(document_id): Path<Uuid>,
 ) -> Result<StatusCode, ironrag_backend::interfaces::http::router_support::ApiError> {
-    let _ = load_content_document_and_authorize(&auth, &state, document_id, POLICY_DOCUMENTS_WRITE)
-        .await?;
+    let _ = load_canonical_content_document_and_authorize(
+        &auth,
+        &state,
+        document_id,
+        POLICY_DOCUMENTS_WRITE,
+    )
+    .await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -806,12 +840,21 @@ async fn workspace_scoped_discovery_only_returns_visible_workspace_and_libraries
         let libraries = body
             .as_array()
             .context("/v1/catalog/workspaces/{id}/libraries must return an array")?;
-        assert_eq!(libraries.len(), 1);
-        assert_eq!(libraries[0]["id"], json!(fixture.library_id));
-        assert_eq!(libraries[0]["workspaceId"], json!(fixture.workspace_id));
-        assert_eq!(libraries[0]["ingestionReadiness"]["ready"], json!(false));
+        // workspace_read grants catalog visibility over the whole workspace:
+        // both same-workspace libraries are listed, the foreign one is not.
+        assert_eq!(libraries.len(), 2);
+        let listed: Vec<_> = libraries.iter().map(|l| l["id"].clone()).collect();
+        assert!(listed.contains(&json!(fixture.library_id)));
+        assert!(listed.contains(&json!(fixture.sibling_library_id)));
+        assert!(!listed.contains(&json!(fixture.foreign_library_id)));
+        let primary = libraries
+            .iter()
+            .find(|l| l["id"] == json!(fixture.library_id))
+            .context("granted library must be listed")?;
+        assert_eq!(primary["workspaceId"], json!(fixture.workspace_id));
+        assert_eq!(primary["ingestionReadiness"]["ready"], json!(false));
         assert_eq!(
-            libraries[0]["ingestionReadiness"]["missingBindingPurposes"],
+            primary["ingestionReadiness"]["missingBindingPurposes"],
             json!(["extract_graph", "embed_chunk"])
         );
 
@@ -1058,13 +1101,13 @@ async fn document_scoped_chunk_reads_use_canonical_content_chunks() -> Result<()
         assert_eq!(chunks.len(), 2);
         assert_eq!(chunks[0]["id"], json!(first_chunk_id));
         assert_eq!(chunks[0]["documentId"], json!(fixture.document_id));
-        assert_eq!(chunks[0]["projectId"], json!(fixture.library_id));
+        assert_eq!(chunks[0]["libraryId"], json!(fixture.library_id));
         assert_eq!(chunks[0]["ordinal"], json!(0));
         assert_eq!(chunks[0]["content"], json!("first chunk text"));
         assert_eq!(chunks[0]["tokenCount"], json!(3));
         assert_eq!(chunks[1]["id"], json!(second_chunk_id));
         assert_eq!(chunks[1]["documentId"], json!(fixture.document_id));
-        assert_eq!(chunks[1]["projectId"], json!(fixture.library_id));
+        assert_eq!(chunks[1]["libraryId"], json!(fixture.library_id));
         assert_eq!(chunks[1]["ordinal"], json!(1));
         assert_eq!(chunks[1]["content"], json!("second chunk text"));
         assert_eq!(chunks[1]["tokenCount"], json!(4));
@@ -1113,6 +1156,7 @@ async fn library_scoped_binding_admin_can_create_library_binding() -> Result<()>
                 &token,
                 "/v1/ai/bindings",
                 json!({
+                    "scopeKind": "library",
                     "workspaceId": fixture.workspace_id,
                     "libraryId": fixture.library_id,
                     "bindingPurpose": TEST_BINDING_PURPOSE,
@@ -1279,66 +1323,89 @@ async fn mcp_tools_list_respects_system_workspace_library_and_document_grants() 
             )
             .await?;
 
-        let system_tools = tool_names(&fixture.mcp_tools_list(&system_admin).await?)?;
-        assert!(system_tools.contains(&"create_workspace".to_string()));
-        assert!(system_tools.contains(&"create_library".to_string()));
-        assert!(system_tools.contains(&"search_documents".to_string()));
-        assert!(system_tools.contains(&"read_document".to_string()));
-        assert!(system_tools.contains(&"create_documents".to_string()));
-        assert!(system_tools.contains(&"create_document_revision".to_string()));
-        assert!(system_tools.contains(&"get_operation".to_string()));
-        assert!(system_tools.contains(&"get_runtime_execution".to_string()));
-        assert!(system_tools.contains(&"get_runtime_execution_trace".to_string()));
-        assert!(system_tools.contains(&"submit_web_run".to_string()));
-        assert!(system_tools.contains(&"get_web_run".to_string()));
-        assert!(system_tools.contains(&"list_web_run_pages".to_string()));
-        assert!(system_tools.contains(&"cancel_web_run".to_string()));
+        // Main mount: read/answer tools only. Mutation and admin tools moved
+        // to the diagnostics mount in the v2 split and must not appear here
+        // for anyone, including the system administrator.
+        const DIAGNOSTICS_ONLY_TOOLS: &[&str] = &[
+            "create_workspace",
+            "create_library",
+            "update_workspace",
+            "update_library",
+            "create_documents",
+            "create_document_revision",
+            "delete_document",
+            "get_operation",
+            "submit_web_run",
+            "cancel_web_run",
+        ];
 
-        let workspace_tools = tool_names(&fixture.mcp_tools_list(&workspace_admin).await?)?;
-        assert!(!workspace_tools.contains(&"create_workspace".to_string()));
-        assert!(workspace_tools.contains(&"create_library".to_string()));
-        assert!(workspace_tools.contains(&"search_documents".to_string()));
-        assert!(workspace_tools.contains(&"read_document".to_string()));
-        assert!(workspace_tools.contains(&"create_documents".to_string()));
-        assert!(workspace_tools.contains(&"create_document_revision".to_string()));
-        assert!(workspace_tools.contains(&"get_operation".to_string()));
-        assert!(workspace_tools.contains(&"get_runtime_execution".to_string()));
-        assert!(workspace_tools.contains(&"get_runtime_execution_trace".to_string()));
-        assert!(workspace_tools.contains(&"submit_web_run".to_string()));
-        assert!(workspace_tools.contains(&"get_web_run".to_string()));
-        assert!(workspace_tools.contains(&"list_web_run_pages".to_string()));
-        assert!(workspace_tools.contains(&"cancel_web_run".to_string()));
+        let system_tools = tool_names(&fixture.mcp_tools_list(&system_admin).await?)?;
+        for read_tool in [
+            "list_workspaces",
+            "list_libraries",
+            "grounded_answer",
+            "search_documents",
+            "read_document",
+            "list_documents",
+            "get_runtime_execution",
+            "get_runtime_execution_trace",
+            "get_web_run",
+            "list_web_run_pages",
+        ] {
+            assert!(system_tools.contains(&read_tool.to_string()), "system missing {read_tool}");
+        }
+        for tool in DIAGNOSTICS_ONLY_TOOLS {
+            assert!(!system_tools.contains(&(*tool).to_string()), "main mount leaked {tool}");
+        }
+
+        // Diagnostics mount: the mutation matrix follows the grant scopes.
+        let system_diag = tool_names(&fixture.mcp_diagnostics_tools_list(&system_admin).await?)?;
+        for tool in DIAGNOSTICS_ONLY_TOOLS {
+            assert!(system_diag.contains(&(*tool).to_string()), "system diag missing {tool}");
+        }
+
+        let workspace_diag =
+            tool_names(&fixture.mcp_diagnostics_tools_list(&workspace_admin).await?)?;
+        assert!(!workspace_diag.contains(&"create_workspace".to_string()));
+        assert!(workspace_diag.contains(&"create_library".to_string()));
+        assert!(workspace_diag.contains(&"create_documents".to_string()));
+        assert!(workspace_diag.contains(&"create_document_revision".to_string()));
+        assert!(workspace_diag.contains(&"get_operation".to_string()));
+        assert!(workspace_diag.contains(&"submit_web_run".to_string()));
+        assert!(workspace_diag.contains(&"cancel_web_run".to_string()));
+
+        let library_diag = tool_names(&fixture.mcp_diagnostics_tools_list(&library_writer).await?)?;
+        assert!(!library_diag.contains(&"create_workspace".to_string()));
+        assert!(!library_diag.contains(&"create_library".to_string()));
+        assert!(library_diag.contains(&"create_documents".to_string()));
+        assert!(library_diag.contains(&"create_document_revision".to_string()));
+        assert!(library_diag.contains(&"get_operation".to_string()));
+        assert!(library_diag.contains(&"submit_web_run".to_string()));
+        assert!(library_diag.contains(&"cancel_web_run".to_string()));
 
         let library_tools = tool_names(&fixture.mcp_tools_list(&library_writer).await?)?;
-        assert!(!library_tools.contains(&"create_workspace".to_string()));
-        assert!(!library_tools.contains(&"create_library".to_string()));
         assert!(library_tools.contains(&"search_documents".to_string()));
         assert!(library_tools.contains(&"read_document".to_string()));
-        assert!(library_tools.contains(&"create_documents".to_string()));
-        assert!(library_tools.contains(&"create_document_revision".to_string()));
-        assert!(library_tools.contains(&"get_operation".to_string()));
         assert!(library_tools.contains(&"get_runtime_execution".to_string()));
-        assert!(library_tools.contains(&"get_runtime_execution_trace".to_string()));
-        assert!(library_tools.contains(&"submit_web_run".to_string()));
-        assert!(library_tools.contains(&"get_web_run".to_string()));
-        assert!(library_tools.contains(&"list_web_run_pages".to_string()));
-        assert!(library_tools.contains(&"cancel_web_run".to_string()));
+        for tool in DIAGNOSTICS_ONLY_TOOLS {
+            assert!(!library_tools.contains(&(*tool).to_string()), "main mount leaked {tool}");
+        }
 
         let document_tools = tool_names(&fixture.mcp_tools_list(&document_writer).await?)?;
-        assert!(!document_tools.contains(&"create_workspace".to_string()));
-        assert!(!document_tools.contains(&"create_library".to_string()));
         assert!(!document_tools.contains(&"search_documents".to_string()));
         assert!(document_tools.contains(&"read_document".to_string()));
-        assert!(!document_tools.contains(&"create_documents".to_string()));
-        assert!(document_tools.contains(&"create_document_revision".to_string()));
-        assert!(document_tools.contains(&"get_operation".to_string()));
         assert!(document_tools.contains(&"get_runtime_execution".to_string()));
-        assert!(document_tools.contains(&"get_runtime_execution_trace".to_string()));
-        assert!(!document_tools.contains(&"submit_web_run".to_string()));
-        assert!(!document_tools.contains(&"get_web_run".to_string()));
-        assert!(!document_tools.contains(&"list_web_run_pages".to_string()));
-        assert!(!document_tools.contains(&"cancel_web_run".to_string()));
         assert!(!document_tools.contains(&"list_audit_events".to_string()));
+
+        let document_diag =
+            tool_names(&fixture.mcp_diagnostics_tools_list(&document_writer).await?)?;
+        // Registry semantics: any document-memory write grant lists the write
+        // tools; per-call authorization still scopes actual creation.
+        assert!(document_diag.contains(&"create_documents".to_string()));
+        assert!(document_diag.contains(&"create_document_revision".to_string()));
+        assert!(document_diag.contains(&"get_operation".to_string()));
+        assert!(!document_diag.contains(&"submit_web_run".to_string()));
+        assert!(!document_diag.contains(&"cancel_web_run".to_string()));
 
         Ok(())
     }
@@ -1658,6 +1725,66 @@ async fn workspace_audit_reader_gets_redacted_visible_events_only() -> Result<()
         let (status, body) = fixture.rest_get(&token, &internal_path).await?;
         assert_eq!(status, StatusCode::FORBIDDEN);
         assert_eq!(body["code"], json!("forbidden"));
+
+        Ok(())
+    }
+    .await;
+
+    fixture.cleanup().await?;
+    result
+}
+
+#[tokio::test]
+#[ignore = "requires local postgres and redis services"]
+async fn document_writer_token_polls_its_async_operation_but_reader_cannot() -> Result<()> {
+    let fixture = GovernanceAuthFixture::create().await?;
+
+    let result = async {
+        let operation_id = Uuid::now_v7();
+        sqlx::query(
+            "insert into ops_async_operation
+                (id, workspace_id, library_id, operation_kind, surface_kind, subject_kind)
+             values ($1, $2, $3, 'replace_document', 'rest', 'content_mutation')",
+        )
+        .bind(operation_id)
+        .bind(fixture.workspace_id)
+        .bind(fixture.library_id)
+        .execute(fixture.pool())
+        .await?;
+
+        // The 202 + Location contract: a principal allowed to admit the
+        // mutation must be able to poll the resulting operation without the
+        // ops-observability permission.
+        let writer = fixture
+            .mint_token_with_grants(
+                Some(fixture.workspace_id),
+                "operation-poll-writer",
+                &[GrantSpec {
+                    resource_kind: "library",
+                    resource_id: fixture.library_id,
+                    permission_kind: "document_write".to_string(),
+                }],
+            )
+            .await?;
+        let path = format!("/v1/ops/operations/{operation_id}");
+        let (status, body) = fixture.rest_get(&writer, &path).await?;
+        assert_eq!(status, StatusCode::OK, "document_write must poll its operation: {body}");
+        assert_eq!(body["id"], json!(operation_id));
+
+        // Query-only access is not part of the write contract and stays out.
+        let reader = fixture
+            .mint_token_with_grants(
+                Some(fixture.workspace_id),
+                "operation-poll-reader",
+                &[GrantSpec {
+                    resource_kind: "library",
+                    resource_id: fixture.library_id,
+                    permission_kind: "query_run".to_string(),
+                }],
+            )
+            .await?;
+        let (status, _body) = fixture.rest_get(&reader, &path).await?;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
 
         Ok(())
     }

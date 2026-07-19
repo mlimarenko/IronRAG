@@ -20,8 +20,9 @@ use crate::{
     interfaces::http::{
         auth::AuthContext,
         authorization::{
-            POLICY_LIBRARY_WRITE, POLICY_USAGE_READ, authorize_library_permission,
-            load_async_operation_and_authorize, load_library_and_authorize,
+            POLICY_LIBRARY_WRITE, POLICY_OPERATION_READ, POLICY_USAGE_READ,
+            authorize_library_permission, load_async_operation_and_authorize,
+            load_library_and_authorize,
         },
         // `list_ingest_queue` + its query/response types moved to the
         // ingest domain (GET /v1/ingest/queue, was GET /v1/ops/ingest-queue)
@@ -196,8 +197,8 @@ pub async fn get_async_operation(
     State(state): State<AppState>,
     Path(operation_id): Path<Uuid>,
 ) -> Result<Json<AsyncOperationDetailResponse>, ApiError> {
-    let _ =
-        load_async_operation_and_authorize(&auth, &state, operation_id, POLICY_USAGE_READ).await?;
+    let _ = load_async_operation_and_authorize(&auth, &state, operation_id, POLICY_OPERATION_READ)
+        .await?;
     let mut operation =
         state.canonical_services.ops.get_async_operation(&state, operation_id).await?;
     let progress =

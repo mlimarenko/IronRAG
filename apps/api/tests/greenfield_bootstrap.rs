@@ -10,6 +10,10 @@
 //! IRONRAG_DATABASE_URL='postgres://postgres:postgres@127.0.0.1:55433/ironrag' cargo test -p ironrag-backend --test greenfield_bootstrap -- --ignored # pragma: allowlist secret
 //! ```
 
+#[path = "support/http_response_support.rs"]
+mod http_response_support;
+use http_response_support::response_json;
+
 use std::{borrow::Cow, path::Path, sync::Arc};
 
 use anyhow::{Context, Result, anyhow};
@@ -20,7 +24,6 @@ use axum::{
     http::{Request, StatusCode, header},
 };
 use base64::{Engine as _, engine::general_purpose::STANDARD};
-use http_body_util::BodyExt;
 use serde_json::{Value, json};
 use sqlx::{PgPool, migrate::Migrator, postgres::PgPoolOptions};
 use tower::ServiceExt;
@@ -338,15 +341,6 @@ async fn inject_historical_library_creator_orphan(pool: &PgPool, library_id: Uui
         "the fixture must contain one historical orphan creator reference"
     );
     Ok(())
-}
-
-async fn response_json(response: axum::response::Response) -> Result<Value> {
-    let bytes =
-        response.into_body().collect().await.context("failed to collect response body")?.to_bytes();
-    if bytes.is_empty() {
-        return Ok(Value::Null);
-    }
-    serde_json::from_slice(&bytes).context("failed to decode response json")
 }
 
 fn compose_like_bootstrap_ai_setup() -> UiBootstrapAiSetup {

@@ -1,14 +1,11 @@
-use sha2::{Digest, Sha256};
-
 use crate::{
     domains::content::{
-        ContentChunk, ContentDocument, ContentDocumentPipelineJob, ContentMutation,
-        ContentMutationItem, ContentRevision, ContentRevisionReadiness, WebPageProvenance,
+        ContentDocument, ContentDocumentPipelineJob, ContentMutation, ContentMutationItem,
+        ContentRevision, ContentRevisionReadiness, WebPageProvenance,
     },
     domains::knowledge::StructuredDocumentRevision,
     infra::knowledge_rows::{
-        KnowledgeChunkRow, KnowledgeDocumentRow, KnowledgeRevisionRow,
-        KnowledgeStructuredRevisionRow,
+        KnowledgeDocumentRow, KnowledgeRevisionRow, KnowledgeStructuredRevisionRow,
     },
     infra::repositories::{content_repository, ingest_repository},
     services::ingest::service::IngestJobHandle,
@@ -154,30 +151,6 @@ pub(super) fn map_structured_revision_data(
         typed_fact_count: data.typed_fact_count,
         outline: data.outline.clone(),
         prepared_at: data.prepared_at,
-    }
-}
-
-pub(super) fn map_knowledge_chunk_row(row: KnowledgeChunkRow) -> ContentChunk {
-    let start_offset = row.span_start.unwrap_or(0);
-    let end_offset = row.span_end.unwrap_or_else(|| {
-        start_offset.saturating_add(i32::try_from(row.normalized_text.len()).unwrap_or(0))
-    });
-    let checksum =
-        format!("sha256:{}", hex::encode(Sha256::digest(row.normalized_text.as_bytes())));
-    ContentChunk {
-        id: row.chunk_id,
-        revision_id: row.revision_id,
-        chunk_index: row.chunk_index,
-        start_offset,
-        end_offset,
-        token_count: row.token_count,
-        normalized_text: row.normalized_text,
-        text_checksum: checksum,
-        // KnowledgeChunkRow does not yet carry temporal bounds. Until that is
-        // mirrored into this projection, consumers fall back to the Postgres
-        // source-of-truth via list_chunks_by_revision.
-        occurred_at: None,
-        occurred_until: None,
     }
 }
 

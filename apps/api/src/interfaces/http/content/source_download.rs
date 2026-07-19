@@ -22,7 +22,7 @@ use crate::{
     },
     interfaces::http::{
         auth::AuthContext,
-        authorization::{POLICY_DOCUMENTS_READ, load_content_document_and_authorize},
+        authorization::{POLICY_DOCUMENTS_READ, load_canonical_content_document_and_authorize},
         router_support::ApiError,
     },
     services::content::source_access::describe_content_source,
@@ -66,8 +66,13 @@ pub async fn download_document_source(
     Path(document_id): Path<Uuid>,
     Query(query): Query<SourceDownloadQuery>,
 ) -> Result<Response, ApiError> {
-    let _ = load_content_document_and_authorize(&auth, &state, document_id, POLICY_DOCUMENTS_READ)
-        .await?;
+    let _ = load_canonical_content_document_and_authorize(
+        &auth,
+        &state,
+        document_id,
+        POLICY_DOCUMENTS_READ,
+    )
+    .await?;
     let summary = state.canonical_services.content.get_document(&state, document_id).await?;
     let revision =
         resolve_source_download_revision(&state, document_id, &summary, query.revision_id).await?;

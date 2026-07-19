@@ -38,10 +38,10 @@ use idempotency::{
 };
 use internal::{EditableDocumentContext, InlineMutationContext, PrefetchedDocumentSummaryData};
 use mappers::{
-    map_document_pipeline_job, map_document_row, map_knowledge_chunk_row,
-    map_knowledge_document_row, map_knowledge_revision_readiness, map_knowledge_revision_row,
-    map_mutation_item_row, map_mutation_row, map_revision_row, map_structured_revision_data,
-    map_structured_revision_row, map_web_page_provenance_row, segment_excerpt,
+    map_document_pipeline_job, map_document_row, map_knowledge_document_row,
+    map_knowledge_revision_readiness, map_knowledge_revision_row, map_mutation_item_row,
+    map_mutation_row, map_revision_row, map_structured_revision_data, map_structured_revision_row,
+    map_web_page_provenance_row, segment_excerpt,
 };
 use source_bytes::{
     AppendableDocumentSource, edited_markdown_file_name, infer_inline_mime_type,

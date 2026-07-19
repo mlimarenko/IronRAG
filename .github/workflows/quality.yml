@@ -209,8 +209,10 @@ jobs:
           set -euo pipefail
           cargo test -p ironrag-contracts --all-targets
           for test_target in \
-            canonical_knowledge_revision_states \
+            governance_auth \
+            audit_events \
             atomic_admission \
+            canonical_knowledge_revision_states \
             ingest_repository \
             ingest_publication \
             web_ingest_repository \

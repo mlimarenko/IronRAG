@@ -315,7 +315,12 @@ impl AuthContext {
                 (grant.resource_kind == "system"
                     || (grant.resource_kind == "workspace"
                         && grant.workspace_id == Some(workspace_id))
-                    || (grant.resource_kind == "library" && grant.library_id == Some(library_id)))
+                    || (grant.resource_kind == "library" && grant.library_id == Some(library_id))
+                    // A document grant must surface its parent library in
+                    // discovery, or the principal could hold a document it can
+                    // never navigate to through the catalog.
+                    || (grant.resource_kind == "document"
+                        && grant.library_id == Some(library_id)))
                     && accepted.iter().any(|permission| grant.permission_kind == *permission)
             })
     }
