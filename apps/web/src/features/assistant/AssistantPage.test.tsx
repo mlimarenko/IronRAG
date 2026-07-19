@@ -40,8 +40,13 @@ vi.mock('@/shared/api', () => ({
   queries: {
     listQuerySessionsOptions: (input: { path: { libraryId: string } }) => ({
       queryKey: ['mockedListQuerySessions', input.path.libraryId || null],
-      queryFn: async () =>
-        queryApiMock.listSessions({ workspaceId: 'ws-1', libraryId: input.path.libraryId }),
+      queryFn: async () => {
+        const items = await queryApiMock.listSessions({
+          workspaceId: 'ws-1',
+          libraryId: input.path.libraryId,
+        })
+        return { items, nextCursor: null, total: items.length }
+      },
     }),
     getQuerySessionOptions: (input: { path: { sessionId: string } }) => ({
       queryKey: ['mockedGetQuerySession', input.path.sessionId],
@@ -98,21 +103,24 @@ describe('AssistantPage integration', () => {
       messages: [],
     })
     queryApiMock.createSession.mockResolvedValue({
+      conversationState: 'active',
+      createdAt: '2026-04-10T10:00:00Z',
       id: 'session-new',
       libraryId: 'library-1',
       title: '',
-      updatedAt: '2026-04-10T11:00:00Z',
       turnCount: 0,
+      updatedAt: '2026-04-10T11:00:00Z',
+      workspaceId: 'ws-1',
     })
     queryApiMock.renameSession.mockResolvedValue({
-      conversation_state: 'active',
-      created_at: '2026-04-10T10:00:00Z',
-      created_by_principal_id: 'principal-1',
+      conversationState: 'active',
+      createdAt: '2026-04-10T10:00:00Z',
       id: 'session-1',
-      library_id: 'library-1',
+      libraryId: 'library-1',
       title: 'Renamed session',
-      updated_at: '2026-04-10T11:00:00Z',
-      workspace_id: 'ws-1',
+      turnCount: 2,
+      updatedAt: '2026-04-10T11:00:00Z',
+      workspaceId: 'ws-1',
     })
     queryApiMock.deleteSession.mockResolvedValue(undefined)
     queryApiMock.createTurnStream.mockResolvedValue({
@@ -232,14 +240,14 @@ describe('AssistantPage integration', () => {
         },
       ])
       return {
-        conversation_state: 'active',
-        created_at: '2026-04-10T10:00:00Z',
-        created_by_principal_id: 'principal-1',
+        conversationState: 'active',
+        createdAt: '2026-04-10T10:00:00Z',
         id: 'session-1',
-        library_id: 'library-1',
+        libraryId: 'library-1',
         title: 'Renamed session',
-        updated_at: '2026-04-10T11:00:00Z',
-        workspace_id: 'ws-1',
+        turnCount: 2,
+        updatedAt: '2026-04-10T11:00:00Z',
+        workspaceId: 'ws-1',
       }
     })
     await renderPage()

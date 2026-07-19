@@ -6,7 +6,6 @@ import type {
   AssistantSessionListItem,
   AssistantSystemPromptResponse,
   LlmContextSnapshot,
-  QueryConversation,
 } from './generated'
 import type { AssistantAgentActivityEvent } from '@/shared/types'
 
@@ -188,15 +187,15 @@ async function createAssistantTurnStreamRequest(
 export const queryApi = {
   listSessions: (params: { workspaceId: string; libraryId: string }) =>
     Query.listQuerySessions({ path: { libraryId: params.libraryId } }).then(
-      (result): AssistantSessionListItem[] => unwrap(result),
+      (result): AssistantSessionListItem[] => unwrap(result).items,
     ),
   createSession: (_workspaceId: string, libraryId: string) =>
-    Query.createQuerySession({ path: { libraryId }, body: {} }).then((result): QueryConversation =>
-      unwrap(result),
+    Query.createQuerySession({ path: { libraryId }, body: {} }).then(
+      (result): AssistantSessionListItem => unwrap(result),
     ),
   renameSession: (sessionId: string, title: string) =>
     Query.renameQuerySession({ body: { title }, path: { sessionId } }).then(
-      (result): QueryConversation => unwrap(result),
+      (result): AssistantSessionListItem => unwrap(result),
     ),
   deleteSession: (sessionId: string) =>
     Query.deleteQuerySession({ path: { sessionId } }).then((result) => {

@@ -3421,19 +3421,6 @@ export type ProviderStructuredOutputMode = 'json_schema' | 'json_object' | 'prom
  */
 export type ProviderTokenLimitParameter = 'max_completion_tokens' | 'max_tokens';
 
-export type QueryConversation = {
-    conversation_state: QueryConversationState;
-    created_at: string;
-    created_by_principal_id?: string | null;
-    id: string;
-    library_id: string;
-    title?: string | null;
-    updated_at: string;
-    workspace_id: string;
-};
-
-export type QueryConversationState = 'active' | 'archived';
-
 export type QuerySessionListResponse = {
     items: Array<AssistantSessionListItem>;
     nextCursor?: string | null;
@@ -8938,9 +8925,9 @@ export type CreateQuerySessionErrors = {
 
 export type CreateQuerySessionResponses = {
     /**
-     * Newly created query conversation
+     * Newly created assistant session in the same shape session lists use
      */
-    201: QueryConversation;
+    201: AssistantSessionListItem;
 };
 
 export type CreateQuerySessionResponse = CreateQuerySessionResponses[keyof CreateQuerySessionResponses];
@@ -9057,9 +9044,9 @@ export type RenameQuerySessionErrors = {
 
 export type RenameQuerySessionResponses = {
     /**
-     * Renamed assistant session
+     * Renamed assistant session in the same shape session lists use
      */
-    200: QueryConversation;
+    200: AssistantSessionListItem;
 };
 
 export type RenameQuerySessionResponse = RenameQuerySessionResponses[keyof RenameQuerySessionResponses];

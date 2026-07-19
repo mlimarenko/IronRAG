@@ -1,7 +1,7 @@
 {
   "name": "ironrag-frontend",
   "private": true,
-  "version": "0.5.10",
+  "version": "0.5.11",
   "packageManager": "npm@11.17.0",
   "type": "module",
   "engines": {

@@ -1,6 +1,7 @@
 import { http, HttpResponse, type HttpHandler } from 'msw'
 
 import type {
+  AssistantSessionListItem,
   AssistantHydratedConversation,
   GetLibraryDashboardResponse,
   ListQuerySessionsResponse,
@@ -36,7 +37,7 @@ export type BrowserMockConfig = {
   bootstrapRequired?: boolean
   dashboard?: GetLibraryDashboardResponse
   queryConversations?: Record<string, AssistantHydratedConversation>
-  querySessions?: ListQuerySessionsResponse
+  querySessions?: AssistantSessionListItem[]
   session?: LoginIamSessionResponse
 }
 
@@ -330,7 +331,13 @@ export function createBrowserMockHandlers(config: BrowserMockConfig = {}): HttpH
       return HttpResponse.json({})
     }),
     http.get('/v1/ops/libraries/:libraryId/dashboard', () => HttpResponse.json(dashboard)),
-    http.get('/v1/query/libraries/:libraryId/sessions', () => HttpResponse.json(querySessions)),
+    http.get('/v1/query/libraries/:libraryId/sessions', () =>
+      HttpResponse.json({
+        items: querySessions,
+        nextCursor: null,
+        total: querySessions.length,
+      } satisfies ListQuerySessionsResponse),
+    ),
     http.patch('/v1/query/sessions/:sessionId', async ({ params, request }) => {
       const sessionId = String(params.sessionId)
       const current = querySessions.find((session) => session.id === sessionId)
@@ -360,16 +367,7 @@ export function createBrowserMockHandlers(config: BrowserMockConfig = {}): HttpH
         }
       }
 
-      return HttpResponse.json({
-        conversation_state: current.conversationState,
-        created_at: current.createdAt,
-        created_by_principal_id: null,
-        id: current.id,
-        library_id: current.libraryId,
-        title,
-        updated_at: updatedAt,
-        workspace_id: current.workspaceId,
-      })
+      return HttpResponse.json({ ...current, title, updatedAt })
     }),
     http.delete('/v1/query/sessions/:sessionId', ({ params }) => {
       const sessionId = String(params.sessionId)

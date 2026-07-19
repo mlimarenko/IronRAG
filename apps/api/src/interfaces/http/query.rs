@@ -483,7 +483,7 @@ pub async fn list_sessions(
     params(("libraryId" = uuid::Uuid, Path, description = "Library that owns the new session")),
     request_body(content = CreateSessionRequest, description = "Optional display title for the new assistant session."),
     responses(
-        (status = 201, description = "Newly created query conversation", body = QueryConversation, headers(("Location" = String, description = "Canonical URI of the created session"))),
+        (status = 201, description = "Newly created assistant session in the same shape session lists use", body = ironrag_contracts::assistant::AssistantSessionListItem, headers(("Location" = String, description = "Canonical URI of the created session"))),
         (status = 400, description = "Invalid request"),
         (status = 401, description = "Caller is not authenticated"),
         (status = 403, description = "Caller is not authorized for the library"),
@@ -546,7 +546,11 @@ pub async fn create_session(
         tracing::warn!(stage = "audit", error = %error, "audit append failed");
     }
     let location = format!("/v1/query/sessions/{}", conversation.id);
-    let mut response = (StatusCode::CREATED, Json(conversation)).into_response();
+    // One session representation everywhere: return the same camelCase list
+    // item shape the session list and detail endpoints use, instead of the
+    // raw snake_case domain entity.
+    let item = map_session_list_item_with_turn_count(conversation, 0);
+    let mut response = (StatusCode::CREATED, Json(item)).into_response();
     if let Ok(value) = axum::http::HeaderValue::from_str(&location) {
         response.headers_mut().insert(axum::http::header::LOCATION, value);
     }
@@ -1127,7 +1131,7 @@ pub async fn get_execution_llm_context(
     .ok_or_else(|| ApiError::resource_not_found("llm_context_snapshot", execution_id))
 }
 
-fn map_session_list_item_with_turn_count(
+pub(crate) fn map_session_list_item_with_turn_count(
     session: QueryConversation,
     turn_count: usize,
 ) -> ironrag_contracts::assistant::AssistantSessionListItem {

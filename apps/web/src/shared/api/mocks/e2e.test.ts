@@ -26,9 +26,12 @@ describe('assistant session browser mocks', () => {
     const initialList = await fetch(
       'http://localhost:3000/v1/query/libraries/library-demo-1/sessions',
     )
-    await expect(initialList.json()).resolves.toEqual([
-      expect.objectContaining({ id: 'session-1', title: 'Original title' }),
-    ])
+    await expect(initialList.json()).resolves.toEqual(
+      expect.objectContaining({
+        items: [expect.objectContaining({ id: 'session-1', title: 'Original title' })],
+        total: 1,
+      }),
+    )
 
     const renameResponse = await fetch('http://localhost:3000/v1/query/sessions/session-1', {
       body: JSON.stringify({ title: '  Durable   title  ' }),
@@ -44,9 +47,12 @@ describe('assistant session browser mocks', () => {
     const renamedList = await fetch(
       'http://localhost:3000/v1/query/libraries/library-demo-1/sessions',
     )
-    await expect(renamedList.json()).resolves.toEqual([
-      expect.objectContaining({ id: 'session-1', title: 'Durable title' }),
-    ])
+    await expect(renamedList.json()).resolves.toEqual(
+      expect.objectContaining({
+        items: [expect.objectContaining({ id: 'session-1', title: 'Durable title' })],
+        total: 1,
+      }),
+    )
 
     const deleteResponse = await fetch('http://localhost:3000/v1/query/sessions/session-1', {
       method: 'DELETE',
@@ -56,6 +62,8 @@ describe('assistant session browser mocks', () => {
     const deletedList = await fetch(
       'http://localhost:3000/v1/query/libraries/library-demo-1/sessions',
     )
-    await expect(deletedList.json()).resolves.toEqual([])
+    await expect(deletedList.json()).resolves.toEqual(
+      expect.objectContaining({ items: [], total: 0 }),
+    )
   })
 })

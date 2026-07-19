@@ -8,11 +8,11 @@ use uuid::Uuid;
 
 use crate::{
     app::state::AppState,
-    domains::query::QueryConversation,
     infra::repositories::query_repository::QueryConversationRow,
     interfaces::http::{
         auth::AuthContext,
         authorization::{POLICY_LIBRARY_WRITE, POLICY_QUERY_RUN, load_query_session_and_authorize},
+        query::map_session_list_item_with_turn_count,
         router_support::ApiError,
     },
     services::{
@@ -37,7 +37,7 @@ pub fn router() -> Router<AppState> {
     params(("sessionId" = uuid::Uuid, Path, description = "Assistant session identifier")),
     request_body(content = ironrag_contracts::assistant::RenameAssistantSessionRequest, description = "New durable session title."),
     responses(
-        (status = 200, description = "Renamed assistant session", body = QueryConversation),
+        (status = 200, description = "Renamed assistant session in the same shape session lists use", body = ironrag_contracts::assistant::AssistantSessionListItem),
         (status = 400, description = "Title is empty or exceeds the contract limit"),
         (status = 401, description = "Caller is not authenticated or lacks scope access"),
         (status = 403, description = "Caller may not mutate this session"),
@@ -59,7 +59,7 @@ pub async fn rename_session(
     State(state): State<AppState>,
     Path(session_id): Path<Uuid>,
     Json(payload): Json<ironrag_contracts::assistant::RenameAssistantSessionRequest>,
-) -> Result<Json<QueryConversation>, ApiError> {
+) -> Result<Json<ironrag_contracts::assistant::AssistantSessionListItem>, ApiError> {
     let session =
         load_query_session_and_authorize(&auth, &state, session_id, POLICY_QUERY_RUN).await?;
     let allow_manage_all = authorize_session_mutation(&auth, &session)?;
@@ -84,7 +84,14 @@ pub async fn rename_session(
         "query session renamed",
     )
     .await;
-    Ok(Json(renamed))
+    // One session representation everywhere: reply with the same camelCase
+    // list item shape the session list uses, including the live turn count.
+    let turn_count =
+        state.canonical_services.query.count_conversation_turns(&state, renamed.id).await?;
+    Ok(Json(map_session_list_item_with_turn_count(
+        renamed,
+        usize::try_from(turn_count).unwrap_or(usize::MAX),
+    )))
 }
 
 #[utoipa::path(

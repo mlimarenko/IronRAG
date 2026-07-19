@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.5.11 — 2026-07-19
+
+### Fixed
+
+- The assistant view crashed on render ("assistant failed to render") because
+  the session rail treated the session list response as a bare array while the
+  endpoint returns a `{items, nextCursor, total}` page envelope. The UI now
+  consumes the envelope everywhere, including optimistic cache updates. The
+  browser mocks used by the end-to-end suite had drifted to the pre-envelope
+  shape, which is how the regression escaped CI; they are now typed against the
+  generated API contract so a future shape drift fails the type check instead
+  of shipping.
+
+### Changed
+
+- One session representation everywhere: `POST /v1/query/libraries/{libraryId}/sessions`
+  and `PATCH /v1/query/sessions/{sessionId}` now return the same camelCase
+  session list item shape the list and detail endpoints use (including the
+  live turn count), instead of a raw snake_case database entity. The
+  `QueryConversation` wire schema is gone from the public contract.
+
 ## 0.5.10 — 2026-07-18
 
 ### Added

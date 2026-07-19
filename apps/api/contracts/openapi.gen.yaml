@@ -5,7 +5,7 @@ info:
   license:
     name: MIT
     identifier: MIT
-  version: 0.5.10
+  version: 0.5.11
 servers:
 - url: /
   description: Same origin (paths include /v1)
@@ -3949,7 +3949,7 @@ paths:
         required: true
       responses:
         '201':
-          description: Newly created query conversation
+          description: Newly created assistant session in the same shape session lists use
           headers:
             Location:
               schema:
@@ -3958,7 +3958,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/QueryConversation'
+                $ref: '#/components/schemas/AssistantSessionListItem'
         '400':
           description: Invalid request
         '401':
@@ -4043,11 +4043,11 @@ paths:
         required: true
       responses:
         '200':
-          description: Renamed assistant session
+          description: Renamed assistant session in the same shape session lists use
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/QueryConversation'
+                $ref: '#/components/schemas/AssistantSessionListItem'
         '400':
           description: Title is empty or exceeds the contract limit
         '401':
@@ -11400,47 +11400,6 @@ components:
       enum:
       - max_completion_tokens
       - max_tokens
-    QueryConversation:
-      type: object
-      required:
-      - id
-      - workspace_id
-      - library_id
-      - conversation_state
-      - created_at
-      - updated_at
-      properties:
-        conversation_state:
-          $ref: '#/components/schemas/QueryConversationState'
-        created_at:
-          type: string
-          format: date-time
-        created_by_principal_id:
-          type:
-          - string
-          - 'null'
-          format: uuid
-        id:
-          type: string
-          format: uuid
-        library_id:
-          type: string
-          format: uuid
-        title:
-          type:
-          - string
-          - 'null'
-        updated_at:
-          type: string
-          format: date-time
-        workspace_id:
-          type: string
-          format: uuid
-    QueryConversationState:
-      type: string
-      enum:
-      - active
-      - archived
     QuerySessionListResponse:
       type: object
       required:

@@ -8,7 +8,7 @@ import {
   mapAssistantSession,
 } from '@/features/assistant/model/assistantAdapter'
 import { queryApi, queries } from '@/shared/api'
-import type { AssistantSessionListItem, QueryConversation } from '@/shared/api/generated'
+import type { AssistantSessionListItem, QuerySessionListResponse } from '@/shared/api/generated'
 import type { AssistantTurnExecutionResponse, LlmContextDebugResponse } from '@/shared/api/query'
 import { errorMessage } from '@/shared/lib/errorMessage'
 import type {
@@ -55,7 +55,7 @@ type SendQuestionResult = {
 type SendQuestionContext = {
   previousActiveSession: string | null
   previousMessages: AssistantMessage[]
-  previousSessions: AssistantSessionListItem[] | undefined
+  previousSessions: QuerySessionListResponse | undefined
 }
 
 type RenameSessionVariables = {
@@ -131,21 +131,14 @@ function useScopedState<T>(
   return [value, setScopedState]
 }
 
-function sessionListItemFromConversation(
-  session: QueryConversation,
-  fallbackTitle: string,
-  turnCount: number,
-): AssistantSessionListItem {
-  return {
-    conversationState: session.conversation_state,
-    createdAt: session.created_at,
-    id: session.id,
-    libraryId: session.library_id,
-    title: session.title ?? fallbackTitle,
-    turnCount,
-    updatedAt: session.updated_at,
-    workspaceId: session.workspace_id,
-  }
+/// Applies an item-level update to the session list page envelope the list
+/// endpoint returns, keeping the cached shape identical to the wire shape.
+function withSessionItems(
+  current: QuerySessionListResponse | undefined,
+  update: (items: AssistantSessionListItem[]) => AssistantSessionListItem[],
+): QuerySessionListResponse {
+  const items = update(current?.items ?? [])
+  return { items, nextCursor: current?.nextCursor ?? null, total: items.length }
 }
 
 function sessionMessagesHydrationKey(sessionId: string, messages: AssistantMessage[]): string {
@@ -416,7 +409,7 @@ export function useAssistantSession({ workspaceId, libraryId, t }: UseAssistantS
 
   const sessions = useMemo<AssistantSession[]>(() => {
     if (!sessionsData || !libraryId) return []
-    return sessionsData
+    return sessionsData.items
       .map(mapAssistantSession)
       .filter((session) => session.libraryId === libraryId)
   }, [libraryId, sessionsData])
@@ -426,14 +419,10 @@ export function useAssistantSession({ workspaceId, libraryId, t }: UseAssistantS
     mutationFn: ({ sessionId, title }: RenameSessionVariables) =>
       queryApi.renameSession(sessionId, title),
     onSuccess: (renamed) => {
-      queryClient.setQueryData<AssistantSessionListItem[]>(
-        sessionsQueryOptions.queryKey,
-        (current = []) =>
-          current.map((session) =>
-            session.id === renamed.id
-              ? sessionListItemFromConversation(renamed, session.title, session.turnCount)
-              : session,
-          ),
+      queryClient.setQueryData<QuerySessionListResponse>(sessionsQueryOptions.queryKey, (current) =>
+        withSessionItems(current, (items) =>
+          items.map((session) => (session.id === renamed.id ? renamed : session)),
+        ),
       )
     },
     onError: (error) => {
@@ -453,9 +442,8 @@ export function useAssistantSession({ workspaceId, libraryId, t }: UseAssistantS
     mutationKey: ['assistant', 'delete-session', libraryId],
     mutationFn: (sessionId: string) => queryApi.deleteSession(sessionId),
     onSuccess: (_result, sessionId) => {
-      queryClient.setQueryData<AssistantSessionListItem[]>(
-        sessionsQueryOptions.queryKey,
-        (current = []) => current.filter((session) => session.id !== sessionId),
+      queryClient.setQueryData<QuerySessionListResponse>(sessionsQueryOptions.queryKey, (current) =>
+        withSessionItems(current, (items) => items.filter((session) => session.id !== sessionId)),
       )
       queryClient.removeQueries({
         queryKey: queries.getQuerySessionOptions({ path: { sessionId } }).queryKey,
@@ -524,7 +512,11 @@ export function useAssistantSession({ workspaceId, libraryId, t }: UseAssistantS
         sessionId = session.id
         hydratedSessionRef.current = sessionId
         setOptimisticSessionId(null)
-        const sessionItem = sessionListItemFromConversation(session, variables.questionText, 1)
+        const sessionItem: AssistantSessionListItem = {
+          ...session,
+          title: session.title || variables.questionText,
+          turnCount: 1,
+        }
         if (libraryScopeRef.current === variables.requestScope) {
           activeSessionRef.current = sessionId
           setActiveSession(sessionId)
@@ -534,15 +526,14 @@ export function useAssistantSession({ workspaceId, libraryId, t }: UseAssistantS
               : current,
           )
         }
-        queryClient.setQueryData<AssistantSessionListItem[]>(
-          variables.sessionsQueryKey,
-          (current = []) => [
+        queryClient.setQueryData<QuerySessionListResponse>(variables.sessionsQueryKey, (current) =>
+          withSessionItems(current, (items) => [
             sessionItem,
-            ...current.filter(
+            ...items.filter(
               (candidate) =>
                 candidate.id !== variables.optimisticSessionId && candidate.id !== sessionItem.id,
             ),
-          ],
+          ]),
         )
       }
 
@@ -571,7 +562,7 @@ export function useAssistantSession({ workspaceId, libraryId, t }: UseAssistantS
     },
     onMutate: async (variables) => {
       await queryClient.cancelQueries({ queryKey: variables.sessionsQueryKey })
-      const previousSessions = queryClient.getQueryData<AssistantSessionListItem[]>(
+      const previousSessions = queryClient.getQueryData<QuerySessionListResponse>(
         variables.sessionsQueryKey,
       )
       const previousActiveSession = activeSessionRef.current
@@ -589,9 +580,8 @@ export function useAssistantSession({ workspaceId, libraryId, t }: UseAssistantS
         setOptimisticSessionId(variables.optimisticSessionId)
         activeSessionRef.current = variables.optimisticSessionId
         setActiveSession(variables.optimisticSessionId)
-        queryClient.setQueryData<AssistantSessionListItem[]>(
-          variables.sessionsQueryKey,
-          (current = []) => [
+        queryClient.setQueryData<QuerySessionListResponse>(variables.sessionsQueryKey, (current) =>
+          withSessionItems(current, (items) => [
             {
               conversationState: 'active',
               createdAt: variables.userMessage.timestamp,
@@ -602,8 +592,8 @@ export function useAssistantSession({ workspaceId, libraryId, t }: UseAssistantS
               updatedAt: variables.userMessage.timestamp,
               workspaceId: variables.workspaceId,
             },
-            ...current,
-          ],
+            ...items,
+          ]),
         )
       }
 
